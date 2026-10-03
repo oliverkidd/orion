@@ -43,6 +43,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Linear(v) => v.area,
         Overlay::BranchSwitch(v) => v.area,
         Overlay::ProjectPicker(v) => v.area,
+        Overlay::Onboard(v) => v.area,
     }
 }
 
@@ -79,6 +80,7 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             app.overlay = None;
             crate::quick_prompt::reopen(app, back.launch, &back.text);
         }
+        Some(Overlay::Onboard(_)) => crate::onboard::dismiss(app),
         // Nothing to unwind on the way out.
         Some(
             Overlay::Help(_)
@@ -135,6 +137,7 @@ pub(crate) fn force_close(app: &mut App) -> bool {
     let parked = quick_draft(overlay);
     match overlay {
         Overlay::Settings(_) => crate::event_loop::close_settings(app),
+        Overlay::Onboard(_) => crate::onboard::dismiss(app),
         _ => app.overlay = None,
     }
     if let Some(draft) = parked {

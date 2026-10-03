@@ -26,15 +26,10 @@ fn listed(action: Action) -> bool {
     )
 }
 
-/// A row's text: the action's label, then the keys this terminal can
-/// press for it, when it has any.
-fn row_label(app: &App, action: Action, label: &str) -> String {
+/// The keys this terminal can press for `action`, when it has any.
+fn row_hint(app: &App, action: Action) -> Option<String> {
     let keys = app.keymap.shown_label(action);
-    if keys == crate::keymap::UNBOUND {
-        label.to_string()
-    } else {
-        format!("{label}  {keys}")
-    }
+    (keys != crate::keymap::UNBOUND).then(|| keys)
 }
 
 /// A centered TYPE-AHEAD menu over `items`, titled `title`.
@@ -60,10 +55,11 @@ pub(super) fn open_command_palette(app: &mut App) {
         .iter()
         .filter(|spec| listed(spec.action))
         .map(|spec| {
-            MenuItem::new(
-                row_label(app, spec.action, spec.label),
-                MenuAction::RunAction(spec.action),
-            )
+            let mut item = MenuItem::new(spec.label, MenuAction::RunAction(spec.action));
+            if let Some(hint) = row_hint(app, spec.action) {
+                item = item.with_hint(hint);
+            }
+            item
         })
         .collect();
     app.overlay = Some(filtered_menu("Command", items));
@@ -84,7 +80,13 @@ const OPEN_ROWS: &[(Action, &str)] = &[
 pub(super) fn open_outside_menu(app: &mut App) {
     let items = OPEN_ROWS
         .iter()
-        .map(|(action, label)| MenuItem::new(row_label(app, *action, label), MenuAction::RunAction(*action)))
+        .map(|(action, label)| {
+            let mut item = MenuItem::new(*label, MenuAction::RunAction(*action));
+            if let Some(hint) = row_hint(app, *action) {
+                item = item.with_hint(hint);
+            }
+            item
+        })
         .collect();
     app.overlay = Some(filtered_menu("Open", items));
 }
@@ -103,6 +105,16 @@ mod tests {
             .collect()
     }
 
+    fn menu_hints(app: &App) -> Vec<(String, Option<String>)> {
+        let Some(Overlay::Menu(menu)) = &app.overlay else {
+            panic!("no menu open");
+        };
+        menu.items
+            .iter()
+            .map(|i| (i.label.clone(), i.hint.clone()))
+            .collect()
+    }
+
     #[test]
     fn the_command_palette_lists_actions_with_their_keys() {
         let mut app = App::new();
@@ -110,7 +122,14 @@ mod tests {
         let rows = rows(&app);
         assert!(rows
             .iter()
-            .any(|(label, action)| label == "Go to file  ^p" && *action == MenuAction::RunAction(Action::FindFile)));
+            .any(|(label, action)| {
+                *label == "Go to file" && *action == MenuAction::RunAction(Action::FindFile)
+            }));
+        assert!(
+            menu_hints(&app)
+                .iter()
+                .any(|(label, hint)| label == "Go to file" && hint.as_deref() == Some("^p"))
+        );
         assert!(rows.iter().all(|(_, action)| match action {
             MenuAction::RunAction(action) => listed(*action),
             _ => false,

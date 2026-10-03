@@ -388,6 +388,8 @@ pub struct MenuItem {
     pub label: String,
     pub action: MenuAction,
     pub destructive: bool,
+    /// Right-aligned key hint, used by the command palette and Open menu.
+    pub hint: Option<String>,
 }
 
 impl MenuItem {
@@ -397,6 +399,7 @@ impl MenuItem {
             label: label.into(),
             action,
             destructive: false,
+            hint: None,
         }
     }
 
@@ -406,7 +409,14 @@ impl MenuItem {
             label: label.into(),
             action,
             destructive: true,
+            hint: None,
         }
+    }
+
+    /// Pin a key hint to the right edge of the row.
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 }
 
@@ -1876,6 +1886,8 @@ impl MetricsView {
 #[derive(Debug, Clone)]
 pub enum Overlay {
     Menu(ContextMenu),
+    /// First-run setup: agents, worktrees, Linear, terminal.
+    Onboard(crate::onboard::OnboardView),
     Confirm(ConfirmDialog),
     Prompt(PromptDialog),
     Help(HelpView),

@@ -164,6 +164,18 @@ pub fn model_choices(kind: AgentKind, custom: Option<&str>) -> Vec<String> {
     model_choices_in(&describe(kind, custom))
 }
 
+/// How a model id is shown in Agents and the pickers: Claude family
+/// aliases are the CLI's "latest of that family" names, so the row says so.
+pub fn model_row_label(model: &str, catalog: Option<orion_core::harness::HarnessCatalog>) -> String {
+    if catalog == Some(orion_core::harness::HarnessCatalog::Claude)
+        && matches!(model, "opus" | "sonnet" | "haiku" | "fable")
+    {
+        format!("{model} · latest")
+    } else {
+        model.to_string()
+    }
+}
+
 /// [`model_choices`] against an explicit descriptor, for callers that
 /// already resolved one (the Agents tab, the launch sites).
 pub fn model_choices_in(descriptor: &orion_core::harness::HarnessDescriptor) -> Vec<String> {
@@ -759,12 +771,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "",
             },
             SettingSpec {
-                kind: SettingKind::CardIssueNumber,
-                label: "Card issue number",
-                hint: "Show the #number of the GitHub issue a session was started from on its card; click it to open the issue",
-                group: "",
-            },
-            SettingSpec {
                 kind: SettingKind::HighlightCurrentCard,
                 label: "Highlight current card",
                 hint: "Wash the cursor's card faintly in its status color, breathing while it runs, asks or waits unread, and keep it lit while you type in its pane (off = the plain gray fill)",
@@ -1093,6 +1099,10 @@ pub struct Config {
     /// (`linear::LinkStore`), and when OPEN PRS first shows a pull request
     /// on it the PR is attached to each of its Linear issues.
     pub linear_auto_attach: bool,
+    /// FIRST-RUN ONBOARDING has been finished or skipped. Local-only so a
+    /// shared `config.json` does not skip the wizard on a new machine.
+    #[serde(default)]
+    pub onboarded: bool,
     /// How long an idle session in an unviewed worktree lives before the
     /// daemon reaps its PTY: "1m", "5m", "15m", "30m", "1h"; "off"
     /// disables. Owned by the daemon (which does the parsing and reaping);
@@ -1207,10 +1217,9 @@ pub struct Config {
     /// row and nothing reads it. Still loaded and written back as stored,
     /// so an older build sharing the file keeps the choice its user made.
     pub hide_card_prompt: bool,
-    /// Show the `#15` of the GitHub issue an ISSUE SESSION was started
-    /// from on its card on the GRID, a link a click opens in the browser
-    /// (the very `⇧I` the card runs). On by default, a config predating
-    /// the key too.
+    /// RETIRED: GitHub issue numbers on session cards. Orion uses Linear,
+    /// so no tab shows the row and the grid never paints `#15`. Still
+    /// loaded and written back as stored.
     pub card_issue_number: bool,
     /// Leave draft pull requests out of the PROJECT OPEN PRS GROUP and the
     /// `/` PALETTE's pull-request rows, so browsing what's open shows only
@@ -1364,8 +1373,9 @@ pub struct Config {
     /// Which AGENT KINDS the NEW SESSION PICKER offers. Off leaves that
     /// harness out of the picker and the PR SESSION picker (and, for
     /// Claude, out of the standing PREWARM POOL slot); sessions that already
-    /// exist keep attaching, resuming and restarting as before. All on by
-    /// default, so a config predating the keys hides nothing.
+    /// exist keep attaching, resuming and restarting as before. Off until
+    /// first-run onboarding or Settings → Agents turns one on. Tests keep
+    /// them on so an empty `{}` fixture still offers every built-in.
     pub claude_enabled: bool,
     pub codex_enabled: bool,
     pub cursor_enabled: bool,
@@ -1535,6 +1545,7 @@ impl Default for Config {
             linear_assignee_email: String::new(),
             linear_task_template: String::new(),
             linear_auto_attach: true,
+            onboarded: false,
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             prewarm_agents: true,
             prewarm_sessions: true,
@@ -1581,15 +1592,15 @@ impl Default for Config {
             muse_model: DEFAULT_CHOICE.into(),
             muse_effort: DEFAULT_CHOICE.into(),
             opencode_model: DEFAULT_CHOICE.into(),
-            claude_enabled: true,
-            codex_enabled: true,
-            cursor_enabled: true,
-            pi_enabled: true,
-            muse_enabled: true,
-            opencode_enabled: true,
+            claude_enabled: cfg!(test),
+            codex_enabled: cfg!(test),
+            cursor_enabled: cfg!(test),
+            pi_enabled: cfg!(test),
+            muse_enabled: cfg!(test),
+            opencode_enabled: cfg!(test),
             hide_uninstalled_harnesses: false,
             custom_harnesses: Vec::new(),
-            harnesses: BTreeMap::new(),
+            harnesses: default_harnesses(),
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
             quick_prompt_focus: false,
             follow_new_session: true,
@@ -1611,7 +1622,25 @@ const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_mark
 /// is stays on this one. The local file is created for a key set away
 /// from its default, and an unreadable one is never rewritten — the key
 /// goes unsaved instead.
-const LOCAL_KEYS: &[&str] = &["linear_assignee_email"];
+const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded"];
+
+/// Production starts with every harness off, including grok (whose
+/// built-in default is on, so the map has to say otherwise). Tests keep
+/// an empty map so `{}` still offers the compiled-in set.
+fn default_harnesses() -> BTreeMap<String, orion_core::harness::HarnessOverride> {
+    if cfg!(test) {
+        return BTreeMap::new();
+    }
+    let mut harnesses = BTreeMap::new();
+    harnesses.insert(
+        "grok".into(),
+        orion_core::harness::HarnessOverride {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    harnesses
+}
 
 /// The task ⌘L fills the QUICK PROMPT with when `linear_task_template` is
 /// empty. `{issues}`, `{ids}` and `{first_id}` are expanded by
@@ -1649,6 +1678,17 @@ impl Config {
              test body in config::with_config_path (or with_default_config)"
         );
         self.write_layers(&settings_path(), &local_settings_path(), false)
+    }
+
+    /// [`save`] that no-ops in a test that never pinned a config path, so
+    /// first-run onboarding can stamp `onboarded` without writing the
+    /// developer's real settings.
+    pub fn try_save(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if CONFIG_PATH_OVERRIDE.with(|p| p.borrow().is_none()) {
+            return Ok(());
+        }
+        self.save()
     }
 
     /// Put every setting back to its default and return the result.
@@ -2042,7 +2082,10 @@ impl Config {
         let descriptor = self.effective_harness_by_id(id);
         match field {
             HarnessField::Enabled => on_off(descriptor.enabled).into(),
-            HarnessField::Model => descriptor.model.default.clone(),
+            HarnessField::Model => {
+                let raw = descriptor.model.default.clone();
+                crate::config::model_row_label(&raw, descriptor.model.catalog)
+            }
             HarnessField::Effort => {
                 let choices = effort_choices_in(
                     &descriptor,
@@ -2068,7 +2111,7 @@ impl Config {
             ),
             HarnessField::Model => match descriptor.model.catalog {
                 Some(orion_core::harness::HarnessCatalog::Claude) => format!(
-                    "Default model for new {label} sessions; rows follow Claude's availableModels or config.json claude_models"
+                    "Default {label} model family (opus · latest, sonnet, haiku); full ids only if Claude Code's availableModels or config.json claude_models lists them"
                 ),
                 Some(orion_core::harness::HarnessCatalog::Cursor) => format!(
                     "Default model family for new {label} sessions; rows follow cursor-agent --list-models"
@@ -3802,32 +3845,21 @@ mod tests {
         );
     }
 
-    /// CARD ISSUE NUMBER: an Appearance row that reads `on` / `off`, on
-    /// by default (a config that predates the key too), and persisted
-    /// under `card_issue_number`.
+    /// CARD ISSUE NUMBER is retired: no tab shows the row, a stored key
+    /// still loads, and an empty file keeps the historical default.
     #[test]
-    fn card_issue_number_default_on_toggle_on_the_appearance_tab_and_persist() {
-        let mut cfg = Config::default();
-        assert!(cfg.card_issue_number, "on by default");
-        assert_eq!(cfg.value_label(SettingKind::CardIssueNumber), "on");
-
-        let (tab, row) = locate(SettingKind::CardIssueNumber).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.card_issue_number);
-        assert_eq!(cfg.value_label(SettingKind::CardIssueNumber), "off");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.card_issue_number);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains(r#""card_issue_number": true"#), "{raw}");
-        assert!(load_from(&path).card_issue_number);
-
+    fn card_issue_number_is_retired_from_the_appearance_tab() {
+        assert!(
+            locate(SettingKind::CardIssueNumber).is_none(),
+            "no tab shows the row"
+        );
+        let cfg = Config::default();
+        assert!(cfg.card_issue_number, "stored default unchanged");
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert!(legacy.card_issue_number);
+        let loaded: Config =
+            serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
+        assert!(!loaded.card_issue_number);
     }
 
     /// HIGHLIGHT CURRENT CARD: an Appearance row that reads `on` / `off`,

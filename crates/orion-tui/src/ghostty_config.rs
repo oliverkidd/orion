@@ -26,6 +26,9 @@ pub const UNBINDS: &[&str] = &[
     "super+r",
     "super+f",
     "super+l",
+    "super+/",
+    "super+shift+/",
+    "super+.",
 ];
 
 /// First and last line of the block orion owns.
@@ -165,7 +168,7 @@ mod tests {
         assert_eq!(
             block(),
             format!(
-                "{BEGIN}\nkeybind = super+shift+p=unbind\nkeybind = super+n=unbind\nkeybind = super+,=unbind\nkeybind = super+p=unbind\nkeybind = super+o=unbind\nkeybind = super+r=unbind\nkeybind = super+f=unbind\nkeybind = super+l=unbind\n{END}\n"
+                "{BEGIN}\nkeybind = super+shift+p=unbind\nkeybind = super+n=unbind\nkeybind = super+,=unbind\nkeybind = super+p=unbind\nkeybind = super+o=unbind\nkeybind = super+r=unbind\nkeybind = super+f=unbind\nkeybind = super+l=unbind\nkeybind = super+/=unbind\nkeybind = super+shift+/=unbind\nkeybind = super+.=unbind\n{END}\n"
             )
         );
     }

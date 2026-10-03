@@ -29,6 +29,7 @@ pub mod linear;
 pub mod links;
 pub(crate) mod list_hit;
 pub mod markdown;
+pub mod onboard;
 pub mod markdown_split;
 pub mod overlay_close;
 pub mod palette;

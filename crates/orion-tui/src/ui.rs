@@ -313,6 +313,7 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
         // The owning overlay gone under an embedded editor — fall through
         // to the modal so the session is never invisible.
     }
+    dim_backdrop(f);
     let area = centered_rect_pct(f.area(), VIM_MODAL_PCT.0, VIM_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let block = Block::default()
@@ -485,7 +486,7 @@ pub(crate) fn menu_footer_hint(menu: &crate::app::ContextMenu) -> Option<String>
     let back = if menu.parent.is_some() { "←: back  " } else { "" };
     if menu.filter.is_some() {
         return Some(format!(
-            "{}type to filter  ↑/↓: move  Backspace: widen  {}{back}Enter: pick  {esc}",
+            "{}type to filter  Backspace: widen  {}{back}{esc}",
             cloud.unwrap_or(""),
             if agent_jump { "?: settings  " } else { "" }
         ));
@@ -494,7 +495,7 @@ pub(crate) fn menu_footer_hint(menu: &crate::app::ContextMenu) -> Option<String>
         return None;
     }
     Some(format!(
-        "{}s/?: settings  {back}Enter: pick  {esc}",
+        "{}s/?: settings  {back}{esc}",
         cloud.unwrap_or("")
     ))
 }
@@ -698,11 +699,24 @@ fn draw_multiline_prompt(
     branch_area
 }
 
+/// Dim every cell already on the frame so an open modal reads as the
+/// only focused surface. The modal's own `Clear` restores its rectangle.
+fn dim_backdrop(f: &mut Frame) {
+    let area = f.area();
+    f.buffer_mut().set_style(
+        area,
+        Style::default()
+            .add_modifier(Modifier::DIM)
+            .bg(crate::theme::BLACK_BACKGROUND),
+    );
+}
+
 fn draw_overlay(f: &mut Frame, app: &mut App) {
     let th = app.theme;
     let Some(overlay) = app.overlay.clone() else {
         return;
     };
+    dim_backdrop(f);
     // A box opened from the ISSUES MODAL or the PULL REQUESTS MODAL stands
     // on it rather than taking it away: the modal is the bottom layer, the
     // box — and any picker the box has up — is drawn over it.
@@ -764,6 +778,12 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 .map(|i| i.label.chars().count())
                 .max()
                 .unwrap_or(8);
+            let hint_w = menu
+                .items
+                .iter()
+                .map(|i| i.hint.as_ref().map(|h| h.chars().count()).unwrap_or(0))
+                .max()
+                .unwrap_or(0);
             // Rows that expand into a submenu get a right-aligned ▸ in an
             // extra column so the affordance is visible before hovering.
             let any_submenu = menu.items.iter().any(|i| i.action.submenu().is_some());
@@ -773,8 +793,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // that outgrows the rows — the pickers' `Tab: cloud off  s/?:
             // settings` did, doubling the width of a six-row list — never
             // pads the modal with empty space, and hovering a row with more
-            // keys (the Claude row's Tab) never resizes it.
-            let width = (label_w + 4 + if any_submenu { 2 } else { 0 })
+            // keys (the Claude row's Tab) never resizes it. Command-palette
+            // rows pin their keys in a right-aligned hint column.
+            let width = (label_w + 4 + if hint_w > 0 { hint_w + 2 } else { 0 } + if any_submenu { 2 } else { 0 })
                 .max(title_width + 2)
                 .min(f.area().width as usize) as u16;
             let height = menu.items.len() as u16 + 2;
@@ -812,7 +833,6 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // the border, and the ▸ sits at the right edge — so a title
             // wider than the rows leaves no ragged gap beside them.
             let row_w = inner.width as usize;
-            let label_w = row_w.saturating_sub(if any_submenu { 4 } else { 2 });
             for (i, item) in menu.items.iter().enumerate() {
                 let Some(row) = row_rect(inner, i) else { break };
                 let mut style = if item.destructive {
@@ -823,14 +843,36 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 if i == menu.hover {
                     style = style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
                 }
-                let text = if item.action.submenu().is_some() {
-                    format!(" {:<label_w$} ▸ ", item.label)
+                let hint = item.hint.as_deref().unwrap_or("");
+                let hint_len = hint.chars().count();
+                let chevron = if item.action.submenu().is_some() {
+                    "▸"
                 } else if any_submenu {
-                    format!(" {:<label_w$}   ", item.label)
+                    " "
                 } else {
-                    format!(" {:<label_w$} ", item.label)
+                    ""
                 };
-                f.render_widget(Paragraph::new(Span::styled(text, style)), row);
+                let chrome = 2 + if !chevron.is_empty() { 2 } else { 0 } + if hint_len > 0 { hint_len + 2 } else { 0 };
+                let label_room = row_w.saturating_sub(chrome);
+                let label = truncate(&item.label, label_room);
+                let used = 1 + label.chars().count() + if hint_len > 0 { 1 + hint_len } else { 0 } + if !chevron.is_empty() { 2 } else { 0 };
+                let pad = row_w.saturating_sub(used + 1);
+                let mut spans = vec![
+                    Span::styled(" ", style),
+                    Span::styled(label, style),
+                    Span::styled(" ".repeat(pad), style),
+                ];
+                if hint_len > 0 {
+                    spans.push(Span::styled(
+                        hint.to_string(),
+                        style.fg(th.dim).remove_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(" ", style));
+                }
+                if !chevron.is_empty() {
+                    spans.push(Span::styled(format!("{chevron} "), style.fg(th.dim)));
+                }
+                f.render_widget(Paragraph::new(Line::from(spans)), row);
             }
             // Record the drawn area for click hit-testing.
             if let Some(Overlay::Menu(m)) = &mut app.overlay {
@@ -1067,6 +1109,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Act(&[RefreshPullRequests]), "reload PRs + issues (GitHub)"),
                         (Act(&[Issues]), "issues: prompt, preset, edit"),
                         (Act(&[PullRequests]), "pull requests: read / launch"),
+                        (Act(&[Linear]), "Linear issues"),
                         (Act(&[SwitchBranch]), "switch the ⌂ root's branch"),
                     ],
                 ),
@@ -1085,6 +1128,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     "SESSIONS",
                     &[
                         (Act(&[QuickPrompt]), "new agent: Enter launches"),
+                        (Act(&[SelectModel]), "Select model"),
+                        (Act(&[CycleEffort]), "Cycle effort"),
+                        (Act(&[SelectLaunchWorktree]), "Select worktree"),
                         (Act(&[NewTerminal]), "terminal in the checkout"),
                         (Act(&[FollowUp]), "follow-up prompt to the agent"),
                         (Act(&[Rename]), "rename the session"),
@@ -1259,19 +1305,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 .position(|r| r.index() == Some(view.selected))
                 .unwrap_or(0);
             let first_row = (sel_row + 1).saturating_sub(body_h);
-            // A row shipped this past week wears a `(new)` prefix; the
-            // label column widens for the tab when one needs the room.
-            let today = crate::config::today_days();
-            let new_prefix = |kind: crate::config::SettingKind| {
-                if kind.is_new(today) {
-                    crate::config::NEW_SETTING_PREFIX
-                } else {
-                    ""
-                }
-            };
             let label_w = crate::config::tab_settings(tab)
                 .iter()
-                .map(|spec| new_prefix(spec.kind).len() + spec.label.chars().count() + 1)
+                .map(|spec| spec.label.chars().count() + 1)
                 .fold(28, usize::max);
             for row in rows.iter().skip(first_row).take(body_h) {
                 match row {
@@ -1309,7 +1345,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                                 Some(spec) => (
                                     spec.label.to_string(),
                                     cfg.value_label(spec.kind),
-                                    new_prefix(spec.kind),
+                                    "",
                                 ),
                                 None => {
                                     let (id, field) = cfg.agent_row(*i).expect(
@@ -1329,7 +1365,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             } else {
                                 cfg.value_label(spec.kind)
                             };
-                            (spec.label.to_string(), value, new_prefix(spec.kind))
+                            (spec.label.to_string(), value, "")
                         };
                         let selected = *i == view.selected && !view.on_tabs;
                         let mut label_style = Style::default();
@@ -2329,6 +2365,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::Issues(view) => crate::issues::draw(f, app, &view, th, false),
         Overlay::PullRequests(view) => crate::pr_modal::draw(f, app, &view, th, false),
         Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
+        Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
         Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
@@ -2730,15 +2767,15 @@ fn settings_keys_hint(view: &crate::app::SettingsView) -> &'static str {
         return "Enter: reassign it here   Esc: leave it where it is";
     }
     if view.on_tabs {
-        return "←/→: tab   ↓: into the list   1-9: jump   R: reset all   Esc: close";
+        return "←/→: tab  1-9: jump  R: reset all  Esc: close";
     }
     if view.is_hotkeys() {
-        return "Enter: rebind  a: add  ⌫: default  x: unbind  R: reset all  Tab: next  ↑: tabs";
+        return "Enter: rebind  a: add  ⌫: default  x: unbind  R: reset all  Esc: close";
     }
     if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
-        return "↑/↓: move  Enter: type a value (empty = default)  R: reset all  Tab: next tab";
+        return "Enter: type a value (empty = default)  R: reset all  Esc: close";
     }
-    "↑/↓: move  Enter: toggle  ←/→: cycle  R: reset all  Tab: next tab  ↑ at top: tabs"
+    "Enter: toggle  ←/→: cycle  R: reset all  Esc: close"
 }
 
 pub(crate) fn centered_rect(frame: Rect, width: u16, height: u16) -> Rect {
@@ -2894,7 +2931,7 @@ pub(crate) fn modal_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>, th: T
 
 /// Clear `area` and draw a [`modal_block`] over it, returning the inner
 /// rect the modal's content goes in.
-fn render_modal_frame<'a>(
+pub(crate) fn render_modal_frame<'a>(
     f: &mut Frame,
     area: Rect,
     title: impl Into<std::borrow::Cow<'a, str>>,
@@ -3974,6 +4011,11 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     } else if matches!(&app.overlay, Some(Overlay::Palette(_))) {
         Span::styled(
             "type: search  ↑/↓: move  Enter: open  Ctrl+u: clear  Esc: close",
+            Style::default().fg(th.dim),
+        )
+    } else if matches!(&app.overlay, Some(Overlay::Onboard(_))) {
+        Span::styled(
+            "←/→ page  ↑/↓ row  Space toggle  Enter next  Esc skip",
             Style::default().fg(th.dim),
         )
     } else if matches!(&app.overlay, Some(Overlay::Settings(_))) {

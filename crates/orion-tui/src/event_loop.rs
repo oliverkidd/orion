@@ -296,6 +296,12 @@ async fn main_loop(
     // Ghostty sends ⌘ chords through the kitty protocol, so Help and the
     // footers print those; anywhere else they print the `^` twins.
     crate::keymap::set_cmd_shown(crate::ghostty_config::inside_ghostty() && !app.is_remote);
+    crate::keymap::set_ghostty_unbound(
+        cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
+    );
+    if !cfg.onboarded {
+        crate::onboard::open(&mut app, &cfg);
+    }
     let mut input = crossterm::event::EventStream::new();
     let mut out: Vec<ClientRequest> = Vec::new();
     // Pointer shape last sent to the terminal (OSC 22), so hover over a
@@ -2980,7 +2986,8 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Tree(_)
         | Overlay::FileTabs(_)
         | Overlay::Metrics(_)
-        | Overlay::ProjectPicker(_) => true,
+        |         Overlay::ProjectPicker(_) => true,
+        Overlay::Onboard(view) => !view.editing_email,
         _ => false,
     }
 }
@@ -3014,6 +3021,25 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             crate::key_combo::note(app, &[chord], Some("Close"));
             crate::overlay_close::click_outside(app, out);
             return;
+        }
+        // Cursor-style launch chords work while the new-agent box (or a
+        // picker it opened) is up, instead of being swallowed as typing.
+        if let Some(action) = app.keymap.lookup(crate::keymap::Scope::Global, &chord) {
+            if matches!(
+                action,
+                crate::keymap::Action::SelectModel
+                    | crate::keymap::Action::CycleEffort
+                    | crate::keymap::Action::SelectLaunchWorktree
+            ) && launch_chord_targets_the_box(&app.overlay)
+            {
+                crate::key_combo::note(
+                    app,
+                    &[chord],
+                    crate::keymap::spec_of(action).map(|s| s.label),
+                );
+                dispatch_action(app, action, None, &chord, out);
+                return;
+            }
         }
         // The KEY COMBO DISPLAY shows a modal's navigation keys bare and
         // never what is typed into its text field (see key_combo.rs).
@@ -3271,6 +3297,9 @@ fn dispatch_action(
         // the aim let go, or on a fresh worktree.
         Action::QuickPrompt if app.launcher_active() => launcher::open_box(app),
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
+        Action::SelectModel => select_model(app),
+        Action::CycleEffort => cycle_effort(app),
+        Action::SelectLaunchWorktree => select_launch_worktree(app),
         Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
@@ -3551,6 +3580,119 @@ fn quick_return_of(prompt: &PromptDialog) -> Option<crate::quick_prompt::QuickRe
         text: prompt.input.as_str().to_string(),
         from_box: true,
     })
+}
+
+/// True when `overlay` is the new-agent box or a picker that still owes
+/// that box back — the surfaces ⌘/ / ⌘⇧/ / ⌘. retarget.
+fn launch_chord_targets_the_box(overlay: &Option<Overlay>) -> bool {
+    match overlay {
+        Some(Overlay::Prompt(p)) => matches!(p.kind, PromptKind::QuickPrompt(_)),
+        Some(Overlay::Menu(m)) => menu_quick_return(m).is_some(),
+        Some(Overlay::ProjectPicker(_)) => true,
+        _ => false,
+    }
+}
+
+fn live_launch_back(app: &App) -> Option<crate::quick_prompt::QuickReturn> {
+    match &app.overlay {
+        Some(Overlay::Prompt(p)) => quick_return_of(p),
+        Some(Overlay::Menu(m)) => menu_quick_return(m),
+        Some(Overlay::ProjectPicker(p)) => Some(p.back.clone()),
+        _ => None,
+    }
+}
+
+fn ensure_launch_box(app: &mut App) -> Option<crate::quick_prompt::QuickReturn> {
+    if let Some(back) = live_launch_back(app) {
+        return Some(back);
+    }
+    if app.launcher_active() {
+        launcher::open_box(app);
+    } else {
+        crate::quick_prompt::open_quick_prompt(app);
+    }
+    live_launch_back(app)
+}
+
+/// `⌘/`: searchable model list for the new-agent box.
+fn select_model(app: &mut App) {
+    if let Some(Overlay::Menu(menu)) = &app.overlay {
+        if menu.items.iter().all(|i| {
+            matches!(
+                i.action,
+                MenuAction::NewAgentOfKind {
+                    model: Some(_),
+                    effort: None,
+                    ..
+                }
+            )
+        }) {
+            return;
+        }
+    }
+    let Some(back) = ensure_launch_box(app) else {
+        return;
+    };
+    launcher::open_model_picker(app, back);
+}
+
+/// `⌘⇧/`: next effort on the current model.
+fn cycle_effort(app: &mut App) {
+    let back = live_launch_back(app);
+    let (kind, custom, model) = match &back {
+        Some(b) => (b.launch.kind, b.launch.custom.clone(), b.launch.model.clone()),
+        None => {
+            let cfg = crate::config::Config::load();
+            (cfg.quick_prompt_kind(), None, cfg.default_model(cfg.quick_prompt_kind()))
+        }
+    };
+    let id = custom
+        .as_deref()
+        .unwrap_or_else(|| kind.as_str())
+        .to_string();
+    let choices = crate::config::effort_choices(kind, model.as_deref(), custom.as_deref());
+    if choices.is_empty() {
+        app.flash = Some(format!(
+            "{} has no effort to cycle",
+            crate::agent_picker::harness_label(kind, custom.as_deref())
+        ));
+        return;
+    }
+    let mut cfg = crate::config::Config::load();
+    cfg.cycle_agent_row(&id, crate::config::HarnessField::Effort, 1);
+    let next = cfg.agent_value(&id, crate::config::HarnessField::Effort);
+    let _ = cfg.try_save();
+    if let Some(back) = back {
+        let launch = crate::quick_prompt::QuickLaunch::of_kind(
+            back.launch.target.clone(),
+            kind,
+            custom,
+            model,
+            crate::config::non_default(&next),
+            &cfg,
+        )
+        .with_issue(back.launch.issue.clone())
+        .with_pr(back.launch.pr.clone())
+        .with_linear(back.launch.linear.clone())
+        .with_cloud(back.launch.cloud)
+        .with_under(back.launch.under.clone());
+        crate::quick_prompt::reopen(app, launch, &back.text);
+    }
+    app.flash = Some(format!("effort: {next}"));
+    app.dirty = true;
+}
+
+/// `⌘.`: worktree picker for the new-agent box.
+fn select_launch_worktree(app: &mut App) {
+    if let Some(Overlay::Menu(menu)) = &app.overlay {
+        if menu.is_launch_worktree_picker() {
+            return;
+        }
+    }
+    let Some(back) = ensure_launch_box(app) else {
+        return;
+    };
+    launcher::open_worktree_picker(app, back);
 }
 
 pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
@@ -5466,14 +5608,19 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
         ),
     };
     let configured = configured.unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into());
+    let catalog = cfg.effective_harness(*kind, custom.as_deref()).model.catalog;
     let items: Vec<MenuItem> = choices
         .iter()
         .map(|choice| {
+            let shown = match sub {
+                SubmenuKind::Models => crate::config::model_row_label(choice, catalog),
+                SubmenuKind::Efforts => (*choice).clone(),
+            };
             MenuItem::new(
                 if *choice == configured {
-                    format!("{choice} ✓")
+                    format!("{shown} ✓")
                 } else {
-                    (*choice).to_string()
+                    shown
                 },
                 MenuAction::NewAgentOfKind {
                     worktree: worktree.clone(),
@@ -5786,6 +5933,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
+        Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
@@ -6680,6 +6828,9 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         {
             view.info(note);
         }
+        crate::keymap::set_ghostty_unbound(
+            cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
+        );
     }
 }
 
@@ -16891,10 +17042,10 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(menu(&app).hovered_claude_cloud(), Some(false));
             assert_eq!(
                 ui::menu_footer_hint(menu(&app)).as_deref(),
-                Some("Tab: cloud off  type to filter  ↑/↓: move  Backspace: widen  ?: settings  ←: back  Enter: pick  Esc: close")
+                Some("Tab: cloud off  type to filter  Backspace: widen  ?: settings  ←: back  Esc: close")
             );
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(menu(&app).items[2].label, "opus", "a model row stays one");
+            assert_eq!(menu(&app).items[2].label, "opus · latest", "a model row stays one");
             assert!(menu(&app).lists_claude_cloud());
             assert!(
                 ui::menu_footer_hint(menu(&app))
@@ -17108,7 +17259,7 @@ diff --git a/src/c.rs b/src/c.rs
                 crate::config::model_choices(AgentKind::Claude, None).len()
             );
             assert_eq!(menu.items[0].label, "default ✓");
-            assert_eq!(menu.items[2].label, "opus");
+            assert_eq!(menu.items[2].label, "opus · latest");
             assert_eq!(menu.hover, 0);
             assert!(menu.parent.is_some());
             // Model rows drill further into the effort list…
@@ -23840,6 +23991,34 @@ diff --git a/src/c.rs b/src/c.rs
             text.contains("Open / fold checkout        Tab"),
             "its chord, in the value column:\n{text}"
         );
+    }
+
+    #[test]
+    fn hotkeys_tab_includes_the_cursor_launch_chords() {
+        let ids: Vec<&str> = crate::config::settings_rows(crate::config::hotkeys_tab())
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::config::SettingsRow::Hotkey(i) => {
+                    crate::keymap::spec_at(i).map(|s| s.id)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in ["select_model", "cycle_effort", "select_launch_worktree"] {
+            assert!(ids.contains(&id), "{id} missing from Hotkeys: {ids:?}");
+        }
+    }
+
+    #[test]
+    fn help_lists_the_cursor_launch_chords() {
+        let mut app = App::new();
+        app.overlay = Some(Overlay::Help(HelpView::default()));
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        for want in ["Select model", "Cycle effort", "Select worktree", "Linear"] {
+            assert!(text.contains(want), "Help is missing {want}:\n{text}");
+        }
     }
 
     /// The headline of the whole tab: press Enter, press a key, and that
@@ -31107,6 +31286,13 @@ diff --git a/src/c.rs b/src/c.rs
                 Some("AgentPresets"),
             ),
             (
+                "Onboard",
+                |app| {
+                    crate::onboard::open(app, &crate::config::Config::load());
+                },
+                None,
+            ),
+            (
                 // Owes the LAUNCHER VIEW's box back, as a picker opened from
                 // the QUICK PROMPT does.
                 "ProjectPicker",
@@ -31260,6 +31446,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Linear(_) => "Linear",
             Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
+            Overlay::Onboard(_) => "Onboard",
         }
     }
 
@@ -31288,7 +31475,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 20, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 21, "a variant came or went: {seen:?}");
         });
     }
 

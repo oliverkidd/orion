@@ -13,7 +13,8 @@ pub enum Hint<'a> {
     Lit(&'a str, &'a str),
 }
 
-/// `key: does  key: does …`, skipping the actions bound to nothing.
+/// `key: does  key: does …`, skipping the actions bound to nothing
+/// and the obvious walk/confirm chords (arrows, Tab, Enter, "move").
 pub fn line(keymap: &Keymap, hints: &[Hint]) -> String {
     joined(keymap, hints, "  ")
 }
@@ -23,13 +24,35 @@ pub fn joined(keymap: &Keymap, hints: &[Hint], sep: &str) -> String {
     hints
         .iter()
         .filter_map(|hint| match hint {
-            Hint::Act(action, does) => keymap
-                .shown_first(*action)
-                .map(|chord| format!("{}: {does}", chord.display())),
-            Hint::Lit(key, does) => Some(format!("{key}: {does}")),
+            Hint::Act(action, does) => keymap.shown_first(*action).and_then(|chord| {
+                let key = chord.display();
+                (!obvious(&key, does)).then(|| format!("{key}: {does}"))
+            }),
+            Hint::Lit(key, does) => (!obvious(key, does)).then(|| format!("{key}: {does}")),
         })
         .collect::<Vec<_>>()
         .join(sep)
+}
+
+/// Arrows, Tab, Enter, and a bare "move" are already how every list
+/// works — the footer only keeps Esc, ⌘, and the verbs that aren't.
+fn obvious(key: &str, does: &str) -> bool {
+    if does.eq_ignore_ascii_case("move") {
+        return true;
+    }
+    let key = key.trim();
+    if key.eq_ignore_ascii_case("tab") || key.eq_ignore_ascii_case("enter") {
+        return true;
+    }
+    let mut any_arrow = false;
+    key.chars().all(|c| match c {
+        '↑' | '↓' | '←' | '→' => {
+            any_arrow = true;
+            true
+        }
+        '/' | ' ' => true,
+        _ => false,
+    }) && any_arrow
 }
 
 /// The chord for copying: `⌘C` where the terminal sends ⌘, `^y` where it
@@ -67,5 +90,21 @@ mod tests {
             ],
         );
         assert_eq!(text, "^p: go to file  Esc: close");
+    }
+
+    #[test]
+    fn a_hint_line_drops_arrows_tab_enter_and_move() {
+        let keymap = Keymap::default();
+        let text = line(
+            &keymap,
+            &[
+                Hint::Lit("↑↓←→", "move"),
+                Hint::Lit("Tab", "next"),
+                Hint::Lit("Enter", "open"),
+                Hint::Lit("Esc", "close"),
+                Hint::Act(Action::CommandPalette, "commands"),
+            ],
+        );
+        assert_eq!(text, "Esc: close  ^⇧P: commands");
     }
 }

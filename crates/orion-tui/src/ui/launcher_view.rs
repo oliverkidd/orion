@@ -13,6 +13,7 @@ use super::{
     PENDING_SESSION_BADGE,
 };
 use crate::app::{App, Focus, HitTarget, Overlay};
+use crate::keymap::Action;
 use crate::launcher::{BoxField, Hidden, LauncherRow, ProjectPicker, ProjectTab, Tally};
 use crate::quick_prompt::QuickLaunch;
 use crate::theme::Theme;
@@ -2246,11 +2247,8 @@ fn draw_card(
 /// The `#15` an ISSUE SESSION's card shows for the GitHub issue it was
 /// started from, while the `card_issue_number` setting is on. None on
 /// every other card, and on every card with the setting off.
-fn card_issue_label(app: &App, a: &orion_core::Agent) -> Option<String> {
-    if !app.card_issue_number {
-        return None;
-    }
-    a.issue_number().map(|n| format!("#{n}"))
+fn card_issue_label(_app: &App, _a: &orion_core::Agent) -> Option<String> {
+    None
 }
 
 /// Where a card drawn whole at `area` puts its issue number `label_w`
@@ -3097,6 +3095,15 @@ const MIN_BRANCH: usize = 12;
 const DETAIL_GAP: &str = "   ·   ";
 const DETAIL_TIGHT: &str = " · ";
 
+/// Live keymap spelling for a launch chord, falling back to the box's
+/// original `^` twin when that action has been unbound.
+fn shown_chord(app: &App, action: Action, fallback: &str) -> String {
+    app.keymap
+        .shown_first(action)
+        .map(|c| c.display())
+        .unwrap_or_else(|| fallback.into())
+}
+
 /// What [`detail_line`] names, before a tier decides how much of it fits.
 #[derive(Clone)]
 struct Details {
@@ -3104,6 +3111,10 @@ struct Details {
     branch: String,
     harness: String,
     model: String,
+    /// Chord beside the worktree — Cursor's workspace picker (`⌘.` / `^.`).
+    worktree_key: String,
+    /// Chord beside the model — Cursor's model picker (`⌘/` / `^/`).
+    model_key: String,
     /// The branch is the WORKTREE PICKER's button — anything but a PR
     /// SESSION's head.
     pickable: bool,
@@ -3142,6 +3153,8 @@ impl Details {
             branch,
             harness,
             model,
+            worktree_key: shown_chord(app, Action::SelectLaunchWorktree, "^T"),
+            model_key: shown_chord(app, Action::SelectModel, "^O"),
             pickable: launch.pr.is_none(),
             fresh: launch.is_new_worktree(),
             background: crate::launcher::project_of(app, &launch.target)
@@ -3200,7 +3213,7 @@ impl Details {
                 "worktree",
                 &self.branch,
                 branch_fg,
-                self.pickable.then_some("^T"),
+                self.pickable.then_some(self.worktree_key.as_str()),
             ),
             (
                 BoxField::Agent,
@@ -3209,7 +3222,13 @@ impl Details {
                 th.text,
                 Some("Tab"),
             ),
-            (BoxField::Model, "model", &self.model, th.text, Some("^O")),
+            (
+                BoxField::Model,
+                "model",
+                &self.model,
+                th.text,
+                Some(self.model_key.as_str()),
+            ),
         ]
         .into_iter()
         .take(fields)
@@ -3538,7 +3557,7 @@ mod tests {
         // beside what they change, so the hint must not name them again.
         for width in 11..=120u16 {
             let hint = box_hint(width);
-            for chord in ["^P", "^T", "^O", "^N", "Tab agent"] {
+            for chord in ["^P", "^T", "^O", "^/", "^N", "Tab agent"] {
                 assert!(
                     !hint.contains(chord),
                     "{width}: {hint:?} still says {chord}"
@@ -3599,13 +3618,13 @@ mod tests {
             "project ",
             "^P",
             "worktree ",
-            "^T",
+            "^t",
             "harness ",
             "claude",
             "Tab",
             "model ",
             "default",
-            "^O",
+            "^/",
         ] {
             assert!(text.contains(want), "{text:?} is missing {want:?}");
         }
@@ -3652,9 +3671,9 @@ mod tests {
                 let cut: String = text[x..x + w].iter().collect();
                 let chord = match field {
                     BoxField::Project => "^P",
-                    BoxField::Worktree => "^T",
+                    BoxField::Worktree => "^t",
                     BoxField::Agent => "Tab",
-                    BoxField::Model => "^O",
+                    BoxField::Model => "^/",
                 };
                 assert!(
                     cut.ends_with(chord),
@@ -4145,56 +4164,25 @@ mod tests {
         assert!(lines[row + 1].contains("claude"), "{:?}", lines[row + 1]);
     }
 
-    /// The `card_issue_number` setting puts an ISSUE SESSION's `#15` at
-    /// the right end of the row saying what it runs on — only with the
-    /// setting on, only on a card started from an issue — and registers
-    /// it as a click target ahead of the card.
+    /// GitHub issue numbers on cards are retired: even with the stored
+    /// flag on, an ISSUE SESSION does not paint `#15` or register a click.
     #[test]
-    fn card_issue_number_shows_the_issue_on_the_runs_on_row() {
+    fn card_issue_number_is_not_drawn() {
         let mut app = a_tree();
         select(&mut app, "api");
         app.tree.agents[0].issue_url = Some("https://github.com/o/r/issues/15".into());
+        app.card_issue_number = true;
         let body = Rect::new(0, 0, 100, 30);
-        let runs_row = |lines: &[String]| {
-            let row = lines
-                .iter()
-                .position(|l| l.contains("s0"))
-                .expect("the session's card drawn");
-            lines[row + 1].clone()
-        };
-
         let lines = drawn_lines(&mut app, body);
-        assert!(!runs_row(&lines).contains("#15"), "off by default");
+        let row = lines
+            .iter()
+            .position(|l| l.contains("s0"))
+            .expect("the session's card drawn");
+        assert!(!lines[row + 1].contains("#15"), "{:?}", lines[row + 1]);
         assert!(!app
             .hits
             .iter()
             .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))));
-
-        app.card_issue_number = true;
-        app.hits.clear();
-        let lines = drawn_lines(&mut app, body);
-        let row = runs_row(&lines);
-        assert!(row.contains("claude"), "{row:?}");
-        assert!(row.contains("#15"), "{row:?}");
-        assert!(
-            row.find("claude") < row.find("#15"),
-            "after what it runs on: {row:?}"
-        );
-        let id = app.tree.agents[0].id.clone();
-        let chip = app
-            .hit_rect(&HitTarget::LauncherCardIssue(id.clone()))
-            .expect("the number is a click target");
-        assert_eq!(
-            app.hit_at(chip.x, chip.y),
-            Some(HitTarget::LauncherCardIssue(id)),
-            "registered ahead of the card, so it wins"
-        );
-        let drawn: String = lines[usize::from(chip.y)]
-            .chars()
-            .skip(usize::from(chip.x))
-            .take(usize::from(chip.width))
-            .collect();
-        assert_eq!(drawn, "#15", "the target is the text");
     }
 
     /// The runs-on line is the harness, then the model, then the effort,
@@ -4798,7 +4786,7 @@ mod tests {
             assert!(line.width() <= width as usize, "{width}: {text:?}");
             assert!(text.contains("new worktree"), "{width}: {text:?}");
             assert!(
-                !text.contains(" / ") && !text.contains("^T"),
+                !text.contains(" / ") && !text.contains("^t"),
                 "{width}: the header carries no checkout crumb: {text:?}"
             );
             let (x, w) = toggle.expect("a worktree launch has a toggle to click");
@@ -4826,14 +4814,14 @@ mod tests {
                 .find(|(f, _, _)| *f == BoxField::Worktree);
             let Some((x, w)) = details.branch else {
                 let row: String = text.iter().collect();
-                assert!(!row.contains("^T"), "{width}: no button, no ^T");
+                assert!(!row.contains("^t"), "{width}: no button, no ^t");
                 assert!(field.is_none(), "{width}: no branch, no field");
                 continue;
             };
             seen += 1;
             let under: String = text[usize::from(x)..usize::from(x + w)].iter().collect();
             assert!(
-                under.starts_with("(worktree") && under.ends_with(" ^T"),
+                under.starts_with("(worktree") && under.ends_with(" ^t"),
                 "{width}: {under:?}"
             );
             let (_, fx, fw) = field.expect("a drawn branch is a field");
@@ -4852,7 +4840,7 @@ mod tests {
         let details = detail_line(&app, &pr, 120, th);
         let text = text_of(&details.line);
         assert!(text.contains("worktree fix-nav"), "{text:?}");
-        assert!(!text.contains("^T"), "{text:?}");
+        assert!(!text.contains("^t"), "{text:?}");
         assert_eq!(details.branch, None);
         assert!(
             !details

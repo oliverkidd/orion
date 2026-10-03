@@ -162,6 +162,12 @@ pub enum Action {
     Settings,
     Metrics,
     Help,
+    /// `⌘/`: pick the model for a new agent — searchable, like Cursor.
+    SelectModel,
+    /// `⌘⇧/`: cycle the effort / reasoning variant of the current model.
+    CycleEffort,
+    /// `⌘.`: pick the worktree a new agent will run in.
+    SelectLaunchWorktree,
     /// `⌘⇧P`: the COMMAND PALETTE — every action by name, with its key.
     CommandPalette,
     /// `⌘O`: the OPEN MENU — what is under the cursor, outside orion: the
@@ -539,10 +545,40 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::QuickPrompt,
         id: "quick_prompt",
         label: "New agent",
-        hint: "Type a task; Enter starts an agent on it (Tab picks the harness, model and effort; Settings → Agents sets the default)",
+        hint: "Type a task; Enter starts an agent on it (Tab picks the harness; ⌘/ the model; ⌘. the worktree; Settings → Agents sets the default)",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["cmd+i", "cmd+n", "ctrl+n"],
+    },
+    ActionSpec {
+        action: Action::SelectModel,
+        id: "select_model",
+        label: "Select model",
+        hint: "Searchable model list for the new-agent box (opens the box first if it is not up); type to narrow, Enter picks",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["cmd+/", "ctrl+/"],
+    },
+    ActionSpec {
+        action: Action::CycleEffort,
+        id: "cycle_effort",
+        label: "Cycle effort",
+        hint: "Step the current model's effort / reasoning variant (high, low, …); updates the new-agent box and the Agents default",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        // `cmd+?` is how some terminals spell ⌘⇧/ (Shift+/ is ?).
+        // `ctrl+y` is the Fine twin a stock terminal can actually deliver
+        // (`^⇧/` needs the kitty protocol; `^?` has no control byte).
+        defaults: &["shift+cmd+/", "cmd+?", "ctrl+y"],
+    },
+    ActionSpec {
+        action: Action::SelectLaunchWorktree,
+        id: "select_launch_worktree",
+        label: "Select worktree",
+        hint: "Pick which worktree a new agent runs in (opens the box first if it is not up); type to narrow, or choose + new worktree. Cursor's workspace picker; the box's ^T is the same action",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["cmd+.", "ctrl+t"],
     },
     ActionSpec {
         action: Action::FollowUp,
@@ -761,6 +797,11 @@ impl KeyChord {
                         mods |= KeyModifiers::SHIFT;
                     }
                     code = KeyCode::Char(c.to_lowercase().next().unwrap_or(c));
+                } else if c == '/'
+                    && (mods.contains(KeyModifiers::SUPER) || mods.contains(KeyModifiers::CONTROL))
+                {
+                    // Keep SHIFT so ⌘/ (model) and ⌘⇧/ (effort) stay
+                    // distinct; without this, both collapse to cmd+/.
                 } else {
                     mods.remove(KeyModifiers::SHIFT);
                 }
@@ -992,6 +1033,17 @@ const CTRL_COLLISIONS: &[(char, &str)] = &[
 ];
 
 static CMD_SHOWN: AtomicBool = AtomicBool::new(false);
+static GHOSTTY_UNBOUND: AtomicBool = AtomicBool::new(false);
+
+/// Ghostty has Orion's UNBINDS in its config (or the setting is on while
+/// running inside Ghostty), so those ⌘ chords are no longer painted ⚠.
+pub fn set_ghostty_unbound(unbound: bool) {
+    GHOSTTY_UNBOUND.store(unbound, Ordering::Relaxed);
+}
+
+pub fn ghostty_unbound() -> bool {
+    GHOSTTY_UNBOUND.load(Ordering::Relaxed)
+}
 
 /// Whether Help, the footers and the palettes print the ⌘ chords: set
 /// once at startup, when orion runs inside a terminal that sends ⌘.
@@ -1092,6 +1144,9 @@ pub fn host_warning(chord: &KeyChord) -> (Reach, Option<&'static str>) {
                 .any(|listed| listed == *chord)
         };
         if listed(crate::ghostty_config::UNBINDS) {
+            if ghostty_unbound() {
+                return (Reach::Fine, None);
+            }
             return (
                 Reach::Risky,
                 Some("Ghostty gives this ⌘ chord to orion only with Settings → General → Ghostty keybinds on; Terminal.app never sends ⌘"),
@@ -1416,6 +1471,38 @@ mod tests {
     }
 
     #[test]
+    fn cmd_slash_and_shift_cmd_slash_are_distinct() {
+        let slash = KeyChord::parse("cmd+/").unwrap();
+        let shift = KeyChord::parse("shift+cmd+/").unwrap();
+        assert_ne!(slash, shift);
+        assert_eq!(slash.spec(), "cmd+/");
+        assert_eq!(shift.spec(), "shift+cmd+/");
+        assert_eq!(slash.display(), "⌘/");
+        assert_eq!(shift.display(), "⌘⇧/");
+        let map = Keymap::default();
+        let at = |spec: &str| map.lookup(Scope::Global, &KeyChord::parse(spec).unwrap());
+        assert_eq!(at("cmd+/"), Some(Action::SelectModel));
+        assert_eq!(at("ctrl+/"), Some(Action::SelectModel));
+        assert_eq!(at("shift+cmd+/"), Some(Action::CycleEffort));
+        assert_eq!(at("cmd+?"), Some(Action::CycleEffort));
+        assert_eq!(at("ctrl+y"), Some(Action::CycleEffort));
+        assert_eq!(at("cmd+."), Some(Action::SelectLaunchWorktree));
+        assert_eq!(at("ctrl+t"), Some(Action::SelectLaunchWorktree));
+        // Terminals deliver ⌘⇧/ as SUPER+SHIFT+/ (keep SHIFT) or as ⌘?.
+        let from_slash = ev(KeyCode::Char('/'), KeyModifiers::SUPER | KeyModifiers::SHIFT);
+        assert_eq!(from_slash, shift);
+        assert_eq!(
+            map.lookup(Scope::Global, &from_slash),
+            Some(Action::CycleEffort)
+        );
+        let from_qmark = ev(KeyCode::Char('?'), KeyModifiers::SUPER);
+        assert_eq!(
+            map.lookup(Scope::Global, &from_qmark),
+            Some(Action::CycleEffort)
+        );
+    }
+
+    #[test]
     fn every_default_parses_and_round_trips() {
         for spec in ACTIONS {
             for raw in spec.defaults {
@@ -1645,6 +1732,11 @@ mod tests {
             assert_eq!(reach, Reach::Risky, "{freed}");
             assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
         }
+        set_ghostty_unbound(true);
+        let (reach, why) = host_warning(&KeyChord::parse("cmd+shift+p").unwrap());
+        set_ghostty_unbound(false);
+        assert_eq!(reach, Reach::Fine, "unbinds written: no ⚠");
+        assert!(why.is_none());
         for passes in ["cmd+k", "cmd+p", "cmd+e", "cmd+j", "cmd+c"] {
             let (reach, _) = host_warning(&KeyChord::parse(passes).unwrap());
             assert_eq!(reach, Reach::Risky, "{passes}");

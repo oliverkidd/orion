@@ -2185,7 +2185,7 @@ fn open_project_picker(app: &mut App, back: QuickReturn) {
 /// with `→` on its row, opened straight onto: Enter takes a model (and
 /// `→` on one its effort list) and hands the box back, Esc hands it back
 /// as it was.
-fn open_model_picker(app: &mut App, back: QuickReturn) {
+pub(super) fn open_model_picker(app: &mut App, back: QuickReturn) {
     let (kind, custom) = (back.launch.kind, back.launch.custom.clone());
     if crate::config::model_choices(kind, custom.as_deref()).is_empty() {
         let harness = crate::agent_picker::harness_label(kind, custom.as_deref());
@@ -2263,7 +2263,7 @@ fn toggle_new_worktree(app: &mut App, launch: QuickLaunch, input: TextInput) {
 /// back as it was (`menu_quick_return`), and a pick hands it back aimed
 /// at the row ([`pick_launch_worktree`]). A PR SESSION has nothing to
 /// pick: the DAEMON runs it in the pull request's own checkout.
-fn open_worktree_picker(app: &mut App, back: QuickReturn) {
+pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
     use std::cmp::Reverse;
     if back.launch.pr.is_some() {
         app.flash =
@@ -4072,7 +4072,7 @@ mod tests {
             );
             let text = buffer_text(&draw_at(&mut app, 140, 40));
             assert!(
-                text.contains("worktree feat ^T"),
+                text.contains("worktree feat ^t"),
                 "the details row follows: {text}"
             );
             assert!(
@@ -7787,6 +7787,55 @@ mod tests {
         });
     }
 
+    #[test]
+    fn cmd_slash_opens_the_searchable_model_picker() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            key(&mut app, KeyCode::Char('/'), KeyModifiers::SUPER);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("expected the model list, got {:?}", app.overlay);
+            };
+            assert_eq!(menu.title.as_deref(), Some("Claude model"));
+            assert!(menu.filter.is_some(), "type-ahead search");
+            // A period still types in the box; ⌘. is the worktree picker.
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            type_text(&mut app, "hi.");
+            key(&mut app, KeyCode::Char('.'), KeyModifiers::SUPER);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("expected the worktree list, got {:?}", app.overlay);
+            };
+            assert!(menu.is_launch_worktree_picker());
+        });
+    }
+
+    #[test]
+    fn shift_cmd_slash_cycles_effort_on_the_box() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            let before = launch(&app).0.effort.clone();
+            key(
+                &mut app,
+                KeyCode::Char('/'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            let Some(Overlay::Prompt(_)) = &app.overlay else {
+                panic!("the box stays up, got {:?}", app.overlay);
+            };
+            let after = launch(&app).0.effort.clone();
+            assert_ne!(after, before, "effort stepped: {before:?} → {after:?}");
+            assert!(
+                app.flash
+                    .as_deref()
+                    .is_some_and(|f| f.starts_with("effort: ")),
+                "{:?}",
+                app.flash
+            );
+        });
+    }
+
     /// `Tab` in the `^O` model list is the pickers' Claude Cloud toggle,
     /// and the footer names it there as it does on the picker's Claude
     /// row. It is the launch's, not one row's: the rows keep their model
@@ -8815,100 +8864,20 @@ mod tests {
         });
     }
 
-    /// With the CARD ISSUE NUMBER setting on, an ISSUE SESSION's card
-    /// shows its `#15` as a link: a click on it lands the cursor on the
-    /// card and opens the issue exactly as `⇧I` does — INPUT PARITY — and
-    /// the target is only as wide as its text: the rest of the card is
-    /// the card's.
+    /// GitHub issue numbers on cards are retired: the stored flag no
+    /// longer draws a `#15` chip or a click target.
     #[test]
-    fn clicking_the_cards_issue_number_opens_it_as_shift_i_does() {
+    fn the_cards_issue_number_is_not_drawn() {
         with_default_config(|| {
-            let mut by_key = card_from_an_issue();
-            let id = by_key.selected_session().expect("a card").id;
-            let sent_by_key = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenIssue);
-
-            let mut by_click = card_from_an_issue();
-            by_click.card_issue_number = true;
-            // The aim let go of, so the click is what puts it back.
-            keys(&mut by_click, &[KeyCode::Esc, KeyCode::Esc]);
-            assert!(by_click.launcher_unaimed);
-            draw(&mut by_click);
-            let chip = by_click
-                .hit_rect(&HitTarget::LauncherCardIssue(id.clone()))
-                .expect("the issue number is drawn on the card");
-            assert_eq!(chip.width, 3, "the link is `#15`, not the card's width");
-            assert!(
-                matches!(
-                    by_click.hit_at(chip.x - 1, chip.y),
-                    Some(HitTarget::LauncherCard(_))
-                ),
-                "the card left of the number is the card's"
-            );
-
-            let sent = click_at(&mut by_click, chip.x, chip.y);
-            assert!(by_click.overlay.is_none(), "{:?}", by_click.overlay);
-            assert_eq!(by_click.flash, by_key.flash);
-            assert_eq!(
-                by_click.flash.as_deref(),
-                Some("opened github.com/o/demo/issues/15")
-            );
-            assert!(!by_click.launcher_unaimed, "the cursor is back on the card");
-            assert_eq!(by_click.selected_session().map(|a| a.id), Some(id));
-            assert_eq!(by_click.focus, Focus::Sessions, "the keys stay on the grid");
-            assert_eq!(
-                sent.iter()
-                    .filter(|r| format!("{r:?}").contains("issues/15"))
-                    .count(),
-                sent_by_key
-                    .iter()
-                    .filter(|r| format!("{r:?}").contains("issues/15"))
-                    .count(),
-            );
-        });
-    }
-
-    /// The setting is off by default: no issue number on the card, and
-    /// nothing on it to click but the card.
-    #[test]
-    fn the_cards_issue_number_is_off_by_default() {
-        with_default_config(|| {
-            let app = card_from_an_issue();
-            assert!(!app.card_issue_number);
+            let mut app = card_from_an_issue();
+            app.card_issue_number = true;
+            draw(&mut app);
             assert!(
                 !app.hits
                     .iter()
                     .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))),
                 "no issue link drawn"
             );
-        });
-    }
-
-    /// A right-click on the issue number is a right-click on its card:
-    /// the card's menu, **Open issue** on it.
-    #[test]
-    fn right_clicking_the_cards_issue_number_opens_the_cards_menu() {
-        with_default_config(|| {
-            let mut app = card_from_an_issue();
-            app.card_issue_number = true;
-            draw(&mut app);
-            let id = app.selected_session().expect("a card").id;
-            let chip = app
-                .hit_rect(&HitTarget::LauncherCardIssue(id))
-                .expect("the issue number is drawn on the card");
-            mouse(
-                &mut app,
-                MouseEventKind::Down(MouseButton::Right),
-                chip.x,
-                chip.y,
-            );
-            match &app.overlay {
-                Some(Overlay::Menu(menu)) => assert!(
-                    menu.items.iter().any(|i| i.label == "Open issue"),
-                    "{:?}",
-                    menu.items.iter().map(|i| &i.label).collect::<Vec<_>>()
-                ),
-                other => panic!("expected the card's menu, got {other:?}"),
-            }
         });
     }
 
@@ -9223,15 +9192,15 @@ mod tests {
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("project demo ^P"), "{text}");
             assert!(text.contains("harness claude Tab"), "{text}");
-            assert!(text.contains("model default ^O"), "{text}");
+            assert!(text.contains("model default ^/"), "{text}");
             assert!(text.contains("new worktree ^N"), "{text}");
             assert!(
-                text.contains("worktree main ^T"),
+                text.contains("worktree main ^t"),
                 "where the launch lands: {text}"
             );
             assert!(!text.contains("(demo / "), "not twice over: {text}");
             assert!(!text.contains("^P project"), "not twice over: {text}");
-            assert!(!text.contains("^O model"), "not twice over: {text}");
+            assert!(!text.contains("^/ model"), "not twice over: {text}");
 
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let text = buffer_text(&draw(&mut app));
