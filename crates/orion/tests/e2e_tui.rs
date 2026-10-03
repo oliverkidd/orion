@@ -93,6 +93,11 @@ impl TuiHarness {
         // reverse/bold attrs wait_for_selected relies on.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
+        // Run from an ssh login, the TUI counts as remote: copies go out
+        // as OSC 52 instead of the platform tool a test stubs, and the
+        // host-terminal cwd reports stop.
+        cmd.env_remove("SSH_CONNECTION");
+        cmd.env_remove("SSH_TTY");
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -416,10 +421,7 @@ fn repo_git(repo: &std::path::Path, args: &[&str]) {
 /// orion was launched. On exit, the shell gets its original directory back.
 #[test]
 fn host_working_directory_follows_project_switches_and_restores_on_exit() {
-    let mut tui = TuiHarness::spawn_with_env(&[
-        ("SSH_CONNECTION", String::new()),
-        ("SSH_TTY", String::new()),
-    ]);
+    let mut tui = TuiHarness::spawn();
     let first = tui.make_repo("cwd-first").canonicalize().unwrap();
     let second = tui.make_repo("cwd-second").canonicalize().unwrap();
     tui.wait_for_text("create your first project");

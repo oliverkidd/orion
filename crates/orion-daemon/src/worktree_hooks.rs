@@ -476,6 +476,10 @@ mod tests {
     /// A script that hangs on a child it did not `exec` — the shape of a
     /// real hook — is killed with that child: the group goes, not just the
     /// script, so "was killed" is the truth.
+    ///
+    /// Under the full parallel run a shell can spend the whole short
+    /// timeout starting up and die before it names its child. That run
+    /// proves nothing about the group, so it goes again with a longer one.
     #[tokio::test]
     async fn hook_past_the_timeout_is_killed_with_what_it_started() {
         let tmp = tempfile::tempdir().unwrap();
@@ -488,29 +492,41 @@ mod tests {
         let id = WorktreeId("w".into());
         let wt = tmp.path().join("gone");
 
-        let started = std::time::Instant::now();
-        let err = run_program(
-            &hook.to_string_lossy(),
-            WorktreeHook::Delete,
-            &ctx(&repo, &wt, &id),
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("timed out after 1s") && err.contains("everything it started"),
-            "{err}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the wait ended with the timeout, not the sleep"
-        );
-        let sleeper = pid_in(&pidfile).await;
-        assert!(
-            wait_dead(sleeper).await,
-            "the sleeper {sleeper} outlived the kill"
-        );
+        for secs in [1, 2, 4, 8] {
+            let _ = std::fs::remove_file(&pidfile);
+            let started = std::time::Instant::now();
+            let err = run_program(
+                &hook.to_string_lossy(),
+                WorktreeHook::Delete,
+                &ctx(&repo, &wt, &id),
+                Duration::from_secs(secs),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains(&format!("timed out after {secs}s"))
+                    && err.contains("everything it started"),
+                "{err}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(secs + 9),
+                "the wait ended with the timeout, not the sleep"
+            );
+            // The script is dead and reaped by now, so the file is final.
+            let Some(sleeper) = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            else {
+                continue;
+            };
+            assert!(
+                wait_dead(sleeper).await,
+                "the sleeper {sleeper} outlived the kill"
+            );
+            return;
+        }
+        panic!("the hook never got as far as starting its child");
     }
 
     /// A hook that starts something long-lived — a dev server — and exits
