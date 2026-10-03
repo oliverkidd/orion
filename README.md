@@ -77,9 +77,32 @@ cd orion
 cargo install --path crates/orion --locked
 ```
 
-That needs [Rust](https://rustup.rs) (`rustup`). Put `~/.cargo/bin` on your `PATH`. Afterwards, `orion upgrade` runs the same install script; it refuses to clobber a local `cargo build` unless you pass `--force`.
+That needs [Rust](https://rustup.rs) (`rustup`). Put `~/.cargo/bin` on your `PATH`.
 
 `orion ssh` and `orion tunnel` need an OpenSSH client. `orion browser` / `orion tunnel` need `ttyd` on the machine that serves the TUI.
+
+## Updating
+
+You installed from a clone. To pick up later commits from GitHub (no local edits):
+
+```sh
+cd /path/to/orion          # the clone, not your app repo
+git pull
+cargo install --path crates/orion --locked
+```
+
+That rebuilds `~/.cargo/bin/orion`. An already-running daemon stays on the old binary until you restart it:
+
+```sh
+orion kill                 # stops the daemon and every session
+orion                      # from the app repo you work in
+```
+
+Skip `orion kill` if nothing is running.
+
+If you *did* change this clone, commit and push first, then on the other machine `git pull` and `cargo install` as above.
+
+Once a `v*` release exists, `orion upgrade` downloads that binary instead. It refuses to overwrite a `cargo install` / `cargo build` binary unless you pass `--force`.
 
 ## Quickstart
 
