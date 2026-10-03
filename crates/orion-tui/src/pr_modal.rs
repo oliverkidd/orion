@@ -604,6 +604,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
         KeyCode::Char('o') if ctrl => open_in_browser(app, out),
         KeyCode::Char('r') if ctrl => refresh(app),
+        KeyCode::Char('l')
+            if ctrl || key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
+            crate::linear::open_attach(app);
+        }
         // Everything else feeds the always-live fuzzy filter, which edits
         // like a terminal line (see text_input).
         _ => {

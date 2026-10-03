@@ -162,6 +162,7 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::AgentPresetEditor(_)) => "AgentPresetEditor",
         Some(Overlay::Issues(_)) => "Issues",
         Some(Overlay::PullRequests(_)) => "PullRequests",
+        Some(Overlay::Linear(_)) => "Linear",
         Some(Overlay::BranchSwitch(_)) => "BranchSwitch",
         Some(Overlay::ProjectPicker(_)) => "ProjectPicker",
     }

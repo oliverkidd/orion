@@ -40,6 +40,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::AgentPresetEditor(v) => v.area,
         Overlay::Issues(v) => v.area,
         Overlay::PullRequests(v) => v.area,
+        Overlay::Linear(v) => v.area,
         Overlay::BranchSwitch(v) => v.area,
         Overlay::ProjectPicker(v) => v.area,
     }

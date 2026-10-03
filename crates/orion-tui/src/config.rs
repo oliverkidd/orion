@@ -26,7 +26,48 @@ pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1
 /// Editor commands the settings overlay cycles through. Every entry
 /// accepts `+<line> <file>`, which is how the overlays launch it. As with
 /// models, hand-edited configs can name any command the list doesn't.
-pub const EDITORS: &[&str] = &["vim", "nvim", "nano", "emacs", "hx"];
+pub const EDITORS: &[&str] = &[
+    crate::editor::DEFAULT_EDITOR,
+    "vim",
+    "nvim",
+    "nano",
+    "emacs",
+    "hx",
+];
+
+/// The **Outside terminal** choices (Settings → General), in the order the
+/// row cycles them: the [`OutsideTerminal`] apps by name, the default first.
+pub const OUTSIDE_TERMINALS: &[&str] = &[
+    OutsideTerminal::Ghostty.as_str(),
+    OutsideTerminal::Terminal.as_str(),
+];
+
+/// The app ⇧T opens a terminal in, outside orion: a Ghostty tab, or a
+/// window of macOS's own Terminal.app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutsideTerminal {
+    #[default]
+    Ghostty,
+    Terminal,
+}
+
+impl OutsideTerminal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OutsideTerminal::Ghostty => "ghostty",
+            OutsideTerminal::Terminal => "terminal",
+        }
+    }
+
+    /// A stored word back to its app; anything unknown is the default.
+    pub fn parse(word: &str) -> Self {
+        if word.trim().eq_ignore_ascii_case(OutsideTerminal::Terminal.as_str()) {
+            OutsideTerminal::Terminal
+        } else {
+            OutsideTerminal::Ghostty
+        }
+    }
+}
 
 /// The **Session pane** choices (Settings → Appearance), in the order the
 /// row cycles them: the [`crate::launcher::PaneSide`] sides by name, the
@@ -87,6 +128,10 @@ pub use orion_core::harness::DEFAULT_CHOICE;
 /// picks origin's default branch itself. Display only — the file holds
 /// `""`, never this word.
 pub const AUTO_CHOICE: &str = "auto";
+
+/// What the Linear account row shows while it names nobody: the owner of
+/// the project's `LINEAR_API_KEY`.
+pub const LINEAR_KEY_OWNER: &str = "the key's owner";
 /// What the Project tab's **Run command** row shows while it is empty:
 /// the checkout's `.orion.json` is what `r` reads then.
 pub const PROJECT_FILE_CHOICE: &str = orion_core::project_file::FILE_NAME;
@@ -383,9 +428,14 @@ pub struct SettingsTab {
 pub enum SettingKind {
     PaletteEnterAttaches,
     WorktreeBaseBranch,
+    LinkEnvFiles,
+    OutsideTerminal,
+    GhosttyKeybinds,
     Editor,
     CloseFinderOnOpen,
     SshSyncConfig,
+    LinearAccount,
+    LinearAutoAttach,
     SessionIdleTimeout,
     PrewarmAgents,
     PrewarmSessions,
@@ -443,7 +493,10 @@ impl SettingKind {
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            SettingKind::WorktreeBaseBranch | SettingKind::RunCommand | SettingKind::OpenCommand
+            SettingKind::WorktreeBaseBranch
+                | SettingKind::LinearAccount
+                | SettingKind::RunCommand
+                | SettingKind::OpenCommand
         )
     }
 
@@ -503,6 +556,11 @@ impl SettingKind {
             | SettingKind::CardIssueNumber => (2026, 9, 24),
             SettingKind::ExpandAllWorktrees | SettingKind::FollowNewSession => (2026, 9, 26),
             SettingKind::HighlightCurrentCard => (2026, 9, 28),
+            SettingKind::LinkEnvFiles
+            | SettingKind::OutsideTerminal
+            | SettingKind::GhosttyKeybinds
+            | SettingKind::LinearAccount
+            | SettingKind::LinearAutoAttach => (2026, 10, 3),
         }
     }
 
@@ -549,7 +607,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::PaletteEnterAttaches,
                 label: "Search Enter attaches",
-                hint: "Enter in / search opens the session in the terminal (a red one always does)",
+                hint: "Enter in the ⌘K jump list opens the session in the terminal (a red one always does)",
                 group: "",
             },
             SettingSpec {
@@ -559,21 +617,51 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "",
             },
             SettingSpec {
+                kind: SettingKind::LinkEnvFiles,
+                label: "Link .env files",
+                hint: "New and adopted worktrees get the main checkout's ignored .env files as symlinks (existing files are kept)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::OutsideTerminal,
+                label: "Outside terminal",
+                hint: "What ⌘O → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::GhosttyKeybinds,
+                label: "Ghostty keybinds",
+                hint: "Keep a marked block in Ghostty's config releasing ⌘⇧P, ⌘N and ⌘, for orion (written when Ghostty is in use)",
+                group: "",
+            },
+            SettingSpec {
                 kind: SettingKind::Editor,
                 label: "File editor",
-                hint: "Editor f/b/F and ⌥click launch (ORION_EDITOR overrides)",
+                hint: "Editor every file opens in — ⌘P, ⌘⇧F, ⌘B and ⌥click (ORION_EDITOR overrides)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::CloseFinderOnOpen,
                 label: "Finder closes on open",
-                hint: "Opening a file closes f/F, so quitting the editor is one Esc",
+                hint: "Opening a file closes the file finder behind the editor, so quitting the editor lands on the grid",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::SshSyncConfig,
                 label: "Sync settings over ssh",
                 hint: "orion ssh / tunnel carry config.json and presets to the remote (config.local.json stays)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::LinearAccount,
+                label: "Linear account",
+                hint: "Whose issues ⌘L lists; Enter types an email (empty = the owner of the project's LINEAR_API_KEY). Kept in config.local.json",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::LinearAutoAttach,
+                label: "Link PRs to Linear",
+                hint: "When a branch started from ⌘L gets a pull request, attach it to each of its Linear issues",
                 group: "",
             },
         ]),
@@ -626,7 +714,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::ShowAllWorktrees,
                 label: "Show all worktrees",
-                hint: "Every worktree gets a band on the grid, even an empty one (d deletes it); deleting a last card keeps the worktree unless Delete emptied worktree is on",
+                hint: "Every worktree gets a band on the grid, even an empty one (Backspace deletes it); deleting a last card keeps the worktree unless Delete emptied worktree is on",
                 group: "",
             },
         ]),
@@ -691,7 +779,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::HideDraftPrs,
                 label: "Draft pull requests",
-                hint: "Show or hide draft pull requests in / search; checkouts always stay",
+                hint: "Show or hide draft pull requests in the ⌘K jump list; checkouts always stay",
                 group: "",
             },
         ]),
@@ -720,7 +808,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::OpenCommand,
                 label: "Open command",
-                hint: "Shell line ⇧Enter / ⇧O runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
+                hint: "Shell line ⌘O → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
                 group: "",
             },
         ]),
@@ -954,6 +1042,21 @@ pub struct Config {
     /// resolving (`git::add_worktree_off_configured`); the TUI writes it so
     /// the settings overlay can edit every key in the shared file.
     pub worktree_base_branch: String,
+    /// ENV LINKS: the main checkout's git-ignored `.env*` files are
+    /// symlinked into every other WORKTREE of the project as it appears.
+    /// Owned by the daemon (`env_links`); the TUI writes it so the
+    /// settings overlay can toggle it.
+    pub link_env_files: bool,
+    /// The app ⇧T opens a terminal in, outside orion: `ghostty` (the
+    /// default) or `terminal` (macOS's Terminal.app), which is also the
+    /// fallback when Ghostty.app isn't installed. See
+    /// [`Config::outside_terminal`].
+    pub outside_terminal: String,
+    /// GHOSTTY KEYBINDS: orion keeps a marked block in Ghostty's config
+    /// unbinding the ⌘ chords its keymap needs (`ghostty_config`), written
+    /// at startup whenever orion runs inside Ghostty or Ghostty is the
+    /// outside terminal. Off leaves Ghostty's config alone.
+    pub ghostty_keybinds: bool,
     /// Editor command the file finder (`f`), tree browser (`b`),
     /// find-in-files (`F`), and ⌥click file links launch, invoked as
     /// `<editor> +<line> <file>`. Any command passes through verbatim, so
@@ -974,6 +1077,22 @@ pub struct Config {
     /// own on every connect — its `config.local.json` still wins there. On
     /// by default; `--no-sync-config` leaves them behind for one connection.
     pub ssh_sync_config: bool,
+    /// LINEAR ACCOUNT: whose issues ⌘L lists. Empty — the default — is
+    /// the owner of the project's `LINEAR_API_KEY`, which for a personal
+    /// key is the user; an email names another member of the workspace,
+    /// for a key a team shares. Always written to `config.local.json`
+    /// ([`LOCAL_KEYS`]), so `orion ssh` never carries it to a remote.
+    pub linear_assignee_email: String,
+    /// The task ⌘L's Enter fills the QUICK PROMPT with for the picked
+    /// issues: `{issues}` becomes each issue's ID, title, link and
+    /// description, `{ids}` the IDs comma-separated, `{first_id}` the
+    /// first one. Hand-edit only; empty — the default — is
+    /// [`DEFAULT_LINEAR_TEMPLATE`]. See [`Config::linear_template`].
+    pub linear_task_template: String,
+    /// LINEAR AUTO-ATTACH: a branch a ⌘L launch cut is remembered
+    /// (`linear::LinkStore`), and when OPEN PRS first shows a pull request
+    /// on it the PR is attached to each of its Linear issues.
+    pub linear_auto_attach: bool,
     /// How long an idle session in an unviewed worktree lives before the
     /// daemon reaps its PTY: "1m", "5m", "15m", "30m", "1h"; "off"
     /// disables. Owned by the daemon (which does the parsing and reaping);
@@ -1407,9 +1526,15 @@ impl Default for Config {
             palette_enter_attaches: true,
             git_init_on_create: true,
             worktree_base_branch: String::new(),
-            editor: "vim".into(),
+            link_env_files: true,
+            outside_terminal: OutsideTerminal::default().as_str().into(),
+            ghostty_keybinds: true,
+            editor: crate::editor::DEFAULT_EDITOR.into(),
             close_finder_on_open: true,
             ssh_sync_config: true,
+            linear_assignee_email: String::new(),
+            linear_task_template: String::new(),
+            linear_auto_attach: true,
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             prewarm_agents: true,
             prewarm_sessions: true,
@@ -1481,6 +1606,22 @@ impl Default for Config {
 /// serde — a file this build can only read key by key.
 const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_marks")];
 
+/// Keys a save always writes to `config.local.json`, never to the
+/// `config.json` that `orion ssh` carries to other machines: who the user
+/// is stays on this one. The local file is created for a key set away
+/// from its default, and an unreadable one is never rewritten — the key
+/// goes unsaved instead.
+const LOCAL_KEYS: &[&str] = &["linear_assignee_email"];
+
+/// The task ⌘L fills the QUICK PROMPT with when `linear_task_template` is
+/// empty. `{issues}`, `{ids}` and `{first_id}` are expanded by
+/// `linear::expand_template`.
+pub const DEFAULT_LINEAR_TEMPLATE: &str = "Fix these Linear issues together, in this worktree:
+
+{issues}
+
+Work through them one at a time and make one commit per issue, its message starting with the issue's ID (for example \"{first_id}: …\"). When every issue is fixed, push the branch and open a single pull request with `gh pr create`, titled \"{ids}: <short summary>\", whose description starts with \"Fixes {ids}\" and then says what changed for each issue.";
+
 impl Config {
     pub fn load() -> Self {
         let cfg = load_layers(&settings_path(), &local_settings_path());
@@ -1544,7 +1685,9 @@ impl Config {
         };
         // A local layer that isn't a readable object was ignored on load,
         // so it holds no keys — and is never rewritten from a partial view.
-        let mut local_root = settings::read_object(local).ok().flatten();
+        let local_read = settings::read_object(local);
+        let local_unreadable = local_read.is_err();
+        let mut local_root = local_read.ok().flatten();
         let serde_json::Value::Object(known) = serde_json::to_value(self).map_err(invalid_data)?
         else {
             unreachable!("Config serializes to a JSON object");
@@ -1566,6 +1709,25 @@ impl Config {
             // A stored value this build couldn't read loaded as its default.
             // Unless it has been changed since, leave the stored one alone.
             if self.skipped.contains(&key) && defaults.get(&key) == Some(&value) {
+                continue;
+            }
+            if LOCAL_KEYS.contains(&key.as_str()) {
+                root.remove(&key);
+                let at_default = defaults.get(&key) == Some(&value);
+                let already_held =
+                    local_root.as_ref().is_some_and(|held| held.contains_key(&key));
+                // Stay out of `config.local.json` until the user sets the
+                // key (or it was already there). An empty Linear email
+                // is the default — "owner of the key" — and must not
+                // appear just because another local key exists.
+                if local_unreadable || (at_default && !already_held) {
+                    continue;
+                }
+                let held = local_root.get_or_insert_with(settings::Object::new);
+                if held.get(&key) != Some(&value) {
+                    held.insert(key, value);
+                    local_changed = true;
+                }
                 continue;
             }
             match local_root.as_mut() {
@@ -1598,17 +1760,33 @@ impl Config {
         crate::launcher::PaneSide::parse(&self.session_pane)
     }
 
+    /// `outside_terminal` resolved to the app ⇧T opens.
+    pub fn outside_terminal(&self) -> OutsideTerminal {
+        OutsideTerminal::parse(&self.outside_terminal)
+    }
+
+    /// The task template ⌘L expands: `linear_task_template`, or
+    /// [`DEFAULT_LINEAR_TEMPLATE`] while that is empty.
+    pub fn linear_template(&self) -> &str {
+        match self.linear_task_template.trim() {
+            "" => DEFAULT_LINEAR_TEMPLATE,
+            _ => &self.linear_task_template,
+        }
+    }
+
     /// `worktree_layout` says the compact LIST rather than the cards.
     pub fn list_layout(&self) -> bool {
         self.worktree_layout.trim().eq_ignore_ascii_case("list")
     }
 
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
-    /// otherwise the `editor` setting, otherwise vim.
+    /// otherwise the `editor` setting, otherwise micro — vim where micro
+    /// isn't installed.
     pub fn editor_command(&self) -> String {
         resolve_editor(
             orion_core::env::non_empty(orion_core::env::EDITOR).as_deref(),
             &self.editor,
+            program_installed(crate::editor::DEFAULT_EDITOR),
         )
     }
 
@@ -2216,9 +2394,17 @@ impl Config {
                 "" => AUTO_CHOICE.into(),
                 name => name.to_string(),
             },
+            SettingKind::LinkEnvFiles => on_off(self.link_env_files).into(),
+            SettingKind::OutsideTerminal => self.outside_terminal().as_str().into(),
+            SettingKind::GhosttyKeybinds => on_off(self.ghostty_keybinds).into(),
             SettingKind::Editor => self.editor.clone(),
             SettingKind::CloseFinderOnOpen => on_off(self.close_finder_on_open).into(),
             SettingKind::SshSyncConfig => on_off(self.ssh_sync_config).into(),
+            SettingKind::LinearAccount => match self.linear_assignee_email.trim() {
+                "" => LINEAR_KEY_OWNER.into(),
+                email => email.to_string(),
+            },
+            SettingKind::LinearAutoAttach => on_off(self.linear_auto_attach).into(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
             SettingKind::PrewarmAgents => on_off(self.prewarm_agents).into(),
             SettingKind::PrewarmSessions => on_off(self.prewarm_sessions).into(),
@@ -2281,7 +2467,20 @@ impl Config {
                 self.palette_enter_attaches = !self.palette_enter_attaches;
             }
             // Typed, not cycled: see `SettingKind::is_text` / `set_text`.
-            SettingKind::WorktreeBaseBranch => {}
+            SettingKind::WorktreeBaseBranch | SettingKind::LinearAccount => {}
+            SettingKind::LinearAutoAttach => {
+                self.linear_auto_attach = !self.linear_auto_attach;
+            }
+            SettingKind::LinkEnvFiles => {
+                self.link_env_files = !self.link_env_files;
+            }
+            SettingKind::OutsideTerminal => {
+                self.outside_terminal =
+                    cycle_choice(self.outside_terminal().as_str(), OUTSIDE_TERMINALS, step).into();
+            }
+            SettingKind::GhosttyKeybinds => {
+                self.ghostty_keybinds = !self.ghostty_keybinds;
+            }
             SettingKind::Editor => {
                 self.editor = cycle_choice(&self.editor, EDITORS, step).into();
             }
@@ -2383,6 +2582,7 @@ impl Config {
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::WorktreeBaseBranch => self.worktree_base_branch.clone(),
+            SettingKind::LinearAccount => self.linear_assignee_email.clone(),
             _ => String::new(),
         }
     }
@@ -2394,6 +2594,10 @@ impl Config {
         match kind {
             SettingKind::WorktreeBaseBranch => {
                 self.worktree_base_branch = value.trim().to_string();
+                true
+            }
+            SettingKind::LinearAccount => {
+                self.linear_assignee_email = value.trim().to_string();
                 true
             }
             _ => false,
@@ -2460,15 +2664,19 @@ fn resolve_sound(configured: &str, remote: bool, macos: bool) -> Option<Sound> {
     }
 }
 
-/// First non-blank of env override → configured value → vim.
-fn resolve_editor(env: Option<&str>, configured: &str) -> String {
-    for value in [env.unwrap_or(""), configured] {
-        let value = value.trim();
-        if !value.is_empty() {
-            return value.to_string();
-        }
+/// First non-blank of env override → configured value → micro; a bare
+/// `micro` on a machine without it is vim instead, so the default never
+/// opens a modal that can't launch.
+fn resolve_editor(env: Option<&str>, configured: &str, micro_installed: bool) -> String {
+    let chosen = [env.unwrap_or(""), configured]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or(crate::editor::DEFAULT_EDITOR);
+    if chosen == crate::editor::DEFAULT_EDITOR && !micro_installed {
+        return crate::editor::FALLBACK_EDITOR.into();
     }
-    "vim".into()
+    chosen.to_string()
 }
 
 /// Whether `kind`'s CLI resolves on this process's PATH right now. A fast
@@ -3256,7 +3464,7 @@ mod tests {
             !cfg.set_text(SettingKind::Editor, "nvim"),
             "a cycled row is not a typed one"
         );
-        assert_eq!(cfg.editor, "vim");
+        assert_eq!(cfg.editor, "micro");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -3449,33 +3657,40 @@ mod tests {
     #[test]
     fn editor_defaults_cycles_and_persists() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.editor, "vim");
+        assert_eq!(cfg.editor, "micro");
         let (tab, row) = locate(SettingKind::Editor).unwrap();
         cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.editor, "nvim");
-        cfg.cycle(tab, row, -1);
         assert_eq!(cfg.editor, "vim");
+        cfg.cycle(tab, row, -1);
+        assert_eq!(cfg.editor, "micro");
         // Hand-edited commands the picker doesn't list cycle from the start.
         cfg.editor = "kak".into();
         cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.editor, "nvim");
+        assert_eq!(cfg.editor, "vim");
 
         cfg.editor = "nvim".into();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         cfg.save_to(&path).unwrap();
         assert_eq!(load_from(&path).editor, "nvim");
-        // A config predating the key keeps vim.
+        // A config predating the key gets the default.
         let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.editor, "vim");
+        assert_eq!(cfg.editor, "micro");
     }
 
     #[test]
-    fn editor_resolution_prefers_env_then_setting_then_vim() {
-        assert_eq!(resolve_editor(Some("hx"), "nvim"), "hx");
-        assert_eq!(resolve_editor(Some("  "), "nvim"), "nvim");
-        assert_eq!(resolve_editor(None, " nvim "), "nvim");
-        assert_eq!(resolve_editor(None, ""), "vim");
+    fn editor_resolution_prefers_env_then_setting_then_micro() {
+        assert_eq!(resolve_editor(Some("hx"), "nvim", true), "hx");
+        assert_eq!(resolve_editor(Some("  "), "nvim", true), "nvim");
+        assert_eq!(resolve_editor(None, " nvim ", true), "nvim");
+        assert_eq!(resolve_editor(None, "", true), "micro");
+        assert_eq!(resolve_editor(None, "micro", false), "vim", "no micro: vim");
+        assert_eq!(resolve_editor(None, "", false), "vim");
+        assert_eq!(
+            resolve_editor(None, "/opt/micro", false),
+            "/opt/micro",
+            "a named path is taken as given"
+        );
     }
 
     #[test]

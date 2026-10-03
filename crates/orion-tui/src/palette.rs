@@ -37,7 +37,13 @@ pub enum PaletteTarget {
         project: ProjectId,
         url: String,
     },
+    /// The last row, always there: open a folder as a new project — the
+    /// prompt the PROJECT DROPDOWN's last row opens.
+    AddProject,
 }
+
+/// What the [`PaletteTarget::AddProject`] row reads, and matches on.
+pub const ADD_PROJECT_ROW: &str = "Add project…";
 
 /// Where a `/` row sits before the query has said anything — the tiers of
 /// the PALETTE's attention order, best first. A SESSION waiting on you
@@ -240,10 +246,14 @@ impl Palette {
 
 impl PaletteItem {
     /// Whether the row belongs in the RECENT SESSIONS list `/` opens on
-    /// before anything is typed: the sessions, and only those. The
-    /// projects, worktrees and pull requests wait for a query.
+    /// before anything is typed: the sessions, and the add-a-project row
+    /// under them. The projects, worktrees and pull requests wait for a
+    /// query.
     fn in_overview(&self) -> bool {
-        matches!(self.target, PaletteTarget::Session(_))
+        matches!(
+            self.target,
+            PaletteTarget::Session(_) | PaletteTarget::AddProject
+        )
     }
 }
 
@@ -409,6 +419,21 @@ fn build_palette_items(
             });
         }
     }
+    // Never stamped and never interacted with, so it sorts under every
+    // other row of its tier: the list's last line until a query ranks it.
+    items.push(PaletteItem {
+        target: PaletteTarget::AddProject,
+        text: ADD_PROJECT_ROW.into(),
+        label_at: 0,
+        crumb: None,
+        stamped: 0,
+        status: None,
+        unseen: false,
+        tier: PaletteTier::Rest,
+        interacted: 0,
+        standing: None,
+        trouble: None,
+    });
     items
 }
 
@@ -511,9 +536,9 @@ mod tests {
     /// session, each naming the project it lives in — no worktree or
     /// branch in the way, and no header rows — in the
     /// attention order NEEDS FEEDBACK, RUNNING, UNSEEN, then by last
-    /// interaction, never-run at the bottom. The cursor starts on the
-    /// session that needs you. `quiet`, a project with no sessions, is not
-    /// a row until something is typed.
+    /// interaction, never-run at the bottom, and adding a project last of
+    /// all. The cursor starts on the session that needs you. `quiet`, a
+    /// project with no sessions, is not a row until something is typed.
     #[test]
     fn empty_query_lists_the_sessions_flat_in_attention_order() {
         assert_eq!(
@@ -524,6 +549,7 @@ mod tests {
                 "demo/unread",
                 "demo/read",
                 "demo/fresh",
+                "Add project…",
             ]
         );
     }
@@ -538,7 +564,10 @@ mod tests {
             .retain(|a| a.name == "read" || a.name == "fresh");
         tree.agents
             .push(agent("older", "w1", AgentStatus::Finished, false, 20));
-        assert_eq!(rows(&tree, ""), ["▶demo/read", "demo/older", "demo/fresh"]);
+        assert_eq!(
+            rows(&tree, ""),
+            ["▶demo/read", "demo/older", "demo/fresh", ADD_PROJECT_ROW]
+        );
     }
 
     /// The overview leaves out the project, worktree and pull request rows;
@@ -552,8 +581,11 @@ mod tests {
             palette
                 .matches
                 .iter()
-                .all(|m| matches!(palette.items[m.item].target, PaletteTarget::Session(_))),
-            "only sessions before a query"
+                .all(|m| matches!(
+                    palette.items[m.item].target,
+                    PaletteTarget::Session(_) | PaletteTarget::AddProject
+                )),
+            "only sessions, and the add-a-project row, before a query"
         );
         assert_eq!(rows(&tree, "quiet"), ["▶quiet", "quiet/main"]);
     }

@@ -7,9 +7,10 @@
 //! from the strip does it close — asked for on 2026-09-04, so a file can be
 //! read, edited and left without ever losing the set of tabs by accident.
 //! A markdown tab is previewed as the rendered page (the MARKDOWN module);
-//! `m` flips it to the source and back. The same modal is where a `.md`
-//! lands from the FILE FINDER's Enter and from a path ⌥clicked in the
-//! pane: read first, edit on Enter.
+//! `m` flips it to the source and back, and Enter on it floats the editor
+//! over the tabs with the page beside it (MARKDOWN SPLIT) rather than
+//! embedding it. The FILE FINDER and a path ⌥clicked in the pane open a
+//! `.md` straight into that split editor.
 
 use std::path::{Path, PathBuf};
 
@@ -436,9 +437,7 @@ fn open_in_editor(app: &mut App) {
         crate::event_loop::vim_size_guess(app)
     };
     if crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, 1, size) {
-        if let Some(vim) = &mut app.vim {
-            vim.embedded = true;
-        }
+        crate::event_loop::embed_editor(app);
     }
 }
 

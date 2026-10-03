@@ -305,7 +305,14 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     let daemon = daemon.clone();
                     let out_tx = out_tx.clone();
                     tokio::spawn(async move {
-                        reply_done(&out_tx, req_id, daemon.delete_worktree(&id, force).await).await;
+                        match daemon.delete_worktree(&id, force).await {
+                            Ok(crate::registry::WorktreeDelete::HasChanges(files)) => {
+                                let _ = out_tx
+                                    .send(ServerEvent::WorktreeHasChanges { req_id, id, files })
+                                    .await;
+                            }
+                            result => reply_done(&out_tx, req_id, result.map(|_| ())).await,
+                        }
                     });
                 }
                 ClientRequest::CreateAgent {

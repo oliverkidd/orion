@@ -336,6 +336,8 @@ pub enum MenuAction {
         target: crate::quick_prompt::QuickTarget,
         back: Box<crate::quick_prompt::QuickReturn>,
     },
+    /// A COMMAND PALETTE or OPEN MENU row: run the action as its key does.
+    RunAction(crate::keymap::Action),
 }
 
 /// Which submenu → (right arrow) opens from a menu row.
@@ -645,6 +647,11 @@ pub enum PendingAction {
     },
     /// Shift+D: every deletable worktree of the selected project.
     DeleteAllWorktrees(Vec<WorktreeId>),
+    /// The daemon answered a worktree delete with `WorktreeHasChanges`:
+    /// these checkouts hold uncommitted or untracked files, and only a
+    /// forced delete removes them — losing those files, never the commits
+    /// on their branches.
+    ForceDeleteWorktrees(Vec<WorktreeId>),
     /// Shift+D: every session row the panel currently shows — agents and
     /// terminals both.
     DeleteAllSessions {
@@ -1890,6 +1897,9 @@ pub enum Overlay {
     Issues(crate::issues::IssuesView),
     /// `v`: the PULL REQUESTS MODAL — the project's open pull requests.
     PullRequests(crate::pr_modal::PullRequestsView),
+    /// `⌘L`: the LINEAR VIEW — the open Linear issues assigned to the
+    /// user, picked to fix together or to attach a pull request to.
+    Linear(crate::linear::LinearView),
     /// `c`: the BRANCH SWITCHER — the ROOT WORKTREE onto another branch.
     BranchSwitch(crate::branch_switch::BranchSwitchView),
     /// `^P` in the LAUNCHER VIEW's box: the PROJECT PICKER.
@@ -3166,15 +3176,6 @@ pub struct App {
     pub sel_project: usize,
     pub sel_worktree: usize,
     pub sel_session: usize,
-    /// How many pill rows the Worktrees column had room for — the page
-    /// Ctrl+d / Ctrl+u jump by half of. No draw sets it since the panels
-    /// went (only tests do), so a half page is a single row.
-    pub worktrees_view_rows: usize,
-    /// The same for the Sessions column: pill rows it had room for as of
-    /// the last draw, the page its Ctrl+d / Ctrl+u halve. A worktree
-    /// with a long ARCHIVED group outgrows the column the way a project
-    /// with many open pull requests outgrows Worktrees.
-    pub sessions_view_rows: usize,
     pub term: Option<AttachedTerm>,
     /// Screens of the sessions the pane showed most recently, most recent
     /// first — at most [`TERM_CACHE_MAX`], each under [`TERM_CACHE_CELLS`].
@@ -3740,6 +3741,13 @@ pub struct App {
     /// startup like `pr_diff_tx`, so the modal's own handlers can start a
     /// fetch. `None` in the unit tests, which then never spawn one.
     pub issues_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::issues::IssuesAnswer>>,
+    /// LINEAR VIEW rows, in flight, failed asks, and the answer channel.
+    pub linear: std::collections::HashMap<ProjectId, crate::linear::LinearList>,
+    pub linear_inflight: std::collections::HashSet<ProjectId>,
+    pub linear_failed: std::collections::HashSet<ProjectId>,
+    pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
+    /// Branches a ⌘L launch cut, so a pull request on one can be attached.
+    pub linear_links: crate::linear::LinkStore,
     /// BACKGROUND READS for the worktree views (`view_jobs`): the DIFF
     /// VIEWER, the FILE FINDER, its grep view and the TREE BROWSER are
     /// handed a clone when they open, and their git and disk reads land
@@ -3830,8 +3838,6 @@ impl App {
             sel_worktree: 0,
             sel_session: 0,
             follow_up: None,
-            worktrees_view_rows: 0,
-            sessions_view_rows: 0,
             term: None,
             term_cache: Vec::new(),
             terminal_tails: HashMap::new(),
@@ -3962,6 +3968,11 @@ impl App {
             issue_comment_inflight: std::collections::HashSet::new(),
             pending_issue_detail: None,
             issues_tx: None,
+            linear: HashMap::new(),
+            linear_inflight: std::collections::HashSet::new(),
+            linear_failed: std::collections::HashSet::new(),
+            linear_tx: None,
+            linear_links: crate::linear::LinkStore::default(),
             view_jobs: None,
             diff_probe: None,
             changed_files: None,
@@ -5133,20 +5144,6 @@ impl App {
         self.worktree_rows()
             .iter()
             .position(|row| row.open_issue().is_some_and(|i| i.url == url))
-    }
-
-    /// Rows a half-page jump (Ctrl+d / Ctrl+u) moves the Worktrees
-    /// cursor: half of what the column showed room for on the last
-    /// frame, never less than one so the keys still move before the
-    /// first draw or in a column squeezed down to a row or two.
-    pub fn worktrees_half_page(&self) -> usize {
-        (self.worktrees_view_rows / 2).max(1)
-    }
-
-    /// Rows a half-page jump moves the Sessions cursor: the same rule as
-    /// [`App::worktrees_half_page`], on the Sessions column's last frame.
-    pub fn sessions_half_page(&self) -> usize {
-        (self.sessions_view_rows / 2).max(1)
     }
 
     /// The open pull request under the Worktrees cursor, when it's on one.

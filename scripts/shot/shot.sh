@@ -46,7 +46,7 @@ git -C "$DEMO" worktree add -q -b wheel-one-line "$WORK/demo-worktrees/wheel-one
 if [ -f "$HERE/scenes/$SCENE.setup.sh" ]; then DEMO="$DEMO" WORK="$WORK" RUNTIME="$RUNTIME" . "$HERE/scenes/$SCENE.setup.sh"; fi
 
 export ORION_RUNTIME_DIR="$RUNTIME" ORION_DATA_DIR="$WORK/data" ORION_AGENT_CMD="${ORION_AGENT_CMD:-/bin/cat}" \
-       ORION_UPDATE_CHECK_SECS=0 ORION_GH_FIXTURES="${ORION_GH_FIXTURES:-$HERE/fixtures}" \
+       ORION_UPDATE_CHECK_SECS=0 ORION_GHOSTTY_CONFIG=off ORION_GH_FIXTURES="${ORION_GH_FIXTURES:-$HERE/fixtures}" \
        PATH="$HERE/bin:$PATH" TERM=xterm-256color
 "$BIN" add "$DEMO" >/dev/null                                # registers the PROJECT (spawns the demo daemon)
 

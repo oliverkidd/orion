@@ -38,6 +38,12 @@ pub struct Config {
     /// with no such branch at all — the default again, with a warning in
     /// the daemon log. Read through [`Config::worktree_base_branch`].
     pub worktree_base_branch: String,
+    /// ENV LINKS: symlink the main checkout's git-ignored `.env*` files
+    /// into every other WORKTREE of the project — one orion creates, one an
+    /// agent moves into, and one made outside orion that the sync adopts —
+    /// so each checkout runs against the clone's secrets. On by default; a
+    /// file already in the worktree is never replaced (see `env_links`).
+    pub link_env_files: bool,
     /// User-defined harnesses from the `custom_harnesses` key, shared with
     /// the TUI's picker. The daemon resolves programs, model flags and
     /// respawns from this list; entries that fail validation are refused
@@ -75,6 +81,7 @@ impl Default for Config {
             prewarm_sessions: true,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             worktree_base_branch: String::new(),
+            link_env_files: true,
             custom_harnesses: Vec::new(),
             harnesses: BTreeMap::new(),
             projects: BTreeMap::new(),
@@ -278,6 +285,15 @@ mod tests {
         assert_eq!(cfg.run_command(Path::new("/tmp/demo")), None);
         assert_eq!(cfg.worktree_base_branch, "develop");
         assert_eq!(skipped.into_iter().collect::<Vec<_>>(), ["projects"]);
+    }
+
+    #[test]
+    fn env_links_default_on_and_allow_opt_out() {
+        assert!(Config::default().link_env_files);
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(cfg.link_env_files);
+        let cfg: Config = serde_json::from_str(r#"{"link_env_files": false}"#).unwrap();
+        assert!(!cfg.link_env_files);
     }
 
     #[test]

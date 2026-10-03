@@ -1001,8 +1001,23 @@ fn draw_bands(
 
 /// What an EMPTY BAND says under its rule, the root's without the delete
 /// it refuses.
-const EMPTY_BAND_HINT: &str = "nothing running · p: new session · t: terminal";
-const EMPTY_BAND_DELETE: &str = " · d: delete worktree";
+fn empty_band_hint(app: &App, is_main: bool) -> String {
+    use crate::hints::Hint::Act;
+    use crate::keymap::Action;
+    let mut hints = vec![
+        Act(Action::QuickPrompt, "new agent"),
+        Act(Action::NewTerminal, "terminal"),
+    ];
+    if !is_main {
+        hints.push(Act(Action::Delete, "delete worktree"));
+    }
+    let keys = crate::hints::joined(&app.keymap, &hints, " · ");
+    if keys.is_empty() {
+        "nothing running".to_string()
+    } else {
+        format!("nothing running · {keys}")
+    }
+}
 
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
 /// in it, drawn only with **Show all worktrees** on — in place of the row
@@ -1027,10 +1042,7 @@ fn draw_empty_band(
     let Some(placed) = crate::launcher::place(window, scroll, row) else {
         return;
     };
-    let mut text = String::from(EMPTY_BAND_HINT);
-    if !band.is_main {
-        text.push_str(EMPTY_BAND_DELETE);
-    }
+    let text = empty_band_hint(app, band.is_main);
     let fg = if lit { th.accent } else { th.dim };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -3324,6 +3336,9 @@ pub(super) fn box_title(launch: &QuickLaunch) -> String {
     }
     if let Some(pr) = &launch.pr {
         head.push(format!("PR #{}", pr.number));
+    }
+    if let Some(linear) = &launch.linear {
+        head.push(linear.title());
     }
     if let Some(preset) = &launch.preset {
         head.push(preset.name.clone());

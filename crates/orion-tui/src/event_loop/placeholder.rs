@@ -607,7 +607,7 @@ mod tests {
             app.selected_worktree().map(|w| w.branch.as_str()),
             Some("feat")
         );
-        press(app, KeyCode::Char('p'), KeyModifiers::NONE, out);
+        press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
         press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
         let branch = match &app.overlay {
             Some(Overlay::Prompt(prompt)) => match &prompt.kind {
@@ -1033,7 +1033,7 @@ mod tests {
             fire_pending_prewarm(&mut app, &mut out);
             assert!(out.is_empty(), "{out:?}");
 
-            press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(
                 app.flash.as_deref(),
@@ -1326,16 +1326,16 @@ mod tests {
 
     // ---- an AGENT PRESET run off the modal's stand-in ----
 
-    /// `n`, "feat", Enter, then `e` on the new row and Enter on the
-    /// "reviewer" preset: the task box is open with "Fix auth" typed, and
+    /// `n`, "feat", Enter, then **Agent presets** on the new row and Enter
+    /// on the "reviewer" preset: the task box is open with "Fix auth" typed, and
     /// the DAEMON has not answered the `CreateWorktree` yet. Returns the
     /// stand-in id and that request's id.
     fn type_preset_task(app: &mut App, out: &mut Vec<ClientRequest>) -> (WorktreeId, u64) {
         let (placeholder, req_id) = stage_modal(app, out);
-        press(app, KeyCode::Char('e'), KeyModifiers::NONE, out);
+        out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
         assert!(
             matches!(&app.overlay, Some(Overlay::AgentPresets(view)) if view.worktree == placeholder),
-            "e on the new row opens the list for it: {:?}",
+            "Agent presets on the new row opens the list for it: {:?}",
             app.overlay
         );
         press(app, KeyCode::Enter, KeyModifiers::NONE, out);
@@ -1416,7 +1416,7 @@ mod tests {
             let mut app = App::new();
             let mut out = Vec::new();
             let (placeholder, req_id) = stage_modal(&mut app, &mut out);
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             assert!(
                 matches!(&app.overlay, Some(Overlay::AgentPresets(view)) if view.worktree == placeholder),
                 "{:?}",
@@ -1502,7 +1502,7 @@ mod tests {
             assert_eq!(app.focus, Focus::Sessions);
 
             // A second launch while the first waits is refused as before.
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert_eq!(
@@ -2188,7 +2188,7 @@ mod tests {
             seed_project_that_ran_first(&mut app);
             app.focus = Focus::Projects;
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w1"));
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let req_id = match out.as_slice() {

@@ -77,7 +77,7 @@ chmod +x "$WORK/bin/agent"
 printf '{"prewarm_agents":false,"prewarm_sessions":false}\n' > "$WORK/data/config.json"
 
 export ORION_RUNTIME_DIR="$RUNTIME" ORION_DATA_DIR="$WORK/data" ORION_AGENT_CMD="$WORK/bin/agent" \
-       ORION_UPDATE_CHECK_SECS=0 ORION_GH_FIXTURES="$REPO/scripts/shot/fixtures" \
+       ORION_UPDATE_CHECK_SECS=0 ORION_GHOSTTY_CONFIG=off ORION_GH_FIXTURES="$REPO/scripts/shot/fixtures" \
        PATH="$WORK/bin:$PATH" TERM=xterm-256color ORION_PERF_LOG="$OUT/perf.jsonl"
 "$BIN" add "$DEMO" >/dev/null                                # registers the PROJECT (spawns the daemon)
 # A second, small project, so the Projects panel has somewhere to go.

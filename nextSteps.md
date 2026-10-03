@@ -6,8 +6,7 @@ Orion review canvas: the audit, features, shortcuts, design briefs, worktrees an
 
 ## 1. Publish the repo
 
-- [ ] Create `github.com/oliverkidd/orion` and push this repo:
-      `git remote add origin git@github.com:oliverkidd/orion.git && git push -u origin main`
+- [x] Public repo: `https://github.com/oliverkidd/orion` (this machine's `origin`).
 - [ ] The history is a fresh single commit, so GitHub will not show it as a fork of
       `AgentSystemLabs/nebula`. The README and LICENSE carry the attribution.
 - [ ] Decide public or private. `install.sh`, `orion upgrade`, `orion ssh` (remote install) and the
@@ -57,31 +56,16 @@ marks its own with `_orionManaged`, and the hooks do nothing outside Orion. (Can
 
 ## 4. Worktrees vs your symlinked .env setup
 
-Orion creates worktrees at `<repo>/../<repo>-worktrees/<branch>`. That folder is fixed, and nothing is
-copied into new worktrees. (Canvas: worktrees)
+Orion creates worktrees at `<repo>/../<repo>-worktrees/<branch>`. **Link .env files** is on by
+default: ignored `.env*` files from the main checkout are symlinked into new and adopted worktrees
+(existing files are kept). Delete now asks before force-removing a dirty checkout.
 
-- [ ] Compare this with where your main repo's existing worktrees live and how its `.env` symlinks are
-      made: a script, a git hook, or by hand.
-- [ ] Quick fix to test: a create hook. Save it as e.g. `~/bin/orion-link-env`, `chmod +x` it, and set it
-      in the main repo:
-
-      #!/bin/sh
-      # $1 = main checkout, $2 = new worktree
-      cd "$1" || exit 1
-      for f in .env .env.local; do
-        [ -e "$1/$f" ] && ln -sf "$1/$f" "$2/$f"
-      done
-
-      git config orion.worktreeCreateHook ~/bin/orion-link-env
-
-  List every env file your repo really uses (including nested apps in a monorepo).
-- [ ] The hook does not run for worktrees you create outside Orion. Those keep whatever your own
-      tooling does.
-- [ ] Delete in the TUI always force-removes the worktree, so uncommitted work is lost. Commit or
-      push before deleting.
-- [ ] Then decide which reworks from the canvas worktrees tab to build: a "files to link" setting,
-      a configurable worktree folder, safe (non-forced) delete, delete-the-branch, hooks for adopted
-      worktrees, auto-clean after merge.
+- [ ] On the work laptop, create a worktree and confirm nested `.env` files (monorepo apps) landed
+      as symlinks into the main checkout.
+- [ ] Confirm a dirty delete shows the "Unsaved work" prompt and that a clean delete still goes
+      through one confirm.
+- [ ] Compare the `<repo>-worktrees/` folder with where your existing worktrees live. A configurable
+      root is still unbuilt if you need to match the company layout.
 
 ## 5. Two Claude accounts
 
@@ -111,23 +95,22 @@ Orion has no account support today. (Canvas: Claude accounts)
 - [ ] If the prototype works, decide whether to build the first-class version: an account picker,
       a "limit reached" card state, and "continue on the other account".
 
-## 6. Linear: attach my issues to a PR
+## 6. Linear (built; verify on the work laptop)
 
-Design is in the canvas design-briefs tab (item 4). Settle these before building:
+`⌘L` lists issues assigned to you, Space marks, Enter starts one agent on the marked set (one
+worktree, one PR). From the pull requests modal, `⌘L` attaches the selected PR. Settings → Linear
+account is an email (empty = owner of `LINEAR_API_KEY`, kept in `config.local.json`). Auto-attach
+is on: a branch cut from ⌘L remembers its issues and attaches the first PR that appears on it.
 
-- [ ] Find which env var the main repo uses (assumed `LINEAR_API_KEY`) and whether it lives in
-      `.env` or `.env.local`.
-- [ ] Find whose key it is. A personal key makes "assigned to me" work. A shared or bot key would list
-      the bot's issues and attach links as the bot, so you would need a personal key instead.
-- [ ] Confirm worktree `.env` files are symlinks into the main checkout. The design follows symlinks
-      only inside the main checkout.
-- [ ] Check whether Linear's GitHub integration is on for your workspace. If it is, PRs that mention an
-      issue ID may already auto-link, and the feature should avoid double links.
-- [ ] Confirm the GraphQL `viewer.assignedIssues` query and the `attachmentLinkGitHubPR` mutation
-      against Linear's current API with a curl call using your key.
-- [ ] Then build it: Ctrl+l in the pull requests modal, issues grouped by status, Space to select,
-      Enter to attach. The key goes only to `api.linear.app` via curl stdin, and is never logged,
-      stored or passed to agents.
+- [ ] Confirm the env var is `LINEAR_API_KEY` and that it lives in `.env` or `.env.local`.
+- [ ] Settings → Linear account: type your Linear email if the key is a shared/bot key, so
+      "assigned to me" is actually you.
+- [ ] Confirm `viewer.assignedIssues` and `attachmentLinkGitHubPR` against the live API. If Linear
+      renamed the mutation, the attach flash will say so.
+- [ ] Check whether Linear's GitHub integration already auto-links (branch names carry `ENG-12`).
+      If it does, you can turn **Link PRs to Linear** off.
+- [ ] Run ⌘L in the real repo, mark two issues, launch, and confirm the agent prompt and the branch
+      name look right. Then attach from `v` → ⌘L.
 
 ## 7. Check on the real repo
 
@@ -149,5 +132,7 @@ Design is in the canvas design-briefs tab (item 4). Settle these before building
       `cargo update -p chacha20`, then `cargo test` and `cargo audit`.
 - [ ] The `assets/*.png` screenshots still show the old "nebula" name. Regenerate them with the repo's
       screenshot tooling once the UI changes settle.
-- [ ] Design briefs 3a (markdown editing), 3b (per-commit diff review) and 3c (skills) are ready to
-      build. They don't need the work laptop, but test them on the real repo.
+- [ ] Design briefs 3b (per-commit diff review) and 3c (skills) are ready to build. 3a (markdown
+      editing) is parked: read-only rendering already exists, and Settings → File editor / ⌘O
+      opens Cursor or VS Code for edits. They don't need the work laptop, but test them on the
+      real repo.

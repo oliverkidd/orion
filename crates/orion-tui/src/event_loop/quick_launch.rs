@@ -47,6 +47,7 @@ pub(super) fn submit(
             launch.effort.as_deref(),
         );
     }
+    crate::linear::remember_submit(app, &launch);
     // A box re-aimed with `^P` fires into a project the screen is not
     // showing: the session starts there and the user keeps working here,
     // so nothing this launch does may move a cursor, a tab or the pane.
@@ -330,7 +331,7 @@ mod tests {
 
     /// `p`, a task, and the send.
     fn launch(app: &mut App, mods: KeyModifiers) -> (u64, WorktreeId) {
-        key(app, KeyCode::Char('p'), KeyModifiers::NONE);
+        key(app, KeyCode::Char('n'), KeyModifiers::CONTROL);
         type_text(app, "tidy the nav");
         send(app, mods)
     }
@@ -387,7 +388,7 @@ mod tests {
             let mut app = App::new();
             seed_tree(&mut app);
             draw(&mut app);
-            key(&mut app, KeyCode::Char('~'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
             assert!(app.launcher_pane_hidden, "folded away to start with");
 
             let (req_id, worktree) = launch(&mut app, KeyModifiers::NONE);
@@ -490,7 +491,7 @@ mod tests {
             let card = on_card(&mut app);
             let focus = app.focus;
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -585,7 +586,7 @@ mod tests {
             let mut app = App::new();
             seed_tree(&mut app);
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let mut terminal = Terminal::new(TestBackend::new(130, 34)).unwrap();
             terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
             let screen = buffer_text(&terminal);
@@ -687,7 +688,7 @@ mod tests {
                 Some("demo")
             );
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             type_text(&mut app, "we");

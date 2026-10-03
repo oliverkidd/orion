@@ -1681,17 +1681,18 @@ pub fn project_of(app: &App, target: &QuickTarget) -> Option<ProjectId> {
 }
 
 /// A fresh worktree for `launch` in `project`, on a branch nobody has
-/// yet: named after the issue for an ISSUE SESSION, the random name `n`
-/// would offer otherwise.
+/// yet: named after the issue for an ISSUE SESSION, after the batch for
+/// a LINEAR launch, the random name `n` would offer otherwise.
 pub fn fresh_worktree(
     app: &App,
     project: ProjectId,
     launch: &crate::quick_prompt::QuickLaunch,
 ) -> QuickTarget {
     let taken = app.project_branches(&project);
-    let branch = match &launch.issue {
-        Some(issue) => crate::branch_name::issue_name(issue.number, &issue.title, &taken),
-        None => crate::branch_name::random_name(&taken),
+    let branch = match (&launch.issue, &launch.linear) {
+        (Some(issue), _) => crate::branch_name::issue_name(issue.number, &issue.title, &taken),
+        (None, Some(linear)) => linear.branch(&taken),
+        (None, None) => crate::branch_name::random_name(&taken),
     };
     QuickTarget::NewWorktree { project, branch }
 }

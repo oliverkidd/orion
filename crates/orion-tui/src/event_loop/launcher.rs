@@ -22,16 +22,13 @@ use crate::text_input::TextInput;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use orion_core::{AgentId, ClientRequest, ProjectId, SessionRef, WorktreeId};
 
-/// Rows of cards `Ctrl+d` / `Ctrl+u` jump.
-const HALF_PAGE: i64 = 2;
-
 /// What `⇧A` says each way: which of the two lists the grid is now of.
 const ARCHIVED_VIEW: &str = "archived sessions — u unarchives one, ⇧A back to the live ones";
 const LIVE_VIEW: &str = "live sessions — ⇧A reads the archived ones";
 
 /// What the grid says when there is nothing to step through yet — of
 /// whichever of the two lists it is showing ([`toggle_archived`]).
-const NO_SESSIONS: &str = "no sessions yet — p starts one";
+const NO_SESSIONS: &str = "no sessions yet — ^n starts one";
 const NO_ARCHIVED_SESSIONS: &str = "nothing archived here — ⇧A back to the live sessions";
 
 /// Is the card under this id one of the ARCHIVED VIEW's? Its session was
@@ -51,7 +48,7 @@ fn nothing_here(app: &App) -> &'static str {
 
 /// What the PROJECT DROPDOWN says with no project to list — never on
 /// screen in practice: the view is only up once there is one.
-const NO_PROJECTS: &str = "no projects yet — o opens a folder";
+const NO_PROJECTS: &str = "no projects yet — ^k, then Add project… opens a folder";
 
 /// What folding the PANE away says, and what bringing it back says. The
 /// first names what went with it: the card under the cursor is let go of
@@ -301,7 +298,7 @@ pub(super) const NO_PANE_HERE: &str = "the terminals are cards on the grid — ^
 /// want of a band under the cursor.
 const TERMINAL_ON_ROOT: &str = "nothing selected — the terminal opens on the root checkout";
 /// And what it says with no root checkout to fall back on.
-const NO_ROOT_FOR_TERMINAL: &str = "no checkout selected — j/k onto a worktree, then t";
+const NO_ROOT_FOR_TERMINAL: &str = "no checkout selected — ↑/↓ onto a worktree, then t";
 
 /// The band the cursor wears — None once the aim has been let go of
 /// (`App::launcher_unaimed`), as `ui::launcher_view::wearing` draws it.
@@ -658,8 +655,6 @@ pub(super) fn handle_action(
         Action::MoveUp => step_up(app, armed, chord, out),
         Action::FocusRight => step_grid(app, 1, 0, out),
         Action::FocusLeft => step_grid(app, -1, 0, out),
-        Action::HalfPageDown => step_grid(app, 0, HALF_PAGE, out),
-        Action::HalfPageUp => step_grid(app, 0, -HALF_PAGE, out),
         // Enter always opens the card under the cursor into the PANE
         // beside the cards, where the session is already running and
         // reading it only takes the keys — expanded or not, and on a
@@ -745,7 +740,7 @@ pub(super) fn follow_up(app: &mut App) {
 
 /// What `⇧V` says with no card under the cursor to read a pull request
 /// off — the aim let go of, or a grid with no sessions in it.
-const NO_CARD_FOR_PR: &str = "no card selected — j/k onto one, then ⇧V opens its pull request";
+const NO_CARD_FOR_PR: &str = "no card selected — ↑/↓ onto one, then ^o opens its pull request";
 
 /// `⇧V` on the grid, and **Open pull request** in a card's menu: the pull
 /// request of the checkout under the cursor — the `#42 title` on its
@@ -766,7 +761,7 @@ pub(super) fn open_pull_request(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// What `y` says with no card under the cursor to comment on the pull
 /// request of.
 pub(super) const NO_CARD_FOR_COMMENT: &str =
-    "no card selected — j/k onto one, then y comments on its pull request";
+    "no card selected — ↑/↓ onto one, then : finds Comment on pull request";
 
 /// The pull request of the checkout under the grid's cursor — the
 /// `#42 title` on its band's rule — or what to say instead: `no_card`
@@ -811,7 +806,7 @@ pub(super) fn click_pull_request(
 }
 
 /// What `⇧I` says with no card under the cursor to read an issue off.
-const NO_CARD_FOR_ISSUE: &str = "no card selected — j/k onto one, then ⇧I opens its issue";
+const NO_CARD_FOR_ISSUE: &str = "no card selected — ↑/↓ onto one, then ^o opens its issue";
 
 /// What `⇧I` says on a card that was not started from an issue.
 const NO_ISSUE: &str = "this session wasn't started from an issue — i lists the project's issues";
@@ -867,7 +862,7 @@ pub(super) fn select_issue_card(app: &mut App, id: &AgentId, out: &mut Vec<Clien
 
 /// What `⇧P` says with no card under the cursor to copy the settings of.
 const NO_CARD_TO_DUPLICATE: &str =
-    "no card selected — j/k onto one, then ⇧P opens the quick prompt on its settings";
+    "no card selected — ↑/↓ onto one, then : finds Duplicate session";
 
 /// `⇧P` on a card, and **Duplicate** in its menu: the QUICK PROMPT, set to
 /// launch what the card runs — the same harness, model and effort, into
@@ -2168,6 +2163,13 @@ fn open_project_picker(app: &mut App, back: QuickReturn) {
         ));
         return;
     }
+    if let Some(linear) = &back.launch.linear {
+        app.flash = Some(format!(
+            "this box is for {} — its project is fixed",
+            linear.ids()
+        ));
+        return;
+    }
     if let Some(pr) = &back.launch.pr {
         app.flash = Some(format!(
             "this box is for PR #{} — its project is fixed",
@@ -3103,7 +3105,7 @@ mod tests {
     fn clicking_the_worktree_toggle_flips_it_as_ctrl_n_does() {
         with_default_config(|| {
             let mut app = two_sessions();
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let fresh = |app: &App| launch(app).0.is_new_worktree();
             let start = fresh(&app);
 
@@ -3218,7 +3220,7 @@ mod tests {
 
             const TYPED: &str = "ship it";
             let opened = |app: &mut App| {
-                key(app, KeyCode::Char('p'), KeyModifiers::NONE);
+                key(app, KeyCode::Char('n'), KeyModifiers::CONTROL);
                 type_text(app, TYPED);
                 assert_eq!(launch(app).1, TYPED);
             };
@@ -3385,7 +3387,7 @@ mod tests {
             let locked = || {
                 let mut app = two_sessions();
                 draw(&mut app);
-                key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+                key(&mut app, KeyCode::Left, KeyModifiers::NONE);
                 key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
                 if app.term.is_none() {
                     app.term = Some(crate::app::AttachedTerm::new(
@@ -3416,8 +3418,8 @@ mod tests {
 
             let mut by_key = locked();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('`'), KeyModifiers::CONTROL);
-            key(&mut by_key, KeyCode::Char('`'), KeyModifiers::CONTROL);
+            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
 
             for app in [&by_click, &by_key] {
                 assert!(app.launcher_pane_hidden, "the pane folded away");
@@ -3441,7 +3443,7 @@ mod tests {
             to_feat(&mut app);
 
             // On the card, `d` is the card's.
-            key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(c))
                     if matches!(c.action, PendingAction::DeleteAgent(_))),
@@ -3452,7 +3454,7 @@ mod tests {
 
             // On the terminal's chip it is the terminal's.
             key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(c))
                     if matches!(c.action, PendingAction::CloseTerminal(_))),
@@ -3529,29 +3531,29 @@ mod tests {
             assert!(screen.contains("idle"), "{screen}");
             assert!(
                 screen.contains(
-                    "nothing running · p: new session · t: terminal · d: delete worktree"
+                    "nothing running · ^n: new agent · t: terminal · ⌫: delete worktree"
                 ),
                 "{screen}"
             );
-            keys(&mut app, &[KeyCode::Char('j'), KeyCode::Char('j')]);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
             assert_eq!(
                 app.selected_worktree().map(|w| w.id.clone()),
                 Some(WorktreeId("w3".into()))
             );
             assert!(app.selected_session_row().is_none(), "no card to be on");
             // Past the last band nothing moves, and back up is `feat`.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(
                 app.selected_worktree().map(|w| w.id.clone()),
                 Some(WorktreeId("w3".into()))
             );
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(
                 app.selected_worktree().map(|w| w.id.clone()),
                 Some(WorktreeId("w2".into()))
             );
             // Tab has no cards to open, and says so.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             assert_eq!(app.launcher_expanded, None);
             assert_eq!(app.flash.as_deref(), Some(super::NO_SESSIONS));
@@ -3572,8 +3574,8 @@ mod tests {
 
             let mut by_key = with_empty_band();
             draw_tall(&mut by_key);
-            keys(&mut by_key, &[KeyCode::Char('j'), KeyCode::Char('j')]);
-            let sent = key(&mut by_key, KeyCode::Char('d'), KeyModifiers::NONE);
+            keys(&mut by_key, &[KeyCode::Down, KeyCode::Down]);
+            let sent = key(&mut by_key, KeyCode::Backspace, KeyModifiers::NONE);
             assert!(is_worktree_confirm(&by_key), "{:?}", by_key.overlay);
             assert!(sent.is_empty(), "asked first: {sent:?}");
 
@@ -3629,8 +3631,8 @@ mod tests {
 
             let mut by_key = with_empty_band_on_a_pull_request();
             let screen = screen_text(&draw_tall(&mut by_key));
-            assert!(screen.contains("d: delete worktree"), "{screen}");
-            keys(&mut by_key, &[KeyCode::Char('j'), KeyCode::Char('j')]);
+            assert!(screen.contains("⌫: delete worktree"), "{screen}");
+            keys(&mut by_key, &[KeyCode::Down, KeyCode::Down]);
             assert_eq!(
                 by_key.selected_worktree().map(|w| w.id.clone()),
                 Some(WorktreeId("w3".into()))
@@ -3643,7 +3645,7 @@ mod tests {
                 "the pull request's link row is under the cursor: {:?}",
                 by_key.selected_session_row()
             );
-            let sent = key(&mut by_key, KeyCode::Char('d'), KeyModifiers::NONE);
+            let sent = key(&mut by_key, KeyCode::Backspace, KeyModifiers::NONE);
             assert!(
                 is_worktree_confirm(&by_key),
                 "{:?} / {:?}",
@@ -3699,7 +3701,7 @@ mod tests {
             let mut app = with_empty_band();
             draw_tall(&mut app);
             to_feat(&mut app);
-            key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             match &app.overlay {
                 Some(Overlay::Confirm(c)) => {
                     assert!(
@@ -3747,7 +3749,7 @@ mod tests {
             let mut app = with_empty_band();
             draw_tall(&mut app);
             to_feat(&mut app);
-            key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             match &app.overlay {
                 Some(Overlay::Confirm(c)) => assert!(
                     matches!(
@@ -3851,15 +3853,15 @@ mod tests {
         with_default_config(|| {
             let mut app = three_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('~'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
             assert!(app.launcher_pane_hidden, "the pane is folded away");
 
             let mut sent = Vec::new();
-            for (turn, step) in [("first", 'h'), ("second", 'l')] {
+            for (turn, step) in [("first", KeyCode::Left), ("second", KeyCode::Right)] {
                 // Along the row to the other card of the root band (which
                 // takes the aim back, the fold having let it go), then
                 // prompt it.
-                key(&mut app, KeyCode::Char(step), KeyModifiers::NONE);
+                key(&mut app, step, KeyModifiers::NONE);
                 let id = app.selected_session().map(|a| a.id.clone()).unwrap();
                 key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
                 type_text(&mut app, turn);
@@ -4037,7 +4039,7 @@ mod tests {
     fn clicking_the_branch_picks_the_worktree_the_launch_runs_in() {
         with_default_config(|| {
             let mut app = two_sessions();
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "fix the nav");
             let (start, _) = launch(&app);
             assert_eq!(
@@ -4113,7 +4115,7 @@ mod tests {
     fn the_worktree_picker_hangs_under_the_branch() {
         with_default_config(|| {
             let mut app = two_sessions();
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let mut buttons = Vec::new();
             for (w, h) in [(140, 40), (110, 30)] {
                 draw_at(&mut app, w, h);
@@ -4212,7 +4214,7 @@ mod tests {
             seed_web(&mut app);
             assert!(app.overlay.is_none(), "nor any later one");
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let (launch, text) = launch(&app);
             assert!(text.is_empty());
             assert!(matches!(launch.target, QuickTarget::Worktree(_)));
@@ -4247,11 +4249,11 @@ mod tests {
             );
 
             // Alone in its band, the card has nowhere to walk.
-            key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Right, KeyModifiers::NONE);
             assert_eq!(selected(&app).as_deref(), Some("a1"));
 
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(selected(&app).as_deref(), Some("a2"), "the next band down");
             assert_eq!(
                 pane(&app),
@@ -4263,11 +4265,11 @@ mod tests {
                 Some("demo"),
                 "the walk stays inside the project the grid is scoped to"
             );
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(selected(&app).as_deref(), Some("a2"), "the last band stays");
 
             app.flash = None;
-            key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Left, KeyModifiers::NONE);
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a2"),
@@ -4276,14 +4278,14 @@ mod tests {
             assert_eq!(app.launcher_expanded, None, "without opening it");
             assert_eq!(app.flash, None, "and says nothing of it");
 
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(selected(&app).as_deref(), Some("a1"));
             assert_eq!(
                 pane(&app),
                 Some(SessionRef::Agent(AgentId("a1".into()))),
                 "and swaps with the cursor"
             );
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a1"),
@@ -4316,7 +4318,7 @@ mod tests {
 
             // One band open at a time: Tab on another closes the first.
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a2"),
@@ -4360,7 +4362,7 @@ mod tests {
 
             // Back to the row's start: `h` stops there.
             for _ in 0..8 {
-                key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+                key(&mut app, KeyCode::Left, KeyModifiers::NONE);
             }
             assert_eq!(at(&app), Some(0), "h stops at the first card");
             assert!(app.launcher_expanded.is_none(), "and never goes in");
@@ -4389,12 +4391,12 @@ mod tests {
 
             // `l` walks them one at a time, the pane following.
             for (i, card) in cards.iter().enumerate().skip(1) {
-                key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+                key(&mut app, KeyCode::Right, KeyModifiers::NONE);
                 assert_eq!(at(&app), Some(i), "l onto card {i}");
                 assert_eq!(pane(&app).as_ref(), Some(card), "the pane follows");
                 assert!(app.launcher_expanded.is_none(), "at the band level still");
             }
-            key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Right, KeyModifiers::NONE);
             assert_eq!(at(&app), Some(last), "l stops at the last card");
             draw(&mut app);
             assert!(
@@ -4502,7 +4504,7 @@ mod tests {
             }
             draw(&mut app);
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            let out = key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            let out = key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert!(
                 out.iter()
                     .any(|r| matches!(r, ClientRequest::MarkAgentSeen { id }
@@ -4525,7 +4527,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            keys(&mut app, &[KeyCode::Esc, KeyCode::Char('j')]);
+            keys(&mut app, &[KeyCode::Esc, KeyCode::Down]);
             let text = buffer_text(&draw(&mut app));
             assert!(
                 text.contains("polish-nav  ↳ feat"),
@@ -4551,7 +4553,7 @@ mod tests {
             );
 
             // And the walk keeps swapping it.
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             let text = buffer_text(&draw(&mut app));
             assert!(
                 text.contains("agent-1  ⌂ main"),
@@ -4597,7 +4599,7 @@ mod tests {
             key(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
             assert_eq!(app.focus, Focus::Sessions, "the hatch is back to the cards");
             assert!(!app.term_locked);
-            keys(&mut app, &[KeyCode::Esc, KeyCode::Char('k')]);
+            keys(&mut app, &[KeyCode::Esc, KeyCode::Up]);
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a1"),
@@ -4870,8 +4872,8 @@ mod tests {
 
     /// TYPE-AHEAD in the PROJECT DROPDOWN: letters narrow the rows to what
     /// they fuzzy-match rather than jumping the cursor, so a project is
-    /// found by name instead of by scrolling. Backspace widens, Esc clears
-    /// the query before it closes the list, and a letter nothing matches
+    /// found by name instead of by scrolling. Backspace widens, Esc closes
+    /// the list, and a letter nothing matches
     /// is refused so the list never empties.
     #[test]
     fn typing_in_the_project_dropdown_narrows_it_to_the_name() {
@@ -4915,8 +4917,8 @@ mod tests {
             );
 
             // A letter nothing matches leaves the list as it was, and says
-            // so; Esc then clears the query before it closes the list. The
-            // `+` moved right to make room for `docs`'s new tab.
+            // so; Esc then closes the list, query and all. The `+` moved
+            // right to make room for `docs`'s new tab.
             draw(&mut app);
             let (x, y) = crumb_cell(&app, HitTarget::LauncherTabAdd);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
@@ -4926,24 +4928,18 @@ mod tests {
             assert_eq!(labels(&app), narrowed, "the list never empties");
             assert!(app.flash.is_some(), "and the refusal says so");
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            assert_eq!(labels(&app).len(), 4, "Esc clears the query first");
-            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            assert!(app.overlay.is_none(), "and then closes: {:?}", app.overlay);
+            assert!(app.overlay.is_none(), "Esc closes: {:?}", app.overlay);
         });
     }
 
-    /// `⌘P` is the click on the header's `+` from the keyboard — INPUT
-    /// PARITY: both are [`super::open_project_menu`], so it is the same
-    /// list hung off the same `+`. It works from the cards and from inside
-    /// the PANE under them, where the chord is taken rather than typed
-    /// into the agent and Esc hands the keys straight back. The chord
-    /// again puts the list away instead of typing a `p` into its
-    /// type-ahead, and a full-screen session, with no header on screen,
-    /// keeps the chord for itself.
+    /// **Projects** in the COMMAND PALETTE is the click on the header's
+    /// `+` — INPUT PARITY: both are [`super::open_project_menu`], so it is
+    /// the same list hung off the same `+`. A ⌘ chord from inside the PANE
+    /// under the cards is taken rather than typed into the agent: ⌘P there
+    /// is Go to file, with the keys back on the cards.
     #[test]
-    fn cmd_p_drops_the_project_dropdown_from_the_cards_and_the_pane() {
+    fn the_projects_command_is_the_click_on_the_plus() {
         with_default_config(|| {
-            let cmd_p = |app: &mut App| key(app, KeyCode::Char('p'), KeyModifiers::SUPER);
             let dropdown = |app: &App| -> (Vec<String>, Option<(u16, u16)>, usize) {
                 let Some(Overlay::Menu(menu)) = &app.overlay else {
                     panic!("no PROJECT DROPDOWN: {:?}", app.overlay);
@@ -4957,21 +4953,20 @@ mod tests {
             draw(&mut by_click);
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherTabAdd);
             mouse(&mut by_click, MouseEventKind::Down(MouseButton::Left), x, y);
-            let mut by_key = two_sessions();
-            draw(&mut by_key);
-            cmd_p(&mut by_key);
-            assert_eq!(dropdown(&by_key), dropdown(&by_click));
-            let mut by_plus = two_sessions();
-            draw(&mut by_plus);
-            key(&mut by_plus, KeyCode::Char('+'), KeyModifiers::NONE);
-            assert_eq!(
-                dropdown(&by_plus),
-                dropdown(&by_click),
-                "+ where ⌘ never arrives"
-            );
+            let mut by_command = two_sessions();
+            draw(&mut by_command);
+            crate::event_loop::run_action(&mut by_command, crate::keymap::Action::ProjectDropdown);
+            assert_eq!(dropdown(&by_command), dropdown(&by_click));
 
-            cmd_p(&mut by_key);
-            assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
+            // A project picked from it lands on its cards.
+            key(&mut by_command, KeyCode::Char('w'), KeyModifiers::NONE);
+            key(&mut by_command, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(by_command.overlay.is_none(), "{:?}", by_command.overlay);
+            assert_eq!(
+                by_command.selected_project().map(|p| p.name.clone()),
+                Some("web".into())
+            );
+            assert_eq!(by_command.focus, Focus::Sessions);
 
             // Inside the pane under the cards.
             let mut app = two_sessions();
@@ -4979,33 +4974,12 @@ mod tests {
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(app.term_locked && !app.collapsed);
             draw(&mut app);
-            let out = cmd_p(&mut app);
+            let out = key(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER);
             assert!(
                 !out.iter().any(|r| matches!(r, ClientRequest::Input { .. })),
                 "the agent was sent the chord: {out:?}"
             );
-            assert_eq!(dropdown(&app).1, dropdown(&by_click).1, "off the same +");
-            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(app.focus, Focus::Terminal, "the keys are the pane's again");
-            assert!(app.term_locked);
-
-            // A project picked from over the pane lands on its cards.
-            cmd_p(&mut app);
-            key(&mut app, KeyCode::Char('w'), KeyModifiers::NONE);
-            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.selected_project().map(|p| p.name.clone()),
-                Some("web".into())
-            );
-            assert_eq!(app.focus, Focus::Sessions);
-
-            // Full-screen: no header, so no list.
-            full_screen(&mut app);
-            assert!(app.collapsed && app.term_locked);
-            cmd_p(&mut app);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(!app.term_locked, "the keys left the pane for Go to file");
         });
     }
 
@@ -5051,7 +5025,7 @@ mod tests {
             let text = buffer_text(&draw(&mut app));
             assert_eq!(tabs_drawn(&app), ["docs", "demo"], "{text}");
             assert!(
-                text.contains("press  p  to prompt"),
+                text.contains("press  ^n  to prompt"),
                 "the grid says what starts one: {text}"
             );
         });
@@ -5151,7 +5125,7 @@ mod tests {
     fn an_empty_project_folds_the_pane_with_its_empty_band_on_the_grid() {
         type Way = fn(&mut App);
         let by_dropdown: Way = |app| {
-            key(app, KeyCode::Char('+'), KeyModifiers::NONE);
+            crate::event_loop::run_action(app, crate::keymap::Action::ProjectDropdown);
             type_text(app, "docs");
             key(app, KeyCode::Enter, KeyModifiers::NONE);
         };
@@ -5203,7 +5177,7 @@ mod tests {
 
                 // `j` takes the aim back, onto the band: the pane it
                 // brings up is docs', and docs has nothing to read.
-                key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+                key(&mut app, KeyCode::Down, KeyModifiers::NONE);
                 let text = buffer_text(&draw(&mut app));
                 assert!(super::has_pane(&app), "{way}: aimed at the band: {text}");
                 assert_eq!(reading(&app), None, "{way}: and it reads nothing");
@@ -5306,7 +5280,7 @@ mod tests {
                 super::open_project(&mut app, &ProjectId("p3".into()), &mut out);
                 assert_eq!(reading(&app), None, "nothing of demo's left attached");
 
-                key(&mut app, KeyCode::Char('~'), KeyModifiers::CONTROL);
+                key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
                 let text = buffer_text(&draw(&mut app));
                 assert!(
                     super::has_pane(&app),
@@ -5439,18 +5413,18 @@ mod tests {
             let terminal = draw(&mut by_click);
             let text = buffer_text(&terminal);
             assert!(text.contains("Welcome to orion"), "{text}");
-            assert!(text.contains("press  p  to prompt"), "{text}");
+            assert!(text.contains("press  ^n  to prompt"), "{text}");
             assert!(!text.contains("type a task"), "only the welcome: {text}");
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherWelcomePrompt);
             let cap = &terminal.backend().buffer()[(x + 7, y)];
-            assert_eq!(cap.symbol(), "p", "{text}");
+            assert_eq!(cap.symbol(), "^", "{text}");
             assert_eq!(cap.bg, by_click.theme.accent, "the key is a key cap");
             assert!(by_click.welcome_active(), "the orion ticks while it is up");
 
             mouse(&mut by_click, MouseEventKind::Down(MouseButton::Left), x, y);
             let mut by_key = on_an_empty_project();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let launch = |app: &App| match &app.overlay {
                 Some(Overlay::Prompt(p)) => match &p.kind {
                     PromptKind::QuickPrompt(launch) => launch.clone(),
@@ -5494,7 +5468,7 @@ mod tests {
             let sky = glyphs(&terminal, grid.y..key_y - 3);
             assert!(sky > 40, "{sky} specks of dust: {}", buffer_text(&terminal));
             assert!(row(&terminal, key_y - 2).contains("   Welcome to orion   "));
-            assert!(row(&terminal, key_y).contains("   press  p  to prompt   "));
+            assert!(row(&terminal, key_y).contains("   press  ^n  to prompt   "));
             assert!(!app.welcome_active(), "animations off: a still frame");
 
             let mut small = on_an_empty_project();
@@ -5511,7 +5485,7 @@ mod tests {
 
     /// `/`, the query, Enter: the fuzzy jump, the way it is typed.
     fn jump(app: &mut App, query: &str) {
-        key(app, KeyCode::Char('/'), KeyModifiers::NONE);
+        key(app, KeyCode::Char('k'), KeyModifiers::CONTROL);
         for c in query.chars() {
             key(app, KeyCode::Char(c), KeyModifiers::NONE);
         }
@@ -5681,7 +5655,7 @@ mod tests {
 
             // A click on the lit tab changes nothing — not even the card
             // the cursor was walked to.
-            key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Right, KeyModifiers::NONE);
             let before = tab_state(&app);
             draw(&mut app);
             let (x, y) = crumb_cell(&app, HitTarget::LauncherTab(ProjectId("p1".into())));
@@ -5699,7 +5673,7 @@ mod tests {
             let mut app = two_tabs();
             assert_eq!(tab_state(&app).2, ["p2", "p1"], "demo is on the right");
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(
@@ -5723,7 +5697,7 @@ mod tests {
             key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
             assert_eq!(tab_state(&app).0.as_deref(), Some("web"));
             assert_eq!(tab_state(&app).2, ["p1", "p2"], "a switch only looks");
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "fix the css");
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(tab_state(&app).2, ["p2", "p1"]);
@@ -5794,7 +5768,7 @@ mod tests {
             draw(&mut app);
             assert_eq!(tab_state(&app).2, ["p1"], "only demo is open");
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             type_text(&mut app, "we");
@@ -5862,7 +5836,7 @@ mod tests {
             let mut app = two_tabs();
             keys(
                 &mut app,
-                &[KeyCode::Char('h'), KeyCode::Char('h'), KeyCode::Char('l')],
+                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
             );
             assert_eq!(selected(&app).as_deref(), Some("a1"), "demo's second card");
 
@@ -5944,7 +5918,7 @@ mod tests {
 
             // Keys that would walk the hidden rows do nothing.
             let before = (app.sel_project, app.sel_worktree, app.sel_session);
-            keys(&mut app, &[KeyCode::Char('j'), KeyCode::Char('l')]);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Right]);
             assert_eq!((app.sel_project, app.sel_worktree, app.sel_session), before);
             assert!(app.projects_closed);
 
@@ -5955,7 +5929,7 @@ mod tests {
             assert!(next.projects_closed && next.launcher_tabs.is_empty());
 
             // `+`: every project, none ticked; picking one reopens it.
-            key(&mut app, KeyCode::Char('+'), KeyModifiers::NONE);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::ProjectDropdown);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("no dropdown: {:?}", app.overlay);
             };
@@ -5993,7 +5967,7 @@ mod tests {
     /// `feat` checkout — the next band down, its one card under the
     /// cursor as the band's remembered card.
     fn to_feat(app: &mut App) {
-        key(app, KeyCode::Char('j'), KeyModifiers::NONE);
+        key(app, KeyCode::Down, KeyModifiers::NONE);
     }
 
     /// Press `code` with no modifiers, once per entry.
@@ -6077,7 +6051,7 @@ mod tests {
                 (th.accent, true, true),
                 "the keys are on the root band"
             );
-            keys(&mut app, &[KeyCode::Char('k'), KeyCode::Char('k')]);
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
             assert_eq!(app.launcher_tab_cursor, Some(ProjectId("p1".into())));
             let terminal = draw(&mut app);
             assert!(
@@ -6145,7 +6119,7 @@ mod tests {
             );
             let before = tab_state(&app);
 
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, None, "one press stays put");
             assert!(
                 app.flash
@@ -6154,7 +6128,7 @@ mod tests {
                 "{:?}",
                 app.flash
             );
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(
                 app.launcher_tab_cursor,
                 Some(ProjectId("p1".into())),
@@ -6162,7 +6136,7 @@ mod tests {
             );
             assert_eq!(tab_state(&app), before, "nothing opened");
 
-            key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Left, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, Some(ProjectId("p2".into())));
             let on_web = (Some("web".into()), Some("a3".into()), before.2.clone());
             assert_eq!(tab_state(&app), on_web, "the grid comes with the cursor");
@@ -6217,7 +6191,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_tabs();
             draw(&mut app);
-            keys(&mut app, &[KeyCode::Esc, KeyCode::Char('j')]);
+            keys(&mut app, &[KeyCode::Esc, KeyCode::Down]);
             assert_eq!(selected(&app).as_deref(), Some("a2"), "the second band");
             assert_eq!(app.launcher_tab_cursor, None);
 
@@ -6241,12 +6215,12 @@ mod tests {
             let mut app = two_tabs();
             keys(
                 &mut app,
-                &[KeyCode::Char('h'), KeyCode::Char('h'), KeyCode::Char('l')],
+                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
             );
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the second card");
-            keys(&mut app, &[KeyCode::Char('k'), KeyCode::Char('k')]);
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
 
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, Some(ProjectId("p1".into())));
             assert!(
                 app.flash
@@ -6255,7 +6229,7 @@ mod tests {
                 "{:?}",
                 app.flash
             );
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, None);
             assert_eq!(tab_state(&app).0.as_deref(), Some("demo"));
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the card it was on");
@@ -6264,9 +6238,9 @@ mod tests {
             keys(
                 &mut app,
                 &[
-                    KeyCode::Char('k'),
-                    KeyCode::Char('k'),
-                    KeyCode::Char('h'),
+                    KeyCode::Up,
+                    KeyCode::Up,
+                    KeyCode::Left,
                     KeyCode::Down,
                     KeyCode::Down,
                 ],
@@ -6279,7 +6253,7 @@ mod tests {
             // was left on rather than its first.
             keys(
                 &mut app,
-                &[KeyCode::Char('k'), KeyCode::Char('k'), KeyCode::Char('l')],
+                &[KeyCode::Up, KeyCode::Up, KeyCode::Right],
             );
             assert_eq!(tab_state(&app).0.as_deref(), Some("demo"));
             assert_eq!(selected(&app).as_deref(), Some("a1"));
@@ -6288,7 +6262,7 @@ mod tests {
 
     /// Esc goes back down on the project the header's cursor walked the
     /// grid to, its card still selected. So does any key the header has
-    /// no use for, which then means what it means on the grid — `p` the
+    /// no use for, which then means what it means on the grid — ^N the
     /// box.
     #[test]
     fn esc_or_another_key_hands_the_keys_back_to_the_cards() {
@@ -6296,11 +6270,11 @@ mod tests {
             let mut app = two_tabs();
             keys(
                 &mut app,
-                &[KeyCode::Char('h'), KeyCode::Char('h'), KeyCode::Char('l')],
+                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
             );
             keys(
                 &mut app,
-                &[KeyCode::Char('k'), KeyCode::Char('k'), KeyCode::Char('h')],
+                &[KeyCode::Up, KeyCode::Up, KeyCode::Left],
             );
             assert!(app.launcher_tab_cursor.is_some());
             let walked = tab_state(&app);
@@ -6311,10 +6285,8 @@ mod tests {
             assert_eq!(tab_state(&app), walked, "still on the project walked to");
             assert!(!app.launcher_unaimed, "and the card is still selected");
 
-            keys(
-                &mut app,
-                &[KeyCode::Char('k'), KeyCode::Char('k'), KeyCode::Char('p')],
-            );
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert_eq!(app.launcher_tab_cursor, None);
             launch(&app);
         });
@@ -6328,11 +6300,11 @@ mod tests {
     fn a_click_on_a_tab_from_the_header_is_enter_on_it() {
         with_default_config(|| {
             let up = [
-                KeyCode::Char('h'),
-                KeyCode::Char('h'),
-                KeyCode::Char('l'),
-                KeyCode::Char('k'),
-                KeyCode::Char('k'),
+                KeyCode::Left,
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Up,
+                KeyCode::Up,
             ];
             let mut by_key = two_tabs();
             keys(&mut by_key, &up);
@@ -6352,7 +6324,7 @@ mod tests {
             // Onto the other tab: `h` and Enter, or a click on it.
             let mut by_key = two_tabs();
             keys(&mut by_key, &up);
-            keys(&mut by_key, &[KeyCode::Char('h'), KeyCode::Enter]);
+            keys(&mut by_key, &[KeyCode::Left, KeyCode::Enter]);
 
             let mut by_click = two_tabs();
             keys(&mut by_click, &up);
@@ -6383,14 +6355,14 @@ mod tests {
     fn x_in_the_header_closes_the_tab_under_its_cursor() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(&mut app, &[KeyCode::Char('h'), KeyCode::Char('h')]);
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left]);
             let before = tab_state(&app);
             keys(
                 &mut app,
                 &[
-                    KeyCode::Char('k'),
-                    KeyCode::Char('k'),
-                    KeyCode::Char('h'),
+                    KeyCode::Up,
+                    KeyCode::Up,
+                    KeyCode::Left,
                     KeyCode::Char('x'),
                 ],
             );
@@ -6408,7 +6380,7 @@ mod tests {
         });
     }
 
-    /// `Backspace`, `Delete` and `d` with the header holding the keys ask
+    /// Delete (`Backspace`) with the header holding the keys asks
     /// before closing the tab under the cursor: the tab is still there
     /// behind the dialog, `Esc` keeps it with the cursor on it, and the
     /// dialog's Enter is `x` — the grid and the cursor land where `x` lands
@@ -6418,18 +6390,18 @@ mod tests {
     fn the_delete_keys_in_the_header_ask_before_closing_the_tab() {
         with_default_config(|| {
             let up = [
-                KeyCode::Char('h'),
-                KeyCode::Char('h'),
-                KeyCode::Char('k'),
-                KeyCode::Char('k'),
-                KeyCode::Char('h'),
+                KeyCode::Left,
+                KeyCode::Left,
+                KeyCode::Up,
+                KeyCode::Up,
+                KeyCode::Left,
             ];
             let mut by_x = two_tabs();
             keys(&mut by_x, &up);
             key(&mut by_x, KeyCode::Char('x'), KeyModifiers::NONE);
             assert_eq!(by_x.launcher_tabs, [ProjectId("p1".into())]);
 
-            for code in [KeyCode::Backspace, KeyCode::Delete, KeyCode::Char('d')] {
+            for code in [KeyCode::Backspace] {
                 let mut app = two_tabs();
                 keys(&mut app, &up);
                 let before = tab_state(&app);
@@ -6479,7 +6451,7 @@ mod tests {
 
             // Down on the cards the same key is the card's own delete.
             let mut app = two_tabs();
-            keys(&mut app, &[KeyCode::Char('h'), KeyCode::Char('h')]);
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left]);
             key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(c))
@@ -6498,14 +6470,14 @@ mod tests {
     fn the_header_cursor_is_drawn_on_its_tab() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(&mut app, &[KeyCode::Char('h'), KeyCode::Char('h')]);
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left]);
             let terminal = draw(&mut app);
             assert_eq!(tab_cursor_drawn(&app, &terminal), "");
 
-            keys(&mut app, &[KeyCode::Char('k'), KeyCode::Char('k')]);
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
             let terminal = draw(&mut app);
             assert_eq!(tab_cursor_drawn(&app, &terminal), "demo");
-            key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Left, KeyModifiers::NONE);
             let terminal = draw(&mut app);
             assert_eq!(tab_cursor_drawn(&app, &terminal), "web");
             assert!(
@@ -6665,7 +6637,7 @@ mod tests {
             for back_down in [
                 (KeyCode::Char('f'), KeyModifiers::CONTROL),
                 (KeyCode::Char('q'), KeyModifiers::CONTROL),
-                (KeyCode::Char('`'), KeyModifiers::CONTROL),
+                (KeyCode::Char('j'), KeyModifiers::SUPER),
             ] {
                 let out = ctrl_f(&mut app);
                 assert!(
@@ -6870,7 +6842,7 @@ mod tests {
             let (x, y) = row_cell(&app, 2);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
-            key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a2"], "the press unarchives one");
             assert_eq!(
                 selected(&app).as_deref(),
@@ -6879,15 +6851,15 @@ mod tests {
             );
             assert!(app.release_watch.is_some(), "and the key is watched");
 
-            key_kind(&mut app, KeyCode::Char('h'), KeyModifiers::NONE, Release);
+            key_kind(&mut app, KeyCode::Left, KeyModifiers::NONE, Release);
             assert!(
                 app.release_watch.is_some(),
                 "another key let go changes nothing"
             );
-            key_kind(&mut app, KeyCode::Char('u'), KeyModifiers::NONE, Repeat);
+            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
             assert_eq!(cards(&app), ["a9", "a2"], "the held `u` is still swallowed");
 
-            key_kind(&mut app, KeyCode::Char('h'), KeyModifiers::NONE, Repeat);
+            key_kind(&mut app, KeyCode::Left, KeyModifiers::NONE, Repeat);
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a9"),
@@ -6895,7 +6867,7 @@ mod tests {
             );
             assert!(app.release_watch.is_some(), "with the watch still on");
 
-            key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Right, KeyModifiers::NONE);
             assert!(
                 app.release_watch.is_none(),
                 "a fresh press of anything ends it"
@@ -6921,11 +6893,11 @@ mod tests {
             // archived ones relative to before the press.
             let archived = |app: &App| app.tree.agents.iter().filter(|a| a.archived).count();
             let before = archived(&app);
-            key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
             assert_eq!(archived(&app), before - 1, "the press unarchives one");
             assert!(app.release_watch.is_some(), "and the key is watched");
             for _ in 0..5 {
-                key_kind(&mut app, KeyCode::Char('u'), KeyModifiers::NONE, Repeat);
+                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
             }
             assert_eq!(archived(&app), before - 1, "held, it unarchives no more");
         });
@@ -7019,7 +6991,7 @@ mod tests {
             draw(&mut app);
             assert_eq!(cards(&app), ["a9", "a2", "a1"], "newest first");
             super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
-            key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a1"], "the delete went through");
             assert!(
@@ -7036,7 +7008,7 @@ mod tests {
             let mut app = three_sessions();
             draw(&mut app);
             super::select(&mut app, AgentId("a1".into()), &mut Vec::new());
-            key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a2"], "the delete went through");
             assert_eq!(selected(&app).as_deref(), Some("a9"), "the card before it");
@@ -7188,7 +7160,7 @@ mod tests {
         });
     }
 
-    /// The ONLY card leaving — archived with `a` or deleted with `d`, each
+    /// The ONLY card leaving — archived with `a` or deleted with ⌫, each
     /// behind its confirm — leaves nothing for the PANE to read, so it
     /// folds away and the empty grid takes the body, the way a project
     /// opened with no sessions lands. INPUT PARITY: both verbs end in the
@@ -7196,15 +7168,18 @@ mod tests {
     #[test]
     fn the_last_card_leaving_folds_the_pane_away() {
         with_default_config(|| {
-            for keys in [&['a', 'y'][..], &['d', 'y'][..]] {
+            for keys in [
+                &[KeyCode::Char('a'), KeyCode::Char('y')][..],
+                &[KeyCode::Backspace, KeyCode::Char('y')][..],
+            ] {
                 let mut app = two_sessions();
                 super::open_project(&mut app, &ProjectId("p2".into()), &mut Vec::new());
                 draw(&mut app);
                 assert_eq!(cards(&app), ["a3"], "web's one card");
                 assert!(super::has_pane(&app), "{keys:?}: the pane reads it");
 
-                for c in keys {
-                    key(&mut app, KeyCode::Char(*c), KeyModifiers::NONE);
+                for code in keys {
+                    key(&mut app, *code, KeyModifiers::NONE);
                 }
                 assert!(cards(&app).is_empty(), "{keys:?}: the card left");
                 assert!(app.launcher_unaimed, "{keys:?}: nothing left to aim at");
@@ -7212,7 +7187,7 @@ mod tests {
                 assert_eq!(app.flash.as_deref(), Some(super::NO_SESSIONS));
                 let text = buffer_text(&draw(&mut app));
                 assert!(
-                    text.contains("press  p  to prompt"),
+                    text.contains("press  ^n  to prompt"),
                     "{keys:?}: the empty grid says what starts one: {text}"
                 );
             }
@@ -7228,7 +7203,7 @@ mod tests {
         with_default_config(|| {
             let mut by_key = two_sessions();
             draw_at(&mut by_key, 130, 50);
-            keys(&mut by_key, &[KeyCode::Esc, KeyCode::Char('j')]);
+            keys(&mut by_key, &[KeyCode::Esc, KeyCode::Down]);
 
             let mut by_click = two_sessions();
             draw_at(&mut by_click, 130, 50);
@@ -7274,7 +7249,7 @@ mod tests {
         with_default_config(|| {
             let mut by_key = two_sessions();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('~'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
             assert!(by_key.launcher_pane_hidden, "^~ folded the pane away");
             to_feat(&mut by_key);
             assert!(
@@ -7291,7 +7266,7 @@ mod tests {
 
             let mut by_click = two_sessions();
             draw(&mut by_click);
-            key(&mut by_click, KeyCode::Char('~'), KeyModifiers::NONE);
+            key(&mut by_click, KeyCode::Char('j'), KeyModifiers::SUPER);
             assert!(by_click.launcher_pane_hidden);
             key(&mut by_click, KeyCode::Esc, KeyModifiers::NONE);
             draw(&mut by_click);
@@ -7352,8 +7327,8 @@ mod tests {
             let mut by_right = two_sessions();
             for app in [&mut by_left, &mut by_right] {
                 draw(app);
-                key(app, KeyCode::Char('~'), KeyModifiers::NONE);
-                keys(app, &[KeyCode::Esc, KeyCode::Char('j')]);
+                key(app, KeyCode::Char('j'), KeyModifiers::SUPER);
+                keys(app, &[KeyCode::Esc, KeyCode::Down]);
                 assert!(
                     app.launcher_pane_hidden,
                     "a key walking the bands leaves the fold be"
@@ -7469,12 +7444,12 @@ mod tests {
             // top row — and the frame brings the card it lands on whole
             // back on screen: the scroll is the keys' again.
             let (row, _) = pb.content.as_ref().unwrap().row_of(a1).expect("a1's row");
-            let step = if row == 0 { 'j' } else { 'k' };
-            key(&mut app, KeyCode::Char(step), KeyModifiers::NONE);
+            let step = if row == 0 { KeyCode::Down } else { KeyCode::Up };
+            key(&mut app, step, KeyModifiers::NONE);
             draw_narrow(&mut app);
             assert!(!app.launcher_scroll_held, "the keys took the scroll back");
             let at = crate::launcher::card_cursor(&app, &bands[band]).expect("on a card");
-            assert_ne!(at, a1, "{step} walked the cursor");
+            assert_ne!(at, a1, "{step:?} walked the cursor");
             assert!(
                 whole(&app, at),
                 "the card under the cursor is whole on screen"
@@ -7494,7 +7469,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "fix the nav");
             let box_behind = |app: &mut App, what: &str| {
                 let text = buffer_text(&draw(app));
@@ -7518,8 +7493,8 @@ mod tests {
             let text = box_behind(&mut app, "a submenu of it");
             assert!(text.contains("model"), "{text}");
 
-            // `^O`: the model list of the box's harness, over the box.
-            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            // `^O`: the model list of the box's harness, over the box. One
+            // Esc takes the whole chain back down to the box.
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
             let text = box_behind(&mut app, "the model picker");
@@ -7542,7 +7517,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "fix the nav");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let text = buffer_text(&draw(&mut app));
@@ -7567,7 +7542,7 @@ mod tests {
         with_config_json(r#"{"quick_prompt_new_worktree": true}"#, || {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "fix it");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let Some(Overlay::ProjectPicker(picker)) = &app.overlay else {
@@ -7610,7 +7585,7 @@ mod tests {
             );
             let (card, shown) = (selected(&app), pane(&app));
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             type_text(&mut app, "we");
@@ -7673,7 +7648,7 @@ mod tests {
             draw(&mut app);
             let (card, shown) = (selected(&app), pane(&app));
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             type_text(&mut app, "we");
@@ -7759,7 +7734,7 @@ mod tests {
             draw(&mut app);
             let tabs = app.launcher_tabs.clone();
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             type_text(&mut app, "away");
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -7786,7 +7761,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "hi");
             key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
@@ -7822,7 +7797,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "hi");
             key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
             let labels = |app: &App| -> Vec<String> {
@@ -7873,7 +7848,7 @@ mod tests {
         with_config_json(r#"{"quick_prompt_new_worktree": true}"#, || {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let (launch, _) = launch(&app);
             assert!(launch.is_new_worktree(), "the setting is on");
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
@@ -7886,7 +7861,7 @@ mod tests {
             assert!(app.tree.worktrees.iter().any(|w| &w.id == worktree));
 
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let (launch, _) = self::launch(&app);
             assert!(launch.is_new_worktree(), "the next box follows the setting");
         });
@@ -7942,7 +7917,7 @@ mod tests {
             );
 
             // `u` unarchives the card under the cursor where it stands.
-            let out = key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+            let out = key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
             assert!(
                 out.iter().any(|r| matches!(
                     r,
@@ -8257,7 +8232,7 @@ mod tests {
     fn shift_v_opens_the_cards_pull_request_as_its_menu_row_does() {
         with_default_config(|| {
             let mut by_key = card_on_a_pull_request();
-            let sent = key(&mut by_key, KeyCode::Char('V'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
             assert_eq!(
                 by_key.flash.as_deref(),
@@ -8296,7 +8271,7 @@ mod tests {
                 p.repo_path = "/nonexistent/orion-shift-r".into();
             }
             assert!(!app.issues_failed.contains(&pid));
-            let sent = key(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT);
+            let sent = key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
             assert!(sent.is_empty(), "gh runs client-side: {sent:?}");
             assert!(app.pr_refresh_requested, "the pull requests are re-asked");
             assert!(app.issues_failed.contains(&pid), "and the issues with them");
@@ -8316,7 +8291,7 @@ mod tests {
                 .and_then(|a| crate::launcher::row(&app, &a.id))
                 .map(|row| row.branch)
                 .expect("a card under the cursor");
-            let sent = key(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             assert_eq!(
                 app.flash,
@@ -8337,20 +8312,20 @@ mod tests {
             let mut app = card_on_a_pull_request();
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.launcher_unaimed);
-            let sent = key(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_PR));
         });
     }
 
-    /// `y` on a card comments on the pull request `⇧V` opens — its
-    /// checkout's, the `#42 title` on its band's rule — with no PR row
-    /// to stand on first.
+    /// **Comment on pull request** on a card comments on the pull request
+    /// ⌘O's menu opens — its checkout's, the `#42 title` on its band's
+    /// rule — with no PR row to stand on first.
     #[test]
-    fn y_on_a_card_comments_on_its_pull_request() {
+    fn commenting_on_a_card_comments_on_its_pull_request() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
-            let sent = key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             match &app.overlay {
                 Some(Overlay::Prompt(prompt)) => match &prompt.kind {
@@ -8368,20 +8343,20 @@ mod tests {
         });
     }
 
-    /// `y` refuses as `⇧V` does: with no card selected, and on a card
-    /// whose checkout has no pull request yet.
+    /// Commenting refuses as opening the pull request does: with no card
+    /// selected, and on a card whose checkout has no pull request yet.
     #[test]
-    fn y_without_a_cards_pull_request_says_why() {
+    fn commenting_without_a_cards_pull_request_says_why() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_COMMENT));
 
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert!(
                 app.flash
@@ -8401,7 +8376,7 @@ mod tests {
     fn clicking_the_bands_pull_request_opens_it_as_shift_v_does() {
         with_default_config(|| {
             let mut by_key = card_on_a_pull_request();
-            key(&mut by_key, KeyCode::Char('V'), KeyModifiers::SHIFT);
+            crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
 
             let mut by_click = card_on_a_pull_request();
             let (line, worktree) = pull_request_line(&by_click);
@@ -8614,7 +8589,7 @@ mod tests {
     fn shift_p_no_longer_opens_the_cards_pull_request() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
-            let sent = key(&mut app, KeyCode::Char('P'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             quick_box(&app);
             assert_ne!(
@@ -8680,7 +8655,7 @@ mod tests {
         with_default_config(|| {
             let mut by_key = card_with_settings();
             let card = by_key.selected_session().expect("a card under the cursor");
-            let sent = key(&mut by_key, KeyCode::Char('P'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "nothing starts until Enter: {sent:?}");
             let launch = quick_box(&by_key);
             assert_eq!(
@@ -8746,7 +8721,7 @@ mod tests {
             let mut app = card_with_settings();
             keys(&mut app, &[KeyCode::Esc, KeyCode::Esc]);
             assert!(app.launcher_unaimed);
-            let sent = key(&mut app, KeyCode::Char('P'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_TO_DUPLICATE));
@@ -8774,7 +8749,7 @@ mod tests {
             );
             draw(&mut app);
             assert_eq!(app.selected_session().map(|a| a.id), Some(id));
-            let sent = key(&mut app, KeyCode::Char('P'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             let launch = quick_box(&app);
             assert!(launch.cloud, "{launch:?}");
@@ -8821,7 +8796,7 @@ mod tests {
     fn shift_i_opens_the_cards_issue_as_its_menu_row_does() {
         with_default_config(|| {
             let mut by_key = card_from_an_issue();
-            let sent = key(&mut by_key, KeyCode::Char('I'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenIssue);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
             assert_eq!(
                 by_key.flash.as_deref(),
@@ -8850,7 +8825,7 @@ mod tests {
         with_default_config(|| {
             let mut by_key = card_from_an_issue();
             let id = by_key.selected_session().expect("a card").id;
-            let sent_by_key = key(&mut by_key, KeyCode::Char('I'), KeyModifiers::SHIFT);
+            let sent_by_key = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenIssue);
 
             let mut by_click = card_from_an_issue();
             by_click.card_issue_number = true;
@@ -8944,7 +8919,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            let sent = key(&mut app, KeyCode::Char('I'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenIssue);
             assert!(sent.is_empty(), "{sent:?}");
             assert_eq!(app.flash.as_deref(), Some(super::NO_ISSUE));
             assert_eq!(issue_menu_row(&mut app), None);
@@ -8958,7 +8933,7 @@ mod tests {
             let mut app = card_from_an_issue();
             keys(&mut app, &[KeyCode::Esc, KeyCode::Esc]);
             assert!(app.launcher_unaimed);
-            let sent = key(&mut app, KeyCode::Char('I'), KeyModifiers::SHIFT);
+            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenIssue);
             assert!(sent.is_empty(), "{sent:?}");
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_ISSUE));
         });
@@ -9244,7 +9219,7 @@ mod tests {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("project demo ^P"), "{text}");
             assert!(text.contains("harness claude Tab"), "{text}");
@@ -9275,8 +9250,8 @@ mod tests {
             let mut app = two_sessions();
             draw(&mut app);
             let before = (selected(&app), app.selected_project().map(|p| p.id.clone()));
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(
                 (selected(&app), app.selected_project().map(|p| p.id.clone())),
                 before
@@ -9544,11 +9519,11 @@ mod tests {
         });
     }
 
-    /// `^~` folds the PANE away and takes the selection with it: no pane
+    /// ⌘J folds the PANE away and takes the selection with it: no pane
     /// is drawn under the cards, no card wears the cursor, and the edge
     /// the pane gave the pointer to drag is gone with it. The same key
-    /// brings all three back. Ctrl and a bare backtick is the second
-    /// chord on the same key, for the terminals that send it unshifted.
+    /// brings all three back. ^J is its twin, for the terminals that
+    /// never send ⌘.
     #[test]
     fn folding_the_pane_away_lets_the_card_go_too() {
         with_default_config(|| {
@@ -9574,8 +9549,8 @@ mod tests {
             let (was_pane, grid_was) = (has_pane(&app), cards_h(&app));
             assert!(was_pane && !app.launcher_unaimed);
 
-            key(&mut app, KeyCode::Char('~'), KeyModifiers::CONTROL);
-            assert!(app.launcher_pane_hidden, "^~ folded the pane away");
+            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            assert!(app.launcher_pane_hidden, "⌘J folded the pane away");
             assert!(
                 app.launcher_unaimed,
                 "folding the pane away let the card under the cursor go"
@@ -9593,7 +9568,7 @@ mod tests {
 
             // The same key back: the pane returns, reading the card it is
             // aimed at again.
-            key(&mut app, KeyCode::Char('~'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
             assert!(!app.launcher_pane_hidden);
             assert!(
                 !app.launcher_unaimed,
@@ -9603,11 +9578,10 @@ mod tests {
             assert!(has_pane(&app));
             assert_eq!(cards_h(&app), grid_was, "the pane took its rows back");
 
-            // The two chords beside it: the bare `~` every terminal
-            // delivers, and `^`` where ctrl reports the key unshifted.
+            // Its twin, both ways.
             for chord in [
-                (KeyCode::Char('~'), KeyModifiers::NONE),
-                (KeyCode::Char('`'), KeyModifiers::CONTROL),
+                (KeyCode::Char('j'), KeyModifiers::CONTROL),
+                (KeyCode::Char('j'), KeyModifiers::CONTROL),
             ] {
                 let folded = app.launcher_pane_hidden;
                 key(&mut app, chord.0, chord.1);
@@ -9620,11 +9594,12 @@ mod tests {
         });
     }
 
-    /// `^`` from inside the pane hands the keys back to the card first —
+    /// ⌘J from inside the pane hands the keys back to the card first —
     /// the pane still up, the card still selected — and only a second
-    /// press folds the pane; a third brings it back.
+    /// press folds the pane; a third brings it back. ^J is the agent's in
+    /// there (a newline to most of them).
     #[test]
-    fn ctrl_backtick_steps_out_to_the_card_then_folds_the_pane() {
+    fn cmd_j_steps_out_to_the_card_then_folds_the_pane() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
@@ -9636,16 +9611,16 @@ mod tests {
             let typed = |out: &[ClientRequest]| {
                 out.iter().any(|r| matches!(r, ClientRequest::Input { .. }))
             };
-            let out = key(&mut app, KeyCode::Char('~'), KeyModifiers::NONE);
-            assert!(typed(&out), "a bare ~ is typed into the session: {out:?}");
+            let out = key(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
+            assert!(typed(&out), "^J is typed into the session: {out:?}");
             assert!(!app.launcher_pane_hidden && app.term_locked);
 
             let card = crate::launcher::cursor(&app, &crate::launcher::bands(&app));
-            let out = key(&mut app, KeyCode::Char('`'), KeyModifiers::CONTROL);
-            assert!(!typed(&out), "^` never reaches the session: {out:?}");
+            let out = key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            assert!(!typed(&out), "⌘J never reaches the session: {out:?}");
             assert_eq!(app.focus, Focus::Sessions, "the keys are the grid's");
             assert!(!app.term_locked);
-            assert!(!app.launcher_pane_hidden, "the first ^` left the pane up");
+            assert!(!app.launcher_pane_hidden, "the first ⌘J left the pane up");
             assert!(!app.launcher_unaimed, "and the card it reads selected");
             assert_eq!(
                 crate::launcher::cursor(&app, &crate::launcher::bands(&app)),
@@ -9656,13 +9631,13 @@ mod tests {
             assert_eq!(app.focus, Focus::Sessions);
 
             // Again, from the cards: the pane folds away.
-            key(&mut app, KeyCode::Char('`'), KeyModifiers::CONTROL);
-            assert!(app.launcher_pane_hidden, "the second ^` folded the pane");
+            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            assert!(app.launcher_pane_hidden, "the second ⌘J folded the pane");
             assert_eq!(app.focus, Focus::Sessions);
             draw(&mut app);
 
             // And once more brings it back.
-            key(&mut app, KeyCode::Char('`'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
             assert!(!app.launcher_pane_hidden);
         });
     }
@@ -9688,7 +9663,7 @@ mod tests {
             assert_eq!(app.flash, None, "nothing moved, nothing said");
 
             // A step along the bands takes the aim back.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert!(!app.launcher_unaimed, "a step re-aimed the grid");
         });
     }
@@ -9716,7 +9691,7 @@ mod tests {
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
             );
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert_eq!(
                 launch(&app).0.target,
                 feat,
@@ -9728,7 +9703,7 @@ mod tests {
             // is the checkout under the cursor either way.
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             assert_eq!(app.launcher_expanded, Some(WorktreeId("w2".into())));
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert_eq!(launch(&app).0.target, feat, "the open band's checkout");
             app.overlay = None;
 
@@ -9737,7 +9712,7 @@ mod tests {
             // onto the root.
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.launcher_expanded.is_none() && !app.launcher_unaimed);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert_eq!(launch(&app).0.target, feat, "the band's checkout");
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert!(launch(&app).0.is_new_worktree());
@@ -9749,7 +9724,7 @@ mod tests {
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.launcher_unaimed);
 
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert!(
                 !matches!(&app.overlay, Some(Overlay::ProjectPicker(_))),
                 "the picker went up instead of the box"
@@ -9788,7 +9763,7 @@ mod tests {
             let feat = QuickTarget::Worktree(WorktreeId("w2".into()));
             super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
 
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
             };
@@ -9813,7 +9788,7 @@ mod tests {
 
             // Pick a harness other than the one the box would open on:
             // the box opens set to it, empty, aimed where p would aim.
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             let row_kind = match &app.overlay {
                 Some(Overlay::Menu(menu)) => match &menu.items[menu.hover].action {
@@ -9836,7 +9811,7 @@ mod tests {
                 launch: QuickLaunch::from_config(feat.clone(), &crate::config::Config::default()),
                 input: crate::text_input::TextInput::multiline_with_text("parked words"),
             });
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             let (picked, typed) = launch(&app);
@@ -9856,7 +9831,7 @@ mod tests {
             draw(&mut app);
             for agent in ["a1", "a2"] {
                 super::select(&mut app, AgentId(agent.into()), &mut Vec::new());
-                key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+                key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
                 assert!(
                     matches!(
                         &launch(&app).0.target,
@@ -9879,7 +9854,7 @@ mod tests {
             let mut app = two_sessions();
             draw(&mut app);
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
 
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let Some(Overlay::ProjectPicker(picker)) = &app.overlay else {
@@ -10077,11 +10052,11 @@ mod tests {
             super::select_card(&mut app, bands[0].cards[0].sref(), &mut Vec::new());
             let at = |band, card| Some(crate::launcher::CardRef { band, card });
             for want in [at(0, 1), at(0, 2), at(1, 0), at(1, 0)] {
-                key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+                key(&mut app, KeyCode::Down, KeyModifiers::NONE);
                 draw(&mut app);
                 assert_eq!(cursor_card(&app), want);
             }
-            key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(cursor_card(&app), at(0, 2), "onto the last line above");
         });
     }
@@ -10189,12 +10164,12 @@ mod tests {
             super::select_card(&mut app, bands[0].cards[0].sref(), &mut Vec::new());
             let at = |band, card| Some(crate::launcher::CardRef { band, card });
             for (code, want) in [
-                (KeyCode::Char('l'), at(0, 1)),
-                (KeyCode::Char('j'), at(0, 4)),
-                (KeyCode::Char('j'), at(1, 0)),
-                (KeyCode::Char('j'), at(1, 0)),
-                (KeyCode::Char('k'), at(0, 3)),
-                (KeyCode::Char('k'), at(0, 0)),
+                (KeyCode::Right, at(0, 1)),
+                (KeyCode::Down, at(0, 4)),
+                (KeyCode::Down, at(1, 0)),
+                (KeyCode::Down, at(1, 0)),
+                (KeyCode::Up, at(0, 3)),
+                (KeyCode::Up, at(0, 0)),
             ] {
                 key(&mut app, code, KeyModifiers::NONE);
                 draw_tall(&mut app);
@@ -10268,7 +10243,7 @@ mod tests {
             let mut by_key = list_of_five();
             draw(&mut by_key);
             super::select_card(&mut by_key, bands[0].cards[0].sref(), &mut Vec::new());
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(cursor_card(&by_key), cursor_card(&app));
 
             draw(&mut app);

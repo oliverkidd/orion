@@ -1,0 +1,1269 @@
+//! The LINEAR VIEW (`⌘L`): open Linear issues assigned to you, picked
+//! together so one agent fixes them in one worktree and opens one pull
+//! request. From the PULL REQUESTS MODAL the same list attaches a pull
+//! request to the issues you mark (`attachmentLinkGitHubPR`).
+//!
+//! The key is the project's `LINEAR_API_KEY` (`.env` / `.env.local`, then
+//! the process env). Only that one name is read. It is never logged, never
+//! stored, and sent only to `api.linear.app` through `curl --config -`.
+//! Settings → Linear account names whose issues are listed (empty = the
+//! owner of that key).
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use orion_core::{ClientRequest, ProjectId};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::Frame;
+use serde::{Deserialize, Serialize};
+
+use crate::app::{clamp_selection, window_start, App, HitTarget, Overlay};
+use crate::markdown::{self, Breaks};
+use crate::pr_modal::PullRequestsView;
+use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
+use crate::text_input::TextInput;
+use crate::theme::Theme;
+use crate::ui::{
+    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, panel_block, render_row, row_rect,
+    search_line, truncate, visible_positions, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+};
+
+const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
+const MIN_LIST_W: u16 = crate::pr_modal::MIN_LIST_W;
+const WHEEL_LINES: i32 = crate::pr_modal::WHEEL_LINES;
+const TIMEOUT_SECS: &str = "20";
+const LINEAR_URL: &str = "https://api.linear.app/graphql";
+const KEY_NAME: &str = "LINEAR_API_KEY";
+const ENV_FILES: &[&str] = &[".env.local", ".env"];
+
+/// One open Linear issue assigned to the configured user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearIssue {
+    pub id: String,
+    pub identifier: String,
+    pub title: String,
+    pub url: String,
+    #[serde(default)]
+    pub description: String,
+    pub status: String,
+    #[serde(default)]
+    pub status_type: String,
+}
+
+impl LinearIssue {
+    pub fn label(&self) -> String {
+        if self.title.trim().is_empty() {
+            self.identifier.clone()
+        } else {
+            format!("{} {}", self.identifier, self.title)
+        }
+    }
+}
+
+/// The issues a ⌘L launch fixes together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearBatch {
+    pub issues: Vec<LinearIssue>,
+    pub task: String,
+}
+
+impl LinearBatch {
+    pub fn ids(&self) -> String {
+        self.issues
+            .iter()
+            .map(|i| i.identifier.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn title(&self) -> String {
+        let ids = self.ids();
+        if ids.is_empty() {
+            "Linear".into()
+        } else {
+            format!("Linear {ids}")
+        }
+    }
+
+    pub fn branch(&self, taken: &[String]) -> String {
+        let ids: Vec<&str> = self.issues.iter().map(|i| i.identifier.as_str()).collect();
+        let title = self.issues.first().map(|i| i.title.as_str()).unwrap_or("");
+        crate::branch_name::linear_name(&ids, title, taken)
+    }
+}
+
+/// What `{issues}` / `{ids}` / `{first_id}` expand to in the task template.
+pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
+    let ids = issues
+        .iter()
+        .map(|i| i.identifier.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first = issues.first().map(|i| i.identifier.as_str()).unwrap_or("");
+    let body = issues
+        .iter()
+        .map(|i| {
+            let desc = i.description.trim();
+            if desc.is_empty() {
+                format!("- {} {} ({})", i.identifier, i.title, i.url)
+            } else {
+                format!("- {} {} ({})\n  {desc}", i.identifier, i.title, i.url)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    template
+        .replace("{issues}", &body)
+        .replace("{ids}", &ids)
+        .replace("{first_id}", first)
+}
+
+/// Browse assigned issues, or attach the current pull request to them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearMode {
+    Browse,
+    Attach {
+        pr_url: String,
+        pr_number: u64,
+        back: Box<PullRequestsView>,
+    },
+}
+
+/// The modal's own state. The rows live on [`App::linear`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearView {
+    pub project: ProjectId,
+    pub project_name: String,
+    pub dir: PathBuf,
+    pub selected: usize,
+    pub scroll: u16,
+    pub view_height: u16,
+    pub body_lines: usize,
+    pub area: Rect,
+    pub list_area: Rect,
+    pub body_area: Rect,
+    pub browser_area: Rect,
+    pub query: TextInput,
+    pub cursor_row: usize,
+    pub marked: BTreeSet<String>,
+    pub mode: LinearMode,
+}
+
+impl LinearView {
+    pub fn new(project: ProjectId, project_name: String, dir: PathBuf, mode: LinearMode) -> Self {
+        Self {
+            project,
+            project_name,
+            dir,
+            selected: 0,
+            scroll: 0,
+            view_height: 0,
+            body_lines: 0,
+            area: Rect::default(),
+            list_area: Rect::default(),
+            body_area: Rect::default(),
+            browser_area: Rect::default(),
+            query: TextInput::new(),
+            cursor_row: 0,
+            marked: BTreeSet::new(),
+            mode,
+        }
+    }
+
+    pub fn max_scroll(&self) -> u16 {
+        crate::app::max_scroll(self.body_lines, self.view_height)
+    }
+
+    pub fn scroll_by(&mut self, delta: i32) {
+        let next = (self.scroll as i32 + delta).clamp(0, self.max_scroll() as i32);
+        self.scroll = next as u16;
+    }
+}
+
+/// What Linear last said about a project's assigned issues.
+#[derive(Debug, Clone)]
+pub struct LinearList {
+    pub list: Vec<LinearIssue>,
+}
+
+/// A finished Linear call, back on the loop.
+#[derive(Debug, Clone)]
+pub enum LinearAnswer {
+    List {
+        project: ProjectId,
+        list: Result<Vec<LinearIssue>, String>,
+    },
+    Attach {
+        identifier: String,
+        result: Result<(), String>,
+    },
+}
+
+/// Branch → Linear issues, so a pull request cut from a ⌘L launch can be
+/// attached once GitHub lists it.
+#[derive(Debug, Clone, Default)]
+pub struct LinkStore {
+    path: Option<PathBuf>,
+    links: HashMap<String, PendingLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingLink {
+    issue_ids: Vec<String>,
+    identifiers: Vec<String>,
+}
+
+impl LinkStore {
+    pub fn load(path: PathBuf) -> Self {
+        let links = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Self {
+            path: Some(path),
+            links,
+        }
+    }
+
+    pub fn remember(&mut self, branch: &str, issues: &[LinearIssue]) {
+        if branch.is_empty() || issues.is_empty() {
+            return;
+        }
+        self.links.insert(
+            branch.to_string(),
+            PendingLink {
+                issue_ids: issues.iter().map(|i| i.id.clone()).collect(),
+                identifiers: issues.iter().map(|i| i.identifier.clone()).collect(),
+            },
+        );
+        self.persist();
+    }
+
+    pub(crate) fn take(&mut self, branch: &str) -> Option<PendingLink> {
+        let link = self.links.remove(branch)?;
+        self.persist();
+        Some(link)
+    }
+
+    fn persist(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&self.links) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+}
+
+/// `⌘L` on the grid: browse assigned issues for the selected project.
+pub(crate) fn open(app: &mut App) {
+    let Some(project) = app.selected_project().cloned() else {
+        app.flash = Some("linear: select a project first".into());
+        return;
+    };
+    open_on(app, project.id, project.name, project.repo_path, LinearMode::Browse);
+}
+
+/// `⌘L` in the PULL REQUESTS MODAL: the same list, for attaching the PR.
+pub(crate) fn open_attach(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return;
+    };
+    let (project, name, dir) = (view.project.clone(), view.project_name.clone(), view.dir.clone());
+    let Some(pr) = selected_open_pr(app) else {
+        app.flash = Some("linear: no pull request selected".into());
+        return;
+    };
+    let back = match &app.overlay {
+        Some(Overlay::PullRequests(view)) => view.clone(),
+        _ => return,
+    };
+    open_on(
+        app,
+        project,
+        name,
+        dir,
+        LinearMode::Attach {
+            pr_url: pr.url,
+            pr_number: pr.number,
+            back: Box::new(back),
+        },
+    );
+}
+
+fn selected_open_pr(app: &App) -> Option<crate::pull_request::OpenPr> {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return None;
+    };
+    let list = app
+        .open_prs
+        .get(&view.project)
+        .map(|o| o.list.as_slice())
+        .unwrap_or(&[]);
+    if list.is_empty() {
+        return None;
+    }
+    let labels: Vec<String> = list.iter().map(|pr| pr.label()).collect();
+    let i = if view.query.split_whitespace().next().is_none() {
+        clamp_selection(view.selected as i64, list.len())
+    } else {
+        let ranked = crate::fuzzy::rank(view.query.as_str(), labels.iter().map(String::as_str));
+        ranked
+            .iter()
+            .find(|(i, _)| *i == view.selected)
+            .or(ranked.first())
+            .map(|(i, _)| *i)?
+    };
+    list.get(i).cloned()
+}
+
+fn open_on(
+    app: &mut App,
+    project: ProjectId,
+    name: String,
+    dir: PathBuf,
+    mode: LinearMode,
+) {
+    let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
+    view.selected = clamp_selection(0, list_len(app, &project));
+    app.overlay = Some(Overlay::Linear(view));
+    request_list(app, project, dir);
+    app.dirty = true;
+}
+
+pub(crate) fn reopen(app: &mut App, mut view: LinearView) {
+    view.selected = clamp_selection(view.selected as i64, list_len(app, &view.project));
+    app.overlay = Some(Overlay::Linear(view));
+    app.dirty = true;
+}
+
+fn list_len(app: &App, project: &ProjectId) -> usize {
+    app.linear.get(project).map_or(0, |l| l.list.len())
+}
+
+fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
+    if app.linear_inflight.contains(&project) {
+        return;
+    }
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    app.linear_inflight.insert(project.clone());
+    app.linear_failed.remove(&project);
+    app.dirty = true;
+    let email = crate::config::Config::load().linear_assignee_email.trim().to_string();
+    tokio::spawn(async move {
+        let result = fetch_assigned(&dir, &email).await;
+        let _ = tx.send(LinearAnswer::List { project, list: result });
+    });
+}
+
+pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
+    match answer {
+        LinearAnswer::List { project, list } => {
+            app.linear_inflight.remove(&project);
+            match list {
+                Ok(list) => {
+                    let n = list.len();
+                    app.linear_failed.remove(&project);
+                    app.linear.insert(project.clone(), LinearList { list });
+                    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+                        if view.project == project {
+                            view.selected = clamp_selection(view.selected as i64, n);
+                        }
+                    }
+                }
+                Err(err) => {
+                    app.linear_failed.insert(project);
+                    app.flash = Some(err);
+                }
+            }
+            app.dirty = true;
+        }
+        LinearAnswer::Attach { identifier, result } => match result {
+            Ok(()) => app.flash = Some(format!("attached the pull request to {identifier}")),
+            Err(err) => app.flash = Some(err),
+        },
+    }
+}
+
+/// Remember a ⌘L launch's branch so the PR it opens can be attached.
+pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
+    let Some(batch) = &launch.linear else {
+        return;
+    };
+    if !crate::config::Config::load().linear_auto_attach {
+        return;
+    }
+    let branch = match &launch.target {
+        QuickTarget::NewWorktree { branch, .. } => branch.clone(),
+        QuickTarget::Worktree(id) => app
+            .tree
+            .worktrees
+            .iter()
+            .find(|w| &w.id == id)
+            .map(|w| w.branch.clone())
+            .unwrap_or_default(),
+    };
+    app.linear_links.remember(&branch, &batch.issues);
+}
+
+/// When a new pull request appears on a remembered branch, attach it.
+pub(crate) fn attach_new_prs(
+    app: &mut App,
+    project: &ProjectId,
+    previous: Option<&[crate::pull_request::OpenPr]>,
+    fresh: &[crate::pull_request::OpenPr],
+) {
+    if !crate::config::Config::load().linear_auto_attach {
+        return;
+    }
+    let dir = app
+        .tree
+        .projects
+        .iter()
+        .find(|p| &p.id == project)
+        .map(|p| p.repo_path.clone());
+    let Some(dir) = dir else {
+        return;
+    };
+    for pr in fresh {
+        let was = previous.is_some_and(|was| was.iter().any(|old| old.url == pr.url));
+        if was {
+            continue;
+        }
+        let Some(link) = app.linear_links.take(&pr.head) else {
+            continue;
+        };
+        for (id, identifier) in link.issue_ids.into_iter().zip(link.identifiers) {
+            spawn_attach(app, dir.clone(), id, identifier, pr.url.clone());
+        }
+    }
+}
+
+fn spawn_attach(app: &mut App, dir: PathBuf, issue_id: String, identifier: String, pr_url: String) {
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let result = attach_pr(&dir, &issue_id, &pr_url).await;
+        let _ = tx.send(LinearAnswer::Attach { identifier, result });
+    });
+}
+
+pub(crate) fn footer_hint(view: &LinearView) -> &'static str {
+    match view.mode {
+        LinearMode::Browse => {
+            "type to filter  Space: mark  Enter: agent on marked  ⇧Tab: preset  ^o: browser  ^r: refresh  Esc: clear / close"
+        }
+        LinearMode::Attach { .. } => {
+            "type to filter  Space: mark  Enter: attach marked to this PR  ^o: browser  Esc: back"
+        }
+    }
+}
+
+pub(crate) fn paste(app: &mut App, text: &str) -> bool {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return false;
+    };
+    view.query.insert_str(text);
+    query_changed(app);
+    true
+}
+
+pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let half = (view.view_height / 2).max(1) as i32;
+    let page = view.view_height.max(1) as i32;
+    match key.code {
+        KeyCode::Esc if !view.query.is_empty() => clear_query(app),
+        KeyCode::Esc => close(app),
+        KeyCode::Down if shift => view.scroll_by(1),
+        KeyCode::Up if shift => view.scroll_by(-1),
+        KeyCode::Down => step(app, 1),
+        KeyCode::Up => step(app, -1),
+        KeyCode::Char('n') if ctrl => step(app, 1),
+        KeyCode::Char('p') if ctrl => step(app, -1),
+        KeyCode::Char('d') if ctrl => view.scroll_by(half),
+        KeyCode::Char('u') if ctrl && view.query.is_empty() => view.scroll_by(-half),
+        KeyCode::PageDown => view.scroll_by(page),
+        KeyCode::PageUp => view.scroll_by(-page),
+        KeyCode::Home => view.scroll = 0,
+        KeyCode::End => view.scroll = view.max_scroll(),
+        KeyCode::Char(' ') => toggle_mark(app),
+        KeyCode::Enter => confirm(app),
+        KeyCode::BackTab => open_preset(app),
+        KeyCode::Tab if shift => open_preset(app),
+        KeyCode::Char('o') if ctrl || cmd => open_in_browser(app, out),
+        KeyCode::Char('r') if ctrl || cmd => refresh(app),
+        _ => {
+            if view.query.handle_key(&key).changed() {
+                query_changed(app);
+            }
+        }
+    }
+    app.dirty = true;
+}
+
+pub(crate) fn handle_mouse(
+    app: &mut App,
+    mouse: MouseEvent,
+    pos: Position,
+    out: &mut Vec<ClientRequest>,
+) {
+    if app.hover_crumb == Some(HitTarget::ModalBrowser)
+        && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+    {
+        open_in_browser(app, out);
+        return;
+    }
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let list = view.list_area;
+    let body = view.body_area;
+    match mouse.kind {
+        MouseEventKind::ScrollDown if list.contains(pos) => step(app, 1),
+        MouseEventKind::ScrollUp if list.contains(pos) => step(app, -1),
+        MouseEventKind::ScrollDown if body.contains(pos) => {
+            if let Some(Overlay::Linear(view)) = &mut app.overlay {
+                view.scroll_by(WHEEL_LINES);
+            }
+        }
+        MouseEventKind::ScrollUp if body.contains(pos) => {
+            if let Some(Overlay::Linear(view)) = &mut app.overlay {
+                view.scroll_by(-WHEEL_LINES);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if list.contains(pos) => {
+            if let Some(i) = row_under(app, pos) {
+                if let Some(Overlay::Linear(view)) = &mut app.overlay {
+                    view.selected = i;
+                    view.scroll = 0;
+                }
+            }
+        }
+        _ => {}
+    }
+    app.dirty = true;
+}
+
+fn row_under(app: &App, pos: Position) -> Option<usize> {
+    let Overlay::Linear(view) = app.overlay.as_ref()? else {
+        return None;
+    };
+    let list = rows(app, &view.project);
+    let visible = visible_rows(&view.query, list);
+    let start = window_start(view.cursor_row, view.list_area.height as usize);
+    let y = pos.y.checked_sub(view.list_area.y)? as usize;
+    visible.get(start + y).map(|(i, _)| *i)
+}
+
+fn close(app: &mut App) {
+    let Some(Overlay::Linear(view)) = app.overlay.take() else {
+        return;
+    };
+    if let LinearMode::Attach { back, .. } = view.mode {
+        crate::pr_modal::reopen(app, *back);
+    }
+}
+
+fn refresh(app: &mut App) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    request_list(app, view.project.clone(), view.dir.clone());
+}
+
+fn clear_query(app: &mut App) {
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.query.clear();
+    }
+    query_changed(app);
+}
+
+fn query_changed(app: &mut App) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    view.scroll = 0;
+    let list = app
+        .linear
+        .get(&view.project)
+        .map(|l| l.list.as_slice())
+        .unwrap_or(&[]);
+    if let Some(i) = cursor_index(view, list) {
+        view.selected = i;
+    }
+}
+
+fn step(app: &mut App, delta: i32) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let list = rows(app, &view.project);
+    let visible = visible_rows(&view.query, list);
+    if visible.is_empty() {
+        return;
+    }
+    let here = visible
+        .iter()
+        .position(|(i, _)| *i == view.selected)
+        .unwrap_or(0);
+    let next = (here as i32 + delta).clamp(0, visible.len() as i32 - 1) as usize;
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.selected = visible[next].0;
+        view.scroll = 0;
+    }
+}
+
+fn toggle_mark(app: &mut App) {
+    let Some(issue) = selected_issue(app).cloned() else {
+        return;
+    };
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        if !view.marked.insert(issue.id.clone()) {
+            view.marked.remove(&issue.id);
+        }
+    }
+}
+
+fn picked(app: &App) -> Vec<LinearIssue> {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return Vec::new();
+    };
+    let list = rows(app, &view.project);
+    let marked: Vec<LinearIssue> = list
+        .iter()
+        .filter(|i| view.marked.contains(&i.id))
+        .cloned()
+        .collect();
+    if marked.is_empty() {
+        selected_issue(app).into_iter().cloned().collect()
+    } else {
+        marked
+    }
+}
+
+fn confirm(app: &mut App) {
+    let issues = picked(app);
+    if issues.is_empty() {
+        app.flash = Some("linear: pick at least one issue".into());
+        return;
+    }
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    match &view.mode {
+        LinearMode::Browse => open_prompt(app, issues),
+        LinearMode::Attach { pr_url, .. } => {
+            let url = pr_url.clone();
+            let dir = view.dir.clone();
+            for issue in issues {
+                spawn_attach(app, dir.clone(), issue.id, issue.identifier, url.clone());
+            }
+        }
+    }
+}
+
+fn open_prompt(app: &mut App, issues: Vec<LinearIssue>) {
+    let Some(launch) = launch_for(app, issues) else {
+        return;
+    };
+    let under = ModalUnder::of(app.overlay.as_ref());
+    crate::quick_prompt::open_box(app, launch.with_under(under));
+}
+
+fn open_preset(app: &mut App) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    if matches!(view.mode, LinearMode::Attach { .. }) {
+        return;
+    }
+    let issues = picked(app);
+    if issues.is_empty() {
+        app.flash = Some("linear: pick at least one issue".into());
+        return;
+    }
+    let Some(launch) = launch_for(app, issues) else {
+        return;
+    };
+    crate::quick_prompt::open_preset_picker(app, QuickReturn::fresh(launch.with_under(ModalUnder::of(app.overlay.as_ref()))));
+}
+
+fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return None;
+    };
+    let project = view.project.clone();
+    let cfg = crate::config::Config::load();
+    let task = expand_template(cfg.linear_template(), &issues);
+    let taken = app.project_branches(&project);
+    let batch = LinearBatch { issues, task };
+    let target = if cfg.quick_prompt_new_worktree {
+        QuickTarget::NewWorktree {
+            project,
+            branch: batch.branch(&taken),
+        }
+    } else {
+        app.root_worktree(&project)
+            .map(QuickTarget::Worktree)
+            .or_else(|| {
+                Some(QuickTarget::NewWorktree {
+                    project,
+                    branch: batch.branch(&taken),
+                })
+            })?
+    };
+    Some(QuickLaunch::from_config(target, &cfg).with_linear(Some(batch)))
+}
+
+fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let url = selected_issue(app).map(|issue| issue.url.clone());
+    if let Some(url) = url {
+        crate::event_loop::open_link(app, &url, out);
+    }
+}
+
+fn rows<'a>(app: &'a App, project: &ProjectId) -> &'a [LinearIssue] {
+    app.linear
+        .get(project)
+        .map(|l| l.list.as_slice())
+        .unwrap_or(&[])
+}
+
+fn has_query(view: &LinearView) -> bool {
+    view.query.split_whitespace().next().is_some()
+}
+
+fn visible_rows(query: &TextInput, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
+    let labels: Vec<String> = list.iter().map(|i| i.label()).collect();
+    crate::fuzzy::rank(query.as_str(), labels.iter().map(String::as_str))
+}
+
+fn cursor_index(view: &LinearView, list: &[LinearIssue]) -> Option<usize> {
+    if list.is_empty() {
+        return None;
+    }
+    if !has_query(view) {
+        return Some(clamp_selection(view.selected as i64, list.len()));
+    }
+    let visible = visible_rows(&view.query, list);
+    if visible.iter().any(|(i, _)| *i == view.selected) {
+        Some(view.selected)
+    } else {
+        visible.first().map(|(i, _)| *i)
+    }
+}
+
+fn selected_issue(app: &App) -> Option<&LinearIssue> {
+    let Overlay::Linear(view) = app.overlay.as_ref()? else {
+        return None;
+    };
+    let list = rows(app, &view.project);
+    let i = cursor_index(view, list)?;
+    list.get(i)
+}
+
+pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, backdrop: bool) {
+    let list_focused = !backdrop;
+    let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
+    f.render_widget(Clear, area);
+    let list_w = (area.width * LIST_PCT / 100)
+        .max(MIN_LIST_W)
+        .min(area.width.saturating_sub(SPLIT_PANE_LAYOUT_MIN));
+    let [list_a, body_a] = Layout::horizontal([
+        Constraint::Length(list_w),
+        Constraint::Min(SPLIT_PANE_LAYOUT_MIN),
+    ])
+    .areas(area);
+
+    let issues: Vec<LinearIssue> = rows(app, &view.project).to_vec();
+    let inflight = app.linear_inflight.contains(&view.project);
+    let failed = app.linear_failed.contains(&view.project);
+    let visible = visible_rows(&view.query, &issues);
+    let cursor = cursor_index(view, &issues);
+    let cursor_row = cursor
+        .and_then(|c| visible.iter().position(|(i, _)| *i == c))
+        .unwrap_or(0);
+
+    let count = if has_query(view) {
+        format!("{}/{}", visible.len(), issues.len())
+    } else {
+        issues.len().to_string()
+    };
+    let marked = view.marked.len();
+    let head = match &view.mode {
+        LinearMode::Browse => format!("Linear — {} ({count})", view.project_name),
+        LinearMode::Attach { pr_number, .. } => {
+            format!("Linear → PR #{pr_number} — {} ({count})", view.project_name)
+        }
+    };
+    let title = if inflight {
+        format!("{head}, refreshing…")
+    } else if marked > 0 {
+        format!("{head}, {marked} marked")
+    } else {
+        head
+    };
+    let foot = match view.mode {
+        LinearMode::Browse => " Space: mark  Enter: agent  ⇧Tab: preset  ^o: browser  ^r: refresh ",
+        LinearMode::Attach { .. } => " Space: mark  Enter: attach to this PR  Esc: back ",
+    };
+    let block = panel_block(&title, list_focused, th).title_bottom(
+        Line::from(Span::styled(foot, Style::default().fg(th.dim))).left_aligned(),
+    );
+    let list_inner = block.inner(list_a);
+    f.render_widget(block, list_a);
+    if let Some(query_area) = row_rect(list_inner, 0) {
+        let line = search_line(&view.query, "type to filter…", query_area, th);
+        f.render_widget(Paragraph::new(line), query_area);
+    }
+    let rows_area = crate::ui::below_first_row(list_inner);
+    if issues.is_empty() {
+        let text = if failed {
+            "couldn't list Linear issues — check LINEAR_API_KEY and Settings → Linear account"
+        } else if inflight || app.linear_tx.is_some() && !app.linear.contains_key(&view.project) {
+            "asking Linear…"
+        } else {
+            "no open issues assigned to you"
+        };
+        empty_list_row(f, rows_area, text, th);
+    } else if visible.is_empty() {
+        empty_list_row(f, rows_area, "no issues match", th);
+    }
+    let start = window_start(cursor_row, rows_area.height as usize);
+    for (row, (index, positions)) in visible.iter().enumerate().skip(start) {
+        let Some(row_area) = row_rect(rows_area, row - start) else {
+            break;
+        };
+        let issue = &issues[*index];
+        let tick = if view.marked.contains(&issue.id) {
+            "● "
+        } else {
+            "  "
+        };
+        let full = format!("{tick}{}", issue.label());
+        let status = issue.status.clone();
+        let budget = (rows_area.width as usize).saturating_sub(2);
+        let status_w = status.chars().count();
+        let text_budget = budget.saturating_sub(if status_w > 0 { status_w + 2 } else { 0 });
+        let label = truncate(&full, text_budget);
+        let pos = visible_positions(positions, &label, &full);
+        let used = label.chars().count();
+        let mut spans = fuzzy_highlight_styled(&label, pos, Style::default(), th);
+        if status_w > 0 && used + status_w < budget {
+            spans.push(Span::raw(" ".repeat(budget - used - status_w)));
+            spans.push(Span::styled(status, Style::default().fg(th.dim)));
+        }
+        render_row(f, row_area, spans, Some(*index) == cursor, list_focused, th);
+    }
+
+    let current = cursor.and_then(|i| issues.get(i));
+    let body_title = current
+        .map(|i| i.identifier.clone())
+        .unwrap_or_else(|| "Linear".into());
+    let width = body_a.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = match current {
+        Some(issue) => body_lines(issue, width, th),
+        None => Vec::new(),
+    };
+    let mut block = panel_block(&body_title, false, th);
+    let body_inner = block.inner(body_a);
+    let max_scroll = (lines.len() as u16).saturating_sub(body_inner.height.max(1));
+    let scroll = view.scroll.min(max_scroll);
+    if max_scroll > 0 {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {}/{} ", scroll + 1, lines.len()),
+                Style::default().fg(th.dim),
+            ))
+            .right_aligned(),
+        );
+    }
+    f.render_widget(block, body_a);
+    let browser_area = match current {
+        Some(_) => crate::ui::browser_button(
+            f,
+            body_a,
+            (body_title.chars().count() + 2) as u16,
+            app.hover_crumb == Some(HitTarget::ModalBrowser),
+            th,
+        ),
+        None => Rect::default(),
+    };
+    let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
+    f.render_widget(
+        Paragraph::new(shown).wrap(Wrap { trim: false }),
+        body_inner,
+    );
+
+    if let Some(Overlay::Linear(v)) = &mut app.overlay {
+        v.area = area;
+        v.list_area = rows_area;
+        v.cursor_row = cursor_row;
+        v.body_area = body_inner;
+        v.browser_area = browser_area;
+        v.view_height = body_inner.height;
+        v.body_lines = lines.len();
+        if let Some(index) = cursor {
+            v.selected = index;
+        }
+        v.scroll = scroll;
+    }
+}
+
+fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            issue.title.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("{} · {}", issue.status, issue.url),
+            Style::default().fg(th.dim),
+        )),
+        Line::from(""),
+    ];
+    if issue.description.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no description)",
+            Style::default().fg(th.dim),
+        )));
+    } else {
+        lines.extend(markdown::render(
+            &issue.description,
+            width.max(20),
+            Breaks::Hard,
+            Style::default(),
+            th,
+        ));
+    }
+    lines
+}
+
+// ---- Linear HTTP (key never on argv) ----
+
+async fn fetch_assigned(dir: &Path, email: &str) -> Result<Vec<LinearIssue>, String> {
+    let key = read_linear_key(dir).ok_or_else(|| {
+        "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)".to_string()
+    })?;
+    let (query, variables) = if email.is_empty() {
+        (
+            r#"query {
+              viewer {
+                assignedIssues(first: 100, filter: { state: { type: { nin: ["completed", "canceled"] } } }) {
+                  nodes { id identifier title url description state { name type } }
+                }
+              }
+            }"#,
+            serde_json::json!({}),
+        )
+    } else {
+        (
+            r#"query($email: String!) {
+              issues(first: 100, filter: {
+                assignee: { email: { eq: $email } }
+                state: { type: { nin: ["completed", "canceled"] } }
+              }) {
+                nodes { id identifier title url description state { name type } }
+              }
+            }"#,
+            serde_json::json!({ "email": email }),
+        )
+    };
+    let json = graphql(&key, query, variables).await?;
+    parse_issues(&json, email.is_empty())
+}
+
+async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> {
+    let key = read_linear_key(dir).ok_or_else(|| {
+        "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)".to_string()
+    })?;
+    let json = graphql(
+        &key,
+        r#"mutation($issueId: String!, $url: String!) {
+          attachmentLinkGitHubPR(issueId: $issueId, url: $url) { success }
+        }"#,
+        serde_json::json!({ "issueId": issue_id, "url": url }),
+    )
+    .await?;
+    if json
+        .pointer("/data/attachmentLinkGitHubPR/success")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
+        return Ok(());
+    }
+    if let Some(err) = graphql_error(&json) {
+        return Err(err);
+    }
+    Err("Linear did not attach the pull request".into())
+}
+
+async fn graphql(
+    key: &str,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+    // Body stays off argv (and off the key's stdin config). std, not the
+    // `tempfile` crate: that one is a test-only dep of this crate.
+    let body_path = std::env::temp_dir().join(format!(
+        "orion-linear-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&body_path, body.as_bytes()).map_err(|e| e.to_string())?;
+    let _cleanup = DeleteOnDrop(body_path.clone());
+    let config = format!("header = \"Authorization: {key}\"\nheader = \"Content-Type: application/json\"\n");
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "--max-time",
+        TIMEOUT_SECS,
+        "--config",
+        "-",
+        "-X",
+        "POST",
+        LINEAR_URL,
+        "--data-binary",
+        &format!("@{}", body_path.display()),
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| format!("couldn't run curl: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(config.as_bytes()).await;
+    }
+    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Linear request failed: {}", err.lines().next().unwrap_or("curl error")));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|_| "Linear returned something that wasn't JSON".into())
+}
+
+fn parse_issues(json: &serde_json::Value, viewer: bool) -> Result<Vec<LinearIssue>, String> {
+    if let Some(err) = graphql_error(json) {
+        return Err(err);
+    }
+    let nodes = if viewer {
+        json.pointer("/data/viewer/assignedIssues/nodes")
+    } else {
+        json.pointer("/data/issues/nodes")
+    };
+    let Some(nodes) = nodes.and_then(|v| v.as_array()) else {
+        return Err("Linear returned no issue list".into());
+    };
+    let mut issues: Vec<LinearIssue> = nodes.iter().filter_map(issue_from).collect();
+    issues.sort_by(|a, b| {
+        status_rank(&a.status_type)
+            .cmp(&status_rank(&b.status_type))
+            .then_with(|| a.status.cmp(&b.status))
+            .then_with(|| a.identifier.cmp(&b.identifier))
+    });
+    Ok(issues)
+}
+
+fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
+    Some(LinearIssue {
+        id: value.get("id")?.as_str()?.to_string(),
+        identifier: value.get("identifier")?.as_str()?.to_string(),
+        title: value.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        url: value.get("url")?.as_str()?.to_string(),
+        description: value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        status: value
+            .pointer("/state/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        status_type: value
+            .pointer("/state/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn status_rank(kind: &str) -> u8 {
+    match kind {
+        "started" => 0,
+        "unstarted" => 1,
+        "backlog" => 2,
+        _ => 3,
+    }
+}
+
+struct DeleteOnDrop(PathBuf);
+
+impl Drop for DeleteOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn graphql_error(json: &serde_json::Value) -> Option<String> {
+    json.get("errors")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|err| err.get("message"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// `LINEAR_API_KEY` from the project's env files, then the process env.
+/// Symlinks are followed only when they stay inside the checkout or its
+/// parent (the usual `../<repo>` layout of a worktree's main folder).
+pub fn read_linear_key(dir: &Path) -> Option<String> {
+    for name in ENV_FILES {
+        if let Some(path) = readable_env_file(dir, name) {
+            if let Some(key) = parse_env_key(&std::fs::read_to_string(path).ok()?) {
+                return Some(key);
+            }
+        }
+    }
+    std::env::var(KEY_NAME).ok().filter(|v| !v.trim().is_empty())
+}
+
+fn readable_env_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let path = dir.join(name);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::canonicalize(&path).ok()?;
+        let root = std::fs::canonicalize(dir).ok()?;
+        let parent = root.parent().unwrap_or(&root);
+        if target.starts_with(&root) || target.starts_with(parent) {
+            return Some(target);
+        }
+        return None;
+    }
+    meta.is_file().then_some(path)
+}
+
+/// The value of `LINEAR_API_KEY` in an env-file body. Other names are ignored.
+pub fn parse_env_key(text: &str) -> Option<String> {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let (name, value) = line.split_once('=')?;
+        if name.trim() != KEY_NAME {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue(id: &str, ident: &str, title: &str) -> LinearIssue {
+        LinearIssue {
+            id: id.into(),
+            identifier: ident.into(),
+            title: title.into(),
+            url: format!("https://linear.app/x/issue/{ident}"),
+            description: String::new(),
+            status: "In Progress".into(),
+            status_type: "started".into(),
+        }
+    }
+
+    #[test]
+    fn template_expands_ids_and_first() {
+        let issues = [issue("1", "ENG-12", "Login"), issue("2", "ENG-15", "Logout")];
+        let out = expand_template("Fix {ids} starting with {first_id}\n{issues}", &issues);
+        assert!(out.contains("ENG-12, ENG-15"));
+        assert!(out.contains("starting with ENG-12"));
+        assert!(out.contains("- ENG-12 Login"));
+        assert!(out.contains("- ENG-15 Logout"));
+    }
+
+    #[test]
+    fn env_key_reads_only_linear() {
+        let text = "OTHER=no\nLINEAR_API_KEY=lin_api_secret\nAWS_SECRET=x\n";
+        assert_eq!(parse_env_key(text).as_deref(), Some("lin_api_secret"));
+        assert_eq!(parse_env_key("export LINEAR_API_KEY='quoted'\n").as_deref(), Some("quoted"));
+        assert_eq!(parse_env_key("FOO=bar\n"), None);
+    }
+
+    #[test]
+    fn batch_names_and_branch() {
+        let batch = LinearBatch {
+            issues: vec![issue("1", "ENG-12", "Fix login redirect"), issue("2", "ENG-15", "x")],
+            task: "go".into(),
+        };
+        assert_eq!(batch.ids(), "ENG-12, ENG-15");
+        assert_eq!(batch.title(), "Linear ENG-12, ENG-15");
+        assert_eq!(batch.branch(&[]), "eng-12-eng-15-fix-login-redirect");
+    }
+
+    #[test]
+    fn link_store_remembers_and_takes() {
+        let mut store = LinkStore::default();
+        store.remember("eng-12-fix", &[issue("abc", "ENG-12", "Fix")]);
+        assert!(store.take("other").is_none());
+        let link = store.take("eng-12-fix").unwrap();
+        assert_eq!(link.identifiers, ["ENG-12"]);
+        assert!(store.take("eng-12-fix").is_none());
+    }
+
+    #[test]
+    fn parse_viewer_list() {
+        let json = serde_json::json!({
+            "data": {
+                "viewer": {
+                    "assignedIssues": {
+                        "nodes": [{
+                            "id": "abc",
+                            "identifier": "ENG-1",
+                            "title": "T",
+                            "url": "https://linear.app/x/issue/ENG-1",
+                            "description": "d",
+                            "state": { "name": "Todo", "type": "unstarted" }
+                        }]
+                    }
+                }
+            }
+        });
+        let list = parse_issues(&json, true).unwrap();
+        assert_eq!(list[0].identifier, "ENG-1");
+        assert_eq!(list[0].status_type, "unstarted");
+    }
+}

@@ -43,6 +43,10 @@ pub const EDITOR: &str = "ORION_EDITOR";
 /// (the footer's `⇡ vX.Y.Z` update indicator); `0` turns it off, as the
 /// e2e tests do so their footers never depend on what GitHub has published.
 pub const UPDATE_CHECK_SECS: &str = "ORION_UPDATE_CHECK_SECS";
+/// A Ghostty config file the TUI keeps its GHOSTTY KEYBINDS block in
+/// instead of the one Ghostty reads, or `off` for none — as the e2e tests
+/// set it, so a run never touches the real one.
+pub const GHOSTTY_CONFIG: &str = "ORION_GHOSTTY_CONFIG";
 /// A file the TUI writes its INPUT LATENCY PROBE's timeline to
 /// (`make perf`); unset, there is no probe.
 pub const PERF_LOG: &str = "ORION_PERF_LOG";

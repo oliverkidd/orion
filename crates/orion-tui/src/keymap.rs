@@ -15,14 +15,16 @@
 //!   one canonical form so a binding matches whatever the emulator sends.
 //!
 //! * **Host reachability.** orion runs *inside* Terminal.app / Ghostty /
-//!   tmux, which eat chords before we ever see them — every `⌘` combo, most
-//!   `^⇧` ones, `^←`. [`host_warning`] flags those at bind time so the user
+//!   tmux, which eat chords before we ever see them — Terminal.app every
+//!   `⌘` combo, Ghostty the `⌘` ones it binds, most `^⇧` ones, `^←`.
+//!   [`host_warning`] flags those at bind time so the user
 //!   finds out at the moment of choosing, not the next time the key does
 //!   nothing.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Which mode a binding is live in. The same chord may mean different
 /// things in each, so conflicts are only conflicts within one scope.
@@ -46,9 +48,9 @@ pub enum Action {
     FocusRight,
     MoveDown,
     MoveUp,
-    HalfPageDown,
-    HalfPageUp,
     Activate,
+    /// `⌘K`: the JUMP list — every project, worktree, session and open
+    /// pull request, with adding a project as its last row.
     Palette,
     /// `.`: the next session in the PALETTE's attention order, no modal.
     NextAttention,
@@ -62,9 +64,9 @@ pub enum Action {
     /// `x`: close the PROJECT TAB the grid is on, landing on the tab that
     /// slides into its place.
     CloseProjectTab,
-    /// `+` (and `⌘P` where the terminal sends ⌘): the PROJECT DROPDOWN, the
-    /// list the `+` after the PROJECT TABS drops — type to narrow it, Enter
-    /// or a click opens the project.
+    /// The PROJECT DROPDOWN, the list the `+` after the PROJECT TABS drops
+    /// — type to narrow it, Enter or a click opens the project. Unbound by
+    /// default: a click on the `+` and ⌘K reach it.
     ProjectDropdown,
     // projects & worktrees
     AddProject,
@@ -79,10 +81,11 @@ pub enum Action {
     /// started from, in the browser. `i` lists the project's issues in
     /// orion; the shifted key goes to GitHub.
     OpenIssue,
-    /// `Shift+T`: a terminal *outside* orion — a new Ghostty tab in the
+    /// `Shift+T`: a terminal *outside* orion — a new Ghostty tab or
+    /// Terminal.app window (the **Outside terminal** setting) in the
     /// selected worktree's directory, where `t` opens one inside orion; a
-    /// silent no-op on a machine without Ghostty.
-    OpenGhosttyTab,
+    /// silent no-op off macOS or over ssh.
+    OpenOutsideTerminal,
     /// `Shift+R`: reload from GitHub now, past every timer — the project's
     /// open pull requests and issues, the worktree's PR, the one the pane
     /// is reading.
@@ -98,6 +101,8 @@ pub enum Action {
     /// `v`: the PULL REQUESTS MODAL — the project's open pull requests,
     /// read in place, commented on, with a PR SESSION launched on one.
     PullRequests,
+    /// `⌘L`: the LINEAR VIEW — open Linear issues assigned to you.
+    Linear,
     /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
     /// another branch, asking what to do with uncommitted changes.
     SwitchBranch,
@@ -157,6 +162,14 @@ pub enum Action {
     Settings,
     Metrics,
     Help,
+    /// `⌘⇧P`: the COMMAND PALETTE — every action by name, with its key.
+    CommandPalette,
+    /// `⌘O`: the OPEN MENU — what is under the cursor, outside orion: the
+    /// repo, pull request or issue on GitHub, the open command, Cursor,
+    /// the outside terminal.
+    OpenOutside,
+    /// The checkout under the cursor in Cursor (the OPEN MENU's row).
+    OpenInCursor,
     Quit,
 }
 
@@ -173,23 +186,20 @@ pub struct ActionSpec {
     pub defaults: &'static [&'static str],
 }
 
-/// One positional PROJECT TAB shortcut. `⌘N` is what a browser user
-/// reaches for — but it is [`Reach::Blocked`] in Terminal.app and most
-/// other emulators, which never encode ⌘ into pty bytes at all. The bare
-/// digit is bound alongside it and is the chord that actually fires there;
-/// digits are otherwise unbound on the grid.
+/// One positional PROJECT TAB shortcut: the bare digit. `⌘N` is what a
+/// browser user reaches for, but Ghostty keeps ⌘1–⌘9 for its own tabs and
+/// Terminal.app never sends ⌘ at all; digits are otherwise unbound on the
+/// grid.
 macro_rules! project_tab_slot {
-    ($n:literal, $id:literal, $label:literal, $cmd:literal, $digit:literal) => {
+    ($n:literal, $id:literal, $label:literal, $digit:literal) => {
         ActionSpec {
             action: Action::SelectProjectTab($n),
             id: $id,
             label: $label,
-            hint: "Open the project on that tab of the header, counting from the left (⌘N only in emulators that send ⌘)",
+            hint: "Open the project on that tab of the header, counting from the left",
             group: "NAVIGATE",
             scope: Scope::Global,
-            // The digit first: it arrives everywhere, and ⌘N is a silent
-            // alias Help and the footer leave out (`shown_chords`).
-            defaults: &[$digit, $cmd],
+            defaults: &[$digit],
         }
     };
 }
@@ -212,7 +222,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Step to the card on the left, stopping at the row's first",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["h", "left"],
+        defaults: &["left"],
     },
     ActionSpec {
         action: Action::FocusRight,
@@ -221,7 +231,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Step to the card on the right, stopping at the row's last",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["l", "right"],
+        defaults: &["right"],
     },
     ActionSpec {
         action: Action::MoveDown,
@@ -230,7 +240,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Move the cursor down a row of cards; twice from the project tabs, into the one under their cursor",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["j", "down"],
+        defaults: &["down"],
     },
     ActionSpec {
         action: Action::MoveUp,
@@ -239,25 +249,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Move the cursor up a row of cards, stopping at the first; twice there, up to the project tabs",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["k", "up"],
-    },
-    ActionSpec {
-        action: Action::HalfPageDown,
-        id: "half_page_down",
-        label: "Half page down",
-        hint: "Jump the cursor down two rows of cards, stopping at the last",
-        group: "NAVIGATE",
-        scope: Scope::Global,
-        defaults: &["ctrl+d"],
-    },
-    ActionSpec {
-        action: Action::HalfPageUp,
-        id: "half_page_up",
-        label: "Half page up",
-        hint: "Jump the cursor up two rows of cards, stopping at the first",
-        group: "NAVIGATE",
-        scope: Scope::Global,
-        defaults: &["ctrl+u"],
+        defaults: &["up"],
     },
     ActionSpec {
         action: Action::Activate,
@@ -271,11 +263,11 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::Palette,
         id: "palette",
-        label: "Fuzzy jump",
-        hint: "Search every project, worktree and session at once",
+        label: "Jump to…",
+        hint: "Search every project, worktree, session and open pull request at once; Enter jumps there, and the last row adds a project",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["/"],
+        defaults: &["cmd+k", "ctrl+k"],
     },
     ActionSpec {
         action: Action::NextAttention,
@@ -313,20 +305,20 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         defaults: &["["],
     },
-    project_tab_slot!(1, "project_tab_1", "Project tab 1", "cmd+1", "1"),
-    project_tab_slot!(2, "project_tab_2", "Project tab 2", "cmd+2", "2"),
-    project_tab_slot!(3, "project_tab_3", "Project tab 3", "cmd+3", "3"),
-    project_tab_slot!(4, "project_tab_4", "Project tab 4", "cmd+4", "4"),
-    project_tab_slot!(5, "project_tab_5", "Project tab 5", "cmd+5", "5"),
-    project_tab_slot!(6, "project_tab_6", "Project tab 6", "cmd+6", "6"),
-    project_tab_slot!(7, "project_tab_7", "Project tab 7", "cmd+7", "7"),
-    project_tab_slot!(8, "project_tab_8", "Project tab 8", "cmd+8", "8"),
-    project_tab_slot!(9, "project_tab_9", "Project tab 9", "cmd+9", "9"),
+    project_tab_slot!(1, "project_tab_1", "Project tab 1", "1"),
+    project_tab_slot!(2, "project_tab_2", "Project tab 2", "2"),
+    project_tab_slot!(3, "project_tab_3", "Project tab 3", "3"),
+    project_tab_slot!(4, "project_tab_4", "Project tab 4", "4"),
+    project_tab_slot!(5, "project_tab_5", "Project tab 5", "5"),
+    project_tab_slot!(6, "project_tab_6", "Project tab 6", "6"),
+    project_tab_slot!(7, "project_tab_7", "Project tab 7", "7"),
+    project_tab_slot!(8, "project_tab_8", "Project tab 8", "8"),
+    project_tab_slot!(9, "project_tab_9", "Project tab 9", "9"),
     ActionSpec {
         action: Action::CloseProjectTab,
         id: "close_project_tab",
         label: "Close project tab",
-        hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — + opens it again",
+        hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — ⌘K opens it again",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["x"],
@@ -335,24 +327,22 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ProjectDropdown,
         id: "project_dropdown",
         label: "Switch project",
-        hint: "Drop the list of every project under the + in the header — type to narrow it, Enter or a click opens one. + is the header's own button and arrives in every terminal and in orion browser; ⌘P does the same from inside the pane, where the terminal sends ⌘ at all (Ghostty/kitty do, Terminal.app and the browser never do)",
+        hint: "Drop the list of every project under the + in the header — type to narrow it, Enter or a click opens one. ⌘K reaches every project too",
         group: "NAVIGATE",
         scope: Scope::Global,
-        // `+`, the header button's own glyph, is the key the app shows —
-        // it arrives everywhere, where `⌘P` is the browser's print dialog
-        // and Terminal.app's nothing. `⌘P` stays bound behind it as the
-        // one chord a LOCKED PANE lets through in Ghostty and kitty.
-        defaults: &["+", "cmd+p"],
+        // No key of its own: the header's `+` is a button, and ⌘K's jump
+        // list holds every project the dropdown does.
+        defaults: &[],
     },
     // ---- PROJECTS & WORKTREES ----
     ActionSpec {
         action: Action::AddProject,
         id: "add_project",
         label: "Open a folder as a project",
-        hint: "Open a folder as a project in orion, from anywhere; ⇧O opens a checkout outside it, in your editor",
+        hint: "Open a folder as a project in orion, from anywhere — ⌘K's last row",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["o"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::New,
@@ -361,16 +351,16 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Pick the harness first (→ drills into its model and effort), then the quick prompt opens set to it, in the checkout under the cursor; on the first-run splash, add a project",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["n"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::GitDiff,
         id: "git_diff",
-        label: "Git diff",
+        label: "Changes",
         hint: "Open the diff viewer for the checkout under the cursor — or, with the pane reading a pull request, that pull request's diff",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["g"],
+        defaults: &["cmd+e", "ctrl+e"],
     },
     ActionSpec {
         action: Action::OpenRepo,
@@ -379,25 +369,25 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Send the selected repo's git remote (GitHub, GitLab, …) to your browser",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["shift+g"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::OpenPullRequest,
         id: "open_pull_request",
         label: "Open pull request in browser",
-        hint: "Send the pull request of the session card under the cursor — its checkout's branch — to your browser, as a click on the card's #42 line does. v lists the pull requests in orion; ⇧V goes to GitHub",
+        hint: "Send the pull request of the session card under the cursor — its checkout's branch — to your browser, as a click on the card's #42 line does. v lists the pull requests in orion",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["shift+v"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::OpenIssue,
         id: "open_issue",
         label: "Open issue in browser",
-        hint: "Send the GitHub issue the session card under the cursor was started from to your browser. i lists the issues in orion; ⇧I goes to GitHub",
+        hint: "Send the GitHub issue the session card under the cursor was started from to your browser. i lists the issues in orion",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["shift+i"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::RefreshPullRequests,
@@ -406,16 +396,16 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Ask GitHub again now for the project's open pull requests and issues, the selected worktree's PR and the one the pane is reading",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["shift+r"],
+        defaults: &["cmd+r", "ctrl+r"],
     },
     ActionSpec {
         action: Action::CommentPullRequest,
         id: "comment_pull_request",
         label: "Comment on pull request",
-        hint: "Open a box to type a comment and post it through gh on the card's pull request — the one ⇧V opens — or, with the pane reading a pull request (a / jump lands on one), on that one",
+        hint: "Open a box to type a comment and post it through gh on the card's pull request, or, with the pane reading a pull request (a ⌘K jump lands on one), on that one",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["y"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Issues,
@@ -436,6 +426,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["v"],
     },
     ActionSpec {
+        action: Action::Linear,
+        id: "linear",
+        label: "Linear issues",
+        hint: "List Linear issues assigned to you; Space marks, Enter starts one agent on the marked set in one worktree",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &["cmd+l", "ctrl+l"],
+    },
+    ActionSpec {
         action: Action::SwitchBranch,
         id: "switch_branch",
         label: "Switch root branch",
@@ -448,30 +447,30 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenWorktree,
         id: "open_worktree",
         label: "Open checkout in editor",
-        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Project), else .orion.json \"open\" — e.g. open http://localhost:3000 (⇧Enter needs the kitty protocol; ⇧O arrives everywhere; ⌥Enter is the ESC CR that VS Code's Shift+Enter setup sends and tmux passes through)",
+        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Project), else .orion.json \"open\" — e.g. open http://localhost:3000",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["shift+enter", "shift+o", "alt+enter"],
+        defaults: &[],
     },
     // ---- SESSIONS ----
     ActionSpec {
         action: Action::NewTerminal,
         id: "new_terminal",
         label: "New shell terminal",
-        hint: "Spawn a plain shell inside orion, in the selected worktree's directory; ⇧T opens one outside it, in a Ghostty tab",
+        hint: "Spawn a plain shell inside orion, in the selected worktree's directory; ⌘O opens one outside it",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["t"],
     },
     // `t`'s shift pair: the same terminal, outside orion.
     ActionSpec {
-        action: Action::OpenGhosttyTab,
-        id: "open_ghostty_tab",
-        label: "Terminal in a Ghostty tab",
-        hint: "Open a new Ghostty tab in the selected worktree's directory — t's terminal, outside orion; does nothing without Ghostty.app",
+        action: Action::OpenOutsideTerminal,
+        id: "open_outside_terminal",
+        label: "Terminal outside orion",
+        hint: "Open the selected worktree's directory in the Outside terminal setting's app — a Ghostty tab or a Terminal.app window",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["shift+t"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Rename,
@@ -485,8 +484,8 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::Archive,
         id: "archive",
-        label: "Archive session",
-        hint: "Archive the selected agent (its PTY is released)",
+        label: "Archive / unarchive",
+        hint: "Archive the selected agent (its PTY is released), or bring an archived one back",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["a"],
@@ -498,7 +497,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Bring an archived agent back into the list",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["u"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::ToggleArchived,
@@ -516,7 +515,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Remove the selected row, behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation — x closes it outright",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["d", "delete", "backspace"],
+        defaults: &["backspace"],
     },
     ActionSpec {
         action: Action::DeleteAll,
@@ -525,7 +524,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Remove every session listed for the checkout under the cursor, behind a confirmation",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["shift+d"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::AgentPresets,
@@ -534,16 +533,16 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Saved launch presets (CLI, model, effort, prefix/postfix) for the checkout under the cursor; Enter asks for an optional task, or skips it; from the pull requests list, a PR session in that branch's worktree",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["e"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::QuickPrompt,
         id: "quick_prompt",
-        label: "Quick prompt",
-        hint: "Type a prompt; Enter starts an agent on it (Settings > Agents picks which)",
+        label: "New agent",
+        hint: "Type a task; Enter starts an agent on it (Tab picks the harness, model and effort; Settings → Agents sets the default)",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["p"],
+        defaults: &["cmd+i", "cmd+n", "ctrl+n"],
     },
     ActionSpec {
         action: Action::FollowUp,
@@ -558,20 +557,20 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::DuplicateSession,
         id: "duplicate_session",
         label: "Duplicate session",
-        hint: "Open the quick prompt set to launch what the selected card runs — the same harness, model, effort and worktree — so only the task is left to type. p opens the box on the defaults; ⇧P on the card",
+        hint: "Open the quick prompt set to launch what the selected card runs — the same harness, model, effort and worktree — so only the task is left to type",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["shift+p"],
+        defaults: &[],
     },
     // ---- FILES ----
     ActionSpec {
         action: Action::FindFile,
         id: "find_file",
-        label: "Find file",
+        label: "Go to file",
         hint: "Fuzzy file finder for the selected worktree",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["f"],
+        defaults: &["cmd+p", "ctrl+p"],
     },
     ActionSpec {
         action: Action::Grep,
@@ -580,7 +579,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "git grep across the selected worktree",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["shift+f"],
+        // ⌘⇧F as in Cursor; `^⇧F` needs the kitty protocol, so `⇧F` is
+        // the twin a stock terminal delivers.
+        defaults: &["cmd+shift+f", "ctrl+shift+f", "shift+f"],
     },
     ActionSpec {
         action: Action::TreeBrowser,
@@ -589,43 +590,40 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Browse the worktree's files with a preview pane",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["b"],
+        defaults: &["cmd+b", "ctrl+b"],
     },
     // ---- TERMINAL ----
     ActionSpec {
         action: Action::UnlockTerminal,
         id: "unlock_terminal",
         label: "Unlock terminal input",
-        hint: "Leave the locked pane and go back to the card (^q always works; ^⇧H needs the kitty protocol)",
+        hint: "Leave the locked pane and go back to the card (Esc leaves; ⇧Esc sends Esc to the agent; ^q always works)",
         group: "TERMINAL",
         scope: Scope::Terminal,
-        defaults: &["ctrl+q", "ctrl+]", "ctrl+shift+h"],
+        defaults: &["esc", "ctrl+q", "ctrl+]", "ctrl+shift+h"],
     },
     // ---- GENERAL ----
     ActionSpec {
         action: Action::ToggleLauncherPane,
         id: "toggle_launcher_pane",
-        label: "Launcher session pane",
-        hint: "Fold the pane under the cards away — which also unselects the card it was reading — or bring it back. From inside the pane the ctrl chords take two presses: the first hands the keys back to the card, the second folds the pane. ^` and ^~ need the kitty protocol; ~ is bound alongside them, the shift of the ` that walks the pane's tabs",
+        label: "Toggle pane",
+        hint: "Fold the pane under the cards away — which also unselects the card it was reading — or bring it back. ⌘J works from inside the pane too",
         group: "GENERAL",
         scope: Scope::Global,
-        // `^`` is the chord to reach for — out of the pane, then the pane
-        // away — and `^~` the same key for the terminals that report it
-        // shifted with ctrl held. Only the kitty protocol carries either:
-        // a stock terminal has no encoding for ctrl and this key, and
-        // sends the same NUL it sends for ^Space. So the bare `~` is bound
-        // beside them — the shift of the `` ` `` that walks the pane's
-        // tabs, which is the key everything else about the pane is on.
-        defaults: &["ctrl+`", "ctrl+~", "~"],
+        // ⌘J, as in Cursor, reaches orion from inside the pane as well —
+        // no one types a ⌘ chord as text. `^J` is its twin for terminals
+        // that never send ⌘, from the cards only: in the pane it is the
+        // agent's newline.
+        defaults: &["cmd+j", "ctrl+j"],
     },
     ActionSpec {
         action: Action::ToggleFullScreen,
         id: "toggle_full_screen",
         label: "Full-screen session",
-        hint: "Give the session in the pane the whole screen, or bring it back down beside the cards — from inside the pane too, where it is never forwarded to the agent. From the cards it full-screens the one under the cursor. ^q and ^` also bring a full-screen session back down",
+        hint: "Give the session in the pane the whole screen, or bring it back down beside the cards — from inside the pane too, where it is never forwarded to the agent. From the cards it full-screens the one under the cursor. Esc and ^q also bring a full-screen session back down",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["ctrl+f"],
+        defaults: &["cmd+f", "ctrl+f"],
     },
     ActionSpec {
         action: Action::PaneTabs,
@@ -643,7 +641,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Connect to a saved ssh host (restarts orion over ssh)",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["shift+h"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Settings,
@@ -652,7 +650,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Open this settings overlay",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["s"],
+        defaults: &["s", "cmd+,"],
     },
     ActionSpec {
         action: Action::Metrics,
@@ -661,16 +659,45 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "RAM used by orion and every live agent's process tree",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["shift+m"],
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Help,
         id: "help",
-        label: "Help",
-        hint: "Toggle the keyboard help overlay",
+        label: "Keyboard shortcuts",
+        hint: "Every key orion answers to, on one page",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["?"],
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::CommandPalette,
+        id: "command_palette",
+        label: "Command palette",
+        hint: "Every action by name, with its key: type to narrow, Enter runs it",
+        group: "GENERAL",
+        scope: Scope::Global,
+        // `:` — vim's command line — is the key a stock terminal
+        // delivers: it sends neither ⌘ nor `^⇧`.
+        defaults: &["cmd+shift+p", "ctrl+shift+p", ":"],
+    },
+    ActionSpec {
+        action: Action::OpenOutside,
+        id: "open_outside",
+        label: "Open outside orion",
+        hint: "A menu of what the cursor is on, outside orion: the repo, pull request or issue on GitHub, the checkout's open command, Cursor, a terminal",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+o", "ctrl+o"],
+    },
+    ActionSpec {
+        action: Action::OpenInCursor,
+        id: "open_in_cursor",
+        label: "Open checkout in Cursor",
+        hint: "Open the checkout under the cursor in Cursor (⌘O on a file opens the file)",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Quit,
@@ -818,6 +845,10 @@ impl KeyChord {
                 out.push('⇧');
                 out.extend(c.to_uppercase());
             }
+            // macOS spells ⌘ chords with the capital: ⌘K, not ⌘k.
+            KeyCode::Char(c) if self.mods.contains(KeyModifiers::SUPER) && c.is_alphabetic() => {
+                out.extend(c.to_uppercase());
+            }
             _ => {
                 if shift {
                     out.push('⇧');
@@ -960,6 +991,88 @@ const CTRL_COLLISIONS: &[(char, &str)] = &[
     ),
 ];
 
+static CMD_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Whether Help, the footers and the palettes print the ⌘ chords: set
+/// once at startup, when orion runs inside a terminal that sends ⌘.
+pub fn set_cmd_shown(shown: bool) {
+    CMD_SHOWN.store(shown, Ordering::Relaxed);
+}
+
+/// Whether the hints print ⌘ chords ([`set_cmd_shown`]).
+pub fn cmd_shown() -> bool {
+    CMD_SHOWN.load(Ordering::Relaxed)
+}
+
+/// [`Keymap::shown_chords`]'s pick: the ⌘ chords of `all` when `cmd`,
+/// the rest otherwise — or all of them, when that side has none.
+fn shown_side(all: &[KeyChord], cmd: bool) -> Vec<KeyChord> {
+    let side: Vec<KeyChord> = all
+        .iter()
+        .filter(|c| c.mods.contains(KeyModifiers::SUPER) == cmd)
+        .copied()
+        .collect();
+    if side.is_empty() {
+        all.to_vec()
+    } else {
+        side
+    }
+}
+
+/// The ⌘ chords Ghostty binds outright by default (Ghostty 1.3), in
+/// orion's spelling: they never reach a program running inside it. Its
+/// `performable` bindings — ⌘C copy, ⌘K clear, ⌘J / ⌘E on a selection,
+/// ⌘⇧F / ⌘G on a search — pass the key on when there is nothing to do, so
+/// they are not here; nor are the three [`crate::ghostty_config::UNBINDS`]
+/// orion releases.
+const GHOSTTY_KEEPS: &[&str] = &[
+    "cmd+v",
+    "cmd+=",
+    "cmd++",
+    "cmd+-",
+    "cmd+0",
+    "cmd+shift+j",
+    "cmd+1",
+    "cmd+2",
+    "cmd+3",
+    "cmd+4",
+    "cmd+5",
+    "cmd+6",
+    "cmd+7",
+    "cmd+8",
+    "cmd+9",
+    "cmd+enter",
+    "shift+cmd+enter",
+    "cmd+q",
+    "cmd+a",
+    "shift+cmd+t",
+    "cmd+z",
+    "shift+cmd+z",
+    "cmd+home",
+    "cmd+end",
+    "cmd+pgup",
+    "cmd+pgdn",
+    "shift+cmd+up",
+    "shift+cmd+down",
+    "cmd+up",
+    "cmd+down",
+    "cmd+left",
+    "cmd+right",
+    "cmd+backspace",
+    "cmd+w",
+    "shift+cmd+w",
+    "alt+cmd+w",
+    "cmd+t",
+    "cmd+[",
+    "cmd+]",
+    "cmd+d",
+    "shift+cmd+d",
+    "cmd+f",
+    "alt+cmd+i",
+    "ctrl+cmd+f",
+    "shift+cmd+v",
+];
+
 /// Whether the host terminal is likely to swallow `chord` before orion
 /// sees it, and why. orion is always a guest inside Terminal.app, Ghostty,
 /// iTerm, tmux or an ssh session, and each of those claims keys for itself
@@ -972,9 +1085,27 @@ pub fn host_warning(chord: &KeyChord) -> (Reach, Option<&'static str>) {
     let alt = m.contains(KeyModifiers::ALT);
 
     if m.contains(KeyModifiers::SUPER) {
+        let listed = |specs: &[&str]| {
+            specs
+                .iter()
+                .filter_map(|spec| KeyChord::parse(&spec.replace("super+", "cmd+")))
+                .any(|listed| listed == *chord)
+        };
+        if listed(crate::ghostty_config::UNBINDS) {
+            return (
+                Reach::Risky,
+                Some("Ghostty gives this ⌘ chord to orion only with Settings → General → Ghostty keybinds on; Terminal.app never sends ⌘"),
+            );
+        }
+        if listed(GHOSTTY_KEEPS) {
+            return (
+                Reach::Blocked,
+                Some("Ghostty keeps this ⌘ chord for itself (ghostty +list-keybinds --default)"),
+            );
+        }
         return (
-            Reach::Blocked,
-            Some("⌘ chords never reach a TUI — Terminal.app swallows them, Ghostty binds its own"),
+            Reach::Risky,
+            Some("⌘ reaches orion in Ghostty and kitty only — Terminal.app and orion browser never send it; the ^ twin works everywhere"),
         );
     }
     // Mission Control owns these on stock macOS (they switch Spaces).
@@ -1143,24 +1274,14 @@ impl Keymap {
         index_of(action).map_or_else(|| UNBOUND.into(), |i| self.display_at(i))
     }
 
-    /// The chords Help and the footer print for an action: every one it
-    /// answers to but the ⌘ ones. ⌘ never reaches orion in Terminal.app
-    /// or `orion browser`, and every ⌘ default has a plain key beside it
-    /// (`1`–`9`, `+`), so the ⌘ chords stay bound as silent aliases
-    /// that only Settings → Hotkeys lists. An action bound to ⌘ chords
-    /// alone — a binding of the user's own — still shows them.
+    /// The chords Help and the footer print for an action: the ⌘ ones in
+    /// a terminal that sends ⌘ ([`set_cmd_shown`]), the rest elsewhere.
+    /// ⌘ never reaches orion in Terminal.app or `orion browser`, and every
+    /// ⌘ default has a `^` twin beside it, so whichever side the host
+    /// cannot use stays bound as a silent alias that only Settings →
+    /// Hotkeys lists. An action bound on one side alone shows that side.
     pub fn shown_chords(&self, action: Action) -> Vec<KeyChord> {
-        let all = self.chords(action);
-        let plain: Vec<KeyChord> = all
-            .iter()
-            .filter(|c| !c.mods.contains(KeyModifiers::SUPER))
-            .copied()
-            .collect();
-        if plain.is_empty() {
-            all.to_vec()
-        } else {
-            plain
-        }
+        shown_side(self.chords(action), cmd_shown())
     }
 
     /// [`Self::label`] without the ⌘ aliases ([`Self::shown_chords`]).
@@ -1260,11 +1381,20 @@ impl Keymap {
     }
 
     /// Rows whose chords the host terminal probably eats, with the worst
-    /// verdict across the row's chords.
+    /// verdict across the row's chords. A ⌘ chord the host might not send
+    /// is no worry on a row that also has a chord without ⌘: that twin is
+    /// the one such a host uses.
     pub fn reach_at(&self, index: usize) -> Reach {
-        self.chords_at(index)
+        let chords = self.chords_at(index);
+        let has_twin = chords
             .iter()
-            .map(|c| host_warning(c).0)
+            .any(|c| !c.mods.contains(KeyModifiers::SUPER));
+        chords
+            .iter()
+            .map(|c| match host_warning(c).0 {
+                Reach::Risky if has_twin && c.mods.contains(KeyModifiers::SUPER) => Reach::Fine,
+                reach => reach,
+            })
             .fold(Reach::Fine, |worst, r| match (worst, r) {
                 (Reach::Blocked, _) | (_, Reach::Blocked) => Reach::Blocked,
                 (Reach::Risky, _) | (_, Reach::Risky) => Reach::Risky,
@@ -1351,28 +1481,13 @@ mod tests {
     fn shift_enter_is_its_own_chord_and_flagged_as_kitty_only() {
         let map = Keymap::default();
         let shift_enter = ev(KeyCode::Enter, KeyModifiers::SHIFT);
-        assert_eq!(
-            map.lookup(Scope::Global, &shift_enter),
-            Some(Action::OpenWorktree)
-        );
+        assert_eq!(map.lookup(Scope::Global, &shift_enter), None);
         assert_eq!(
             map.lookup(Scope::Global, &ev(KeyCode::Enter, KeyModifiers::NONE)),
             Some(Action::Activate)
         );
         assert_eq!(shift_enter.spec(), "shift+enter");
         assert_eq!(host_warning(&shift_enter).0, Reach::Risky);
-        // …so a stock terminal gets a letter for it too, and the ESC CR a
-        // Shift+Enter mapping (VS Code's /terminal-setup, Option as Meta)
-        // sends — which tmux passes through where it flattens the shifted
-        // Enter — lands on the same action as Alt+Enter.
-        assert_eq!(
-            map.lookup(Scope::Global, &ev(KeyCode::Char('O'), KeyModifiers::SHIFT)),
-            Some(Action::OpenWorktree)
-        );
-        assert_eq!(
-            map.lookup(Scope::Global, &ev(KeyCode::Enter, KeyModifiers::ALT)),
-            Some(Action::OpenWorktree)
-        );
     }
 
     #[test]
@@ -1414,83 +1529,44 @@ mod tests {
         );
     }
 
-    /// ^d / ^u are panel chords only: a locked pane must keep forwarding
-    /// them as the shell's EOF and kill-to-start, so the Terminal scope
-    /// never answers to them.
+    /// `t` is a shell terminal inside orion; one outside it is a row of
+    /// the OPEN MENU `⌘O` drops, with no letter of its own.
     #[test]
-    fn half_page_chords_are_bound_in_the_panels_and_not_the_locked_pane() {
-        let map = Keymap::default();
-        let ctrl_d = KeyChord::parse("ctrl+d").unwrap();
-        let ctrl_u = KeyChord::parse("ctrl+u").unwrap();
-        assert_eq!(
-            map.lookup(Scope::Global, &ctrl_d),
-            Some(Action::HalfPageDown)
-        );
-        assert_eq!(map.lookup(Scope::Global, &ctrl_u), Some(Action::HalfPageUp));
-        assert_eq!(map.lookup(Scope::Terminal, &ctrl_d), None);
-        assert_eq!(map.lookup(Scope::Terminal, &ctrl_u), None);
-        // Plain, kitty-free control bytes: every emulator delivers them.
-        assert!(host_warning(&ctrl_d).0.is_fine());
-        assert!(host_warning(&ctrl_u).0.is_fine());
-    }
-
-    /// `t` / `⇧T` is a SHIFT PAIR (#93): the lowercase key does it inside
-    /// orion, the shifted one outside — a shell terminal in the pane, a
-    /// Ghostty tab. `⇧C`, the Ghostty tab's old key, is free.
-    #[test]
-    fn t_is_a_terminal_in_orion_and_shift_t_one_in_ghostty() {
+    fn t_is_a_terminal_in_orion_and_cmd_o_reaches_one_outside() {
         let map = Keymap::default();
         let at = |spec: &str| map.lookup(Scope::Global, &KeyChord::parse(spec).unwrap());
         assert_eq!(at("t"), Some(Action::NewTerminal));
-        assert_eq!(at("shift+t"), Some(Action::OpenGhosttyTab));
-        assert_eq!(at("shift+c"), None, "⇧C is free");
+        assert_eq!(at("shift+t"), None);
+        assert_eq!(at("cmd+o"), Some(Action::OpenOutside));
+        assert_eq!(at("ctrl+o"), Some(Action::OpenOutside));
+        assert!(map.chords(Action::OpenOutsideTerminal).is_empty());
         assert_eq!(map.label(Action::NewTerminal), "t");
     }
 
-    /// Help and the footer leave the ⌘ aliases out: they are bound, and
-    /// Settings → Hotkeys lists them, but only the key that arrives in
-    /// every terminal is printed. A ⌘-only binding still shows.
+    /// Help and the footer print one side of each ⌘ / `^` pair: the ⌘
+    /// chords where the terminal sends ⌘, the `^` twins elsewhere. A
+    /// binding on one side alone shows on both.
     #[test]
-    fn shown_chords_leave_the_cmd_aliases_out() {
-        let mut map = Keymap::default();
-        let cmd_p = KeyChord::parse("cmd+p").unwrap();
-        assert!(
-            map.chords(Action::ProjectDropdown).contains(&cmd_p),
-            "still bound"
-        );
-        assert_eq!(
-            map.lookup(Scope::Global, &cmd_p),
-            Some(Action::ProjectDropdown),
-            "and still answers"
-        );
-        assert!(
-            map.label(Action::ProjectDropdown).contains('⌘'),
-            "Hotkeys lists it"
-        );
-        assert!(!map.shown_label(Action::ProjectDropdown).contains('⌘'));
-        assert_eq!(map.shown_label(Action::ProjectDropdown), "+");
+    fn shown_chords_pick_the_side_the_terminal_sends() {
+        let map = Keymap::default();
+        let finder = map.chords(Action::FindFile);
+        let spell = |chords: Vec<KeyChord>| {
+            chords.iter().map(KeyChord::display).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(spell(shown_side(finder, false)), "^p");
+        assert_eq!(spell(shown_side(finder, true)), "⌘P");
+        let help = [KeyChord::parse("cmd+k").unwrap()];
+        assert_eq!(spell(shown_side(&help, false)), "⌘K", "⌘ alone still shows");
         for n in 1..=9u8 {
             let action = Action::SelectProjectTab(n);
-            assert_eq!(map.shown_label(action), n.to_string());
-            assert_eq!(
-                map.first(action).map(|c| c.display()),
-                Some(n.to_string()),
-                "the digit leads the slot's defaults"
-            );
+            assert_eq!(spell(shown_side(map.chords(action), true)), n.to_string());
         }
-        let help = index_of(Action::Help).unwrap();
-        map.bind(help, KeyChord::parse("cmd+k").unwrap(), false);
-        assert_eq!(map.shown_label(Action::Help), "⌘k", "⌘ alone still shows");
-        assert_eq!(
-            map.shown_first(Action::Help).map(|c| c.display()),
-            Some("⌘k".to_string())
-        );
     }
 
     #[test]
     fn binding_steals_the_chord_from_its_previous_owner() {
         let mut map = Keymap::default();
-        let g = KeyChord::parse("g").unwrap();
+        let g = KeyChord::parse("ctrl+e").unwrap();
         let open_repo = index_of(Action::OpenRepo).unwrap();
         assert_eq!(
             map.conflicts(open_repo, &g),
@@ -1536,8 +1612,8 @@ mod tests {
         ]));
         assert!(map.chords(Action::Quit).is_empty(), "the row is cleared");
         assert_eq!(
-            map.lookup(Scope::Global, &KeyChord::parse("?").unwrap()),
-            Some(Action::Help),
+            map.lookup(Scope::Global, &KeyChord::parse("s").unwrap()),
+            Some(Action::Settings),
             "the rest of the map is untouched"
         );
     }
@@ -1545,12 +1621,12 @@ mod tests {
     #[test]
     fn a_hand_edited_duplicate_is_flagged_on_both_rows() {
         // Nothing in the overlay can produce this; a text editor can.
-        let map = Keymap::from_overrides(&BTreeMap::from([("open_repo".into(), "g".into())]));
+        let map = Keymap::from_overrides(&BTreeMap::from([("open_repo".into(), "ctrl+e".into())]));
         let open_repo = index_of(Action::OpenRepo).unwrap();
         let diff = index_of(Action::GitDiff).unwrap();
         assert!(map.is_ambiguous(open_repo));
         assert!(map.is_ambiguous(diff));
-        assert_eq!(map.shadowed_by(open_repo), vec!["Git diff"]);
+        assert_eq!(map.shadowed_by(open_repo), vec!["Changes"]);
         // The defaults themselves are always unambiguous.
         assert!(Keymap::default()
             .binds
@@ -1560,10 +1636,31 @@ mod tests {
     }
 
     #[test]
-    fn cmd_chords_are_reported_unreachable() {
+    fn cmd_chords_are_reported_by_who_keeps_them() {
         let (reach, why) = host_warning(&KeyChord::parse("cmd+]").unwrap());
-        assert_eq!(reach, Reach::Blocked);
+        assert_eq!(reach, Reach::Blocked, "Ghostty's own");
         assert!(why.unwrap().contains('⌘'));
+        for freed in ["cmd+shift+p", "cmd+n", "cmd+,"] {
+            let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
+            assert_eq!(reach, Reach::Risky, "{freed}");
+            assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
+        }
+        for passes in ["cmd+k", "cmd+p", "cmd+e", "cmd+j", "cmd+c"] {
+            let (reach, _) = host_warning(&KeyChord::parse(passes).unwrap());
+            assert_eq!(reach, Reach::Risky, "{passes}");
+        }
+    }
+
+    /// No default chord is one Ghostty keeps for itself: every ⌘ default
+    /// either passes through it or is one orion's block releases.
+    #[test]
+    fn no_default_is_a_chord_ghostty_keeps() {
+        let map = Keymap::default();
+        for (i, spec) in ACTIONS.iter().enumerate() {
+            for chord in map.chords_at(i) {
+                assert_ne!(host_warning(chord).0, Reach::Blocked, "{}: {}", spec.id, chord.spec());
+            }
+        }
     }
 
     #[test]
@@ -1585,14 +1682,16 @@ mod tests {
     }
 
     #[test]
-    fn every_action_ships_with_a_reachable_chord() {
-        // Some defaults are deliberately iffy (^] is a fallback hatch, ⌘P
-        // an alias), but no action may be *only* reachable through a chord
-        // the host terminal is likely to eat.
+    fn every_bound_action_ships_with_a_reachable_chord() {
+        // Some defaults are deliberately iffy (^] is a fallback hatch, the
+        // ⌘ chords Ghostty-only), but no bound action may be *only*
+        // reachable through a chord the host terminal is likely to eat.
+        // An action shipped with no key at all is a COMMAND PALETTE row.
         let map = Keymap::default();
         for (i, spec) in ACTIONS.iter().enumerate() {
+            let chords = map.chords_at(i);
             assert!(
-                map.chords_at(i).iter().any(|c| host_warning(c).0.is_fine()),
+                chords.is_empty() || chords.iter().any(|c| host_warning(c).0.is_fine()),
                 "{} has no chord a stock terminal delivers",
                 spec.id
             );

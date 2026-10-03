@@ -114,6 +114,15 @@ struct PrewarmEntry {
     buffered_hooks: Vec<(HookEvent, Option<String>)>,
 }
 
+/// What [`Daemon::delete_worktree`] came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeDelete {
+    Deleted,
+    /// Unforced, and this many files in the checkout have uncommitted or
+    /// untracked changes: nothing was killed or removed.
+    HasChanges(usize),
+}
+
 pub struct Daemon {
     sessions: Mutex<HashMap<SessionRef, Arc<PtySession>>>,
     status_machines: Mutex<HashMap<AgentId, AgentStatusMachine>>,
@@ -760,6 +769,7 @@ impl Daemon {
             },
         };
         let worktree = self.register_worktree(project_id, path, branch)?;
+        self.link_env_files(&project.repo_path, &worktree.path).await;
         // The row is out; the WORKTREE HOOK runs still under the lock, so
         // it is ordered with the operation it belongs to — a delete of
         // this path waits for it, two hooks never overlap — and the Ack
@@ -802,6 +812,7 @@ impl Daemon {
         }
         let path = git::add_pr_worktree(&project.repo_path, number, head).await?;
         let worktree = self.register_worktree(project_id, path, head)?;
+        self.link_env_files(&project.repo_path, &worktree.path).await;
         self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
             .await;
         drop(ops);
@@ -831,7 +842,16 @@ impl Daemon {
         Ok(worktree)
     }
 
-    pub async fn delete_worktree(self: &Arc<Self>, id: &WorktreeId, force: bool) -> Result<()> {
+    /// Delete a WORKTREE: its sessions, its checkout, its row. Unforced, a
+    /// checkout with uncommitted or untracked changes is left exactly as
+    /// it was — no session killed — and the answer says how many files,
+    /// so the client can ask before a forced resend loses them. The
+    /// branch survives either way, and with it every commit on it.
+    pub async fn delete_worktree(
+        self: &Arc<Self>,
+        id: &WorktreeId,
+        force: bool,
+    ) -> Result<WorktreeDelete> {
         let ops = self.worktree_ops.lock().await;
         let worktree = self.store.get_worktree(id)?.context("worktree not found")?;
         if worktree.is_main {
@@ -841,12 +861,23 @@ impl Daemon {
             .store
             .get_project(&worktree.project_id)?
             .context("project not found")?;
+        if !force && worktree.path.exists() {
+            // A checkout git can't read has nothing it can report as
+            // changed; the removal below says what is wrong with it.
+            let changed = git::changed_files(&worktree.path).await.unwrap_or(0);
+            if changed > 0 {
+                return Ok(WorktreeDelete::HasChanges(changed));
+            }
+        }
 
         // Kill sessions living in this worktree.
         let (_, _, agents, terminals) = self.store.load_tree()?;
         self.kill_sessions_in(std::slice::from_ref(id), &agents, &terminals);
 
-        git::remove_worktree(&project.repo_path, &worktree.path, force).await?;
+        // Forced either way: the changes check above is the only one the
+        // user is asked about, and git's own refuses a clean checkout
+        // that holds a submodule.
+        git::remove_worktree(&project.repo_path, &worktree.path, true).await?;
         self.store.delete_worktree(id)?;
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Worktree(id.clone()),
@@ -862,7 +893,40 @@ impl Daemon {
         self.run_worktree_hook(WorktreeHook::Delete, &project.repo_path, &worktree)
             .await;
         drop(ops);
-        Ok(())
+        Ok(WorktreeDelete::Deleted)
+    }
+
+    /// ENV LINKS for a checkout just added to the project cloned at
+    /// `repo`: the main checkout — git's first worktree, which is `repo`
+    /// itself unless the project was added from a linked one — lends its
+    /// ignored `.env*` files to `worktree`. Off with the `link_env_files`
+    /// SETTING; a failure is a client warning, never a failed create.
+    async fn link_env_files(&self, repo: &Path, worktree: &Path) {
+        let main = git::list_worktrees(repo)
+            .await
+            .ok()
+            .and_then(|entries| entries.into_iter().next())
+            .map_or_else(|| repo.to_path_buf(), |main| main.path);
+        self.link_env_files_from(&main, worktree).await;
+    }
+
+    /// [`Daemon::link_env_files`] with the main checkout already known.
+    async fn link_env_files_from(&self, main: &Path, worktree: &Path) {
+        if !crate::config::Config::load().link_env_files {
+            return;
+        }
+        match crate::env_links::link(main, worktree).await {
+            Ok(linked) if !linked.is_empty() => tracing::info!(
+                worktree = %worktree.display(),
+                files = ?linked,
+                "linked .env files from the main checkout"
+            ),
+            Ok(_) => {}
+            Err(e) => self.warn_clients(format!(
+                "couldn't link .env files into {}: {e:#}",
+                worktree.display()
+            )),
+        }
     }
 
     /// Run the repository's WORKTREE HOOK for `hook`, if it configures
@@ -960,6 +1024,9 @@ impl Daemon {
             };
             self.store.insert_worktree(&worktree)?;
             adopted = true;
+            if let (false, Some(main)) = (worktree.is_main, main_path.as_deref()) {
+                self.link_env_files_from(main, &worktree.path).await;
+            }
             self.broadcast(ServerEvent::EntityUpserted {
                 entity: Entity::Worktree(worktree),
             });
@@ -6132,6 +6199,31 @@ mod tests {
         );
     }
 
+    /// ENV LINKS: a new worktree gets the main checkout's ignored `.env`
+    /// as a link back to it, before the create hook runs.
+    #[tokio::test]
+    async fn create_worktree_links_the_main_checkouts_env_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = init_repo(&root);
+        std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(repo.join(".env"), "TOKEN=1\n").unwrap();
+        let daemon = test_daemon();
+        let project = project_at(&daemon, &repo);
+
+        let created = daemon
+            .create_worktree(&project.id, "feat", None)
+            .await
+            .unwrap();
+        let EntityId::Worktree(id) = created else {
+            panic!("a worktree id: {created:?}");
+        };
+        let worktree = daemon.store.get_worktree(&id).unwrap().unwrap();
+        let linked = worktree.path.join(".env");
+        assert_eq!(std::fs::read_link(&linked).unwrap(), repo.join(".env"));
+        assert_eq!(std::fs::read_to_string(linked).unwrap(), "TOKEN=1\n");
+    }
+
     /// The delete hook runs after the checkout is gone and the row is
     /// dropped, sees the deleted path, and its failure is a broadcast
     /// warning: the request still succeeds and the row stays gone.
@@ -6279,6 +6371,55 @@ mod tests {
 
         assert!(!wt.exists());
         assert!(drain_warnings(&mut events).is_empty());
+    }
+
+    /// Unforced, a checkout with an untracked file and an edited one is
+    /// answered with its change count and left on disk with its row;
+    /// forced, it goes. An ignored file is not a change.
+    #[tokio::test]
+    async fn an_unforced_delete_of_a_changed_worktree_keeps_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = init_repo(&root);
+        std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+        git_in(&repo, &["add", ".gitignore"]);
+        git_in(&repo, &["commit", "-qm", "ignore"]);
+        let wt = root.join("repo-worktrees").join("feat");
+        git_in(
+            &repo,
+            &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
+        );
+        let daemon = test_daemon();
+        project_at(&daemon, &repo);
+        seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
+        let id = WorktreeId("feat".into());
+
+        std::fs::write(wt.join(".env"), "IGNORED=1\n").unwrap();
+        assert_eq!(
+            daemon.delete_worktree(&id, false).await.unwrap(),
+            WorktreeDelete::Deleted,
+            "an ignored file alone is no reason to ask"
+        );
+
+        git_in(
+            &repo,
+            &["worktree", "add", &wt.to_string_lossy(), "feat"],
+        );
+        seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
+        std::fs::write(wt.join("notes.txt"), "draft").unwrap();
+        std::fs::write(wt.join(".gitignore"), ".env\nedited\n").unwrap();
+        assert_eq!(
+            daemon.delete_worktree(&id, false).await.unwrap(),
+            WorktreeDelete::HasChanges(2)
+        );
+        assert!(wt.join("notes.txt").exists(), "nothing removed");
+        assert!(daemon.store.get_worktree(&id).unwrap().is_some(), "row kept");
+
+        assert_eq!(
+            daemon.delete_worktree(&id, true).await.unwrap(),
+            WorktreeDelete::Deleted
+        );
+        assert!(!wt.exists());
     }
 
     fn git_in(repo: &Path, args: &[&str]) {

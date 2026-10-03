@@ -1622,11 +1622,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             let page = view.list_area.height.max(1) as i64;
             let selected = view.selected as i64;
             match key.code {
-                // Two-stage, like every fuzzy overlay: the query first.
-                KeyCode::Esc if !view.query.as_str().is_empty() => {
-                    view.query.clear();
-                    view.requery();
-                }
+                // Esc closes the list, query and all (`closes_on_esc`).
                 KeyCode::Esc => app.overlay = None,
                 // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
                 KeyCode::Down => view.select(selected + 1),
@@ -1781,7 +1777,7 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
 /// The FOOTER's hint while the modal is up.
 pub fn footer_hint(view: &BranchSwitchView) -> &'static str {
     match view.stage {
-        Stage::Pick => "type: filter  ↑/↓ ^n/^p: move  Enter: switch (nothing matching: create)  ^r: fetch  Esc: clear/close",
+        Stage::Pick => "type: filter  ↑/↓ ^n/^p: move  Enter: switch (nothing matching: create)  ^r: fetch  Esc: close",
         Stage::Dirty { .. } => "s: stash  b: bring along  c: commit  d: discard  ↑/↓ Enter: choose  Esc: back to the list",
         Stage::Commit { .. } => "type the commit message  Enter: commit & switch  Esc: back",
         Stage::Working(_) => "git is running  Esc: hide (c shows it again; a result that lands while hidden goes to the footer)",
@@ -2928,13 +2924,7 @@ mod tests {
         assert_eq!(view(&app).matches.len(), 1);
         assert_eq!(view(&app).selected_branch().unwrap().name, "release-1.2");
         key(&mut app, KeyCode::Esc);
-        assert_eq!(
-            view(&app).query.as_str(),
-            "",
-            "the first Esc clears the query"
-        );
-        key(&mut app, KeyCode::Esc);
-        assert!(app.overlay.is_none(), "the second closes");
+        assert!(app.overlay.is_none(), "one Esc closes, query and all");
     }
 
     #[test]
@@ -2985,7 +2975,7 @@ mod tests {
         type_text(&mut app, "main");
         key(&mut app, KeyCode::Enter);
         assert_eq!(view(&app).status.as_ref().unwrap().text, "already on main");
-        key(&mut app, KeyCode::Esc);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         type_text(&mut app, "feature");
         key(&mut app, KeyCode::Enter);
         let status = view(&app).status.clone().unwrap();

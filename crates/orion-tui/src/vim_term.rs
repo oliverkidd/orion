@@ -1,4 +1,4 @@
-//! Embedded editor modal: a local PTY child (vim) rendered inside the TUI.
+//! Embedded editor modal: a local PTY child (micro, vim, …) rendered inside the TUI.
 //!
 //! Unlike agent/terminal sessions (daemon-owned PTYs reached over IPC), the
 //! editor is spawned in-process: it's a short-lived affordance of the
@@ -10,7 +10,7 @@
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use ratatui::layout::Rect;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Reader-thread → main-loop messages. `generation` stamps which spawn they
@@ -29,20 +29,31 @@ pub struct VimTerm {
     pub rows: u16,
     /// "path:line" for the modal title.
     pub title: String,
+    /// The checkout the editor runs in.
+    pub cwd: PathBuf,
+    /// The file and line it was opened on (empty / 0 for a bare command).
+    pub file: String,
+    pub line: u64,
     /// Rendered inside the open overlay's preview pane — the TREE BROWSER's,
     /// or the FILE TABS' body — instead of the centered modal (set by that
     /// overlay's Enter).
     pub embedded: bool,
     /// Inner rect from the last draw; `sync_vim_size` resizes to it.
     pub area: Rect,
+    /// The editor quits on Ctrl+Q itself, asking to save first (micro), so
+    /// Ctrl+Q goes to it rather than force-closing the modal.
+    pub quits_itself: bool,
+    /// The file's rendered page beside the editor (a `.md` in the
+    /// floating modal; see `markdown_split`).
+    pub markdown: Option<crate::markdown_split::MarkdownSide>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 impl VimTerm {
-    /// Spawn `editor +<line> <file>` in the checkout. `Err` is a user-facing
-    /// flash message.
+    /// Spawn `editor +<line> <file>` in the checkout — micro off orion's
+    /// own config dir (`editor`). `Err` is a user-facing flash message.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_editor(
         editor: &str,
@@ -55,16 +66,27 @@ impl VimTerm {
         tx: UnboundedSender<VimEvent>,
     ) -> Result<Self, String> {
         let title = format!("{file}:{line}");
-        Self::spawn_cmd(
+        let micro = crate::editor::is_micro(editor);
+        let micro_dir = crate::editor::micro_config_dir();
+        if micro {
+            crate::editor::ensure_micro_config(&micro_dir).map_err(|e| {
+                format!("couldn't set up micro's config in {}: {e}", micro_dir.display())
+            })?;
+        }
+        let mut term = Self::spawn_cmd(
             editor,
-            &[format!("+{line}"), file.to_string()],
+            &crate::editor::editor_args(editor, &micro_dir, file, line),
             root,
             title,
             cols,
             rows,
             generation,
             tx,
-        )
+        )?;
+        term.quits_itself = micro;
+        term.file = file.to_string();
+        term.line = line;
+        Ok(term)
     }
 
     /// Editor-agnostic spawn (tests use a shell here).
@@ -137,8 +159,13 @@ impl VimTerm {
             cols,
             rows,
             title,
+            cwd: cwd.to_path_buf(),
+            file: String::new(),
+            line: 0,
             embedded: false,
             area: Rect::default(),
+            quits_itself: false,
+            markdown: None,
             master: pair.master,
             writer,
             killer,
@@ -264,6 +291,40 @@ mod tests {
         // spawn's generation stamp.
         recv_until(&mut rx, &mut term, |_, ev| {
             matches!(ev, VimEvent::Exited { generation: 7 })
+        })
+        .await;
+    }
+
+    /// The real micro, where installed: it opens on the asked line off
+    /// orion's config dir, and quits on its own Ctrl+Q.
+    #[tokio::test]
+    async fn micro_opens_on_the_line_and_quits_on_ctrl_q() {
+        if !crate::config::program_installed("micro") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        let micro_dir = dir.path().join("micro");
+        crate::editor::ensure_micro_config(&micro_dir).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut term = VimTerm::spawn_cmd(
+            "micro",
+            &crate::editor::editor_args("micro", &micro_dir, "a.txt", 3),
+            dir.path(),
+            "test".into(),
+            80,
+            24,
+            3,
+            tx,
+        )
+        .unwrap();
+        recv_until(&mut rx, &mut term, |t, _| {
+            t.parser.screen().contents().contains("(3,1)")
+        })
+        .await;
+        term.input(&[0x11]);
+        recv_until(&mut rx, &mut term, |_, ev| {
+            matches!(ev, VimEvent::Exited { generation: 3 })
         })
         .await;
     }

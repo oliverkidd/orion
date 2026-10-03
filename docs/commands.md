@@ -30,7 +30,7 @@ orion upgrade              install the latest published orion
 ```sh
 orion                    # launch the TUI (auto-starts the daemon). With no project yet, a
                           # launch from inside a git repo offers it on the splash — Enter
-                          # opens it; anywhere else, `o` browses for one
+                          # opens it; anywhere else, Enter browses for one
 ```
 
 ## Projects and the daemon
@@ -88,7 +88,7 @@ See [Configuration](configuration.md#backup-restore-and-other-machines).
 ```sh
 orion ssh <host> [dir]   # open orion on a remote machine over ssh (installs it there if
                           # missing); destinations are remembered for the TUI's HOSTS PICKER
-                          # (`Shift+H`). Needs the OpenSSH client (`ssh`) on PATH here. This
+                          # (SSH hosts, `⌘⇧P`). Needs the OpenSSH client (`ssh`) on PATH here. This
                           # machine's config.json and agent presets ride along, and the remote
                           # orion merges them into its own settings (its config.local.json
                           # still wins); --no-sync-config or the ssh_sync_config setting leaves

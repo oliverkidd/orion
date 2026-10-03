@@ -233,7 +233,7 @@ pub(crate) enum Command {
     /// and sessions. This machine's `config.json` and agent presets ride
     /// along and are merged into the remote's settings, where its own
     /// `config.local.json` still wins. Destinations are remembered for the
-    /// TUI's host picker (`Shift+H`).
+    /// TUI's host picker (**SSH hosts** in its command palette, `⌘⇧P`).
     #[command(after_help = SSH_EXAMPLES)]
     Ssh {
         /// ssh destination, passed verbatim (e.g. user@server).

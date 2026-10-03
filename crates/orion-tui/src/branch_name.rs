@@ -27,6 +27,37 @@ pub fn slugify(input: &str) -> String {
 /// hyphenated words, capped so a long title stays a usable ref. A name
 /// already in `taken` gets a `-2`, `-3`, … suffix.
 pub fn issue_name(number: u64, title: &str, taken: &[String]) -> String {
+    unused(&prefixed(&format!("issue-{number}"), &title_slug(title)), taken)
+}
+
+/// A branch for LINEAR issues fixed together in one fresh worktree:
+/// `eng-12-eng-15-fix-login-redirect` — every identifier (the first
+/// [`MAX_LINEAR_IDS`], then `more`), lowercased, then the first issue's
+/// title as [`issue_name`] slugs it. Linear's GitHub integration finds
+/// an issue by its identifier in the branch name, so each one stays
+/// spelled whole. A name already in `taken` gets a `-2`, `-3`, … suffix.
+pub fn linear_name(identifiers: &[&str], title: &str, taken: &[String]) -> String {
+    const MAX_LINEAR_IDS: usize = 4;
+    let mut ids: Vec<String> = identifiers
+        .iter()
+        .take(MAX_LINEAR_IDS)
+        .map(|id| title_slug(id))
+        .filter(|id| !id.is_empty())
+        .collect();
+    if identifiers.len() > MAX_LINEAR_IDS {
+        ids.push("more".into());
+    }
+    let head = if ids.is_empty() {
+        "linear".to_string()
+    } else {
+        ids.join("-")
+    };
+    unused(&prefixed(&head, &title_slug(title)), taken)
+}
+
+/// `title` lowercased and reduced to hyphenated ASCII words, capped so a
+/// long title stays a usable ref.
+fn title_slug(title: &str) -> String {
     const MAX_SLUG: usize = 40;
     // Whole words only up to the cap: a slug cut mid-word
     // (`…-when-the-pre`) reads worse than a shorter one.
@@ -54,14 +85,22 @@ pub fn issue_name(number: u64, title: &str, taken: &[String]) -> String {
         }
         slug.push_str(&word);
     }
-    let slug = slug.as_str();
-    let base = if slug.is_empty() {
-        format!("issue-{number}")
+    slug
+}
+
+/// `head-slug`, or `head` alone for an empty slug.
+fn prefixed(head: &str, slug: &str) -> String {
+    if slug.is_empty() {
+        head.to_string()
     } else {
-        format!("issue-{number}-{slug}")
-    };
-    if !taken.contains(&base) {
-        return base;
+        format!("{head}-{slug}")
+    }
+}
+
+/// `base`, or the first `base-2`, `base-3`, … not in `taken`.
+fn unused(base: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == base) {
+        return base.to_string();
     }
     (2..)
         .map(|n| format!("{base}-{n}"))
@@ -207,6 +246,26 @@ mod tests {
                 &["issue-15-fix-login".into(), "issue-15-fix-login-2".into()]
             ),
             "issue-15-fix-login-3"
+        );
+    }
+
+    /// Every identifier stays whole in a LINEAR batch's branch, so the
+    /// integration can find each issue by name; past four, `more` stands in.
+    #[test]
+    fn linear_branches_carry_every_identifier_and_the_first_title() {
+        assert_eq!(
+            linear_name(&["ENG-12", "ENG-15"], "Fix login redirect", &[]),
+            "eng-12-eng-15-fix-login-redirect"
+        );
+        assert_eq!(
+            linear_name(&["A-1", "A-2", "A-3", "A-4", "A-5"], "x", &[]),
+            "a-1-a-2-a-3-a-4-more-x"
+        );
+        assert_eq!(linear_name(&["ENG-1"], "", &[]), "eng-1");
+        assert_eq!(linear_name(&[], "", &[]), "linear");
+        assert_eq!(
+            linear_name(&["ENG-1"], "Fix", &["eng-1-fix".into()]),
+            "eng-1-fix-2"
         );
     }
 

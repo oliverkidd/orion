@@ -29,12 +29,16 @@ const DOWN: &[u8] = b"\x1b[B";
 const CTRL_Q: &[u8] = &[0x11];
 const CTRL_R: &[u8] = &[0x12];
 const CTRL_E: &[u8] = &[0x05];
+const CTRL_N: &[u8] = &[0x0e];
+const CTRL_U: &[u8] = &[0x15];
+/// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
+const COMMANDS: &[u8] = b":";
 
 /// A row only the PROJECT's own menu carries.
 const PROJECT_MENU_ROW: &str = "Remove from list";
-/// Terminal pane input-locked: keys forward to the PTY. The footer spells
-/// chords the compact way `KeyChord::display` does — `^q`, not `Ctrl+q`.
-const FOOTER_TERMINAL_LOCKED: &str = "^q: sessions";
+/// Terminal pane input-locked: keys forward to the PTY, and Esc is the
+/// way back out to the grid's cards.
+const FOOTER_TERMINAL_LOCKED: &str = "Esc: back to the card";
 
 struct TuiHarness {
     writer: Box<dyn Write + Send>,
@@ -81,6 +85,7 @@ impl TuiHarness {
         cmd.env(orion_core::env::AGENT_CMD, "/bin/sh"); // stand-in for claude
         cmd.env(orion_core::env::WORKTREE_SYNC_MS, "100"); // fast external-change pickup
         cmd.env(orion_core::env::UPDATE_CHECK_SECS, "0"); // the footer must not depend on GitHub
+        cmd.env(orion_core::env::GHOSTTY_CONFIG, "off"); // never touch the machine's Ghostty config
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");
@@ -324,7 +329,7 @@ fn row_is_selected(screen: &vt100::Screen, needle: &str) -> bool {
 }
 
 fn add_project(tui: &mut TuiHarness, path: &Path, expect_name: &str) {
-    tui.send(b"o");
+    run_command(tui, "open a folder");
     tui.wait_for_text("Open project");
     tui.type_str(&path.to_string_lossy());
     tui.send(ENTER);
@@ -338,6 +343,14 @@ fn add_project(tui: &mut TuiHarness, path: &Path, expect_name: &str) {
         "no modal may open on its own",
     );
     tui.wait_for_text(expect_name);
+}
+
+/// Pick `name` from the COMMAND PALETTE: `:`, its name typed, Enter.
+fn run_command(tui: &mut TuiHarness, name: &str) {
+    tui.send(COMMANDS);
+    tui.wait_for_text("Command ⌕");
+    tui.type_str(name);
+    tui.send(ENTER);
 }
 
 /// The project's own menu, where its verbs live: a right-click on its
@@ -362,7 +375,7 @@ fn choose_menu_row(tui: &mut TuiHarness, label: &str) {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        tui.send(b"j");
+        tui.send(DOWN);
     }
     panic!(
         "menu row {label:?} never came under the cursor:\n{}",
@@ -374,7 +387,7 @@ fn choose_menu_row(tui: &mut TuiHarness, label: &str) {
 /// grid starts one, then stepped into so the pane has the keys. `task` is
 /// typed into the box — the grid's box will not launch on an empty one.
 fn start_session(tui: &mut TuiHarness, task: &str) {
-    tui.send(b"p");
+    tui.send(CTRL_N);
     tui.wait_for_text("what should the agent do?");
     tui.type_str(task);
     tui.send(ENTER);
@@ -428,7 +441,7 @@ fn tui_help_modal_grouped_keymap() {
 
     // The grouped two-column keymap: every section header on screen at
     // once (the old single list clipped its tail on short terminals).
-    tui.send(b"?");
+    run_command(&mut tui, "keyboard shortcuts");
     tui.wait_for_text("NAVIGATE & SEARCH");
     tui.wait_for_text("CHECKOUTS & GITHUB");
     tui.wait_for_text("SESSIONS");
@@ -528,8 +541,8 @@ fn tui_manual_link_add_is_unavailable() {
     add_project(&mut tui, &repo, "link-proj");
 
     tui.send(b"L");
-    tui.send(b"?");
-    // If Shift+L still opened a prompt, this `?` would type into it instead
+    run_command(&mut tui, "keyboard shortcuts");
+    // If Shift+L still opened a prompt, this `:` would type into it instead
     // of opening HELP OVERLAY, so this heading proves the key was a no-op.
     tui.wait_for_text("NAVIGATE & SEARCH");
     tui.wait_for_gone("attach a link");
@@ -695,10 +708,10 @@ fn tui_git_diff_modal() {
     std::fs::write(repo.join("hello.txt"), "hello world\n").unwrap();
 
     // No wait on a changed-file count: it rides the session cards, and
-    // this project has none. `g` reads the checkout for itself.
+    // this project has none. ^e reads the checkout for itself.
 
     // ---- open the modal; the selected file's diff renders ----
-    tui.send(b"g");
+    tui.send(CTRL_E);
     tui.wait_for_text("Files (2)");
     // Status is path-ordered, so .keep (modified) is selected first.
     tui.wait_for_selected(".keep");
@@ -729,19 +742,16 @@ fn tui_git_diff_modal() {
     tui.wait_for_text("Files (1/2)");
     tui.wait_for_selected(".keep");
     tui.wait_for_text("+tracked change");
-    tui.send(ESC); // first clears the filter, not the modal
+    tui.send(CTRL_U); // clears the filter, not the modal
     tui.wait_for_text("Files (2)");
 
     // ---- the modal blocks other interaction ----
-    // n would open the NEW SESSION PICKER on the grid; inside the modal it
-    // feeds the filter instead (verified after close — stale-frame
-    // convention).
+    // ^n would open the box on the grid; inside the modal it is the
+    // filter's (verified after close — stale-frame convention).
     tui.send(b"n");
     tui.wait_for_text("no matches");
-    tui.send(ESC); // clears the filter…
-    tui.wait_for_text("Files (2)"); // (also keeps the two Escs from coalescing)
-    tui.send(ESC); // …and the second closes the modal
-    tui.wait_for_gone("Files (2)");
+    tui.send(ESC); // closes the modal, filter and all
+    tui.wait_for_gone("Files (");
     assert!(
         !tui.screen_text().contains("what should the agent do?"),
         "modal swallowed n\n--- screen ---\n{}",
@@ -751,7 +761,7 @@ fn tui_git_diff_modal() {
     // ---- clean tree flashes instead of opening ----
     repo_git(&repo, &["add", "."]);
     repo_git(&repo, &["commit", "-m", "wip"]);
-    tui.send(b"g");
+    tui.send(CTRL_E);
     tui.wait_for_text("no changes in main");
 }
 
@@ -893,12 +903,12 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     tui.send(ENTER);
     tui.wait_for_text("row 60");
 
-    // The pane's first content row is two below its TERMINAL header;
+    // The pane's first content row is two below its header;
     // `row 58` sits near the bottom of the pane.
     let (header_row, content_top, row58, col58) = {
         let parser = tui.parser.lock().unwrap();
         let screen = parser.screen();
-        let (header_row, _) = find_text(screen, "SESSION").expect("the pane header");
+        let (header_row, _) = find_text(screen, "● agent-1  ⌂").expect("the pane header");
         let (row58, col58) = find_text(screen, "row 58").expect("row 58 on screen");
         (header_row, header_row + 2, row58, col58)
     };

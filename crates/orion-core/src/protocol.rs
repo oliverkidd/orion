@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 44;
+pub const PROTOCOL_VERSION: u32 = 45;
 
 /// Max IPC frame size (length prefix sanity bound).
 pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
@@ -87,6 +87,9 @@ pub enum ClientRequest {
     DeleteWorktree {
         req_id: u64,
         id: WorktreeId,
+        /// Delete even when the checkout has uncommitted or untracked
+        /// changes. Unforced, such a checkout is answered with
+        /// `WorktreeHasChanges` and left exactly as it was.
         force: bool,
     },
     CreateAgent {
@@ -475,6 +478,14 @@ pub enum ServerEvent {
         req_id: u64,
         worktree: Worktree,
         outcome: EnterOutcome,
+    },
+    /// Reply to an unforced `DeleteWorktree` whose checkout has `files`
+    /// files with uncommitted or untracked changes: no session was killed
+    /// and nothing was removed. Only a `force: true` resend deletes it.
+    WorktreeHasChanges {
+        req_id: u64,
+        id: WorktreeId,
+        files: usize,
     },
     Error {
         req_id: Option<u64>,

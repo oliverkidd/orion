@@ -327,20 +327,95 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Line::from(Span::styled(
-            " Ctrl+Q: force close ",
+            format!(" {} ", editor_modal_hint(vim)),
             Style::default().fg(th.dim),
         )));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    f.render_widget(
-        tui_term::widget::PseudoTerminal::new(vim.parser.screen()),
-        inner,
-    );
-    app.host_cursor = pty_cursor_cell(vim.parser.screen(), inner);
-    // Write-back: the post-draw sync resizes the PTY to the drawn rect.
-    if let Some(vim) = &mut app.vim {
-        vim.area = inner;
+    let layout = vim
+        .markdown
+        .as_ref()
+        .map_or(crate::markdown_split::Layout::EditorOnly, |side| {
+            side.layout(inner.width)
+        });
+    let (editor, page) = crate::markdown_split::split(inner, layout);
+    if editor.width > 0 {
+        f.render_widget(
+            tui_term::widget::PseudoTerminal::new(vim.parser.screen()),
+            editor,
+        );
+        app.host_cursor = pty_cursor_cell(vim.parser.screen(), editor);
     }
+    let Some(vim) = &mut app.vim else {
+        return;
+    };
+    // Write-back: the post-draw sync resizes the PTY to the drawn rect —
+    // the whole interior when the page hides it, so it never shrinks to 0.
+    vim.area = if editor.width > 0 { editor } else { inner };
+    if let Some(side) = &mut vim.markdown {
+        side.interior = inner.width;
+        side.area = draw_markdown_page(f, side, page, layout, th);
+    }
+}
+
+/// The editor modal's bottom-border keys: the editor's own save and quit,
+/// the force close where the editor has no Ctrl+Q of its own, ⌘O, and a
+/// MARKDOWN SPLIT's Ctrl+T.
+pub(crate) fn editor_modal_hint(vim: &crate::vim_term::VimTerm) -> String {
+    let mut hint = String::from(if vim.quits_itself {
+        "Ctrl+S: save  Ctrl+Q: quit  Ctrl+D: next match"
+    } else {
+        "Ctrl+Q: force close"
+    });
+    hint.push_str("  ⌘O: Cursor");
+    if vim.markdown.is_some() && !vim.embedded {
+        hint.push_str("  Ctrl+T: page");
+    }
+    hint
+}
+
+/// A MARKDOWN SPLIT's rendered page in `page` (nothing when it is empty):
+/// a rule down its left edge beside the editor, then the file flowed for
+/// the rest of the width. The rect the text took, for the wheel.
+fn draw_markdown_page(
+    f: &mut Frame,
+    side: &mut crate::markdown_split::MarkdownSide,
+    page: Rect,
+    layout: crate::markdown_split::Layout,
+    th: Theme,
+) -> Rect {
+    if page.width < 2 || page.height == 0 {
+        return Rect::default();
+    }
+    let text_area = if layout == crate::markdown_split::Layout::Split {
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(th.dim));
+        let inner = block.inner(page);
+        f.render_widget(block, page);
+        Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        page
+    };
+    let rendered = crate::markdown::Rendered::for_width(
+        side.rendered.take(),
+        &side.text,
+        text_area.width,
+        crate::markdown::Breaks::Reflow,
+        th,
+    );
+    let max = rendered.lines.len().saturating_sub(text_area.height as usize);
+    side.scroll = side.scroll.min(max.min(u16::MAX as usize) as u16);
+    f.render_widget(
+        Paragraph::new(rendered.lines.clone()).scroll((side.scroll, 0)),
+        text_area,
+    );
+    side.rendered = Some(rendered);
+    text_area
 }
 
 /// How much of the box a modal floating over it leaves showing on every
@@ -401,9 +476,16 @@ pub(crate) fn menu_footer_hint(menu: &crate::app::ContextMenu) -> Option<String>
             "Tab: cloud off  "
         }
     });
+    // A picker opened from the QUICK PROMPT is owed its box back.
+    let esc = if crate::event_loop::menu_quick_return(menu).is_some_and(|back| back.from_box) {
+        "Esc: back to the box"
+    } else {
+        "Esc: close"
+    };
+    let back = if menu.parent.is_some() { "←: back  " } else { "" };
     if menu.filter.is_some() {
         return Some(format!(
-            "{}type to filter  ↑/↓: move  Backspace: widen  {}Enter: pick  Esc: back",
+            "{}type to filter  ↑/↓: move  Backspace: widen  {}{back}Enter: pick  {esc}",
             cloud.unwrap_or(""),
             if agent_jump { "?: settings  " } else { "" }
         ));
@@ -411,14 +493,8 @@ pub(crate) fn menu_footer_hint(menu: &crate::app::ContextMenu) -> Option<String>
     if cloud.is_none() && !agent_jump {
         return None;
     }
-    // A picker opened from the QUICK PROMPT is owed its box back.
-    let esc = if crate::event_loop::menu_quick_return(menu).is_some_and(|back| back.from_box) {
-        "Esc: back to the box"
-    } else {
-        "Esc: close"
-    };
     Some(format!(
-        "{}s/?: settings  Enter: pick  {esc}",
+        "{}s/?: settings  {back}Enter: pick  {esc}",
         cloud.unwrap_or("")
     ))
 }
@@ -634,6 +710,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
     match crate::quick_prompt::modal_under(&overlay) {
         Some(ModalUnder::Issues(view)) => crate::issues::draw(f, app, &view, th, true),
         Some(ModalUnder::PullRequests(view)) => crate::pr_modal::draw(f, app, &view, th, true),
+        Some(ModalUnder::Linear(view)) => crate::linear::draw(f, app, &view, th, true),
         None => {}
     }
     match overlay {
@@ -955,6 +1032,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             }
             use HelpKeys::{Act, Lit};
             type HelpSection = (&'static str, &'static [(HelpKeys, &'static str)]);
+            // Only the actions with a key are rows: the rest are the
+            // COMMAND PALETTE's, which GENERAL names.
             const LEFT: &[HelpSection] = &[
                 (
                     "NAVIGATE & SEARCH",
@@ -963,24 +1042,19 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Act(&[FocusLeft, FocusRight]), "step along a row of cards"),
                         (Act(&[FocusNext]), "open / fold the checkout"),
                         (Act(&[Activate]), "into the pane (attach)"),
-                        (Act(&[HalfPageDown, HalfPageUp]), "jump two rows of cards"),
                         (
                             Act(&[NextProjectTab, PrevProjectTab]),
                             "next / previous project tab",
                         ),
                         (Lit("1-9"), "open that project tab"),
-                        (
-                            Act(&[ProjectDropdown, CloseProjectTab]),
-                            "project list / close tab",
-                        ),
-                        (Act(&[AddProject]), "open a folder as a project"),
-                        (Act(&[Palette]), "fuzzy jump to anything"),
+                        (Act(&[CloseProjectTab]), "close the project tab"),
+                        (Act(&[Palette]), "jump to anything, add a project"),
                         (Lit("^o / ^f"), "jump pick: open / focus row"),
                         (
                             Act(&[NextAttention, PrevAttention]),
                             "next/prev session needing you",
                         ),
-                        (Act(&[FindFile]), "find file (^y copies path)"),
+                        (Act(&[FindFile]), "go to file (⌘C / ^y: copy)"),
                         (Act(&[Grep]), "find in files (git grep)"),
                         (Act(&[TreeBrowser]), "file tree browser"),
                     ],
@@ -988,17 +1062,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 (
                     "CHECKOUTS & GITHUB",
                     &[
-                        (Act(&[OpenWorktree]), "open in editor (open command)"),
-                        (Act(&[GitDiff]), "diff (^r reviewed, ^t tree)"),
-                        (Act(&[OpenRepo]), "the repo on GitHub"),
-                        (
-                            Act(&[OpenPullRequest, OpenIssue]),
-                            "card's PR / issue on GitHub",
-                        ),
+                        (Act(&[OpenOutside]), "open: GitHub, Cursor, terminal"),
+                        (Act(&[GitDiff]), "changes (^r reviewed, ^t tree)"),
                         (Act(&[RefreshPullRequests]), "reload PRs + issues (GitHub)"),
                         (Act(&[Issues]), "issues: prompt, preset, edit"),
                         (Act(&[PullRequests]), "pull requests: read / launch"),
-                        (Act(&[CommentPullRequest]), "comment on the card's PR"),
                         (Act(&[SwitchBranch]), "switch the ⌂ root's branch"),
                     ],
                 ),
@@ -1016,21 +1084,15 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 (
                     "SESSIONS",
                     &[
-                        (Act(&[QuickPrompt]), "quick prompt: Enter launches"),
-                        (Act(&[New]), "new session: pick a CLI first"),
-                        (Act(&[DuplicateSession]), "quick prompt as this card"),
-                        (Act(&[AgentPresets]), "agent presets: saved launches"),
-                        (
-                            Act(&[NewTerminal, OpenGhosttyTab]),
-                            "terminal: here / in Ghostty",
-                        ),
+                        (Act(&[QuickPrompt]), "new agent: Enter launches"),
+                        (Act(&[NewTerminal]), "terminal in the checkout"),
                         (Act(&[FollowUp]), "follow-up prompt to the agent"),
                         (Act(&[Rename]), "rename the session"),
                         (
-                            Act(&[Archive, Unarchive, ToggleArchived]),
-                            "archive / unarchive / show",
+                            Act(&[Archive, ToggleArchived]),
+                            "archive or bring back / show",
                         ),
-                        (Act(&[Delete, DeleteAll]), "delete one / delete all"),
+                        (Act(&[Delete]), "delete (asks first)"),
                     ],
                 ),
                 (
@@ -1038,6 +1100,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     &[
                         (Act(&[Activate]), "lock input"),
                         (Act(&[UnlockTerminal]), "unlock, back to the card"),
+                        (Lit("⇧Esc"), "Esc to the agent"),
                         (Act(&[PaneTabs]), "pane: session ↔ its terminals"),
                         (Lit("drag"), "select + copy (2×click: word)"),
                         (Lit("click / drag"), "the app that took the mouse"),
@@ -1045,21 +1108,17 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Lit("⇧drag"), "select via your terminal"),
                         (Lit("right-click"), "card / tab menu: run, restart"),
                         (Lit("drag the pane edge"), "resize the pane"),
-                        (Lit("click outside"), "dismiss any modal (= Esc)"),
+                        (Lit("Esc"), "close any modal (or click out)"),
                     ],
                 ),
                 (
                     "GENERAL",
                     &[
+                        (Act(&[CommandPalette]), "every action, by name"),
                         (Act(&[ToggleLauncherPane]), "fold / unfold the pane"),
                         (Act(&[ToggleFullScreen]), "full-screen / normal size"),
-                        // The SHIFT PAIRS' rule (#93), once, for every
-                        // letter above that has a shifted twin.
-                        (Lit("⇧ + letter"), "bigger, or outside orion"),
-                        (Act(&[Hosts]), "ssh hosts (a: new, d: del)"),
                         (Act(&[Settings]), "settings; Hotkeys tab rebinds"),
-                        (Act(&[Metrics]), "memory: orion + agents"),
-                        (Act(&[Quit, Help]), "quit / toggle this help"),
+                        (Act(&[Quit]), "quit"),
                     ],
                 ),
             ];
@@ -1923,6 +1982,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     // The arrow its Worktrees-panel row wears (`pr_row`),
                     // since that row is where picking it lands.
                     PaletteTarget::PullRequest { .. } => ("↗ ", "↗ "),
+                    PaletteTarget::AddProject => ("+ ", "+ "),
                 };
                 let status = item.status;
                 // A pull request carries no status; its colors are its
@@ -2268,6 +2328,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         }
         Overlay::Issues(view) => crate::issues::draw(f, app, &view, th, false),
         Overlay::PullRequests(view) => crate::pr_modal::draw(f, app, &view, th, false),
+        Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
         Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
@@ -2937,6 +2998,7 @@ pub(crate) fn browser_button_under(app: &App, pos: Position) -> Option<HitTarget
     let button = match &app.overlay {
         Some(Overlay::PullRequests(v)) => v.browser_area,
         Some(Overlay::Issues(v)) => v.browser_area,
+        Some(Overlay::Linear(v)) => v.browser_area,
         _ => return None,
     };
     button.contains(pos).then_some(HitTarget::ModalBrowser)
@@ -3856,25 +3918,30 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let hints = if let Some(flash) = &app.flash {
         Span::styled(flash.clone(), Style::default().fg(th.warn))
-    } else if app.vim.is_some() {
+    } else if let Some(vim) = &app.vim {
         Span::styled(
-            ":wq / :q to finish  Ctrl+Q: force close",
+            if vim.quits_itself {
+                editor_modal_hint(vim)
+            } else {
+                format!(":wq / :q to finish  {}", editor_modal_hint(vim))
+            },
             Style::default().fg(th.dim),
         )
     } else if let Some(Overlay::Grep(view)) = &app.overlay {
         Span::styled(
             format!(
-                "type: search  ↑/↓: move  Enter: edit in {}  Ctrl+u: clear  Esc: clear/close",
-                editor_name(&view.editor)
+                "type: search  ↑/↓: move  Enter: edit in {}  {}: Cursor  Esc: close",
+                editor_name(&view.editor),
+                crate::hints::outside_key(),
             ),
             Style::default().fg(th.dim),
         )
     } else if let Some(Overlay::Diff(view)) = &app.overlay {
         Span::styled(
             if view.tree.is_some() {
-                "type: filter  ↑/↓: move  ←/→: fold  ⇧↑/↓: scroll  Ctrl+d/u: half list  Ctrl+t: flat list  Ctrl+u: clear filter  Esc: clear/close"
+                "type: filter  ↑/↓: move  ←/→: fold  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: flat list  Esc: close"
             } else {
-                "type: filter  ↑/↓: file  ⇧↑/↓: scroll  Ctrl+d/u: half list  Ctrl+t: tree  Ctrl+u: clear filter  Esc: clear/close"
+                "type: filter  ↑/↓: file  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: tree  Esc: close"
             },
             Style::default().fg(th.dim),
         )
@@ -3888,30 +3955,25 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(
             format!(
                 "type: filter  ↑/↓: move  ←/→: fold  Enter: open/edit  ⇧↑/↓: scroll{md}  \
-                 Ctrl+u: clear filter  Esc: clear/close"
+                 {}: copy path  {}: Cursor  Esc: close",
+                crate::hints::copy_key(),
+                crate::hints::outside_key(),
             ),
             Style::default().fg(th.dim),
         )
     } else if let Some(Overlay::Files(view)) = &app.overlay {
-        // A markdown selection is read first (the FILE TABS); the hint
-        // says so rather than promising the editor.
-        let enter = if view
-            .selected_path()
-            .is_some_and(crate::markdown::is_markdown_path)
-        {
-            "Enter: preview".to_string()
-        } else {
-            format!("Enter: edit in {}", editor_name(&view.editor))
-        };
         Span::styled(
             format!(
-                "type: search  ↑/↓: move  {enter}  Ctrl+y: copy path  Ctrl+u: clear  Esc: clear/close"
+                "type: search  ↑/↓: move  Enter: edit in {}  {}: copy path  {}: Cursor  Esc: close",
+                editor_name(&view.editor),
+                crate::hints::copy_key(),
+                crate::hints::outside_key(),
             ),
             Style::default().fg(th.dim),
         )
     } else if matches!(&app.overlay, Some(Overlay::Palette(_))) {
         Span::styled(
-            "type: search  ↑/↓: move  Enter: open  Ctrl+u: clear  Esc: clear/close",
+            "type: search  ↑/↓: move  Enter: open  Ctrl+u: clear  Esc: close",
             Style::default().fg(th.dim),
         )
     } else if matches!(&app.overlay, Some(Overlay::Settings(_))) {
@@ -3953,6 +4015,11 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         )
     } else if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         Span::styled(crate::pr_modal::footer_hint(), Style::default().fg(th.dim))
+    } else if let Some(Overlay::Linear(view)) = &app.overlay {
+        Span::styled(
+            crate::linear::footer_hint(view),
+            Style::default().fg(th.dim),
+        )
     } else if let Some(Overlay::BranchSwitch(view)) = &app.overlay {
         Span::styled(
             crate::branch_switch::footer_hint(view),
@@ -3985,12 +4052,15 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             Some(crate::quick_prompt::ModalUnder::PullRequests(_)) => {
                 "Enter: launch  ⇧Tab: preset  Esc: back to pull requests"
             }
+            Some(crate::quick_prompt::ModalUnder::Linear(_)) => {
+                "Enter: launch  ⇧Tab: preset  Esc: back to Linear"
+            }
             None => "Enter: launch  ⇧Tab: preset  Esc: back to sessions",
         };
         Span::styled(hint, Style::default().fg(th.dim))
     } else if matches!(&app.overlay, Some(Overlay::ProjectPicker(_))) {
         Span::styled(
-            "type: filter projects  ↑/↓: move  Enter: aim the box there  Esc: clear/back to the box",
+            "type: filter projects  ↑/↓: move  Enter: aim the box there  Esc: back to the box",
             Style::default().fg(th.dim),
         )
     } else if app.overlay.is_some() {
@@ -3998,45 +4068,46 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     } else if app.splash_showing() {
         // The splash covers the panels, so every panel hotkey is dead here.
         // List only what actually fires.
+        use crate::hints::Hint::Act;
+        let open = app
+            .launch_repo_name()
+            .map_or_else(|| "open a folder".to_string(), |name| format!("open {name}"));
+        let mut list = vec![Act(Action::Activate, open.as_str())];
+        if app.launch_repo_name().is_some() {
+            list.push(Act(Action::Palette, "another folder"));
+        }
+        list.extend([
+            Act(Action::CommandPalette, "commands"),
+            Act(Action::Settings, "settings"),
+            Act(Action::Quit, "quit"),
+        ]);
         Span::styled(
-            {
-                let k = |a| key_hint(app, a);
-                // Launched inside a repo: Enter opens it, and `o` is for
-                // any other folder.
-                let here = app
-                    .launch_repo_name()
-                    .map(|name| format!("{}: open {name}  ", k(Action::Activate)))
-                    .unwrap_or_default();
-                format!(
-                    "{here}{}: open {}folder  {}: ssh host  {}: settings  {}: help  {}: quit",
-                    k(Action::AddProject),
-                    if here.is_empty() { "a " } else { "another " },
-                    k(Action::Hosts),
-                    k(Action::Settings),
-                    k(Action::Help),
-                    k(Action::Quit),
-                )
-            },
+            crate::hints::line(&app.keymap, &list),
             Style::default().fg(th.dim),
         )
     } else if app.launcher_grid()
         && app.focus != Focus::Terminal
         && app.launcher_tab_cursor.is_some()
     {
-        // The LAUNCHER VIEW's PROJECT TABS holding the keys (`k`,`k` off
+        // The LAUNCHER VIEW's PROJECT TABS holding the keys (`↑`,`↑` off
         // the top row of cards): walking the header's cursor, which
         // switches the grid as it goes, and the ways back down.
+        use crate::hints::Hint::{Act, Lit};
         let k = |a| key_hint(app, a);
+        let walk = format!("{}{}", k(Action::FocusLeft), k(Action::FocusRight));
         let down = k(Action::MoveDown);
+        let into = format!("{} or {down}{down}", k(Action::Activate));
         Span::styled(
-            format!(
-                "{}{}: switch project  {} or {down}{down}: into its cards  {}: close tab  esc: back to the cards  {}: help  {}: quit",
-                k(Action::FocusLeft),
-                k(Action::FocusRight),
-                k(Action::Activate),
-                k(Action::CloseProjectTab),
-                k(Action::Help),
-                k(Action::Quit),
+            crate::hints::line(
+                &app.keymap,
+                &[
+                    Lit(&walk, "switch project"),
+                    Lit(&into, "into its cards"),
+                    Act(Action::CloseProjectTab, "close tab"),
+                    Lit("Esc", "back to the cards"),
+                    Act(Action::CommandPalette, "commands"),
+                    Act(Action::Quit, "quit"),
+                ],
             ),
             Style::default().fg(th.dim),
         )
@@ -4045,6 +4116,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         // under the cursor, and the PROJECT TABS beside them. Not while
         // the pane under it has the keys — those are the pane's own
         // hints, below.
+        use crate::hints::Hint::{Act, Lit};
         let k = |a| key_hint(app, a);
         let move_keys = format!(
             "{}{}{}{}",
@@ -4053,43 +4125,45 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             k(Action::MoveUp),
             k(Action::FocusRight),
         );
+        let tabs = format!("{}{}", k(Action::PrevProjectTab), k(Action::NextProjectTab));
+        let list = if app.show_archived {
+            // The ARCHIVED VIEW is a different list with different
+            // verbs on it: there is nothing to attach, prompt or
+            // archive there, only the two a card in it takes.
+            vec![
+                Lit(&move_keys, "move"),
+                Act(Action::Archive, "unarchive"),
+                Act(Action::Delete, "delete"),
+                Act(Action::ToggleArchived, "back to live sessions"),
+                Act(Action::Palette, "jump"),
+                Act(Action::CommandPalette, "commands"),
+                Act(Action::Quit, "quit"),
+            ]
+        } else {
+            vec![
+                Lit(&move_keys, "move"),
+                Act(Action::Activate, "open"),
+                Act(Action::QuickPrompt, "new agent"),
+                Lit(&tabs, "project tabs"),
+                Act(Action::PaneTabs, "terminals"),
+                Act(Action::Archive, "archive"),
+                Act(Action::ToggleArchived, "archived"),
+                Act(Action::GitDiff, "changes"),
+                Act(Action::Palette, "jump"),
+                Act(Action::CommandPalette, "commands"),
+                Act(Action::Settings, "settings"),
+                Act(Action::Quit, "quit"),
+            ]
+        };
         Span::styled(
-            if app.show_archived {
-                // The ARCHIVED VIEW is a different list with different
-                // verbs on it: there is nothing to attach, prompt or
-                // archive there, only the two a card in it takes.
-                format!(
-                    "{move_keys}: move  {}: unarchive  {}: delete  {}: back to live sessions  {}: jump  {}: help  {}: quit",
-                    k(Action::Unarchive),
-                    k(Action::Delete),
-                    k(Action::ToggleArchived),
-                    k(Action::Palette),
-                    k(Action::Help),
-                    k(Action::Quit),
-                )
-            } else {
-                format!(
-                    "{move_keys}: move  {}: open  {}: new session  {}{}: project tabs  {}: terminals  {}: archive  {}: archived  {}: diff  {}: jump  {}: settings  {}: help  {}: quit",
-                    k(Action::Activate),
-                    k(Action::QuickPrompt),
-                    k(Action::PrevProjectTab),
-                    k(Action::NextProjectTab),
-                    k(Action::PaneTabs),
-                    k(Action::Archive),
-                    k(Action::ToggleArchived),
-                    k(Action::GitDiff),
-                    k(Action::Palette),
-                    k(Action::Settings),
-                    k(Action::Help),
-                    k(Action::Quit),
-                )
-            },
+            crate::hints::line(&app.keymap, &list),
             Style::default().fg(th.dim),
         )
     } else {
         // Spelled from the live keymap for the same reason the Help
         // overlay is: these are the first place a rebound key would start
         // lying.
+        use crate::hints::Hint::{Act, Lit};
         let k = |a| key_hint(app, a);
         let text = match app.focus {
             // The pane is the CLOUD SESSION PANEL: there is no terminal to
@@ -4103,20 +4177,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
                 "session exited — Esc: back to sessions".to_string()
             }
             Focus::Terminal if app.term_locked => format!(
-                "{}: {}  {}  ⌥click: open link",
-                // The pane under the cards is left by the fold's own key
-                // (`^``: back to the card, again: fold the pane).
-                if app.launcher_grid() {
-                    app.keymap
-                        .chords(Action::ToggleLauncherPane)
-                        .iter()
-                        .find(|c| !crate::key_combo::is_text_key(c))
-                        .map(|c| c.display())
-                } else {
-                    None
-                }
-                .or_else(|| app.keymap.first(Action::UnlockTerminal).map(|c| c.display()))
-                .unwrap_or_else(|| "^q".into()),
+                "Esc: {}  ⇧Esc: Esc to the agent  ⌥click: open link  {}",
                 // The LAUNCHER VIEW has its grid of sessions to go back to,
                 // and a full-screen session comes back down to its pane.
                 if app.launcher_grid() {
@@ -4140,56 +4201,58 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
                 k(Action::FocusLeft)
             ),
             Focus::Terminal => "select a session and press Enter to attach".to_string(),
-            Focus::Projects => format!(
-                "{}/{}: add  {}: rename  {}: remove  {}: search  {}: help",
-                k(Action::New),
-                k(Action::AddProject),
-                k(Action::Rename),
-                k(Action::Delete),
-                k(Action::Palette),
-                k(Action::Help)
+            Focus::Projects => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(Action::Rename, "rename"),
+                    Act(Action::Delete, "remove"),
+                    Act(Action::Palette, "jump"),
+                    Act(Action::CommandPalette, "commands"),
+                ],
             ),
             // An open-PR row answers to a different set of verbs than a
             // checkout does, so the hint follows the cursor into the group.
-            Focus::Worktrees if app.selected_worktree_pr().is_some() => format!(
-                "{}: new session  {}: preset  {}: open in browser  {}: diff  PgUp/PgDn: scroll  {}: refresh  {}: search  {}: help",
-                k(Action::New),
-                k(Action::AgentPresets),
-                k(Action::Activate),
-                k(Action::GitDiff),
-                k(Action::RefreshPullRequests),
-                k(Action::Palette),
-                k(Action::Help)
+            Focus::Worktrees if app.selected_worktree_pr().is_some() => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(Action::Activate, "open in browser"),
+                    Act(Action::GitDiff, "changes"),
+                    Lit("PgUp/PgDn", "scroll"),
+                    Act(Action::RefreshPullRequests, "refresh"),
+                    Act(Action::CommandPalette, "commands"),
+                ],
             ),
-            // An issue row: the browser, a prompt or a preset on it, and
-            // the pane's scroll keys.
-            Focus::Worktrees if app.selected_worktree_issue().is_some() => format!(
-                "{}: open in browser  {}: prompt  {}: preset  PgUp/PgDn: scroll  {}: search  {}: help",
-                k(Action::Activate),
-                k(Action::QuickPrompt),
-                k(Action::AgentPresets),
-                k(Action::Palette),
-                k(Action::Help)
+            // An issue row: the browser, a prompt on it, and the pane's
+            // scroll keys.
+            Focus::Worktrees if app.selected_worktree_issue().is_some() => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(Action::Activate, "open in browser"),
+                    Act(Action::QuickPrompt, "prompt"),
+                    Lit("PgUp/PgDn", "scroll"),
+                    Act(Action::CommandPalette, "commands"),
+                ],
             ),
-            Focus::Worktrees => format!(
-                "{}: new worktree  {}: presets  {}: {}  {}: open  {}: terminal  {}: delete  {}: refresh PRs  {}: search  {}: help",
-                k(Action::New),
-                k(Action::AgentPresets),
-                k(Action::Rename),
-                if app
-                    .selected_worktree()
-                    .is_some_and(|w| app.worktree_running(&w.id))
-                {
-                    "stop"
-                } else {
-                    "run"
-                },
-                k(Action::OpenWorktree),
-                k(Action::NewTerminal),
-                k(Action::Delete),
-                k(Action::RefreshPullRequests),
-                k(Action::Palette),
-                k(Action::Help)
+            Focus::Worktrees => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(
+                        Action::Rename,
+                        if app
+                            .selected_worktree()
+                            .is_some_and(|w| app.worktree_running(&w.id))
+                        {
+                            "stop"
+                        } else {
+                            "run"
+                        },
+                    ),
+                    Act(Action::OpenOutside, "open"),
+                    Act(Action::NewTerminal, "terminal"),
+                    Act(Action::Delete, "delete"),
+                    Act(Action::RefreshPullRequests, "refresh PRs"),
+                    Act(Action::CommandPalette, "commands"),
+                ],
             ),
             // A discovered pull request opens, reads in the pane and shows
             // its diff; it has no stored row to edit or delete, and the
@@ -4200,41 +4263,46 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
                     .selected_link()
                     .is_some_and(|row| row.id().is_none()) =>
             {
-                format!(
-                    "{}: open in browser  {}: diff  PgUp/PgDn: scroll  {}: refresh  {}: help",
-                    k(Action::Activate),
-                    k(Action::GitDiff),
-                    k(Action::RefreshPullRequests),
-                    k(Action::Help)
+                crate::hints::line(
+                    &app.keymap,
+                    &[
+                        Act(Action::Activate, "open in browser"),
+                        Act(Action::GitDiff, "changes"),
+                        Lit("PgUp/PgDn", "scroll"),
+                        Act(Action::RefreshPullRequests, "refresh"),
+                    ],
                 )
             }
-            Focus::Sessions if app.selected_link().is_some() => format!(
-                "{}: open in browser  {}: edit URL  {}: delete  {}: help",
-                k(Action::Activate),
-                k(Action::Rename),
-                k(Action::Delete),
-                k(Action::Help)
+            Focus::Sessions if app.selected_link().is_some() => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(Action::Activate, "open in browser"),
+                    Act(Action::Rename, "edit URL"),
+                    Act(Action::Delete, "delete"),
+                ],
             ),
             // A Cloud row leads out of orion like a link row does; the
             // menu holds the one verb that reaches the session from here.
-            Focus::Sessions if app.previewed_cloud().is_some() => format!(
-                "{}: open in browser  {}: rename  {}: archive  {}: del  {}: help",
-                k(Action::Activate),
-                k(Action::Rename),
-                k(Action::Archive),
-                k(Action::Delete),
-                k(Action::Help)
+            Focus::Sessions if app.previewed_cloud().is_some() => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(Action::Activate, "open in browser"),
+                    Act(Action::Rename, "rename"),
+                    Act(Action::Archive, "archive"),
+                    Act(Action::Delete, "del"),
+                ],
             ),
-            Focus::Sessions => format!(
-                "{}: focus  {}: agent  {}: presets  {}: terminal  {}: rename  {}: archive  {}: del  {}: help",
-                k(Action::Activate),
-                k(Action::New),
-                k(Action::AgentPresets),
-                k(Action::NewTerminal),
-                k(Action::Rename),
-                k(Action::Archive),
-                k(Action::Delete),
-                k(Action::Help)
+            Focus::Sessions => crate::hints::line(
+                &app.keymap,
+                &[
+                    Act(Action::Activate, "focus"),
+                    Act(Action::QuickPrompt, "new agent"),
+                    Act(Action::NewTerminal, "terminal"),
+                    Act(Action::Rename, "rename"),
+                    Act(Action::Archive, "archive"),
+                    Act(Action::Delete, "del"),
+                    Act(Action::CommandPalette, "commands"),
+                ],
             ),
         };
         Span::styled(text, Style::default().fg(th.dim))
@@ -4966,6 +5034,7 @@ mod tests {
             preset: None,
             issue: None,
             pr: None,
+            linear: None,
             under: None,
             cloud: false,
         });

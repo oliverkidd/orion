@@ -20,14 +20,14 @@
   past that the oldest give up their scrollback and keep only the screen (a fiftieth of the size), and
   scrolling up in a pane that came back that way replays its ring once to get the history back.
 - **A key never waits on git, the disk or the DAEMON.** Everything a keypress can start that takes
-  longer than a frame runs off the event loop and lands when it is done. The DIFF VIEWER (`g`), the
-  FILE FINDER (`f`), its grep view (`F`) and the TREE BROWSER (`b`) open on the keypress and fill in
+  longer than a frame runs off the event loop and lands when it is done. The DIFF VIEWER (`⌘E`), the
+  FILE FINDER (`⌘P`), its grep view (`⌘⇧F`) and the TREE BROWSER (`⌘B`) open on the keypress and fill in
   when `git status` / `git ls-files` answer — what is typed meanwhile is kept and applied — and a
   file's diff, a search and a preview are read on the blocking pool: the pane keeps what it showed
   for up to 60 ms, which is longer than a read takes, and says `loading…` past that. The DIFF VIEWER
   opens on the list the changed-files badge's last `git status` found (two seconds old at most; its own
   `git status` still runs, and the reader keeps their place when it lands), so the first diff is being
-  read while the list is checked rather than after — on a ten-thousand-file checkout `g` went from
+  read while the list is checked rather than after — on a ten-thousand-file checkout `⌘E` went from
   260 ms of frozen UI to a list in 2 ms and a diff in 60. It reads the row after the cursor ahead and
   keeps what it has read (2 MB at most, gone with the modal), so `↓` paints the next diff on the
   keypress and re-reads it behind. List filters rank with `orion-fuzzy`, a crate of its own only so
@@ -119,9 +119,9 @@
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
   card's green `▶`; **Stop run** kills the process tree and drops the row. The idle reaper and the prewarm
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
-  the ending instead of respawning — a command starts only when you pick **Run**. `Shift+Enter` (or `Shift+O`) runs `open`
+  the ending instead of respawning — a command starts only when you pick **Run**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#the-project-file-orionjson).
-- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent (`n`) first asks which CLI to
+- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New session** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree. Claude's picker can also dispatch a one-shot Cloud task as
   `claude --cloud=<task>`; because Claude accepts that description as a process argument, don't put
   secrets in the Cloud task. That CLI prints the new session's id and exits, and the DAEMON reads the
@@ -331,9 +331,9 @@ that is not a checkout to pull out from under it). The name sweeps the way a run
 five seconds after orion sees the merge land, then holds still in solid purple — nothing about a landed
 checkout is live, so it says so once; one found already merged (last run's cache, a first lookup) never
 sweeps, and a merged checkout left lying around costs an idle orion no repaints. Jump to it with
-`/` and the pane reads the pull request — description, stats, conversation — exactly as the PULL REQUESTS
+`⌘K` and the pane reads the pull request — description, stats, conversation — exactly as the PULL REQUESTS
 MODAL does (whose list retires a pull request on merge, and which `hide_draft_prs` never thins — the
-modal lists drafts too); `g` shows its diff. Manual link
+modal lists drafts too); `⌘E` shows its diff. Manual link
 attachment is gone; links an earlier version saved stay in the database, so no data is discarded,
 though the grid draws none of them.
 
@@ -352,7 +352,7 @@ merge reaches them sooner anyway — the moment a pull request drops out of the 
 its branch is asked again on the next tick, and turns purple seconds after the merge. An empty answer
 backs off by doubling — out to 3 min for a branch that never grows a PR, 10 min for a project with none
 open — so a machine with thirty repos does not cost thirty API calls a beat. Focusing the
-terminal window pulls the next lookup forward, floored at a few seconds; `Shift+R` is the one
+terminal window pulls the next lookup forward, floored at a few seconds; `⌘R` is the one
 gesture that asks straight away, every checkout of the project and its open issues included.
 
 The open list is one GraphQL query per project rather than `gh pr list`, because a row's checks need

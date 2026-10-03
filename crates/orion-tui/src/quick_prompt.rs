@@ -78,6 +78,13 @@ pub struct QuickLaunch {
     /// ROOT WORKTREE). Kept across the box's pickers, as the issue is;
     /// `Ctrl+N` is refused, the checkout being the DAEMON's to pick.
     pub pr: Option<PrLaunch>,
+    /// The LINEAR issues this launch fixes together, when the box was
+    /// opened from ⌘L: named in the title, the name of the worktree a
+    /// fresh checkout gets, and — once Enter sends it — remembered with
+    /// that branch (`linear::LinkStore`) so the pull request it opens is
+    /// attached to every one of them. Kept across the box's pickers, as
+    /// the issue is; `^P` is refused, the issues being this project's.
+    pub linear: Option<crate::linear::LinearBatch>,
     /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
     /// `Tab` picker toggles it, as it does in the NEW SESSION PICKER, and
     /// Enter sends the typed text as the cloud task (`claude --cloud
@@ -100,6 +107,7 @@ pub struct QuickLaunch {
 pub enum ModalUnder {
     Issues(Box<crate::issues::IssuesView>),
     PullRequests(Box<crate::pr_modal::PullRequestsView>),
+    Linear(Box<crate::linear::LinearView>),
 }
 
 impl ModalUnder {
@@ -108,6 +116,7 @@ impl ModalUnder {
         match overlay? {
             Overlay::Issues(view) => Some(Self::Issues(Box::new(view.clone()))),
             Overlay::PullRequests(view) => Some(Self::PullRequests(Box::new(view.clone()))),
+            Overlay::Linear(view) => Some(Self::Linear(Box::new(view.clone()))),
             _ => None,
         }
     }
@@ -117,6 +126,7 @@ impl ModalUnder {
         match self {
             Self::Issues(view) => crate::issues::reopen(app, *view),
             Self::PullRequests(view) => crate::pr_modal::reopen(app, *view),
+            Self::Linear(view) => crate::linear::reopen(app, *view),
         }
     }
 }
@@ -327,6 +337,7 @@ impl QuickLaunch {
             preset: None,
             issue: None,
             pr: None,
+            linear: None,
             under: None,
             cloud: false,
         }
@@ -356,6 +367,14 @@ impl QuickLaunch {
         self
     }
 
+    /// The same launch, for the LINEAR issues `linear` (or for none). What
+    /// every picker's return trip does to the launch it rebuilt, so the
+    /// batch survives a `Tab` or `Shift+Tab` pick as the issue does.
+    pub fn with_linear(mut self, linear: Option<crate::linear::LinearBatch>) -> Self {
+        self.linear = linear;
+        self
+    }
+
     /// The same launch, sent to Claude Cloud when `cloud` — and when the
     /// launch can go there at all: plain Claude, no preset, no issue, no
     /// pull request. What the `Tab` picker's pick does last, after the
@@ -374,15 +393,20 @@ impl QuickLaunch {
     /// context beside a cloud task — so their `Tab` picker offers no
     /// toggle. (A preset does not count: the `Tab` pick clears it.)
     pub fn takes_cloud(&self) -> bool {
-        self.issue.is_none() && self.pr.is_none()
+        self.issue.is_none() && self.pr.is_none() && self.linear.is_none()
     }
 
     /// The task Enter sends when the box is empty: an ISSUE SESSION's box
-    /// may be sent as it is, the issue being the task. `None` for every
+    /// may be sent as it is, the issue being the task, and a LINEAR box's
+    /// sends the task it was filled with. `None` for every
     /// other launch, whose empty box sends no task at all — the CLI starts
     /// bare (`launches_empty`).
     pub fn default_task(&self) -> Option<String> {
-        self.issue.as_ref().map(|issue| issue.default_task())
+        match (&self.issue, &self.linear) {
+            (Some(issue), _) => Some(issue.default_task()),
+            (None, Some(linear)) => Some(linear.task.clone()),
+            (None, None) => None,
+        }
     }
 
     /// Does Enter on an empty box launch? Every box but a CLAUDE CLOUD
@@ -456,6 +480,9 @@ impl QuickLaunch {
         if let Some(pr) = &self.pr {
             head.push(format!("PR #{}", pr.number));
         }
+        if let Some(linear) = &self.linear {
+            head.push(linear.title());
+        }
         if let Some(preset) = &self.preset {
             head.push(preset.name.clone());
         }
@@ -482,6 +509,10 @@ impl QuickLaunch {
                 issue.number
             ),
             (None, None) => match &self.pr {
+                None if self.linear.is_some() => {
+                    "the task below fixes the picked issues — edit it, then Enter (empty = the same task)"
+                        .into()
+                }
                 Some(pr) => format!(
                     "what should the agent do about PR #{}? (empty = start with no prompt)",
                     pr.number
@@ -508,7 +539,7 @@ impl QuickLaunch {
             ) => a == b,
             _ => false,
         };
-        same_place && self.issue == other.issue && self.pr == other.pr
+        same_place && self.issue == other.issue && self.pr == other.pr && self.linear == other.linear
     }
 
     /// Does Enter cut a fresh worktree before it launches? The box's frame
@@ -721,16 +752,7 @@ pub(crate) fn toggle_new_worktree(app: &mut App, launch: QuickLaunch, input: Tex
             .map(|w| w.project_id.clone())
         {
             None => Err("quick prompt: worktree no longer exists"),
-            Some(project) => {
-                let taken = app.project_branches(&project);
-                let branch = match &launch.issue {
-                    Some(issue) => {
-                        crate::branch_name::issue_name(issue.number, &issue.title, &taken)
-                    }
-                    None => crate::branch_name::random_name(&taken),
-                };
-                Ok(QuickTarget::NewWorktree { project, branch })
-            }
+            Some(project) => Ok(crate::launcher::fresh_worktree(app, project, &launch)),
         },
     };
     match target {

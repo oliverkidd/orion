@@ -528,6 +528,14 @@ pub async fn config_get(repo: &Path, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// How many files in `checkout` have uncommitted changes — staged,
+/// unstaged or untracked, one `git status --porcelain` line each (an
+/// untracked folder counts once). Ignored files are not changes.
+pub async fn changed_files(checkout: &Path) -> Result<usize> {
+    let out = git(checkout, &["status", "--porcelain"]).await?;
+    Ok(out.lines().filter(|line| !line.is_empty()).count())
+}
+
 pub async fn remove_worktree(repo: &Path, worktree_path: &Path, force: bool) -> Result<()> {
     // Checkout already gone (manual rm -rf): `git worktree remove` would fail,
     // but the user's intent is already satisfied — just drop git's stale

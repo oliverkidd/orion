@@ -33,6 +33,7 @@ mod alerts;
 mod focus_walk;
 mod host_terminal;
 mod launcher;
+mod menus;
 mod optimistic;
 mod pacing;
 mod placeholder;
@@ -287,6 +288,14 @@ async fn main_loop(
     // when its settings carry one, so an org-restricted machine offers the
     // ids the CLI will accept instead of aliases it refuses.
     crate::claude_catalogue::bootstrap(cfg.claude_enabled);
+    // The ⌘ chords Ghostty would otherwise keep for itself, released in
+    // its config whenever Ghostty is in use (`ghostty_config`).
+    if let Some(note) = crate::ghostty_config::ensure_for(&cfg) {
+        app.flash = Some(note);
+    }
+    // Ghostty sends ⌘ chords through the kitty protocol, so Help and the
+    // footers print those; anywhere else they print the `^` twins.
+    crate::keymap::set_cmd_shown(crate::ghostty_config::inside_ghostty() && !app.is_remote);
     let mut input = crossterm::event::EventStream::new();
     let mut out: Vec<ClientRequest> = Vec::new();
     // Pointer shape last sent to the terminal (OSC 22), so hover over a
@@ -332,6 +341,10 @@ async fn main_loop(
     let (issues_tx, mut issues_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::issues::IssuesAnswer>();
     app.issues_tx = Some(issues_tx);
+    let (linear_tx, mut linear_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::linear::LinearAnswer>();
+    app.linear_tx = Some(linear_tx);
+    app.linear_links = crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
     // The BRANCH SWITCHER's git — the listing, the changed-file count,
     // the background fetch and the switch itself — lands here too.
     let (branch_tx, mut branch_rx) =
@@ -670,6 +683,11 @@ async fn main_loop(
             answer = issues_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::issues::land_answer(&mut app, answer);
+                }
+            }
+            answer = linear_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::linear::land_answer(&mut app, answer);
                 }
             }
             answer = branch_rx.recv() => {
@@ -1247,6 +1265,7 @@ fn note_open_prs_answer(
         }
     }
     let previous = app.open_prs.get(&project);
+    let previous_list = previous.map(|o| o.list.clone());
     let found = list.as_ref().is_some_and(|l| !l.is_empty());
     let step = if found {
         OPEN_PRS_REFRESH
@@ -1280,6 +1299,7 @@ fn note_open_prs_answer(
     app.dirty |= changed;
     app.pr_cache_dirty |= changed;
     reask_checkouts_whose_pr_left(app, &left);
+    let project_id = project.clone();
     app.open_prs.insert(
         project,
         crate::app::OpenPrs {
@@ -1297,6 +1317,10 @@ fn note_open_prs_answer(
     // must change its word there as well, and one merged since must leave.
     if changed {
         refresh_palette(app);
+    }
+    let fresh = app.open_prs.get(&project_id).map(|o| o.list.clone());
+    if let Some(fresh) = fresh {
+        crate::linear::attach_new_prs(app, &project_id, previous_list.as_deref(), &fresh);
     }
     // So does the PULL REQUESTS MODAL, whose cursor follows its pull
     // request across the new list.
@@ -2348,6 +2372,11 @@ fn handle_vim_event(app: &mut App, ev: VimEvent) {
             if let Some(vim) = &mut app.vim {
                 if vim.generation == generation {
                     vim.process(&data);
+                    // The editor repaints after every save, so its output
+                    // is when to look for a new page (MARKDOWN SPLIT).
+                    if let Some(side) = &mut vim.markdown {
+                        side.refresh();
+                    }
                     app.dirty = true;
                 }
             }
@@ -2361,15 +2390,19 @@ fn handle_vim_event(app: &mut App, ev: VimEvent) {
     }
 }
 
-/// Drop the editor; an embedded one hands its preview pane back to the tree
-/// browser with the (possibly just-edited) file reloaded. The FILE TABS
-/// re-read the file whether the editor was theirs or floating over them,
-/// and land the cursor on the strip — the level Ctrl+Q steps back to.
+/// Drop the editor; an embedded one — or a markdown split floating over
+/// it — hands the tree browser its preview back with the (possibly
+/// just-edited) file reloaded. The FILE TABS re-read the file whether the
+/// editor was theirs or floating over them, and land the cursor on the
+/// strip — the level Ctrl+Q steps back to.
 fn close_vim(app: &mut App) {
-    let embedded = app.vim.as_ref().is_some_and(|v| v.embedded);
+    let from_tree = app
+        .vim
+        .as_ref()
+        .is_some_and(|v| v.embedded || v.markdown.is_some());
     app.vim = None;
     match &mut app.overlay {
-        Some(Overlay::Tree(view)) if embedded => view.load_preview(),
+        Some(Overlay::Tree(view)) if from_tree => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
         _ => {}
     }
@@ -2568,11 +2601,11 @@ fn typing_into_pane(app: &App) -> bool {
             .is_some_and(|t| !t.exited && t.scroll_offset() == 0)
 }
 
-/// Is `chord` one of the pane fold's (`^~`, `^``, whatever the Hotkeys tab
+/// Is `chord` one of the pane fold's (`⌘J`, whatever the Hotkeys tab
 /// binds to it) that a LOCKED PANE lets through rather than forwards — a
-/// chord with a command modifier, never one that types a character.
+/// ⌘ chord only: `^J`, its twin from the cards, is the agent's newline.
 fn folds_launcher_pane(app: &App, chord: &crate::keymap::KeyChord) -> bool {
-    !crate::key_combo::is_text_key(chord)
+    chord.mods.contains(KeyModifiers::SUPER)
         && app
             .keymap
             .chords(crate::keymap::Action::ToggleLauncherPane)
@@ -2637,6 +2670,9 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     }
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         return crate::pr_modal::paste(app, text);
+    }
+    if matches!(&app.overlay, Some(Overlay::Linear(_))) {
+        return crate::linear::paste(app, text);
     }
     let Some(overlay) = &mut app.overlay else {
         return false;
@@ -2912,6 +2948,43 @@ pub(crate) fn open_follow_up(app: &mut App, id: AgentId, text: String) {
     }
 }
 
+/// Tests: run `action` the way its COMMAND PALETTE row does — the one
+/// path to the actions that ship without a key — and what it sent.
+#[cfg(test)]
+pub(crate) fn run_action(app: &mut App, action: crate::keymap::Action) -> Vec<ClientRequest> {
+    let mut out = Vec::new();
+    run_menu_action(app, MenuAction::RunAction(action), &mut out);
+    out
+}
+
+/// The bare Esc chord.
+const ESC: crate::keymap::KeyChord = crate::keymap::KeyChord {
+    code: KeyCode::Esc,
+    mods: KeyModifiers::NONE,
+};
+
+/// The overlays Esc closes outright rather than one stage at a time:
+/// lists and viewers, where nothing typed is lost with them. A list that
+/// has a form open on it — the hosts picker's new-host row, a branch
+/// switch past its list — backs that out first, through its own Esc.
+fn closes_on_esc(overlay: &Overlay) -> bool {
+    match overlay {
+        Overlay::Hosts(view) => view.input.is_none(),
+        Overlay::BranchSwitch(view) => matches!(view.stage, crate::branch_switch::Stage::Pick),
+        Overlay::Menu(_)
+        | Overlay::Help(_)
+        | Overlay::Diff(_)
+        | Overlay::Palette(_)
+        | Overlay::Files(_)
+        | Overlay::Grep(_)
+        | Overlay::Tree(_)
+        | Overlay::FileTabs(_)
+        | Overlay::Metrics(_)
+        | Overlay::ProjectPicker(_) => true,
+        _ => false,
+    }
+}
+
 fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // The editor modal sits above every overlay: all keys forward to it —
     // vim needs Esc — except Ctrl+Q, the same hatch the terminal lock uses.
@@ -2931,6 +3004,15 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         if chord == HARDWIRED_UNLOCK {
             crate::key_combo::note(app, &[chord], Some("Force close"));
             crate::overlay_close::force_close(app);
+            return;
+        }
+        // Esc closes a list or a viewer in one press, typed filter, open
+        // submenu and all — the way a click outside it does, which still
+        // hands back what a QUICK PROMPT's picker owes it. A box with
+        // typed work in it keeps its own Esc.
+        if chord == ESC && app.overlay.as_ref().is_some_and(closes_on_esc) {
+            crate::key_combo::note(app, &[chord], Some("Close"));
+            crate::overlay_close::click_outside(app, out);
             return;
         }
         // The KEY COMBO DISPLAY shows a modal's navigation keys bare and
@@ -2986,33 +3068,41 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             leave_terminal_lock(app);
             return;
         }
-        // `^`` / `^~` are the way out of the LAUNCHER PANE: the first
-        // press hands the keys back to the card the pane reads, and the
-        // same chord from the cards then folds the pane away
+        // `⌘J` is the way out of the LAUNCHER PANE: the first press
+        // hands the keys back to the card the pane reads, and the same
+        // chord from the cards then folds the pane away
         // (`launcher::fold_key`). Only the pane under the cards (a
-        // full-screen session has none to fold) and only a chord no one
-        // types as text: the bare `~` bound beside them is the agent's
-        // here.
+        // full-screen session has none to fold).
         if app.launcher_grid() && folds_launcher_pane(app, &chord) {
             let did = launcher::fold_key(app);
             crate::key_combo::note(app, &[chord], Some(did));
             return;
         }
-        // `⌘P` drops the PROJECT DROPDOWN from inside the pane under the
-        // cards, as a click on the header's `+` does: no one types a ⌘
-        // chord as text, so the agent loses nothing. Esc hands the keys
-        // straight back to the pane; a project picked lands on its cards.
-        // A full-screen session has no header to hang the list from, and
-        // gets the chord.
-        if app.launcher_grid() && drops_project_dropdown(app, &chord) {
-            crate::key_combo::note(
-                app,
-                &[chord],
-                crate::keymap::spec_of(crate::keymap::Action::ProjectDropdown).map(|s| s.label),
-            );
-            launcher::open_project_menu(app);
-            return;
+        // Every other ⌘ chord orion binds reaches it from inside the pane
+        // too — ⌘K, ⌘P, ⌘E, ⌘⇧P — as if the keys were the cards': no one
+        // types a ⌘ chord as text, so the agent loses nothing. The lock
+        // goes first, so what opens lands back on the card, not in the
+        // agent.
+        if chord.mods.contains(KeyModifiers::SUPER) {
+            if let Some(action) = app.keymap.lookup(crate::keymap::Scope::Global, &chord) {
+                crate::key_combo::note(
+                    app,
+                    &[chord],
+                    crate::keymap::spec_of(action).map(|s| s.label),
+                );
+                leave_terminal_lock(app);
+                dispatch_action(app, action, None, &chord, out);
+                return;
+            }
         }
+        // `⇧Esc` is the agent's Esc — the plain key leaves the pane — so
+        // what goes down the PTY is a bare Esc, never the shifted one a
+        // kitty-protocol agent would read as something else.
+        let key = if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::SHIFT {
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else {
+            key
+        };
         let exited = app.term.as_ref().is_some_and(|t| t.exited);
         // A stand-in pane (QUICK PROMPT, checkout still being cut) has no
         // PTY behind it: the keystroke has nowhere to go until the real
@@ -3126,6 +3216,20 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let Some(action) = action else {
         return;
     };
+    dispatch_action(app, action, armed, &chord, out);
+}
+
+/// Run `action` the way its key does from the panels and the grid: the
+/// key press's own path, and the one the COMMAND PALETTE, the OPEN MENU
+/// and a ⌘ chord typed in a LOCKED PANE share. `armed` and `chord` are
+/// the DOUBLE TAP's, `None` and the action's own key from a menu.
+fn dispatch_action(
+    app: &mut App,
+    action: crate::keymap::Action,
+    armed: Option<(crate::keymap::Action, std::time::Instant)>,
+    chord: &crate::keymap::KeyChord,
+    out: &mut Vec<ClientRequest>,
+) {
     // Every PROJECT TAB closed: the splash is on screen with the projects'
     // rows still selected under it, so only the keys that open a project,
     // or put up nothing but a modal, mean anything. The rest would walk or
@@ -3137,7 +3241,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // card; the rest keep their panel meaning. Only the grid: over a
     // full-screen session the keys are the PTY's, and the ones that get
     // past it (an exited pane unlocks) are the pane's own.
-    if app.launcher_grid() && launcher::handle_action(app, action, armed, &chord, out) {
+    if app.launcher_grid() && launcher::handle_action(app, action, armed, chord, out) {
         return;
     }
     use crate::keymap::Action;
@@ -3169,10 +3273,11 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
         Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
+        Action::Linear => crate::linear::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
         Action::FocusRight => match app.focus {
             Focus::Sessions => {
-                if double_tapped(app, action, armed, &chord, "enter pane") {
+                if double_tapped(app, action, armed, chord, "enter pane") {
                     walk_focus_forward(app, out);
                 }
             }
@@ -3180,7 +3285,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             // does. A dead or empty pane has nothing to lock into.
             Focus::Terminal => {
                 let live = app.term.as_ref().is_some_and(|t| !t.exited);
-                if live && double_tapped(app, action, armed, &chord, "type into terminal") {
+                if live && double_tapped(app, action, armed, chord, "type into terminal") {
                     walk_focus_forward(app, out);
                 }
             }
@@ -3226,30 +3331,6 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         | Action::ProjectDropdown => app.flash = Some(launcher::NO_TABS_HERE.into()),
         Action::MoveDown => move_selection(app, 1, out),
         Action::MoveUp => move_selection(app, -1, out),
-        // Ctrl+d / Ctrl+u jump the cursor half a panel at a time in the
-        // two columns that routinely outgrow their height — Worktrees once
-        // the OPEN PRS group is open, Sessions once the ARCHIVED group is
-        // — through every row kind alike, stopping at either end; the
-        // draw then scrolls the list after the cursor exactly as it does
-        // for a single step, so the row landed on is always in view.
-        // Those panels only: a locked pane never gets here (the chords
-        // are the shell's EOF and kill-to-start), every line editor keeps
-        // ^u for itself, and Projects is short enough that the keys stay
-        // unclaimed there.
-        Action::HalfPageDown | Action::HalfPageUp => {
-            let page = match app.focus {
-                Focus::Worktrees => app.worktrees_half_page() as i64,
-                Focus::Sessions => app.sessions_half_page() as i64,
-                _ => 0,
-            };
-            if page > 0 {
-                let delta = match action {
-                    Action::HalfPageDown => page,
-                    _ => -page,
-                };
-                move_selection(app, delta, out);
-            }
-        }
         // The first-run SPLASH, started inside a git repo: Enter opens it —
         // the one-key way from a fresh install to a project.
         Action::Activate if app.splash_showing() => open_launch_repo(app, out),
@@ -3319,7 +3400,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
                 } else {
                     "Run worktree"
                 };
-                crate::key_combo::note(app, &[chord], Some(does));
+                crate::key_combo::note(app, &[*chord], Some(does));
                 toggle_run(app, out);
             }
             Focus::Terminal => {}
@@ -3332,6 +3413,12 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             if app.focus == Focus::Sessions {
                 match app.selected_session_row() {
                     Some(SessionRow::Agent(a)) if !a.archived => archive_agent(app, a.id),
+                    // `a` on an archived card brings it back: one key
+                    // for both ways, as the card menu's row reads.
+                    Some(SessionRow::Agent(a)) => {
+                        activate::unarchive(app, a.id, out);
+                        release_watch::arm(&mut app.release_watch, *chord, std::time::Instant::now());
+                    }
                     Some(SessionRow::Terminal(_)) => {
                         app.flash = Some("terminals can't be archived — d closes them".into());
                     }
@@ -3350,7 +3437,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
                         // One card per press of `u`, however long it is held.
                         release_watch::arm(
                             &mut app.release_watch,
-                            chord,
+                            *chord,
                             std::time::Instant::now(),
                         );
                     }
@@ -3414,7 +3501,10 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         Action::OpenPullRequest => launcher::open_pull_request(app, out),
         Action::OpenIssue => launcher::open_issue(app, out),
         Action::DuplicateSession => launcher::duplicate_session(app),
-        Action::OpenGhosttyTab => open_ghostty_tab(app),
+        Action::OpenOutsideTerminal => open_outside_terminal(app),
+        Action::OpenInCursor => open_checkout_in_cursor(app),
+        Action::OpenOutside => menus::open_outside_menu(app),
+        Action::CommandPalette => menus::open_command_palette(app),
         // Shift+Enter / Shift+O: the selected worktree's OPEN COMMAND, from
         // any panel — the cursor's worktree is the context wherever the
         // cursor stands, as it is for `g`, `f` and `b`, so the key is never
@@ -3586,11 +3676,14 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::config::SettingKind::WorktreeBaseBranch => {
                     "branch new worktrees start from (empty = auto: origin's default branch)"
                 }
+                crate::config::SettingKind::LinearAccount => {
+                    "email of the Linear user whose issues ⌘L lists (empty = the LINEAR_API_KEY's owner)"
+                }
                 crate::config::SettingKind::RunCommand => {
-                    "shell line r runs in this project's worktrees (empty = the checkout's .orion.json \"run\")"
+                    "shell line the right-click menu's Run starts in this project's worktrees (empty = the checkout's .orion.json \"run\")"
                 }
                 crate::config::SettingKind::OpenCommand => {
-                    "shell line Shift+Enter / Shift+O runs to open a worktree of this project (empty = the checkout's .orion.json \"open\")"
+                    "shell line ⌘O → Open command runs to open a worktree of this project (empty = the checkout's .orion.json \"open\")"
                 }
                 _ => "value (empty = default)",
             };
@@ -3665,8 +3758,8 @@ fn add_project_prefill(app: &App) -> String {
 }
 
 /// The keys the all-tabs-closed SPLASH answers ([`App::projects_closed`]):
-/// the ones that open a project — Enter, `n`, `o`, `+`, a `/` pick, the
-/// attention walk — and the ones that only put a modal up.
+/// the ones that open a project — Enter, a ⌘K pick, the attention walk,
+/// their COMMAND PALETTE rows — and the ones that only put a modal up.
 fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
     use crate::keymap::Action;
     matches!(
@@ -3676,6 +3769,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::AddProject
             | Action::ProjectDropdown
             | Action::Palette
+            | Action::CommandPalette
             | Action::NextAttention
             | Action::PrevAttention
             | Action::Quit
@@ -3788,43 +3882,115 @@ fn open_repo_in_browser(app: &mut App) {
     }
 }
 
-/// A new Ghostty tab in the selected worktree's directory (`Shift+C`), or in the
-/// project's own clone when it has no worktrees yet. `open -a` hands
-/// Ghostty a folder, which it takes like one dropped on its Dock icon: a tab
-/// in the front window under the default `macos-dock-drop-behavior =
-/// new-tab`. Silent — no flash at all — when there is no Ghostty to hand it
-/// to: off macOS, no Ghostty.app installed, or over ssh, where `open` would
-/// reach the remote machine's screen instead of the one being looked at.
-fn open_ghostty_tab(app: &mut App) {
-    open_ghostty_tab_with(app, ghostty_app());
+/// A terminal app outside orion, ready to be handed a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutsideApp {
+    bundle: std::path::PathBuf,
+    /// What one hand-off opens, for the flash: "Ghostty tab".
+    opens: &'static str,
 }
 
-fn open_ghostty_tab_with(app: &mut App, ghostty: Option<std::path::PathBuf>) {
-    let Some(ghostty) = ghostty.filter(|_| !app.is_remote) else {
+/// macOS's own Terminal.app.
+const TERMINAL_APP: &str = "/System/Applications/Utilities/Terminal.app";
+
+/// The **Outside terminal** setting resolved to an installed app: Ghostty
+/// when chosen and installed, else Terminal.app. None off macOS.
+fn outside_app(choice: crate::config::OutsideTerminal) -> Option<OutsideApp> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let terminal = || {
+        let bundle = std::path::PathBuf::from(TERMINAL_APP);
+        bundle.is_dir().then_some(OutsideApp {
+            bundle,
+            opens: "Terminal window",
+        })
+    };
+    match choice {
+        crate::config::OutsideTerminal::Ghostty => ghostty_app()
+            .map(|bundle| OutsideApp {
+                bundle,
+                opens: "Ghostty tab",
+            })
+            .or_else(terminal),
+        crate::config::OutsideTerminal::Terminal => terminal(),
+    }
+}
+
+/// A terminal outside orion (`Shift+T`) in the selected worktree's
+/// directory, or in the project's own clone when it has no worktrees yet:
+/// a Ghostty tab or a Terminal.app window, per the **Outside terminal**
+/// setting. `open -a` hands the app a folder, which Ghostty takes like one
+/// dropped on its Dock icon — a tab in the front window under the default
+/// `macos-dock-drop-behavior = new-tab` — and Terminal.app as a new window
+/// there. Silent — no flash at all — when there is no app to hand it to:
+/// off macOS, or over ssh, where `open` would reach the remote machine's
+/// screen instead of the one being looked at.
+fn open_outside_terminal(app: &mut App) {
+    let choice = crate::config::Config::load().outside_terminal();
+    open_outside_terminal_with(app, outside_app(choice));
+}
+
+fn open_outside_terminal_with(app: &mut App, outside: Option<OutsideApp>) {
+    let Some(outside) = outside.filter(|_| !app.is_remote) else {
         return;
     };
+    app.flash = Some(match context_dir(app) {
+        Ok(dir) if open_in_app(&outside.bundle, &dir) => {
+            format!("opened a {} in {}", outside.opens, dir.display())
+        }
+        Ok(dir) => format!("couldn't open a {} in {}", outside.opens, dir.display()),
+        Err(why) => why,
+    });
+}
+
+/// The checkout the cursor is on — the selected worktree, else its
+/// project's repo — while it is still on disk, or what to say instead.
+fn context_dir(app: &App) -> Result<std::path::PathBuf, String> {
     let dir = app
         .selected_worktree()
         .map(|w| w.path.clone())
-        .or_else(|| app.selected_project().map(|p| p.repo_path.clone()));
-    let Some(dir) = dir else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
-        return;
-    };
-    if !dir.is_dir() {
-        app.flash = Some(format!("path missing on disk: {}", dir.display()));
+        .or_else(|| app.selected_project().map(|p| p.repo_path.clone()))
+        .ok_or_else(|| SELECT_CONTEXT_FIRST.to_string())?;
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err(format!("path missing on disk: {}", dir.display()))
+    }
+}
+
+/// The OPEN MENU's **Checkout in Cursor**: the checkout under the cursor
+/// as a Cursor window. Over ssh it would open on the remote machine's
+/// screen, so it says so instead.
+fn open_checkout_in_cursor(app: &mut App) {
+    if app.is_remote {
+        app.flash = Some("Cursor would open on the remote machine — nothing opened".into());
         return;
     }
-    app.flash = Some(if open_in_app(&ghostty, &dir) {
-        format!("opened a Ghostty tab in {}", dir.display())
-    } else {
-        format!("couldn't open a Ghostty tab in {}", dir.display())
+    let Some(cli) = crate::editor::cursor_cli() else {
+        app.flash = Some("Cursor isn't installed".into());
+        return;
+    };
+    app.flash = Some(match context_dir(app) {
+        Ok(dir) if open_dir_in_cursor(&cli, &dir) => format!("opened {} in Cursor", dir.display()),
+        Ok(dir) => format!("couldn't open {} in Cursor", dir.display()),
+        Err(why) => why,
     });
+}
+
+/// `cursor <dir>`: whether Cursor took the hand-off.
+fn open_dir_in_cursor(cli: &std::path::Path, dir: &std::path::Path) -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    let mut cursor = std::process::Command::new(cli);
+    cursor.arg(dir);
+    spawn_and_reap(cursor, "open in Cursor")
 }
 
 /// Ghostty.app where macOS installs put it: `/Applications` for the DMG drag
 /// and Homebrew's cask, `~/Applications` for a per-user drag.
-fn ghostty_app() -> Option<std::path::PathBuf> {
+pub(crate) fn ghostty_app() -> Option<std::path::PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -3838,6 +4004,77 @@ fn ghostty_app_in(roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
         .iter()
         .map(|root| root.join("Applications/Ghostty.app"))
         .find(|bundle| bundle.is_dir())
+}
+
+/// `⌘C`, or `^Y` in a terminal that never sends ⌘: copy the path under
+/// a file overlay's cursor.
+fn copies_path(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::SUPER),
+        KeyCode::Char('y') => key.modifiers.contains(KeyModifiers::CONTROL),
+        _ => false,
+    }
+}
+
+/// `⌘O`: the chord that hands what is under the cursor to an app outside
+/// orion.
+fn is_cmd_o(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::SUPER)
+}
+
+/// The file under the cursor of the open file overlay — the finder's row,
+/// the tree's file, the grep hit, the focused file tab — as (checkout,
+/// path as the editor takes it, line).
+fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
+    match &app.overlay {
+        Some(Overlay::Files(finder)) => finder
+            .selected_path()
+            .map(|path| (finder.root.clone(), path.to_string(), 1)),
+        Some(Overlay::Tree(view)) => view
+            .selected_node()
+            .filter(|node| !node.is_dir)
+            .map(|node| (view.root.clone(), node.path.clone(), 1)),
+        Some(Overlay::Grep(view)) => view
+            .selected_hit()
+            .map(|hit| (view.root.clone(), hit.path.clone(), hit.line)),
+        Some(Overlay::FileTabs(view)) => view.selected().map(|tab| {
+            (
+                view.root.clone(),
+                tab.path.to_string_lossy().into_owned(),
+                1,
+            )
+        }),
+        _ => None,
+    }
+}
+
+/// `cursor <root> --goto <file>:<line>`: whether Cursor took the hand-off.
+fn open_in_cursor(cli: &std::path::Path, root: &std::path::Path, file: &str, line: u64) -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    let mut cursor = std::process::Command::new(cli);
+    cursor.args(crate::editor::cursor_args(root, file, line));
+    spawn_and_reap(cursor, "open in Cursor")
+}
+
+/// `⌘O` on a file in an overlay: the file in Cursor, on its checkout's
+/// window at the line. Over ssh — Cursor would open on the remote
+/// machine's screen — or with no Cursor installed, the built-in editor
+/// opens it instead, as Enter would.
+fn open_file_outside(app: &mut App, root: &std::path::Path, file: &str, line: u64) {
+    let cli = crate::editor::cursor_cli().filter(|_| !app.is_remote);
+    if let Some(cli) = cli {
+        app.flash = Some(if open_in_cursor(&cli, root, file, line) {
+            format!("opened {file} in Cursor")
+        } else {
+            format!("couldn't open {file} in Cursor")
+        });
+        return;
+    }
+    let editor = crate::config::Config::load().editor_command();
+    let size = vim_size_guess(app);
+    spawn_editor_modal(app, &editor, root, file, line, size);
 }
 
 /// `open -a <bundle> <path>`: whether LaunchServices took the hand-off.
@@ -4343,9 +4580,11 @@ fn close_finder_behind_editor(app: &mut App) {
 }
 
 /// Boot `editor` on `file` at `line` (cwd `root`) into the editor modal at
-/// grid `size`, replacing whatever it held; a spawn failure flashes. False
-/// when nothing was spawned — the main loop isn't running (unit tests
-/// without a channel) or the spawn failed.
+/// grid `size`, replacing whatever it held; a spawn failure flashes. A
+/// markdown file gets its rendered page beside the editor (MARKDOWN
+/// SPLIT), which a caller embedding the editor in a pane leaves out
+/// ([`embed_editor`]). False when nothing was spawned — the main loop
+/// isn't running (unit tests without a channel) or the spawn failed.
 pub(crate) fn spawn_editor_modal(
     app: &mut App,
     editor: &str,
@@ -4360,7 +4599,10 @@ pub(crate) fn spawn_editor_modal(
     let (cols, rows) = size;
     app.vim_generation += 1;
     match VimTerm::spawn_editor(editor, root, file, line, cols, rows, app.vim_generation, tx) {
-        Ok(vim) => {
+        Ok(mut vim) => {
+            if crate::markdown::is_markdown_path(file) {
+                vim.markdown = Some(crate::markdown_split::MarkdownSide::load(root.join(file)));
+            }
             app.vim = Some(vim);
             true
         }
@@ -4375,27 +4617,9 @@ pub(crate) fn spawn_editor_modal(
 /// inside the modal terminal. With `close_finder_on_open` the finder closes
 /// as the editor opens, so quitting the editor is a single Esc; with it off
 /// the finder stays open underneath and quitting lands back on the results.
-/// Enter in the finder: a markdown file is read first — the FILE TABS'
-/// rendered page takes the finder's place, and Enter there is the editor
-/// — since a `.md` is usually opened to be read; anything else goes
-/// straight to the editor modal.
+/// Every file opens to be edited — a markdown file with its rendered page
+/// beside the editor (MARKDOWN SPLIT).
 fn open_selected_file(app: &mut App) {
-    let Some(Overlay::Files(finder)) = &app.overlay else {
-        return;
-    };
-    let Some(path) = finder.selected_path().map(str::to_string) else {
-        return;
-    };
-    if crate::markdown::is_markdown_path(&path) {
-        let root = finder.root.clone();
-        let file = root.join(&path);
-        crate::file_tabs::open(app, root, vec![file]);
-        return;
-    }
-    open_selected_file_in_editor(app);
-}
-
-fn open_selected_file_in_editor(app: &mut App) {
     let Some(Overlay::Files(finder)) = &app.overlay else {
         return;
     };
@@ -4433,9 +4657,16 @@ fn open_selected_tree_file_in_editor(app: &mut App) {
         vim_size_guess(app) // never drawn yet
     };
     if spawn_editor_modal(app, &editor, &root, &path, 1, size) {
-        if let Some(vim) = &mut app.vim {
-            vim.embedded = true;
-        }
+        embed_editor(app);
+    }
+}
+
+/// Put the just-spawned editor in the open overlay's pane — unless it is
+/// a markdown file, which floats as the modal so its rendered page has
+/// room beside it (MARKDOWN SPLIT).
+pub(crate) fn embed_editor(app: &mut App) {
+    if let Some(vim) = &mut app.vim {
+        vim.embedded = vim.markdown.is_none();
     }
 }
 
@@ -4456,10 +4687,8 @@ pub(crate) fn vim_size_guess(app: &App) -> (u16, u16) {
 
 /// ⌥click on a file path in the terminal pane: resolve it against the
 /// attached session's worktree and open it in the editor modal at the
-/// referenced line — or, for a markdown file, read it first in the FILE
-/// TABS (the rendered page; Enter there is the editor), since a `.md` an
-/// agent points at is there to be read. The line, if any, is the source's
-/// and the page has no row for it.
+/// referenced line — a markdown file with its rendered page beside the
+/// editor (MARKDOWN SPLIT).
 fn open_file_link(app: &mut App, path: &str, line: Option<u64>) {
     let Some(root) = attached_worktree_root(app) else {
         app.flash = Some("no worktree for this session".into());
@@ -4469,12 +4698,6 @@ fn open_file_link(app: &mut App, path: &str, line: Option<u64>) {
         app.flash = Some(format!("file not found: {path}"));
         return;
     };
-    if crate::markdown::is_markdown_path(&file) {
-        // `join` leaves an absolute (`~/`-expanded) path as it is.
-        let file = root.join(&file);
-        crate::file_tabs::open(app, root, vec![file]);
-        return;
-    }
     let editor = crate::config::Config::load().editor_command();
     let size = vim_size_guess(app);
     spawn_editor_modal(app, &editor, &root, &file, line.unwrap_or(1), size);
@@ -4533,22 +4756,70 @@ fn resolve_file_link(root: &std::path::Path, path: &str) -> Option<String> {
 }
 
 /// Keys while the editor modal is open: Ctrl+Q force-closes (the terminal
-/// lock's hatch — vim owns Esc), everything else forwards in the legacy
-/// dialect (vim never pushes kitty flags).
+/// lock's hatch — vim owns Esc) unless the editor quits on it itself
+/// (micro, which asks to save first). ⌘O hands the file to Cursor. A
+/// MARKDOWN SPLIT takes Ctrl+T (swap or hide the page) and, while the page
+/// is all that shows, the scrolling keys. Everything else forwards in the
+/// legacy dialect (the editors never push kitty flags).
 fn handle_vim_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if ctrl && key.code == KeyCode::Char('q') {
-        if let Some(vim) = &mut app.vim {
-            vim.kill();
-        }
+    let Some(vim) = &mut app.vim else {
+        return;
+    };
+    if ctrl && key.code == KeyCode::Char('q') && !vim.quits_itself {
+        vim.kill();
         close_vim(app);
         return;
     }
-    if let Some(vim) = &mut app.vim {
-        if let Some(data) = keys::encode_key(&key, 0) {
-            vim.input(&data);
+    if is_cmd_o(&key) {
+        open_editor_file_in_cursor(app);
+        return;
+    }
+    let embedded = vim.embedded;
+    if let Some(side) = vim.markdown.as_mut().filter(|_| !embedded) {
+        if ctrl && key.code == KeyCode::Char('t') {
+            side.toggle();
+            app.dirty = true;
+            return;
+        }
+        if side.layout(side.interior) == crate::markdown_split::Layout::PageOnly {
+            let page = side.area.height.max(1) as i32;
+            match key.code {
+                KeyCode::Down => side.scroll_by(1),
+                KeyCode::Up => side.scroll_by(-1),
+                KeyCode::PageDown => side.scroll_by(page),
+                KeyCode::PageUp => side.scroll_by(-page),
+                KeyCode::Home => side.scroll = 0,
+                KeyCode::End => side.scroll_by(i32::MAX / 2),
+                _ => {}
+            }
+            app.dirty = true;
+            return;
         }
     }
+    if let Some(data) = keys::encode_key(&key, 0) {
+        vim.input(&data);
+    }
+}
+
+/// ⌘O in the editor: the file in Cursor too, at the line it opened on —
+/// the editor stays up, holding whatever it hasn't saved.
+fn open_editor_file_in_cursor(app: &mut App) {
+    let Some(vim) = &app.vim else {
+        return;
+    };
+    let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line);
+    app.flash = Some(if app.is_remote {
+        "Cursor would open on the remote machine — the file stays here".into()
+    } else {
+        match crate::editor::cursor_cli() {
+            Some(cli) if open_in_cursor(&cli, &root, &file, line) => {
+                format!("opened {file} in Cursor")
+            }
+            Some(_) => format!("couldn't open {file} in Cursor"),
+            None => "Cursor isn't installed".into(),
+        }
+    });
 }
 
 /// Archive asks first, always — the CONFIRM DIALOG `d` goes behind — so
@@ -5410,6 +5681,12 @@ fn select_session_row(app: &mut App, i: usize, debounce: Duration, out: &mut Vec
 }
 
 pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    if is_cmd_o(&key) {
+        if let Some((root, file, line)) = overlay_file(app) {
+            open_file_outside(app, &root, &file, line);
+            return;
+        }
+    }
     if matches!(&app.overlay, Some(Overlay::Settings(_))) {
         handle_settings_key(app, key);
         return;
@@ -5508,6 +5785,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key),
         Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
+        Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
@@ -5543,24 +5821,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
             }
             KeyCode::Backspace if menu.filter.is_some() => menu.pop_filter(),
-            KeyCode::Esc if menu.has_filter_text() => {
-                menu.set_filter("");
-            }
-            // Esc in a submenu backs out one level; at the top it closes —
-            // unless the picker was opened from the QUICK PROMPT, which is
-            // owed its box back with the text still in it. Only a box that
-            // was up comes back: `n`'s NEW SESSION PICKER is reached with
-            // none and closes as any menu does (`QuickReturn::from_box`).
-            KeyCode::Esc => match menu.parent.take() {
-                Some(parent) => *menu = *parent,
-                None => match menu_quick_return(menu) {
-                    Some(back) if back.from_box => {
-                        app.overlay = None;
-                        crate::quick_prompt::reopen(app, back.launch, &back.text);
-                    }
-                    _ => app.overlay = None,
-                },
-            },
+            // Esc never lands here: `closes_on_esc` closes the menu from any
+            // level, and `overlay_close::click_outside` hands a picker
+            // opened from the QUICK PROMPT its box back with the text.
             KeyCode::Char('j') | KeyCode::Down => {
                 menu.hover = (menu.hover + 1).min(menu.items.len() - 1)
             }
@@ -5813,13 +6076,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             let half = (view.list_area.height / 2).max(1) as i64;
             let page = view.view_height.max(1) as i32;
             match key.code {
-                // Two-stage escape: an active filter is cleared before the
-                // second Esc closes the modal.
-                KeyCode::Esc if !view.filter.is_empty() => {
-                    view.filter.clear();
-                    activate::diff_filter_changed(view);
-                }
-                KeyCode::Esc => app.overlay = None,
+                // Esc closes the modal, filter and all (`closes_on_esc`).
                 KeyCode::Char('d') if ctrl => {
                     activate::diff_file(view, view.cursor() as i64 + half)
                 }
@@ -5878,13 +6135,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Palette(palette) => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
-                // Two-stage escape: an active query is cleared before the
-                // second Esc closes the palette.
-                KeyCode::Esc if !palette.query.is_empty() => {
-                    palette.query.clear();
-                    palette.apply_filter();
-                }
-                KeyCode::Esc => app.overlay = None,
+                // Esc closes the palette, query and all (`closes_on_esc`).
                 // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
                 KeyCode::Down => palette.select(palette.selected as i64 + 1),
                 KeyCode::Up => palette.select(palette.selected as i64 - 1),
@@ -5912,13 +6163,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Files(finder) => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
-                // Two-stage escape: an active query is cleared before the
-                // second Esc closes the finder.
-                KeyCode::Esc if !finder.query.is_empty() => {
-                    finder.query.clear();
-                    finder.apply_filter();
-                }
-                KeyCode::Esc => app.overlay = None,
+                // Esc closes the finder, query and all (`closes_on_esc`).
                 // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
                 KeyCode::Down => finder.select(finder.selected as i64 + 1),
                 KeyCode::Up => finder.select(finder.selected as i64 - 1),
@@ -5926,11 +6171,12 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 KeyCode::Char('p') if ctrl => finder.select(finder.selected as i64 - 1),
                 // Enter opens the selected file in the editor modal, which
                 // closes the finder unless `close_finder_on_open` is off —
-                // or, for a markdown file, reads it first in the FILE TABS.
+                // a markdown file beside its rendered page.
                 KeyCode::Enter => open_selected_file(app),
-                // Ctrl+y copies the selected path (relative to the worktree
-                // root) to the clipboard — ready to paste into an agent.
-                KeyCode::Char('y') if ctrl => {
+                // ⌘C (Ctrl+y without ⌘) copies the selected path (relative
+                // to the worktree root) to the clipboard — ready to paste
+                // into an agent.
+                _ if copies_path(&key) => {
                     if let Some(path) = finder.selected_path().map(str::to_string) {
                         app.overlay = None;
                         let label = format!("copied {path}");
@@ -5949,13 +6195,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Grep(view) => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
-                // Two-stage escape: an active query is cleared before the
-                // second Esc closes the overlay.
-                KeyCode::Esc if !view.query.is_empty() => {
-                    view.query.clear();
-                    view.run_search();
-                }
-                KeyCode::Esc => app.overlay = None,
+                // Esc closes the overlay, query and all (`closes_on_esc`).
                 // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
                 KeyCode::Down => view.select(view.selected as i64 + 1),
                 KeyCode::Up => view.select(view.selected as i64 - 1),
@@ -5979,13 +6219,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             let half = (view.view_height / 2).max(1) as i32;
             let page = view.view_height.max(1) as i32;
             match key.code {
-                // Two-stage escape: an active filter is cleared before the
-                // second Esc closes the modal.
-                KeyCode::Esc if !view.filter.is_empty() => {
-                    view.filter.clear();
-                    view.apply_filter();
-                }
-                KeyCode::Esc => app.overlay = None,
+                // Esc closes the modal, filter and all (`closes_on_esc`).
                 // The preview scrolls on the diff-modal keys: ⇧↑/↓ lines,
                 // Ctrl+d/u half pages, PageUp/Down, Home/End.
                 KeyCode::Char('d') if ctrl => view.scroll_by(half),
@@ -6014,9 +6248,10 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         open_selected_tree_file_in_editor(app);
                     }
                 }
-                // Ctrl+y copies the selected path (relative to the worktree
-                // root) to the clipboard — ready to paste into an agent.
-                KeyCode::Char('y') if ctrl => {
+                // ⌘C (Ctrl+y without ⌘) copies the selected path (relative
+                // to the worktree root) to the clipboard — ready to paste
+                // into an agent.
+                _ if copies_path(&key) => {
                     if let Some(path) = view.selected_node().map(|n| n.path.clone()) {
                         app.overlay = None;
                         let label = format!("copied {path}");
@@ -6432,6 +6667,20 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         return;
     }
     apply_config(app, &cfg);
+    let ghostty_row = crate::config::setting_at(tab, index).is_some_and(|spec| {
+        matches!(
+            spec.kind,
+            crate::config::SettingKind::OutsideTerminal
+                | crate::config::SettingKind::GhosttyKeybinds
+        )
+    });
+    if ghostty_row {
+        if let (Some(note), Some(view)) =
+            (crate::ghostty_config::ensure_for(&cfg), settings_mut(app))
+        {
+            view.info(note);
+        }
+    }
 }
 
 /// Adopt every config value the running app mirrors. Shared by startup and
@@ -6898,7 +7147,14 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             // One reconcile at the end: the cursor settles on a survivor.
             let before = selection_snapshot(app);
             for id in ids {
-                delete_worktree(app, id, out);
+                delete_worktree(app, id, false, out);
+            }
+            reconcile_selection(app, before, out);
+        }
+        PendingAction::ForceDeleteWorktrees(ids) => {
+            let before = selection_snapshot(app);
+            for id in ids {
+                delete_worktree(app, id, true, out);
             }
             reconcile_selection(app, before, out);
         }
@@ -6965,7 +7221,7 @@ fn close_terminal(app: &mut App, id: TerminalId, out: &mut Vec<ClientRequest>) {
 /// its session comes up like a manual switch would.
 fn delete_worktree_and_settle(app: &mut App, id: WorktreeId, out: &mut Vec<ClientRequest>) {
     let before = selection_snapshot(app);
-    delete_worktree(app, id, out);
+    delete_worktree(app, id, false, out);
     reconcile_selection(app, before, out);
 }
 
@@ -7064,8 +7320,10 @@ fn confirm_close_terminal_in(app: &App, t: &orion_core::TerminalTab) -> ConfirmD
 /// Delete a worktree optimistically: drop its rows now (the daemon deletes
 /// in the background — `git worktree remove` can take seconds). The
 /// eventual EntityRemoved is a no-op; an Error for this req_id restores the
-/// rows via the rollback stashed in the intent.
-fn delete_worktree(app: &mut App, id: WorktreeId, out: &mut Vec<ClientRequest>) {
+/// rows via the rollback stashed in the intent, and so does the
+/// `WorktreeHasChanges` an unforced delete of a changed checkout gets,
+/// which then asks whether to force it ([`ask_to_force_delete`]).
+fn delete_worktree(app: &mut App, id: WorktreeId, force: bool, out: &mut Vec<ClientRequest>) {
     let intent = match remove_worktree_rows(app, &id) {
         Some(rollback) => PendingIntent::DeleteWorktree(rollback),
         None => PendingIntent::None,
@@ -7073,8 +7331,56 @@ fn delete_worktree(app: &mut App, id: WorktreeId, out: &mut Vec<ClientRequest>) 
     send_with(app, out, intent, |req_id| ClientRequest::DeleteWorktree {
         req_id,
         id,
-        force: true,
+        force,
     });
+}
+
+/// The daemon kept worktree `id` because `files` of its files have
+/// uncommitted or untracked changes: ask before a forced delete loses
+/// them. A second answer while that question is still up — a Shift+D over
+/// several changed checkouts — joins the same dialog.
+fn ask_to_force_delete(app: &mut App, id: WorktreeId, files: usize) {
+    let mut ids = match &app.overlay {
+        Some(Overlay::Confirm(ConfirmDialog {
+            action: PendingAction::ForceDeleteWorktrees(ids),
+            ..
+        })) => ids.clone(),
+        _ => Vec::new(),
+    };
+    if !ids.contains(&id) {
+        ids.push(id);
+    }
+    app.overlay = Some(Overlay::Confirm(confirm_force_delete_worktrees(app, ids, files)));
+}
+
+/// The dialog [`ask_to_force_delete`] puts up. `files` is the newest
+/// answer's count; once several checkouts are in the question it names
+/// them instead.
+fn confirm_force_delete_worktrees(app: &App, ids: Vec<WorktreeId>, files: usize) -> ConfirmDialog {
+    let branch = |id: &WorktreeId| {
+        app.tree
+            .worktrees
+            .iter()
+            .find(|w| &w.id == id)
+            .map_or_else(|| id.0.clone(), |w| w.branch.clone())
+    };
+    let message = match ids.as_slice() {
+        [one] => format!(
+            "Worktree '{}' has {files} uncommitted or untracked file(s). Deleting it loses them; commits on its branch are kept.\nDelete it anyway?",
+            branch(one)
+        ),
+        many => format!(
+            "{} worktrees have uncommitted or untracked files: {}. Deleting them loses those files; commits on their branches are kept.\nDelete them anyway?",
+            many.len(),
+            many.iter().map(branch).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    ConfirmDialog {
+        title: "Unsaved work".into(),
+        message,
+        action: PendingAction::ForceDeleteWorktrees(ids),
+        area: ratatui::layout::Rect::default(),
+    }
 }
 
 fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientRequest>) {
@@ -7132,6 +7438,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 )
                 .with_issue(back.launch.issue.clone())
                 .with_pr(back.launch.pr.clone())
+                .with_linear(back.launch.linear.clone())
                 // The Claude row's `Tab` toggle rides the pick: the box
                 // comes back a CLAUDE CLOUD one, where it can be one.
                 .with_cloud(cloud)
@@ -7260,6 +7567,13 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         MenuAction::ToggleDraftPrs => toggle_hide_draft_prs(app, out),
         MenuAction::PickLaunchWorktree { target, back } => {
             launcher::pick_launch_worktree(app, target, *back)
+        }
+        MenuAction::RunAction(action) => {
+            let chord = app.keymap.first(action).unwrap_or(crate::keymap::KeyChord {
+                code: KeyCode::Null,
+                mods: KeyModifiers::NONE,
+            });
+            dispatch_action(app, action, None, &chord, out);
         }
     }
 }
@@ -7554,6 +7868,7 @@ fn jump_to_target_inner(
         // (`launcher::open_tab`): the card it was last left on, or with no
         // session in it the empty grid and no pane.
         PaletteTarget::Project(id) => launcher::open_tab(app, &id, out),
+        PaletteTarget::AddProject => open_prompt(app, PromptKind::AddProject),
         PaletteTarget::Worktree(id) => {
             if app.selected_worktree().is_some_and(|w| w.id == id) {
                 app.focus = Focus::Sessions;
@@ -9060,8 +9375,18 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     let mouse_pos = ratatui::layout::Position::new(mouse.column, mouse.row);
     update_pointer(app, &mouse);
     // The editor modal swallows the mouse entirely — its selection/scroll
-    // story is vim's, not ours.
-    if app.vim.is_some() {
+    // story is vim's, not ours — but for the wheel over a MARKDOWN SPLIT's
+    // page, which scrolls the page.
+    if let Some(vim) = &mut app.vim {
+        if let Some(side) = vim.markdown.as_mut().filter(|s| s.area.contains(mouse_pos)) {
+            let step = crate::markdown_split::WHEEL_LINES;
+            match mouse.kind {
+                MouseEventKind::ScrollDown => side.scroll_by(step),
+                MouseEventKind::ScrollUp => side.scroll_by(-step),
+                _ => return,
+            }
+            app.dirty = true;
+        }
         return;
     }
     // A left-click outside any modal dismisses it, exactly as Esc would, and
@@ -9414,6 +9739,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         crate::pr_modal::handle_mouse(app, mouse, mouse_pos, out);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Linear(_))) {
+        crate::linear::handle_mouse(app, mouse, mouse_pos, out);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::BranchSwitch(_))) {
@@ -10366,6 +10695,16 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             if let SessionRef::Terminal(id) = session {
                 land_terminal_tail(app, id, tail);
             }
+        }
+        ServerEvent::WorktreeHasChanges { req_id, id, files } => {
+            // The checkout is still there, rows and sessions with it: put
+            // the optimistic removal back, then ask about forcing it.
+            app.left_behind.remove(&req_id);
+            if let Some(PendingIntent::DeleteWorktree(rollback)) = app.pending.remove(&req_id) {
+                restore_worktree_rows(app, rollback);
+            }
+            ask_to_force_delete(app, id, files);
+            app.dirty = true;
         }
         ServerEvent::Error { req_id, message } => {
             // A failed request's intent never gets an Ack; clear it — and if
@@ -11769,51 +12108,81 @@ mod tests {
         );
     }
 
-    const GHOSTTY: &str = "/Applications/Ghostty.app";
+    fn ghostty() -> Option<OutsideApp> {
+        Some(OutsideApp {
+            bundle: "/Applications/Ghostty.app".into(),
+            opens: "Ghostty tab",
+        })
+    }
 
     #[test]
-    fn ghostty_tab_opens_in_the_selected_worktree() {
+    fn outside_terminal_opens_in_the_selected_worktree() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new();
         app.is_remote = false;
         seed_worktree_at(&mut app, dir.path());
         app.flash = None;
-        open_ghostty_tab_with(&mut app, Some(GHOSTTY.into()));
+        open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(
             app.flash,
             Some(format!("opened a Ghostty tab in {}", dir.path().display()))
         );
+        open_outside_terminal_with(
+            &mut app,
+            Some(OutsideApp {
+                bundle: TERMINAL_APP.into(),
+                opens: "Terminal window",
+            }),
+        );
+        assert_eq!(
+            app.flash,
+            Some(format!("opened a Terminal window in {}", dir.path().display()))
+        );
     }
 
     #[test]
-    fn ghostty_tab_is_silent_without_ghostty_or_over_ssh() {
+    fn outside_terminal_is_silent_without_an_app_or_over_ssh() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new();
         app.is_remote = false;
         seed_worktree_at(&mut app, dir.path());
         app.flash = None;
-        open_ghostty_tab_with(&mut app, None);
-        assert_eq!(app.flash, None, "no Ghostty.app: not a word");
+        open_outside_terminal_with(&mut app, None);
+        assert_eq!(app.flash, None, "no app: not a word");
 
         let mut empty = App::new();
         empty.flash = None;
-        open_ghostty_tab_with(&mut empty, None);
+        open_outside_terminal_with(&mut empty, None);
         assert_eq!(empty.flash, None, "nor a select-first nudge");
 
         app.is_remote = true;
-        open_ghostty_tab_with(&mut app, Some(GHOSTTY.into()));
+        open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(app.flash, None, "over ssh the tab would open elsewhere");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn ghostty_tab_names_a_checkout_gone_from_disk() {
+    fn terminal_app_is_the_choice_or_the_fallback() {
+        use crate::config::OutsideTerminal;
+        let terminal = outside_app(OutsideTerminal::Terminal).expect("every Mac has Terminal.app");
+        assert_eq!(terminal.bundle, std::path::PathBuf::from(TERMINAL_APP));
+        let chosen = outside_app(OutsideTerminal::Ghostty).unwrap();
+        if ghostty_app().is_some() {
+            assert_eq!(chosen.opens, "Ghostty tab");
+        } else {
+            assert_eq!(chosen, terminal, "no Ghostty.app: Terminal.app instead");
+        }
+    }
+
+    #[test]
+    fn outside_terminal_names_a_checkout_gone_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let gone = dir.path().join("gone");
         let mut app = App::new();
         app.is_remote = false;
         seed_worktree_at(&mut app, &gone);
         app.flash = None;
-        open_ghostty_tab_with(&mut app, Some(GHOSTTY.into()));
+        open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(
             app.flash,
             Some(format!("path missing on disk: {}", gone.display()))
@@ -12213,15 +12582,14 @@ mod tests {
         );
     }
 
-    /// While the tree is empty, `n` opens the add-project prompt from any
-    /// focus — the splash hides the panels, so the per-panel meanings of
-    /// `n` would just dead-end.
+    /// While the tree is empty, **New session** opens the add-project
+    /// prompt from any focus — the splash hides the panels, so its
+    /// per-panel meanings would just dead-end.
     #[test]
-    fn n_adds_project_from_any_focus_while_tree_empty() {
+    fn new_adds_project_from_any_focus_while_tree_empty() {
         let mut app = App::new();
         app.focus = Focus::Sessions;
-        let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
+        run_action(&mut app, crate::keymap::Action::New);
         let Some(Overlay::Prompt(p)) = &app.overlay else {
             panic!("expected add-project prompt, got {:?}", app.overlay);
         };
@@ -12238,7 +12606,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("o: open a folder"), "{text}");
+        assert!(text.contains("Enter: open a folder"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
         assert!(text.contains("q: quit"), "{text}");
         for dead in ["d: remove", "m: menu", "/: search"] {
@@ -12248,13 +12616,13 @@ mod tests {
             );
         }
 
-        // A project lands: the grid, the grid's keymap — without `o`,
-        // which the Help overlay lists; the footer keeps the keys a card
-        // takes.
+        // A project lands: the grid, the grid's keymap — without opening
+        // a folder, which ⌘K's last row does; the footer keeps the keys a
+        // card takes.
         seed_tree(&mut app);
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("new session"), "{text}");
+        assert!(text.contains("new agent"), "{text}");
         assert!(!text.contains("open a folder"), "{text}");
     }
 
@@ -12295,14 +12663,14 @@ mod tests {
     }
 
     /// Started outside a repo there is no folder to name: the splash says
-    /// `o` opens one, and Enter opens the prompt rather than nothing.
+    /// Enter opens one, and Enter opens the prompt rather than nothing.
     #[test]
     fn enter_on_the_first_run_splash_elsewhere_opens_the_prompt() {
         let mut app = App::new();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("o: open a folder"), "{text}");
+        assert!(text.contains("Enter: open a folder"), "{text}");
         let mut out = Vec::new();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         let Some(Overlay::Prompt(p)) = &app.overlay else {
@@ -12367,7 +12735,7 @@ mod tests {
         let mut app = App::new();
         let tmp = launched_in_alpha(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AddProject));
         let Some(Overlay::Prompt(p)) = &app.overlay else {
             panic!("expected the open-project prompt, got {:?}", app.overlay);
         };
@@ -12424,7 +12792,7 @@ mod tests {
             seed_tree(&mut app);
             app.focus = focus;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AddProject));
             let Some(Overlay::Prompt(p)) = &app.overlay else {
                 panic!(
                     "expected add-project prompt at {focus:?}, got {:?}",
@@ -12465,7 +12833,7 @@ mod tests {
         let mut app = App::new();
         let mut out = Vec::new();
         let l = |app: &mut App, out: &mut Vec<ClientRequest>| {
-            press(app, KeyCode::Char('l'), KeyModifiers::NONE, out)
+            press(app, KeyCode::Right, KeyModifiers::NONE, out)
         };
 
         app.focus = Focus::Sessions;
@@ -12480,7 +12848,7 @@ mod tests {
         assert_eq!(app.focus, Focus::Sessions, "too slow: two single presses");
         assert!(app.edge_tap.is_some(), "but the late one arms again");
 
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         assert!(app.edge_tap.is_none(), "any other key breaks the pair");
         l(&mut app, &mut out);
         assert_eq!(app.focus, Focus::Sessions, "so this is a first press again");
@@ -12519,7 +12887,7 @@ mod tests {
         assert_eq!(p.input.trim(), "https://example.dev/spec", "prefilled");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
-        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert!(
             matches!(&app.overlay, Some(Overlay::Confirm(c)) if c.title == "Delete link"),
             "expected the delete confirm, got {:?}",
@@ -12737,53 +13105,6 @@ mod tests {
         assert_eq!(app.worktree_row_count(), 2);
         assert_eq!(app.sel_worktree, 1);
         assert!(on_w2(&app));
-    }
-
-    /// The half-page chords belong to the Worktrees and Sessions columns.
-    /// Projects leaves them unclaimed as before, and a locked pane
-    /// forwards them to the PTY as the control bytes they are — Ctrl+d is
-    /// the shell's EOF and Ctrl+u its kill-to-start, and an agent running
-    /// in there is owed both.
-    #[test]
-    fn half_page_chords_stay_out_of_the_projects_panel_and_the_locked_pane() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Number the lines")]);
-        app.worktrees_view_rows = 6;
-        app.sessions_view_rows = 6;
-        let mut out = Vec::new();
-
-        app.focus = Focus::Projects;
-        let before = (app.sel_project, app.sel_worktree, app.sel_session);
-        ctrl(&mut app, 'd', &mut out);
-        ctrl(&mut app, 'u', &mut out);
-        assert_eq!(
-            (app.sel_project, app.sel_worktree, app.sel_session),
-            before,
-            "Projects: no cursor moved"
-        );
-        assert!(app.overlay.is_none(), "Projects: nothing opened");
-
-        app.focus = Focus::Terminal;
-        app.term_locked = true;
-        app.term = Some(AttachedTerm::new(
-            SessionRef::Agent(AgentId("a1".into())),
-            80,
-            24,
-        ));
-        out.clear();
-        ctrl(&mut app, 'd', &mut out);
-        assert!(
-            matches!(out.last(), Some(ClientRequest::Input { data, .. }) if data == b"\x04"),
-            "^d reaches the PTY as EOF: {out:?}"
-        );
-        ctrl(&mut app, 'u', &mut out);
-        assert!(
-            matches!(out.last(), Some(ClientRequest::Input { data, .. }) if data == b"\x15"),
-            "^u reaches the PTY as kill-to-start: {out:?}"
-        );
-        assert_eq!(app.sel_worktree, 0, "the Worktrees cursor never moved");
-        assert!(app.term_locked, "and the lock held");
     }
 
     /// A repo with nothing open backs off instead of asking every beat, and
@@ -13014,7 +13335,7 @@ mod tests {
         app.focus = Focus::Sessions;
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "number".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -13068,7 +13389,7 @@ mod tests {
         assert_eq!(app.worktree_row_count(), 1, "folded: only the checkout");
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "#7".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -13089,7 +13410,7 @@ mod tests {
         seed_open_prs(&mut app, &[(7, "Attach links to worktrees")]);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "attach".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -13138,7 +13459,7 @@ mod tests {
             vec![(7, "Attach links", false), (9, "Number the lines", true)],
         );
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         // The overview is the sessions; `#` reaches the pull requests, each
         // with its project in front of it like every other row.
         press(&mut app, KeyCode::Char('#'), KeyModifiers::NONE, &mut out);
@@ -13255,7 +13576,7 @@ mod tests {
         seed_open_prs(&mut app, &[(7, "Attach links to worktrees")]);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "demo #7".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -13611,7 +13932,7 @@ mod tests {
         app.pr_diff_inflight = Some(7);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none(), "not the worktree's diff modal");
         assert_eq!(
             app.flash.as_deref(),
@@ -13626,8 +13947,8 @@ mod tests {
         );
     }
 
-    /// `y` on a pull request row — the PROJECT OPEN PRS GROUP's or the
-    /// Sessions panel's PR ROW — opens the COMMENT BOX: a multi-row task
+    /// **Comment on the PR** on a pull request row — the PROJECT OPEN PRS
+    /// GROUP's or the Sessions panel's PR ROW — opens the COMMENT BOX: a multi-row task
     /// box titled with the row, carrying the pull request Enter will post
     /// to. Off a pull request row the key only says what it wants, and
     /// both rows' menus offer the same box as **Comment…**.
@@ -13639,7 +13960,7 @@ mod tests {
         app.focus = Focus::Worktrees;
         app.sel_worktree = 1;
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         let Some(Overlay::Prompt(prompt)) = &app.overlay else {
             panic!("expected the COMMENT BOX, got {:?}", app.overlay);
         };
@@ -13679,7 +14000,7 @@ mod tests {
         seed_branch_pr(&mut app, 9, "Fix login");
         app.focus = Focus::Sessions;
         app.sel_session = sessions_pr_row(&app);
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p))
                 if matches!(&p.kind, PromptKind::PrComment { number: 9, .. })),
@@ -13689,14 +14010,14 @@ mod tests {
         let items = menu_items_for_link(&app.selected_link().expect("the PR ROW"));
         assert!(items.iter().any(|i| i.label == "Comment…"), "{items:?}");
 
-        // Off a pull request row, on a card, `y` comments on the card's
-        // pull request — its checkout's, the one `⇧V` opens.
+        // Off a pull request row, on a card, it comments on the card's
+        // pull request — its checkout's, the one ⌘O's menu opens.
         app.overlay = None;
         let pr_row = sessions_pr_row(&app);
         app.sel_session = (0..app.visible_session_rows().len())
             .find(|i| *i != pr_row)
             .expect("an agent row");
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p))
                 if matches!(&p.kind, PromptKind::PrComment { number: 9, .. })),
@@ -13733,14 +14054,14 @@ mod tests {
         };
 
         // Nothing typed: the box closes and nothing is posted.
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
         assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
 
         // Shift+Enter breaks a line; Enter posts — here from a checkout
         // that is not on disk, so the box comes back with the text.
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         type_text(&mut app, "Looks good", &mut out);
         press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
         type_text(&mut app, "to me", &mut out);
@@ -13794,7 +14115,7 @@ mod tests {
             app.overlay
         );
         app.overlay = None;
-        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Second try"),
             "{:?}",
@@ -14127,11 +14448,11 @@ diff --git a/docs/keys.md b/docs/keys.md
         }
         assert_eq!(diff_tree_rows(&app), ["docs", "*keys.md"]);
         assert!(diff_view(&app).diff.contains("+new-keys"));
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
         assert_eq!(
             diff_tree_rows(&app),
             ["crates/tui/src", "*a.rs", "b.rs", "docs", "keys.md"],
-            "Esc clears the filter first, and the cursor goes home"
+            "^u clears the filter, and the cursor goes home"
         );
 
         ctrl(&mut app, 'r', &mut out);
@@ -14761,7 +15082,7 @@ diff --git a/src/c.rs b/src/c.rs
         note_pr_answer(&mut app, &other, true);
         assert!(!app.pr_lookup_due(&other), "swept minutes from now");
 
-        press(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.open_prs_lookup_due(&pid), "the key skips the floor");
         assert!(app.pr_lookup_due(&wid), "and the beat");
         assert!(
@@ -14782,7 +15103,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.sel_worktree = app.visible_worktrees().len();
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pr_refresh_requested = false;
-        press(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.pr_refresh_requested);
         assert_eq!(
             app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
@@ -14832,7 +15153,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.pr_lookup_due(&wid));
 
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none(), "no prompt");
         assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
         assert!(app.pr_lookup_due(&wid), "the row's own lookup is due");
@@ -14857,14 +15178,14 @@ diff --git a/src/c.rs b/src/c.rs
         // One already in flight is left to land: nothing is stacked on it.
         app.pending_pr_detail = None;
         app.pr_detail_inflight.insert(url.clone());
-        press(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.pending_pr_detail.is_none());
 
         // From an agent row the key refreshes all the same…
         app.sel_session = 0;
         app.pr_refresh_requested = false;
         app.flash = None;
-        press(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.pr_refresh_requested && app.overlay.is_none());
         assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
 
@@ -14887,7 +15208,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_link(&mut app, "https://example.dev/spec");
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('D'), KeyModifiers::NONE, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
         let Some(Overlay::Confirm(c)) = &app.overlay else {
             panic!("expected the bulk confirm, got {:?}", app.overlay);
         };
@@ -14909,7 +15230,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "demo".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -15677,13 +15998,12 @@ diff --git a/src/c.rs b/src/c.rs
             other => panic!("expected the memory modal, got {other:?}"),
         };
         let clicked = steady(app.overlay.take());
-        let mut keyed = Vec::new();
-        handle_terminal_event(
-            &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT)),
-            &mut keyed,
+        let keyed = run_action(&mut app, crate::keymap::Action::Metrics);
+        assert_eq!(
+            steady(app.overlay.take()),
+            clicked,
+            "the click is the palette's **Memory**"
         );
-        assert_eq!(steady(app.overlay.take()), clicked, "the click is `⇧M`");
         assert!(matches!(
             keyed.last(),
             Some(ClientRequest::GetMetrics { .. })
@@ -16571,7 +16891,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(menu(&app).hovered_claude_cloud(), Some(false));
             assert_eq!(
                 ui::menu_footer_hint(menu(&app)).as_deref(),
-                Some("Tab: cloud off  type to filter  ↑/↓: move  Backspace: widen  ?: settings  Enter: pick  Esc: back")
+                Some("Tab: cloud off  type to filter  ↑/↓: move  Backspace: widen  ?: settings  ←: back  Enter: pick  Esc: close")
             );
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert_eq!(menu(&app).items[2].label, "opus", "a model row stays one");
@@ -16814,8 +17134,8 @@ diff --git a/src/c.rs b/src/c.rs
             // Effort rows are leaves.
             assert_eq!(menu.items[3].action.submenu(), None);
 
-            // ← backs out to the models; Esc also backs out one level, and
-            // only closes from the top.
+            // ← backs out to the models; Esc closes the whole menu from
+            // any level.
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected model submenu after ←");
@@ -16823,12 +17143,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(menu.title.as_deref(), Some("Claude model"));
             assert_eq!(menu.hover, 2, "← restores the parent's hover");
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected root picker after Esc");
-            };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none());
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert!(
                 !out.iter()
                     .any(|r| matches!(r, ClientRequest::CreateAgent { .. })),
@@ -17261,7 +17576,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert_eq!(
@@ -17299,7 +17614,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "the fire is the change of default"
             );
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("{:?}", app.overlay);
             };
@@ -17321,7 +17636,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             // "reviewer": claude · opus · high, the first preset.
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
@@ -17674,13 +17989,14 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(app.run_flash_when_seen, None, "spent");
     }
 
-    /// `Shift+Enter` on a worktree fires its OPEN COMMAND — the project's
-    /// **Open command** setting first, else `.orion.json`'s `open` — and
-    /// with neither says where to put one, without Enter's drill-in. The
-    /// key answers from the Sessions panel too, where the cursor's
-    /// worktree is just as much the context, and `Shift+O` beside it.
+    /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
+    /// the project's **Open command** setting first, else `.orion.json`'s
+    /// `open` — and with neither says where to put one, without Enter's
+    /// drill-in. It answers from the Sessions panel too, where the
+    /// cursor's worktree is just as much the context. ⇧Enter and ⌥Enter
+    /// stay Enter's.
     #[test]
-    fn shift_enter_on_a_worktree_fires_its_open_command() {
+    fn the_open_command_fires_on_a_worktree() {
         use crate::config::SettingKind::OpenCommand;
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.json");
@@ -17689,7 +18005,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_repo_tree(&mut app, dir.path());
             app.focus = Focus::Worktrees;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
             let flash = app.flash.clone().unwrap_or_default();
             assert!(
                 flash.contains("no open command")
@@ -17704,29 +18020,23 @@ diff --git a/src/c.rs b/src/c.rs
                 r#"{"open": "open http://localhost:3000"}"#,
             )
             .unwrap();
-            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
             assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:3000"));
 
             // The setting wins over the file, and is read fresh per press.
             let mut cfg = crate::config::Config::load();
             assert!(cfg.set_project_text(dir.path(), OpenCommand, "open http://localhost:5173"));
             cfg.save_to(&config_path).unwrap();
-            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
             assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
 
-            // Sessions panel, Shift+O: the same worktree is under the
+            // Sessions panel: the same worktree is under the
             // cursor, so the same command fires, and focus stays put.
             app.focus = Focus::Sessions;
             app.flash = None;
-            press(&mut app, KeyCode::Char('O'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenWorktree));
             assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
             assert_eq!(app.focus, Focus::Sessions);
-            // Alt+Enter — the ESC CR a terminal without the kitty protocol
-            // sends for a mapped Shift+Enter — is the same key.
-            app.flash = None;
-            press(&mut app, KeyCode::Enter, KeyModifiers::ALT, &mut out);
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
-            assert_eq!(app.focus, Focus::Sessions, "still not Enter's drill-in");
             assert!(
                 out.is_empty(),
                 "opening is the TUI's own doing, never a request"
@@ -17840,7 +18150,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
             &mut out,
         );
         assert!(matches!(
@@ -17911,7 +18221,7 @@ diff --git a/src/c.rs b/src/c.rs
         let via_key = |app: &mut App, focus: Focus, row: usize| {
             app.focus = focus;
             app.sel_session = row;
-            press(app, KeyCode::Char('d'), KeyModifiers::NONE, &mut Vec::new());
+            press(app, KeyCode::Backspace, KeyModifiers::NONE, &mut Vec::new());
             take_confirm(app)
         };
         let key_agent = via_key(&mut app, Focus::Sessions, 0);
@@ -18085,8 +18395,7 @@ diff --git a/src/c.rs b/src/c.rs
         }
         out.clear();
 
-        // Bare Esc is NOT a hatch: it forwards to the pty untouched — Claude
-        // Code owns Esc (interrupt) and double-Esc (clear input / jump back).
+        // Bare Esc leaves the pane. ⇧Esc is the agent's Esc.
         app.focus = Focus::Terminal;
         app.term_locked = true;
         handle_key(
@@ -18094,11 +18403,21 @@ diff --git a/src/c.rs b/src/c.rs
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut out,
         );
-        assert_eq!(app.focus, Focus::Terminal, "Esc stays in the terminal");
-        assert!(app.term_locked, "Esc keeps the input lock");
+        assert_eq!(app.focus, Focus::Sessions, "Esc leaves the pane");
+        assert!(!app.term_locked, "Esc clears the input lock");
+        assert!(out.is_empty(), "Esc must not reach the pty");
+        app.focus = Focus::Terminal;
+        app.term_locked = true;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT),
+            &mut out,
+        );
+        assert_eq!(app.focus, Focus::Terminal, "⇧Esc stays in the terminal");
+        assert!(app.term_locked, "⇧Esc keeps the input lock");
         assert!(
             matches!(out.last(), Some(ClientRequest::Input { data, .. }) if data == b"\x1b"),
-            "Esc forwards to the pty immediately"
+            "⇧Esc forwards a bare Esc to the pty"
         );
         out.clear();
 
@@ -21208,7 +21527,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
         match &app.overlay {
             Some(Overlay::Diff(v)) => {
                 assert_eq!(v.files.len(), 2, "{:?}", v.files);
@@ -21232,7 +21551,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none(), "clean tree opens no modal");
         assert!(
             app.flash
@@ -21258,7 +21577,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('G'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenRepo));
         assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r"));
         assert!(app.overlay.is_none(), "the browser is the whole feature");
         assert!(out.is_empty(), "nothing to tell the daemon about");
@@ -21271,7 +21590,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('G'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenRepo));
         assert_eq!(app.flash.as_deref(), Some("no git remote on this repo"));
     }
 
@@ -21448,7 +21767,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &dir.path().join("nope"));
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none());
         assert!(
             app.flash.as_deref().unwrap_or("").contains("missing"),
@@ -21644,14 +21963,9 @@ diff --git a/src/c.rs b/src/c.rs
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert_eq!(view(&app).matches.len(), 1);
 
-        // First Esc clears the filter, second closes.
+        // Esc closes the modal, filter and all.
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        let v = view(&app);
-        assert_eq!(v.filter, "", "Esc clears the filter first");
-        assert_eq!(v.matches.len(), 2, "full list restored in git order");
-        assert_eq!(v.selected_file().unwrap().path, "alpha.rs");
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "second Esc closes the modal");
+        assert!(app.overlay.is_none(), "one Esc closes the modal");
         assert!(out.is_empty(), "filtering never talks to the daemon");
     }
 
@@ -21683,7 +21997,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             // Status is path-ordered, so a.txt is the selected file. Marking
             // sinks it below z.txt and advances to the next file.
             press(
@@ -21707,7 +22021,7 @@ diff --git a/src/c.rs b/src/c.rs
             // Reopen: the mark comes back from the store, already sunk, and
             // the first unreviewed file starts selected.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             assert_eq!(diff_order(&app), ["z.txt", "a.txt"], "restored + sunk");
             assert_eq!(diff_view(&app).selected_file().unwrap().path, "z.txt");
 
@@ -21730,7 +22044,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "selection follows the unmarked file"
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             assert!(diff_view(&app).reviewed.is_empty(), "unmark persisted");
             assert!(out.is_empty(), "reviewed marks never talk to the daemon");
         });
@@ -21746,7 +22060,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             press(
                 &mut app,
                 KeyCode::Char('r'),
@@ -21757,7 +22071,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             // The approved diff no longer matches what's on disk.
             std::fs::write(repo.join("a.txt"), "changed again\n").unwrap();
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             assert!(
                 diff_view(&app).reviewed.is_empty(),
                 "an edited file comes back unreviewed"
@@ -21775,7 +22089,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             press(
                 &mut app,
                 KeyCode::Char('r'),
@@ -21788,7 +22102,7 @@ diff --git a/src/c.rs b/src/c.rs
             run_git(&repo, &["add", "."]);
             run_git(&repo, &["commit", "-m", "wip"]);
             std::fs::write(repo.join("a.txt"), "post-commit\n").unwrap();
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             assert!(
                 diff_view(&app).reviewed.is_empty(),
                 "a commit resets the worktree's marks"
@@ -22168,12 +22482,12 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn slash_opens_palette_listing_projects_then_worktrees_then_sessions() {
+    fn ctrl_k_opens_palette_listing_projects_then_worktrees_then_sessions() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         let texts: Vec<&str> = palette(&app)
             .items
             .iter()
@@ -22188,8 +22502,9 @@ diff --git a/src/c.rs b/src/c.rs
                 "orion/feat-x",
                 "demo/main/agent-1",
                 "orion/feat-x/codex-1",
+                crate::palette::ADD_PROJECT_ROW,
             ],
-            "grouped build order, archived never listed"
+            "grouped build order, archived never listed, adding a project last"
         );
         // The empty query is the RECENT SESSIONS list: the sessions alone,
         // flat — the projects and worktrees wait for a query.
@@ -22199,7 +22514,10 @@ diff --git a/src/c.rs b/src/c.rs
             .iter()
             .map(|m| p.items[m.item].text.as_str())
             .collect();
-        assert_eq!(shown, ["demo/main/agent-1", "orion/feat-x/codex-1"]);
+        assert_eq!(
+            shown,
+            ["demo/main/agent-1", "orion/feat-x/codex-1", crate::palette::ADD_PROJECT_ROW]
+        );
         assert!(out.is_empty(), "opening the palette sends nothing");
     }
 
@@ -22214,7 +22532,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_second_project(&mut app);
             app.show_archived = show_archived;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
             let listed: Vec<&str> = palette(&app)
                 .items
                 .iter()
@@ -22228,12 +22546,12 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn palette_typing_filters_best_match_first_and_esc_is_two_stage() {
+    fn palette_typing_filters_best_match_first_and_esc_closes() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "main".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -22250,10 +22568,7 @@ diff --git a/src/c.rs b/src/c.rs
                 .iter()
                 .all(|m| p.items[m.item].text.contains("main")));
         }
-        // First Esc clears the query, second closes.
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert_eq!(palette(&app).query, "");
-        assert!(!palette(&app).matches.is_empty());
+        // One Esc closes, query and all.
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none());
         assert!(out.is_empty(), "browsing the palette sends nothing");
@@ -22265,7 +22580,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -22292,7 +22607,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -22334,7 +22649,7 @@ diff --git a/src/c.rs b/src/c.rs
                 unseen: false,
             },
         );
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -22364,7 +22679,7 @@ diff --git a/src/c.rs b/src/c.rs
                 unseen: false,
             },
         );
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -22388,7 +22703,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -22412,7 +22727,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -22774,7 +23089,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "featx".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -22808,11 +23123,10 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
-        assert_eq!(palette(&app).items.len(), 3);
-        // Park the cursor on the session row before the tree churns.
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        assert_eq!(palette(&app).items.len(), 4, "the tree's three and Add project…");
+        // The cursor opens on the session row, above Add project…, and
+        // stays there while the tree churns.
 
         hse(
             &mut app,
@@ -22851,7 +23165,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         // Tall enough that the sidebar's headers show past the modal.
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -22893,7 +23207,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -22965,7 +23279,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         app.tree.agents.clear();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "demo".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -23325,7 +23639,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(text.contains(tab.title), "tab strip rendered:\n{text}");
         }
         assert!(
-            text.contains("Enter in / search opens the session"),
+            text.contains("Enter in the ⌘K jump list opens the session"),
             "selected setting's hint shown in the footer:\n{text}"
         );
         let Some(Overlay::Settings(view)) = &app.overlay else {
@@ -23469,7 +23783,7 @@ diff --git a/src/c.rs b/src/c.rs
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(crate::config::Config::load().editor, "nvim");
+            assert_eq!(crate::config::Config::load().editor, "vim");
             assert_eq!(settings_view(&app).tab, 0, "→ did not move the tab");
 
             // ↑ off the top row steps onto the strip; now → is the tab.
@@ -23481,7 +23795,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(settings_view(&app).tab, 1);
             assert_eq!(
                 crate::config::Config::load().editor,
-                "nvim",
+                "vim",
                 "no value was cycled while the strip had focus"
             );
             // ↓ drops back into the list.
@@ -23578,27 +23892,28 @@ diff --git a/src/c.rs b/src/c.rs
             open_settings_on(&mut app, crate::config::hotkeys_tab(), &mut out);
             let row = crate::keymap::index_of(crate::keymap::Action::Help).unwrap();
             for _ in 0..row {
-                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
+            let changes = app.keymap.label(crate::keymap::Action::GitDiff);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            // `g` is Git diff's — capturing it must not silently steal it.
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            // `^e` is Changes' — capturing it must not silently steal it.
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             let view = settings_view(&app);
             let (text, level) = view.notice.clone().expect("a warning");
             assert_eq!(level, crate::app::NoticeLevel::Warn);
             assert!(text.contains("already"), "{text}");
-            assert!(text.contains("Git diff"), "names the current owner: {text}");
+            assert!(text.contains("Changes"), "names the current owner: {text}");
             assert!(!view.capturing(), "the capture is paused on the warning");
             assert_eq!(
                 app.keymap.label(crate::keymap::Action::Help),
-                "?",
+                "—",
                 "nothing changed yet"
             );
 
             // Esc leaves it where it was.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert_eq!(app.keymap.label(crate::keymap::Action::GitDiff), "g");
-            assert_eq!(app.keymap.label(crate::keymap::Action::Help), "?");
+            assert_eq!(app.keymap.label(crate::keymap::Action::GitDiff), changes);
+            assert_eq!(app.keymap.label(crate::keymap::Action::Help), "—");
         });
     }
 
@@ -23611,22 +23926,22 @@ diff --git a/src/c.rs b/src/c.rs
             open_settings_on(&mut app, crate::config::hotkeys_tab(), &mut out);
             let row = crate::keymap::index_of(crate::keymap::Action::Help).unwrap();
             for _ in 0..row {
-                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(app.keymap.label(crate::keymap::Action::Help), "g");
+            assert_eq!(app.keymap.label(crate::keymap::Action::Help), "^e");
             assert_eq!(
                 app.keymap.label(crate::keymap::Action::GitDiff),
-                "—",
+                "⌘E",
                 "one keystroke can only mean one thing"
             );
             // The panels agree with the map.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             seed_tree(&mut app);
             app.focus = Focus::Worktrees;
-            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
             assert!(matches!(app.overlay, Some(Overlay::Help(_))));
         });
     }
@@ -23798,18 +24113,17 @@ diff --git a/src/c.rs b/src/c.rs
         crate::config::with_config_path(dir.path().join("config.json"), || {
             let mut app = App::new();
             let mut keymap = app.keymap.clone();
-            let idx = crate::keymap::index_of(crate::keymap::Action::Hosts).unwrap();
+            let idx = crate::keymap::index_of(crate::keymap::Action::Settings).unwrap();
             keymap.bind(idx, crate::keymap::KeyChord::parse("f9").unwrap(), false);
             app.keymap = keymap;
 
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, &mut out);
+            let mut out = run_action(&mut app, crate::keymap::Action::Help);
             let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
             assert!(text.contains("F9"), "help follows the keymap:\n{text}");
             assert!(
-                !text.contains("H             ssh hosts"),
+                !text.contains("s             settings"),
                 "and drops the old key:\n{text}"
             );
 
@@ -23818,7 +24132,7 @@ diff --git a/src/c.rs b/src/c.rs
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let footer = buffer_text(&terminal);
             assert!(
-                footer.contains("F9: ssh host"),
+                footer.contains("F9: settings"),
                 "footer follows too:\n{footer}"
             );
         });
@@ -23830,7 +24144,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn a_hand_edited_duplicate_is_called_out_on_the_row() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"keybindings": {"help": "g"}}"#).unwrap();
+        std::fs::write(&path, r#"{"keybindings": {"help": "ctrl+e"}}"#).unwrap();
         crate::config::with_config_path(path, || {
             let mut app = App::new();
             app.keymap = crate::config::Config::load().keymap();
@@ -23838,13 +24152,13 @@ diff --git a/src/c.rs b/src/c.rs
             open_settings_on(&mut app, crate::config::hotkeys_tab(), &mut out);
             let row = crate::keymap::index_of(crate::keymap::Action::GitDiff).unwrap();
             for _ in 0..row {
-                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
             let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
             assert!(
-                text.contains("also belongs to Help"),
+                text.contains("also belongs to Keyboard shortcuts"),
                 "the row names its rival:\n{text}"
             );
         });
@@ -23877,7 +24191,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('M'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
         assert!(matches!(app.overlay, Some(Overlay::Metrics(_))));
 
         // The keypress itself fires the initial reading's request.
@@ -23951,7 +24265,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('M'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
             other => panic!("expected GetMetrics, got {other:?}"),
@@ -24052,7 +24366,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('M'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
         request_metrics(&mut app, &mut out);
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
@@ -24114,7 +24428,7 @@ diff --git a/src/c.rs b/src/c.rs
             KeyModifiers::CONTROL,
             &mut out,
         );
-        press(&mut app, KeyCode::Char('M'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
         request_metrics(&mut app, &mut out);
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
@@ -24122,13 +24436,13 @@ diff --git a/src/c.rs b/src/c.rs
         };
         hse(&mut app, ServerEvent::Metrics { req_id, snapshot });
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         let Some(Overlay::Metrics(view)) = &app.overlay else {
             panic!("metrics closed");
         };
         assert_eq!(view.selected, 2, "j walks down to the ui row");
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         let Some(Overlay::Metrics(view)) = &app.overlay else {
             panic!("metrics closed");
         };
@@ -24144,7 +24458,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn metrics_reply_after_close_is_dropped() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('M'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
             other => panic!("expected GetMetrics, got {other:?}"),
@@ -24194,7 +24508,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
             let files = &finder(&app).files;
             assert!(files.contains(&"a.txt".to_string()), "{files:?}");
             assert!(files.contains(&"fresh.txt".to_string()), "{files:?}");
@@ -24243,11 +24557,12 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// Enter on a markdown file reads it first: the FILE TABS take the
-    /// finder's place with the rendered page, and Enter there is the
-    /// editor. The same rule serves a `.md` ⌥clicked in the pane.
+    /// Every file opens to be edited: Enter on a markdown file is the
+    /// editor with the rendered page beside it (MARKDOWN SPLIT), floating
+    /// rather than embedded. The same rule serves a `.md` ⌥clicked in the
+    /// pane, and the FILE TABS' Enter on one.
     #[test]
-    fn a_markdown_file_from_the_finder_or_a_clicked_path_is_read_first() {
+    fn a_markdown_file_opens_in_the_editor_beside_its_page() {
         let dir = tempfile::tempdir().unwrap();
         let repo = test_repo(&dir);
         std::fs::write(repo.join("notes.md"), "# Notes\n\n- one\n").unwrap();
@@ -24257,55 +24572,134 @@ diff --git a/src/c.rs b/src/c.rs
         app.vim_tx = Some(tx);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
-        for c in ['n', 'o', 't'] {
-            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
-        }
-        assert_eq!(finder(&app).selected_path(), Some("notes.md"));
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(app.vim.is_none(), "no editor yet");
-        let Some(Overlay::FileTabs(tabs)) = &app.overlay else {
-            panic!("expected the file tabs, got {:?}", app.overlay);
-        };
-        assert_eq!(tabs.tabs.len(), 1);
-        assert_eq!(tabs.tabs[0].label, "notes.md");
-        assert!(tabs.renders_markdown(), "the rendered page, not the source");
-        assert_eq!(tabs.preview_text, "# Notes\n\n- one");
+        // A shell stands in for the editor.
+        with_config_json(r#"{"editor": "/bin/sh", "close_finder_on_open": true}"#, || {
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            for c in ['n', 'o', 't'] {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
+            assert_eq!(finder(&app).selected_path(), Some("notes.md"));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        });
+        let vim = app.vim.as_ref().expect("Enter edits");
+        assert!(!vim.embedded);
+        let side = vim.markdown.as_ref().expect("the page beside it");
+        assert_eq!(side.path, repo.join("notes.md"));
+        assert_eq!(side.text, "# Notes\n\n- one\n");
+        assert!(app.overlay.is_none(), "the finder closed behind it");
 
-        // Enter in the tabs is the editor, embedded under the strip. A
-        // shell stands in for vim.
-        if let Some(Overlay::FileTabs(t)) = &mut app.overlay {
-            t.editor = "/bin/sh".into();
-        }
+        // The FILE TABS float it too, rather than embedding it.
+        app.vim = None;
+        app.overlay = Some(Overlay::FileTabs(crate::file_tabs::FileTabsView::new(
+            repo.clone(),
+            "/bin/sh".into(),
+            vec![repo.join("notes.md")],
+        )));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         let vim = app.vim.as_ref().expect("enter edits");
-        assert!(vim.embedded, "the editor takes the preview pane");
+        assert!(!vim.embedded && vim.markdown.is_some());
         assert!(
             matches!(&app.overlay, Some(Overlay::FileTabs(_))),
             "the tabs stay underneath"
         );
 
-        // A clicked path takes the same route; a code file still goes
-        // straight to the editor.
+        // A clicked path takes the same route; a code file gets no page.
         app.vim = None;
         app.overlay = None;
-        open_file_link(&mut app, "notes.md", Some(3));
-        let Some(Overlay::FileTabs(tabs)) = &app.overlay else {
-            panic!("expected the file tabs, got {:?}", app.overlay);
-        };
-        assert_eq!(tabs.tabs[0].label, "notes.md");
-        assert!(tabs.renders_markdown());
-        assert!(app.vim.is_none());
-        app.overlay = None;
+        with_config_json(r#"{"editor": "/bin/sh"}"#, || {
+            open_file_link(&mut app, "notes.md", Some(3));
+        });
+        assert!(app.vim.as_ref().is_some_and(|v| v.markdown.is_some()));
+        assert_eq!(app.vim.as_ref().map(|v| v.line), Some(3));
+        app.vim = None;
         with_config_json(r#"{"editor": "/bin/sh"}"#, || {
             open_file_link(&mut app, "a.txt", Some(1));
         });
+        assert!(app.vim.as_ref().is_some_and(|v| v.markdown.is_none()));
         assert!(app.overlay.is_none(), "no tabs for a text file");
         assert_eq!(
             app.vim.as_ref().map(|v| v.title.as_str()),
             Some("a.txt:1"),
             "the editor, at the line"
         );
+    }
+
+    /// An editor modal on a shell, posing as `quits_itself` micro or not,
+    /// with a markdown page beside it when `page` names a file.
+    fn shell_editor(dir: &std::path::Path, page: Option<&str>) -> VimTerm {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut vim =
+            VimTerm::spawn_cmd("/bin/sh", &[], dir, "t".into(), 80, 24, 1, tx).unwrap();
+        vim.markdown = page.map(|name| crate::markdown_split::MarkdownSide::load(dir.join(name)));
+        vim
+    }
+
+    /// micro asks to save on its own Ctrl+Q, so the key goes to it; an
+    /// editor without one (vim) keeps Ctrl+Q as the force close.
+    #[test]
+    fn ctrl_q_goes_to_an_editor_that_quits_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        let mut out = Vec::new();
+        let mut micro = shell_editor(dir.path(), None);
+        micro.quits_itself = true;
+        app.vim = Some(micro);
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL, &mut out);
+        assert!(app.vim.is_some(), "micro's own quit, not ours");
+
+        app.vim = Some(shell_editor(dir.path(), None));
+        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL, &mut out);
+        assert!(app.vim.is_none(), "the force close");
+    }
+
+    /// Ctrl+T swaps a MARKDOWN SPLIT's page in on a narrow modal, where
+    /// the arrows then scroll the page instead of reaching the editor.
+    #[test]
+    fn ctrl_t_swaps_in_the_page_and_the_arrows_scroll_it() {
+        use crate::markdown_split::Layout;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "x\n\n".repeat(40)).unwrap();
+        let mut app = App::new();
+        let mut out = Vec::new();
+        let mut vim = shell_editor(dir.path(), Some("a.md"));
+        let side = vim.markdown.as_mut().unwrap();
+        side.interior = 80;
+        side.area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        side.rendered = Some(crate::markdown::Rendered {
+            width: 80,
+            lines: vec![ratatui::text::Line::raw("x"); 40],
+        });
+        app.vim = Some(vim);
+        let side = |app: &App| app.vim.as_ref().unwrap().markdown.clone().unwrap();
+        assert_eq!(side(&app).layout(80), Layout::EditorOnly);
+
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL, &mut out);
+        assert_eq!(side(&app).layout(80), Layout::PageOnly);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE, &mut out);
+        assert_eq!(side(&app).scroll, 11);
+        press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+        assert_eq!(side(&app).scroll, 0);
+    }
+
+    /// ⌘O on a finder row over ssh — where Cursor would open on the other
+    /// machine — falls back to the built-in editor.
+    #[test]
+    fn cmd_o_over_ssh_edits_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        let mut app = App::new();
+        app.is_remote = true;
+        seed_repo_tree(&mut app, &repo);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.vim_tx = Some(tx);
+        let mut out = Vec::new();
+        with_config_json(r#"{"editor": "/bin/sh"}"#, || {
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::SUPER, &mut out);
+        });
+        let vim = app.vim.as_ref().expect("the built-in editor instead");
+        assert_eq!(Some(vim.file.as_str()), finder(&app).selected_path());
     }
 
     #[test]
@@ -24321,7 +24715,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
             // A shell stands in for vim (`sh +1 a.txt` still spawns fine).
             if let Some(Overlay::Files(f)) = &mut app.overlay {
                 f.editor = "/bin/sh".into();
@@ -24355,7 +24749,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
             if let Some(Overlay::Files(f)) = &mut app.overlay {
                 f.editor = "/nonexistent/orion-not-an-editor".into();
             }
@@ -24371,7 +24765,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn file_finder_escape_clears_query_then_closes() {
+    fn file_finder_escape_closes_query_and_all() {
         let mut app = App::new();
         app.overlay = Some(Overlay::Files(FileFinder::new(
             "/nonexistent-orion-finder-test".into(),
@@ -24383,10 +24777,7 @@ diff --git a/src/c.rs b/src/c.rs
         press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
         assert_eq!(finder(&app).matches.len(), 1, "b matches only beta.rs");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert_eq!(finder(&app).query, "", "first Esc clears the query");
-        assert_eq!(finder(&app).matches.len(), 2, "cleared query shows all");
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "second Esc closes the finder");
+        assert!(app.overlay.is_none(), "one Esc closes the finder");
     }
 
     #[test]
@@ -24405,13 +24796,13 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
             assert_eq!(finder(&app).editor, expect);
             app.overlay = None;
-            press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
             assert_eq!(tree_view(&app).editor, expect);
             app.overlay = None;
-            press(&mut app, KeyCode::Char('F'), KeyModifiers::SHIFT, &mut out);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
             let Some(Overlay::Grep(view)) = &app.overlay else {
                 panic!("F opens the grep overlay");
             };
@@ -24423,7 +24814,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn f_without_worktree_flashes() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none());
         assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
     }
@@ -24481,7 +24872,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut out = Vec::new();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
         for c in ['n', 'o', 't'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24514,7 +24905,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(tree_view(&app).preview_line_count, 3, "the source lines");
 
         // Off markdown, Ctrl+r reaches the filter, which ignores it.
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
         for c in ['a', '.', 't'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24527,7 +24918,7 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert_eq!(tree_view(&app).filter.as_str(), "a.t", "not typed");
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
         for c in ['n', 'o', 't'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24538,7 +24929,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn t_opens_tree_browser_folds_dirs_and_filters_hierarchies() {
+    fn ctrl_b_opens_tree_browser_folds_dirs_and_filters_hierarchies() {
         let dir = tempfile::tempdir().unwrap();
         let repo = test_repo(&dir);
         std::fs::create_dir_all(repo.join("src/sub")).unwrap();
@@ -24550,7 +24941,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.vim_tx = Some(tx);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
         assert_eq!(tree_view(&app).file_count, 3);
         // Collapsed by default: dirs first, then top-level files; the
         // selected dir previews its children.
@@ -24606,13 +24997,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.vim.is_none(), "Ctrl+Q force-closes the editor");
         assert_eq!(tree_view(&app).preview, "deeper");
 
-        // Two-stage escape: clear the filter (restoring the folded tree),
-        // then close.
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert_eq!(tree_view(&app).filter, "", "first Esc clears the filter");
+        // Ctrl+u clears the filter (restoring the folded tree); Esc closes.
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        assert_eq!(tree_view(&app).filter, "", "Ctrl+u clears the filter");
         assert_eq!(tree_rows(&app), vec!["src", "a.txt"]);
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "second Esc closes the browser");
+        assert!(app.overlay.is_none(), "Esc closes the browser");
     }
 
     #[test]
@@ -24625,7 +25015,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
         for c in ['l', 'i', 'b'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24663,7 +25053,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn b_without_worktree_flashes() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none());
         assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
     }
@@ -24675,7 +25065,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -24699,7 +25089,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
         for c in ['l', 'i', 'b'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24736,7 +25126,7 @@ diff --git a/src/c.rs b/src/c.rs
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.vim_tx = Some(tx);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
 
         // A draw teaches the browser its preview rect, so the editor can
         // spawn at the pane's size. Row 0 is a.txt (the only file).
@@ -24789,7 +25179,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn shift_f_opens_grep_and_typing_searches() {
+    fn cmd_shift_f_opens_grep_and_typing_searches() {
         let dir = tempfile::tempdir().unwrap();
         let repo = test_repo(&dir);
         std::fs::write(repo.join("hay.txt"), "one\nneedle here\n").unwrap();
@@ -24797,7 +25187,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('F'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
         assert!(grep_view(&app).hits.is_empty(), "opens with no results");
         assert!(out.is_empty(), "opening the overlay sends nothing");
 
@@ -24810,22 +25200,22 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(view.hits[0].line, 2);
         assert_eq!(view.hits[0].text, "needle here");
 
-        // Two-stage escape: clear the query, then close.
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert_eq!(grep_view(&app).query, "", "first Esc clears the query");
+        // Ctrl+u clears the query; Esc closes.
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        assert_eq!(grep_view(&app).query, "", "Ctrl+u clears the query");
         assert!(
             grep_view(&app).hits.is_empty(),
             "cleared query shows no hits"
         );
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "second Esc closes the overlay");
+        assert!(app.overlay.is_none(), "Esc closes the overlay");
     }
 
     #[test]
     fn shift_f_without_worktree_flashes() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('F'), KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
         assert!(app.overlay.is_none());
         assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
     }
@@ -24844,7 +25234,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('F'), KeyModifiers::SHIFT, &mut out);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
             for c in "orig".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
@@ -24894,7 +25284,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('F'), KeyModifiers::SHIFT, &mut out);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
             for c in "orig".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
@@ -25044,7 +25434,7 @@ diff --git a/src/c.rs b/src/c.rs
         }
         app.focus = Focus::Worktrees;
 
-        press(&mut app, KeyCode::Char('D'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
         let Some(Overlay::Confirm(c)) = &app.overlay else {
             panic!("Shift+D confirms first: {:?}", app.overlay);
         };
@@ -25093,7 +25483,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app); // p1/w1(main) + agent-1
         let mut out = Vec::new();
         app.focus = Focus::Worktrees;
-        press(&mut app, KeyCode::Char('D'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
         assert!(app.overlay.is_none(), "nothing to confirm");
         assert!(app.flash.is_some(), "the refusal explains itself");
         assert!(out.is_empty(), "nothing is requested");
@@ -25139,7 +25529,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.term = Some(AttachedTerm::new(sref.clone(), 40, 10));
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('D'), KeyModifiers::SHIFT, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
         let Some(Overlay::Confirm(c)) = &app.overlay else {
             panic!("Shift+D confirms first: {:?}", app.overlay);
         };
@@ -25705,6 +26095,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "demo/main",
                 "secret/main",
                 "demo/main/agent-1",
+                crate::palette::ADD_PROJECT_ROW,
             ],
             "every row pathed from its project down"
         );
@@ -25765,7 +26156,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         for c in "hush".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25940,10 +26331,10 @@ diff --git a/src/c.rs b/src/c.rs
     fn open_presets(app: &mut App, out: &mut Vec<ClientRequest>) {
         seed_tree(app);
         app.focus = Focus::Sessions;
-        press(app, KeyCode::Char('e'), KeyModifiers::NONE, out);
+        out.extend(run_action(app, crate::keymap::Action::AgentPresets));
         assert!(
             matches!(&app.overlay, Some(Overlay::AgentPresets(_))),
-            "e in Sessions should open the presets list, got {:?}",
+            "Agent presets in Sessions should open the presets list, got {:?}",
             app.overlay
         );
     }
@@ -26022,7 +26413,7 @@ diff --git a/src/c.rs b/src/c.rs
             let before = agents_under_root(&app);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             for _ in 0..skip_row {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
@@ -26106,7 +26497,7 @@ diff --git a/src/c.rs b/src/c.rs
                 app.focus = focus;
                 assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
                 let mut out = Vec::new();
-                press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+                out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                     panic!(
                         "e from {focus:?} opens the PR preset picker, got {:?} ({:?})",
@@ -26135,7 +26526,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             app.sel_worktree = 1;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             // The row names, and the cursor, of the PR picker on screen.
             fn pr_picker(app: &App) -> (Vec<String>, usize) {
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
@@ -26254,7 +26645,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                 panic!(
                     "e on a PR row opens the preset picker, got {:?}",
@@ -26377,7 +26768,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.sel_worktree = app.open_pr_row_of(&pr_url(7)).expect("#7 is a row");
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             let rows = app.tree.worktrees.len();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             type_text(&mut app, "Fix auth", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -26410,7 +26801,7 @@ diff --git a/src/c.rs b/src/c.rs
                 skip_task: true,
             });
             crate::agent_presets::save(&presets).unwrap();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -27673,7 +28064,7 @@ diff --git a/src/c.rs b/src/c.rs
                 app.focus = Focus::Projects;
                 let worktree = app.selected_worktree().unwrap().id.clone();
 
-                press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
                 let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                     panic!("p should open the quick prompt, got {:?}", app.overlay);
                 };
@@ -27952,7 +28343,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "the cursor is on the root row"
             );
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let branch = match &app.overlay {
                 Some(Overlay::Prompt(prompt)) => match &prompt.kind {
                     PromptKind::QuickPrompt(launch) => match &launch.target {
@@ -28056,7 +28447,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             // A worktree the daemon refuses (a branch that exists, a fetch
             // that failed) hands the text back for a retry.
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Try again"));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let req_id = match out.as_slice() {
@@ -28096,7 +28487,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(app);
             app.focus = Focus::Sessions;
-            press(app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(app, "Fix auth"));
             press(app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(ClientRequest::CreateAgent { req_id, .. }) = out.last() else {
@@ -28184,7 +28575,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
 
             let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -28248,7 +28639,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
@@ -28311,7 +28702,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
@@ -28365,7 +28756,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
             for open in [KeyCode::Tab, KeyCode::BackTab] {
@@ -28406,7 +28797,7 @@ diff --git a/src/c.rs b/src/c.rs
             );
 
             // A box with a harness picked in it and a prompt typed.
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -28420,7 +28811,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             // The same place: the box comes back whole, and the slot is
             // empty again.
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -28448,7 +28839,7 @@ diff --git a/src/c.rs b/src/c.rs
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
             );
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -28469,7 +28860,7 @@ diff --git a/src/c.rs b/src/c.rs
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.quick_draft.is_some(), "Esc parks the flipped box");
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -28492,7 +28883,7 @@ diff --git a/src/c.rs b/src/c.rs
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
             );
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -28512,7 +28903,7 @@ diff --git a/src/c.rs b/src/c.rs
             }
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.quick_draft.is_none(), "an empty box parks nothing");
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.is_empty()));
             assert!(out.is_empty(), "none of this launches anything: {out:?}");
         });
@@ -28527,7 +28918,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
@@ -28619,7 +29010,7 @@ diff --git a/src/c.rs b/src/c.rs
             };
 
             // An ordinary preset: picked, then the empty box sent.
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
@@ -28639,7 +29030,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             // Over typed text it is applied, not launched.
             out.clear();
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -28651,7 +29042,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             // Over an empty box it launches the moment it is picked.
             app.overlay = None;
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "launched: {:?}", app.overlay);
@@ -28672,7 +29063,7 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut out = Vec::new();
                 seed_tree(&mut app);
                 app.focus = Focus::Sessions;
-                press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
                 assert!(paste_into_overlay(&mut app, "Fix auth"));
                 press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
@@ -28736,7 +29127,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             let words: Vec<String> = (0..300).map(|i| format!("w{i:03}")).collect();
             let long = words.join(" ");
             assert!(paste_into_overlay(&mut app, &long));
@@ -28850,7 +29241,7 @@ diff --git a/src/c.rs b/src/c.rs
                 other => panic!("expected the box, got {other:?}"),
             };
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             // The caret parked mid-text, to prove the flip keeps it.
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
@@ -28978,7 +29369,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 app.overlay.is_none(),
@@ -29014,7 +29405,7 @@ diff --git a/src/c.rs b/src/c.rs
             // The cloud box is the one that cannot: there is nothing to
             // send as the task.
             out.clear();
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -29043,7 +29434,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_default_config(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(
                 app.flash.as_deref(),
@@ -29052,7 +29443,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(out.is_empty(), "{out:?}");
 
             app.focus = Focus::Worktrees;
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(
                 app.flash.as_deref(),
@@ -29166,7 +29557,6 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected cursor model submenu, got {:?}", app.overlay);
             };
-            let all = menu.items.len();
             assert!(menu.filter.is_some(), "model submenus take type-ahead");
 
             // The title shows the affordance before anything is typed.
@@ -29238,33 +29628,22 @@ diff --git a/src/c.rs b/src/c.rs
                     if m == "claude-opus-5-thinking" && e == "high-fast"
             ));
 
-            // Backspace widens; Esc clears the text first, then backs out
-            // to the (still filtered) model list.
+            // Backspace widens; ← backs out to the (still filtered) model
+            // list; Esc closes the whole menu.
             press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 unreachable!()
             };
             assert_eq!(menu.filter_query(), "h");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                unreachable!()
-            };
-            assert_eq!(menu.title.as_deref(), Some("Cursor effort"));
-            assert_eq!(menu.filter_query(), "");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 unreachable!()
             };
             assert_eq!(menu.title.as_deref(), Some("Cursor model"));
             assert_eq!(menu.filter_query(), "opus");
             assert_eq!(menu.hover, 1, "← restores the parent's hover");
-            // Clearing the filter brings every row back, hovering the ✓.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                unreachable!()
-            };
-            assert_eq!(menu.items.len(), all);
-            assert_eq!(menu.items[menu.hover].label, "default ✓");
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
         });
     }
 
@@ -29456,7 +29835,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             app.sel_worktree = 1;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
 
             // The delete keys ask first, and backing out of the confirm
             // lands in the PR picker again.
@@ -29533,7 +29912,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             app.sel_worktree = 1;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let list = match &app.overlay {
                 Some(Overlay::AgentPresets(view)) => view.list_area,
@@ -29634,7 +30013,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
             let Some(Overlay::Hosts(view)) = &app.overlay else {
                 panic!(
                     "shift+h should open the hosts picker, got {:?}",
@@ -29666,8 +30045,8 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
-            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.should_quit, "Enter hands off by quitting");
             assert!(app.overlay.is_none());
@@ -29682,8 +30061,8 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
-            press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             match &app.overlay {
                 Some(Overlay::Hosts(view)) => {
                     assert_eq!(view.hosts.len(), 1, "row dropped in place");
@@ -29703,7 +30082,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
             // Draw once so the modal writes back its hit-test rects.
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -29727,7 +30106,7 @@ diff --git a/src/c.rs b/src/c.rs
             // Reopened, a click outside the modal closes it.
             app.should_quit = false;
             app.pending_ssh = None;
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             handle_mouse(
                 &mut app,
@@ -30087,7 +30466,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             press(
                 &mut by_key,
-                KeyCode::Char('d'),
+                KeyCode::Backspace,
                 KeyModifiers::NONE,
                 &mut out,
             );
@@ -30167,7 +30546,7 @@ diff --git a/src/c.rs b/src/c.rs
                     if app.selected_session().map(|a| a.id) == Some(reaped.clone()) {
                         break;
                     }
-                    press(&mut app, KeyCode::Char('h'), KeyModifiers::NONE, &mut out);
+                    press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
                 }
                 assert_eq!(
                     app.selected_session().map(|a| a.id),
@@ -30217,7 +30596,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_presets(|| {
             type Open = fn(&mut App, &mut Vec<ClientRequest>);
             let palette: Open = |app, out| {
-                press(app, KeyCode::Char('/'), KeyModifiers::NONE, out);
+                press(app, KeyCode::Char('k'), KeyModifiers::CONTROL, out);
             };
             let new_session: Open = |app, _out| {
                 app.focus = Focus::Sessions;
@@ -30225,12 +30604,12 @@ diff --git a/src/c.rs b/src/c.rs
             };
             let presets: Open = |app, out| {
                 app.focus = Focus::Sessions;
-                press(app, KeyCode::Char('e'), KeyModifiers::NONE, out);
+                out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
             };
             let pr_presets: Open = |app, out| {
                 seed_open_prs(app, &[(7, "Attach links")]);
                 app.sel_worktree = app.open_pr_row_of(&pr_url(7)).expect("#7 is a row");
-                press(app, KeyCode::Char('e'), KeyModifiers::NONE, out);
+                out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
             };
             let surfaces: [(&str, Open); 4] = [
                 ("palette", palette),
@@ -30287,9 +30666,9 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// A click on a file finder row is Enter on it — the FILE TABS reader
-    /// for a markdown file. The click used to call the editor directly, and
-    /// so missed the reader when Enter learned it.
+    /// A click on a file finder row is Enter on it — the editor with the
+    /// page beside it for a markdown file. The click used to call the
+    /// editor directly, and so missed the reader when Enter learned it.
     #[test]
     fn a_click_on_a_finder_row_is_enter_on_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -30301,7 +30680,9 @@ diff --git a/src/c.rs b/src/c.rs
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, &mut out);
+            with_config_json(r#"{"editor": "/bin/sh"}"#, || {
+                press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            });
             for c in ['n', 'o', 't'] {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
@@ -30322,11 +30703,9 @@ diff --git a/src/c.rs b/src/c.rs
         click(&mut by_mouse, list.x + 1, list.y, &mut mouse_out);
 
         assert!(
-            matches!(&by_mouse.overlay, Some(Overlay::FileTabs(_))),
-            "the reader, not the editor: {:?}",
-            by_mouse.overlay
+            by_mouse.vim.as_ref().is_some_and(|v| v.markdown.is_some()),
+            "the editor beside the page"
         );
-        assert!(by_mouse.vim.is_none());
         assert_eq!(
             ui_digest(&by_mouse, &mouse_out),
             ui_digest(&by_keys, &keys_out)
@@ -30408,7 +30787,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn help_click_outside_closes_and_inside_stays() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Help));
         let area = drawn_modal_area(&mut app);
         click(&mut app, area.x + 2, area.y + 2, &mut out);
         assert!(
@@ -30426,7 +30805,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_link(&mut app, "https://example.dev/spec");
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('D'), KeyModifiers::NONE, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
         assert!(
             matches!(app.overlay, Some(Overlay::Confirm(_))),
             "{:?}",
@@ -30472,8 +30851,7 @@ diff --git a/src/c.rs b/src/c.rs
     #[test]
     fn prompt_click_outside_abandons_it() {
         let mut app = App::new();
-        let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
+        let mut out = run_action(&mut app, crate::keymap::Action::New);
         assert!(
             matches!(app.overlay, Some(Overlay::Prompt(_))),
             "{:?}",
@@ -30525,7 +30903,7 @@ diff --git a/src/c.rs b/src/c.rs
         ));
         app.focus = Focus::Sessions;
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, &mut out);
+        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Help));
         let modal = drawn_modal_area(&mut app);
         // The modal is centred over the pane; its bottom-right cell is not.
         let pane = app.term_area;
@@ -30568,18 +30946,22 @@ diff --git a/src/c.rs b/src/c.rs
                 |app| {
                     seed_tree(app);
                     seed_link(app, "https://example.dev/spec");
-                    press(app, KeyCode::Char('D'), KeyModifiers::NONE, &mut Vec::new());
+                    run_action(app, crate::keymap::Action::DeleteAll);
                 },
                 None,
             ),
             (
                 "Prompt",
-                |app| press(app, KeyCode::Char('n'), KeyModifiers::NONE, &mut Vec::new()),
+                |app| {
+                    run_action(app, crate::keymap::Action::New);
+                },
                 None,
             ),
             (
                 "Help",
-                |app| press(app, KeyCode::Char('?'), KeyModifiers::NONE, &mut Vec::new()),
+                |app| {
+                    run_action(app, crate::keymap::Action::Help);
+                },
                 None,
             ),
             (
@@ -30599,7 +30981,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "Palette",
                 |app| {
                     seed_tree(app);
-                    press(app, KeyCode::Char('/'), KeyModifiers::NONE, &mut Vec::new());
+                    press(app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut Vec::new());
                 },
                 None,
             ),
@@ -30671,6 +31053,14 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "Linear",
+                |app| {
+                    seed_tree(app);
+                    crate::linear::open(app);
+                },
+                None,
+            ),
+            (
                 "BranchSwitch",
                 |app| {
                     seed_tree(app);
@@ -30722,7 +31112,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "ProjectPicker",
                 |app| {
                     seed_tree(app);
-                    press(app, KeyCode::Char('p'), KeyModifiers::NONE, &mut Vec::new());
+                    press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut Vec::new());
                     press(
                         app,
                         KeyCode::Char('p'),
@@ -30794,13 +31184,13 @@ diff --git a/src/c.rs b/src/c.rs
     fn file_tabs_ctrl_q_steps_back_to_the_strip_before_closing() {
         with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
-            let a = dir.path().join("a.md");
+            let a = dir.path().join("a.txt");
             std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
             let mut app = App::new();
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
-            // A shell stands in for vim (`sh +1 a.md` still spawns fine).
+            // A shell stands in for vim (`sh +1 a.txt` still spawns fine).
             app.overlay = Some(Overlay::FileTabs(crate::file_tabs::FileTabsView::new(
                 dir.path().to_path_buf(),
                 "/bin/sh".into(),
@@ -30867,6 +31257,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",
             Overlay::Issues(_) => "Issues",
             Overlay::PullRequests(_) => "PullRequests",
+            Overlay::Linear(_) => "Linear",
             Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
         }
@@ -30897,7 +31288,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 19, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 20, "a variant came or went: {seen:?}");
         });
     }
 
@@ -30967,26 +31358,23 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// Where the two exits part company: Esc peels a typed filter, an open
-    /// submenu and a nested form one layer at a time — deliberately. Ctrl+Q
-    /// takes the lot in one press, which is what makes it the exit that can
-    /// never leave the user stuck.
+    /// Where the two exits part company: Esc closes a list outright — a
+    /// typed filter or an open submenu included — but backs a nested form
+    /// out one layer, deliberately. Ctrl+Q takes the lot in one press,
+    /// which is what makes it the exit that can never leave the user stuck.
     #[test]
     fn ctrl_q_takes_the_layers_esc_would_peel() {
         with_seeded_presets(|| {
-            // A typed diff filter: Esc clears it and keeps the viewer.
+            // A typed diff filter: Esc closes the viewer, filter and all.
             let staged_diff = |app: &mut App| {
                 seed_tree(app);
                 app.overlay = Some(Overlay::Diff(fake_diff_view(10)));
                 assert!(paste_into_overlay(app, "alpha"));
             };
-            assert!(
-                matches!(peel_with(staged_diff, KeyCode::Esc), Some(Overlay::Diff(_))),
-                "Esc should clear the filter first"
-            );
+            assert!(peel_with(staged_diff, KeyCode::Esc).is_none());
             assert!(peel_with(staged_diff, KeyCode::Char('q')).is_none());
 
-            // An open MODEL submenu: Esc backs out one level.
+            // An open MODEL submenu: Esc closes the whole menu.
             let submenu = |app: &mut App| {
                 let mut out = Vec::new();
                 seed_tree(app);
@@ -30999,10 +31387,7 @@ diff --git a/src/c.rs b/src/c.rs
                     app.overlay
                 );
             };
-            assert!(
-                matches!(peel_with(submenu, KeyCode::Esc), Some(Overlay::Menu(m)) if m.parent.is_none()),
-                "Esc should pop to the root menu"
-            );
+            assert!(peel_with(submenu, KeyCode::Esc).is_none());
             assert!(peel_with(submenu, KeyCode::Char('q')).is_none());
 
             // The PRESET EDITOR over its list: Esc goes back to the list.
@@ -31010,7 +31395,7 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut out = Vec::new();
                 seed_tree(app);
                 app.focus = Focus::Sessions;
-                press(app, KeyCode::Char('e'), KeyModifiers::NONE, &mut out);
+                out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
                 press(app, KeyCode::Char('a'), KeyModifiers::CONTROL, &mut out);
                 assert!(
                     matches!(app.overlay, Some(Overlay::AgentPresetEditor(_))),
@@ -31056,7 +31441,7 @@ diff --git a/src/c.rs b/src/c.rs
                     let mut out = Vec::new();
                     seed_tree(app);
                     app.focus = Focus::Sessions;
-                    press(app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+                    press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
                     assert!(paste_into_overlay(app, "Fix auth"));
                     press(app, opener, KeyModifiers::NONE, &mut out);
                 };
@@ -31114,7 +31499,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
+            out.extend(run_action(&mut app, crate::keymap::Action::New));
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             drawn_modal_area(&mut app);
             click(&mut app, 0, 0, &mut out);
@@ -31131,7 +31516,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
             press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
             // While typing, list verbs are just characters — q must not
             // close, d must not delete.
@@ -31164,7 +31549,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
             press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             match &app.overlay {
@@ -31191,7 +31576,7 @@ diff --git a/src/c.rs b/src/c.rs
         crate::hosts::with_hosts_path(path, || {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT, &mut out);
+            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
             assert!(matches!(app.overlay, Some(Overlay::Hosts(_))));
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -31200,8 +31585,8 @@ diff --git a/src/c.rs b/src/c.rs
                 text.contains("no hosts yet"),
                 "empty state introduces the feature:\n{text}"
             );
-            // d on the empty list must not panic or write.
-            press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+            // Backspace on the empty list must not panic or write.
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(!app.should_quit, "Enter on an empty list is a no-op");
         });
@@ -31222,15 +31607,11 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         let mut out = Vec::new();
         assert!(app.key_combo.is_none(), "nothing pressed yet");
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("j - Move down"));
-        press(
-            &mut app,
-            KeyCode::Char('d'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        assert_eq!(combo_text(&app).as_deref(), Some("^d - Half page down"));
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        assert_eq!(combo_text(&app).as_deref(), Some("↓ - Move down"));
+        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+        assert_eq!(combo_text(&app).as_deref(), Some("^e - Changes"));
+        app.overlay = None;
         press(&mut app, KeyCode::Char(';'), KeyModifiers::NONE, &mut out);
         assert_eq!(
             combo_text(&app).as_deref(),
@@ -31240,15 +31621,15 @@ diff --git a/src/c.rs b/src/c.rs
 
         // The palette is a modal with a text field: what is typed into it
         // never shows, its navigation keys show bare.
-        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("/ - Fuzzy jump"));
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        assert_eq!(combo_text(&app).as_deref(), Some("^k - Jump to…"));
         assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
         press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Char('B'), KeyModifiers::SHIFT, &mut out);
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert_eq!(
             combo_text(&app).as_deref(),
-            Some("/ - Fuzzy jump"),
+            Some("^k - Jump to…"),
             "typed text leaves the last combo standing"
         );
         press(
@@ -31259,13 +31640,11 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert_eq!(combo_text(&app).as_deref(), Some("^u"));
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("Esc"));
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        assert_eq!(combo_text(&app).as_deref(), Some("Esc - Close"));
         assert!(app.overlay.is_none());
 
         // The hardwired hatch out of any modal names itself.
-        press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("? - Help"));
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
         press(
             &mut app,
             KeyCode::Char('q'),
@@ -31329,8 +31708,8 @@ diff --git a/src/c.rs b/src/c.rs
         };
         apply_config(&mut app, &cfg);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("j - Move down"));
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        assert_eq!(combo_text(&app).as_deref(), Some("↓ - Move down"));
         apply_config(&mut app, &cfg);
         assert!(app.key_combo.is_some(), "a config apply leaves it standing");
     }
@@ -31376,19 +31755,19 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         draw_frame(&mut terminal, &mut app).unwrap();
         let text = buffer_text(&terminal);
         let rows: Vec<&str> = text.lines().collect();
         assert_eq!(
             rows[28].trim_end(),
-            "  j  - Move down",
+            "  ↓  - Move down",
             "the row above the bar, at the far left"
         );
         assert!(rows[29].contains("orion v"), "the bar itself is untouched");
         let cell = &terminal.backend().buffer()[(2, 28)];
-        assert_eq!(cell.symbol(), "j");
+        assert_eq!(cell.symbol(), "↓");
         assert_eq!(cell.bg, app.theme.sel_bg, "the key sits in a keycap");
         assert_eq!(cell.fg, app.theme.accent);
 
@@ -31470,7 +31849,7 @@ diff --git a/src/c.rs b/src/c.rs
                 .unwrap();
             app.sel_session = 0;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             let by_key = match &app.overlay {
                 Some(Overlay::Confirm(c)) => c.clone(),
                 other => panic!("d opens the confirm, got {other:?}"),
@@ -31505,8 +31884,70 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
+    /// A delete of a checkout with unsaved work: the daemon's
+    /// `WorktreeHasChanges` puts the band back and asks; yes resends the
+    /// delete forced.
+    #[test]
+    fn a_changed_worktree_is_kept_until_the_force_is_confirmed() {
+        with_default_config(|| {
+            let mut app = App::new();
+            seed_emptiable_tree(&mut app);
+            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
+            menu_delete(&mut app, "a2");
+            let mut out = Vec::new();
+            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+            let req_id = out
+                .iter()
+                .find_map(|r| match r {
+                    ClientRequest::DeleteWorktree { req_id, id, force: false } if id.0 == "w2" => {
+                        Some(*req_id)
+                    }
+                    _ => None,
+                })
+                .expect("an unforced worktree delete");
+            assert!(!app.tree.worktrees.iter().any(|w| w.id.0 == "w2"));
+
+            let mut out = Vec::new();
+            handle_server_event(
+                &mut app,
+                ServerEvent::WorktreeHasChanges {
+                    req_id,
+                    id: WorktreeId("w2".into()),
+                    files: 3,
+                },
+                &mut out,
+            );
+            assert!(
+                app.tree.worktrees.iter().any(|w| w.id.0 == "w2"),
+                "the band is back"
+            );
+            let dialog = match &app.overlay {
+                Some(Overlay::Confirm(c)) => c.clone(),
+                other => panic!("the force question, got {other:?}"),
+            };
+            assert_eq!(
+                dialog.action,
+                PendingAction::ForceDeleteWorktrees(vec![WorktreeId("w2".into())])
+            );
+            assert!(
+                dialog.message.contains("'feature' has 3 uncommitted or untracked file(s)"),
+                "{}",
+                dialog.message
+            );
+
+            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+            assert!(
+                out.iter().any(|r| matches!(
+                    r,
+                    ClientRequest::DeleteWorktree { id, force: true, .. } if id.0 == "w2"
+                )),
+                "{out:?}"
+            );
+        });
+    }
+
     /// `Enter`/`y` is yes: the card's delete goes out, then the same
-    /// forced worktree delete the band's own `d` sends, and the band drops.
+    /// worktree delete the band's own `d` sends, and the band drops.
     #[test]
     fn yes_deletes_the_card_and_then_the_worktree() {
         with_default_config(|| {
@@ -31522,7 +31963,7 @@ diff --git a/src/c.rs b/src/c.rs
                 .filter_map(|r| match r {
                     ClientRequest::DeleteAgent { id, .. } if id.0 == "a2" => Some("delete-agent"),
                     ClientRequest::DeleteWorktree {
-                        force: true, id, ..
+                        force: false, id, ..
                     } if id.0 == "w2" => Some("delete-worktree"),
                     _ => None,
                 })
