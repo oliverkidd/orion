@@ -39,8 +39,11 @@ These shipped in `f00da21`. Verify on the work laptop; do not rebuild.
 ## Status (2026-10-03, work laptop)
 
 An agent worked through this list on the work laptop. `[x]` means done or
-dropped (the reason is given). Every open box needs Oliver at the keyboard: the
-TUI, a Linear key, or a `/login`.
+dropped (the reason is given). Every open box needs Oliver at the keyboard.
+
+Everything below is committed and pushed (`1a582c7`), installed with `cargo
+install --path crates/orion --locked`, and the old daemon stopped with `orion
+kill`. The next `orion` opens the onboarding wizard (`onboarded` is unset).
 
 Orion keeps its data in `~/Library/Application Support/dev.orion.orion/` on
 macOS (`orion config path`). `~/.orion/` is only the fallback.
@@ -54,8 +57,7 @@ macOS (`orion config path`). `~/.orion/` is only the fallback.
       answers (`gh pr list -R RiploData/riplo-os` works).
 - [x] `orion --version` (0.42.0). `orion add` registered riplo-nightshift and
       riplo-os.
-- [ ] Reload Ghostty config (`⌘⇧,`). Orion's keybind block is already in
-      `~/.config/ghostty/config`.
+- [x] Reload Ghostty config (`⌘⇧,`).
 - [x] Keep secrets out of `config.json`. It holds only the `claude-b` row.
 
 ## 2. Agent hook files
@@ -83,33 +85,45 @@ macOS (`orion config path`). `~/.orion/` is only the fallback.
 
 ## 4. Verify Linear (live API)
 
-- [ ] Make a personal key (Linear → Settings → Security & access → Personal
-      API keys) and put `LINEAR_API_KEY=lin_api_…` in
-      `riplo-os/.env.local`. Neither work repo's code reads that name today.
-      riplo-nightshift's design notes reserve it for the bot's service key,
-      though, so don't put a personal key there.
+- [x] Personal key in `riplo-os/.env.local` only. riplo-nightshift's design
+      notes reserve `LINEAR_API_KEY` for the bot's service key, so it's not
+      there. The key is Oliver's own (oliver@riplo.ai), so Settings → Linear
+      account stays empty.
 - [x] API names: `User.assignedIssues` and
       `attachmentLinkGitHubPR(issueId: String!, url: String!)` both match
-      Linear's published schema (`linear/linear` → `packages/sdk/src/schema.graphql`).
-      A live call still waits on the key.
-- [ ] Auto-link: team branches already carry the id (`feature/riplo-968-…`),
-      and Orion's do too (`riplo-968-<slug>`). With the key, check whether
-      RIPLO-968 already has its PR attached. If it does, Linear's GitHub
-      integration links by itself, so turn **Link PRs to Linear** off.
+      Linear's published schema and the live API: Orion's exact query
+      returned 42 open issues, and introspection shows the mutation's args.
+- [x] Auto-link: Linear's GitHub integration already links PRs by itself
+      (RIPLO-968, -972 and -973 each had theirs, with no human creator).
+      **Link PRs to Linear** is off (`linear_auto_attach: false`).
+      Colleagues should turn it off too.
 - [ ] `⌘L`, mark two issues, launch, confirm the prompt and branch name. Then
       attach from `v` → `⌘L`.
 
 ## 5. Two Claude accounts (Option A prototype)
 
-- [x] `~/bin/claude-b` wrapper (`CLAUDE_CONFIG_DIR=$HOME/.claude-b`).
-- [x] `harnesses.claude-b` in `config.json`. `orion config harnesses` shows it
-      matches the built-in Claude row apart from id, label and program.
-- [ ] `CLAUDE_CONFIG_DIR=~/.claude-b claude`, then `/login` with the second
-      account. `~/.claude-b` starts empty: no CLAUDE.md, skills or settings
-      unless you link them in.
+- [x] Prototype (wrapper + `harnesses.claude-b`) worked, then was replaced
+      by the built-in accounts below; the wrapper is deleted.
+- [x] `CLAUDE_CONFIG_DIR=~/.claude-b claude`, then `/login`. It signed in to
+      the same account as `~/.claude` (the browser approved whichever
+      claude.ai account it was signed in to).
 - [ ] Verify: separate login/usage; status dots and titles; resume after
       daemon restart; what the card does at a usage limit.
-- [ ] If it works, decide later on an account picker. Don't start it unasked.
+- [x] Built and installed: Claude accounts as
+      `claude_accounts` in config.json, each named **Claude (email)**, set
+      up on the onboarding wizard's Claude accounts page and in Settings →
+      Agents → Claude accounts (sign in / out, add with shared setup,
+      remove, the account `⌘N` uses); a "limit reached" card from Claude's
+      `StopFailure` hook; `⇧C` Continue on another account.
+- [x] `config.json` migrated: `claude_enabled: true`,
+      `claude_accounts: [{"id": "claude-b", "config_dir": "~/.claude-b"}]`,
+      `harnesses.grok.enabled: false`, `linear_auto_attach: false`.
+- [ ] Sign `claude-b` in with the second account (wizard's Claude accounts
+      page, or Settings → Agents → Claude accounts → Enter). Both dirs are
+      engineering@riplo.ai today; use a private browser window, or sign out
+      of claude.ai first, or type the other email. `~/.claude-b` doesn't
+      share `~/.claude`'s CLAUDE.md / skills / plugins; to get that, remove
+      `claude-b` and **Add account** instead, which offers to share them.
 
 ## 6. Use the product, then keybinds
 
@@ -119,8 +133,13 @@ macOS (`orion config path`). `~/.orion/` is only the fallback.
 
 ## 7. Later product work (not this laptop's first day)
 
-- [ ] **Skills** picker at launch (design brief 3c).
-- [ ] **Per-commit diff review** (design brief 3b).
+- [x] **Skills**: not a picker (agents find skills themselves). Built a
+      browser instead: `⌘S` lists every skill, `Enter` edits, `^A` new,
+      `^D` to the Trash.
+- [x] **Per-commit diff review**: a commit strip in `⌘E` (All changes /
+      Uncommitted / each commit, `⇧←`/`⇧→`). PR views stay whole-diff.
+      The design briefs lived on a review canvas that never
+      reached this laptop; these follow Oliver's description instead.
 - [ ] **Markdown editing**: parked. No WYSIWYG.
 - [ ] **First release**: `git tag v0.1.0 && git push --tags`. Until then
       `install.sh` / `orion upgrade` fall back to `cargo install --git`.
@@ -144,6 +163,18 @@ macOS (`orion config path`). `~/.orion/` is only the fallback.
 - [x] `chacha20` 0.10.1 → 0.10.2. `cargo audit` isn't installed
       (`cargo install cargo-audit --locked`, then `cargo audit`).
 - [ ] `assets/*.png` still say "nebula". `make shot` when the UI settles.
+- [ ] Follow-ups from the pre-commit `/simplify` pass (not urgent):
+      - `continue_on.rs` holds the daemon's `spawn_gate` through the stop
+        wait, the transcript copy and the respawn, so an attach elsewhere
+        can stall for a few seconds during a move. Hold it only around the
+        kill and the respawn, with a per-agent "moving" mark.
+      - The limit-reached footer (`ui.rs`) loads the config every frame
+        while such a card is selected; load once per frame and share it.
+      - `skills.rs` re-renders the selected SKILL.md every frame; cache it.
+      - `continue_on::find_transcript` repeats `registry.rs`
+        `claude_transcript_exists`; `skills.rs` re-derives Codex's home
+        (move `codex_home` into `orion_core::paths`); `launcher.rs`
+        `home_relative` is a third copy of `skills::tilde`.
 
 ---
 
