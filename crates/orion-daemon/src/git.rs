@@ -64,10 +64,13 @@ pub struct WorktreeEntry {
 }
 
 /// Parse `git worktree list --porcelain`. The first entry is the main
-/// checkout.
+/// checkout. Linked checkouts that are not the user's are left out, so the
+/// grid never adopts them (or links `.env` files into them): ones git marks
+/// prunable (directory gone), and a tool's scratch checkouts in the system
+/// temp dir — fallow's audit caches, say.
 pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
-    let mut entries = parse_worktree_list(&out);
+    let mut entries = without_scratch(parse_worktree_list(&out), &temp_roots());
     for entry in &mut entries {
         if entry.branch != "(detached)" && !entry.branch.starts_with("detached @ ") {
             continue;
@@ -82,7 +85,8 @@ pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
 /// The parse behind `list_worktrees`, kept free of git so it can be pinned
 /// against captured porcelain output: one stanza per checkout, `worktree
 /// <path>` first, then `HEAD <sha>` and either `branch refs/heads/<name>`
-/// or `detached`, separated by blank lines.
+/// or `detached`, separated by blank lines. A stanza with a `prunable` line
+/// is dropped: its directory is gone, so there is nothing to show.
 fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
     /// Close out the stanza in progress, if one is open: a `branch` line
     /// named it, otherwise it is a detached HEAD. The next `worktree` line
@@ -92,11 +96,13 @@ fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
         path: Option<PathBuf>,
         branch: &mut Option<String>,
         head: Option<&str>,
+        prunable: bool,
     ) {
-        if let Some(path) = path {
+        let branch = branch.take();
+        if let (Some(path), false) = (path, prunable) {
             entries.push(WorktreeEntry {
                 path,
-                branch: branch.take().unwrap_or_else(|| detached_label(head)),
+                branch: branch.unwrap_or_else(|| detached_label(head)),
             });
         }
     }
@@ -105,18 +111,53 @@ fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
     let mut path: Option<PathBuf> = None;
     let mut branch: Option<String> = None;
     let mut head: Option<String> = None;
+    let mut prunable = false;
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
-            close(&mut entries, path.take(), &mut branch, head.as_deref());
+            close(
+                &mut entries,
+                path.take(),
+                &mut branch,
+                head.as_deref(),
+                prunable,
+            );
             head = None;
+            prunable = false;
             path = Some(PathBuf::from(p));
         } else if let Some(sha) = line.strip_prefix("HEAD ") {
             head = Some(sha.to_string());
         } else if let Some(b) = line.strip_prefix("branch ") {
             branch = Some(b.trim_start_matches("refs/heads/").to_string());
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            prunable = true;
         }
     }
-    close(&mut entries, path, &mut branch, head.as_deref());
+    close(&mut entries, path, &mut branch, head.as_deref(), prunable);
+    entries
+}
+
+/// The system temp dir as git may print it: as `TMPDIR` spells it and with
+/// symlinks resolved (macOS's `/var/folders/…` is `/private/var/folders/…`),
+/// plus `/tmp` both ways.
+fn temp_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for dir in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        if let Ok(canonical) = dir.canonicalize() {
+            roots.push(canonical);
+        }
+        roots.push(dir);
+    }
+    roots
+}
+
+/// `entries` without the linked checkouts under one of `roots`. A repo whose
+/// main checkout (the first entry) is itself in a temp dir — a test's, a
+/// throwaway clone — keeps every worktree.
+fn without_scratch(mut entries: Vec<WorktreeEntry>, roots: &[PathBuf]) -> Vec<WorktreeEntry> {
+    let in_temp = |path: &Path| roots.iter().any(|root| path.starts_with(root));
+    if entries.first().is_some_and(|main| !in_temp(&main.path)) {
+        entries.retain(|e| !in_temp(&e.path));
+    }
     entries
 }
 
@@ -625,6 +666,74 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch, "b");
         assert!(parse_worktree_list("").is_empty());
+    }
+
+    /// A stanza git marks prunable (its directory is gone) is not a
+    /// checkout anyone can open, so it never becomes a row.
+    #[test]
+    fn parse_worktree_list_drops_prunable_stanzas() {
+        let porcelain = "worktree /repo\n\
+                         HEAD 0123456789abcdef0123456789abcdef01234567\n\
+                         branch refs/heads/main\n\
+                         \n\
+                         worktree /gone\n\
+                         HEAD fedcba9876543210fedcba9876543210fedcba98\n\
+                         detached\n\
+                         prunable gitdir file points to non-existent location\n\
+                         \n\
+                         worktree /repo-worktrees/feat\n\
+                         HEAD abcdef0123456789abcdef0123456789abcdef01\n\
+                         branch refs/heads/feat\n\
+                         \n";
+        let paths: Vec<PathBuf> = parse_worktree_list(porcelain)
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/repo"),
+                PathBuf::from("/repo-worktrees/feat")
+            ]
+        );
+    }
+
+    /// A tool's scratch checkouts in the temp dir (fallow's audit caches)
+    /// are left out of a repo that lives elsewhere, and kept for a repo
+    /// that is itself in a temp dir.
+    #[test]
+    fn without_scratch_drops_temp_worktrees_of_a_repo_outside_temp() {
+        let entry = |path: &str| WorktreeEntry {
+            path: PathBuf::from(path),
+            branch: "b".into(),
+        };
+        let paths = |entries: Vec<WorktreeEntry>| -> Vec<PathBuf> {
+            entries.into_iter().map(|e| e.path).collect()
+        };
+        let roots = [PathBuf::from("/private/var/folders/x/T")];
+
+        let kept = without_scratch(
+            vec![
+                entry("/src/app"),
+                entry("/private/var/folders/x/T/fallow-audit-base-cache-1"),
+                entry("/src/app-worktrees/feat"),
+            ],
+            &roots,
+        );
+        assert_eq!(
+            paths(kept),
+            vec![
+                PathBuf::from("/src/app"),
+                PathBuf::from("/src/app-worktrees/feat")
+            ]
+        );
+
+        let in_temp = vec![
+            entry("/private/var/folders/x/T/repo"),
+            entry("/private/var/folders/x/T/repo-worktrees/feat"),
+        ];
+        assert_eq!(without_scratch(in_temp, &roots).len(), 2);
+        assert!(without_scratch(Vec::new(), &roots).is_empty());
     }
 
     #[test]
