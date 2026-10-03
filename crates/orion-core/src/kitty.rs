@@ -1,8 +1,9 @@
 //! Kitty keyboard protocol negotiation, tmux-style: the child talks to a
-//! virtual terminal (the ring + client-side vt100 parser), so nobody would
-//! ever answer its `CSI ? u` support query. We scan the output stream here,
-//! answer queries ourselves, and track the child's flag stack so attached
-//! clients know how to encode keys for it.
+//! virtual terminal (the DAEMON's ring + client-side vt100 parser, or the
+//! TUI's own parser behind the BUILT-IN EDITOR), so nobody would ever
+//! answer its `CSI ? u` support query. We scan the output stream here,
+//! answer queries ourselves, and track the child's flag stack so whoever
+//! encodes keys for it knows how.
 //!
 //! Also answers DA1 (`CSI c`) — the common detection recipe is "send the
 //! kitty query then DA1, protocol is supported iff the kitty reply arrives
@@ -10,15 +11,18 @@
 //!
 //! And the DSR queries: device status (`CSI 5 n`) is always OK, while a
 //! cursor position report (`CSI 6 n`) needs a screen, so the scanner only
-//! marks where in the chunk it was asked and the pump answers it from
-//! `pty::cursor`. Replies stay in query order either way.
+//! marks where in the chunk it was asked and the caller answers it off its
+//! own screen (the daemon's `pty::cursor`, the editor modal's parser).
+//! Replies stay in query order either way. A child that waits for these
+//! answers before it draws — Microsoft Edit asks for DA1 and a cursor
+//! report at startup — would otherwise hang on a blank screen.
 //!
 //! And bracketed paste (`CSI ? 2004 h` / `l`): a client reads the mode off
 //! its own parser to paste the way a terminal would, but a child sets it
 //! once — claude at startup — and a ring that has wrapped since no longer
 //! holds the set, so the replay has to restore it (`PtySession::snapshot`).
 
-use super::ESC;
+const ESC: u8 = 0x1b;
 
 /// Max nesting the spec suggests implementations may cap the stack at.
 const MAX_STACK: usize = 32;
@@ -212,13 +216,13 @@ impl KittyScanner {
                 }
             }
             // DA1 (CSI c / CSI 0 c): claim VT102 so detection loops terminate.
-            b'c' if params.is_empty() || params == [b'0'] => {
+            b'c' if params.is_empty() || params == *b"0" => {
                 actions.reply_bytes(b"\x1b[?6c");
             }
             // DSR 5 (device status): always OK.
-            b'n' if params == [b'5'] => actions.reply_bytes(b"\x1b[0n"),
+            b'n' if params == *b"5" => actions.reply_bytes(b"\x1b[0n"),
             // DSR 6 (cursor position): the pump reads it off a screen.
-            b'n' if params == [b'6'] => actions.replies.push(Reply::CursorPosition { at: end }),
+            b'n' if params == *b"6" => actions.replies.push(Reply::CursorPosition { at: end }),
             _ => {}
         }
     }

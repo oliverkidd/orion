@@ -1416,30 +1416,69 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 
 /// The footer's key line for the modal: the form's keys while it is up,
 /// the reader's otherwise.
-pub(crate) fn footer_hint(view: &IssuesView) -> &'static str {
+/// The ISSUES MODAL's own keys: one table [`handle_key`] matches and
+/// [`hints`] spells. The letters are the filter's, so the verbs are
+/// chords.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const PROMPT: Key = Key::new(&["enter"], "prompt an agent");
+    pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
+    pub const EDIT: Key = Key::new(&["ctrl+e"], "edit");
+    /// `^Y` is the grid's `y` (reply) as a chord.
+    pub const COMMENT: Key = Key::new(&["ctrl+c", "ctrl+y"], "comment");
+    pub const BROWSER: Key = Key::new(&["ctrl+o"], "browser");
+    pub const REFRESH: Key = Key::new(&["ctrl+r"], "refresh");
+    /// The reading pane, a page at a time.
+    pub const READ: Key = Key::new(&["pgup", "pgdn"], "read").show(2);
+    /// The editor: the next field, and saving the two to GitHub.
+    pub const FIELD: Key = Key::new(&["tab"], "field");
+    pub const SAVE: Key = Key::new(&["enter"], "save to GitHub");
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[
+        PROMPT, PRESET, EDIT, COMMENT, BROWSER, REFRESH, READ, FIELD, SAVE,
+    ];
+}
+
+/// The keys along the modal's bottom edge: the list's, or the editor's
+/// while it is up. Esc clears a typed filter before it closes.
+pub(crate) fn hints(view: &IssuesView) -> Vec<crate::hints::Hint> {
+    use crate::hints::Hint;
     if view.editor.is_some() {
-        "Tab/↑↓: field  ⇧Enter/^J: newline  Enter: save to GitHub  Esc: cancel edit"
-    } else {
-        "type to filter  ↑/↓ ^n/^p: issue  PgUp/PgDn ^d/^u: read  Enter: prompt an agent  ⇧Tab: preset  ^e: edit  ^c/^y: comment  ^o: browser  ^r: refresh  Esc: clear / close"
+        return vec![
+            keys::FIELD.hint(),
+            crate::ui::task_keys::NEWLINE.hint(),
+            keys::SAVE.hint().kept(),
+            Hint::new("Esc", "cancel edit"),
+        ];
     }
+    vec![
+        keys::PROMPT.hint().kept(),
+        keys::PRESET.hint(),
+        keys::EDIT.hint(),
+        keys::COMMENT.hint(),
+        keys::BROWSER.hint(),
+        keys::READ.hint(),
+        keys::REFRESH.hint(),
+        Hint::new(
+            "Esc",
+            if view.query.is_empty() {
+                "close"
+            } else {
+                "clear"
+            },
+        ),
+    ]
 }
 
 // ---- launching ----
 
 /// Where a launch from the modal lands: the project's ROOT WORKTREE —
-/// which every project has whether the panel shows it or not — as every
-/// new session's box does, never the checkout of the card under the
-/// cursor; or, with the `quick_prompt_new_worktree` SETTING on, a fresh
-/// worktree named after the issue. `Ctrl+N` in the box flips between the
-/// two.
-fn launch_target(app: &App, project: &ProjectId, issue: &IssueRef) -> Option<QuickTarget> {
-    if crate::config::Config::load().quick_prompt_new_worktree {
-        let taken = app.project_branches(project);
-        return Some(QuickTarget::NewWorktree {
-            project: project.clone(),
-            branch: crate::branch_name::issue_name(issue.number, &issue.title, &taken),
-        });
-    }
+/// which every project has whether the panel shows it or not — never the
+/// checkout of the card under the cursor. The box's WORKTREE PICKER
+/// (`⌘.` / `^T`) offers a fresh worktree named after the issue as its
+/// first row.
+fn launch_target(app: &App, project: &ProjectId) -> Option<QuickTarget> {
     app.root_worktree(project).map(QuickTarget::Worktree)
 }
 
@@ -1455,7 +1494,7 @@ fn launch_for_selected(app: &mut App) -> Option<QuickLaunch> {
         return None;
     };
     let issue = issue.launch_ref();
-    let Some(target) = launch_target(app, &project, &issue) else {
+    let Some(target) = launch_target(app, &project) else {
         app.flash = Some("issues: the project has no worktree to launch into".into());
         return None;
     };
@@ -1490,7 +1529,7 @@ fn open_preset_for_selected(app: &mut App) {
 fn launch_for_row(app: &mut App) -> Option<QuickLaunch> {
     let issue = app.selected_worktree_issue()?.launch_ref();
     let project = app.selected_project()?.id.clone();
-    let Some(target) = launch_target(app, &project, &issue) else {
+    let Some(target) = launch_target(app, &project) else {
         app.flash = Some("issues: the project has no worktree to launch into".into());
         return None;
     };
@@ -1567,16 +1606,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // The launches are the QUICK PROMPT box's own keys: Enter prompts,
         // Shift+Tab picks a preset (a shifted Tab under the kitty protocol
         // is the same key).
-        KeyCode::Enter => open_prompt_for_selected(app),
-        KeyCode::BackTab => open_preset_for_selected(app),
-        KeyCode::Tab if shift => open_preset_for_selected(app),
+        _ if keys::PROMPT.matches(&key) => open_prompt_for_selected(app),
+        _ if keys::PRESET.matches(&key) => open_preset_for_selected(app),
         // The AGENT PRESETS list's edit chord.
-        KeyCode::Char('e') if ctrl => open_editor(app),
-        // `Ctrl+y` is the grid's `y` (reply) as a chord, the letters being
-        // the filter's.
-        KeyCode::Char('c') | KeyCode::Char('y') if ctrl => open_comment_for_selected(app),
-        KeyCode::Char('o') if ctrl => open_in_browser(app, out),
-        KeyCode::Char('r') if ctrl => refresh(app),
+        _ if keys::EDIT.matches(&key) => open_editor(app),
+        _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
+        _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
+        _ if keys::REFRESH.matches(&key) => refresh(app),
         // Everything else feeds the always-live fuzzy filter, which edits
         // like a terminal line (see text_input).
         _ => {
@@ -1825,13 +1861,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &IssuesView, th: Theme, b
         count,
         if inflight { ", refreshing…" } else { "" }
     );
-    let block = panel_block(&title, list_focused, th).title_bottom(
-        Line::from(Span::styled(
-            " Enter: prompt  ⇧Tab: preset  ^e: edit  ^c: comment  ^o: browser  ^r: refresh ",
-            Style::default().fg(th.dim),
-        ))
-        .left_aligned(),
-    );
+    let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
     // The always-live filter on the list's first line, the rows under it.
@@ -1896,7 +1926,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &IssuesView, th: Theme, b
 
     // ---- right: the editor, while it is up ----
     if let Some(editor) = &view.editor {
-        let (title_area, body_area, body_view) = draw_editor(f, body_a, editor, th);
+        let (title_area, body_area, body_view, foot_w) = draw_editor(f, body_a, editor, th);
+        if !backdrop {
+            crate::hints::draw_on_border(f, area, &hints(view), foot_w, th);
+        }
         if let Some(Overlay::Issues(v)) = &mut app.overlay {
             v.area = area;
             v.list_area = rows_area;
@@ -1962,6 +1995,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &IssuesView, th: Theme, b
     };
     let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
     f.render_widget(Paragraph::new(shown), body_inner);
+    // The modal's keys along its bottom edge — none while a box over it
+    // has the keys: its own border says them.
+    if !backdrop {
+        let reserve = if max_scroll > 0 { 12 } else { 0 };
+        crate::hints::draw_on_border(f, area, &hints(view), reserve, th);
+    }
 
     // Write-back (draw works on a clone): the rects the mouse hit-tests,
     // the pane's size for paging, and the clamped cursor and scroll.
@@ -1983,31 +2022,30 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &IssuesView, th: Theme, b
 }
 
 /// The reading pane as the form: the title on the first row, the
-/// description in a box under it, the frame's foot saying what Enter will
-/// do — or why the last one did nothing, or that GitHub is being asked.
-/// Returns the title row and the description box for click-to-focus, and
-/// the view the description was drawn with while it has the caret.
+/// description in a box under it, the frame's foot saying why the last
+/// save did nothing, or that GitHub is being asked — its keys are the
+/// modal's, along its bottom edge ([`hints`]). Returns the title row and
+/// the description box for click-to-focus, the view the description was
+/// drawn with while it has the caret, and the width the foot took at the
+/// frame's right end, for the keys to stay clear of.
 fn draw_editor(
     f: &mut Frame,
     area: Rect,
     editor: &IssueEditor,
     th: Theme,
-) -> (Rect, Rect, Option<TextView>) {
+) -> (Rect, Rect, Option<TextView>, u16) {
     let title = format!("Edit issue #{}", editor.number);
-    let (foot, style) = match (&editor.notice, editor.saving) {
-        (Some(notice), _) => (format!(" {notice} "), Style::default().fg(th.err)),
-        (None, true) => (" saving… ".to_string(), Style::default().fg(th.warn)),
-        (None, false) if area.width >= 60 => (
-            " Tab: field  ⇧Enter: newline  Enter: save  Esc: cancel ".to_string(),
-            Style::default().fg(th.dim),
-        ),
-        (None, false) => (
-            " Enter: save  Esc: cancel ".to_string(),
-            Style::default().fg(th.dim),
-        ),
+    let foot = match (&editor.notice, editor.saving) {
+        (Some(notice), _) => Some((format!(" {notice} "), Style::default().fg(th.err))),
+        (None, true) => Some((" saving… ".to_string(), Style::default().fg(th.warn))),
+        (None, false) => None,
     };
-    let block = panel_block(&title, true, th)
-        .title_bottom(Line::from(Span::styled(foot, style)).left_aligned());
+    let mut block = panel_block(&title, true, th);
+    let mut foot_w = 0;
+    if let Some((foot, style)) = foot {
+        foot_w = foot.chars().count() as u16 + 2;
+        block = block.title_bottom(Line::from(Span::styled(foot, style)).right_aligned());
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -2073,7 +2111,7 @@ fn draw_editor(
             );
         }
     }
-    (title_area, body_area, body_view)
+    (title_area, body_area, body_view, foot_w)
 }
 
 /// Test-only accessors: nothing in the app reads these any more.
@@ -3176,9 +3214,11 @@ mod tests {
             issue(13, "Login page"),
         ]);
         app.pending_issue_detail = None;
-        assert!(footer_hint(issues_view(&app)).starts_with("type to filter"));
+        let esc = |app: &App| hints(issues_view(app)).last().map(|h| h.does.clone());
+        assert_eq!(esc(&app).as_deref(), Some("close"));
         type_str(&mut app, "login");
         assert_eq!(issues_view(&app).query.as_str(), "login");
+        assert_eq!(esc(&app).as_deref(), Some("clear"), "Esc clears first");
         let shot = screen(&mut app, 120, 40);
         assert!(shot.contains("(2/3)"), "{shot}");
         assert!(
@@ -3502,7 +3542,7 @@ mod tests {
         assert!(form.contains(" Description "), "{form}");
         assert!(form.contains("Login bounces back to /."), "{form}");
         assert!(form.contains("#15 Fix login"), "the list stays: {form}");
-        assert!(form.contains("Enter: save"), "{form}");
+        assert!(form.contains("Enter save to GitHub"), "{form}");
         let e = editor(&app).unwrap();
         assert!(
             e.title_area.width > 0 && e.body_area.height > 0,

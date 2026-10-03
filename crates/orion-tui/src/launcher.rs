@@ -5,9 +5,9 @@
 //! rule — with the session under the cursor live in the PANE beside them
 //! ([`split`]). Walking the cards walks the pane, so stepping through the
 //! grid reads each session's progress in turn. The QUICK PROMPT launches
-//! from here: `^P` picks the PROJECT with type-ahead over every one this
-//! machine knows, `^O` the MODEL, `Tab` the harness, `^N` flips between a
-//! fresh worktree and the checkout under the cursor.
+//! from here: `⌘P` picks the PROJECT with type-ahead over every one this
+//! machine knows, `⌘.` the checkout in it — a fresh worktree its first
+//! row — `Tab` the harness, `⌘/` the MODEL and `⌘Y` steps the effort.
 //!
 //! Nothing here is a second copy of the tree: the list's cursor IS the
 //! app's selection (`App::selected_session`), moved through the same
@@ -165,7 +165,12 @@ fn row_of(
 /// see `event_loop::sweep_target`), else the project's OPEN PRS list's
 /// row on the same head branch, which the selected project has before
 /// its own lookup lands.
-fn row_pr(app: &App, worktree: &WorktreeId, project: &ProjectId, branch: &str) -> Option<RowPr> {
+pub(crate) fn row_pr(
+    app: &App,
+    worktree: &WorktreeId,
+    project: &ProjectId,
+    branch: &str,
+) -> Option<RowPr> {
     if let Some(Some(pr)) = app.pull_requests.get(worktree) {
         return Some(RowPr {
             number: pr.number,
@@ -334,6 +339,42 @@ pub fn cursor(app: &App, bands: &[Band]) -> Option<CardRef> {
     let band = band_cursor(app, bands)?;
     let card = card_cursor(app, &bands[band])?;
     Some(CardRef { band, card })
+}
+
+/// The PANE's own keys while it holds them unlocked — reading what it
+/// shows rather than typing into it (`event_loop::launcher::focus_pane`):
+/// one table its key handler (`event_loop::launcher::pane_key`) matches
+/// and the FOOTER spells, so the two can never disagree.
+pub mod pane_keys {
+    use crate::hints::Key;
+
+    /// A line of the page, or of the session's scrollback.
+    pub const LINE: Key = Key::new(&["up", "down"], "scroll").show(2);
+    /// A pane's height.
+    pub const PAGE: Key = Key::new(&["pgup", "pgdn"], "page").show(2);
+    /// The top and the bottom.
+    pub const ENDS: Key = Key::new(&["home", "end"], "top/end").show(2);
+    /// Back to the card the pane reads.
+    pub const BACK: Key = Key::new(&["esc"], "back to the grid");
+    /// In a LOCKED PANE, the agent's own Esc: the plain key leaves the
+    /// pane, so the shifted one goes down the PTY as a bare Esc.
+    pub const AGENT_ESC: Key = Key::new(&["shift+esc"], "Esc to the agent");
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn every_pane_key_parses() {
+            for key in [
+                super::LINE,
+                super::PAGE,
+                super::ENDS,
+                super::BACK,
+                super::AGENT_ESC,
+            ] {
+                assert!(key.parses(), "{:?}", key.chords);
+            }
+        }
+    }
 }
 
 // ---- the GRID ----
@@ -1413,26 +1454,20 @@ pub fn continue_does(targets: &[(String, String)]) -> Option<String> {
 }
 
 /// The line a card stopped on a usage limit carries under Claude's words:
-/// [`continue_does`] under the key the live keymap gives it (`⇧C:
-/// continue on Claude B`), or the right-click menu's way to it when the
-/// action has no key.
+/// [`continue_does`] under the key the live keymap gives it (`⇧C continue
+/// on Claude B`), or the right-click menu's way to it when the action has
+/// no key.
 pub fn continue_hint(
     keymap: &crate::keymap::Keymap,
     targets: &[(String, String)],
 ) -> Option<String> {
     let does = continue_does(targets)?;
-    let keyed = crate::hints::line(
-        keymap,
-        &[crate::hints::Hint::Act(
-            crate::keymap::Action::ContinueOn,
-            &does,
-        )],
-    );
-    Some(if keyed.is_empty() {
-        format!("right-click: {does}")
-    } else {
-        keyed
-    })
+    Some(
+        match crate::hints::act(keymap, crate::keymap::Action::ContinueOn, &does) {
+            Some(hint) => format!("{} {}", hint.key, hint.does),
+            None => format!("right-click: {does}"),
+        },
+    )
 }
 
 // ---- the PROJECT DROPDOWN's list ----
@@ -1636,9 +1671,9 @@ pub fn checkout_for(app: &App, project: &ProjectId) -> Option<WorktreeId> {
 }
 
 /// Where a launch from the box lands for `project`: a fresh worktree off
-/// the project's default base (`new_worktree` — the
-/// `quick_prompt_new_worktree` SETTING, or `^N` in the box), or an
-/// existing checkout ([`launch_checkout`]): the worktree under the grid's
+/// the project's default base (`new_worktree` — a box already aimed at
+/// one, re-aimed with the PROJECT PICKER), or an existing checkout
+/// ([`launch_checkout`]): the worktree under the grid's
 /// cursor, else the project's ROOT BRANCH. A project with no usable
 /// checkout — still being cut, or none at all — gets a fresh worktree
 /// either way.
@@ -1736,8 +1771,8 @@ pub fn fresh_worktree(
 /// Where `launch` lands with its NEW WORKTREE toggle flipped: a fresh
 /// worktree of the project it is aimed at, or — flipping off — an existing
 /// checkout of it, the one under the grid's cursor else the ROOT BRANCH
-/// ([`launch_checkout`]). The box's `^N` and the AGENT PRESETS list's
-/// `Tab` both flip through here. A PR SESSION's checkout is the DAEMON's
+/// ([`launch_checkout`]). The AGENT PRESETS list's `Tab` flips through
+/// here. A PR SESSION's checkout is the DAEMON's
 /// to pick, so it has nothing to flip; the error says why for the footer.
 pub fn flipped_target(
     app: &App,
@@ -1766,7 +1801,7 @@ pub fn is_background(app: &App, project: &ProjectId) -> bool {
     app.launcher_active() && app.selected_project().is_some_and(|p| &p.id != project)
 }
 
-/// The PROJECT's display name, for the box's target row.
+/// The PROJECT's display name, for the box's header.
 pub fn project_name(app: &App, project: &ProjectId) -> Option<String> {
     app.tree
         .projects
@@ -1775,22 +1810,30 @@ pub fn project_name(app: &App, project: &ProjectId) -> Option<String> {
         .map(|p| p.name.clone())
 }
 
-/// One of the four details on the view's box: where the session runs —
-/// the project and the checkout in it — what runs there, on which model.
-/// Each is drawn with the chord that changes it beside it
-/// (`ui::launcher_view::detail_line`), and each is a button — a click on
-/// one opens the very picker its chord does, through the one
+/// One of the fields in the view's box header: where the session runs —
+/// the project and the checkout in it — what runs there, on which model
+/// and effort, and the AGENT PRESET wrapping the task when one is on.
+/// Each is drawn with the key that changes it beside it
+/// (`ui::launcher_view::box_header`), and each is a button — a click on
+/// one opens the very picker its key does, through the one
 /// `event_loop::launcher::open_box_field` both ways in call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxField {
-    /// `^P` — the PROJECT the launch is aimed at.
+    /// The box's own `⌘P` / `^P` — the PROJECT the launch is aimed at.
     Project,
-    /// `^T` — the checkout in it the launch runs in: the WORKTREE PICKER.
+    /// Select worktree (`⌘.` / `^T`) — the checkout in it the launch runs
+    /// in, or a fresh one: the WORKTREE PICKER.
     Worktree,
-    /// `Tab` — the harness that runs there.
+    /// The box's own `Tab` — the harness that runs there.
     Agent,
-    /// `^O` — that harness's MODEL, and its effort.
+    /// Select model (`⌘/` / `^/`) — that harness's MODEL list.
     Model,
+    /// Cycle effort (`⌘Y` / `^Y`) steps it; a click opens the model's
+    /// EFFORT list. Not drawn for a harness with no effort.
+    Effort,
+    /// The box's own `⇧Tab` — the AGENT PRESET on the launch, drawn only
+    /// while one is.
+    Preset,
 }
 
 /// One project the PROJECT PICKER offers.
@@ -2313,12 +2356,12 @@ mod tests {
         assert_eq!(split(short, None), (short, None));
     }
 
-    /// With `^N` off the box lands in the checkout under the grid's
-    /// cursor — the band it is on, or the worktree it is inside — and,
-    /// with the aim let go, on the project's ROOT BRANCH, whatever
-    /// checkout the project was last left on; another project's box
-    /// (`^P`) lands on that project's root, not this grid's cursor. With
-    /// `^N` on it cuts a fresh worktree.
+    /// The box lands in the checkout under the grid's cursor — the band
+    /// it is on, or the worktree it is inside — and, with the aim let go,
+    /// on the project's ROOT BRANCH, whatever checkout the project was
+    /// last left on; another project's box (`⌘P`) lands on that project's
+    /// root, not this grid's cursor. A box already aimed at a fresh
+    /// worktree keeps cutting one.
     #[test]
     fn a_launch_lands_in_the_cursors_checkout_or_on_the_root_branch() {
         let mut app = app();

@@ -166,6 +166,10 @@ pub enum Action {
     PaneTabs,
     /// Open the Nth PROJECT TAB (1-based) in the LAUNCHER VIEW's header.
     SelectProjectTab(u8),
+    /// `⌘G`: HOME — the splash with orion's animation, over the grid;
+    /// Esc, Enter or any key that opens a project comes back to the grid
+    /// where it was.
+    Home,
     Hosts,
     Settings,
     /// The settings overlay on the Agents tab's CLAUDE ACCOUNTS: who each
@@ -182,10 +186,12 @@ pub enum Action {
     /// `⌘⇧P`: the COMMAND PALETTE — every action by name, with its key.
     CommandPalette,
     /// `⌘O`: the OPEN MENU — what is under the cursor, outside orion: the
-    /// repo, pull request or issue on GitHub, the open command, Cursor,
-    /// the outside terminal.
+    /// repo, pull request or issue on GitHub, the open command, the OPEN
+    /// IN APP editor, the outside terminal.
     OpenOutside,
-    /// The checkout under the cursor in Cursor (the OPEN MENU's row).
+    /// The checkout under the cursor in the OPEN IN APP editor (the OPEN
+    /// MENU's row). Its id keeps the name it shipped with, `open_in_cursor`,
+    /// so a key bound to it stays bound.
     OpenInCursor,
     Quit,
 }
@@ -335,7 +341,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::CloseProjectTab,
         id: "close_project_tab",
         label: "Close project tab",
-        hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — ⌘K opens it again",
+        hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — {palette} opens it again",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["x"],
@@ -344,7 +350,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ProjectDropdown,
         id: "project_dropdown",
         label: "Switch project",
-        hint: "Drop the list of every project under the + in the header — type to narrow it, Enter or a click opens one. ⌘K reaches every project too",
+        hint: "Drop the list of every project under the + in the header — type to narrow it, Enter or a click opens one. {palette} reaches every project too",
         group: "NAVIGATE",
         scope: Scope::Global,
         // No key of its own: the header's `+` is a button, and ⌘K's jump
@@ -356,7 +362,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::AddProject,
         id: "add_project",
         label: "Open a folder as a project",
-        hint: "Open a folder as a project in orion, from anywhere — ⌘K's last row",
+        hint: "Open a folder as a project in orion, from anywhere — the last row of {palette}",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -419,7 +425,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::CommentPullRequest,
         id: "comment_pull_request",
         label: "Comment on pull request",
-        hint: "Open a box to type a comment and post it through gh on the card's pull request, or, with the pane reading a pull request (a ⌘K jump lands on one), on that one",
+        hint: "Open a box to type a comment and post it through gh on the card's pull request, or, with the pane reading a pull request (a {palette} jump lands on one), on that one",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -474,7 +480,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NewTerminal,
         id: "new_terminal",
         label: "New shell terminal",
-        hint: "Spawn a plain shell inside orion, in the selected worktree's directory; ⌘O opens one outside it",
+        hint: "Spawn a plain shell inside orion, in the selected worktree's directory; {open_outside} opens one outside it",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["t"],
@@ -556,7 +562,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::QuickPrompt,
         id: "quick_prompt",
         label: "New agent",
-        hint: "Type a task; Enter starts an agent on it (Tab picks the harness; ⌘/ the model; ⌘. the worktree; Settings → Agents sets the default)",
+        hint: "Type a task; Enter starts an agent on it (Tab picks the harness; {select_model} the model; {cycle_effort} the effort; {select_launch_worktree} the worktree; Settings → Agents sets the default)",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["cmd+i", "cmd+n", "ctrl+n"],
@@ -574,19 +580,22 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::CycleEffort,
         id: "cycle_effort",
         label: "Cycle effort",
-        hint: "Step the current model's effort / reasoning variant (high, low, …); updates the new-agent box and the Agents default",
+        hint: "Step the new-agent box's effort / reasoning variant (default, low, high, …), shown in its header; with no box up, the Agents default",
         group: "SESSIONS",
         scope: Scope::Global,
-        // `cmd+?` is how some terminals spell ⌘⇧/ (Shift+/ is ?).
-        // `ctrl+y` is the Fine twin a stock terminal can actually deliver
-        // (`^⇧/` needs the kitty protocol; `^?` has no control byte).
-        defaults: &["shift+cmd+/", "cmd+?", "ctrl+y"],
+        // `⌘Y` first, with `^Y` its twin as every entry point has one:
+        // macOS keeps ⌘⇧/ for every app's Help menu, so in Ghostty that
+        // press opens Help and never reaches orion. ⌘⇧/ stays bound behind
+        // them — `cmd+?`, the one spelling every way a terminal sends it
+        // folds to ([`KeyChord::from_event`]) — for a terminal or a Mac
+        // that lets it through.
+        defaults: &["cmd+y", "ctrl+y", "cmd+?"],
     },
     ActionSpec {
         action: Action::SelectLaunchWorktree,
         id: "select_launch_worktree",
         label: "Select worktree",
-        hint: "Pick which worktree a new agent runs in (opens the box first if it is not up); type to narrow, or choose + new worktree. Cursor's workspace picker; the box's ^T is the same action",
+        hint: "Pick which worktree a new agent runs in (opens the box first if it is not up); type to narrow, or choose + new worktree. Cursor's workspace picker",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["cmd+.", "ctrl+t"],
@@ -652,7 +661,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Skills,
         id: "skills",
         label: "Skills",
-        hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^d moves it to the Trash",
+        hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^D moves it to the Trash",
         group: "FILES",
         scope: Scope::Global,
         defaults: &["cmd+s", "ctrl+s"],
@@ -662,7 +671,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::UnlockTerminal,
         id: "unlock_terminal",
         label: "Unlock terminal input",
-        hint: "Leave the locked pane and go back to the card (Esc leaves; ⇧Esc sends Esc to the agent; ^q always works)",
+        hint: "Leave the locked pane and go back to the card (Esc leaves; ⇧Esc sends Esc to the agent; ^Q always works)",
         group: "TERMINAL",
         scope: Scope::Terminal,
         defaults: &["esc", "ctrl+q", "ctrl+]", "ctrl+shift+h"],
@@ -672,7 +681,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ToggleLauncherPane,
         id: "toggle_launcher_pane",
         label: "Toggle pane",
-        hint: "Fold the pane under the cards away — which also unselects the card it was reading — or bring it back. ⌘J works from inside the pane too",
+        hint: "Fold the pane under the cards away — which also unselects the card it was reading — or bring it back. {toggle_launcher_pane} works from inside the pane too",
         group: "GENERAL",
         scope: Scope::Global,
         // ⌘J, as in Cursor, reaches orion from inside the pane as well —
@@ -685,7 +694,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ToggleFullScreen,
         id: "toggle_full_screen",
         label: "Full-screen session",
-        hint: "Give the session in the pane the whole screen, or bring it back down beside the cards — from inside the pane too, where it is never forwarded to the agent. From the cards it full-screens the one under the cursor. Esc and ^q also bring a full-screen session back down",
+        hint: "Give the session in the pane the whole screen, or bring it back down beside the cards — from inside the pane too, where it is never forwarded to the agent. From the cards it full-screens the one under the cursor. Esc and ^Q also bring a full-screen session back down",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["cmd+f", "ctrl+f"],
@@ -698,6 +707,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["`"],
+    },
+    ActionSpec {
+        action: Action::Home,
+        id: "home",
+        label: "Home",
+        hint: "The home screen: orion's animation and the ways into a project. Esc or Enter goes back to the grid where you were; a click on the footer's orion version does the same as this key",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+g", "ctrl+g"],
     },
     ActionSpec {
         action: Action::Hosts,
@@ -759,7 +777,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenOutside,
         id: "open_outside",
         label: "Open outside orion",
-        hint: "A menu of what the cursor is on, outside orion: the repo, pull request or issue on GitHub, the checkout's open command, Cursor, a terminal",
+        hint: "A menu of what the cursor is on, outside orion: the repo, pull request or issue on GitHub, the checkout's open command, your editor app, a terminal",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["cmd+o", "ctrl+o"],
@@ -767,8 +785,8 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::OpenInCursor,
         id: "open_in_cursor",
-        label: "Open checkout in Cursor",
-        hint: "Open the checkout under the cursor in Cursor (⌘O on a file opens the file)",
+        label: "Open checkout in app",
+        hint: "Open the checkout under the cursor in the Open in app editor — Cursor, VS Code, … ({open_outside} on a file opens the file)",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],
@@ -820,11 +838,15 @@ impl KeyChord {
     /// press compares equal however the emulator spelled it:
     ///
     /// * `Char('J')` and `shift + Char('j')` both become `shift+j`;
-    /// * shift is dropped from punctuation and digits, where the glyph
-    ///   already carries it (`?` is `?`, never `shift+?`);
+    /// * a shifted symbol is its glyph, without the shift: `?` is `?`,
+    ///   never `shift+?` — and `shift + /`, which the kitty protocol
+    ///   sends for ⌘⇧/ where a legacy terminal sends `?`, is `?` too
+    ///   (the US layout's pairs, [`SHIFTED`]), so `cmd+?`, `⌘⇧/` and
+    ///   `⌘?` all name the one chord whichever spelling arrives;
     /// * `BackTab` becomes `shift+tab`;
     /// * `ctrl+5` — the legacy encoding's name for byte 0x1D — becomes
-    ///   `ctrl+]`, which is what the user actually pressed.
+    ///   `ctrl+]`, which is what the user actually pressed, and `ctrl+7`
+    ///   (byte 0x1F) becomes `ctrl+/`.
     pub fn from_event(key: &KeyEvent) -> Self {
         let mut mods = key.modifiers & KEPT_MODS;
         let mut code = key.code;
@@ -835,12 +857,16 @@ impl KeyChord {
                         mods |= KeyModifiers::SHIFT;
                     }
                     code = KeyCode::Char(c.to_lowercase().next().unwrap_or(c));
-                } else if c == '/'
-                    && (mods.contains(KeyModifiers::SUPER) || mods.contains(KeyModifiers::CONTROL))
-                {
-                    // Keep SHIFT so ⌘/ (model) and ⌘⇧/ (effort) stay
-                    // distinct; without this, both collapse to cmd+/.
                 } else {
+                    // ⌘⇧/ arrives as `/` with shift (the kitty protocol's
+                    // base key) or as `?` with or without it (a legacy
+                    // terminal, or kitty's alternate keys): one chord,
+                    // `cmd+?`, distinct from ⌘/ either way.
+                    if mods.contains(KeyModifiers::SHIFT) {
+                        if let Some(&(_, shifted)) = SHIFTED.iter().find(|(base, _)| *base == c) {
+                            code = KeyCode::Char(shifted);
+                        }
+                    }
                     mods.remove(KeyModifiers::SHIFT);
                 }
             }
@@ -852,6 +878,11 @@ impl KeyChord {
         }
         if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('5') {
             code = KeyCode::Char(']');
+        }
+        // `^/` sends byte 0x1F in the legacy encoding, which crossterm
+        // names `ctrl+7`; the kitty protocol sends the `/` itself.
+        if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('7') {
+            code = KeyCode::Char('/');
         }
         Self { code, mods }
     }
@@ -905,7 +936,11 @@ impl KeyChord {
         out
     }
 
-    /// Compact on-screen spelling: `^q`, `⇧Tab`, `⌥p`, `⌘k`, `↓`.
+    /// The on-screen spelling — THE key label: every hint, footer, help
+    /// row and settings row prints a chord through here, so one key reads
+    /// the same everywhere. `^Q`, `⇧Tab`, `⌥P`, `⌘K`, `⌘?`, `↓`: a
+    /// letter under a modifier is its capital, as macOS's menus spell it,
+    /// and a bare letter stays the letter you type.
     pub fn display(&self) -> String {
         let mut out = String::new();
         if self.mods.contains(KeyModifiers::CONTROL) {
@@ -924,8 +959,12 @@ impl KeyChord {
                 out.push('⇧');
                 out.extend(c.to_uppercase());
             }
-            // macOS spells ⌘ chords with the capital: ⌘K, not ⌘k.
-            KeyCode::Char(c) if self.mods.contains(KeyModifiers::SUPER) && c.is_alphabetic() => {
+            // macOS spells chords with the capital: ⌘K and ^K, not ⌘k.
+            KeyCode::Char(c)
+                if self.mods.intersects(
+                    KeyModifiers::SUPER | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ) && c.is_alphabetic() =>
+            {
                 out.extend(c.to_uppercase());
             }
             _ => {
@@ -943,6 +982,43 @@ impl fmt::Display for KeyChord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.display())
     }
+}
+
+/// The US layout's shifted symbols, `(base, shifted)`: what
+/// [`KeyChord::from_event`] folds a shifted base key onto, so `shift + /`
+/// and `?` are one chord.
+const SHIFTED: &[(char, char)] = &[
+    ('/', '?'),
+    ('1', '!'),
+    ('2', '@'),
+    ('3', '#'),
+    ('4', '$'),
+    ('5', '%'),
+    ('6', '^'),
+    ('7', '&'),
+    ('8', '*'),
+    ('9', '('),
+    ('0', ')'),
+    ('-', '_'),
+    ('=', '+'),
+    ('[', '{'),
+    (']', '}'),
+    ('\\', '|'),
+    (';', ':'),
+    ('\'', '"'),
+    (',', '<'),
+    ('.', '>'),
+    ('`', '~'),
+];
+
+/// The base key a shifted symbol is typed with on a US layout — `/` for
+/// `?` — for another program's spelling of the chord (Ghostty's
+/// `super+shift+/`).
+pub fn unshifted(c: char) -> Option<char> {
+    SHIFTED
+        .iter()
+        .find(|(_, shifted)| *shifted == c)
+        .map(|(base, _)| *base)
 }
 
 /// The named keys, each with its config spelling, its on-screen glyph, and
@@ -1094,6 +1170,13 @@ pub fn cmd_shown() -> bool {
     CMD_SHOWN.load(Ordering::Relaxed)
 }
 
+/// The chords of `all` this terminal can press ([`shown_side`] under
+/// [`cmd_shown`]) — a modal's own key table spelled the way the keymap's
+/// actions are.
+pub fn shown_side_of(all: &[KeyChord]) -> Vec<KeyChord> {
+    shown_side(all, cmd_shown())
+}
+
 /// [`Keymap::shown_chords`]'s pick: the ⌘ chords of `all` when `cmd`,
 /// the rest otherwise — or all of them, when that side has none.
 fn shown_side(all: &[KeyChord], cmd: bool) -> Vec<KeyChord> {
@@ -1109,19 +1192,23 @@ fn shown_side(all: &[KeyChord], cmd: bool) -> Vec<KeyChord> {
     }
 }
 
-/// The ⌘ chords Ghostty binds outright by default (Ghostty 1.3), in
-/// orion's spelling: they never reach a program running inside it. Its
-/// `performable` bindings — ⌘C copy, ⌘K clear, ⌘J / ⌘E on a selection,
-/// ⌘⇧F / ⌘G on a search — pass the key on when there is nothing to do, so
-/// they are not here; nor are the three [`crate::ghostty_config::UNBINDS`]
-/// orion releases.
-const GHOSTTY_KEEPS: &[&str] = &[
+/// The ⌘ chords Ghostty binds by default (`ghostty +list-keybinds
+/// --default`, Ghostty 1.3.1), in orion's spelling: none of them reaches a
+/// program running inside it until the GHOSTTY KEYBINDS block releases it
+/// ([`crate::ghostty_config`]), and the few the block never takes
+/// ([`crate::ghostty_config::NEVER_RELEASED`]) never do.
+const GHOSTTY_BINDS: &[&str] = &[
+    "cmd+<",
+    "cmd+,",
+    "cmd+c",
     "cmd+v",
     "cmd+=",
     "cmd++",
     "cmd+-",
     "cmd+0",
-    "cmd+shift+j",
+    "ctrl+shift+cmd+j",
+    "shift+cmd+j",
+    "alt+shift+cmd+j",
     "cmd+1",
     "cmd+2",
     "cmd+3",
@@ -1133,7 +1220,9 @@ const GHOSTTY_KEEPS: &[&str] = &[
     "cmd+9",
     "cmd+enter",
     "shift+cmd+enter",
+    "shift+cmd+p",
     "cmd+q",
+    "cmd+k",
     "cmd+a",
     "shift+cmd+t",
     "cmd+z",
@@ -1142,25 +1231,43 @@ const GHOSTTY_KEEPS: &[&str] = &[
     "cmd+end",
     "cmd+pgup",
     "cmd+pgdn",
+    "cmd+j",
     "shift+cmd+up",
     "shift+cmd+down",
-    "cmd+up",
-    "cmd+down",
-    "cmd+left",
-    "cmd+right",
-    "cmd+backspace",
+    "cmd+n",
     "cmd+w",
-    "shift+cmd+w",
     "alt+cmd+w",
+    "shift+cmd+w",
+    "alt+shift+cmd+w",
     "cmd+t",
-    "cmd+[",
-    "cmd+]",
+    "cmd+{",
+    "cmd+}",
     "cmd+d",
     "shift+cmd+d",
+    "cmd+[",
+    "cmd+]",
+    "alt+cmd+up",
+    "alt+cmd+down",
+    "alt+cmd+left",
+    "alt+cmd+right",
+    "ctrl+cmd+up",
+    "ctrl+cmd+down",
+    "ctrl+cmd+left",
+    "ctrl+cmd+right",
+    "ctrl+cmd+=",
+    "cmd+up",
+    "cmd+down",
     "cmd+f",
+    "cmd+e",
+    "shift+cmd+f",
+    "cmd+g",
+    "shift+cmd+g",
     "alt+cmd+i",
     "ctrl+cmd+f",
     "shift+cmd+v",
+    "cmd+right",
+    "cmd+left",
+    "cmd+backspace",
 ];
 
 /// Whether the host terminal is likely to swallow `chord` before orion
@@ -1175,25 +1282,24 @@ pub fn host_warning(chord: &KeyChord) -> (Reach, Option<&'static str>) {
     let alt = m.contains(KeyModifiers::ALT);
 
     if m.contains(KeyModifiers::SUPER) {
-        let listed = |specs: &[&str]| {
-            specs
-                .iter()
-                .filter_map(|spec| KeyChord::parse(&spec.replace("super+", "cmd+")))
-                .any(|listed| listed == *chord)
-        };
-        if listed(crate::ghostty_config::UNBINDS) {
-            if ghostty_unbound() {
-                return (Reach::Fine, None);
-            }
-            return (
-                Reach::Risky,
-                Some("Ghostty gives this ⌘ chord to orion only with Settings → General → Ghostty keybinds on; Terminal.app never sends ⌘"),
-            );
-        }
-        if listed(GHOSTTY_KEEPS) {
+        let ghostty_binds = GHOSTTY_BINDS
+            .iter()
+            .filter_map(|spec| KeyChord::parse(spec))
+            .any(|listed| listed == *chord);
+        let released = crate::ghostty_config::releases(chord);
+        if ghostty_binds && !released {
             return (
                 Reach::Blocked,
-                Some("Ghostty keeps this ⌘ chord for itself (ghostty +list-keybinds --default)"),
+                Some("Ghostty keeps this ⌘ chord for itself — orion never takes copy, paste, quit or its tab and window keys"),
+            );
+        }
+        if released && ghostty_unbound() {
+            return (Reach::Fine, None);
+        }
+        if ghostty_binds {
+            return (
+                Reach::Risky,
+                Some("Ghostty gives this ⌘ chord to orion only with Settings → General → Ghostty keybinds on (then reload Ghostty, ⌘⇧,); Terminal.app never sends ⌘"),
             );
         }
         return (
@@ -1497,7 +1603,13 @@ impl Keymap {
 }
 
 fn parse_list(specs: &[&str]) -> Vec<KeyChord> {
-    specs.iter().filter_map(|s| KeyChord::parse(s)).collect()
+    let mut chords = Vec::new();
+    for chord in specs.iter().filter_map(|s| KeyChord::parse(s)) {
+        if !chords.contains(&chord) {
+            chords.push(chord);
+        }
+    }
+    chords
 }
 
 #[cfg(test)]
@@ -1514,15 +1626,17 @@ mod tests {
         let shift = KeyChord::parse("shift+cmd+/").unwrap();
         assert_ne!(slash, shift);
         assert_eq!(slash.spec(), "cmd+/");
-        assert_eq!(shift.spec(), "shift+cmd+/");
+        assert_eq!(shift.spec(), "cmd+?", "⌘⇧/ is ⌘? on a US layout");
+        assert_eq!(KeyChord::parse("cmd+?").unwrap(), shift);
         assert_eq!(slash.display(), "⌘/");
-        assert_eq!(shift.display(), "⌘⇧/");
+        assert_eq!(shift.display(), "⌘?");
         let map = Keymap::default();
         let at = |spec: &str| map.lookup(Scope::Global, &KeyChord::parse(spec).unwrap());
         assert_eq!(at("cmd+/"), Some(Action::SelectModel));
         assert_eq!(at("ctrl+/"), Some(Action::SelectModel));
         assert_eq!(at("shift+cmd+/"), Some(Action::CycleEffort));
         assert_eq!(at("cmd+?"), Some(Action::CycleEffort));
+        assert_eq!(at("cmd+y"), Some(Action::CycleEffort));
         assert_eq!(at("ctrl+y"), Some(Action::CycleEffort));
         assert_eq!(at("cmd+."), Some(Action::SelectLaunchWorktree));
         assert_eq!(at("ctrl+t"), Some(Action::SelectLaunchWorktree));
@@ -1538,6 +1652,102 @@ mod tests {
             map.lookup(Scope::Global, &from_qmark),
             Some(Action::CycleEffort)
         );
+    }
+
+    /// macOS keeps ⌘⇧/ for every app's Help menu, so in Ghostty it opens
+    /// Help and never reaches orion: Cycle effort leads with a chord
+    /// neither macOS nor Ghostty takes — `⌘Y`, its `^Y` twin beside it, as
+    /// every entry point has — and keeps ⌘⇧/ bound behind them.
+    #[test]
+    fn cycle_effort_leads_with_a_chord_the_mac_lets_through() {
+        let map = Keymap::default();
+        let chords = map.chords(Action::CycleEffort);
+        let cmd = shown_side(chords, true);
+        let twin = shown_side(chords, false);
+        assert_eq!(cmd.first().map(KeyChord::display).as_deref(), Some("⌘Y"));
+        assert_eq!(twin.first().map(KeyChord::display).as_deref(), Some("^Y"));
+        let first = cmd[0];
+        assert!(
+            !GHOSTTY_BINDS
+                .iter()
+                .filter_map(|spec| KeyChord::parse(spec))
+                .any(|bound| bound == first),
+            "Ghostty binds nothing on ⌘Y"
+        );
+        assert!(crate::ghostty_config::releases(&first));
+        assert!(chords.contains(&KeyChord::parse("shift+cmd+/").unwrap()));
+    }
+
+    /// ⌘⇧/ reaches orion spelled three ways — Ghostty's kitty protocol
+    /// sends the base key `/` with SHIFT, its alternate keys (and a
+    /// legacy terminal) the glyph `?` with or without SHIFT — and every
+    /// one of them is the CycleEffort chord, whichever spelling the
+    /// keymap holds: the default, or a capture of any one of them.
+    #[test]
+    fn every_spelling_of_shift_cmd_slash_is_one_chord() {
+        let spellings = [
+            ev(
+                KeyCode::Char('?'),
+                KeyModifiers::SHIFT | KeyModifiers::SUPER,
+            ),
+            ev(
+                KeyCode::Char('/'),
+                KeyModifiers::SHIFT | KeyModifiers::SUPER,
+            ),
+            ev(KeyCode::Char('?'), KeyModifiers::SUPER),
+        ];
+        let map = Keymap::default();
+        for chord in spellings {
+            assert_eq!(chord.spec(), "cmd+?");
+            assert_eq!(chord.display(), "⌘?");
+            assert_eq!(map.lookup(Scope::Global, &chord), Some(Action::CycleEffort));
+            // A rebind captured from any one spelling answers the others.
+            let mut rebound = Keymap::default();
+            rebound.bind(index_of(Action::CycleEffort).unwrap(), chord, false);
+            for other in spellings {
+                assert_eq!(
+                    rebound.lookup(Scope::Global, &other),
+                    Some(Action::CycleEffort)
+                );
+            }
+        }
+        // ⌘/ stays Select model however the shift-less key arrives.
+        assert_eq!(
+            map.lookup(Scope::Global, &ev(KeyCode::Char('/'), KeyModifiers::SUPER)),
+            Some(Action::SelectModel)
+        );
+        // The same fold for the rest of the row: ⌘⇧1 is ⌘!, never ⌘1.
+        assert_eq!(
+            ev(
+                KeyCode::Char('1'),
+                KeyModifiers::SHIFT | KeyModifiers::SUPER
+            ),
+            KeyChord::parse("cmd+!").unwrap()
+        );
+        assert_ne!(
+            ev(
+                KeyCode::Char('1'),
+                KeyModifiers::SHIFT | KeyModifiers::SUPER
+            ),
+            KeyChord::parse("cmd+1").unwrap()
+        );
+        assert_eq!(unshifted('?'), Some('/'));
+        assert_eq!(unshifted('a'), None);
+    }
+
+    /// One label for a chord everywhere: a letter under any modifier is
+    /// its capital, a bare letter the letter typed.
+    #[test]
+    fn chords_display_in_one_spelling() {
+        let show = |spec: &str| KeyChord::parse(spec).unwrap().display();
+        assert_eq!(show("ctrl+q"), "^Q");
+        assert_eq!(show("cmd+k"), "⌘K");
+        assert_eq!(show("ctrl+shift+p"), "^⇧P");
+        assert_eq!(show("alt+p"), "⌥P");
+        assert_eq!(show("shift+a"), "⇧A");
+        assert_eq!(show("t"), "t");
+        assert_eq!(show("backspace"), "⌫");
+        assert_eq!(show("ctrl+/"), "^/");
     }
 
     #[test]
@@ -1631,6 +1841,20 @@ mod tests {
         );
     }
 
+    /// `^/` in Terminal.app or tmux is byte 0x1F, which crossterm names
+    /// `ctrl+7`: it is still Select model's twin, as the box's header
+    /// says it is.
+    #[test]
+    fn legacy_ctrl_7_is_ctrl_slash() {
+        let legacy = ev(KeyCode::Char('7'), KeyModifiers::CONTROL);
+        assert_eq!(legacy, KeyChord::parse("ctrl+/").unwrap());
+        assert_eq!(legacy.display(), "^/");
+        assert_eq!(
+            Keymap::default().lookup(Scope::Global, &legacy),
+            Some(Action::SelectModel)
+        );
+    }
+
     #[test]
     fn parses_the_literal_plus_key() {
         let plus = KeyChord::parse("+").unwrap();
@@ -1678,7 +1902,7 @@ mod tests {
         let spell = |chords: Vec<KeyChord>| {
             chords.iter().map(KeyChord::display).collect::<Vec<_>>().join(" ")
         };
-        assert_eq!(spell(shown_side(finder, false)), "^p");
+        assert_eq!(spell(shown_side(finder, false)), "^P");
         assert_eq!(spell(shown_side(finder, true)), "⌘P");
         let help = [KeyChord::parse("cmd+k").unwrap()];
         assert_eq!(spell(shown_side(&help, false)), "⌘K", "⌘ alone still shows");
@@ -1762,20 +1986,28 @@ mod tests {
 
     #[test]
     fn cmd_chords_are_reported_by_who_keeps_them() {
-        let (reach, why) = host_warning(&KeyChord::parse("cmd+]").unwrap());
-        assert_eq!(reach, Reach::Blocked, "Ghostty's own");
-        assert!(why.unwrap().contains('⌘'));
-        for freed in ["cmd+shift+p", "cmd+n", "cmd+,"] {
+        for kept in ["cmd+c", "cmd+w", "cmd+1", "cmd+q"] {
+            let (reach, why) = host_warning(&KeyChord::parse(kept).unwrap());
+            assert_eq!(reach, Reach::Blocked, "{kept} is Ghostty's for good");
+            assert!(why.unwrap().contains('⌘'));
+        }
+        // Every other chord Ghostty binds is one the block can release —
+        // a rebind onto ⌘] included.
+        for freed in ["cmd+shift+p", "cmd+n", "cmd+,", "cmd+k", "cmd+]"] {
             let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
             assert_eq!(reach, Reach::Risky, "{freed}");
             assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
         }
         set_ghostty_unbound(true);
         let (reach, why) = host_warning(&KeyChord::parse("cmd+shift+p").unwrap());
+        let (rebound, _) = host_warning(&KeyChord::parse("cmd+]").unwrap());
+        let (copy, _) = host_warning(&KeyChord::parse("cmd+c").unwrap());
         set_ghostty_unbound(false);
         assert_eq!(reach, Reach::Fine, "unbinds written: no ⚠");
         assert!(why.is_none());
-        for passes in ["cmd+k", "cmd+p", "cmd+e", "cmd+j", "cmd+c"] {
+        assert_eq!(rebound, Reach::Fine);
+        assert_eq!(copy, Reach::Blocked);
+        for passes in ["cmd+p", "cmd+u"] {
             let (reach, _) = host_warning(&KeyChord::parse(passes).unwrap());
             assert_eq!(reach, Reach::Risky, "{passes}");
         }

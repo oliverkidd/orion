@@ -280,6 +280,21 @@ pub(crate) enum Command {
         #[arg(long)]
         no_sync_config: bool,
     },
+    /// Check what orion needs on this machine.
+    ///
+    /// One line each for git, gh and its sign-in, the File editor and what
+    /// really opens, the Open in app editor, Ghostty and orion's keybind
+    /// block in its config, the CLI of every agent turned on, and this
+    /// project's LINEAR_API_KEY (where it was found, never the key) — with
+    /// the command that fixes whatever is missing. It never installs
+    /// anything. Exits non-zero only when something orion can't do without
+    /// is missing: git, or an editor to open files in.
+    #[command(after_help = DOCTOR_EXAMPLES)]
+    Doctor {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install the latest published orion over this one.
     ///
     /// Runs the install script for the newest release. Upgrading with a daemon
@@ -369,6 +384,11 @@ Examples:
   orion tunnel user@server /srv/app  start in a directory there
   orion tunnel user@server --port 9000
                                       pick the local end of the tunnel";
+
+const DOCTOR_EXAMPLES: &str = "\
+Examples:
+  orion doctor                    check this machine, from the repo you work in
+  orion doctor --json             the same, for a script";
 
 const UPGRADE_EXAMPLES: &str = "\
 Examples:

@@ -1,0 +1,9 @@
+diff --git a/main.rs b/main.rs
+index 3333333..4444444 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    println!("hello");
++    println!("hello, a much longer line that should wrap when the pane is narrow because the product should never let code run off the screen edge");
+ }

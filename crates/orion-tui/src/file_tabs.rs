@@ -7,10 +7,9 @@
 //! from the strip does it close — asked for on 2026-09-04, so a file can be
 //! read, edited and left without ever losing the set of tabs by accident.
 //! A markdown tab is previewed as the rendered page (the MARKDOWN module);
-//! `m` flips it to the source and back, and Enter on it floats the editor
-//! over the tabs with the page beside it (MARKDOWN SPLIT) rather than
-//! embedding it. The FILE FINDER and a path ⌥clicked in the pane open a
-//! `.md` straight into that split editor.
+//! `m` flips it to the source and back, and Enter edits it embedded like
+//! any other tab. The FILE FINDER and a path ⌥clicked in the pane open a
+//! `.md` as its MARKDOWN PAGE instead (`markdown_view`).
 
 use std::path::{Path, PathBuf};
 
@@ -300,6 +299,53 @@ pub(crate) fn open(app: &mut App, root: PathBuf, paths: Vec<PathBuf>) {
 /// and ↑ off the top steps back onto the strip; Enter opens the editor;
 /// Esc backs out one level, so from the strip it closes. `m` on a
 /// markdown tab flips between the rendered page and the source.
+/// The FILE TABS' keys: one table [`handle_key`] matches and [`hints`]
+/// spells.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const SWITCH: Key = Key::new(&["tab", "right", "l"], "switch");
+    pub const INTO: Key = Key::new(&["down", "j"], "preview");
+    pub const SCROLL: Key = Key::new(&["up", "down", "k", "j"], "scroll").show(2);
+    pub const HALF: Key = Key::new(&["ctrl+d", "ctrl+u"], "half page").show(2);
+    pub const EDIT: Key = Key::new(&["enter"], "edit");
+    pub const SOURCE: Key = Key::new(&["m"], "source");
+    pub const BACK: Key = Key::new(&["esc", "q"], "close");
+}
+
+/// The keys on the FILE TABS' bottom border: the strip's, the preview's,
+/// or — with the file open in the editor — the way back to the tabs.
+pub(crate) fn hints(view: &FileTabsView, editing: bool) -> Vec<crate::hints::Hint> {
+    let editor = crate::ui::editor_name(&view.editor);
+    if editing {
+        return vec![crate::ui::editor_keys::QUIT
+            .hint_as(format!(
+                "back to the tabs (kills {editor}; :q keeps the file)"
+            ))
+            .kept()];
+    }
+    let source = view
+        .markdown
+        .then(|| keys::SOURCE.hint_as(if view.pretty { "source" } else { "rendered" }));
+    let mut hints = if view.on_tabs {
+        vec![
+            keys::SWITCH.hint(),
+            crate::hints::Hint::new("1-9", "jump"),
+            keys::INTO.hint(),
+        ]
+    } else {
+        vec![keys::SCROLL.hint(), keys::HALF.hint()]
+    };
+    hints.push(keys::EDIT.hint_as(format!("edit in {editor}")).kept());
+    hints.extend(source);
+    hints.push(keys::BACK.hint_as(if view.on_tabs {
+        "close"
+    } else {
+        "back to the tabs"
+    }));
+    hints
+}
+
 enum Cmd {
     Close,
     ToStrip,
@@ -316,7 +362,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     let Some(Overlay::FileTabs(view)) = &app.overlay else {
         return;
     };
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let (on_tabs, tab, tabs) = (view.on_tabs, view.tab as i64, view.tabs.len());
     let half = (view.view_height / 2).max(1) as i32;
@@ -324,11 +369,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     let at_top = view.scroll == 0;
 
     let cmd = match key.code {
-        KeyCode::Esc | KeyCode::Char('q') if on_tabs => Cmd::Close,
-        KeyCode::Esc | KeyCode::Char('q') => Cmd::ToStrip,
+        _ if keys::BACK.matches(&key) && on_tabs => Cmd::Close,
+        _ if keys::BACK.matches(&key) => Cmd::ToStrip,
         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => Cmd::Tab(tab - 1),
         KeyCode::Tab if shift => Cmd::Tab(tab - 1),
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Cmd::Tab(tab + 1),
+        _ if keys::SWITCH.matches(&key) => Cmd::Tab(tab + 1),
         // 1-9 jump straight to a tab; out-of-range digits are ignored.
         KeyCode::Char(c @ '1'..='9') => {
             let want = c as i64 - '1' as i64;
@@ -338,17 +383,20 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                 return;
             }
         }
-        KeyCode::Enter => Cmd::Edit,
-        KeyCode::Char('m') if view.markdown => Cmd::Pretty,
+        _ if keys::EDIT.matches(&key) => Cmd::Edit,
+        _ if keys::SOURCE.matches(&key) && view.markdown => Cmd::Pretty,
         // ---- the strip has the cursor ----
-        KeyCode::Down | KeyCode::Char('j') if on_tabs => Cmd::IntoPreview,
+        _ if keys::INTO.matches(&key) && on_tabs => Cmd::IntoPreview,
         KeyCode::Up | KeyCode::Char('k') if on_tabs => return,
         // ---- the preview has it ----
         KeyCode::Down | KeyCode::Char('j') => Cmd::Scroll(1),
         KeyCode::Up | KeyCode::Char('k') if at_top => Cmd::ToStrip,
         KeyCode::Up | KeyCode::Char('k') => Cmd::Scroll(-1),
-        KeyCode::Char('d') if ctrl => Cmd::Scroll(half),
-        KeyCode::Char('u') if ctrl => Cmd::Scroll(-half),
+        _ if keys::HALF.matches(&key) => Cmd::Scroll(if key.code == KeyCode::Char('d') {
+            half
+        } else {
+            -half
+        }),
         KeyCode::PageDown => Cmd::Scroll(page),
         KeyCode::PageUp => Cmd::Scroll(-page),
         KeyCode::Home | KeyCode::Char('g') => Cmd::Top,
@@ -417,9 +465,10 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
     app.dirty = true;
 }
 
-/// Enter: the editor opens on the focused file, embedded where the preview
-/// was — the modal and its tabs stay put underneath, and quitting the
-/// editor (or Ctrl+Q) lands back on the strip with the file re-read.
+/// Enter: the editor opens on the focused file — a markdown one too —
+/// embedded where the preview was: the modal and its tabs stay put
+/// underneath, and quitting the editor (or its force close) lands back on
+/// the strip with the file re-read.
 fn open_in_editor(app: &mut App) {
     let Some(Overlay::FileTabs(view)) = &app.overlay else {
         return;
@@ -669,7 +718,7 @@ mod tests {
         assert!(page.contains("• one item"), "{page}");
         assert!(page.contains("k │ v"), "the table has its columns: {page}");
         assert!(
-            page.contains("m: source"),
+            page.contains("m source"),
             "the hint names the toggle: {page}"
         );
         let view = view_in(&app);
@@ -686,7 +735,7 @@ mod tests {
             source.contains(" 1 # Alpha title"),
             "the source, numbered: {source}"
         );
-        assert!(source.contains("m: rendered"), "{source}");
+        assert!(source.contains("m rendered"), "{source}");
         assert_eq!(view_in(&app).preview_line_count, 7);
     }
 

@@ -2,7 +2,6 @@
 //! and records hit regions for mouse interaction.
 
 use crate::app::{App, ConnState, Focus, HitTarget, Overlay, PaletteTarget, PromptDialog};
-use crate::git_diff::{classify_diff_line, DiffLineKind};
 use crate::keymap::Action;
 use crate::text_input::{TextInput, TextView};
 use crate::theme::Theme;
@@ -13,7 +12,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+mod diff_view;
+pub(crate) mod footer;
 mod launcher_view;
+
+pub(crate) use diff_view::diff_keys;
+use footer::draw_footer;
 
 /// Outer size of the editor modal, as (width, height) percent of the frame.
 /// Shared with the event loop's pre-draw PTY size guess.
@@ -36,141 +40,88 @@ const TASK_PROMPT_SIZE: (u16, u16) = (80, 14);
 /// session already running.
 const FOLLOW_UP_PROMPT_SIZE: (u16, u16) = (76, 9);
 
-/// The key hints on a task box's bottom border, widest that fits inside
-/// `width` (the block's, so two columns go to its edges). The QUICK PROMPT
-/// has three more keys to advertise than the cloud and preset boxes —
-/// `Tab` retargets the harness, `⇧Tab` picks an AGENT PRESET, `^N` flips
-/// the launch into a fresh worktree — and a hint wider than the border is
-/// silently chopped, hence the tiers and the test that measures them.
-/// Its line break is advertised as `⇧Enter`, the chord a web form uses;
-/// `^J` still breaks the line, unadvertised, for the terminal that flattens
-/// a shifted Enter (tmux, Terminal.app).
-fn task_prompt_hint(kind: &crate::app::PromptKind, width: u16) -> &'static str {
-    if matches!(kind, crate::app::PromptKind::QuickPrompt(_)) {
-        return if width >= 79 {
-            " Enter launch · ⇧Enter newline · Tab agent · ⇧Tab preset · ^N worktree · Esc "
-        } else if width >= 65 {
-            " Enter launch · ⇧Enter newline · Tab agent · ⇧Tab preset · Esc "
-        } else if width >= 57 {
-            " ↵ launch · ⇧↵ newline · Tab agent · ⇧Tab preset · Esc "
-        } else if width >= 44 {
-            " ↵ launch · Tab agent · ⇧Tab preset · Esc "
-        } else if width >= 22 {
-            " Esc · ⇧↵ · Tab · ↵ "
-        } else {
-            " Esc · ⇧↵ · ↵ "
-        };
-    }
-    // The FOLLOW-UP MODAL sends a turn to a session already running: no
-    // picker, and Enter sends rather than launching anything.
-    if matches!(kind, crate::app::PromptKind::FollowUp { .. }) {
-        return if width >= 55 {
-            " Enter: send · Shift+Enter/^J: newline · Esc: cancel "
-        } else if width >= 40 {
-            " Enter send · ^J newline · Esc cancel "
-        } else {
-            " Esc · ^J · Enter "
-        };
-    }
-    // A comment posts rather than launches, and Esc goes back to the
-    // ISSUES MODAL rather than cancelling into the panels.
-    if matches!(kind, crate::app::PromptKind::IssueComment { .. }) {
-        return if width >= 53 {
-            " Enter: post · Shift+Enter/^J: newline · Esc: back "
-        } else if width >= 38 {
-            " Enter post · ^J newline · Esc back "
-        } else {
-            " Esc · ^J · Enter "
-        };
-    }
-    // The COMMENT BOX posts rather than launches, and has no picker.
-    if matches!(kind, crate::app::PromptKind::PrComment { .. }) {
-        return if width >= 55 {
-            " Enter: post · Shift+Enter/^J: newline · Esc: cancel "
-        } else if width >= 40 {
-            " Enter post · ^J newline · Esc cancel "
-        } else {
-            " Esc · ^J · Enter "
-        };
-    }
-    if width >= 57 {
-        " Enter: launch · Shift+Enter/^J: newline · Esc: cancel "
-    } else if width >= 42 {
-        // Not 36: at 36–41 columns this line was two characters wider than
-        // the border and lost its tail.
-        " Enter launch · ^J newline · Esc cancel "
-    } else {
-        " Esc · ^J · Enter "
+/// A multi-row task box's keys — the QUICK PROMPT (the New session box)
+/// and its siblings: the follow-up, the comment boxes, a preset's or a
+/// cloud launch's task. One table the box's key arm
+/// (`event_loop::handle_overlay_key`) matches and [`task_hints`] and the
+/// QUICK PROMPT's header (`launcher_view::box_header`) spell; the line
+/// break is the line editor's own (`TextInput::takes_newline`), listed so
+/// the border can name it. The header's other keys — the worktree, the
+/// model, the effort — are the keymap's (Select worktree, Select model,
+/// Cycle effort), which work over the box and its pickers alike.
+pub(crate) mod task_keys {
+    use crate::hints::Key;
+
+    pub const SUBMIT: Key = Key::new(&["enter"], "launch");
+    /// `⇧Enter` where the kitty protocol carries it, `^J` everywhere.
+    pub const NEWLINE: Key = Key::new(&["shift+enter", "alt+enter", "ctrl+j"], "newline");
+    /// The QUICK PROMPT's PROJECT PICKER: `⌘P` where ⌘ arrives, `^P`
+    /// everywhere.
+    pub const PROJECT: Key = Key::new(&["cmd+p", "ctrl+p"], "project");
+    /// The QUICK PROMPT's harness for this one launch.
+    pub const AGENT: Key = Key::new(&["tab"], "agent");
+    /// One of the saved AGENT PRESETS.
+    pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
+    pub const CANCEL: Key = Key::new(&["esc"], "cancel");
+
+    #[cfg(test)]
+    #[test]
+    fn every_task_key_parses_and_newline_is_the_editors() {
+        for key in [SUBMIT, NEWLINE, PROJECT, AGENT, PRESET, CANCEL] {
+            assert!(key.parses(), "{:?}", key.chords);
+        }
+        let input = crate::text_input::TextInput::multiline();
+        for chord in NEWLINE.chords() {
+            let event = crossterm::event::KeyEvent::new(chord.code, chord.mods);
+            assert!(input.takes_newline(&event), "{chord} breaks the line");
+        }
     }
 }
 
-/// The QUICK PROMPT's target row, the first inside its frame. Off — the
-/// launch lands in the selected checkout — it is a quiet `worktree: feat`
-/// with the `[ ] new worktree ^N` toggle pinned right. On, it is the
-/// loudest row in the box: a filled NEW WORKTREE chip, the branch Enter
-/// will cut beside it in bold, and the toggle ticked, all in the green
-/// the frame has turned. A PR SESSION's box names the pull request and
-/// its head branch instead — the checkout the DAEMON reuses or cuts —
-/// with no toggle, there being nothing to flip. The right half is dropped
-/// whole before the left is cut short.
-fn quick_target_line(
-    app: &App,
-    launch: &crate::quick_prompt::QuickLaunch,
-    width: u16,
-    th: Theme,
-) -> Line<'static> {
-    let branch = match &launch.pr {
-        Some(pr) => pr.head.clone(),
-        None => crate::quick_prompt::target_branch(app, launch)
-            .unwrap_or_else(|| "(worktree gone)".into()),
+/// The keys on a task box's bottom border. The QUICK PROMPT's project,
+/// worktree, harness, model and effort keys are not here: each sits in
+/// its header beside the thing it changes, and a second copy along the
+/// border was most of what made the box read as a wall of chords. `⇧Tab`
+/// is, until a preset is on — then the header's `preset` field carries
+/// it. Its Esc goes back to the modal it was opened over, where it was
+/// opened over one.
+pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hint> {
+    use crate::app::PromptKind;
+    use task_keys::{CANCEL, NEWLINE, PRESET, SUBMIT};
+    let (submit, back) = match kind {
+        PromptKind::QuickPrompt(launch) => {
+            use crate::quick_prompt::ModalUnder;
+            let back = match &launch.under {
+                Some(ModalUnder::Issues(_)) => "back to issues",
+                Some(ModalUnder::PullRequests(_)) => "back to pull requests",
+                Some(ModalUnder::Linear(_)) => "back to Linear",
+                None => "cancel",
+            };
+            let mut hints = vec![SUBMIT.hint().kept(), NEWLINE.hint()];
+            if launch.preset.is_none() {
+                hints.push(PRESET.hint());
+            }
+            hints.push(CANCEL.hint_as(back));
+            return hints;
+        }
+        // The FOLLOW-UP MODAL sends a turn to a session already running.
+        PromptKind::FollowUp { .. } => ("send", "cancel"),
+        // A comment posts; Esc goes back to the ISSUES MODAL it stood in
+        // for.
+        PromptKind::IssueComment { .. } => ("post", "back"),
+        PromptKind::PrComment { .. } => ("post", "cancel"),
+        // A setting over lines (the Linear task template) saves, and Esc
+        // goes back to the overlay.
+        PromptKind::SettingText { .. } => ("save", "back"),
+        _ => ("launch", "cancel"),
     };
-    let (left, right) = if let Some(pr) = &launch.pr {
-        let dim = Style::default().fg(th.dim);
-        (
-            vec![
-                Span::styled(format!("PR #{} · worktree: ", pr.number), dim),
-                Span::styled(branch, Style::default().fg(th.muted)),
-            ],
-            vec![Span::styled("reused or cut on Enter ", dim)],
-        )
-    } else if launch.is_new_worktree() {
-        let chip = Style::default()
-            .fg(th.on_accent)
-            .bg(th.ok)
-            .add_modifier(Modifier::BOLD);
-        let on = Style::default().fg(th.ok).add_modifier(Modifier::BOLD);
-        (
-            vec![
-                Span::styled(" NEW WORKTREE ", chip),
-                Span::styled(format!(" {branch}"), on),
-            ],
-            vec![
-                Span::styled("[✓] new worktree", on),
-                Span::styled(" ^N ", Style::default().fg(th.dim)),
-            ],
-        )
-    } else {
-        let dim = Style::default().fg(th.dim);
-        (
-            vec![
-                Span::styled("worktree: ", dim),
-                Span::styled(branch, Style::default().fg(th.muted)),
-            ],
-            vec![
-                Span::styled("[ ] new worktree", dim),
-                Span::styled(" ^N ", dim),
-            ],
-        )
-    };
-    let left_w: usize = left.iter().map(|s| s.width()).sum();
-    let right_w: usize = right.iter().map(|s| s.width()).sum();
-    let mut spans = left;
-    if usize::from(width) > left_w + right_w {
-        spans.push(Span::raw(" ".repeat(usize::from(width) - left_w - right_w)));
-        spans.extend(right);
-    }
-    Line::from(spans)
+    vec![
+        SUBMIT.hint_as(submit).kept(),
+        NEWLINE.hint(),
+        CANCEL.hint_as(back),
+    ]
 }
+
 /// Width of a one-line prompt, and of the wider one carrying a directory
 /// listing under its input.
 const PROMPT_W: u16 = 56;
@@ -181,7 +132,8 @@ const CONFIRM_MIN_W: u16 = 52;
 const HELP_W: u16 = 92;
 /// The help overlay's key column: chords past it are dropped whole.
 const HELP_KEY_W: usize = 14;
-const SETTINGS_W: u16 = 84;
+/// Wide enough for the whole tab strip, Linear and Hotkeys included.
+const SETTINGS_W: u16 = 90;
 const MEMORY_W: u16 = 74;
 const HOSTS_W: u16 = 64;
 /// Layout floor for a split modal's right pane. Deliberately below
@@ -226,6 +178,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
         }
         draw_footer(f, app, footer);
         draw_overlay(f, app);
+        draw_page(f, app);
         draw_vim(f, app);
         return;
     }
@@ -266,6 +219,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
         }
         draw_footer(f, app, footer);
         draw_overlay(f, app);
+        draw_page(f, app);
         draw_vim(f, app);
         return;
     }
@@ -276,6 +230,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
     crate::splash::draw_splash(f, app, body);
     draw_footer(f, app, footer);
     draw_overlay(f, app);
+    draw_page(f, app);
     draw_vim(f, app);
 }
 
@@ -326,107 +281,160 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
                 .fg(th.on_accent)
                 .bg(th.accent)
                 .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Line::from(Span::styled(
-            format!(" {} ", editor_modal_hint(vim)),
-            Style::default().fg(th.dim),
-        )));
+        ));
+    let block = crate::hints::modal_block(block, &editor_hints(vim), area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let layout = vim
-        .markdown
-        .as_ref()
-        .map_or(crate::markdown_split::Layout::EditorOnly, |side| {
-            side.layout(inner.width)
-        });
-    let (editor, page) = crate::markdown_split::split(inner, layout);
-    if editor.width > 0 {
-        f.render_widget(
-            tui_term::widget::PseudoTerminal::new(vim.parser.screen()),
-            editor,
-        );
-        app.host_cursor = pty_cursor_cell(vim.parser.screen(), editor);
+    f.render_widget(
+        tui_term::widget::PseudoTerminal::new(vim.parser.screen()),
+        inner,
+    );
+    app.host_cursor = pty_cursor_cell(vim.parser.screen(), inner);
+    // Write-back: the post-draw sync resizes the PTY to the drawn rect.
+    if let Some(vim) = &mut app.vim {
+        vim.area = inner;
     }
-    let Some(vim) = &mut app.vim else {
+}
+
+/// The editor modal's keys: the editor's own save and quit, which it
+/// reads itself, and the ones orion takes before the editor sees them
+/// (`event_loop::handle_vim_key`) — the force close and ⌘O.
+pub(crate) mod editor_keys {
+    use crate::hints::Key;
+
+    pub const SAVE: Key = Key::new(&["ctrl+s"], "save");
+    pub const QUIT: Key = Key::new(&["ctrl+q"], "quit");
+    pub const NEXT_MATCH: Key = Key::new(&["ctrl+d"], "next match");
+    pub const MENU: Key = Key::new(&["f10"], "menu");
+    pub const PALETTE: Key = Key::new(&["ctrl+p"], "palette");
+    /// `is_editor_hatch`: always the modal's, whatever the editor.
+    pub const FORCE_CLOSE: Key = Key::new(&["ctrl+\\"], "force close");
+    /// `^Q` force-closes too, for an editor that has no `^Q` of its own.
+    pub const QUIT_FORCE: Key = Key::new(&["ctrl+q"], "force close");
+}
+
+/// The editor modal's keys while it runs an installer (`install`): the
+/// stop while it runs, and the close once it has exited — kept back until
+/// then so its last lines can be read.
+pub(crate) mod install_keys {
+    use crate::hints::Key;
+
+    pub const STOP: Key = Key::new(&["ctrl+q"], "stop");
+    pub const CLOSE: Key = Key::new(&["enter", "esc", "q", "ctrl+q"], "close");
+}
+
+/// The editor modal's bottom-border keys, for the editor it runs: its
+/// own save and quit, the force close, and ⌘O.
+pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::Hint> {
+    use crate::editor::Kind;
+    use crate::hints::Hint;
+    use editor_keys::*;
+    if vim.install.is_some() {
+        return match vim.finished {
+            None => vec![install_keys::STOP.hint().kept()],
+            Some(_) => vec![install_keys::CLOSE.hint().kept()],
+        };
+    }
+    // A `claude auth` run closes itself when it is done; there is no file
+    // to hand to an app.
+    if vim.account_auth {
+        return vec![
+            Hint::new("browser", "finishes it"),
+            QUIT.hint_as("close").kept(),
+        ];
+    }
+    let mut hints = match vim.kind {
+        Kind::Micro => vec![SAVE.hint(), QUIT.hint().kept(), NEXT_MATCH.hint()],
+        Kind::Edit => vec![SAVE.hint(), QUIT.hint().kept(), MENU.hint()],
+        Kind::Fresh => vec![SAVE.hint(), QUIT.hint().kept(), PALETTE.hint()],
+        Kind::Vim | Kind::Helix => vec![Hint::new(":w", "save"), Hint::new(":q", "quit").kept()],
+        Kind::Emacs => vec![Hint::new("^X ^S", "save"), Hint::new("^X ^C", "quit").kept()],
+        Kind::Other => Vec::new(),
+    };
+    hints.push(if vim.quits_itself { FORCE_CLOSE.hint() } else { QUIT_FORCE.hint() });
+    hints.push(crate::hints::in_app_hint());
+    hints
+}
+
+/// The MARKDOWN PAGE, over every overlay and under the editor its Enter
+/// opens: the file rendered, flowed to the modal's width with a column of
+/// margin each side, scrolled where its keys left it.
+fn draw_page(f: &mut Frame, app: &mut App) {
+    let th = app.theme;
+    if app.vim.as_ref().is_some_and(|v| !v.embedded) {
+        return; // the editor modal covers it exactly
+    }
+    let Some(page) = &mut app.page else {
         return;
     };
-    // Write-back: the post-draw sync resizes the PTY to the drawn rect —
-    // the whole interior when the page hides it, so it never shrinks to 0.
-    vim.area = if editor.width > 0 { editor } else { inner };
-    if let Some(side) = &mut vim.markdown {
-        side.interior = inner.width;
-        side.area = draw_markdown_page(f, side, page, layout, th);
-    }
-}
-
-/// The editor modal's bottom-border keys: the editor's own save and quit,
-/// the force close where the editor has no Ctrl+Q of its own, ⌘O, and a
-/// MARKDOWN SPLIT's Ctrl+T.
-pub(crate) fn editor_modal_hint(vim: &crate::vim_term::VimTerm) -> String {
-    // A `claude auth` run closes itself when it is done; there is no file
-    // for Cursor.
-    if vim.account_auth {
-        return "the browser finishes it — Ctrl+Q: close".into();
-    }
-    let mut hint = String::from(if vim.quits_itself {
-        "Ctrl+S: save  Ctrl+Q: quit  Ctrl+D: next match"
-    } else {
-        "Ctrl+Q: force close"
-    });
-    hint.push_str("  ⌘O: Cursor");
-    if vim.markdown.is_some() && !vim.embedded {
-        hint.push_str("  Ctrl+T: page");
-    }
-    hint
-}
-
-/// A MARKDOWN SPLIT's rendered page in `page` (nothing when it is empty):
-/// a rule down its left edge beside the editor, then the file flowed for
-/// the rest of the width. The rect the text took, for the wheel.
-fn draw_markdown_page(
-    f: &mut Frame,
-    side: &mut crate::markdown_split::MarkdownSide,
-    page: Rect,
-    layout: crate::markdown_split::Layout,
-    th: Theme,
-) -> Rect {
-    if page.width < 2 || page.height == 0 {
-        return Rect::default();
-    }
-    let text_area = if layout == crate::markdown_split::Layout::Split {
-        let block = Block::default()
-            .borders(Borders::LEFT)
-            .border_style(Style::default().fg(th.dim));
-        let inner = block.inner(page);
-        f.render_widget(block, page);
-        Rect {
-            x: inner.x + 1,
-            width: inner.width.saturating_sub(1),
-            ..inner
-        }
-    } else {
-        page
+    dim_backdrop(f);
+    let area = centered_rect_pct(f.area(), VIM_MODAL_PCT.0, VIM_MODAL_PCT.1);
+    f.render_widget(Clear, area);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(th.accent))
+        .title(Span::styled(
+            format!(" {} ", page.file),
+            Style::default()
+                .fg(th.on_accent)
+                .bg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    block = crate::hints::modal_block(block, &page_hints(page), area.width, th);
+    let inner = block.inner(area);
+    let text = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
     };
-    let rendered = crate::markdown::Rendered::for_width(
-        side.rendered.take(),
-        &side.text,
-        text_area.width,
+    page.frame = area;
+    page.area = text;
+    page.rendered = Some(crate::markdown::Rendered::for_width(
+        page.rendered.take(),
+        &page.text,
+        text.width,
         crate::markdown::Breaks::Reflow,
         th,
-    );
-    let max = rendered.lines.len().saturating_sub(text_area.height as usize);
-    side.scroll = side.scroll.min(max.min(u16::MAX as usize) as u16);
-    f.render_widget(
-        Paragraph::new(rendered.lines.clone()).scroll((side.scroll, 0)),
-        text_area,
-    );
-    side.rendered = Some(rendered);
-    text_area
+    ));
+    page.settle();
+    if let Some(at) = page.position() {
+        block = block.title_bottom(
+            Line::from(Span::styled(format!(" {at} "), Style::default().fg(th.dim)))
+                .right_aligned(),
+        );
+    }
+    f.render_widget(block, area);
+    let rows: Vec<Line> = page
+        .rendered
+        .iter()
+        .flat_map(|r| r.lines.iter())
+        .skip(page.scroll as usize)
+        .take(text.height as usize)
+        .cloned()
+        .collect();
+    f.render_widget(Paragraph::new(rows), text);
+}
+
+/// The MARKDOWN PAGE's keys (`markdown_view::MarkdownPage::key`).
+pub(crate) mod page_keys {
+    use crate::hints::Key;
+
+    pub const EDIT: Key = Key::new(&["enter", "e"], "edit");
+}
+
+/// The MARKDOWN PAGE's bottom-border keys.
+pub(crate) fn page_hints(page: &crate::markdown_view::MarkdownPage) -> Vec<crate::hints::Hint> {
+    vec![
+        page_keys::EDIT.hint_as(format!("edit in {}", editor_name(&page.editor))),
+        crate::hints::in_app_hint(),
+        crate::hints::ESC_CLOSE.hint(),
+    ]
 }
 
 /// How much of the box a modal floating over it leaves showing on every
 /// side: two rows and two columns, enough for the frame, the title and
-/// the details row above whatever is drawn over them.
+/// the header above whatever is drawn over them.
 const OVER_BOX_INSET: u16 = 4;
 
 /// The rect a multi-row task box is drawn in — one place, so a modal that
@@ -464,51 +472,199 @@ pub(crate) fn over_box_rect(frame: Rect, over: Option<Rect>, width: u16, height:
     }
 }
 
-/// The footer bar's keys while `menu` is up, for the menus that have keys
-/// of their own beyond Enter and Esc: the session pickers (the `?` jump
-/// to the hovered harness's Agents section, and `Tab` on a Claude row
-/// that can go to the cloud, with the state it would flip) and their
-/// type-ahead MODEL / EFFORT submenus — the Claude ones name `Tab` too,
-/// first, where a narrow terminal cuts it last. None for a plain context
-/// menu, which keeps the generic `Esc: close  Enter: confirm`. The keys
-/// live down here, not in the modal's bottom border, so the modal stays
-/// as narrow as its rows.
-pub(crate) fn menu_footer_hint(menu: &crate::app::ContextMenu) -> Option<String> {
-    let agent_jump = menu.hovered_agent_kind().is_some();
-    let cloud = menu.hovered_claude_cloud().map(|on| {
-        if on {
-            "Tab: cloud on  "
-        } else {
-            "Tab: cloud off  "
+/// A one-line PROMPT's keys — a name, a URL, the open-project path with
+/// its directory listing: one table its key arm
+/// (`event_loop::handle_overlay_key`) matches and [`prompt_hints`]
+/// spells. The caret keys are the line editor's, the same in every field
+/// (docs/keys.md, "Typed fields").
+pub(crate) mod prompt_keys {
+    use crate::hints::Key;
+
+    pub const OK: Key = Key::new(&["enter"], "ok");
+    pub const CANCEL: Key = Key::new(&["esc"], "cancel");
+    /// The path prompt's listing: pick a directory, dive in, climb out,
+    /// complete the typed partial.
+    pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
+    pub const DIVE: Key = Key::new(&["right"], "open");
+    pub const ASCEND: Key = Key::new(&["left"], "up");
+    pub const COMPLETE: Key = Key::new(&["tab"], "complete");
+
+    #[cfg(test)]
+    #[test]
+    fn every_prompt_key_parses() {
+        for key in [OK, CANCEL, PICK, DIVE, ASCEND, COMPLETE] {
+            assert!(key.parses(), "{:?}", key.chords);
         }
-    });
-    // A picker opened from the QUICK PROMPT is owed its box back.
-    let esc = if crate::event_loop::menu_quick_return(menu).is_some_and(|back| back.from_box) {
-        "Esc: back to the box"
+    }
+}
+
+/// The keys on a one-line prompt's bottom border.
+pub(crate) fn prompt_hints(is_path: bool) -> Vec<crate::hints::Hint> {
+    use prompt_keys::{ASCEND, CANCEL, COMPLETE, DIVE, OK, PICK};
+    if is_path {
+        vec![
+            OK.hint_as("add").kept(),
+            PICK.hint(),
+            DIVE.hint(),
+            ASCEND.hint(),
+            COMPLETE.hint(),
+            CANCEL.hint(),
+        ]
     } else {
-        "Esc: close"
-    };
-    let back = if menu.parent.is_some() { "←: back  " } else { "" };
-    if menu.filter.is_some() {
-        return Some(format!(
-            "{}type to filter  Backspace: widen  {}{back}{esc}",
-            cloud.unwrap_or(""),
-            if agent_jump { "?: settings  " } else { "" }
-        ));
+        vec![OK.hint().kept(), CANCEL.hint()]
     }
-    if cloud.is_none() && !agent_jump {
-        return None;
+}
+
+/// A CONFIRM DIALOG's keys: one table its key arm
+/// (`event_loop::handle_overlay_key`) matches and [`confirm_hints`]
+/// spells.
+pub(crate) mod confirm_keys {
+    use crate::hints::Key;
+
+    pub const YES: Key = Key::new(&["enter", "y"], "confirm").show(2);
+    /// The three-way dialogs' middle answer.
+    pub const NO: Key = Key::new(&["n"], "no");
+    /// A removed account's config dir to the Trash as well.
+    pub const TRASH: Key = Key::new(&["t"], "dir to the Trash too");
+    pub const CANCEL: Key = Key::new(&["esc", "n"], "cancel");
+
+    #[cfg(test)]
+    #[test]
+    fn every_confirm_key_parses() {
+        for key in [YES, NO, TRASH, CANCEL] {
+            assert!(key.parses(), "{:?}", key.chords);
+        }
     }
-    Some(format!(
-        "{}s/?: settings  {back}{esc}",
-        cloud.unwrap_or("")
-    ))
+}
+
+/// The answers a confirm dialog asking `action` takes, as its bottom
+/// border spells them. `n` cancels, except where it is an answer of its
+/// own.
+pub(crate) fn confirm_hints(action: &crate::app::PendingAction) -> Vec<crate::hints::Hint> {
+    use crate::app::PendingAction;
+    use confirm_keys::{CANCEL, NO, TRASH, YES};
+    match action {
+        PendingAction::ThenDeleteWorktree { offered: true, .. } => vec![
+            YES.hint_as("yes, both"),
+            NO.hint_as("no, the card only"),
+            CANCEL.hint(),
+        ],
+        PendingAction::AddClaudeAccount(_) => vec![
+            YES.hint_as("share it"),
+            NO.hint_as("start empty"),
+            CANCEL.hint(),
+        ],
+        PendingAction::RemoveClaudeAccount { .. } => vec![
+            YES.hint_as("remove, keep the dir"),
+            TRASH.hint(),
+            CANCEL.show(2).hint(),
+        ],
+        _ => vec![YES.hint(), CANCEL.show(2).hint()],
+    }
+}
+
+/// A menu's own keys — every context menu, picker, the COMMAND PALETTE
+/// and the OPEN MENU: one table the menu's key arm
+/// (`event_loop::handle_overlay_key`) matches and [`menu_hints`] spells.
+pub(crate) mod menu_keys {
+    use crate::hints::Key;
+
+    pub const CHOOSE: Key = Key::new(&["enter"], "choose");
+    /// Into the hovered row's submenu (`▸`).
+    pub const INTO: Key = Key::new(&["right", "l"], "more");
+    /// Back out of a submenu.
+    pub const BACK: Key = Key::new(&["left", "h"], "back");
+    /// The hovered harness's section of Settings → Agents. `s` only
+    /// where no filter eats letters.
+    pub const SETTINGS: Key = Key::new(&["?", "s"], "settings");
+    /// Claude's launch mode, on a row that can go to the cloud.
+    pub const CLOUD: Key = Key::new(&["tab"], "cloud");
+    /// Widen a type-ahead filter.
+    pub const WIDEN: Key = Key::new(&["backspace"], "widen");
+
+    #[cfg(test)]
+    #[test]
+    fn every_menu_key_parses() {
+        for key in [CHOOSE, INTO, BACK, SETTINGS, CLOUD, WIDEN] {
+            assert!(key.parses(), "{:?}", key.chords);
+        }
+    }
+}
+
+/// The keys on a menu's bottom border — the same for every menu, with
+/// the extras the hovered row has: `Tab cloud on` on a Claude row that
+/// can go to the cloud, `? settings` on a harness, `→ more` on a row
+/// with a submenu, `← back` inside one, `⌫ widen` with a filter typed.
+/// Esc closes the whole menu — or, for a picker opened from the QUICK
+/// PROMPT, goes back to the box.
+pub(crate) fn menu_hints(menu: &crate::app::ContextMenu) -> Vec<crate::hints::Hint> {
+    use crate::hints::Hint;
+    let mut hints = vec![menu_keys::CHOOSE.hint().kept()];
+    // The launch mode is the one thing on the row Tab changes, and the
+    // border is the only place it says so: kept however narrow.
+    if let Some(on) = menu.hovered_claude_cloud() {
+        hints.push(
+            menu_keys::CLOUD
+                .hint_as(if on { "cloud on" } else { "cloud off" })
+                .kept(),
+        );
+    }
+    if menu
+        .items
+        .get(menu.hover)
+        .is_some_and(|item| item.action.submenu().is_some())
+    {
+        hints.push(menu_keys::INTO.hint());
+    }
+    if menu.parent.is_some() {
+        hints.push(menu_keys::BACK.hint());
+    }
+    if menu.hovered_agent_kind().is_some() {
+        hints.push(menu_keys::SETTINGS.hint());
+    }
+    if menu.filter.as_ref().is_some_and(|f| !f.query.is_empty()) {
+        hints.push(menu_keys::WIDEN.hint());
+    }
+    let from_box = crate::event_loop::menu_quick_return(menu).is_some_and(|back| back.from_box);
+    hints.push(Hint::new(
+        "Esc",
+        if from_box { "back to the box" } else { "close" },
+    ));
+    hints
+}
+
+/// What the hovered row of a menu does, in a sentence, for the
+/// EXPLANATION line above its keys: an action's own hint from the keymap
+/// registry — the COMMAND PALETTE's and the OPEN MENU's rows — and
+/// nothing for a row that is its own explanation.
+pub(crate) fn menu_explanation(menu: &crate::app::ContextMenu) -> &'static str {
+    match menu.items.get(menu.hover).map(|item| &item.action) {
+        Some(crate::app::MenuAction::RunAction(action)) => {
+            crate::keymap::spec_of(*action).map_or("", |spec| spec.hint)
+        }
+        _ => "",
+    }
+}
+
+/// Rows a menu keeps for its EXPLANATION: two, on a menu any of whose
+/// rows has one — so the frame holds still as the cursor moves — else
+/// none.
+fn menu_explain_rows(menu: &crate::app::ContextMenu) -> u16 {
+    let any = menu
+        .items
+        .iter()
+        .any(|item| matches!(item.action, crate::app::MenuAction::RunAction(_)));
+    if any {
+        2
+    } else {
+        0
+    }
 }
 
 /// The box a menu floats over: the QUICK PROMPT its rows owe back, drawn
 /// under it — returned as its rect, for [`over_box_rect`], and where its
 /// branch landed this frame, for the WORKTREE PICKER that hangs from it
-/// (empty when the details row had no room for it). A menu with no box
+/// (empty when the header had no room for it). A menu with no box
 /// behind it — a context menu, a picker reached from a PR or an issue row
 /// with no box up — draws nothing and floats where it always did.
 fn draw_menu_backdrop(
@@ -537,11 +693,11 @@ fn draw_multiline_prompt(
     backdrop: bool,
 ) -> Rect {
     let th = app.theme;
-    // The QUICK PROMPT carries one row the other task boxes do not — where
-    // the launch lands — and takes it in height rather than out of the
-    // editor. Its frame turns green while Enter will cut a fresh worktree
-    // first, so the state reads from across the room, before the row or the
-    // title does.
+    // The QUICK PROMPT carries a header the other task boxes do not —
+    // where the launch runs and what runs it — and takes it in height
+    // rather than out of the editor. Its frame turns green while Enter will
+    // cut a fresh worktree first, so the state reads from across the room,
+    // before the header or the title does.
     let quick = match &prompt.kind {
         crate::app::PromptKind::QuickPrompt(launch) => Some(launch),
         _ => None,
@@ -556,20 +712,18 @@ fn draw_multiline_prompt(
     } else {
         th.accent
     };
-    // The LAUNCHER VIEW's box is its front door: bigger, and with the
-    // project on its target row and `^P` / `^O` in its hints.
+    // The LAUNCHER VIEW's box is its front door: bigger, its title what it
+    // is for, and air inside its frame.
     let launcher = quick.is_some();
     let area = multiline_prompt_rect(f.area(), prompt);
     f.render_widget(Clear, area);
     // A backdrop's border says nothing: Enter and Esc belong to whatever
     // is drawn over it, and naming the box's own keys there would be a
     // lie about which press does what.
-    let hint = if backdrop {
-        ""
-    } else if launcher {
-        launcher_view::box_hint(area.width)
+    let hints = if backdrop {
+        Vec::new()
     } else {
-        task_prompt_hint(&prompt.kind, area.width)
+        task_hints(&prompt.kind)
     };
     let title = match quick {
         Some(launch) if launcher => launcher_view::box_title(launch),
@@ -582,10 +736,18 @@ fn draw_multiline_prompt(
         .title(Span::styled(
             format!(" {title} "),
             Style::default().fg(frame),
-        ))
-        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(th.dim))));
+        ));
+    let block = crate::hints::modal_block(block, &hints, area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let label = prompt.label.clone();
+    // The QUICK PROMPT says what Enter sends as the modal's EXPLANATION:
+    // one dim line along the bottom of its frame, right above its keys.
+    let (inner, explain_row) = match quick {
+        Some(_) => crate::hints::explain_area(&label, inner, 1),
+        None => (inner, Rect::default()),
+    };
+    crate::hints::draw_explain(f, explain_row, &label, th);
     // The view's box gets a column of air inside its border as well, so
     // nothing in it reads as hung off the frame.
     let inner = if launcher && inner.width >= 6 {
@@ -597,58 +759,53 @@ fn draw_multiline_prompt(
     } else {
         inner
     };
-
-    let label = prompt.label.clone();
-    // The view's box leads with the row of details — the project, the
-    // checkout, the harness and its model — then a blank row, then the
-    // prompt header: the question, and the toggle that cuts a fresh
-    // worktree. The blank row is the point: without it the details read as
-    // part of the question under them.
-    let mut toggle_area = Rect::default();
+    // It leads with its header — where the launch runs, over what runs it
+    // (`launcher_view::box_header`) — then a blank row: without it the
+    // fields read as part of the task under them. The header gives up its
+    // last rows before the editor drops under three.
     let mut detail_areas: Vec<(crate::launcher::BoxField, Rect)> = Vec::new();
     let mut branch_area = Rect::default();
-    let head_rows = match quick.filter(|_| launcher && inner.height >= 5) {
-        Some(launch) => {
-            let row = row_rect(inner, 0).expect("a five-row inner area has row 0");
-            let details = launcher_view::detail_line(app, launch, row.width, th);
-            f.render_widget(details.line, row);
-            // Each detail is a button: the columns it was drawn in, in
-            // screen coordinates, so a click there opens its own picker.
-            let cols = |row: Rect, (x, width): (u16, u16)| Rect {
-                x: row.x + x,
+    let head_rows = match quick {
+        Some(launch) if inner.height >= 5 => {
+            let cfg = crate::config::Config::load();
+            let header = launcher_view::box_header(app, launch, &cfg, inner.width, th);
+            let rows = (header.lines.len() as u16).min(inner.height - 4);
+            for (i, line) in header.lines.into_iter().take(usize::from(rows)).enumerate() {
+                let row = row_rect(inner, i).expect("the header's rows are inside the box");
+                f.render_widget(line, row);
+            }
+            // Each field is a button: the cells it was drawn in, in screen
+            // coordinates, so a click there opens its own picker.
+            let cell = |(row, x, width): (u16, u16, u16)| Rect {
+                x: inner.x + x,
+                y: inner.y + row,
                 width,
-                ..row
+                height: 1,
             };
-            detail_areas = details
+            detail_areas = header
                 .fields
                 .into_iter()
-                .map(|(field, x, width)| (field, cols(row, (x, width))))
+                .filter(|(_, row, _, _)| *row < rows)
+                .map(|(field, row, x, width)| (field, cell((row, x, width))))
                 .collect();
-            branch_area = details.branch.map(|at| cols(row, at)).unwrap_or_default();
-            let row = row_rect(inner, 2).expect("a five-row inner area has row 2");
-            let header = launcher_view::target_line(launch, &label, row.width, th);
-            f.render_widget(header.line, row);
-            toggle_area = header.toggle.map(|at| cols(row, at)).unwrap_or_default();
-            3
+            branch_area = header
+                .branch
+                .filter(|(row, _, _)| *row < rows)
+                .map(cell)
+                .unwrap_or_default();
+            rows + 1
         }
+        Some(_) => 0,
         None => {
-            // The QUICK PROMPT's target row above the label: the toggle
-            // and its state in one glance, whichever way it stands.
-            let target_rows = u16::from(quick.is_some() && inner.height >= 5);
-            if let (1, Some(launch)) = (target_rows, quick) {
-                let row = row_rect(inner, 0).expect("a five-row inner area has a target row");
-                f.render_widget(quick_target_line(app, launch, row.width, th), row);
-            }
-            let label_rows = u16::from(inner.height.saturating_sub(target_rows) >= 4);
+            let label_rows = u16::from(inner.height >= 4);
             if label_rows == 1 {
-                let row = row_rect(inner, usize::from(target_rows))
-                    .expect("a four-row inner area has a label row");
+                let row = row_rect(inner, 0).expect("a four-row inner area has a label row");
                 f.render_widget(
                     Paragraph::new(Span::styled(label, Style::default().fg(th.dim))),
                     row,
                 );
             }
-            target_rows + label_rows
+            label_rows
         }
     };
 
@@ -696,7 +853,6 @@ fn draw_multiline_prompt(
     if let Some(Overlay::Prompt(p)) = &mut app.overlay {
         p.area = area;
         p.editor_area = editor_inner;
-        p.toggle_area = toggle_area;
         p.detail_areas = detail_areas;
         p.branch_area = branch_area;
         p.input.set_view(view);
@@ -744,8 +900,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             launcher_view::draw_project_picker(f, app, &picker)
         }
         Overlay::Menu(menu) => {
-            // `Tab` (the harness) and `^O` (the model) layer their list
-            // over the box rather than taking the box away, as `^P` does:
+            // `Tab` (the harness), Select model and a click on the
+            // effort layer their list over the box rather than taking the
+            // box away, as `^P` does:
             // the task you typed is still in front of you while you pick
             // what will run it.
             let backdrop = draw_menu_backdrop(f, app, &menu);
@@ -753,8 +910,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // The WORKTREE PICKER hangs from the branch it was opened on,
             // wherever the box has it this frame — a resize moves both —
             // its rows' text in the branch's column (a border and a space
-            // in). Centered over the box when the details row found no
-            // room for the branch.
+            // in). Centered over the box when the header found no room
+            // for the branch.
             let at = menu.at.or_else(|| {
                 let (_, branch) = backdrop.filter(|_| menu.is_launch_worktree_picker())?;
                 (branch.width > 0).then(|| (branch.x.saturating_sub(2), branch.y + 1))
@@ -793,17 +950,37 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // extra column so the affordance is visible before hovering.
             let any_submenu = menu.items.iter().any(|i| i.action.submenu().is_some());
             // The modal is as wide as its rows or its title, whichever is
-            // longer, and no wider: its keys go in the footer bar (see
-            // `menu_footer_hint`), not in the bottom border, so a hint
-            // that outgrows the rows — the pickers' `Tab: cloud off  s/?:
-            // settings` did, doubling the width of a six-row list — never
-            // pads the modal with empty space, and hovering a row with more
+            // longer — and at least as wide as its first verb and its way
+            // out, the keys on its bottom border (`menu_hints`). A hint
+            // that outgrows the rows — the pickers' `Tab cloud off · ?
+            // settings` — drops off the border's end rather than padding
+            // the modal with empty space, and hovering a row with more
             // keys (the Claude row's Tab) never resizes it. Command-palette
-            // rows pin their keys in a right-aligned hint column.
-            let width = (label_w + 4 + if hint_w > 0 { hint_w + 2 } else { 0 } + if any_submenu { 2 } else { 0 })
-                .max(title_width + 2)
-                .min(f.area().width as usize) as u16;
-            let height = menu.items.len() as u16 + 2;
+            // rows pin their keys in a right-aligned hint column, and say
+            // what they do on the EXPLANATION rows above the border.
+            let hints = menu_hints(&menu);
+            // Wide enough for the kept keys of whichever row is hovered,
+            // so moving the cursor never resizes the modal.
+            let essential = (0..menu.items.len())
+                .map(|hover| {
+                    let mut at = menu.clone();
+                    at.hover = hover;
+                    let kept: Vec<crate::hints::Hint> =
+                        menu_hints(&at).into_iter().filter(|h| h.keep).collect();
+                    crate::hints::text(&kept, usize::MAX).chars().count() + 6
+                })
+                .max()
+                .unwrap_or(0);
+            let explain_rows = menu_explain_rows(&menu);
+            let min_w = if explain_rows > 0 { 64 } else { essential };
+            let width = (label_w
+                + 4
+                + if hint_w > 0 { hint_w + 2 } else { 0 }
+                + if any_submenu { 2 } else { 0 })
+            .max(title_width + 2)
+            .max(min_w)
+            .min(f.area().width as usize) as u16;
+            let height = menu.items.len() as u16 + 2 + explain_rows;
             let area = match at {
                 Some((ax, ay)) => {
                     let x = ax.min(f.area().width.saturating_sub(width));
@@ -832,8 +1009,24 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
                 ));
             }
+            let block = crate::hints::modal_block(block, &hints, area.width, th);
             let inner = block.inner(area);
             f.render_widget(block, area);
+            let explain = Rect {
+                y: inner.y + inner.height.saturating_sub(explain_rows),
+                height: explain_rows.min(inner.height),
+                ..inner
+            };
+            crate::hints::draw_explain(
+                f,
+                explain,
+                &crate::hints::expand(menu_explanation(&menu), &app.keymap),
+                th,
+            );
+            let inner = Rect {
+                height: inner.height.saturating_sub(explain_rows),
+                ..inner
+            };
             // Every row spans the modal — the hovered row's bar reaches
             // the border, and the ▸ sits at the right edge — so a title
             // wider than the rows leaves no ragged gap beside them.
@@ -901,39 +1094,21 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             } else {
                 th.accent
             };
-            let answers: &[(&str, Color)] = match confirm.action {
-                crate::app::PendingAction::ThenDeleteWorktree { offered: true, .. } => &[
-                    ("[Enter/y] yes, both", th.err),
-                    ("[n] no, the card only", th.err),
-                    ("[Esc] cancel", th.dim),
-                ],
-                crate::app::PendingAction::AddClaudeAccount(_) => &[
-                    ("[Enter/y] share it", th.accent),
-                    ("[n] start empty", th.accent),
-                    ("[Esc] cancel", th.dim),
-                ],
-                crate::app::PendingAction::RemoveClaudeAccount { .. } => &[
-                    ("[Enter/y] remove, keep the dir", th.err),
-                    ("[t] dir to the Trash too", th.err),
-                    ("[Esc/n] cancel", th.dim),
-                ],
-                _ => &[("[Enter/y] confirm", th.err), ("[Esc/n] cancel", th.dim)],
-            };
-            let mut legend = Vec::new();
-            for (i, (answer, fg)) in answers.iter().enumerate() {
-                if i > 0 {
-                    legend.push(Span::raw("   "));
-                }
-                legend.push(Span::styled(*answer, Style::default().fg(*fg)));
-            }
-            let legend = Line::from(legend);
+            // The answers are the dialog's keys, on its bottom border like
+            // every modal's — each kept, however narrow, since a question
+            // with an answer missing is a trap.
+            let hints: Vec<crate::hints::Hint> = confirm_hints(&confirm.action)
+                .into_iter()
+                .map(crate::hints::Hint::kept)
+                .collect();
+            let legend_w = crate::hints::text(&hints, usize::MAX).chars().count() + 6;
             let longest = msg_lines
                 .iter()
-                .map(|l| l.chars().count())
+                .map(|l| l.chars().count() + 4)
                 .max()
                 .unwrap_or(0)
-                .max(legend.width());
-            let width = (longest as u16 + 4).max(CONFIRM_MIN_W);
+                .max(legend_w);
+            let width = (longest as u16).max(CONFIRM_MIN_W);
             let height = msg_lines.len() as u16 + 4;
             let area = centered_rect(f.area(), width, height);
             f.render_widget(Clear, area);
@@ -945,14 +1120,12 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     format!(" {} ", confirm.title),
                     Style::default().fg(tone),
                 ));
+            let block = crate::hints::modal_block(block, &hints, area.width, th);
             let inner = block.inner(area);
             f.render_widget(block, area);
-            let mut lines: Vec<Line> = msg_lines
-                .into_iter()
-                .map(|l| Line::from(l.to_string()))
-                .collect();
-            lines.push(Line::from(""));
-            lines.push(legend);
+            // A row of air above and below the question.
+            let mut lines: Vec<Line> = vec![Line::from("")];
+            lines.extend(msg_lines.into_iter().map(|l| Line::from(format!(" {l}"))));
             f.render_widget(Paragraph::new(lines), inner);
             // Record the drawn area for click hit-testing.
             if let Some(Overlay::Confirm(c)) = &mut app.overlay {
@@ -973,7 +1146,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             } else {
                 0
             };
-            let area = centered_rect(f.area(), width, 6 + list_h);
+            let area = centered_rect(f.area(), width, 5 + list_h);
             f.render_widget(Clear, area);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -983,6 +1156,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     format!(" {} ", prompt.title),
                     Style::default().fg(th.accent),
                 ));
+            let block = crate::hints::modal_block(block, &prompt_hints(is_path), area.width, th);
             let inner = block.inner(area);
             f.render_widget(block, area);
 
@@ -1060,18 +1234,6 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 }
             }
 
-            // Bottom row: the key hints.
-            if let Some(r) = row_rect(inner, (3 + list_h) as usize) {
-                let hint = if is_path {
-                    "[Enter] add  [↓↑] pick  [→] open  [←] up  [Tab] complete  [Esc] cancel"
-                } else {
-                    "[Enter] ok  [⌥←→] word  [Ctrl+u] clear  [Esc] cancel"
-                };
-                f.render_widget(
-                    Paragraph::new(Span::styled(hint, Style::default().fg(th.dim))),
-                    r,
-                );
-            }
             // Record the listing and dialog rects for click hit-testing.
             if let Some(Overlay::Prompt(p)) = &mut app.overlay {
                 p.list_area = list_area;
@@ -1091,8 +1253,12 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             enum HelpKeys {
                 Lit(&'static str),
                 Act(&'static [crate::keymap::Action]),
+                /// A modal's own keys, from the table its handler matches.
+                Keys(&'static [crate::hints::Key]),
+                /// The PROJECT TAB slots, first to last.
+                Slots,
             }
-            use HelpKeys::{Act, Lit};
+            use HelpKeys::{Act, Keys, Lit, Slots};
             type HelpSection = (&'static str, &'static [(HelpKeys, &'static str)]);
             // Only the actions with a key are rows: the rest are the
             // COMMAND PALETTE's, which GENERAL names.
@@ -1108,15 +1274,19 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             Act(&[NextProjectTab, PrevProjectTab]),
                             "next / previous project tab",
                         ),
-                        (Lit("1-9"), "open that project tab"),
+                        (Slots, "open that project tab"),
                         (Act(&[CloseProjectTab]), "close the project tab"),
                         (Act(&[Palette]), "jump to anything, add a project"),
-                        (Lit("^o / ^f"), "jump pick: open / focus row"),
+                        (
+                            Keys(&[finder_keys::ATTACH, finder_keys::FOCUS_ROW]),
+                            "jump pick: open / focus row",
+                        ),
                         (
                             Act(&[NextAttention, PrevAttention]),
                             "next/prev session needing you",
                         ),
-                        (Act(&[FindFile]), "go to file (⌘C / ^y: copy)"),
+                        (Act(&[FindFile]), "go to file"),
+                        (Keys(&[crate::hints::COPY_PATH]), "copy a finder's path"),
                         (Act(&[Grep]), "find in files (git grep)"),
                         (Act(&[TreeBrowser]), "file tree browser"),
                         (Act(&[Skills]), "skills: read, edit, trash"),
@@ -1125,8 +1295,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 (
                     "CHECKOUTS & GITHUB",
                     &[
-                        (Act(&[OpenOutside]), "open: GitHub, Cursor, terminal"),
-                        (Act(&[GitDiff]), "changes (^r reviewed, ^t tree)"),
+                        (Act(&[OpenOutside]), "open: GitHub, your editor, terminal"),
+                        (Act(&[GitDiff]), "changes: commits, files, diff"),
                         (Act(&[RefreshPullRequests]), "reload PRs + issues (GitHub)"),
                         (Act(&[Issues]), "issues: prompt, preset, edit"),
                         (Act(&[PullRequests]), "pull requests: read / launch"),
@@ -1139,8 +1309,19 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     // same line editor (text_input.rs).
                     "TYPING IN A FIELD",
                     &[
-                        (Lit("←→ / ⌥←→"), "move by character / by word"),
-                        (Lit("^a^e ⌥⌫ ^u^k"), "ends · del word · kill line"),
+                        (Keys(&[crate::text_input::keys::WORD]), "move by word"),
+                        (
+                            Keys(&[crate::text_input::keys::LINE_ENDS]),
+                            "start / end of the line",
+                        ),
+                        (
+                            Keys(&[crate::text_input::keys::DELETE_WORD]),
+                            "delete a word",
+                        ),
+                        (
+                            Keys(&[crate::text_input::keys::KILL]),
+                            "kill to start / end",
+                        ),
                     ],
                 ),
             ];
@@ -1168,7 +1349,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     &[
                         (Act(&[Activate]), "lock input"),
                         (Act(&[UnlockTerminal]), "unlock, back to the card"),
-                        (Lit("⇧Esc"), "Esc to the agent"),
+                        (
+                            Keys(&[crate::launcher::pane_keys::AGENT_ESC]),
+                            "Esc to the agent",
+                        ),
                         (Act(&[PaneTabs]), "pane: session ↔ its terminals"),
                         (Lit("drag"), "select + copy (2×click: word)"),
                         (Lit("click / drag"), "the app that took the mouse"),
@@ -1183,6 +1367,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     "GENERAL",
                     &[
                         (Act(&[CommandPalette]), "every action, by name"),
+                        (Act(&[Home]), "home: orion's animation"),
                         (Act(&[ToggleLauncherPane]), "fold / unfold the pane"),
                         (Act(&[ToggleFullScreen]), "full-screen / normal size"),
                         (Act(&[Settings]), "settings; Hotkeys tab rebinds"),
@@ -1200,6 +1385,18 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             let keys_of = |k: &HelpKeys| -> String {
                 match k {
                     Lit(s) => (*s).to_string(),
+                    Keys(keys) => keys
+                        .iter()
+                        .map(crate::hints::Key::label)
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    Slots => {
+                        let slot = |n| app.keymap.shown_first(SelectProjectTab(n));
+                        match (slot(1), slot(9)) {
+                            (Some(a), Some(b)) => format!("{a}-{b}"),
+                            _ => crate::keymap::UNBOUND.to_string(),
+                        }
+                    }
                     Act(actions) => {
                         let full = actions
                             .iter()
@@ -1240,6 +1437,18 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(th.accent))
                 .title(" Help ");
+            let block = crate::hints::modal_block(
+                block,
+                &[
+                    crate::hints::act(&app.keymap, CommandPalette, "every action"),
+                    Some(crate::hints::ESC_CLOSE.hint()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+                area.width,
+                th,
+            );
             let inner = block.inner(area);
             f.render_widget(block, area);
             let [left_a, right_a] =
@@ -1297,13 +1506,38 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 .map(|p| (p.name.clone(), p.repo_path.clone()));
             let project_settings = project.as_ref().map(|(_, path)| cfg.project(path));
             // Rows the modal spends on anything but settings: the tab
-            // strip and its rule above the body, and a blank + hint +
-            // keys + config path below it.
-            const CHROME: u16 = 2 + 4;
+            // strip and its rule above the body, and a blank and the
+            // EXPLANATION's two rows below it. The keys are on the bottom
+            // border, the config file's path on the top one.
+            const CHROME: u16 = 2 + 3;
             let want = rows.len() as u16 + CHROME + 2;
             let height = want.min(f.area().height.saturating_sub(2)).max(CHROME + 3);
             let area = centered_rect(f.area(), SETTINGS_W, height);
-            let inner = render_modal_frame(f, area, " Settings ", th);
+            f.render_widget(Clear, area);
+            let path = crate::skills::tilde(
+                &orion_core::paths::config_path(),
+                orion_core::env::home_dir().as_deref(),
+            );
+            let path_room = usize::from(area.width).saturating_sub(16);
+            let path = if path.chars().count() > path_room {
+                let tail: String = path
+                    .chars()
+                    .skip(path.chars().count() + 1 - path_room)
+                    .collect();
+                format!("…{tail}")
+            } else {
+                path
+            };
+            let block = modal_block(" Settings ", th).title(
+                Line::from(Span::styled(
+                    format!(" {path} "),
+                    Style::default().fg(th.dim),
+                ))
+                .right_aligned(),
+            );
+            let block = crate::hints::modal_block(block, &settings_hints(&view), area.width, th);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
 
             let dim = Style::default().fg(th.dim);
             let capturing = view.capturing();
@@ -1400,6 +1634,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                                     .as_ref()
                                     .map(|s| s.value_label(spec.kind))
                                     .unwrap_or_else(|| "n/a".into())
+                            } else if let Some(status) = crate::linear::status_value(app, spec.kind)
+                            {
+                                // The LINEAR TAB's status rows: the app's
+                                // to say, never the file's.
+                                status
                             } else {
                                 cfg.value_label(spec.kind)
                             };
@@ -1470,58 +1709,50 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(""));
             }
 
-            // ---- footer: notice or hint, then the keys, then the file ----
-            lines.push(Line::from(""));
-            match &view.notice {
-                Some((text, level)) => lines.push(Line::from(Span::styled(
-                    truncate(&format!(" {text}"), inner.width as usize),
+            // ---- the EXPLANATION: a notice, or what the row does ----
+            // A row the config file has double-booked explains itself in
+            // place of its usual hint — that's the more urgent thing to
+            // say about it.
+            let shadowed = view
+                .is_hotkeys()
+                .then(|| app.keymap.shadowed_by(view.selected))
+                .filter(|names| !names.is_empty());
+            let (explanation, explain_style) = match (&view.notice, shadowed) {
+                // `i` asked whether to run an installer: the question
+                // stands in the explanation's place until it is answered.
+                _ if view.install.is_some() => (
+                    view.install
+                        .as_ref()
+                        .map(|plan| plan.question())
+                        .unwrap_or_default(),
+                    Style::default().fg(th.accent),
+                ),
+                (Some((text, level)), _) => (
+                    text.clone(),
                     match level {
                         crate::app::NoticeLevel::Warn => Style::default().fg(th.warn),
                         crate::app::NoticeLevel::Info => Style::default().fg(th.muted),
                     },
-                ))),
-                None => {
-                    // A row the config file has double-booked explains
-                    // itself in place of its usual hint — that's the more
-                    // urgent thing to say about it.
-                    let shadowed = view
-                        .is_hotkeys()
-                        .then(|| app.keymap.shadowed_by(view.selected))
-                        .filter(|names| !names.is_empty());
-                    match shadowed {
-                        Some(names) => lines.push(Line::from(Span::styled(
-                            truncate(
-                                &format!(
-                                    " ✗ this key also belongs to {} — whichever is listed first wins",
-                                    names.join(", ")
-                                ),
-                                inner.width as usize,
-                            ),
-                            Style::default().fg(th.warn),
-                        ))),
-                        None => {
-                            let hint = crate::config::hint_at(tab, view.selected);
-                            lines.push(Line::from(Span::styled(
-                                truncate(&format!(" {hint}"), inner.width as usize),
-                                dim,
-                            )));
-                        }
-                    }
-                }
-            }
-            lines.push(Line::from(Span::styled(
-                truncate(
-                    &format!(" {}", settings_keys_hint(&view)),
-                    inner.width as usize,
                 ),
-                dim,
-            )));
-            let path = orion_core::paths::config_path();
-            lines.push(Line::from(Span::styled(
-                truncate(&format!(" {}", path.display()), inner.width as usize),
-                dim,
-            )));
+                (None, Some(names)) => (
+                    format!(
+                        "✗ this key also belongs to {} — whichever is listed first wins",
+                        names.join(", ")
+                    ),
+                    Style::default().fg(th.warn),
+                ),
+                (None, None) => (
+                    crate::hints::expand(&crate::config::hint_at(tab, view.selected), &app.keymap),
+                    dim,
+                ),
+            };
             f.render_widget(Paragraph::new(lines), inner);
+            let explain = Rect {
+                y: inner.y + inner.height.saturating_sub(2),
+                height: inner.height.min(2),
+                ..inner
+            };
+            crate::hints::draw_explain_as(f, explain, &explanation, explain_style);
             if let Some(Overlay::Settings(v)) = &mut app.overlay {
                 v.area = area;
                 v.tab_hits = hits;
@@ -1801,7 +2032,15 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
 
             let height = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
             let area = centered_rect(f.area(), MEMORY_W, height);
-            let inner = render_modal_frame(f, area, " Memory ", th);
+            f.render_widget(Clear, area);
+            let block = crate::hints::modal_block(
+                modal_block(" Memory · refreshes every 2s ", th),
+                &[metrics_keys::OPEN.hint().kept(), metrics_keys::CLOSE.hint()],
+                area.width,
+                th,
+            );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
             f.render_widget(Paragraph::new(lines), inner);
             if let Some(Overlay::Metrics(v)) = &mut app.overlay {
                 v.area = area;
@@ -1816,267 +2055,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 };
             }
         }
-        Overlay::Diff(view) => {
-            let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
-            f.render_widget(Clear, area);
-            // Top: the COMMIT LIST, as tall as its rows up to a cap; the
-            // file list and the diff share what is left.
-            let strip_h = view
-                .commits
-                .as_ref()
-                .map_or(0, |list| commit_strip_height(list, area.height));
-            let [strip_a, panes_a] =
-                Layout::vertical([Constraint::Length(strip_h), Constraint::Min(0)]).areas(area);
-            let strip_list = match &view.commits {
-                Some(list) if strip_h > 0 => {
-                    draw_commit_strip(f, list, view.commits_focused, strip_a, th)
-                }
-                _ => Rect::default(),
-            };
-            let files_focused = !view.commits_focused;
-            // Cap first, floor second: on a tiny screen the file list keeps
-            // its minimum and SPLIT_PANE_LAYOUT_MIN squeezes the diff pane
-            // instead.
-            let files_w = view
-                .files_width
-                .min(area.width.saturating_sub(crate::app::MIN_DIFF_PANE_W))
-                .max(crate::app::MIN_DIFF_FILES_W);
-            let [files_a, diff_a] = Layout::horizontal([
-                Constraint::Length(files_w),
-                Constraint::Min(SPLIT_PANE_LAYOUT_MIN),
-            ])
-            .areas(panes_a);
-
-            // Left: changed-file list — flat paths, or the directory tree
-            // (`Ctrl+t`); a stateless follow-window keeps the selected row
-            // visible.
-            let mut files_title = if view.listing.is_some() && view.files.is_empty() {
-                "Files (…)".to_string()
-            } else if view.filter.is_empty() {
-                format!("Files ({})", view.files.len())
-            } else {
-                format!("Files ({}/{})", view.matches.len(), view.files.len())
-            };
-            if !view.reviewed.is_empty() {
-                files_title.push_str(&format!(" · {}✓", view.reviewed.len()));
-            }
-            // The hint names the list `Ctrl+t` leads to, not the one up.
-            let block = panel_block(&files_title, files_focused, th).title_bottom(Line::from(
-                Span::styled(
-                    if view.tree.is_some() {
-                        " ^t: flat list "
-                    } else {
-                        " ^t: tree "
-                    },
-                    Style::default().fg(th.dim),
-                ),
-            ));
-            let files_inner = block.inner(files_a);
-            f.render_widget(block, files_a);
-
-            // First row: the always-on fuzzy filter input.
-            if let Some(filter_area) = row_rect(files_inner, 0) {
-                let line = search_line(&view.filter, "type to filter…", filter_area, th);
-                f.render_widget(Paragraph::new(line), filter_area);
-            }
-            let list_inner = below_first_row(files_inner);
-
-            if view.listing.is_some() && view.files.is_empty() {
-                empty_list_row(f, list_inner, "reading changes…", th);
-            } else if view.files.is_empty() {
-                empty_list_row(f, list_inner, "no files changed", th);
-            } else if view.row_count() == 0 {
-                empty_list_row(f, list_inner, NO_MATCHES, th);
-            }
-            let start = view.window_start(list_inner.height as usize);
-            // Both lists open a row the same way: the status code, then the
-            // ✓ — so the two columns read straight down whichever is up.
-            let gutter = |file: Option<&crate::git_diff::DiffFile>, reviewed: bool| {
-                let status = match file {
-                    Some(file) => Span::styled(
-                        format!("{} ", file.status_str()),
-                        Style::default().fg(match (file.xy[0], file.xy[1]) {
-                            ('?', '?') | ('A', _) => th.ok,
-                            ('D', _) | (_, 'D') => th.err,
-                            ('R', _) | ('C', _) => th.accent,
-                            _ => th.warn,
-                        }),
-                    ),
-                    None => Span::raw("   "),
-                };
-                let mark = if reviewed {
-                    Span::styled("✓ ", Style::default().fg(th.ok))
-                } else {
-                    Span::raw("  ")
-                };
-                vec![status, mark]
-            };
-            match &view.tree {
-                None => {
-                    for (row, (i, m)) in view.matches.iter().enumerate().skip(start).enumerate() {
-                        let Some(row_area) = row_rect(list_inner, row) else {
-                            break;
-                        };
-                        let file = &view.files[m.file];
-                        let budget = (list_inner.width as usize).saturating_sub(5);
-                        let mut spans = gutter(Some(file), view.reviewed.contains_key(&file.path));
-                        let shown = truncate(&file.path, budget);
-                        let used = shown.chars().count();
-                        spans.extend(fuzzy_highlight_spans(&shown, &m.positions, th));
-                        if let Some(orig) = &file.orig_path {
-                            let rest = budget.saturating_sub(used);
-                            if rest > 3 {
-                                spans.push(Span::styled(
-                                    truncate(&format!(" ← {orig}"), rest),
-                                    Style::default().fg(th.dim),
-                                ));
-                            }
-                        }
-                        render_row(f, row_area, spans, i == view.selected, files_focused, th);
-                    }
-                }
-                // The TREE BROWSER's rows behind the flat list's gutter: a
-                // directory wears the fold marker and the accent, and its ✓
-                // once every file under it has one.
-                Some(tree) => {
-                    let done = tree.reviewed_nodes(&view.files, &view.reviewed);
-                    for (row, (i, r)) in tree.rows.iter().enumerate().skip(start).enumerate() {
-                        let Some(row_area) = row_rect(list_inner, row) else {
-                            break;
-                        };
-                        let node = &tree.nodes[r.node];
-                        let file = tree.file_of[r.node].map(|f| &view.files[f]);
-                        let indent = "  ".repeat(node.depth);
-                        let marker = if !node.is_dir {
-                            "  "
-                        } else if tree.is_open(r.node, !view.filter.is_empty()) {
-                            "▾ "
-                        } else {
-                            "▸ "
-                        };
-                        let budget = (list_inner.width as usize)
-                            .saturating_sub(5 + indent.chars().count() + 2);
-                        let shown = truncate(&node.name, budget);
-                        let mut spans = gutter(file, done[r.node]);
-                        spans.push(Span::raw(indent));
-                        spans.push(Span::styled(marker, Style::default().fg(th.accent)));
-                        if node.is_dir {
-                            spans.push(Span::styled(shown, Style::default().fg(th.accent)));
-                        } else {
-                            let positions = visible_positions(&r.positions, &shown, &node.name);
-                            spans.extend(fuzzy_highlight_spans(&shown, positions, th));
-                        }
-                        render_row(f, row_area, spans, i == tree.selected, files_focused, th);
-                    }
-                }
-            }
-
-            // Right: the selected file's diff, scrolled — or, on a tree
-            // directory's row, the list of what changed under it. The title
-            // names the COMMIT LIST row it is taken under.
-            let sel_path = match view.selected_dir() {
-                Some(dir) => format!("{dir}/"),
-                None => view.selected_path().unwrap_or("").to_string(),
-            };
-            let sel_reviewed = view.reviewed.contains_key(&sel_path);
-            let under = match &view.scope {
-                crate::git_diff::DiffScope::Uncommitted => String::new(),
-                crate::git_diff::DiffScope::Branch { .. } => " · all changes".to_string(),
-                scope @ crate::git_diff::DiffScope::Commit { sha, .. } => {
-                    let short = view
-                        .commits
-                        .as_ref()
-                        .and_then(|list| list.commit_of(scope))
-                        .map_or_else(|| sha.chars().take(7).collect(), |c| c.short.clone());
-                    format!(" @ {short}")
-                }
-            };
-            let title = truncate(
-                &format!(
-                    "{}{under}: {}{}",
-                    view.branch,
-                    sel_path,
-                    if sel_reviewed { " ✓" } else { "" }
-                ),
-                (diff_a.width as usize).saturating_sub(4),
-            );
-            let mut block = panel_block(&title, true, th).title_bottom(Line::from(Span::styled(
-                " ^r: toggle reviewed ",
-                Style::default().fg(th.dim),
-            )));
-            let diff_inner = block.inner(diff_a);
-            let max_scroll = (view.diff_line_count as u16).saturating_sub(diff_inner.height.max(1));
-            let scroll = view.scroll.min(max_scroll);
-            if max_scroll > 0 {
-                block = block.title_bottom(
-                    Line::from(Span::styled(
-                        format!(" {}/{} ", scroll + 1, view.diff_line_count),
-                        Style::default().fg(th.dim),
-                    ))
-                    .right_aligned(),
-                );
-            }
-            f.render_widget(block, diff_a);
-            // A commit's message heads the diff in colours of its own — a
-            // body line that starts with `-` is prose, not a removed line —
-            // with a rule under it, scrolled with the diff.
-            let height = diff_inner.height as usize;
-            let header_rows = view.header_rows();
-            let mut lines: Vec<Line> = (scroll as usize..header_rows.min(scroll as usize + height))
-                .map(|i| match view.header.get(i) {
-                    Some(text) => Line::from(Span::styled(
-                        text.clone(),
-                        match i {
-                            0 => Style::default().fg(th.dim),
-                            2 => Style::default().add_modifier(Modifier::BOLD),
-                            _ => Style::default(),
-                        },
-                    )),
-                    None => Line::from(Span::styled(
-                        "─".repeat(diff_inner.width as usize),
-                        Style::default().fg(th.dim),
-                    )),
-                })
-                .collect();
-            // Only the rows in view are styled: a diff runs to 20 000
-            // lines, and building a `Line` for each of them on every frame
-            // was most of what scrolling a large one cost.
-            let body = view
-                .diff
-                .lines()
-                .skip((scroll as usize).saturating_sub(header_rows))
-                .take(height - lines.len())
-                .map(|l| {
-                    let style = match classify_diff_line(l) {
-                        DiffLineKind::Add => Style::default().fg(th.ok),
-                        DiffLineKind::Remove => Style::default().fg(th.err),
-                        DiffLineKind::Hunk => Style::default().fg(th.accent),
-                        DiffLineKind::Header => Style::default().fg(th.dim),
-                        DiffLineKind::Context => Style::default(),
-                    };
-                    Line::from(Span::styled(l.to_string(), style))
-                });
-            lines.extend(body);
-            f.render_widget(Paragraph::new(lines), diff_inner);
-
-            // Write-back (draw works on a clone): page size for key paging,
-            // scroll re-clamped so resizes never strand the view.
-            if let Some(Overlay::Diff(v)) = &mut app.overlay {
-                v.view_height = diff_inner.height;
-                v.scroll = scroll;
-                v.list_area = list_inner;
-                v.area = area;
-                v.files_width = files_w;
-                if let Some(list) = &mut v.commits {
-                    list.area = if strip_h > 0 {
-                        strip_a
-                    } else {
-                        Rect::default()
-                    };
-                    list.list_area = strip_list;
-                }
-            }
-        }
+        Overlay::Diff(view) => diff_view::draw(f, app, &view, th),
         Overlay::Palette(palette) => {
             let area = centered_rect(f.area(), PALETTE_SIZE.0, PALETTE_SIZE.1);
             let title = if palette.query.is_empty() {
@@ -2084,7 +2063,20 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             } else {
                 format!(" Jump to ({}/{}) ", palette.hits(), palette.items.len())
             };
-            let inner = render_modal_frame(f, area, title, th);
+            f.render_widget(Clear, area);
+            let block = crate::hints::modal_block(
+                modal_block(title, th),
+                &[
+                    finder_keys::OPEN.hint_as("jump").kept(),
+                    finder_keys::ATTACH.hint(),
+                    finder_keys::FOCUS_ROW.hint(),
+                    crate::hints::ESC_CLOSE.hint(),
+                ],
+                area.width,
+                th,
+            );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
 
             // First row: the always-on fuzzy query input.
             if let Some(query_area) = row_rect(inner, 0) {
@@ -2268,7 +2260,20 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     finder.files.len()
                 )
             };
-            let inner = render_modal_frame(f, area, title, th);
+            f.render_widget(Clear, area);
+            let block = crate::hints::modal_block(
+                modal_block(title, th),
+                &[
+                    finder_keys::OPEN.hint_as(format!("edit in {}", editor_name(&finder.editor))),
+                    crate::hints::COPY_PATH.hint(),
+                    crate::hints::in_app_hint(),
+                    crate::hints::ESC_CLOSE.hint(),
+                ],
+                area.width,
+                th,
+            );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
 
             // First row: the always-on fuzzy query input.
             if let Some(query_area) = row_rect(inner, 0) {
@@ -2322,7 +2327,20 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     view.hits.len()
                 )
             };
-            let inner = render_modal_frame(f, area, title, th);
+            f.render_widget(Clear, area);
+            let block = crate::hints::modal_block(
+                modal_block(title, th),
+                &[
+                    finder_keys::OPEN.hint_as(format!("edit in {}", editor_name(&view.editor))),
+                    crate::hints::COPY_PATH.hint(),
+                    crate::hints::in_app_hint(),
+                    crate::hints::ESC_CLOSE.hint(),
+                ],
+                area.width,
+                th,
+            );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
 
             // First row: the always-live grep query.
             if let Some(query_area) = row_rect(inner, 0) {
@@ -2390,18 +2408,36 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 .clamp(5, f.area().height.max(5));
             let area = centered_rect(f.area(), HOSTS_W, height);
             f.render_widget(Clear, area);
-            let hint = if adding {
-                " type user@host [dir]  Enter: connect  Esc: cancel "
+            let hints = if adding {
+                vec![
+                    hosts_keys::CONNECT
+                        .hint_as("connect (restarts orion over ssh)")
+                        .kept(),
+                    hosts_keys::CANCEL.hint(),
+                ]
             } else {
-                " Enter: connect  a: new host  d: remove  Esc: close "
+                vec![
+                    hosts_keys::CONNECT.hint().kept(),
+                    hosts_keys::NEW.hint(),
+                    hosts_keys::REMOVE.hint(),
+                    crate::hints::ESC_CLOSE.hint(),
+                ]
             };
-            let block = modal_block(" SSH Hosts ", th)
-                .title_bottom(Line::from(Span::styled(hint, Style::default().fg(th.dim))));
+            let block =
+                crate::hints::modal_block(modal_block(" SSH Hosts ", th), &hints, area.width, th);
             let inner = block.inner(area);
             f.render_widget(block, area);
 
             if total == 0 && !adding {
-                empty_list_row(f, inner, "no hosts yet — a connects to a new one", th);
+                empty_list_row(
+                    f,
+                    inner,
+                    &format!(
+                        "no hosts yet — {} connects to a new one",
+                        hosts_keys::NEW.label()
+                    ),
+                    th,
+                );
             }
             // Follow-window keeps the cursor visible; while adding, pin the
             // window to the tail so the input row is always on screen.
@@ -2472,7 +2508,16 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // room, and the preview is a whole file.
             let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
             let title = format!(" Open files ({}) ", view.tabs.len());
-            let inner = render_modal_frame(f, area, title, th);
+            let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+            f.render_widget(Clear, area);
+            let block = crate::hints::modal_block(
+                modal_block(title, th),
+                &crate::file_tabs::hints(&view, editing),
+                area.width,
+                th,
+            );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
 
             // ---- tab strip and its rule ----
             let (strip, hits) = tab_strip(
@@ -2497,9 +2542,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 x: inner.x,
                 y: inner.y.saturating_add(2),
                 width: inner.width,
-                height: inner.height.saturating_sub(3),
+                height: inner.height.saturating_sub(2),
             };
-            let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
             // A markdown tab shows the rendered page — flowed for this
             // width, kept on the view between draws — unless `m` asked
             // for the source. No gutter: rendered rows aren't source lines.
@@ -2516,7 +2560,14 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 Some(r) => r.lines.len(),
                 None => view.preview_lines.len(),
             };
-            let max_scroll = line_count
+            // Source lines wrap, so the last screenful starts earlier.
+            let clamp_count = match &rendered {
+                Some(_) => line_count,
+                None => {
+                    wrapped_clamp_count(&view.preview_lines, line_count, view.preview_is_file, body)
+                }
+            };
+            let max_scroll = clamp_count
                 .saturating_sub(body.height as usize)
                 .min(u16::MAX as usize) as u16;
             let scroll = view.scroll.min(max_scroll);
@@ -2541,20 +2592,6 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 f.render_widget(Paragraph::new(lines), body);
             }
 
-            // ---- keys hint on the last row ----
-            if let Some(hint_area) = row_rect(inner, inner.height.saturating_sub(1) as usize) {
-                f.render_widget(
-                    Paragraph::new(Span::styled(
-                        truncate(
-                            &format!(" {}", file_tabs_keys_hint(&view, editing)),
-                            inner.width as usize,
-                        ),
-                        Style::default().fg(th.dim),
-                    )),
-                    hint_area,
-                );
-            }
-
             // Write-back (draw works on a clone): hit rects for the mouse,
             // the pane for the embedded editor, the page size for paging,
             // the scroll re-clamped so resizes never strand the view, the
@@ -2565,7 +2602,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 v.body_area = body;
                 v.view_height = body.height;
                 v.scroll = scroll;
-                v.preview_line_count = line_count;
+                v.preview_line_count = clamp_count;
                 if rendered.is_some() {
                     v.rendered = rendered;
                 }
@@ -2676,7 +2713,17 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 Some(r) => r.lines.len(),
                 None => view.preview_lines.len(),
             };
-            let max_scroll = (line_count.min(u16::MAX as usize) as u16)
+            // Source lines wrap, so the last screenful starts earlier.
+            let clamp_count = match &rendered {
+                Some(_) => line_count,
+                None => wrapped_clamp_count(
+                    &view.preview_lines,
+                    line_count,
+                    view.preview_is_file,
+                    preview_inner,
+                ),
+            };
+            let max_scroll = (clamp_count.min(u16::MAX as usize) as u16)
                 .saturating_sub(preview_inner.height.max(1));
             let scroll = view.scroll.min(max_scroll);
             if !editing && max_scroll > 0 {
@@ -2714,6 +2761,30 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 };
                 f.render_widget(Paragraph::new(lines), preview_inner);
             }
+            // The browser's keys along its bottom edge, under both frames
+            // and clear of the preview's scroll position. While the editor
+            // is up in the preview, its own keys are on its frame.
+            if !editing {
+                let mut hints = vec![
+                    finder_keys::OPEN.hint_as("open / edit"),
+                    finder_keys::FOLD.hint(),
+                    finder_keys::SCROLL.hint(),
+                ];
+                if view.markdown {
+                    hints.push(finder_keys::SOURCE.hint_as(if view.pretty {
+                        "source"
+                    } else {
+                        "rendered"
+                    }));
+                }
+                hints.extend([
+                    crate::hints::COPY_PATH.hint(),
+                    crate::hints::in_app_hint(),
+                    crate::hints::ESC_CLOSE.hint(),
+                ]);
+                let reserve = if max_scroll > 0 { 14 } else { 0 };
+                crate::hints::draw_on_border(f, area, &hints, reserve, th);
+            }
 
             // Write-back (draw works on a clone): page size for key paging,
             // scroll re-clamped so resizes never strand the view, preview
@@ -2721,7 +2792,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             if let Some(Overlay::Tree(v)) = &mut app.overlay {
                 v.view_height = preview_inner.height;
                 v.scroll = scroll;
-                v.preview_line_count = line_count;
+                v.preview_line_count = clamp_count;
                 if rendered.is_some() {
                     v.rendered = rendered;
                 }
@@ -2741,42 +2812,6 @@ fn key_hint(app: &App, action: crate::keymap::Action) -> String {
         .shown_first(action)
         .map(|c| c.display())
         .unwrap_or_else(|| "—".into())
-}
-
-/// The keys line at the bottom of the settings overlay. It changes with
-/// what the cursor is on, because the three places it can be — the tab
-/// strip, a value row, a hotkey row — take genuinely different keys, and a
-/// single union of all of them would read as noise.
-/// The FILE TABS' bottom-row hint: what the keys do from where the cursor
-/// is — the strip, the preview, or the editor drawn over it.
-fn file_tabs_keys_hint(view: &crate::file_tabs::FileTabsView, editing: bool) -> String {
-    let editor = editor_name(&view.editor);
-    let md = markdown_toggle_hint("m", view.markdown, view.pretty);
-    if editing {
-        format!(
-            "{editor} has the keys  Ctrl+q: back to the tabs (kills {editor}; :q keeps the file)"
-        )
-    } else if view.on_tabs {
-        format!(
-            "←/→ or Tab: switch  1-9: jump  ↓: preview  Enter: edit in {editor}{md}  \
-             Esc / Ctrl+q: close"
-        )
-    } else {
-        format!(
-            "j/k: scroll  Ctrl+d/u: half page  ↑ off the top: tabs  Enter: edit in {editor}{md}  \
-             Esc / Ctrl+q: back to the tabs"
-        )
-    }
-}
-
-/// The hint segment for a markdown preview's toggle, naming the view the
-/// key switches *to*; nothing at all for a file that isn't markdown.
-fn markdown_toggle_hint(key: &str, markdown: bool, pretty: bool) -> String {
-    match (markdown, pretty) {
-        (true, true) => format!("  {key}: source"),
-        (true, false) => format!("  {key}: rendered"),
-        (false, _) => String::new(),
-    }
 }
 
 /// The tab strip the SETTINGS OVERLAY and the FILE TABS share: labels laid
@@ -2823,10 +2858,24 @@ fn strip_rule(width: u16, th: Theme) -> Line<'static> {
     ))
 }
 
+/// The line-number gutter's width for `line_count` lines in `inner` —
+/// none for a directory listing or a placeholder, or on a pane too narrow
+/// to spare it and still leave room for the code itself — and the columns
+/// left for the text.
+fn preview_columns(line_count: usize, is_file: bool, inner: Rect) -> (usize, usize) {
+    let num_w = line_count.to_string().len().max(2);
+    let gutter = is_file && (inner.width as usize) > num_w + 1 + MIN_PREVIEW_TEXT_W;
+    let gutter_w = if gutter { num_w + 1 } else { 0 };
+    (
+        gutter_w,
+        (inner.width as usize).saturating_sub(gutter_w).max(1),
+    )
+}
+
 /// The highlighted preview the TREE BROWSER and the FILE TABS draw: the
-/// visible window of `lines` from `scroll`, with a line-number gutter when
-/// the text is a real file and the pane is wide enough to spare it and
-/// still leave room for the code itself.
+/// visible window of `lines` from line `scroll`, each line wrapped at the
+/// pane's edge rather than cut off there — code included — under a
+/// line-number gutter that numbers a line's first row only.
 fn preview_window(
     lines: &[Vec<(crate::syntax::TokenKind, String)>],
     line_count: usize,
@@ -2835,61 +2884,240 @@ fn preview_window(
     inner: Rect,
     th: Theme,
 ) -> Vec<Line<'static>> {
-    let num_w = line_count.to_string().len().max(2);
-    let gutter = is_file && (inner.width as usize) > num_w + 1 + MIN_PREVIEW_TEXT_W;
-    lines
-        .iter()
-        .enumerate()
-        .skip(scroll as usize)
-        .take(inner.height as usize)
-        .map(|(i, runs)| {
-            let mut spans = Vec::with_capacity(runs.len() + 1);
-            if gutter {
-                spans.push(Span::styled(
-                    format!("{:>num_w$} ", i + 1),
-                    Style::default().fg(th.edge),
-                ));
+    let (gutter_w, text_w) = preview_columns(line_count, is_file, inner);
+    let height = inner.height as usize;
+    let mut rows = Vec::with_capacity(height);
+    for (i, runs) in lines.iter().enumerate().skip(scroll as usize) {
+        let styled: Vec<(String, Style)> = runs
+            .iter()
+            .map(|(kind, text)| (text.clone(), token_style(*kind, th)))
+            .collect();
+        for (part, chunk) in crate::markdown::chunk_runs(&styled, text_w)
+            .into_iter()
+            .enumerate()
+        {
+            if rows.len() == height {
+                return rows;
             }
-            spans.extend(
-                runs.iter()
-                    .map(|(kind, text)| Span::styled(text.clone(), token_style(*kind, th))),
-            );
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn settings_keys_hint(view: &crate::app::SettingsView) -> &'static str {
-    if view.capturing() {
-        return "press the key you want   Esc: cancel";
-    }
-    if view.capture.is_some() {
-        return "Enter: reassign it here   Esc: leave it where it is";
-    }
-    if view.on_tabs {
-        return "←/→: tab  1-9: jump  R: reset all  Esc: close";
-    }
-    if view.is_hotkeys() {
-        return "Enter: rebind  a: add  ⌫: default  x: unbind  R: reset all  Esc: close";
-    }
-    if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
-        return "Enter: type a value (empty = default)  R: reset all  Esc: close";
-    }
-    if view.tab == crate::config::agents_tab() {
-        let cfg = crate::config::Config::load();
-        match cfg.account_row(view.selected) {
-            Some(crate::config::AccountRow::Add) => return "Enter: add an account  Esc: close",
-            // Only an account orion added is orion's to remove.
-            Some(crate::config::AccountRow::Account(id)) if cfg.is_extra_account(&id) => {
-                return "Enter: sign in  o: sign out  ⌫: remove  ←/→: on/off  Esc: close";
+            let mut spans = Vec::with_capacity(chunk.len() + 1);
+            if gutter_w > 0 {
+                let number = match part {
+                    0 => format!("{:>w$} ", i + 1, w = gutter_w - 1),
+                    _ => " ".repeat(gutter_w),
+                };
+                spans.push(Span::styled(number, Style::default().fg(th.edge)));
             }
-            Some(crate::config::AccountRow::Account(_)) => {
-                return "Enter: sign in  o: sign out  ←/→: on/off  Esc: close";
-            }
-            None => {}
+            spans.extend(chunk);
+            rows.push(Line::from(spans));
         }
     }
-    "Enter: toggle  ←/→: cycle  R: reset all  Esc: close"
+    rows
+}
+
+/// The line count a wrapped source preview clamps its scroll against: its
+/// last screenful starts at the first line whose rows from there to the
+/// end fit `inner`, so the scroll — in lines — may reach that line and no
+/// further. `line_count` itself when every row fits from the top, or when
+/// no line wraps.
+fn wrapped_clamp_count(
+    lines: &[Vec<(crate::syntax::TokenKind, String)>],
+    line_count: usize,
+    is_file: bool,
+    inner: Rect,
+) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let (_, text_w) = preview_columns(line_count, is_file, inner);
+    let height = inner.height.max(1) as usize;
+    let mut rows = 0;
+    let mut top = lines.len();
+    for (i, runs) in lines.iter().enumerate().rev() {
+        let width: usize = runs.iter().map(|(_, text)| text.width()).sum();
+        rows += width.div_ceil(text_w).max(1);
+        if rows > height {
+            break;
+        }
+        top = i;
+    }
+    if top == 0 {
+        line_count
+    } else {
+        top + height
+    }
+}
+
+/// The finders' own keys — the jump list (`⌘K`), Go to file, Find in
+/// files and the tree browser: one table their key arms
+/// (`event_loop::handle_overlay_key`) match and their bottom borders
+/// spell. Typing is the query's; ↑/↓ (or `^N`/`^P`) walk the matches.
+pub(crate) mod finder_keys {
+    use crate::hints::Key;
+
+    pub const OPEN: Key = Key::new(&["enter"], "open");
+    /// The jump list: the row opened (attached, for a session) whatever
+    /// Enter is set to do, or only focused.
+    pub const ATTACH: Key = Key::new(&["ctrl+o"], "open");
+    pub const FOCUS_ROW: Key = Key::new(&["ctrl+f"], "focus row");
+    /// The tree: fold a directory, or open it.
+    pub const FOLD: Key = Key::new(&["left", "right"], "fold").show(2);
+    /// A preview's scroll.
+    pub const SCROLL: Key = Key::new(&["shift+up", "shift+down"], "scroll").show(2);
+    /// A markdown preview between its rendered page and its source.
+    pub const SOURCE: Key = Key::new(&["ctrl+r"], "source");
+
+    #[cfg(test)]
+    #[test]
+    fn every_finder_key_parses() {
+        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE] {
+            assert!(key.parses(), "{:?}", key.chords);
+        }
+    }
+}
+
+/// The SSH HOSTS list's keys, as its key arm matches them.
+pub(crate) mod hosts_keys {
+    use crate::hints::Key;
+
+    pub const CONNECT: Key = Key::new(&["enter"], "connect");
+    pub const NEW: Key = Key::new(&["a", "n"], "new host");
+    pub const REMOVE: Key = Key::new(&["d", "x", "backspace", "delete"], "remove");
+    pub const CANCEL: Key = Key::new(&["esc"], "cancel");
+}
+
+/// The memory modal's keys, as its key arm matches them.
+pub(crate) mod metrics_keys {
+    use crate::hints::Key;
+
+    pub const OPEN: Key = Key::new(&["enter"], "open session");
+    pub const CLOSE: Key = Key::new(&["esc", "q", "shift+m"], "close");
+}
+
+/// The SETTINGS OVERLAY's keys: one table its key handler
+/// (`event_loop::handle_settings_key`) matches and [`settings_hints`]
+/// spells.
+pub(crate) mod settings_keys {
+    use crate::hints::Key;
+
+    pub const CLOSE: Key = Key::new(&["esc", "q", "s"], "close");
+    pub const NEXT_TAB: Key = Key::new(&["tab", "]"], "next tab");
+    pub const PREV_TAB: Key = Key::new(&["shift+tab", "["], "previous tab");
+    /// Enter on a row: toggle it, cycle it, type it, rebind it.
+    pub const CHOOSE: Key = Key::new(&["enter", "space"], "toggle");
+    /// A value row's value, either way.
+    pub const CYCLE: Key = Key::new(&["left", "right", "h", "l"], "cycle").show(2);
+    pub const RESET_ALL: Key = Key::new(&["shift+r"], "reset all");
+    /// A HOTKEYS row: a second chord beside the first, the default back,
+    /// none at all.
+    pub const ADD: Key = Key::new(&["a", "+"], "add");
+    pub const DEFAULT: Key = Key::new(&["backspace", "delete"], "default");
+    pub const UNBIND: Key = Key::new(&["x"], "unbind");
+    /// A CLAUDE ACCOUNTS row.
+    pub const SIGN_OUT: Key = Key::new(&["o"], "sign out");
+    pub const REMOVE: Key = Key::new(&["backspace", "delete"], "remove");
+    /// A row whose program isn't on PATH — the **File editor**'s editor,
+    /// an agent's CLI — and the Enter that runs its installer once asked.
+    pub const INSTALL: Key = Key::new(&["i"], "install");
+    pub const RUN: Key = Key::new(&["enter"], "run it here");
+
+    #[cfg(test)]
+    #[test]
+    fn every_settings_key_parses() {
+        for key in [
+            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, ADD, DEFAULT, UNBIND, SIGN_OUT,
+            REMOVE, INSTALL, RUN,
+        ] {
+            assert!(key.parses(), "{:?}", key.chords);
+        }
+    }
+}
+
+/// The keys on the SETTINGS OVERLAY's bottom border, for the row under
+/// its cursor.
+pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hints::Hint> {
+    use crate::hints::Hint;
+    use settings_keys::*;
+    if view.capturing() {
+        return vec![
+            Hint::new("any key", "binds it").kept(),
+            Hint::new("Esc", "cancel"),
+        ];
+    }
+    if view.capture.is_some() {
+        return vec![
+            Hint::new("Enter", "reassign it here").kept(),
+            Hint::new("Esc", "leave it where it is"),
+        ];
+    }
+    if let Some(plan) = &view.install {
+        let mut hints = Vec::new();
+        if plan.runnable() {
+            hints.push(RUN.hint().kept());
+        }
+        hints.push(Hint::new("Esc", "back"));
+        return hints;
+    }
+    let tail = [RESET_ALL.hint(), CLOSE.hint()];
+    let mut hints = if view.on_tabs {
+        let digits = crate::keymap::KeyChord::parse("1")
+            .zip(crate::keymap::KeyChord::parse("9"))
+            .map(|(a, b)| format!("{a}-{b}"))
+            .unwrap_or_default();
+        vec![CYCLE.hint_as("tab"), Hint::new(digits, "jump")]
+    } else if view.is_hotkeys() {
+        vec![
+            CHOOSE.hint_as("rebind").kept(),
+            ADD.hint(),
+            DEFAULT.hint(),
+            UNBIND.hint(),
+        ]
+    } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
+        vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
+    } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_status())
+    {
+        vec![CHOOSE.hint_as("test the connection").kept()]
+    } else {
+        let cfg = (view.tab == crate::config::agents_tab()).then(crate::config::Config::load);
+        match cfg
+            .as_ref()
+            .and_then(|cfg| cfg.account_row(view.selected).map(|row| (cfg, row)))
+        {
+            Some((_, crate::config::AccountRow::Add)) => {
+                return vec![CHOOSE.hint_as("add an account").kept(), CLOSE.hint()];
+            }
+            Some((cfg, crate::config::AccountRow::Account(id))) => {
+                let mut hints = vec![CHOOSE.hint_as("sign in").kept(), SIGN_OUT.hint()];
+                // Only an account orion added is orion's to remove.
+                if cfg.is_extra_account(&id) {
+                    hints.push(REMOVE.hint());
+                }
+                if installable(view) {
+                    hints.push(INSTALL.hint());
+                }
+                hints.push(CYCLE.hint_as("on/off"));
+                hints.push(CLOSE.hint());
+                return hints;
+            }
+            None => vec![CHOOSE.hint().kept(), CYCLE.hint()],
+        }
+    };
+    if !view.on_tabs && installable(view) {
+        hints.push(INSTALL.hint());
+    }
+    hints.push(NEXT_TAB.hint());
+    hints.extend(tail);
+    hints
+}
+
+/// The SETTINGS OVERLAY's row under the cursor names a program that isn't
+/// on PATH and that orion knows how to install (`install`).
+fn installable(view: &crate::app::SettingsView) -> bool {
+    !view.is_hotkeys()
+        && crate::install::settings_row_plan(
+            &crate::config::Config::load(),
+            view.tab,
+            view.selected,
+            &crate::install::Tools::here(),
+        )
+        .is_some()
 }
 
 pub(crate) fn centered_rect(frame: Rect, width: u16, height: u16) -> Rect {
@@ -2966,10 +3194,17 @@ fn draw_launcher_pane_grip(
         let cells = (edge.x..edge.x + edge.width).map(|x| (x, edge.y));
         (cells.collect(), "─", "━", GRIP_W)
     };
+    // The edge wears the accent while the pane has the keys — with its
+    // header's title and rule, what says which side of it they are on.
+    let edge_fg = if app.focus == Focus::Terminal {
+        th.accent
+    } else {
+        th.edge
+    };
     for &at in &cells {
         if let Some(cell) = buf.cell_mut(at) {
             cell.set_symbol(rule);
-            cell.set_style(Style::default().fg(th.edge));
+            cell.set_style(Style::default().fg(edge_fg));
         }
     }
     // Beside the cards the rule crosses the one under both headers — the
@@ -3043,208 +3278,22 @@ pub(crate) fn modal_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>, th: T
         ))
 }
 
-/// Clear `area` and draw a [`modal_block`] over it, returning the inner
-/// rect the modal's content goes in.
+/// Clear `area` and draw a [`modal_block`] over it with `hints` — the
+/// modal's keys — on its bottom border (`hints::modal_block`), returning
+/// the inner rect the modal's content goes in. Every accent modal's frame,
+/// so no modal draws its keys anywhere else.
 pub(crate) fn render_modal_frame<'a>(
     f: &mut Frame,
     area: Rect,
     title: impl Into<std::borrow::Cow<'a, str>>,
+    hints: &[crate::hints::Hint],
     th: Theme,
 ) -> Rect {
     f.render_widget(Clear, area);
-    let block = modal_block(title, th);
+    let block = crate::hints::modal_block(modal_block(title, th), hints, area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
-}
-
-/// The most rows the DIFF VIEWER's COMMIT LIST shows before it scrolls:
-/// **All changes**, **Uncommitted changes** and the four newest commits.
-const COMMIT_STRIP_ROWS: u16 = 6;
-
-/// The COMMIT LIST's height in a modal `modal_h` rows tall: its rows and
-/// borders, never more than a third of the modal — and none at all where a
-/// third is too little to show a row.
-fn commit_strip_height(list: &crate::commit_list::CommitList, modal_h: u16) -> u16 {
-    let rows = (list.row_count() as u16).clamp(1, COMMIT_STRIP_ROWS);
-    match (rows + 2).min(modal_h / 3) {
-        h if h < 3 => 0,
-        h => h,
-    }
-}
-
-/// The DIFF VIEWER's COMMIT LIST across the top of the modal: its title
-/// says what the branch is measured against, and each row what it is and
-/// how much it changed. The rows' rect, for the pointer.
-fn draw_commit_strip(
-    f: &mut Frame,
-    list: &crate::commit_list::CommitList,
-    focused: bool,
-    area: Rect,
-    th: Theme,
-) -> Rect {
-    let title = match (&list.base, list.merge_base.is_some()) {
-        _ if !list.loaded => "Commits".to_string(),
-        (Some(base), true) if list.commits.is_empty() => format!("Commits · none ahead of {base}"),
-        (Some(base), false) => format!("Commits · no history in common with {base}"),
-        (None, _) => "Commits · no base branch to compare with".to_string(),
-        (Some(base), true) if list.has_older() => {
-            format!(
-                "Commits ({}/{}) · since {base}",
-                list.commits.len(),
-                list.total
-            )
-        }
-        (Some(base), true) => format!("Commits ({}) · since {base}", list.total),
-    };
-    let hint = if focused {
-        " ⇧←/⇧→: older/newer · tab: files "
-    } else {
-        " ⇧←/⇧→: older/newer · tab: commits "
-    };
-    let block = panel_block(&title, focused, th)
-        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(th.dim))));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if !list.loaded {
-        empty_list_row(f, inner, "reading commits…", th);
-        return inner;
-    }
-    let now = crate::app::now_ms();
-    let start = list.window_start(inner.height as usize);
-    for (row, i) in (start..list.row_count()).enumerate() {
-        let (Some(row_area), Some(entry)) = (row_rect(inner, row), list.row(i)) else {
-            break;
-        };
-        // The selection marker takes the first column.
-        let width = (row_area.width as usize).saturating_sub(1);
-        let spans = commit_row_spans(list, entry, width, now, th);
-        render_row(f, row_area, spans, i == list.selected, focused, th);
-    }
-    inner
-}
-
-/// Columns a commit's subject keeps before the author, then the time, give
-/// theirs up to it.
-const MIN_SUBJECT_W: usize = 16;
-
-/// One COMMIT LIST row, `width` columns: what it is on the left — a
-/// commit's short sha and subject — and on the right who and when, then
-/// how much it changed. A narrow row gives up the author first, then the
-/// time, then the counts, before the subject shrinks.
-fn commit_row_spans(
-    list: &crate::commit_list::CommitList,
-    row: crate::commit_list::Row,
-    width: usize,
-    now: i64,
-    th: Theme,
-) -> Vec<Span<'static>> {
-    use crate::commit_list::Row;
-    let dim = Style::default().fg(th.dim);
-    let (sha, label, meta, stat) = match row {
-        Row::Branch => (None, "All changes".to_string(), Vec::new(), list.branch),
-        Row::Uncommitted => (
-            None,
-            "Uncommitted changes".to_string(),
-            Vec::new(),
-            list.uncommitted,
-        ),
-        Row::Commit(i) => {
-            let commit = &list.commits[i];
-            let mut meta = vec![commit.author.clone(), commit.ago(now)];
-            meta.retain(|part| !part.is_empty());
-            (
-                Some(commit.short.clone()),
-                commit.subject.clone(),
-                meta,
-                commit.stat,
-            )
-        }
-        Row::Older => {
-            let text = match list.paging {
-                Some(_) => "reading older commits…".to_string(),
-                None => format!("… {} older commits", list.total - list.commits.len()),
-            };
-            return vec![Span::styled(truncate(&text, width), dim)];
-        }
-    };
-    let merge = matches!(row, Row::Commit(i) if list.commits[i].is_merge());
-    let mut counts: Vec<Span<'static>> = Vec::new();
-    if let Some(stat) = stat {
-        let noun = if stat.files == 1 { "file" } else { "files" };
-        counts.push(Span::styled(
-            format!("{} {noun}", stat.files),
-            Style::default().fg(th.muted),
-        ));
-        if let Some(lines) = stat.lines {
-            counts.push(Span::styled(
-                format!("  +{}", lines.added),
-                Style::default().fg(th.ok),
-            ));
-            counts.push(Span::styled(
-                format!(" -{}", lines.removed),
-                Style::default().fg(th.err),
-            ));
-        }
-    } else if merge {
-        counts.push(Span::styled("merge", dim));
-    }
-    let span_w = |spans: &[Span]| {
-        spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum::<usize>()
-    };
-    let sha_w = sha.as_ref().map_or(0, |s| s.chars().count() + 1);
-    let left_min = sha_w + label.chars().count().min(MIN_SUBJECT_W);
-    // Who and when, then when alone, then nothing; then the counts go.
-    let mut meta_text = meta.join(" · ");
-    let fits = |meta: &str, counts: usize| {
-        let meta = meta.chars().count();
-        left_min
-            + [meta, counts]
-                .iter()
-                .filter(|w| **w > 0)
-                .map(|w| w + 2)
-                .sum::<usize>()
-            <= width
-    };
-    if !fits(&meta_text, span_w(&counts)) {
-        meta_text = meta.last().cloned().unwrap_or_default();
-    }
-    if !fits(&meta_text, span_w(&counts)) {
-        meta_text.clear();
-    }
-    if !fits(&meta_text, span_w(&counts)) {
-        counts.clear();
-    }
-    let mut right: Vec<Span<'static>> = Vec::new();
-    if !meta_text.is_empty() {
-        right.push(Span::styled(meta_text, dim));
-    }
-    if !counts.is_empty() {
-        if !right.is_empty() {
-            right.push(Span::raw("  "));
-        }
-        right.extend(counts);
-    }
-    let right_w = span_w(&right);
-    let gap = if right_w > 0 { 2 } else { 0 };
-    let label = truncate(&label, width.saturating_sub(sha_w + right_w + gap));
-    let mut spans = Vec::new();
-    if let Some(sha) = sha {
-        spans.push(Span::styled(
-            format!("{sha} "),
-            Style::default().fg(th.accent),
-        ));
-    }
-    let used = sha_w + label.chars().count();
-    spans.push(Span::raw(label));
-    if right_w > 0 {
-        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w))));
-        spans.extend(right);
-    }
-    spans
 }
 
 /// A dim one-line placeholder on the first row of an otherwise empty list,
@@ -3613,14 +3662,17 @@ fn render_button<'a>(
     );
 }
 
-/// The pull-request reading pane. Replaces the session view while the
-/// Worktrees cursor rests on an open-PR row, or the focused Sessions cursor
-/// on the PR ROW (`App::previewed_pr`): headline, description, then the
-/// conversation, scrolled by `pr_preview_scroll`.
+/// The PULL REQUEST PAGE in the pane (`pr_preview`): what it shows while
+/// the cursor rests on a band's pull request, an open-PR row, or the
+/// Sessions cursor's PR ROW (`App::previewed_pr`) — the headline and the
+/// tabs fixed at the top, the active tab's body scrolled under them by
+/// `pr_preview_scroll`.
 ///
-/// The line count is written back to `app.pr_preview_lines` so the scroll
-/// handlers know how far down they may go — the pane is the only thing that
-/// knows how wide the prose wrapped.
+/// The body's line count is written back to `app.pr_preview_lines`, and
+/// the body's rect to `app.term_area`, so the scroll handlers know how far
+/// down they may go and how far a page is — the pane is the only thing
+/// that knows how wide the prose wrapped. The tab labels and the listed
+/// rows go into the hit map ahead of the pane, for the mouse.
 fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     let th = app.theme;
     let Some(pr) = app.previewed_pr() else {
@@ -3635,7 +3687,7 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     ];
     // The right-hand tag is the pane's state word, the same slot the PTY
     // view uses for "exited" / "scroll N" / "INPUT". A loaded PR needs none:
-    // its state is the first thing in the body.
+    // its state is the first thing under its title.
     let right = match (&detail, failed) {
         (Some(_), _) => None,
         (None, true) => Some(Span::styled(
@@ -3653,50 +3705,41 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         width: inner.width.saturating_sub(1),
         ..inner
     };
-    app.term_area = inner;
-    app.hits.push((inner, HitTarget::TerminalPane));
     // Nothing in this pane is a PTY, so the link/file scanners have nothing
     // to find — clear them or ⌥click would still hit last frame's hits.
     app.term_links = Vec::new();
     app.term_file_links = Vec::new();
 
-    // The placeholders wrap through the same helper the body does: the pane
-    // is as narrow as the user drags it, and ratatui clips an overwide line
-    // rather than folding it.
-    let placeholder = |message: &str| {
-        let w = (inner.width as usize).saturating_sub(2).max(20);
-        let row = |text: &str, style: Style| Line::from(Span::styled(format!(" {text}"), style));
-        let mut lines = vec![Line::from("")];
-        lines.extend(
-            crate::pr_preview::wrap(&pr.label, w)
-                .iter()
-                .map(|t| row(t, Style::default().fg(th.muted))),
-        );
-        lines.push(Line::from(""));
-        lines.extend(
-            crate::pr_preview::wrap(message, w)
-                .iter()
-                .map(|t| row(t, Style::default().fg(th.dim))),
-        );
-        lines
+    let title = pr
+        .label
+        .strip_prefix(&format!("#{}", pr.number))
+        .unwrap_or(&pr.label)
+        .trim()
+        .to_string();
+    let input = crate::pr_preview::PageInput {
+        number: pr.number,
+        title: &title,
+        detail: detail.as_ref(),
+        failed,
+        posting: false,
+        browser_key: key_hint(app, Action::Activate),
+        diff_key: key_hint(app, Action::GitDiff),
+        now: orion_core::clock::now_secs() as i64,
     };
-    let lines: Vec<Line> = match (&detail, failed) {
-        (Some(detail), _) => crate::pr_preview::lines(detail, inner.width as usize, th),
-        (None, true) => placeholder(&format!(
-                "couldn't read this pull request — is `gh` installed and logged in?                  {} still opens it in the browser.",
-            key_hint(app, Action::Activate)
-        )),
-        (None, false) => placeholder("reading it…"),
-    };
-    app.pr_preview_lines = lines.len();
-    // Clamp here rather than in the handlers: the pane is what knows how
-    // many rows the prose wrapped to, and a narrower window can strand the
-    // offset past the end.
-    let max = (lines.len() as u16).saturating_sub(inner.height.max(1));
-    let scroll = app.pr_preview_scroll.min(max);
-    app.pr_preview_scroll = scroll;
-    let shown: Vec<Line> = lines.into_iter().skip(scroll as usize).collect();
-    f.render_widget(Paragraph::new(shown), inner);
+    let page = crate::pr_preview::page(&input, &app.pr_tabs, focused, inner.width as usize, th);
+    let mut tabs = std::mem::take(&mut app.pr_tabs);
+    let drawn = crate::pr_preview::draw(f, inner, &page, &mut tabs, app.pr_preview_scroll);
+    for (rect, tab) in &tabs.tab_hits {
+        app.hits.push((*rect, HitTarget::PrPageTab(*tab)));
+    }
+    for (rect, row) in &tabs.row_hits {
+        app.hits.push((*rect, HitTarget::PrPageRow(*row)));
+    }
+    app.pr_tabs = tabs;
+    app.hits.push((inner, HitTarget::TerminalPane));
+    app.term_area = drawn.body;
+    app.pr_preview_lines = drawn.lines;
+    app.pr_preview_scroll = drawn.scroll;
 }
 
 /// The ISSUE PREVIEW: what the pane shows while the Worktrees cursor rests
@@ -4145,682 +4188,17 @@ fn attached_session_name(app: &App) -> Option<String> {
     }
 }
 
-/// `project ▸ branch ▸ session` breadcrumb of the current selection; the
-/// segment matching the focused panel is highlighted. Sessions/Terminal
-/// focus both highlight the session segment.
-fn breadcrumb(app: &App) -> Vec<Span<'static>> {
-    let th = app.theme;
-    let seg = |name: &str, active: bool| {
-        Span::styled(
-            truncate(name, 20),
-            if active {
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(th.muted)
-            },
-        )
-    };
-    let sep = || Span::styled(" ▸ ", Style::default().fg(th.dim));
-
-    let mut spans = Vec::new();
-    let Some(project) = app.selected_project() else {
-        return spans;
-    };
-    spans.push(seg(&project.name, app.focus == Focus::Projects));
-    if let Some(worktree) = app.selected_worktree() {
-        spans.push(sep());
-        spans.push(seg(&worktree.branch, app.focus == Focus::Worktrees));
-        if let Some(session) = app.selected_session_row() {
-            spans.push(sep());
-            // A link's crumb is its display label, not the raw URL — the
-            // crumb has 20 cells and "https://" would eat eight of them.
-            let name = match session.as_link() {
-                Some(link) => link.label(),
-                None => session.name().to_string(),
-            };
-            spans.push(seg(
-                &name,
-                matches!(app.focus, Focus::Sessions | Focus::Terminal),
-            ));
-        }
-    }
-    spans
-}
-
 /// Short display name for an editor command: the basename when it's a
-/// path, so footer hints say "edit in nvim", not the full path.
-fn editor_name(cmd: &str) -> &str {
+/// path, so hints say "edit in nvim", not the full path.
+pub(crate) fn editor_name(cmd: &str) -> &str {
     std::path::Path::new(cmd)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(cmd)
 }
 
-/// The bottom bar, drawn under the splash and the collapsed view too,
-/// with the KEY COMBO DISPLAY on the padding row above it.
-fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
-    draw_footer_bar(f, app, area);
-    draw_key_combo(f, app, area);
-}
-
-/// The KEY COMBO DISPLAY: the last key press
-/// and what it did — `j - Move down` — on the footer's padding row at the
-/// far left, the one blank row on screen and right where vim keeps
-/// `showcmd`. Each key sits in a keycap (the selected-row fill) so it
-/// reads across a screen share; the label is plain text. Nothing is drawn
-/// once the press has aged out (`key_combo::LINGER`; the loop clears it),
-/// so the row stays the breathing space it was.
-fn draw_key_combo(f: &mut Frame, app: &App, area: Rect) {
-    let Some(combo) = &app.key_combo else {
-        return;
-    };
-    if area.height < 2 || area.width == 0 {
-        return;
-    }
-    let row = Rect {
-        y: area.y,
-        height: 1,
-        ..area
-    };
-    let th = app.theme;
-    let cap = Style::default()
-        .fg(th.accent)
-        .bg(th.sel_bg)
-        .add_modifier(Modifier::BOLD);
-    let mut spans = vec![Span::raw(" ")];
-    for (i, key) in combo.keys.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(format!(" {} ", key.display()), cap));
-    }
-    if let Some(does) = &combo.does {
-        spans.push(Span::styled(" - ", Style::default().fg(th.dim)));
-        spans.push(Span::styled(does.as_str(), Style::default().fg(th.text)));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), row);
-}
-
-/// Draw the bar.
-fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
-    // `area` includes the blank padding row; the bar itself is its last row.
-    let area = Rect {
-        y: area.y + area.height.saturating_sub(1),
-        height: area.height.min(1),
-        ..area
-    };
-    let th = app.theme;
-    // The hint branches below build with `dim`; lift to muted at the end
-    // so hints read as secondary, not disabled (flash/warn stays as-is).
-    let conn = match app.conn {
-        ConnState::Connected => Span::styled("⏻ connected", Style::default().fg(th.ok)),
-        ConnState::Disconnected => Span::styled("✗ disconnected", Style::default().fg(th.err)),
-    };
-    let hints = if let Some(flash) = &app.flash {
-        Span::styled(flash.clone(), Style::default().fg(th.warn))
-    } else if let Some(vim) = &app.vim {
-        Span::styled(
-            if vim.quits_itself {
-                editor_modal_hint(vim)
-            } else {
-                format!(":wq / :q to finish  {}", editor_modal_hint(vim))
-            },
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Grep(view)) = &app.overlay {
-        Span::styled(
-            format!(
-                "type: search  ↑/↓: move  Enter: edit in {}  {}: Cursor  Esc: close",
-                editor_name(&view.editor),
-                crate::hints::outside_key(),
-            ),
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Diff(view)) = &app.overlay {
-        Span::styled(
-            match (view.commits.is_some(), view.commits_focused, view.tree.is_some()) {
-                (_, true, _) => {
-                    "↑/↓: commit  Enter/Tab: its files  ⇧↑/↓: scroll  type: filter files  Esc: close"
-                }
-                (true, false, true) => {
-                    "type: filter  ↑/↓: move  ←/→: fold  ⇧←/→: commit  Tab: commits  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: flat list  Esc: close"
-                }
-                (true, false, false) => {
-                    "type: filter  ↑/↓: file  ⇧←/→: commit  Tab: commits  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: tree  Esc: close"
-                }
-                (false, _, true) => {
-                    "type: filter  ↑/↓: move  ←/→: fold  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: flat list  Esc: close"
-                }
-                (false, _, false) => {
-                    "type: filter  ↑/↓: file  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: tree  Esc: close"
-                }
-            },
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::FileTabs(view)) = &app.overlay {
-        Span::styled(
-            file_tabs_keys_hint(view, app.vim.as_ref().is_some_and(|v| v.embedded)),
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Tree(view)) = &app.overlay {
-        let md = markdown_toggle_hint("Ctrl+r", view.markdown, view.pretty);
-        Span::styled(
-            format!(
-                "type: filter  ↑/↓: move  ←/→: fold  Enter: open/edit  ⇧↑/↓: scroll{md}  \
-                 {}: copy path  {}: Cursor  Esc: close",
-                crate::hints::copy_key(),
-                crate::hints::outside_key(),
-            ),
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Files(view)) = &app.overlay {
-        Span::styled(
-            format!(
-                "type: search  ↑/↓: move  Enter: edit in {}  {}: copy path  {}: Cursor  Esc: close",
-                editor_name(&view.editor),
-                crate::hints::copy_key(),
-                crate::hints::outside_key(),
-            ),
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::Palette(_))) {
-        Span::styled(
-            "type: search  ↑/↓: move  Enter: open  Ctrl+u: clear  Esc: close",
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::Onboard(_))) {
-        Span::styled(
-            "←/→ page  ↑/↓ row  Space toggle  Enter next  Esc skip",
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::Settings(_))) {
-        Span::styled(
-            match &app.overlay {
-                Some(Overlay::Settings(view)) => settings_keys_hint(view),
-                _ => "",
-            },
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::Metrics(_))) {
-        Span::styled(
-            "↑/↓: select  Enter: open session  Esc: close  (refreshes every 2s)",
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Hosts(view)) = &app.overlay {
-        Span::styled(
-            if view.input.is_some() {
-                "type user@host [dir]  Enter: connect (restarts orion over ssh)  Esc: cancel"
-            } else {
-                "↑/↓: select  Enter: connect (restarts orion over ssh)  a: new  d: remove  Esc: close"
-            },
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::AgentPresets(view)) = &app.overlay {
-        Span::styled(
-            crate::preset_overlays::footer_hint(view),
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::AgentPresetEditor(_))) {
-        Span::styled(
-            "Tab/↑↓: next field  ←/→: cycle  Shift+Enter/^J: newline  Enter: save  Esc: back to list",
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Issues(view)) = &app.overlay {
-        Span::styled(
-            crate::issues::footer_hint(view),
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
-        Span::styled(crate::pr_modal::footer_hint(), Style::default().fg(th.dim))
-    } else if let Some(Overlay::Linear(view)) = &app.overlay {
-        Span::styled(
-            crate::linear::footer_hint(view),
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::Skills(view)) = &app.overlay {
-        Span::styled(
-            crate::skills::footer_hint(editor_name(&view.editor)),
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(Overlay::BranchSwitch(view)) = &app.overlay {
-        Span::styled(
-            crate::branch_switch::footer_hint(view),
-            Style::default().fg(th.dim),
-        )
-    } else if matches!(&app.overlay, Some(Overlay::Menu(m)) if m.is_project_picker()) {
-        Span::styled(
-            "type: filter  Enter: open the project  ↑/↓: move  Esc: close",
-            Style::default().fg(th.dim),
-        )
-    } else if let Some(hint) = app.overlay.as_ref().and_then(|o| match o {
-        Overlay::Menu(m) => menu_footer_hint(m),
-        _ => None,
-    }) {
-        Span::styled(hint, Style::default().fg(th.dim))
-    } else if matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(p.kind, crate::app::PromptKind::QuickPrompt(_)))
-    {
-        // `^P`, `^O`, `Tab` and `^N` are on the box itself now, each
-        // beside the thing it changes — a third copy down here was most
-        // of what made this screen read as a wall of chords. A box
-        // standing on a modal goes back to it.
-        let hint = match app
-            .overlay
-            .as_ref()
-            .and_then(crate::quick_prompt::modal_under)
-        {
-            Some(crate::quick_prompt::ModalUnder::Issues(_)) => {
-                "Enter: launch  ⇧Tab: preset  Esc: back to issues"
-            }
-            Some(crate::quick_prompt::ModalUnder::PullRequests(_)) => {
-                "Enter: launch  ⇧Tab: preset  Esc: back to pull requests"
-            }
-            Some(crate::quick_prompt::ModalUnder::Linear(_)) => {
-                "Enter: launch  ⇧Tab: preset  Esc: back to Linear"
-            }
-            None => "Enter: launch  ⇧Tab: preset  Esc: back to sessions",
-        };
-        Span::styled(hint, Style::default().fg(th.dim))
-    } else if matches!(&app.overlay, Some(Overlay::ProjectPicker(_))) {
-        Span::styled(
-            "type: filter projects  ↑/↓: move  Enter: aim the box there  Esc: back to the box",
-            Style::default().fg(th.dim),
-        )
-    } else if app.overlay.is_some() {
-        Span::styled("Esc: close  Enter: confirm", Style::default().fg(th.dim))
-    } else if app.splash_showing() {
-        // The splash covers the panels, so every panel hotkey is dead here.
-        // List only what actually fires.
-        use crate::hints::Hint::Act;
-        let open = app
-            .launch_repo_name()
-            .map_or_else(|| "open a folder".to_string(), |name| format!("open {name}"));
-        let mut list = vec![Act(Action::Activate, open.as_str())];
-        if app.launch_repo_name().is_some() {
-            list.push(Act(Action::Palette, "another folder"));
-        }
-        list.extend([
-            Act(Action::CommandPalette, "commands"),
-            Act(Action::Settings, "settings"),
-            Act(Action::Quit, "quit"),
-        ]);
-        Span::styled(
-            crate::hints::line(&app.keymap, &list),
-            Style::default().fg(th.dim),
-        )
-    } else if app.launcher_grid()
-        && app.focus != Focus::Terminal
-        && app.launcher_tab_cursor.is_some()
-    {
-        // The LAUNCHER VIEW's PROJECT TABS holding the keys (`↑`,`↑` off
-        // the top row of cards): walking the header's cursor, which
-        // switches the grid as it goes, and the ways back down.
-        use crate::hints::Hint::{Act, Lit};
-        let k = |a| key_hint(app, a);
-        let walk = format!("{}{}", k(Action::FocusLeft), k(Action::FocusRight));
-        let down = k(Action::MoveDown);
-        let into = format!("{} or {down}{down}", k(Action::Activate));
-        Span::styled(
-            crate::hints::line(
-                &app.keymap,
-                &[
-                    Lit(&walk, "switch project"),
-                    Lit(&into, "into its cards"),
-                    Act(Action::CloseProjectTab, "close tab"),
-                    Lit("Esc", "back to the cards"),
-                    Act(Action::CommandPalette, "commands"),
-                    Act(Action::Quit, "quit"),
-                ],
-            ),
-            Style::default().fg(th.dim),
-        )
-    } else if app.launcher_grid() && app.focus != Focus::Terminal {
-        // The LAUNCHER VIEW's GRID: walking the cards, opening the one
-        // under the cursor, and the PROJECT TABS beside them. Not while
-        // the pane under it has the keys — those are the pane's own
-        // hints, below.
-        use crate::hints::Hint::{Act, Lit};
-        let k = |a| key_hint(app, a);
-        let move_keys = format!(
-            "{}{}{}{}",
-            k(Action::FocusLeft),
-            k(Action::MoveDown),
-            k(Action::MoveUp),
-            k(Action::FocusRight),
-        );
-        let tabs = format!("{}{}", k(Action::PrevProjectTab), k(Action::NextProjectTab));
-        // A session under the cursor stopped on a usage limit: the way on
-        // is the first thing worth naming after opening it.
-        let carry_on = app
-            .selected_session()
-            .filter(|a| a.limit_reached().is_some())
-            .and_then(|a| {
-                crate::launcher::continue_does(&crate::config::Config::load().continue_targets(&a))
-            });
-        let list = if app.show_archived {
-            // The ARCHIVED VIEW is a different list with different
-            // verbs on it: there is nothing to attach, prompt or
-            // archive there, only the two a card in it takes.
-            vec![
-                Lit(&move_keys, "move"),
-                Act(Action::Archive, "unarchive"),
-                Act(Action::Delete, "delete"),
-                Act(Action::ToggleArchived, "back to live sessions"),
-                Act(Action::Palette, "jump"),
-                Act(Action::CommandPalette, "commands"),
-                Act(Action::Quit, "quit"),
-            ]
-        } else {
-            let mut list = vec![Lit(&move_keys, "move"), Act(Action::Activate, "open")];
-            if let Some(does) = &carry_on {
-                list.push(Act(Action::ContinueOn, does));
-            }
-            list.extend([
-                Act(Action::QuickPrompt, "new agent"),
-                Lit(&tabs, "project tabs"),
-                Act(Action::PaneTabs, "terminals"),
-                Act(Action::Archive, "archive"),
-                Act(Action::ToggleArchived, "archived"),
-                Act(Action::GitDiff, "changes"),
-                Act(Action::Palette, "jump"),
-                Act(Action::CommandPalette, "commands"),
-                Act(Action::Settings, "settings"),
-                Act(Action::Quit, "quit"),
-            ]);
-            list
-        };
-        Span::styled(
-            crate::hints::line(&app.keymap, &list),
-            Style::default().fg(th.dim),
-        )
-    } else {
-        // Spelled from the live keymap for the same reason the Help
-        // overlay is: these are the first place a rebound key would start
-        // lying.
-        use crate::hints::Hint::{Act, Lit};
-        let k = |a| key_hint(app, a);
-        let text = match app.focus {
-            // The pane is the CLOUD SESSION PANEL: there is no terminal to
-            // type into, and Enter hands the session to the browser.
-            Focus::Terminal if app.previewed_cloud().is_some() => format!(
-                "{}: open in browser  {}: sessions",
-                k(Action::Activate),
-                k(Action::FocusLeft)
-            ),
-            Focus::Terminal if app.term.as_ref().is_some_and(|t| t.exited) => {
-                "session exited — Esc: back to sessions".to_string()
-            }
-            Focus::Terminal if app.term_locked => format!(
-                "Esc: {}  ⇧Esc: Esc to the agent  ⌥click: open link  {}",
-                // The LAUNCHER VIEW has its grid of sessions to go back to,
-                // and a full-screen session comes back down to its pane.
-                if app.launcher_grid() {
-                    "back to the card"
-                } else if app.launcher_active() && app.collapsed {
-                    "normal size"
-                } else {
-                    "sessions"
-                },
-                // A program that asked for the mouse gets the drag (its
-                // own selection copies); promising orion's would lie.
-                if app.child_mouse_mode().0 != vt100::MouseProtocolMode::None {
-                    "drag: to the app (⇧drag: terminal)"
-                } else {
-                    "drag: select+copy"
-                },
-            ),
-            Focus::Terminal if app.term.is_some() => format!(
-                "{}: type into terminal  {}: sessions",
-                k(Action::Activate),
-                k(Action::FocusLeft)
-            ),
-            Focus::Terminal => "select a session and press Enter to attach".to_string(),
-            Focus::Projects => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(Action::Rename, "rename"),
-                    Act(Action::Delete, "remove"),
-                    Act(Action::Palette, "jump"),
-                    Act(Action::CommandPalette, "commands"),
-                ],
-            ),
-            // An open-PR row answers to a different set of verbs than a
-            // checkout does, so the hint follows the cursor into the group.
-            Focus::Worktrees if app.selected_worktree_pr().is_some() => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(Action::Activate, "open in browser"),
-                    Act(Action::GitDiff, "changes"),
-                    Lit("PgUp/PgDn", "scroll"),
-                    Act(Action::RefreshPullRequests, "refresh"),
-                    Act(Action::CommandPalette, "commands"),
-                ],
-            ),
-            // An issue row: the browser, a prompt on it, and the pane's
-            // scroll keys.
-            Focus::Worktrees if app.selected_worktree_issue().is_some() => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(Action::Activate, "open in browser"),
-                    Act(Action::QuickPrompt, "prompt"),
-                    Lit("PgUp/PgDn", "scroll"),
-                    Act(Action::CommandPalette, "commands"),
-                ],
-            ),
-            Focus::Worktrees => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(
-                        Action::Rename,
-                        if app
-                            .selected_worktree()
-                            .is_some_and(|w| app.worktree_running(&w.id))
-                        {
-                            "stop"
-                        } else {
-                            "run"
-                        },
-                    ),
-                    Act(Action::OpenOutside, "open"),
-                    Act(Action::NewTerminal, "terminal"),
-                    Act(Action::Delete, "delete"),
-                    Act(Action::RefreshPullRequests, "refresh PRs"),
-                    Act(Action::CommandPalette, "commands"),
-                ],
-            ),
-            // A discovered pull request opens, reads in the pane and shows
-            // its diff; it has no stored row to edit or delete, and the
-            // refresh key re-asks GitHub for it. Previously saved rows
-            // retain the edit and delete verbs.
-            Focus::Sessions
-                if app
-                    .selected_link()
-                    .is_some_and(|row| row.id().is_none()) =>
-            {
-                crate::hints::line(
-                    &app.keymap,
-                    &[
-                        Act(Action::Activate, "open in browser"),
-                        Act(Action::GitDiff, "changes"),
-                        Lit("PgUp/PgDn", "scroll"),
-                        Act(Action::RefreshPullRequests, "refresh"),
-                    ],
-                )
-            }
-            Focus::Sessions if app.selected_link().is_some() => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(Action::Activate, "open in browser"),
-                    Act(Action::Rename, "edit URL"),
-                    Act(Action::Delete, "delete"),
-                ],
-            ),
-            // A Cloud row leads out of orion like a link row does; the
-            // menu holds the one verb that reaches the session from here.
-            Focus::Sessions if app.previewed_cloud().is_some() => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(Action::Activate, "open in browser"),
-                    Act(Action::Rename, "rename"),
-                    Act(Action::Archive, "archive"),
-                    Act(Action::Delete, "del"),
-                ],
-            ),
-            Focus::Sessions => crate::hints::line(
-                &app.keymap,
-                &[
-                    Act(Action::Activate, "focus"),
-                    Act(Action::QuickPrompt, "new agent"),
-                    Act(Action::NewTerminal, "terminal"),
-                    Act(Action::Rename, "rename"),
-                    Act(Action::Archive, "archive"),
-                    Act(Action::Delete, "del"),
-                    Act(Action::CommandPalette, "commands"),
-                ],
-            ),
-        };
-        Span::styled(text, Style::default().fg(th.dim))
-    };
-    // Quiet footer: context on the left, live stats on the right. The
-    // hostname only earns a slot when it's a remote session, and the
-    // connection state only when something is wrong.
-    // (The version nameplate is spliced in at the front further down, once
-    // the width left for the hints is known.)
-    let mut spans = vec![Span::raw(" ")];
-    if app.is_remote {
-        spans.push(Span::styled(
-            truncate(&app.hostname, 24),
-            Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
-    }
-    if matches!(app.conn, ConnState::Disconnected) {
-        spans.push(conn);
-        spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
-    }
-    let crumbs = breadcrumb(app);
-    if !crumbs.is_empty() {
-        spans.extend(crumbs);
-        // No changed-file count here: it rides each card's branch, where
-        // it reads as that checkout's (`launcher_view::draw_card`).
-        spans.push(Span::styled("    ", Style::default()));
-    }
-    let mut hints = hints;
-    if hints.style.fg == Some(th.dim) {
-        hints.style.fg = Some(th.muted);
-    }
-    spans.push(hints);
-    // Right edge: live session/process counts and orion's total memory
-    // footprint, fed by the footer metrics poll. The hints clip before the
-    // readout does.
-    let usage = footer_usage(app);
-    let right_w = usage
-        .as_ref()
-        .map(|s| s.chars().count() as u16 + 2)
-        .unwrap_or(0)
-        .min(area.width);
-    let left = Rect {
-        width: area.width.saturating_sub(right_w),
-        ..area
-    };
-    // Which orion this is, at the far left: the one thing on the bar that
-    // never moves with the cursor, so it reads as a nameplate rather than
-    // context. It costs the hints ~18 columns, which they can afford — a
-    // clipped key list still spells the keys that matter, in order. A
-    // clipped *flash* loses the end of a sentence, so the nameplate steps
-    // aside for one that would not otherwise fit.
-    let plate = format!("orion v{}", env!("CARGO_PKG_VERSION"));
-    // A newer published release rides the nameplate as `⇡ v0.22.0`, in the
-    // heads-up color: the version is already what this span says, so "and
-    // a newer one exists" belongs beside it rather than anywhere else on
-    // the bar. It is part of the plate for the yield below — a flash that
-    // would be clipped drops both.
-    let update = app.update_available.as_ref().map(|v| format!(" ⇡ v{v}"));
-    let plate_w = plate.chars().count()
-        + update.as_ref().map_or(0, |u| u.chars().count())
-        + "  ·  ".chars().count();
-    let body_w: usize = spans.iter().map(|s| s.width()).sum();
-    if app.flash.is_none() || body_w + plate_w <= left.width as usize {
-        let mut plate_spans = vec![Span::styled(plate, Style::default().fg(th.dim))];
-        if let Some(update) = update {
-            plate_spans.push(Span::styled(
-                update,
-                Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
-            ));
-        }
-        plate_spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
-        spans.splice(1..1, plate_spans);
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), left);
-    if let Some(usage) = usage {
-        let right = Rect {
-            x: area.x + area.width.saturating_sub(right_w),
-            width: right_w,
-            ..area
-        };
-        // The readout is a button — a click opens the memory modal, as
-        // `⇧M` does — and nothing about a dim figure says so, so the
-        // pointer on it lifts it to full text and underlines it, as the
-        // header's buttons are. Only the words are the target, laid where
-        // the right alignment puts them, not the padding beside them.
-        let span = Span::styled(usage, Style::default().fg(th.dim));
-        let span = if app.hover_crumb == Some(HitTarget::FooterUsage) {
-            span.style(
-                Style::default()
-                    .fg(th.text)
-                    .add_modifier(Modifier::UNDERLINED),
-            )
-        } else {
-            span
-        };
-        let width = (span.width() as u16).min(right.width);
-        app.hits.push((
-            Rect {
-                x: right.x + right.width - width,
-                width,
-                ..right
-            },
-            HitTarget::FooterUsage,
-        ));
-        f.render_widget(
-            Paragraph::new(Line::from(span)).alignment(ratatui::layout::Alignment::Right),
-            right,
-        );
-    }
-}
-
-/// The footer's right-edge readout: live sessions, their process count,
-/// and orion's total memory footprint (TUI + daemon + every session's
-/// process subtree). None until the first metrics reply arrives.
-fn footer_usage(app: &App) -> Option<String> {
-    let m = app.last_metrics.as_ref()?;
-    // Prewarm-pool spares are agent CLIs but not agents anyone opened;
-    // they get their own count so the agent figure matches the sidebar.
-    let spares = m.sessions.iter().filter(|s| s.prewarm.is_some()).count();
-    let agents = m
-        .sessions
-        .iter()
-        .filter(|s| matches!(s.session, SessionRef::Agent(_)) && s.prewarm.is_none())
-        .count();
-    let terms = m.sessions.len() - agents - spares;
-    let total = m.daemon_rss_bytes
-        + app.client_rss_bytes
-        + m.sessions.iter().map(|s| s.rss_bytes).sum::<u64>();
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let warm = if spares > 0 {
-        format!(" · {spares} warm")
-    } else {
-        String::new()
-    };
-    Some(format!(
-        "{agents} agent{} · {terms} term{}{warm} · {}",
-        plural(agents),
-        plural(terms),
-        fmt_mem(total)
-    ))
-}
-
 /// Style for one syntax-highlight token kind of the tree-browser preview
-/// (classification lives in syntax.rs, the `classify_diff_line` split).
+/// and the DIFF VIEWER's code (classification lives in syntax.rs).
 pub(crate) fn token_style(kind: crate::syntax::TokenKind, th: Theme) -> Style {
     use crate::syntax::TokenKind;
     match kind {
@@ -5357,8 +4735,8 @@ mod tests {
     }
 
     /// A modal that floats over the box sits inside the box's rect while
-    /// it fits there, leaving the frame, the title and the details row
-    /// showing around it; one too wide or too tall for that falls back to
+    /// it fits there, leaving the frame, the title and the header showing
+    /// around it; one too wide or too tall for that falls back to
     /// the middle of the screen rather than spilling off the box.
     #[test]
     fn a_modal_over_the_box_sits_inside_it_while_it_fits() {
@@ -5390,11 +4768,13 @@ mod tests {
         );
     }
 
-    /// Every tier of a task box's hint has to fit between the borders it
-    /// is drawn on, or ratatui clips the end silently — the SETTINGS
-    /// OVERLAY has been bitten by exactly that.
+    /// A task box's keys sit on its bottom border, fitted to it: whole
+    /// hints drop off the end and Enter and Esc stay, never a hint cut
+    /// short. Each box names its own verb and way out, and the QUICK
+    /// PROMPT leaves the keys its header sets beside what they change
+    /// (`Tab`, `^P`, `^T`, `^/`, `^Y`) off its border.
     #[test]
-    fn task_prompt_hints_fit_the_border_they_sit_on() {
+    fn task_box_hints_fit_the_border_they_sit_on() {
         use crate::app::PromptKind;
         let quick = PromptKind::QuickPrompt(crate::quick_prompt::QuickLaunch {
             target: crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId::from(
@@ -5432,39 +4812,38 @@ mod tests {
             label: "#7 Attach links".into(),
             back: None,
         };
-        for width in 20..=TASK_PROMPT_SIZE.0 {
+        let text = |kind: &PromptKind, width: usize| {
+            crate::hints::text(&task_hints(kind), width.saturating_sub(6))
+        };
+        for width in 20..=TASK_PROMPT_SIZE.0 as usize {
             for kind in [&quick, &cloud, &comment, &pr_comment] {
-                let hint = task_prompt_hint(kind, width);
+                let hint = text(kind, width);
                 assert!(
-                    hint.chars().count() <= width.saturating_sub(2) as usize,
+                    hint.chars().count() + 6 <= width.max(26),
                     "{width}: {hint:?}"
                 );
+                assert!(hint.contains("Esc"), "{width}: {hint:?} lost its way out");
             }
         }
-        // The full-width box advertises the two pickers and the toggle,
-        // and its line break as the web's Shift+Enter, never ^J.
-        let full = task_prompt_hint(&quick, TASK_PROMPT_SIZE.0);
-        assert!(
-            full.contains("Tab agent")
-                && full.contains("⇧Tab preset")
-                && full.contains("^N worktree")
-                && full.contains("⇧Enter newline"),
-            "{full}"
+        let full = text(&quick, launcher_view::BOX_SIZE.0 as usize);
+        assert_eq!(
+            full, "Enter launch · ^J newline · ⇧Tab preset · Esc cancel",
+            "no ⌘ from this terminal, so no kitty ⇧Enter either: ^J"
         );
-        for width in 20..=TASK_PROMPT_SIZE.0 {
-            let hint = task_prompt_hint(&quick, width);
-            assert!(!hint.contains("^J"), "{width}: {hint:?}");
+        for chord in ["^P", "^T", "^/", "^Y", "^N", "Tab agent"] {
+            assert!(!full.contains(chord), "{full} repeats {chord}");
         }
-        assert!(!task_prompt_hint(&cloud, TASK_PROMPT_SIZE.0).contains("Tab"));
-        // The COMMENT BOX posts rather than launches, and offers no picker.
-        let post = task_prompt_hint(&pr_comment, TASK_PROMPT_SIZE.0);
+        assert!(!text(&cloud, 80).contains("Tab"));
+        let post = text(&pr_comment, 80);
         assert!(
-            post.contains("post") && !post.contains("launch") && !post.contains("Tab"),
+            post.starts_with("Enter post") && !post.contains("Tab"),
             "{post}"
         );
-        // A comment posts, and Esc goes back to the modal.
-        let posts = task_prompt_hint(&comment, TASK_PROMPT_SIZE.0);
-        assert!(posts.contains("post") && posts.contains("back"), "{posts}");
+        let back = text(&comment, 80);
+        assert!(
+            back.starts_with("Enter post") && back.ends_with("Esc back"),
+            "{back}"
+        );
     }
 
     #[test]

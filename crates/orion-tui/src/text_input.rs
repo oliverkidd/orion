@@ -670,6 +670,19 @@ impl PartialEq<String> for TextInput {
     }
 }
 
+/// The line editor's keys as Help spells them ("TYPING IN A FIELD"):
+/// [`TextInput::handle_key`]'s own arms answer every one, which the test
+/// beside them presses to prove.
+pub mod keys {
+    use crate::hints::Key;
+
+    pub const WORD: Key = Key::new(&["alt+left", "alt+right"], "move by word").show(2);
+    pub const LINE_ENDS: Key = Key::new(&["ctrl+a", "ctrl+e"], "start / end of line").show(2);
+    pub const DELETE_WORD: Key = Key::new(&["alt+backspace"], "delete a word");
+    pub const KILL: Key = Key::new(&["ctrl+u", "ctrl+k"], "kill to start / end").show(2);
+    pub const ALL: &[Key] = &[WORD, LINE_ENDS, DELETE_WORD, KILL];
+}
+
 /// Test-only accessors: nothing in the app reads these any more.
 #[cfg(test)]
 impl TextInput {
@@ -682,6 +695,25 @@ impl TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every chord Help names for the line editor is one it answers:
+    /// pressed mid-word in a field, each moves the caret or deletes.
+    #[test]
+    fn every_key_help_names_is_the_editors() {
+        for key in keys::ALL {
+            assert!(key.parses(), "{:?}", key.chords);
+            for chord in key.chords() {
+                let mut input = TextInput::new();
+                input.set_text("one two three");
+                input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+                input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+                let before = (input.as_str().to_string(), input.cursor_chars());
+                let edit = input.handle_key(&KeyEvent::new(chord.code, chord.mods));
+                let after = (input.as_str().to_string(), input.cursor_chars());
+                assert!(edit.consumed() && before != after, "{chord} did nothing");
+            }
+        }
+    }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)

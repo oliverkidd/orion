@@ -1631,8 +1631,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Char('p') if ctrl => view.select(selected - 1),
                 KeyCode::PageDown => view.select(selected + page),
                 KeyCode::PageUp => view.select(selected - page),
-                KeyCode::Char('r') if ctrl => refresh(app),
-                KeyCode::Enter => activate_selected(app),
+                _ if keys::FETCH.matches(&key) => refresh(app),
+                _ if keys::SWITCH.matches(&key) => activate_selected(app),
                 _ => {
                     if view.query.handle_key(&key).changed() {
                         view.requery();
@@ -1684,7 +1684,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                 };
                 view.status = None;
             }
-            KeyCode::Enter => {
+            _ if keys::COMMIT.matches(&key) => {
                 let text = message.as_str().trim().to_string();
                 if text.is_empty() {
                     view.status = Some(Status::error("type a commit message first"));
@@ -1702,7 +1702,14 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         Stage::Working(_) => {
             if key.code == KeyCode::Esc {
                 app.overlay = None;
-                app.flash = Some("still switching — c shows it, the result lands here".into());
+                let again = crate::hints::key_or(
+                    &app.keymap,
+                    crate::keymap::Action::SwitchBranch,
+                    "the branch switcher",
+                );
+                app.flash = Some(format!(
+                    "still switching — {again} shows it, the result lands here"
+                ));
             }
         }
     }
@@ -1774,22 +1781,40 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
 
 // ---- drawing ----
 
-/// The FOOTER's hint while the modal is up.
-pub fn footer_hint(view: &BranchSwitchView) -> &'static str {
-    match view.stage {
-        Stage::Pick => "type: filter  ↑/↓ ^n/^p: move  Enter: switch (nothing matching: create)  ^r: fetch  Esc: close",
-        Stage::Dirty { .. } => "s: stash  b: bring along  c: commit  d: discard  ↑/↓ Enter: choose  Esc: back to the list",
-        Stage::Commit { .. } => "type the commit message  Enter: commit & switch  Esc: back",
-        Stage::Working(_) => "git is running  Esc: hide (c shows it again; a result that lands while hidden goes to the footer)",
-    }
+/// The BRANCH SWITCHER's own keys: one table [`handle_key`] matches and
+/// [`hints`] spells — the uncommitted-changes question's letters are its
+/// [`CHOICES`]' own.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const SWITCH: Key = Key::new(&["enter"], "switch");
+    pub const FETCH: Key = Key::new(&["ctrl+r"], "fetch");
+    pub const COMMIT: Key = Key::new(&["enter"], "commit & switch");
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[SWITCH, FETCH, COMMIT];
 }
 
-fn border_hint(stage: &Stage) -> &'static str {
+/// The keys along the modal's bottom border, for the stage it is at.
+pub(crate) fn hints(stage: &Stage) -> Vec<crate::hints::Hint> {
+    use crate::hints::Hint;
     match stage {
-        Stage::Pick => " Enter switch · ↑↓ move · ^r fetch · Esc clear/close ",
-        Stage::Dirty { .. } => " s/b/c/d or ↑↓ Enter · Esc back ",
-        Stage::Commit { .. } => " Enter commit & switch · Esc back ",
-        Stage::Working(_) => " working… · Esc hide ",
+        Stage::Pick => vec![
+            keys::SWITCH
+                .hint_as("switch (nothing matching: create)")
+                .kept(),
+            keys::FETCH.hint(),
+            Hint::new("Esc", "close"),
+        ],
+        Stage::Dirty { .. } => {
+            let mut hints: Vec<Hint> = CHOICES
+                .iter()
+                .map(|choice| Hint::new(choice.key().to_string(), choice.label().to_lowercase()))
+                .collect();
+            hints.push(Hint::new("Esc", "back to the list"));
+            hints
+        }
+        Stage::Commit { .. } => vec![keys::COMMIT.hint().kept(), Hint::new("Esc", "back")],
+        Stage::Working(_) => vec![Hint::new("Esc", "hide (git keeps working)")],
     }
 }
 
@@ -1899,13 +1924,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &BranchSwitchView, th: Th
         " Switch branch — {} ⌂ root · on {} ",
         view.project_name, view.current
     );
-    let block = modal_block(title, th).title_bottom(
-        Line::from(Span::styled(
-            border_hint(&view.stage),
-            Style::default().fg(th.dim),
-        ))
-        .left_aligned(),
-    );
+    let block =
+        crate::hints::modal_block(modal_block(title, th), &hints(&view.stage), area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let [body, status_row] =

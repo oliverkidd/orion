@@ -143,7 +143,14 @@ fn encode_legacy(key: &KeyEvent) -> Option<Vec<u8>> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     let mut out: Vec<u8> = Vec::with_capacity(8);
-    if alt {
+    // Alt is an ESC ahead of the key — except on the keys whose CSI carries
+    // it in its modifier field (`ESC[1;3D`), where a second ESC would make
+    // the key Alt twice over.
+    let csi_mods = matches!(
+        key.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
+    );
+    if alt && !csi_mods {
         out.push(0x1b);
     }
 
@@ -176,8 +183,8 @@ fn encode_legacy(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Down => out.extend_from_slice(arrow(b'B', key.modifiers)),
         KeyCode::Right => out.extend_from_slice(arrow(b'C', key.modifiers)),
         KeyCode::Left => out.extend_from_slice(arrow(b'D', key.modifiers)),
-        KeyCode::Home => out.extend_from_slice(b"\x1b[H"),
-        KeyCode::End => out.extend_from_slice(b"\x1b[F"),
+        KeyCode::Home => out.extend_from_slice(arrow(b'H', key.modifiers)),
+        KeyCode::End => out.extend_from_slice(arrow(b'F', key.modifiers)),
         KeyCode::PageUp => out.extend_from_slice(b"\x1b[5~"),
         KeyCode::PageDown => out.extend_from_slice(b"\x1b[6~"),
         KeyCode::Delete => out.extend_from_slice(b"\x1b[3~"),
@@ -188,7 +195,8 @@ fn encode_legacy(key: &KeyEvent) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Arrow keys, with xterm modifier encoding (\x1b[1;<m><dir>) when modified.
+/// Arrow keys, Home and End, with xterm modifier encoding
+/// (\x1b[1;<m><dir>) when modified.
 fn arrow(dir: u8, mods: KeyModifiers) -> &'static [u8] {
     // Static tables keep this allocation-free for the common cases.
     macro_rules! seq {
@@ -213,6 +221,8 @@ fn arrow(dir: u8, mods: KeyModifiers) -> &'static [u8] {
         b'A' => seq!("A"),
         b'B' => seq!("B"),
         b'C' => seq!("C"),
+        b'H' => seq!("H"),
+        b'F' => seq!("F"),
         _ => seq!("D"),
     }
 }
@@ -283,6 +293,22 @@ mod tests {
         assert_eq!(
             encode_key(&key(KeyCode::Left, KeyModifiers::CONTROL), 0),
             Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            encode_key(&key(KeyCode::Left, KeyModifiers::ALT), 0),
+            Some(b"\x1b[1;3D".to_vec()),
+            "Alt once, in the modifier field"
+        );
+        assert_eq!(
+            encode_key(&key(KeyCode::Home, KeyModifiers::NONE), 0),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(
+            encode_key(
+                &key(KeyCode::End, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+                0
+            ),
+            Some(b"\x1b[1;6F".to_vec())
         );
     }
 

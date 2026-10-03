@@ -19,6 +19,13 @@ use std::time::Duration;
 /// waiting: keystrokes are about to need it.
 pub(super) fn enter_terminal_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.focus = Focus::Terminal;
+    // A pane reading a page — a pull request, an issue — takes the keys to
+    // scroll it: the session attached behind it is not what is on screen,
+    // and must not be what the next key types into.
+    if app.pane_reads_page() {
+        app.dirty = true;
+        return;
+    }
     if app.term.as_ref().is_some_and(|t| !t.exited) {
         app.term_locked = true;
         fire_pending_attach(app, out);
@@ -102,9 +109,12 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::LauncherBandMore(_),
         ) => app.focus = Focus::Sessions,
         Some(HitTarget::PanelBg(focus)) => app.focus = focus,
-        Some(HitTarget::TerminalPane | HitTarget::CloudSessionLink) => {
-            enter_terminal_pane(app, out)
-        }
+        Some(
+            HitTarget::TerminalPane
+            | HitTarget::CloudSessionLink
+            | HitTarget::PrPageTab(_)
+            | HitTarget::PrPageRow(_),
+        ) => enter_terminal_pane(app, out),
         // The crumb is a button out of a full-screen session, not
         // somewhere focus lives: its own handler is what moves focus. So
         // are the PANE's own TAB STRIP tabs — a click on one says what
@@ -124,6 +134,7 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::LauncherIssues
             | HitTarget::LauncherWelcomePrompt
             | HitTarget::FooterUsage
+            | HitTarget::FooterHome
             | HitTarget::ModalBrowser,
         )
         | None => {}

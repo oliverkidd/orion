@@ -141,7 +141,7 @@ mod tests {
         };
         assert_eq!(
             combo.text(),
-            "^d - Half page down",
+            "^D - Half page down",
             "chords use the footer's spelling"
         );
     }

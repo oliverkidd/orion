@@ -278,7 +278,9 @@ mod tests {
     //! The box's send in the LAUNCHER VIEW, through the loop's own entry
     //! points: Enter puts the new session in the pane and leaves the keys
     //! on the cards.
-    use super::super::tests::{buffer_text, hse, seed_tree, with_config_json, with_default_config};
+    use super::super::tests::{
+        buffer_text, hse, pick_fresh_worktree, seed_tree, with_config_json, with_default_config,
+    };
     use super::super::{handle_server_event, handle_terminal_event};
     use crate::app::{App, Focus};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -480,7 +482,8 @@ mod tests {
         });
     }
 
-    /// The same for a box `^N` flipped onto a fresh worktree: the two
+    /// The same for a box aimed at a fresh worktree (the WORKTREE
+    /// PICKER's first row): the two
     /// stand-in rows go up in a band of their own without the cursor,
     /// and neither Ack — the checkout's, then the session's — takes it
     /// there.
@@ -494,7 +497,7 @@ mod tests {
 
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "tidy the nav");
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            pick_fresh_worktree(&mut app, &mut Vec::new());
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             let (req_id, branch) = match out.as_slice() {
                 [ClientRequest::CreateWorktree { req_id, branch, .. }] => (*req_id, branch.clone()),

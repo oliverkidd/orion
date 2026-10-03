@@ -45,6 +45,16 @@ git -C "$DEMO" worktree add -q -b wheel-one-line "$WORK/demo-worktrees/wheel-one
 # (its own fixtures directory) before the defaults below fill in.
 if [ -f "$HERE/scenes/$SCENE.setup.sh" ]; then DEMO="$DEMO" WORK="$WORK" RUNTIME="$RUNTIME" . "$HERE/scenes/$SCENE.setup.sh"; fi
 
+# An onboarded data dir with the agents on, as the e2e harness seeds one (`seed_onboarded_config` in
+# crates/orion/tests/e2e_tui.rs): a fresh one opens on the first-run wizard, which would cover every
+# scene. A setup that wrote its own config keeps it.
+mkdir -p "$WORK/data"
+[ -f "$WORK/data/config.local.json" ] || echo '{"onboarded": true}' > "$WORK/data/config.local.json"
+[ -f "$WORK/data/config.json" ] || cat > "$WORK/data/config.json" <<'JSON'
+{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
+ "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true}
+JSON
+
 export ORION_RUNTIME_DIR="$RUNTIME" ORION_DATA_DIR="$WORK/data" ORION_AGENT_CMD="${ORION_AGENT_CMD:-/bin/cat}" \
        ORION_UPDATE_CHECK_SECS=0 ORION_GHOSTTY_CONFIG=off ORION_GH_FIXTURES="${ORION_GH_FIXTURES:-$HERE/fixtures}" \
        PATH="$HERE/bin:$PATH" TERM=xterm-256color

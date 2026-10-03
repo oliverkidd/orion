@@ -642,7 +642,7 @@ mod tests {
             &p.config,
             json!({"theme": "ocean", "from_a_newer_orion": {"x": 1}}),
         );
-        put(&p.local, json!({"editor": "nano"}));
+        put(&p.local, json!({"editor": "emacs"}));
         put(
             &p.presets,
             json!([{"name": "future", "kind": "antigravity"}]),
@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(bundle["agent_presets"][0]["kind"], "antigravity");
         assert_eq!(bundle["ssh_hosts"][0]["host"], "a@b");
         assert!(
-            !bundle.to_string().contains("nano"),
+            !bundle.to_string().contains("emacs"),
             "the local layer stays"
         );
 
@@ -852,13 +852,16 @@ mod tests {
         let err = read_source(&folder.display().to_string()).unwrap_err();
         assert!(err.to_string().contains("holds none"), "{err}");
         put(&folder.join("config.json"), json!({"theme": "amber"}));
-        put(&folder.join("config.local.json"), json!({"editor": "nano"}));
+        put(
+            &folder.join("config.local.json"),
+            json!({"editor": "emacs"}),
+        );
         put(&folder.join("agent_presets.json"), json!([{"name": "p"}]));
         let bundle = read_source(&folder.display().to_string()).unwrap();
         assert_eq!(bundle["config"], json!({"theme": "amber"}));
         assert_eq!(bundle["agent_presets"][0]["name"], "p");
         assert!(
-            !bundle.to_string().contains("nano"),
+            !bundle.to_string().contains("emacs"),
             "never the local layer"
         );
 

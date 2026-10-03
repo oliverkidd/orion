@@ -80,9 +80,10 @@ pub enum Answer {
         ticket: u64,
         result: Result<DiffListing, String>,
     },
-    /// The files behind a COMMIT LIST row (`commit_list::request_scope`):
-    /// one commit's, the whole branch's, or the uncommitted changes' read
-    /// as `g` reads them, marks and all.
+    /// The files behind what the COMMIT LIST puts on screen
+    /// (`commit_list::request_scope`): one commit's, the ticked commits'
+    /// read together, or the uncommitted changes' read as `g` reads them,
+    /// marks and all.
     ScopeFiles {
         ticket: u64,
         scope: crate::git_diff::DiffScope,

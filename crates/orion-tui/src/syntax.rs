@@ -1,10 +1,11 @@
-//! Minimal syntax highlighter for the tree-browser preview.
+//! Minimal syntax highlighter for the tree-browser preview and the DIFF
+//! VIEWER's code (`diff_doc`).
 //!
 //! A per-line tokenizer that recognizes comments, strings, numbers, and a
 //! per-language keyword set — enough color to make code scannable without
 //! pulling in a highlighter crate (the `fuzzy` precedent). Classification
-//! lives here; styling itself lives in ui.rs (the `classify_diff_line`
-//! rule). Block comments carry state across lines; multiline strings don't
+//! lives here; styling itself lives in ui.rs (`token_style`). Block
+//! comments carry state across lines; multiline strings don't
 //! (an unterminated string just colors to the end of its line).
 
 /// Token classification for coloring.

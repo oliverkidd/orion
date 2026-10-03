@@ -141,6 +141,15 @@ impl AgentPresetsView {
         self.quick.as_ref().filter(|q| q.from_box)
     }
 
+    /// Does the list carry its own NEW WORKTREE row and `Tab`? Everywhere
+    /// but over the QUICK PROMPT, whose header names the checkout and
+    /// whose WORKTREE PICKER (`⌘.`) has a fresh worktree as its first row:
+    /// a second toggle for the same choice under the box was the clutter
+    /// the box lost its own for.
+    pub fn has_worktree_row(&self) -> bool {
+        self.box_behind().is_none()
+    }
+
     /// The rows `filter` leaves, top to bottom: indices into `presets`,
     /// each with the name's matched char positions (lit when drawn). Worked
     /// out afresh on every call rather than kept — a handful of names — so
@@ -845,7 +854,10 @@ pub(crate) fn open_agent_preset_task(
     out: &mut Vec<ClientRequest>,
 ) {
     let Some(preset) = view.presets.get(view.selected).cloned() else {
-        app.flash = Some("no preset selected — Ctrl+a creates one".into());
+        app.flash = Some(format!(
+            "no preset selected — {} creates one",
+            keys::NEW.label()
+        ));
         return;
     };
     if !crate::config::Config::load().preset_harness_usable(&preset) {
@@ -953,8 +965,8 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
             },
         },
         // Letters type ahead and Enter picks, so the NEW WORKTREE toggle
-        // is the one key left free on the list — in every mode.
-        KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => toggle_new_worktree(app),
+        // is the one key left free on the list — wherever it has the row.
+        _ if keys::WORKTREE.matches(&key) && view.has_worktree_row() => toggle_new_worktree(app),
         KeyCode::Down => view.step(1),
         KeyCode::Up => view.step(-1),
         KeyCode::Char('n') if ctrl => view.step(1),
@@ -967,13 +979,16 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         // reopen the manager, they dropped the box, its text and the pull
         // request, and the next Enter launched a plain session into the
         // picker's context checkout (for a PR SESSION, the ROOT WORKTREE).
-        KeyCode::Char('a') if ctrl => {
+        _ if keys::NEW.matches(&key) => {
             let (worktree, quick) = (view.worktree.clone(), view.aimed_quick());
             open_agent_preset_editor(app, worktree, quick, None);
         }
-        KeyCode::Char('e') if ctrl => {
+        _ if keys::EDIT.matches(&key) => {
             if view.presets.is_empty() {
-                app.flash = Some("no preset selected — Ctrl+a creates one".into());
+                app.flash = Some(format!(
+                    "no preset selected — {} creates one",
+                    keys::NEW.label()
+                ));
             } else {
                 let (worktree, quick) = (view.worktree.clone(), view.aimed_quick());
                 let index = view.selected;
@@ -981,15 +996,11 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
             }
         }
         // `Delete` too: it types nothing, so it can stay a verb.
-        KeyCode::Char('d') if ctrl => {
+        _ if keys::DELETE.matches(&key) => {
             let view = view.clone();
             open_delete_preset_confirm(app, &view);
         }
-        KeyCode::Delete => {
-            let view = view.clone();
-            open_delete_preset_confirm(app, &view);
-        }
-        KeyCode::Enter => activate_selected(app, out),
+        _ if keys::LAUNCH.matches(&key) => activate_selected(app, out),
         // Type-ahead: Backspace widens; a letter narrows the rows to the
         // names it fuzzy matches, the cursor on the best. A letter no name
         // matches is refused, so the list never empties under the user.
@@ -1000,7 +1011,7 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
             let query = format!("{}{c}", view.filter);
             if !view.type_filter(c) {
                 app.flash = Some(if view.presets.is_empty() {
-                    "no presets yet — Ctrl+a creates one".into()
+                    format!("no presets yet — {} creates one", keys::NEW.label())
                 } else {
                     format!("no preset matches '{query}'")
                 });
@@ -1033,9 +1044,9 @@ fn activate_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// `Tab` on the AGENT PRESETS list, and a click on its `[ ] new worktree`
 /// row: flip where the launch lands between a fresh worktree and a
 /// checkout — the manager's between the worktree `e` was pressed on and a
-/// fresh one of its project, a picker's through the same flip the QUICK
-/// PROMPT's `^N` makes (`launcher::flipped_target`), so the box it hands
-/// over is already aimed. A PR SESSION has nothing to flip: its checkout
+/// fresh one of its project, a picker's through `launcher::flipped_target`,
+/// so the box it hands over is already aimed. A picker opened from the box
+/// has no row to flip ([`AgentPresetsView::has_worktree_row`]). A PR SESSION has nothing to flip: its checkout
 /// is the pull request's own, and the footer says so. INPUT PARITY: the
 /// key and the click both call this.
 pub(crate) fn toggle_new_worktree(app: &mut App) {
@@ -1191,22 +1202,32 @@ pub(crate) fn handle_list_mouse(
     }
 }
 
-/// The key hint on the list's frame, by mode: where Esc goes is the one
-/// thing that differs between the box's picker and one opened on a pull
-/// request or an issue — until letters are typed, when Esc clears them.
-/// Letters type ahead, so the verbs are `Ctrl` chords (`^a`).
-fn modal_hint(view: &AgentPresetsView) -> String {
-    format!(" {} ", footer_keys(view))
+/// The AGENT PRESETS list's and the PRESET EDITOR's own keys: one table
+/// their key handlers ([`handle_list_key`], [`handle_editor_key`]) match
+/// and their bottom borders spell. Letters type ahead, so the list's
+/// verbs are chords.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const LAUNCH: Key = Key::new(&["enter"], "launch");
+    pub const NEW: Key = Key::new(&["ctrl+a"], "new");
+    pub const EDIT: Key = Key::new(&["ctrl+e"], "edit");
+    pub const DELETE: Key = Key::new(&["ctrl+d", "delete"], "delete");
+    /// The NEW WORKTREE toggle under the rows.
+    pub const WORKTREE: Key = Key::new(&["tab"], "new worktree");
+    /// The editor: the next field, a choice row's value, save.
+    pub const FIELD: Key = Key::new(&["tab", "down"], "field");
+    pub const CHOOSE: Key = Key::new(&["left", "right"], "choose").show(2);
+    pub const SAVE: Key = Key::new(&["enter"], "save");
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[LAUNCH, NEW, EDIT, DELETE, WORKTREE, FIELD, CHOOSE, SAVE];
 }
 
-/// The FOOTER's hint while the list is up, by mode, as the frame's.
-pub(crate) fn footer_hint(view: &AgentPresetsView) -> String {
-    format!("type: filter  ↑/↓: select  {}", footer_keys(view))
-}
-
-/// The keys both hints share: Enter's verb, the manage chords, and where
-/// Esc goes.
-fn footer_keys(view: &AgentPresetsView) -> String {
+/// The keys on the list's frame, by mode: Enter's verb, the manage
+/// chords, and where Esc goes — the one thing that differs between the
+/// box's picker and one opened on a pull request or an issue, until
+/// letters are typed, when Esc clears them.
+pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     let enter = if view.is_picker() { "use" } else { "launch" };
     let esc = if !view.filter.is_empty() {
         "clear"
@@ -1215,7 +1236,28 @@ fn footer_keys(view: &AgentPresetsView) -> String {
     } else {
         "close"
     };
-    format!("Enter: {enter}  ^a: new  ^e: edit  ^d: delete  Esc: {esc}")
+    let mut hints = vec![
+        keys::LAUNCH.hint_as(enter).kept(),
+        keys::NEW.hint(),
+        keys::EDIT.hint(),
+        keys::DELETE.hint(),
+    ];
+    if view.has_worktree_row() {
+        hints.push(keys::WORKTREE.hint());
+    }
+    hints.push(crate::hints::Hint::new("Esc", esc));
+    hints
+}
+
+/// The keys on the PRESET EDITOR's frame.
+pub(crate) fn editor_hints() -> Vec<crate::hints::Hint> {
+    vec![
+        keys::FIELD.hint(),
+        keys::CHOOSE.hint(),
+        crate::ui::task_keys::NEWLINE.hint(),
+        keys::SAVE.hint().kept(),
+        crate::hints::Hint::new("Esc", "back to the list"),
+    ]
 }
 
 /// The AGENT PRESETS list modal.
@@ -1225,10 +1267,12 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
     let cursor = view.cursor(&visible);
     let selected = visible.get(cursor).map_or(0, |(index, _)| *index);
     // Sized for every preset, not the filtered few, so the frame holds
-    // still under the typing — plus the NEW WORKTREE row under them.
+    // still under the typing — plus the NEW WORKTREE row under them, where
+    // the list has one.
+    let row = u16::from(view.has_worktree_row());
     let height = (total.max(1) as u16)
-        .saturating_add(3)
-        .clamp(6, f.area().height.max(6));
+        .saturating_add(2 + row)
+        .clamp(5 + row, f.area().height.max(5 + row));
     let area = centered_rect(f.area(), AGENT_PRESETS_W, height);
     f.render_widget(Clear, area);
     // In QUICK PROMPT picker mode Enter applies the row to the launch
@@ -1246,29 +1290,39 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
         "" => format!(" {title} ⌕ "),
         query => format!(" {title} ⌕ {query} "),
     };
-    let hint = modal_hint(view);
-    let block = modal_block(&title, th)
-        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(th.dim))));
+    let block =
+        crate::hints::modal_block(modal_block(&title, th), &list_hints(view), area.width, th);
     let frame_inner = block.inner(area);
     f.render_widget(block, area);
     // The last row inside the frame is where the launch lands; the
-    // presets fill the rest.
-    let toggle_area = Rect {
-        y: frame_inner.bottom().saturating_sub(1),
-        height: frame_inner.height.min(1),
-        ..frame_inner
+    // presets fill the rest. Over the box, the box's header says that.
+    let toggle_area = if row == 1 {
+        Rect {
+            y: frame_inner.bottom().saturating_sub(1),
+            height: frame_inner.height.min(1),
+            ..frame_inner
+        }
+    } else {
+        Rect::default()
     };
     let inner = Rect {
-        height: frame_inner.height.saturating_sub(1),
+        height: frame_inner.height.saturating_sub(row),
         ..frame_inner
     };
-    f.render_widget(
-        Paragraph::new(worktree_line(app, view, toggle_area.width, th)),
-        toggle_area,
-    );
+    if row == 1 {
+        f.render_widget(
+            Paragraph::new(worktree_line(app, view, toggle_area.width, th)),
+            toggle_area,
+        );
+    }
 
     if total == 0 {
-        empty_list_row(f, inner, "no presets yet — Ctrl+a creates one", th);
+        empty_list_row(
+            f,
+            inner,
+            &format!("no presets yet — {} creates one", keys::NEW.label()),
+            th,
+        );
     }
     let start = window_start(cursor, inner.height as usize);
     for (pos, (i, lit)) in visible.iter().enumerate().skip(start) {
@@ -1404,18 +1458,12 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
     let height = 9 + banner + 2 * box_h;
     let area = centered_rect(f.area(), PRESET_EDITOR_W, height);
     f.render_widget(Clear, area);
-    let hint = if area.width >= 72 {
-        " Tab/↑↓: field  ←/→ or type: choose  ⇧Enter: newline  Enter: save  Esc "
-    } else {
-        " Tab: field  ←/→ or type: choose  Enter: save  Esc "
-    };
     let title = if editor.is_edit() {
         format!(" Edit preset — {} ", editor.name.trim())
     } else {
         " New preset ".to_string()
     };
-    let block = modal_block(title, th)
-        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(th.dim))));
+    let block = crate::hints::modal_block(modal_block(title, th), &editor_hints(), area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
 

@@ -2503,6 +2503,13 @@ impl Daemon {
         if let Err(e) = install_result {
             tracing::warn!(error = %e, cwd = %worktree.path.display(), "hook install failed");
         }
+        // The two dialects that write into the checkout keep those files out
+        // of the project's `git status`.
+        if matches!(harness.hook_dialect(), Some(AgentKind::Claude | AgentKind::Cursor)) {
+            if let Err(e) = hooks::installer::exclude_managed_files(&worktree.path) {
+                tracing::warn!(error = %e, cwd = %worktree.path.display(), "info/exclude not updated");
+            }
+        }
 
         // ORION_AGENT_CMD overrides for tests; default is the kind's CLI.
         let cmd_override = std::env::var(env::AGENT_CMD).ok();

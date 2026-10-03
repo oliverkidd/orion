@@ -884,9 +884,10 @@ fn push_run(line: &mut Vec<Span<'static>>, text: &str, style: Style) {
 }
 
 /// Split styled runs into rows of at most `width` columns, at characters —
-/// for code and raw text, which have no word gaps to prefer. Always at
-/// least one row, so an empty line stays a line.
-fn chunk_runs(runs: &[(String, Style)], width: usize) -> Vec<Vec<Span<'static>>> {
+/// for code and raw text, which have no word gaps to prefer (the preview
+/// panes wrap source lines with it too). Always at least one row, so an
+/// empty line stays a line.
+pub(crate) fn chunk_runs(runs: &[(String, Style)], width: usize) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut row: Vec<Span<'static>> = Vec::new();

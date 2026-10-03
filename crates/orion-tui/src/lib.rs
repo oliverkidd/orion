@@ -10,7 +10,9 @@ pub mod commit_list;
 pub mod completion;
 pub mod config;
 pub mod cursor_catalogue;
+pub mod diff_doc;
 pub mod diff_tree;
+pub mod doctor;
 pub mod dropped_files;
 pub mod editor;
 pub mod event_loop;
@@ -21,6 +23,7 @@ pub mod git_diff;
 pub mod grep_search;
 pub mod hints;
 pub mod hosts;
+pub mod install;
 pub mod ipc;
 pub mod issues;
 pub mod key_combo;
@@ -31,8 +34,9 @@ pub mod linear;
 pub mod links;
 pub(crate) mod list_hit;
 pub mod markdown;
+pub mod markdown_view;
 pub mod onboard;
-pub mod markdown_split;
+pub mod outside_editor;
 pub mod overlay_close;
 pub mod palette;
 pub mod perf;
@@ -72,6 +76,13 @@ pub use bundle::ConfigOp;
 /// machine's settings. See [`bundle`].
 pub fn run_config(op: ConfigOp) -> Result<()> {
     bundle::run(op)
+}
+
+/// `orion doctor [--json]`: what this machine has of what orion leans on,
+/// a line each with the fix for whatever is missing (see [`doctor`]).
+/// False when something orion can't do without is missing.
+pub fn run_doctor(json: bool) -> bool {
+    doctor::run(json)
 }
 
 /// Entry point for the TUI client. Terminal setup/teardown lives here so the

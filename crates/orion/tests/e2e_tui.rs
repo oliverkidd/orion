@@ -35,6 +35,10 @@ const CTRL_N: &[u8] = &[0x0e];
 const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
 const CTRL_D: &[u8] = &[0x04];
+const CTRL_A: &[u8] = &[0x01];
+const CTRL_G: &[u8] = &[0x07];
+const SHIFT_TAB: &[u8] = b"\x1b[Z";
+const SPACE: &[u8] = b" ";
 /// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
 const COMMANDS: &[u8] = b":";
 
@@ -42,7 +46,7 @@ const COMMANDS: &[u8] = b":";
 const PROJECT_MENU_ROW: &str = "Remove from list";
 /// Terminal pane input-locked: keys forward to the PTY, and Esc is the
 /// way back out to the grid's cards.
-const FOOTER_TERMINAL_LOCKED: &str = "Esc: back to the card";
+const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 
 /// A data dir as a user who finished first-run setup leaves it: the
 /// ONBOARDING wizard already seen (it would cover the grid every test
@@ -448,7 +452,7 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
     let mut tui = TuiHarness::spawn();
     let first = tui.make_repo("cwd-first").canonicalize().unwrap();
     let second = tui.make_repo("cwd-second").canonicalize().unwrap();
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &first, "cwd-first");
     tui.wait_for_working_directory(&first);
     add_project(&mut tui, &second, "cwd-second");
@@ -463,7 +467,7 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
 #[test]
 fn tui_help_modal_grouped_keymap() {
     let mut tui = TuiHarness::spawn();
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
 
     // The grouped two-column keymap: every section header on screen at
     // once (the old single list clipped its tail on short terminals).
@@ -491,7 +495,7 @@ fn orion_open_from_inside_a_session_raises_the_file_tabs() {
     std::fs::write(&alpha, "# alpha opened from the session\n").unwrap();
     std::fs::write(&beta, "fn beta() {}\n").unwrap();
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "open-proj");
 
     // ---- an agent (the stand-in shell), stepped into and locked ----
@@ -508,7 +512,7 @@ fn orion_open_from_inside_a_session_raises_the_file_tabs() {
     tui.wait_for_text("Open files (2)");
     // The preview is the file itself — text the shell never echoed.
     tui.wait_for_text("alpha opened from the session");
-    tui.wait_for_text("Enter: edit in");
+    tui.wait_for_text("Enter edit in");
 
     // ---- → moves to the next tab and its preview ----
     tui.send(b"\x1b[C");
@@ -529,7 +533,7 @@ fn tui_project_rename_shows_the_folder_and_empty_undoes_it() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("acme-repo");
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "acme-repo");
 
     // ---- rename: the tab takes the label ----
@@ -563,7 +567,7 @@ fn tui_manual_link_add_is_unavailable() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("link-proj");
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "link-proj");
 
     tui.send(b"L");
@@ -610,7 +614,7 @@ fn tui_issues_are_prefetched_before_the_modal_opens() {
 
     let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
     let repo = tui.make_repo("issues-proj");
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "issues-proj");
 
     // No `i` yet: the list is asked for because the project is selected.
@@ -683,7 +687,7 @@ fn tui_issues_modal_edits_the_issue_in_place() {
 
     let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
     let repo = tui.make_repo("issues-proj");
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "issues-proj");
     tui.send(b"i");
     tui.wait_for_text("#15 Fix login redirect");
@@ -725,7 +729,7 @@ fn tui_git_diff_modal() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("diff-proj");
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "diff-proj");
     // The root worktree row must exist before g has anything to diff.
 
@@ -741,33 +745,33 @@ fn tui_git_diff_modal() {
     tui.wait_for_text("Files (2)");
     // Status is path-ordered, so .keep (modified) is selected first.
     tui.wait_for_selected(".keep");
-    tui.wait_for_text("+tracked change");
+    tui.wait_for_text("+ tracked change");
 
     // ---- Ctrl+r marks .keep reviewed: it sinks below hello.txt and the
     // selection auto-advances to the next file, loading its diff ----
     tui.send(CTRL_R);
     tui.wait_for_text("· 1✓"); // files-panel title counts the mark
     tui.wait_for_selected("hello.txt");
-    tui.wait_for_text("+hello world");
+    tui.wait_for_text("+ hello world");
 
     // ---- Down reaches the reviewed zone; Ctrl+r unmarks .keep, which
     // pops back to the top of the list and stays selected ----
     tui.send(DOWN);
     tui.wait_for_selected(".keep");
-    tui.wait_for_text("+tracked change");
+    tui.wait_for_text("+ tracked change");
     tui.send(CTRL_R);
     tui.wait_for_gone("· 1✓");
 
     // ---- arrow to the untracked file ----
     tui.send(DOWN);
     tui.wait_for_selected("hello.txt");
-    tui.wait_for_text("+hello world");
+    tui.wait_for_text("+ hello world");
 
     // ---- type-to-filter narrows the list and reselects the top match ----
     tui.type_str("kee");
     tui.wait_for_text("Files (1/2)");
     tui.wait_for_selected(".keep");
-    tui.wait_for_text("+tracked change");
+    tui.wait_for_text("+ tracked change");
     tui.send(CTRL_U); // clears the filter, not the modal
     tui.wait_for_text("Files (2)");
 
@@ -792,10 +796,11 @@ fn tui_git_diff_modal() {
 }
 
 /// The DIFF VIEWER's COMMIT LIST end to end: a clean checkout with commits
-/// of its own opens on the whole branch instead of saying "no changes";
-/// `Tab` and `↓` walk to one commit and show exactly its files under its
-/// message; `⇧←`/`⇧→` step older and newer from the files; and a dirty
-/// checkout opens on its uncommitted changes, as it always did.
+/// of its own opens on the whole branch, every commit ticked, instead of
+/// saying "no changes"; `^A` unticks them and the cursor's commit shows
+/// exactly its files under its message; `⇧←`/`⇧→` step older and newer
+/// from the files; ticked commits read one at a time with `^G`; and a
+/// dirty checkout opens on its uncommitted changes, as it always did.
 #[test]
 fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     let mut tui = TuiHarness::spawn();
@@ -821,43 +826,54 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     repo_git(&repo, &["add", "."]);
     repo_git(&repo, &["commit", "-m", "add beta"]);
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "commits-proj");
 
-    // ---- nothing uncommitted: the whole branch, its commits listed ----
+    // ---- nothing uncommitted: the whole branch, every commit ticked ----
     tui.send(CTRL_E);
-    tui.wait_for_text("Commits (2) · since origin/main");
-    tui.wait_for_selected("All changes");
+    tui.wait_for_text("Commits · 2 since origin/main");
+    tui.wait_for_text("all ticked · together");
     tui.wait_for_text("Files (2)");
-    tui.wait_for_text("+alpha line");
+    tui.wait_for_text("+ alpha line");
 
-    // ---- Tab, ↓: the newest commit, exactly its files ----
-    tui.send(TAB);
-    tui.send(DOWN);
+    // ---- ⇧Tab, ^A: nothing ticked, the newest commit, exactly its files ----
+    tui.send(SHIFT_TAB);
+    tui.send(CTRL_A);
     tui.wait_for_text("Files (1)");
-    tui.wait_for_text("+beta line");
-    tui.wait_for_gone("+alpha line");
+    tui.wait_for_text("+ beta line");
+    tui.wait_for_gone("+ alpha line");
 
-    // ---- Enter hands the keys back; ⇧← is the commit before, its
+    // ---- Enter hands the keys on; ⇧← is the commit before, its
     // message over its diff; ⇧→ the one after ----
     tui.send(ENTER);
     tui.send(SHIFT_LEFT);
     tui.wait_for_text("the alpha body");
-    tui.wait_for_text("+alpha line");
-    tui.wait_for_gone("+beta line");
+    tui.wait_for_text("+ alpha line");
+    tui.wait_for_gone("+ beta line");
     tui.send(SHIFT_RIGHT);
-    tui.wait_for_text("+beta line");
+    tui.wait_for_text("+ beta line");
     tui.wait_for_gone("the alpha body");
+
+    // ---- tick both, read them one at a time, oldest first ----
+    tui.send(SHIFT_TAB);
+    tui.send(SPACE);
+    tui.send(DOWN);
+    tui.send(SPACE);
+    tui.wait_for_text("all ticked · together");
+    tui.send(CTRL_G);
+    tui.wait_for_text("commit 1 of 2 · add alpha");
+    tui.send(SHIFT_RIGHT);
+    tui.wait_for_text("commit 2 of 2 · add beta");
     tui.send(ESC);
-    tui.wait_for_gone("Commits (");
+    tui.wait_for_gone("Commits ·");
 
     // ---- something uncommitted: the view it always was, on top ----
     std::fs::write(repo.join("wip.txt"), "wip line\n").unwrap();
     tui.send(CTRL_E);
     tui.wait_for_selected("Uncommitted changes");
-    tui.wait_for_text("+wip line");
+    tui.wait_for_text("+ wip line");
     tui.send(ESC);
-    tui.wait_for_gone("Commits (");
+    tui.wait_for_gone("Commits ·");
 }
 
 /// The BRANCH SWITCHER end to end: `c` lists the repo's branches, typing
@@ -880,7 +896,7 @@ fn tui_branch_switcher_moves_the_root_checkout() {
     repo_git(&repo, &["branch", "feature-login"]);
     repo_git(&repo, &["branch", "release-2"]);
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "switch-proj");
 
     // ---- a clean checkout switches on Enter ----
@@ -971,7 +987,7 @@ fn tui_skills_browser_lists_filters_reads_and_trashes() {
         "# Deploy",
     );
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "skills-proj");
 
     // Three, not five: `.claude/skills` and `.cursor/skills` are one folder.
@@ -1074,7 +1090,7 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
     let repo = tui.make_repo("drag-proj");
 
-    tui.wait_for_text("create your first project");
+    tui.wait_for_text("open your first project");
     add_project(&mut tui, &repo, "drag-proj");
 
     start_session(&mut tui, "hello");

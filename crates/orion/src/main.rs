@@ -78,6 +78,12 @@ fn main() -> Result<()> {
             remote_port,
             sync_config: !no_sync_config,
         }),
+        Some(Command::Doctor { json }) => {
+            if !orion_tui::run_doctor(json) {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Some(Command::Upgrade { force }) => upgrade::run_upgrade(force),
         Some(Command::StaleDaemonNote) => {
             if orion_daemon::lifecycle::daemon_is_stale() {

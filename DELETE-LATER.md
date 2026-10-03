@@ -93,10 +93,10 @@ macOS (`orion config path`). `~/.orion/` is only the fallback.
       `attachmentLinkGitHubPR(issueId: String!, url: String!)` both match
       Linear's published schema and the live API: Orion's exact query
       returned 42 open issues, and introspection shows the mutation's args.
-- [x] Auto-link: Linear's GitHub integration already links PRs by itself
-      (RIPLO-968, -972 and -973 each had theirs, with no human creator).
-      **Link PRs to Linear** is off (`linear_auto_attach: false`).
-      Colleagues should turn it off too.
+- [x] Auto-link: keep **Link PRs to Linear** on (the default). Branch names
+      don't always carry the ticket id, so Linear's GitHub integration
+      can't be relied on; the API attach is what links the PR, and Linear
+      keeps one attachment per PR, so it never duplicates.
 - [ ] `⌘L`, mark two issues, launch, confirm the prompt and branch name. Then
       attach from `v` → `⌘L`.
 
@@ -117,7 +117,7 @@ macOS (`orion config path`). `~/.orion/` is only the fallback.
       `StopFailure` hook; `⇧C` Continue on another account.
 - [x] `config.json` migrated: `claude_enabled: true`,
       `claude_accounts: [{"id": "claude-b", "config_dir": "~/.claude-b"}]`,
-      `harnesses.grok.enabled: false`, `linear_auto_attach: false`.
+      `harnesses.grok.enabled: false` (Link PRs to Linear stays on).
 - [ ] Sign `claude-b` in with the second account (wizard's Claude accounts
       page, or Settings → Agents → Claude accounts → Enter). Both dirs are
       engineering@riplo.ai today; use a private browser window, or sign out

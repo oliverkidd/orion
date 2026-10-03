@@ -162,6 +162,9 @@ pub enum HitTarget {
     /// The footer's right-edge readout (`2 agents · 1 term · 412 MB`): a
     /// click opens the memory modal — the one `⇧M` opens.
     FooterUsage,
+    /// The footer's nameplate at the far left (`orion v0.42.0`): a click
+    /// goes HOME, or back from it — what `⌘G` does.
+    FooterHome,
     /// The `↗ open in browser` BUTTON on the ISSUES and PULL REQUESTS
     /// MODALS' reading pane, pinned right on its top border: a click opens
     /// the row under the cursor in the browser, through the very function
@@ -171,6 +174,14 @@ pub enum HitTarget {
     /// map: it is what `hover_crumb` holds while the pointer rests on the
     /// button (`ui::browser_button_under`), so the draw can underline it.
     ModalBrowser,
+    /// A tab's label on the PULL REQUEST PAGE the pane reads
+    /// (`pr_preview`): a click shows that tab, the pane taking the keys.
+    /// Registered ahead of the pane, so it wins.
+    PrPageTab(crate::pr_preview::PrTab),
+    /// A listed row on that page — a file, a commit, a check — by its
+    /// place in the tab: a click is Enter on it. Registered ahead of the
+    /// pane, so it wins.
+    PrPageRow(usize),
 }
 
 /// Default outer width of the diff modal's file-list panel.
@@ -527,7 +538,7 @@ impl ContextMenu {
     /// Some only while a Claude row is highlighted keeps Tab free
     /// everywhere else: the picker's Claude row, and every row of the
     /// Claude MODEL / EFFORT lists under it — reached with `→`, or opened
-    /// straight onto by the box's `^O`.
+    /// straight onto by the box's Select model and its effort field.
     /// Two pickers offer it: the NEW SESSION PICKER (its `"New session"`
     /// title is the gate — the PR SESSION picker and a PR row's menu share
     /// these rows but never launch cloud, the daemon refusing a PR launch
@@ -930,21 +941,16 @@ pub struct PromptDialog {
     /// written during draw: a click there puts the caret where it points,
     /// and the wheel over it scrolls the text.
     pub editor_area: Rect,
-    /// The `[ ] new worktree ^N` toggle on the LAUNCHER VIEW box's prompt
-    /// header, written during draw: a click there flips the launch, the
-    /// same as `^N`. Empty on every other box, and an empty rect contains
-    /// no point — so no other box has to know about it.
-    pub toggle_area: Rect,
-    /// The box's four details — `project ^P`, `worktree main ^T`, `agent
-    /// Tab`, `model ^O` — and the columns each was drawn in, written
-    /// during draw: a click on one opens the picker its chord opens, the
-    /// branch the WORKTREE PICKER. Empty on every other box, and on a box
-    /// too narrow to draw a field at all.
+    /// The QUICK PROMPT header's fields — `project demo ⌘P`, `worktree
+    /// main ⌘.`, `agent Claude Tab`, `model opus ⌘/`, `effort high ⌘Y`,
+    /// a preset's — and the cells each was drawn in, written during draw:
+    /// a click on one opens the picker its key opens. Empty on every
+    /// other box, and on a box too narrow to draw a field at all.
     pub detail_areas: Vec<(crate::launcher::BoxField, Rect)>,
-    /// The branch alone in that row's `worktree main ^T`, written during
-    /// draw: the WORKTREE PICKER hangs from it. Empty wherever the branch
-    /// is not drawn or names nothing to pick — a PR SESSION's checkout is
-    /// the DAEMON's.
+    /// The branch alone in that header's `worktree main ⌘.`, written
+    /// during draw: the WORKTREE PICKER hangs from it. Empty wherever the
+    /// branch is not drawn or names nothing to pick — a PR SESSION's
+    /// checkout is the DAEMON's.
     pub branch_area: Rect,
 }
 
@@ -965,7 +971,6 @@ impl PromptDialog {
             list_area: Rect::default(),
             area: Rect::default(),
             editor_area: Rect::default(),
-            toggle_area: Rect::default(),
             detail_areas: Vec::new(),
             branch_area: Rect::default(),
         };
@@ -984,8 +989,9 @@ impl PromptDialog {
     }
 
     /// The task prompts — the Claude Cloud launch task, a message to a live
-    /// cloud session, an AGENT PRESET's task and the QUICK PROMPT — and an
-    /// issue comment are the ones with a multi-row editor.
+    /// cloud session, an AGENT PRESET's task and the QUICK PROMPT — an
+    /// issue comment, and a typed setting that runs over lines (the Linear
+    /// task template) are the ones with a multi-row editor.
     pub fn is_multiline(&self) -> bool {
         matches!(
             self.kind,
@@ -996,7 +1002,7 @@ impl PromptDialog {
                 | PromptKind::AgentPresetTask { .. }
                 | PromptKind::QuickPrompt { .. }
                 | PromptKind::IssueComment { .. }
-        )
+        ) || matches!(self.kind, PromptKind::SettingText { kind, .. } if kind.is_multiline_text())
     }
 
     fn home() -> Option<std::path::PathBuf> {
@@ -1083,7 +1089,59 @@ pub struct DiffMatch {
     pub positions: Vec<usize>,
 }
 
-/// Full-screen git-diff viewer: file list left, scrollable diff right.
+/// Which panel of the DIFF VIEWER has the keys — the one wearing the
+/// accent. `Tab` walks them in reading order: what is on screen (the
+/// COMMIT LIST), its files, the diff.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiffFocus {
+    /// `↑`/`↓` walk the commits, `Space` ticks one.
+    Commits,
+    /// `↑`/`↓` walk the files; typing filters them.
+    #[default]
+    Files,
+    /// `↑`/`↓` scroll the diff.
+    Diff,
+}
+
+/// A list's viewport as last drawn: its first row, following the cursor —
+/// until the wheel scrolls it, when it stays where the wheel put it for as
+/// long as the cursor stays where it was (`pinned_at`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListScroll {
+    pub top: usize,
+    pub pinned_at: Option<usize>,
+}
+
+impl ListScroll {
+    /// The first row of a list of `len` one-line rows, `height` tall, with
+    /// the cursor on `cursor`: the last top, moved just enough to show the
+    /// cursor — or, scrolled by the wheel since the cursor last moved, held.
+    pub fn start(&self, cursor: usize, len: usize, height: usize) -> usize {
+        let max_top = len.saturating_sub(height.max(1));
+        let top = self.top.min(max_top);
+        if self.pinned_at == Some(cursor) {
+            return top;
+        }
+        if cursor < top {
+            cursor
+        } else if cursor >= top + height.max(1) {
+            (cursor + 1 - height.max(1)).min(max_top)
+        } else {
+            top
+        }
+    }
+
+    /// The wheel: `delta` rows, the cursor left where it is.
+    pub fn wheel(&mut self, delta: i64, cursor: usize, len: usize, height: usize) {
+        let max_top = len.saturating_sub(height.max(1)) as i64;
+        let top = self.start(cursor, len, height) as i64;
+        self.top = (top + delta).clamp(0, max_top) as usize;
+        self.pinned_at = Some(cursor);
+    }
+}
+
+/// The DIFF VIEWER (`⌘E`): the COMMIT LIST over the changed files down the
+/// left, the selected file's diff on the right.
 #[derive(Debug, Clone)]
 pub struct DiffView {
     /// Checkout dir the diffs are read from.
@@ -1099,18 +1157,27 @@ pub struct DiffView {
     pub matches: Vec<DiffMatch>,
     /// Index into `matches` (not `files`).
     pub selected: usize,
-    /// Diff text of the selected file (reloaded on selection change).
+    /// Diff text of the selected file (reloaded on selection change): what
+    /// a reviewed ✓ fingerprints.
     pub diff: String,
-    /// Cached line count of `diff`, for scroll clamping.
-    pub diff_line_count: usize,
-    /// Top visible diff line.
-    pub scroll: u16,
-    /// Inner height of the diff pane, written back during draw (the
-    /// `ContextMenu::area` pattern) so paging and clamping track resizes.
+    /// `diff` read for the reading pane, under the REVIEW HEAD
+    /// (`diff_doc`). Shared with every frame's clone of the view.
+    pub doc: std::sync::Arc<crate::diff_doc::DiffDoc>,
+    /// The diff pane's top row: rows, not lines, since lines wrap.
+    pub scroll: usize,
+    /// Inner height and text width of the diff pane, written back during
+    /// draw (the `ContextMenu::area` pattern) so paging and clamping track
+    /// resizes and the wrap. Zero until the first draw.
     pub view_height: u16,
+    pub view_width: u16,
     /// Screen rect of the file-list rows (filter row excluded), written back
     /// during draw so clicks can hit-test rows.
     pub list_area: Rect,
+    /// The file list's viewport.
+    pub files_scroll: ListScroll,
+    /// The diff pane, as last drawn: a click there hands it the keys, and
+    /// the wheel over it scrolls it.
+    pub diff_area: Rect,
     /// Full modal rect, written back during draw; bounds the file-panel
     /// splitter drag and hit-tests its border.
     pub area: Rect,
@@ -1169,22 +1236,21 @@ pub struct DiffView {
     /// the tree's — `selected` and `matches` stay current underneath, so
     /// toggling back lands on a list that is already right.
     pub tree: Option<crate::diff_tree::DiffTree>,
-    /// The COMMIT LIST across the top (`commit_list`): the branch's commits
-    /// since its base, under **All changes** and **Uncommitted changes**.
-    /// `None` for a pull request's view, which has no local branch to list.
-    pub commits: Option<crate::commit_list::CommitList>,
-    /// What the file list and every diff are of: the COMMIT LIST row whose
-    /// file list last landed (`commit_list::land_scope`).
+    /// The COMMIT LIST over the files (`commit_list`): the branch's own
+    /// commits since its base, under **Uncommitted changes**, each with a
+    /// box to tick. `None` for a pull request's view, which has no local
+    /// branch to list.
+    pub commits: Option<Box<crate::commit_list::CommitList>>,
+    /// What the file list and every diff are of: what the COMMIT LIST put
+    /// on screen when its file list last landed (`commit_list::land_scope`).
     pub scope: crate::git_diff::DiffScope,
-    /// `Tab` gave the keys to the COMMIT LIST: `↑`/`↓` walk its rows and
-    /// `Enter` hands them back to the files.
-    pub commits_focused: bool,
-    /// A commit's message, heading the diff of each of its files (one entry
-    /// per line, drawn apart from the diff's own colouring); empty under
-    /// every other row.
-    pub header: Vec<String>,
+    /// The panel with the keys.
+    pub focus: DiffFocus,
+    /// The REVIEW HEAD over each file's diff: a commit's message, what was
+    /// ticked, a pull request's title; empty over the uncommitted changes.
+    pub head: Vec<crate::diff_doc::Head>,
     /// Whether this scope has shown a file yet: the first opens at the top,
-    /// on the header; every later one at its own first line, the header a
+    /// on the head; every later one at its own first line, the head a
     /// scroll up.
     pub header_read: bool,
     /// ✓ marks taken under a row that is not on screen — a commit's, the
@@ -1212,7 +1278,7 @@ impl DiffView {
         let mut view = Self::new(root, branch, Vec::new(), true);
         view.jobs = Some(jobs);
         view.listing = Some(listing);
-        view.commits = Some(crate::commit_list::CommitList::reading());
+        view.commits = Some(Box::new(crate::commit_list::CommitList::reading()));
         view
     }
 
@@ -1238,17 +1304,17 @@ impl DiffView {
         }
     }
 
-    /// Put `diff` on screen as the diff of `path`. `keep_scroll` is a
-    /// re-read of the file already showing: the reader's place is kept.
-    /// Under a commit's message the first file opens on the message and
-    /// every later one past it (`header_read`).
+    /// Put `diff` on screen as the diff of `path`, read for the pane under
+    /// the REVIEW HEAD (`diff_doc`). `keep_scroll` is a re-read of the file
+    /// already showing: the reader's place is kept. Under a head the first
+    /// file opens on it and every later one past it (`header_read`).
     pub fn show_diff(&mut self, path: Option<&str>, diff: String, keep_scroll: bool) {
-        self.diff_line_count = diff.lines().count() + self.header_rows();
+        self.doc = std::sync::Arc::new(crate::diff_doc::DiffDoc::build(&self.head, path, &diff));
         self.diff = diff;
         self.shown = path.map(str::to_string);
         if !keep_scroll {
             self.scroll = if self.header_read {
-                self.header_rows() as u16
+                self.head_rows()
             } else {
                 0
             };
@@ -1258,33 +1324,35 @@ impl DiffView {
         }
     }
 
-    /// The rows the commit message takes above the diff: its lines and the
-    /// rule under them, or none.
-    pub fn header_rows(&self) -> usize {
-        match self.header.len() {
-            0 => 0,
-            n => n + 1,
+    /// A new REVIEW HEAD over the diff on screen — a tick changed what it
+    /// says, not which file is up.
+    pub fn set_head(&mut self, head: Vec<crate::diff_doc::Head>) {
+        self.doc = std::sync::Arc::new(self.doc.with_head(&head));
+        self.head = head;
+    }
+
+    /// The rows the REVIEW HEAD takes above the diff, its rule included —
+    /// counted at the pane's width once it has been drawn.
+    pub fn head_rows(&self) -> usize {
+        match self.view_width {
+            0 => self.doc.head_lines,
+            width => self.doc.head_rows(width),
         }
     }
 
-    /// What the diff pane says for a COMMIT LIST row with no file in it.
+    /// What the diff pane says for a scope with no file in it.
     pub fn empty_note(&self) -> &'static str {
         match self.scope {
             crate::git_diff::DiffScope::Uncommitted => "(no uncommitted changes)",
-            crate::git_diff::DiffScope::Branch { .. } => "(no changes since the branch's base)",
             crate::git_diff::DiffScope::Commit { .. } => "(an empty commit: it changes no file)",
+            crate::git_diff::DiffScope::Ranges(_) => "(together, these commits change no file)",
         }
     }
 
-    /// Where the file list and the diff sit: the modal under the COMMIT
-    /// LIST, as last drawn — what the files/diff border's grab zone spans.
+    /// Where the left column and the diff sit: the whole modal, as last
+    /// drawn — what the column/diff border's grab zone spans.
     pub fn panes_area(&self) -> Rect {
-        let top = self.commits.as_ref().map_or(0, |list| list.area.height);
-        Rect {
-            y: self.area.y + top,
-            height: self.area.height.saturating_sub(top),
-            ..self.area
-        }
+        self.area
     }
 
     pub fn new(root: PathBuf, branch: String, files: Vec<DiffFile>, head_ok: bool) -> Self {
@@ -1296,10 +1364,13 @@ impl DiffView {
             matches: Vec::new(),
             selected: 0,
             diff: String::new(),
-            diff_line_count: 0,
+            doc: Default::default(),
             scroll: 0,
             view_height: 0,
+            view_width: 0,
             list_area: Rect::default(),
+            files_scroll: ListScroll::default(),
+            diff_area: Rect::default(),
             area: Rect::default(),
             files_width: DEFAULT_DIFF_FILES_W,
             files_drag: None,
@@ -1317,8 +1388,8 @@ impl DiffView {
             tree: None,
             commits: None,
             scope: crate::git_diff::DiffScope::Uncommitted,
-            commits_focused: false,
-            header: Vec::new(),
+            focus: DiffFocus::Files,
+            head: Vec::new(),
             header_read: false,
             scope_marks: HashMap::new(),
         };
@@ -1326,8 +1397,17 @@ impl DiffView {
         view
     }
 
-    pub fn max_scroll(&self) -> u16 {
-        max_scroll(self.diff_line_count, self.view_height)
+    /// The furthest the diff pane scrolls: its last row on its bottom row,
+    /// counted at the width it was last drawn at (a row a line before it).
+    pub fn max_scroll(&self) -> usize {
+        match self.view_width {
+            0 => self
+                .doc
+                .lines
+                .len()
+                .saturating_sub(usize::from(self.view_height.max(1))),
+            width => self.doc.max_scroll(width, self.view_height),
+        }
     }
 
     /// Screen x of the files/diff boundary — the column where the diff panel
@@ -1344,9 +1424,44 @@ impl DiffView {
         }
     }
 
-    /// Clamped relative scroll.
-    pub fn scroll_by(&mut self, delta: i32) {
-        self.scroll = scrolled_by(self.scroll, delta, self.max_scroll());
+    /// Clamped relative scroll of the diff pane, in rows.
+    pub fn scroll_by(&mut self, delta: i64) {
+        self.scroll = (self.scroll as i64 + delta).clamp(0, self.max_scroll() as i64) as usize;
+    }
+
+    /// The panel `Tab` (`forward`) or `⇧Tab` hands the keys to: reading
+    /// order, round again — the COMMIT LIST only where there is one.
+    pub fn next_focus(&self, forward: bool) -> DiffFocus {
+        let order: &[DiffFocus] = if self.commits.is_some() {
+            &[DiffFocus::Commits, DiffFocus::Files, DiffFocus::Diff]
+        } else {
+            &[DiffFocus::Files, DiffFocus::Diff]
+        };
+        let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let step = if forward { 1 } else { order.len() - 1 };
+        order[(at + step) % order.len()]
+    }
+
+    /// The line of the file at the top of the diff pane — the first line of
+    /// code from there down, by its number in the file as it is now: where
+    /// `⌘O` opens the file. The first line when there is none.
+    pub fn line_on_screen(&self) -> u64 {
+        let first = match self.view_width {
+            0 => 0,
+            width => self.doc.locate(self.scroll, width).0,
+        };
+        self.doc.lines[first.min(self.doc.lines.len())..]
+            .iter()
+            .find_map(|line| match line {
+                crate::diff_doc::DocLine::Code { new: Some(n), .. } => Some(u64::from(*n)),
+                _ => None,
+            })
+            .unwrap_or(1)
+    }
+
+    /// A page of the diff pane: its height, less a row of overlap.
+    pub fn page(&self) -> i64 {
+        i64::from(self.view_height.max(2) - 1)
     }
 
     /// Clamped absolute selection in the list on screen — the filtered
@@ -1413,10 +1528,11 @@ impl DiffView {
         row.is_some()
     }
 
-    /// First visible row of the file list's stateless follow-window for a
-    /// list of `height` rows.
+    /// First visible row of the file list, `height` rows tall: where it was
+    /// last drawn, following the cursor (`ListScroll`).
     pub fn window_start(&self, height: usize) -> usize {
-        window_start(self.cursor(), height)
+        self.files_scroll
+            .start(self.cursor(), self.row_count(), height)
     }
 
     /// Whether the cursor is still where opening the modal put it: the top
@@ -1953,6 +2069,10 @@ pub struct SettingsView {
     /// Transient line under the body: duplicate warnings, host-terminal
     /// warnings, "reset to default".
     pub notice: Option<(String, NoticeLevel)>,
+    /// The install `i` asked about on a row whose program isn't on PATH
+    /// (`install`): Enter runs it in the editor modal, anything else
+    /// leaves it.
+    pub install: Option<crate::install::Plan>,
 }
 
 impl SettingsView {
@@ -3153,6 +3273,8 @@ pub struct PrDiffAnswer {
     pub url: String,
     pub title: String,
     pub diff: Option<String>,
+    /// The file the viewer was asked to open at (`PrReviewAt::File`).
+    pub file: Option<String>,
 }
 
 /// A finished `gh pr comment`, back on the loop: which pull request (and
@@ -3538,6 +3660,12 @@ pub struct App {
     /// splash's Enter, `+`, `o`, `/` — clears it
     /// ([`App::reopen_projects`]). Remembered across restarts.
     pub projects_closed: bool,
+    /// HOME is up: the SPLASH, with orion's animation, drawn over a grid
+    /// that is still there underneath, cursor and all — `⌘G` (or a click
+    /// on the footer's nameplate) puts it up, and Esc, Enter, an arrow or
+    /// any way into a project takes it down onto that grid again
+    /// (`event_loop::home_key`). Never remembered across a restart.
+    pub home: bool,
     /// The PROJECT TABS have the keyboard, and this is the tab their
     /// cursor is on: `k`,`k` (↑,↑) on the GRID's top row walks up into the
     /// header (`event_loop::launcher::focus_tabs`), `h` / `l` move this
@@ -3724,6 +3852,12 @@ pub struct App {
     pub theme: crate::theme::Theme,
     /// Embedded editor modal (find-in-files Enter), above every overlay.
     pub vim: Option<crate::vim_term::VimTerm>,
+    /// MARKDOWN PAGE: a `.md` file opened to read, above every overlay
+    /// and under the editor its Enter opens.
+    pub page: Option<crate::markdown_view::MarkdownPage>,
+    /// The missing editor this run has already said it stood another in
+    /// for (`event_loop::note_editor_fallback`), so it says so once.
+    pub editor_fallback_noted: Option<String>,
     /// Where editor reader threads send output; the main loop installs it.
     pub vim_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::vim_term::VimEvent>>,
     /// Stamp for the current editor spawn, so a closed editor's buffered
@@ -3832,6 +3966,13 @@ pub struct App {
     /// line count as of the last draw (for clamping).
     pub pr_preview_scroll: u16,
     pub pr_preview_lines: usize,
+    /// Where the pane's reader stands on the PULL REQUEST PAGE: its tab,
+    /// and the row cursor of the tabs that list things.
+    pub pr_tabs: crate::pr_preview::PrTabs,
+    /// The file the DIFF VIEWER opens a pull request's diff at — the
+    /// Changes tab's row acted on — by the pull request's URL. Taken by
+    /// the next pull-request diff to open, whichever it is.
+    pub pr_diff_at: Option<(String, String)>,
     /// The pull request whose full diff is being fetched, if any — one at a
     /// time, so mashing the key can't spawn a `gh pr diff` per press.
     pub pr_diff_inflight: Option<u64>,
@@ -3914,6 +4055,14 @@ pub struct App {
     pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
+    /// The last **Test connection** (Settings → Linear): the checkout
+    /// whose key it tried, where that key was found, and what Linear said
+    /// — what the row says while that is still the key on show.
+    pub linear_test: Option<(
+        std::path::PathBuf,
+        Option<crate::linear::KeySource>,
+        crate::linear::LinearTest,
+    )>,
     /// BACKGROUND READS for the worktree views (`view_jobs`): the DIFF
     /// VIEWER, the FILE FINDER, its grep view and the TREE BROWSER are
     /// handed a clone when they open, and their git and disk reads land
@@ -4045,6 +4194,7 @@ impl App {
             hover_crumb: None,
             launcher_tabs: Vec::new(),
             projects_closed: false,
+            home: false,
             launcher_tab_cursor: None,
             launcher_tabs_more: Vec::new(),
             launch_repo: None,
@@ -4091,6 +4241,8 @@ impl App {
             is_remote: orion_core::host::is_remote_session(),
             theme: crate::theme::Theme::default(),
             vim: None,
+            page: None,
+            editor_fallback_noted: None,
             vim_tx: None,
             vim_generation: 0,
             accounts_tx: None,
@@ -4115,6 +4267,8 @@ impl App {
             pr_refresh_requested: false,
             pr_preview_scroll: 0,
             pr_preview_lines: 0,
+            pr_tabs: Default::default(),
+            pr_diff_at: None,
             pr_diff_inflight: None,
             pr_diff_refreshing: std::collections::HashSet::new(),
             pr_diff_tx: None,
@@ -4141,6 +4295,7 @@ impl App {
             linear_failed: std::collections::HashSet::new(),
             linear_tx: None,
             linear_links: crate::linear::LinkStore::default(),
+            linear_test: None,
             view_jobs: None,
             diff_probe: None,
             changed_files: None,
@@ -4224,15 +4379,16 @@ impl App {
     /// at all (a first run), or every tab closed ([`App::projects_closed`]),
     /// the splash's "open a project" comes first.
     pub fn launcher_active(&self) -> bool {
-        self.tree.has_projects() && !self.projects_closed
+        self.tree.has_projects() && !self.projects_closed && !self.home
     }
 
-    /// A project is being opened: out of the all-tabs-closed SPLASH and
-    /// back onto the grid. Run by every move that selects a project, so
-    /// the flag never outlives the first project landed on.
+    /// A project is being opened: out of the all-tabs-closed SPLASH — or
+    /// HOME — and back onto the grid. Run by every move that selects a
+    /// project, so neither flag outlives the first project landed on.
     pub fn reopen_projects(&mut self) {
-        if self.projects_closed {
+        if self.projects_closed || self.home {
             self.projects_closed = false;
+            self.home = false;
             self.dirty = true;
         }
     }
@@ -4363,7 +4519,7 @@ impl App {
         // nowhere for focus to rest, so it comes back to the cards
         // rather than sitting on a pane that is no longer on screen.
         if self.focus == Focus::Terminal
-            && self.term.is_some()
+            && (self.term.is_some() || self.pane_reads_page())
             && !self.launcher_pane_hidden
             && self.launcher_aimed()
         {
@@ -5350,10 +5506,36 @@ impl App {
                 label: pr.label(),
             });
         }
-        if self.focus != Focus::Sessions {
+        // The LAUNCHER VIEW's pane holds the keys while it reads the pull
+        // request (`→` off the row's last card, Enter on a band with no
+        // cards, a click on it): it goes on reading it there.
+        if !matches!(self.focus, Focus::Sessions | Focus::Terminal) {
             return None;
         }
-        let row = self.selected_link()?;
+        let row = match self.selected_session_row() {
+            Some(SessionRow::Link(row)) => row,
+            Some(_) => return None,
+            // Nothing under the cursor: a band whose own `gh pr view` has
+            // not answered yet, its row still to come, while the project's
+            // open list already names its pull request — the band's rule
+            // shows it (`launcher::row_pr`). The pane reads that one now,
+            // so `→` has a page to focus while it loads, and the row that
+            // lands later is the same URL, the reader left in place.
+            None => {
+                let worktree = self.selected_worktree()?;
+                let pr = crate::launcher::row_pr(
+                    self,
+                    &worktree.id,
+                    &worktree.project_id,
+                    &worktree.branch,
+                )?;
+                return Some(PreviewedPr {
+                    number: pr.number,
+                    label: crate::pull_request::numbered_label(pr.number, &pr.title),
+                    url: pr.url,
+                });
+            }
+        };
         let pr = row.pull_request()?;
         Some(PreviewedPr {
             number: pr.number,
@@ -5380,6 +5562,13 @@ impl App {
                 .map(|pr| pr.url)
                 .or_else(|| self.previewed_issue().map(|i| i.url.clone()))
         })
+    }
+
+    /// The pane is reading a page — a pull request, an issue, a Claude
+    /// Cloud session — rather than showing a PTY: FOCUS in it scrolls the
+    /// page, and there is nothing to type into.
+    pub fn pane_reads_page(&self) -> bool {
+        self.reading_url().is_some() || self.previewed_cloud().is_some()
     }
 
     /// The Claude Cloud row the pane should be describing: the SESSIONS

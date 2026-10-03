@@ -1,6 +1,6 @@
 pub mod cloud;
 pub mod cursor;
-pub mod kitty;
+pub use orion_core::kitty;
 mod osc;
 pub mod progress;
 pub mod ring;

@@ -86,20 +86,35 @@
   is a standing `--base` for every worktree nobody names one for — `master` for a repo whose
   default branch is not what origin says, or that has no origin — resolved the same way, and
   falling back to `origin/HEAD` in a repo that has no branch of that name.
-- **A branch reads one commit at a time — the COMMIT LIST.** The DIFF VIEWER (`⌘E`) lists the
-  checkout's own commits, newest first: `git log <merge-base>..HEAD`, measured against the base
-  worktrees are cut from — the `worktree_base_branch` SETTING's branch (origin's copy first), else
-  `origin/HEAD`, else the branch the ROOT WORKTREE is on — as the checkout last fetched it, since
-  the list never fetches. HEAD is all it needs, so a detached checkout lists the same way. Above
-  the commits sit **All changes** — the merge-base against the working tree, untracked files
-  included — and, while the checkout is dirty, **Uncommitted changes**, the view `⌘E` always
-  opened on and still does while there is any. Picking a row re-lists the files for it, and every
-  diff walked is taken against that row; a commit's against its first parent, its message heading
-  each diff. The list is read in the same background job as the viewer's `git status`, and a
-  branch past 50 commits is read 50 at a time, the next page when the cursor reaches `… N older
-  commits` — `git log` diffs each commit it lists to count its lines, so three hundred commits
-  are never diffed to show six. A pull request's diff has no commit list: `gh pr diff` hands it
-  over whole, and a commit at a time would be a `gh` call per commit.
+- **A branch reads as what it added — the COMMIT LIST.** The DIFF VIEWER (`⌘E`) lists the
+  checkout's own commits, newest first: `git log --first-parent --no-merges <merge-base>..HEAD`,
+  measured against the base worktrees are cut from — the `worktree_base_branch` SETTING's branch
+  (origin's copy first), else `origin/HEAD`, else the branch the ROOT WORKTREE is on — as the
+  checkout last fetched it, since the list never fetches. First parents walk the line the branch was
+  committed on and never into a merged branch's history; `--no-merges` drops the merges themselves:
+  a branch that merged `main` in to keep up lists only its own work. HEAD is all it needs, so a
+  detached checkout lists the same way. Over the commits sits **Uncommitted changes** while the
+  checkout is dirty, the view `⌘E` always opened on and still does then; a clean checkout opens with
+  every commit ticked. What is on screen is a scope: the cursor's row with nothing ticked — a
+  commit against its first parent, its message heading each diff — or the ticked rows, one at a
+  time or TOGETHER. Together, rows side by side on the branch are one range, `git diff <first
+  parent of the oldest> <newest>` (the working tree, for the uncommitted row); an unticked commit or
+  a merge between two starts another range, and a file two ranges touch reads as each range's diff
+  in turn, so a commit left out never comes back in a diff that runs across it. A range down to the
+  branch's first commit is taken from the merge-base at its newest end instead, which keeps it one
+  diff across merges of the base — every commit ticked is exactly the branch's diff. Each scope's
+  file list is read before it goes up, and every diff walked is taken against it. The list is read
+  in the same background job as the viewer's `git status`, and a branch past 50 commits is read 50
+  at a time, the next page when the cursor reaches `… N older commits` — `git log` diffs each
+  commit it lists to count its lines, so three hundred commits are never diffed to show six. A pull
+  request's diff has no commit list: `gh pr diff` hands it over whole. One of its commits opens on
+  its own (`event_loop::open_pr_review`) when the project's repo has it.
+- **The diff pane is read, not paged — `diff_doc`.** A file's `git diff` is read once, as it lands,
+  into lines that say what they are: its headers into the facts on the pane's edge (added, renamed
+  from, `+20 −3`), each `@@` into the line it starts on, each line of code into its old and new
+  numbers and its syntax runs. Drawing wraps every line at the pane's width — code at a word where
+  that leaves the row half full — and the pane scrolls by rows, counted once per width and cached,
+  so a 20 000-line diff scrolls as cheaply as a short one.
 - **Worktrees made outside orion show up anyway — WORKTREE SYNC.** Every 2 s the DAEMON mtime-probes
   the git files a worktree operation touches — the repo's shared `.git/HEAD`, the `.git/worktrees`
   directory, and each linked checkout's own `HEAD` — and only when the newest of those stamps has moved
@@ -171,6 +186,9 @@
   "Hooks need review" prompt and every later worktree is silent). Groups are tagged `_orionManaged`,
   user hooks preserved, rebuilt each spawn. Each hook is a fail-soft curl to the daemon's loopback HTTP
   endpoint, authenticated with a per-boot bearer token injected into the agent's environment only.
+  The checkout's own files (`.claude/settings.local.json`, `.cursor/hooks.json`,
+  `.cursor/rules/orion-title.mdc`) are listed in the clone's `.git/info/exclude` as orion writes them —
+  local to the clone, never committed — so they never show in `git status` or the CHANGES view.
 - **…plus the progress bar, for the cancel no hook reports.** Escaping out of a turn fires no `Stop` and
   suppresses the idle notification that normally un-sticks one, so orion also reads the CLI's terminal
   progress-bar escapes (OSC 9;4) straight off the PTY. That signal survives a cancel, and it stays busy
@@ -348,7 +366,8 @@ cards' `#42 title` line. The row outlives
 the pull request: once it is merged or closed the row stays, badged `merged` or `closed` (an open one is
 badged `ready` — ready for review, the state and nothing more — and a draft is dimmed and badged `draft`;
 one GitHub says cannot merge, its branch conflicting with the base or a check failing, is red end to end
-and badged `conflicts` or `failing` instead, the PR PREVIEW spelling the same out beside the state),
+and badged `conflicts` or `failing` instead, the PULL REQUEST PAGE saying the conflict beside the
+state and marking a failed check on its Checks tab),
 for as long as the checkout does — a worktree whose PR has shipped is the one
 you are about to archive or delete, and the PR is what you check first. A merged one also takes over the
 checkout's band: purple dot and purple branch name, so the checkout to
@@ -357,8 +376,9 @@ that is not a checkout to pull out from under it). The name sweeps the way a run
 five seconds after orion sees the merge land, then holds still in solid purple — nothing about a landed
 checkout is live, so it says so once; one found already merged (last run's cache, a first lookup) never
 sweeps, and a merged checkout left lying around costs an idle orion no repaints. Jump to it with
-`⌘K` and the pane reads the pull request — description, stats, conversation — exactly as the PULL REQUESTS
-MODAL does (whose list retires a pull request on merge, and which `hide_draft_prs` never thins — the
+`⌘K` and the pane reads the pull request as its [page](keys.md#the-pull-request-page) — description and
+conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
+as the PULL REQUESTS MODAL does (whose list retires a pull request on merge, and which `hide_draft_prs` never thins — the
 modal lists drafts too); `⌘E` shows its diff. Manual link
 attachment is gone; links an earlier version saved stay in the database, so no data is discarded,
 though the grid draws none of them.

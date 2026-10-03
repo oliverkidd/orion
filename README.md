@@ -43,9 +43,10 @@ orion replaces the reading with a grid and a color. Every session is a card — 
 | **Claude accounts** | Add a second Claude login in Settings → Agents (or at first run): its own config dir, your `CLAUDE.md`, settings and skills shared, signed in from inside orion. Each is named after its email, `Claude (you@example.com)`, and two signed in as one are flagged. A session that hits its usage limit goes red with Claude's reset time; `⇧C` carries it, conversation and all, onto the other account. |
 | **A task box, not a picker** | `⌘N` opens the quick prompt: type the task, `Enter`, and an agent is working on it. |
 | **Real git worktrees** | `⌘N` in the box flips the launch onto a fresh `git worktree`. Ignored `.env*` files from the main checkout are symlinked in by default. Delete asks before losing uncommitted work. |
-| **Linear, assigned to you** | `⌘L` lists issues assigned to you. Space marks, Enter starts one agent on the set and asks for a single PR. From the PR modal, `⌘L` attaches the selected pull request. Put `LINEAR_API_KEY` in the project's `.env` or `.env.local`. |
+| **Pull requests, in tabs** | The pull request beside the cards — or under the cursor in `v` — reads like Cursor's page: `Description · Changes 11 · Commits 4 · ✗ Checks 44/45 · ✓ Reviews`. `Enter` on a file or a commit opens its diff, on a check its log. |
+| **Linear, assigned to you** | `⌘L` lists issues assigned to you. Space marks, Enter starts one agent on the set and asks for a single PR, attached to the issues once it opens. Settings → Linear has every option — the link (on), the account, the task template — and tests the project's `LINEAR_API_KEY`, read from its `.env.local` or `.env`. |
 | **Ghostty by default** | Settings picks Ghostty or Terminal.app. Stolen Command chords are unbound in Ghostty's config so they reach orion — reload with `⌘⇧,` after the first launch. |
-| **Diff, find, grep, browse** | `⌘E` the diff — uncommitted, the whole branch, or one commit at a time (`⇧←`/`⇧→`) — `⌘P` the file finder, `⌘⇧F` grep, `⌘B` the tree. Markdown renders in place. `⌘O` opens the file in your editor (Cursor, VS Code, or whatever Settings → File editor names). |
+| **Diff, find, grep, browse** | `⌘E` the diff, wrapped and numbered in the file's colours — the uncommitted changes, everything the branch added (merges of `main` left out), or the commits you tick, together or one at a time — `⌘P` the file finder, `⌘⇧F` grep, `⌘B` the tree. Markdown opens as its rendered page; `Enter` edits any file in micro, Microsoft Edit or fresh — VS Code's keys, wrapped lines, the mouse (Settings → File editor) — and `⌘O` opens it in Cursor, VS Code, Sublime Text or Zed (Settings → Open in app). |
 | **Your skills, browsable** | `⌘S` lists every agent skill on the machine — yours, the project's, Cursor's and Codex's, installed plugins' — searchable by name and description, each read in place. `Enter` edits one, `^A` starts a new one, `^D` moves one to the Trash. |
 | **It follows you** | `orion ssh <host>` opens orion there. `orion tunnel <host>` puts that machine's TUI in a browser tab. |
 
@@ -70,6 +71,10 @@ macOS or Linux. The installer downloads a prebuilt binary from the latest GitHub
 ```sh
 curl -fsSL https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh | sh
 ```
+
+Then it makes sure of what orion leans on: **git** (it stops without it), an **editor** files open in — fresh, unless fresh, micro or Microsoft Edit is already there, from Homebrew or else fresh's own quick-install script on Linux and micro's on a Mac without Homebrew — and **gh**, for pull requests and issues (Homebrew, or a pointer to its install page). Anything already there it leaves alone, without a word. `sh -s -- --no-deps` (or `ORION_NO_DEPS=1`) installs orion alone.
+
+`orion doctor` checks all of it at any time — git, gh and its sign-in, the editor and what really opens, the Open in app editor, Ghostty's keybinds, the CLI of every agent you turned on, the project's `LINEAR_API_KEY` — and prints the command that fixes whatever is missing. It never installs anything itself; first-run setup and Settings do, on `i` ([Configuration](docs/configuration.md#installing-editors-and-agent-clis)).
 
 Until a `v*` release exists, install from the repo:
 
@@ -115,13 +120,13 @@ cd ~/code/my-app
 orion
 ```
 
-The first launch opens a short setup: which agents to turn on (they all start off), worktree defaults, Linear and the outside terminal. `Esc` skips it, and Settings (`⌘,`) changes any of it later. Then the splash: `Enter` adds the repo as your first project and opens the grid. Or register one first: `orion add ~/code/my-app`.
+The first launch opens a short setup, a step at a time: which agents to turn on (they all start off) — a missing CLI installs from there with `i` — your Claude accounts, the editor files open in and the app `⌘O` hands them to, worktree defaults, Linear and the outside terminal, then a summary of what you chose and the keys to press next. `Esc` skips it, and Settings (`⌘,`) changes any of it later. Then the splash: `Enter` adds the repo as your first project and opens the grid. Or register one first: `orion add ~/code/my-app`.
 
-**2. Start an agent.** `⌘N` (`Ctrl+N` if the terminal never sends ⌘) opens the quick prompt. Type the task, `Enter`. `Tab` picks the harness, `⌘/` the model, `⌘.` the checkout, `⌘P` the project.
+**2. Start an agent.** `⌘N` (`Ctrl+N` if the terminal never sends ⌘) opens the quick prompt. Type the task, `Enter`. `Tab` picks the harness, `⌘/` the model, `⌘Y` steps the effort, `⌘.` the checkout (or a fresh worktree), `⌘P` the project — the box's header shows each with its key.
 
 **3. Read the grid.** `↑` / `↓` walk the bands. `Enter` steps into the pane. `Esc` leaves it. `Space` on a card sends the next turn without opening the session. `q` quits the TUI; sessions keep running in the daemon.
 
-**4. Linear (optional).** Put `LINEAR_API_KEY=lin_api_…` in the project's `.env` or `.env.local`. `⌘L` lists issues assigned to the key's owner. Settings → Linear account takes your email if the key is shared. Space marks, Enter launches one agent for the set.
+**4. Linear (optional).** Put `LINEAR_API_KEY=lin_api_…` in the project's `.env` or `.env.local`. `⌘L` lists issues assigned to the key's owner. Settings → Linear → **Test connection** says whose it is, and **Linear account** takes your email if the key is shared. Space marks, Enter launches one agent for the set.
 
 Reload Ghostty's config (`⌘⇧,`) after the first launch so Command chords reach orion.
 
@@ -130,7 +135,7 @@ Reload Ghostty's config (`⌘⇧,`) after the first launch so Command chords rea
 | | |
 |---|---|
 | [**Keys**](docs/keys.md) | Default bindings, the grid, worktree views, the mouse. All of it rebindable in Settings. |
-| [**Commands**](docs/commands.md) | The `orion` CLI: `add`, `worktree`, `spawn`, `open`, `config`, `ssh`, `tunnel`, `kill`, `upgrade`. |
+| [**Commands**](docs/commands.md) | The `orion` CLI: `add`, `worktree`, `spawn`, `open`, `config`, `ssh`, `tunnel`, `kill`, `doctor`, `upgrade`. |
 | [**Sessions**](docs/sessions.md) | The quick prompt, the grid, presets, issues, pull requests. |
 | [**Configuration**](docs/configuration.md) | `config.json` and `config.local.json` (`orion config path` prints where; on macOS `~/Library/Application Support/dev.orion.orion/`), the settings overlay, project files, env overrides. |
 | [**How it works**](docs/how-it-works.md) | The daemon, hook dialects, auto-title, worktree relocation. |

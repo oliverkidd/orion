@@ -23,17 +23,11 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// Editor commands the settings overlay cycles through. Every entry
-/// accepts `+<line> <file>`, which is how the overlays launch it. As with
-/// models, hand-edited configs can name any command the list doesn't.
-pub const EDITORS: &[&str] = &[
-    crate::editor::DEFAULT_EDITOR,
-    "vim",
-    "nvim",
-    "nano",
-    "emacs",
-    "hx",
-];
+/// Editor commands the **File editor** row cycles through, the VS
+/// Code-style ones first (`editor::EDITORS`); each is told the file and
+/// line its own way (`editor::editor_args`). As with models, hand-edited
+/// configs can name any command the list doesn't.
+pub const EDITORS: &[&str] = crate::editor::EDITORS;
 
 /// The **Outside terminal** choices (Settings → General), in the order the
 /// row cycles them: the [`OutsideTerminal`] apps by name, the default first.
@@ -135,6 +129,9 @@ pub const AUTO_CHOICE: &str = "auto";
 /// What the Linear account row shows while it names nobody: the owner of
 /// the project's `LINEAR_API_KEY`.
 pub const LINEAR_KEY_OWNER: &str = "the key's owner";
+/// What the task template row shows while it is empty: the built-in
+/// [`DEFAULT_LINEAR_TEMPLATE`].
+pub const LINEAR_TEMPLATE_DEFAULT: &str = "default";
 /// What the Project tab's **Run command** row shows while it is empty:
 /// the checkout's `.orion.json` is what `r` reads then.
 pub const PROJECT_FILE_CHOICE: &str = orion_core::project_file::FILE_NAME;
@@ -426,12 +423,6 @@ pub const AGENTS_HEAD: &[SettingSpec] = &[
         group: "Quick prompt",
     },
     SettingSpec {
-        kind: SettingKind::QuickPromptNewWorktree,
-        label: "New worktree",
-        hint: "Each new session's box starts on a fresh worktree (off = the project's root branch; ^N flips one box)",
-        group: "Quick prompt",
-    },
-    SettingSpec {
         kind: SettingKind::HideUninstalledHarnesses,
         label: "Hide missing CLIs",
         hint: "List only harnesses found on PATH in the New session picker (daemon still checks at launch)",
@@ -456,10 +447,17 @@ pub enum SettingKind {
     OutsideTerminal,
     GhosttyKeybinds,
     Editor,
+    OutsideEditor,
     CloseFinderOnOpen,
     SshSyncConfig,
     LinearAccount,
     LinearAutoAttach,
+    LinearTaskTemplate,
+    /// The Linear tab's read-only row: where the selected project's
+    /// `LINEAR_API_KEY` was found, if anywhere (`linear::status_value`).
+    LinearKey,
+    /// The Linear tab's action row: Enter asks Linear whose key it is.
+    LinearTest,
     SessionIdleTimeout,
     PrewarmAgents,
     PrewarmSessions,
@@ -481,7 +479,6 @@ pub enum SettingKind {
     QuickPromptKind,
     QuickPromptFocus,
     FollowNewSession,
-    QuickPromptNewWorktree,
     RunCommand,
     OpenCommand,
     RememberHarness,
@@ -530,9 +527,23 @@ impl SettingKind {
             self,
             SettingKind::WorktreeBaseBranch
                 | SettingKind::LinearAccount
+                | SettingKind::LinearTaskTemplate
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
         )
+    }
+
+    /// A typed row whose value runs over lines — the Linear task
+    /// template: its prompt is a multi-row box, `⇧Enter` breaking a line.
+    pub fn is_multiline_text(self) -> bool {
+        self == SettingKind::LinearTaskTemplate
+    }
+
+    /// A row that says how things stand rather than holding a setting:
+    /// nothing in the file behind it, nothing to cycle. Its value is the
+    /// app's to tell (`linear::status_value`), and Enter is its one verb.
+    pub fn is_status(self) -> bool {
+        matches!(self, SettingKind::LinearKey | SettingKind::LinearTest)
     }
 
     /// A row on the PROJECT TAB: its value is the focused project's, kept
@@ -580,9 +591,7 @@ impl SettingKind {
             // v0.33.0
             SettingKind::PresetText => (2026, 9, 18),
             // v0.34.0
-            SettingKind::BlackBackground
-            | SettingKind::SessionPane
-            | SettingKind::QuickPromptNewWorktree => (2026, 9, 22),
+            SettingKind::BlackBackground | SettingKind::SessionPane => (2026, 9, 22),
             // v0.38.0, then rows not yet in a release
             SettingKind::DeleteEmptyWorktree
             | SettingKind::ShowAllWorktrees
@@ -595,7 +604,11 @@ impl SettingKind {
             | SettingKind::OutsideTerminal
             | SettingKind::GhosttyKeybinds
             | SettingKind::LinearAccount
-            | SettingKind::LinearAutoAttach => (2026, 10, 3),
+            | SettingKind::LinearAutoAttach
+            | SettingKind::LinearTaskTemplate
+            | SettingKind::LinearKey
+            | SettingKind::LinearTest
+            | SettingKind::OutsideEditor => (2026, 10, 3),
         }
     }
 
@@ -642,7 +655,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::PaletteEnterAttaches,
                 label: "Search Enter attaches",
-                hint: "Enter in the ⌘K jump list opens the session in the terminal (a red one always does)",
+                hint: "Enter in the {palette} jump list opens the session in the terminal (a red one always does)",
                 group: "",
             },
             SettingSpec {
@@ -660,19 +673,25 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::OutsideTerminal,
                 label: "Outside terminal",
-                hint: "What ⌘O → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
+                hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::GhosttyKeybinds,
                 label: "Ghostty keybinds",
-                hint: "Keep a marked block in Ghostty's config releasing ⌘⇧P, ⌘N and ⌘, for orion (written when Ghostty is in use)",
+                hint: "Keep a marked block in Ghostty's config releasing every ⌘ chord orion's keys use, rebinds included (written when Ghostty is in use)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::Editor,
                 label: "File editor",
-                hint: "Editor every file opens in — ⌘P, ⌘⇧F, ⌘B and ⌥click (ORION_EDITOR overrides)",
+                hint: "Editor every file opens in — {find_file}, {grep}, {tree_browser} and ⌥click (ORION_EDITOR overrides)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::OutsideEditor,
+                label: "Open in app",
+                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text, Zed",
                 group: "",
             },
             SettingSpec {
@@ -685,18 +704,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::SshSyncConfig,
                 label: "Sync settings over ssh",
                 hint: "orion ssh / tunnel carry config.json and presets to the remote (config.local.json stays)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::LinearAccount,
-                label: "Linear account",
-                hint: "Whose issues ⌘L lists; Enter types an email (empty = the owner of the project's LINEAR_API_KEY). Kept in config.local.json",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::LinearAutoAttach,
-                label: "Link PRs to Linear",
-                hint: "When a branch started from ⌘L gets a pull request, attach it to each of its Linear issues",
                 group: "",
             },
         ]),
@@ -808,7 +815,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::HideDraftPrs,
                 label: "Draft pull requests",
-                hint: "Show or hide draft pull requests in the ⌘K jump list; checkouts always stay",
+                hint: "Show or hide draft pull requests in the {palette} jump list; checkouts always stay",
                 group: "",
             },
         ]),
@@ -820,6 +827,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "Agents",
         body: TabBody::Agents,
+    },
+    // Every Linear option in one place: the onboarding wizard's Linear
+    // page draws the same rows (`LINEAR_SETTINGS`).
+    SettingsTab {
+        title: "Linear",
+        body: TabBody::Values(LINEAR_SETTINGS),
     },
     // Settings that belong to one project rather than to orion. The tab
     // edits the selected project's entry in `projects` and names that
@@ -837,7 +850,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::OpenCommand,
                 label: "Open command",
-                hint: "Shell line ⌘O → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
+                hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
                 group: "",
             },
         ]),
@@ -859,6 +872,43 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "Hotkeys",
         body: TabBody::Hotkeys,
+    },
+];
+
+/// The LINEAR TAB's rows, top to bottom — and the onboarding wizard's
+/// Linear page, which mirrors them. Linking pull requests leads: it is on
+/// by default and the one most people only ever check. The key's status
+/// and the connection test are the selected project's.
+pub const LINEAR_SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        kind: SettingKind::LinearAutoAttach,
+        label: "Link PRs to Linear",
+        hint: "Attach the PR a {linear} launch opens to its Linear issues via the API — no issue ID needed in the branch name, and no duplicates: Linear keeps one attachment per PR",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearAccount,
+        label: "Linear account",
+        hint: "Whose issues {linear} lists; Enter types an email (empty = the owner of the project's LINEAR_API_KEY). Kept in config.local.json",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearTaskTemplate,
+        label: "Task template",
+        hint: "The task {linear} fills the new agent's box with; Enter edits it — the issues, ids and first_id placeholders, in braces, are filled in (empty = the default)",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearKey,
+        label: "API key",
+        hint: "Where the selected project's LINEAR_API_KEY comes from: its .env.local, then its .env, then orion's own environment. The key itself is never shown",
+        group: "Connection",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearTest,
+        label: "Test connection",
+        hint: "Enter asks Linear whose key it is — the account's name and email, or why it could not",
+        group: "Connection",
     },
 ];
 
@@ -956,11 +1006,9 @@ pub fn all_settings() -> impl Iterator<Item = (usize, usize, &'static SettingSpe
 /// The Agents tab reads the registry for its harness rows.
 pub fn hint_at(tab: usize, index: usize) -> String {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
-        Some(TabBody::Values(settings) | TabBody::Project(settings)) => settings
-            .get(index)
-            .map(|s| s.hint)
-            .unwrap_or("")
-            .to_string(),
+        Some(TabBody::Values(settings) | TabBody::Project(settings)) => {
+            settings.get(index).map(setting_hint).unwrap_or_default()
+        }
         Some(TabBody::Hotkeys) => crate::keymap::spec_at(index)
             .map(|s| s.hint)
             .unwrap_or("")
@@ -968,6 +1016,27 @@ pub fn hint_at(tab: usize, index: usize) -> String {
         Some(TabBody::Agents) => Config::load().agent_hint_by_index(index),
         None => String::new(),
     }
+}
+
+/// A value row's hint — led, on the two rows that pick a program, by what
+/// is installed on this machine.
+fn setting_hint(spec: &SettingSpec) -> String {
+    let installed = match spec.kind {
+        SettingKind::Editor => EDITORS
+            .iter()
+            .copied()
+            .filter(|editor| program_installed(editor))
+            .collect::<Vec<_>>(),
+        SettingKind::OutsideEditor => {
+            crate::outside_editor::installed_names(&crate::outside_editor::Places::here())
+        }
+        _ => return spec.hint.to_string(),
+    };
+    let list = match installed.as_slice() {
+        [] => "none".to_string(),
+        names => names.join(", "),
+    };
+    format!("Installed: {list}. {}", spec.hint)
 }
 
 /// One terminal row of the settings overlay body, in display order.
@@ -1107,12 +1176,19 @@ pub struct Config {
     /// outside terminal. Off leaves Ghostty's config alone.
     pub ghostty_keybinds: bool,
     /// Editor command the file finder (`f`), tree browser (`b`),
-    /// find-in-files (`F`), and ⌥click file links launch, invoked as
-    /// `<editor> +<line> <file>`. Any command passes through verbatim, so
+    /// find-in-files (`F`), ⌥click file links and a MARKDOWN PAGE's Enter
+    /// launch, each told the file and line its own way
+    /// (`editor::editor_args`). Any command passes through verbatim, so
     /// hand-edited configs can name editors the picker doesn't list. The
-    /// `ORION_EDITOR` env var overrides it for the process; see
+    /// `ORION_EDITOR` env var overrides it for the process, and one that
+    /// isn't installed falls back (`editor::resolve`); see
     /// [`Config::editor_command`].
     pub editor: String,
+    /// OPEN IN APP: the GUI editor ⌘O hands a file or a checkout to —
+    /// `auto` (the default: the first installed of Cursor, VS Code,
+    /// Sublime Text and Zed, else the system default), `cursor`,
+    /// `vscode`, `sublime`, `zed` or `default`. See `outside_editor`.
+    pub outside_editor: String,
     /// Opening a file from the file finder (`f`) or find-in-files (`F`)
     /// closes that overlay as the editor modal opens, so quitting the
     /// editor lands back on the panels instead of on the finder the user
@@ -1135,12 +1211,17 @@ pub struct Config {
     /// The task ⌘L's Enter fills the QUICK PROMPT with for the picked
     /// issues: `{issues}` becomes each issue's ID, title, link and
     /// description, `{ids}` the IDs comma-separated, `{first_id}` the
-    /// first one. Hand-edit only; empty — the default — is
-    /// [`DEFAULT_LINEAR_TEMPLATE`]. See [`Config::linear_template`].
+    /// first one. Settings → Linear → **Task template** edits it; empty —
+    /// the default — is [`DEFAULT_LINEAR_TEMPLATE`]. See
+    /// [`Config::linear_template`].
     pub linear_task_template: String,
-    /// LINEAR AUTO-ATTACH: a branch a ⌘L launch cut is remembered
+    /// LINEAR AUTO-ATTACH (Settings → Linear → **Link PRs to Linear**, on
+    /// by default): a branch a ⌘L launch cut is remembered
     /// (`linear::LinkStore`), and when OPEN PRS first shows a pull request
-    /// on it the PR is attached to each of its Linear issues.
+    /// on it the PR is attached to each of its Linear issues through the
+    /// API — the link does not depend on the branch name carrying an issue
+    /// ID, and Linear keeps one attachment per pull request, so attaching
+    /// twice never duplicates.
     pub linear_auto_attach: bool,
     /// FIRST-RUN ONBOARDING has been finished or skipped. Local-only so a
     /// shared `config.json` does not skip the wizard on a new machine.
@@ -1445,8 +1526,10 @@ pub struct Config {
     /// that breaks one entry refuses its launches with the reason, never
     /// the whole file (see `orion_core::settings`). Written even when
     /// empty: a save patches only the keys it writes, so a map emptied by
-    /// removing its last entry (an account's deltas, say) has to be.
-    #[serde(default)]
+    /// removing its last entry (an account's deltas, say) has to be. A
+    /// file with no `harnesses` key at all reads as a fresh config does
+    /// ([`default_harnesses`]); one that has the key is read as written.
+    #[serde(default = "default_harnesses")]
     pub harnesses: BTreeMap<String, orion_core::harness::HarnessOverride>,
     /// CLAUDE ACCOUNTS beyond the default one (`claude_accounts`): each a
     /// Claude Code config dir under a stable id, `{"id": "claude-2",
@@ -1483,11 +1566,14 @@ pub struct Config {
     /// outranks it — a launch that enters the new session's pane has to
     /// go there.
     pub follow_new_session: bool,
-    /// Whether each new QUICK PROMPT starts aimed at a fresh worktree
-    /// rather than the checkout under the grid's cursor (the project's
-    /// ROOT BRANCH when nothing is aimed at — `launcher::target_for`).
-    /// `^N` flips the one box that is up; the next box starts from this
-    /// again. Off by default.
+    /// RETIRED with the box's `[ ] new worktree` toggle. Through 0.42 the
+    /// **New worktree** SETTING (Settings → Agents, and the onboarding
+    /// wizard's Worktrees page) started every QUICK PROMPT aimed at a
+    /// fresh worktree. Every box starts in the checkout under the grid's
+    /// cursor now, and a fresh one is the WORKTREE PICKER's first row
+    /// (`⌘.` / `^T`), so no tab shows the row and nothing reads it. Still
+    /// loaded and written back as stored, so an older build sharing the
+    /// file keeps the choice its user made.
     pub quick_prompt_new_worktree: bool,
     /// Hotkey overrides, keyed by `keymap::ActionSpec::id`; the value is a
     /// comma-separated chord list (`"j, down"`), and an empty string means
@@ -1592,6 +1678,7 @@ impl Default for Config {
             outside_terminal: OutsideTerminal::default().as_str().into(),
             ghostty_keybinds: true,
             editor: crate::editor::DEFAULT_EDITOR.into(),
+            outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
             ssh_sync_config: true,
             linear_assignee_email: String::new(),
@@ -1678,10 +1765,15 @@ const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_mark
 const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded"];
 
 /// Production starts with every harness off, including grok (whose
-/// built-in default is on, so the map has to say otherwise). Tests keep
-/// an empty map so `{}` still offers the compiled-in set.
+/// built-in default is on, so the map has to say otherwise) — a fresh
+/// config, and a `config.json` with no `harnesses` key at all, which is
+/// why the field's serde default is this too: serde's own default for a
+/// missing field is an empty map, which left Grok Build on. Tests keep an
+/// empty map so `{}` still offers the compiled-in set, unless they ask
+/// for the shipped one ([`with_shipped_defaults`]).
 fn default_harnesses() -> BTreeMap<String, orion_core::harness::HarnessOverride> {
-    if cfg!(test) {
+    #[cfg(test)]
+    if !SHIPPED_DEFAULTS.with(std::cell::Cell::get) {
         return BTreeMap::new();
     }
     let mut harnesses = BTreeMap::new();
@@ -1874,13 +1966,20 @@ impl Config {
     }
 
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
-    /// otherwise the `editor` setting, otherwise micro — vim where micro
-    /// isn't installed.
+    /// otherwise the `editor` setting, otherwise fresh — and one that isn't
+    /// installed swapped for the first installed of fresh, micro, edit and
+    /// vim ([`Config::editor_resolved`] says when).
     pub fn editor_command(&self) -> String {
-        resolve_editor(
+        self.editor_resolved().command
+    }
+
+    /// [`Config::editor_command`], with the editor it stands in for when
+    /// the one asked for isn't installed.
+    pub fn editor_resolved(&self) -> crate::editor::Resolved {
+        crate::editor::resolve(
             orion_core::env::non_empty(orion_core::env::EDITOR).as_deref(),
             &self.editor,
-            program_installed(crate::editor::DEFAULT_EDITOR),
+            program_installed,
         )
     }
 
@@ -2277,14 +2376,16 @@ impl Config {
         }
     }
 
-    /// [`Config::account_value`] without the switch, for the onboarding
-    /// page's narrower rows — it lists the switches a page before.
-    pub fn account_brief(&self, row: &AccountRow) -> String {
+    /// [`Config::account_value`] without the switch, in two columns —
+    /// the config dir and who it is signed in as — for the onboarding
+    /// page, which lists the switches a page before. **Add account** has
+    /// where a new one would go, and nothing to be signed in as.
+    pub fn account_parts(&self, row: &AccountRow) -> (String, String) {
         match row {
-            AccountRow::Add => self.next_account_dir(),
+            AccountRow::Add => (self.next_account_dir(), String::new()),
             AccountRow::Account(id) => match self.account_status(id) {
-                Some((_, dir, state)) => format!("{dir} · {state}"),
-                None => "n/a".into(),
+                Some((_, dir, state)) => (dir, state),
+                None => ("n/a".into(), String::new()),
             },
         }
     }
@@ -2495,6 +2596,21 @@ impl Config {
                 self.set_harness_effort(id, next);
             }
         }
+    }
+
+    /// The Agents tab's Effort row for harness `id`, set to `effort` —
+    /// what Cycle effort writes as it steps the new-agent box, so the next
+    /// box starts where this one was left. Only an effort the harness's
+    /// default model offers (a Cursor box on another family steps itself
+    /// alone); false when nothing changed.
+    pub fn set_agent_effort(&mut self, id: &str, effort: &str) -> bool {
+        let descriptor = self.effective_harness_by_id(id);
+        let choices = effort_choices_in(&descriptor, descriptor.default_model());
+        if !fits(effort, &choices) || descriptor.effort.default.eq_ignore_ascii_case(effort) {
+            return false;
+        }
+        self.set_harness_effort(id, effort.to_string());
+        true
     }
 
     /// Write an Enabled toggle: the `harnesses` map where it speaks, else
@@ -2792,7 +2908,11 @@ impl Config {
             SettingKind::LinkEnvFiles => on_off(self.link_env_files).into(),
             SettingKind::OutsideTerminal => self.outside_terminal().as_str().into(),
             SettingKind::GhosttyKeybinds => on_off(self.ghostty_keybinds).into(),
-            SettingKind::Editor => self.editor.clone(),
+            SettingKind::Editor => editor_label(&self.editor, &self.editor_resolved()),
+            SettingKind::OutsideEditor => crate::outside_editor::value_label(
+                &self.outside_editor,
+                &crate::outside_editor::Places::here(),
+            ),
             SettingKind::CloseFinderOnOpen => on_off(self.close_finder_on_open).into(),
             SettingKind::SshSyncConfig => on_off(self.ssh_sync_config).into(),
             SettingKind::LinearAccount => match self.linear_assignee_email.trim() {
@@ -2800,6 +2920,12 @@ impl Config {
                 email => email.to_string(),
             },
             SettingKind::LinearAutoAttach => on_off(self.linear_auto_attach).into(),
+            SettingKind::LinearTaskTemplate => match self.linear_task_template.trim() {
+                "" => LINEAR_TEMPLATE_DEFAULT.into(),
+                custom => format!("custom: {}", custom.lines().next().unwrap_or_default()),
+            },
+            // The app's to tell (`linear::status_value`), not the file's.
+            SettingKind::LinearKey | SettingKind::LinearTest => String::new(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
             SettingKind::PrewarmAgents => on_off(self.prewarm_agents).into(),
             SettingKind::PrewarmSessions => on_off(self.prewarm_sessions).into(),
@@ -2835,7 +2961,6 @@ impl Config {
             },
             SettingKind::QuickPromptFocus => on_off(self.quick_prompt_focus).into(),
             SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
-            SettingKind::QuickPromptNewWorktree => on_off(self.quick_prompt_new_worktree).into(),
         }
     }
 
@@ -2868,14 +2993,18 @@ impl Config {
 
     /// Cycle one static setting row. The Agents tab's harness rows cycle
     /// through [`Config::cycle_agent_row`] instead.
-    fn cycle_kind(&mut self, kind: SettingKind, delta: i32) {
+    pub(crate) fn cycle_kind(&mut self, kind: SettingKind, delta: i32) {
         let step = if delta == 0 { 1 } else { delta };
         match kind {
             SettingKind::PaletteEnterAttaches => {
                 self.palette_enter_attaches = !self.palette_enter_attaches;
             }
             // Typed, not cycled: see `SettingKind::is_text` / `set_text`.
-            SettingKind::WorktreeBaseBranch | SettingKind::LinearAccount => {}
+            SettingKind::WorktreeBaseBranch
+            | SettingKind::LinearAccount
+            | SettingKind::LinearTaskTemplate => {}
+            // Status, not a setting: nothing to cycle.
+            SettingKind::LinearKey | SettingKind::LinearTest => {}
             SettingKind::LinearAutoAttach => {
                 self.linear_auto_attach = !self.linear_auto_attach;
             }
@@ -2891,6 +3020,12 @@ impl Config {
             }
             SettingKind::Editor => {
                 self.editor = cycle_choice(&self.editor, EDITORS, step).into();
+            }
+            SettingKind::OutsideEditor => {
+                let current = crate::outside_editor::Choice::parse(&self.outside_editor);
+                self.outside_editor =
+                    cycle_choice(current.as_str(), crate::outside_editor::CHOICES, step).into();
+                crate::outside_editor::forget_hint_name();
             }
             SettingKind::CloseFinderOnOpen => {
                 self.close_finder_on_open = !self.close_finder_on_open;
@@ -2978,9 +3113,6 @@ impl Config {
             SettingKind::FollowNewSession => {
                 self.follow_new_session = !self.follow_new_session;
             }
-            SettingKind::QuickPromptNewWorktree => {
-                self.quick_prompt_new_worktree = !self.quick_prompt_new_worktree;
-            }
         }
     }
 
@@ -2991,6 +3123,9 @@ impl Config {
         match kind {
             SettingKind::WorktreeBaseBranch => self.worktree_base_branch.clone(),
             SettingKind::LinearAccount => self.linear_assignee_email.clone(),
+            // The template the box would get, the default spelled out: an
+            // edit starts from words, not from an empty box.
+            SettingKind::LinearTaskTemplate => self.linear_template().to_string(),
             _ => String::new(),
         }
     }
@@ -3006,6 +3141,17 @@ impl Config {
             }
             SettingKind::LinearAccount => {
                 self.linear_assignee_email = value.trim().to_string();
+                true
+            }
+            // The default sent back unchanged stays the default — stored
+            // empty, so a later build's better default reaches it.
+            SettingKind::LinearTaskTemplate => {
+                let value = value.trim();
+                self.linear_task_template = if value == DEFAULT_LINEAR_TEMPLATE.trim() {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
                 true
             }
             _ => false,
@@ -3072,19 +3218,18 @@ fn resolve_sound(configured: &str, remote: bool, macos: bool) -> Option<Sound> {
     }
 }
 
-/// First non-blank of env override → configured value → micro; a bare
-/// `micro` on a machine without it is vim instead, so the default never
-/// opens a modal that can't launch.
-fn resolve_editor(env: Option<&str>, configured: &str, micro_installed: bool) -> String {
-    let chosen = [env.unwrap_or(""), configured]
-        .into_iter()
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .unwrap_or(crate::editor::DEFAULT_EDITOR);
-    if chosen == crate::editor::DEFAULT_EDITOR && !micro_installed {
-        return crate::editor::FALLBACK_EDITOR.into();
+/// The **File editor** row's value: the setting as stored — the default
+/// when blank — and, when that editor isn't installed, the one that opens
+/// instead.
+fn editor_label(stored: &str, resolved: &crate::editor::Resolved) -> String {
+    let shown = match stored.trim() {
+        "" => crate::editor::DEFAULT_EDITOR,
+        typed => typed,
+    };
+    match &resolved.missing {
+        Some(_) => format!("{shown} — not installed, opens {}", resolved.command),
+        None => shown.to_string(),
     }
-    chosen.to_string()
 }
 
 /// Whether `kind`'s CLI resolves on this process's PATH right now. A fast
@@ -3094,23 +3239,42 @@ fn resolve_editor(env: Option<&str>, configured: &str, micro_installed: bool) ->
 /// fast check behind `hide_uninstalled_harnesses`, for built-ins and
 /// customs alike.
 pub fn program_installed(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| program_on(&paths, program))
+    program_on(&search_path(), program)
+}
+
+/// The PATH programs are looked up on: this process's — or, in a test
+/// that named one ([`with_search_path`]), that test's, so no test swaps
+/// the process-wide PATH under every other test's `git`.
+pub fn search_path() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Some(path) = SEARCH_PATH.with(|p| p.borrow().clone()) {
+        return path;
+    }
+    std::env::var_os("PATH").unwrap_or_default()
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEARCH_PATH: std::cell::RefCell<Option<std::ffi::OsString>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with [`search_path`] — and so [`program_installed`] — reading
+/// `path` on this test's thread.
+#[cfg(test)]
+pub fn with_search_path<T>(path: std::ffi::OsString, f: impl FnOnce() -> T) -> T {
+    SEARCH_PATH.with(|slot| {
+        let prev = slot.replace(Some(path));
+        let out = f();
+        slot.replace(prev);
+        out
+    })
 }
 
 /// Whether `program` is a file in one of the directories `paths` lists,
 /// PATH-style.
 fn program_on(paths: &std::ffi::OsStr, program: &str) -> bool {
-    let program = program.trim();
-    if program.is_empty() {
-        return false;
-    }
-    for dir in std::env::split_paths(paths) {
-        let candidate = dir.join(program);
-        if candidate.is_file() {
-            return true;
-        }
-    }
-    false
+    crate::install::which(paths, program).is_some()
 }
 
 /// [`DEFAULT_CHOICE`] (or blank) → None; anything else passes through.
@@ -3206,6 +3370,23 @@ fn local_settings_path() -> PathBuf {
 thread_local! {
     static CONFIG_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static SHIPPED_DEFAULTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the defaults a release ships — Grok Build off — where a
+/// test otherwise keeps every harness on.
+#[cfg(test)]
+pub fn with_shipped_defaults<T>(f: impl FnOnce() -> T) -> T {
+    SHIPPED_DEFAULTS.with(|cell| {
+        let prev = cell.replace(true);
+        let out = f();
+        cell.set(prev);
+        out
+    })
 }
 
 /// Whether this test thread pinned the config to a file of its own —
@@ -3670,9 +3851,9 @@ mod tests {
         let path = dir.path().join("config.json");
         let local = dir.path().join("config.local.json");
         std::fs::write(&path, r#"{"editor": "nvim", "theme": "ocean"}"#).unwrap();
-        std::fs::write(&local, r#"{"editor": "nano"}"#).unwrap();
+        std::fs::write(&local, r#"{"editor": "vim"}"#).unwrap();
         let mut cfg = load_from(&path);
-        assert_eq!(cfg.editor, "nano");
+        assert_eq!(cfg.editor, "vim");
         assert_eq!(cfg.theme, "ocean");
 
         cfg.theme = "forest".into();
@@ -3683,10 +3864,7 @@ mod tests {
             "nvim",
             "the local value stays local"
         );
-        assert_eq!(
-            read_json_file(&local),
-            serde_json::json!({"editor": "nano"})
-        );
+        assert_eq!(read_json_file(&local), serde_json::json!({"editor": "vim"}));
 
         cfg.editor = "hx".into();
         cfg.save_to(&path).unwrap();
@@ -3706,6 +3884,113 @@ mod tests {
             assert!(!local.exists());
             assert_eq!(Config::load().theme, Config::default().theme);
         });
+    }
+
+    /// Every Linear option is on the LINEAR TAB, in one place and nowhere
+    /// else: linking pull requests first — on by default — the account,
+    /// the task template, then the key's status and the connection test.
+    #[test]
+    fn the_linear_tab_gathers_every_linear_option() {
+        let tab = SETTINGS_TABS
+            .iter()
+            .position(|t| t.title == "Linear")
+            .expect("a Linear tab");
+        assert_eq!(tab_settings(tab), LINEAR_SETTINGS);
+        let kinds: Vec<SettingKind> = LINEAR_SETTINGS.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                SettingKind::LinearAutoAttach,
+                SettingKind::LinearAccount,
+                SettingKind::LinearTaskTemplate,
+                SettingKind::LinearKey,
+                SettingKind::LinearTest,
+            ]
+        );
+        // An explanation's braces name actions (`hints::expand`): the
+        // template's placeholders must not read as one.
+        let keymap = crate::keymap::Keymap::default();
+        let template = hint_at(tab, 2);
+        assert!(!template.contains("{issues}"), "{template}");
+        assert!(
+            crate::hints::expand(&template, &keymap).contains("issues, ids and first_id"),
+            "{template}"
+        );
+        for kind in kinds {
+            assert_eq!(
+                locate(kind).map(|(t, _)| t),
+                Some(tab),
+                "{kind:?} lives on one tab"
+            );
+            let others = all_settings().filter(|(t, _, s)| s.kind == kind && *t != tab);
+            assert_eq!(others.count(), 0, "{kind:?} on another tab too");
+        }
+        assert!(
+            all_settings()
+                .filter(|(t, ..)| *t != tab)
+                .all(|(_, _, s)| !s.label.contains("Linear")),
+            "no Linear row left elsewhere"
+        );
+
+        // The defaults, as the rows read them.
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(
+            cfg.linear_auto_attach,
+            "linking pull requests is on by default"
+        );
+        assert_eq!(cfg.value_label(SettingKind::LinearAutoAttach), "on");
+        assert_eq!(
+            cfg.value_label(SettingKind::LinearAccount),
+            LINEAR_KEY_OWNER
+        );
+        assert_eq!(
+            cfg.value_label(SettingKind::LinearTaskTemplate),
+            LINEAR_TEMPLATE_DEFAULT
+        );
+        assert!(SettingKind::LinearKey.is_status() && SettingKind::LinearTest.is_status());
+        assert!(!SettingKind::LinearKey.is_text());
+
+        // The switch toggles from its row; the status rows cycle nothing.
+        let mut cfg = Config::default();
+        let (t, r) = locate(SettingKind::LinearAutoAttach).unwrap();
+        cfg.cycle(t, r, 0);
+        assert!(!cfg.linear_auto_attach);
+        let before = serde_json::to_value(&cfg).unwrap();
+        for kind in [SettingKind::LinearKey, SettingKind::LinearTest] {
+            let (t, r) = locate(kind).unwrap();
+            cfg.cycle(t, r, 1);
+        }
+        assert_eq!(serde_json::to_value(&cfg).unwrap(), before);
+    }
+
+    /// The task template is a typed row over lines: its edit starts from
+    /// the template the box would get, the default spelled out; the
+    /// default sent back unchanged stays the default, stored empty; a
+    /// custom one shows its first line.
+    #[test]
+    fn the_task_template_row_edits_the_whole_template() {
+        assert!(SettingKind::LinearTaskTemplate.is_text());
+        assert!(SettingKind::LinearTaskTemplate.is_multiline_text());
+        let mut cfg = Config::default();
+        assert_eq!(
+            cfg.text_value(SettingKind::LinearTaskTemplate),
+            DEFAULT_LINEAR_TEMPLATE
+        );
+        assert!(cfg.set_text(SettingKind::LinearTaskTemplate, DEFAULT_LINEAR_TEMPLATE));
+        assert_eq!(cfg.linear_task_template, "");
+        assert!(cfg.set_text(SettingKind::LinearTaskTemplate, "Fix {ids}\n\n{issues}\n"));
+        assert_eq!(cfg.linear_task_template, "Fix {ids}\n\n{issues}");
+        assert_eq!(cfg.linear_template(), "Fix {ids}\n\n{issues}");
+        assert_eq!(
+            cfg.value_label(SettingKind::LinearTaskTemplate),
+            "custom: Fix {ids}"
+        );
+        assert!(cfg.set_text(SettingKind::LinearTaskTemplate, "   "));
+        assert_eq!(
+            cfg.linear_template(),
+            DEFAULT_LINEAR_TEMPLATE,
+            "empty is the default"
+        );
     }
 
     #[test]
@@ -3883,7 +4168,7 @@ mod tests {
             !cfg.set_text(SettingKind::Editor, "nvim"),
             "a cycled row is not a typed one"
         );
-        assert_eq!(cfg.editor, "micro");
+        assert_eq!(cfg.editor, "fresh");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -4076,16 +4361,20 @@ mod tests {
     #[test]
     fn editor_defaults_cycles_and_persists() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.editor, "micro");
+        assert_eq!(cfg.editor, "fresh");
         let (tab, row) = locate(SettingKind::Editor).unwrap();
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.editor, "vim");
+        // The VS Code-style editors come first.
+        for next in ["micro", "edit", "vim"] {
+            cfg.cycle(tab, row, 1);
+            assert_eq!(cfg.editor, next);
+        }
+        cfg.editor = "micro".into();
         cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.editor, "micro");
+        assert_eq!(cfg.editor, "fresh");
         // Hand-edited commands the picker doesn't list cycle from the start.
         cfg.editor = "kak".into();
         cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.editor, "vim");
+        assert_eq!(cfg.editor, "micro");
 
         cfg.editor = "nvim".into();
         let dir = tempfile::tempdir().unwrap();
@@ -4094,22 +4383,84 @@ mod tests {
         assert_eq!(load_from(&path).editor, "nvim");
         // A config predating the key gets the default.
         let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.editor, "micro");
+        assert_eq!(cfg.editor, "fresh");
+    }
+
+    /// The row says when the editor it names isn't installed, and which
+    /// one opens instead.
+    #[test]
+    fn the_editor_row_names_a_missing_editor_and_its_stand_in() {
+        let fine = crate::editor::Resolved {
+            command: "nvim".into(),
+            missing: None,
+        };
+        assert_eq!(editor_label("nvim", &fine), "nvim");
+        let fell = crate::editor::Resolved {
+            command: "edit".into(),
+            missing: Some("fresh".into()),
+        };
+        assert_eq!(editor_label("", &fell), "fresh — not installed, opens edit");
+        assert_eq!(
+            editor_label("fresh", &fell),
+            "fresh — not installed, opens edit"
+        );
+    }
+
+    /// A `config.json` without a `harnesses` key — `{}`, or a file from
+    /// before orion first rewrote it — starts Grok Build off, as a fresh
+    /// config does. A map that is there is read as written: grok on when
+    /// it says so, and an empty one leaves the compiled-in default (on).
+    #[test]
+    fn a_config_without_harnesses_starts_grok_off() {
+        with_shipped_defaults(|| {
+            let grok = |cfg: &Config| {
+                cfg.raw_harness_registry()
+                    .into_iter()
+                    .find(|entry| entry.id == "grok")
+                    .expect("grok is built in")
+                    .enabled
+            };
+            assert!(!grok(&Config::default()));
+            let missing: Config = serde_json::from_str("{}").unwrap();
+            assert!(!grok(&missing), "no key reads as a fresh config");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            std::fs::write(&path, r#"{"claude_enabled": true, "editor": "vim"}"#).unwrap();
+            assert!(!grok(&load_from(&path)), "nor through the layered load");
+
+            let on: Config =
+                serde_json::from_str(r#"{"harnesses": {"grok": {"enabled": true}}}"#).unwrap();
+            assert!(grok(&on), "an explicit switch stands");
+            let empty: Config = serde_json::from_str(r#"{"harnesses": {}}"#).unwrap();
+            assert!(empty.harnesses.is_empty(), "an explicit map, as written");
+            assert!(grok(&empty));
+        });
+        let test: Config = serde_json::from_str("{}").unwrap();
+        assert!(test.harnesses.is_empty(), "tests keep the compiled-in set");
     }
 
     #[test]
-    fn editor_resolution_prefers_env_then_setting_then_micro() {
-        assert_eq!(resolve_editor(Some("hx"), "nvim", true), "hx");
-        assert_eq!(resolve_editor(Some("  "), "nvim", true), "nvim");
-        assert_eq!(resolve_editor(None, " nvim ", true), "nvim");
-        assert_eq!(resolve_editor(None, "", true), "micro");
-        assert_eq!(resolve_editor(None, "micro", false), "vim", "no micro: vim");
-        assert_eq!(resolve_editor(None, "", false), "vim");
+    fn outside_editor_defaults_to_auto_cycles_and_persists() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.outside_editor, "auto");
+        let (tab, row) = locate(SettingKind::OutsideEditor).unwrap();
+        assert_eq!(locate(SettingKind::Editor).map(|(t, _)| t), Some(tab));
+        for next in ["cursor", "vscode", "sublime", "zed", "default", "auto"] {
+            cfg.cycle(tab, row, 1);
+            assert_eq!(cfg.outside_editor, next);
+        }
+        cfg.outside_editor = "VSCode".into();
+        cfg.cycle(tab, row, 1);
         assert_eq!(
-            resolve_editor(None, "/opt/micro", false),
-            "/opt/micro",
-            "a named path is taken as given"
+            cfg.outside_editor, "sublime",
+            "a hand-typed case still steps on"
         );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        assert_eq!(load_from(&path).outside_editor, "sublime");
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.outside_editor, "auto", "a config predating the key");
     }
 
     #[test]
@@ -4192,6 +4543,39 @@ mod tests {
 
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert!(!legacy.hide_draft_prs);
+    }
+
+    /// QUICK PROMPT NEW WORKTREE: retired with the box's toggle — a fresh
+    /// worktree is the WORKTREE PICKER's first row. The key an older build
+    /// wrote still loads to what it wrote and is written back as stored,
+    /// but no tab shows it any more.
+    #[test]
+    fn quick_prompt_new_worktree_is_retired_but_still_round_trips() {
+        assert!(
+            !Config::default().quick_prompt_new_worktree,
+            "the default an older build reads"
+        );
+        let cfg: Config = serde_json::from_str(r#"{"quick_prompt_new_worktree": true}"#).unwrap();
+        assert!(
+            cfg.quick_prompt_new_worktree,
+            "loaded to what an older build wrote"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        assert!(
+            load_from(&path).quick_prompt_new_worktree,
+            "written back as stored"
+        );
+
+        assert!(
+            SETTINGS_TABS.iter().all(|t| match t.body {
+                TabBody::Values(rows) => rows.iter().all(|r| r.label != "New worktree"),
+                _ => true,
+            }) && AGENTS_HEAD.iter().all(|r| r.label != "New worktree"),
+            "no tab shows the row"
+        );
     }
 
     /// CARD PROMPT: retired with every card carrying its last prompt. The
@@ -5679,7 +6063,6 @@ mod tests {
                             "Agent".to_string(),
                             "Focus".to_string(),
                             "Follow new".to_string(),
-                            "New worktree".to_string(),
                             "Hide missing CLIs".to_string()
                         ]
                     ),

@@ -3,8 +3,8 @@
 //! the session's name and status, gathered into a BAND per worktree whose
 //! rule wears the branch and its pull request — beside the PANE that reads
 //! the card under the cursor (`ui::draw` splits the body and fills that pane);
-//! plus the view's own pieces of the QUICK PROMPT (the project on its
-//! target row, its key hints) and the PROJECT PICKER.
+//! plus the view's own pieces of the QUICK PROMPT (its title and the
+//! header of its fields, each with its key) and the PROJECT PICKER.
 
 use super::{
     ago_badge, below_first_row, centered_rect, empty_list_row, fit_ago, fuzzy_highlight_spans,
@@ -25,9 +25,9 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 use ratatui::Frame;
 
 /// Width of the view's QUICK PROMPT, and its height: wider and taller than
-/// the panels' box, since here it is the front door. The extra row over
-/// the panels' box pays for the blank one between the details and the
-/// question, so the editor keeps its full height.
+/// the panels' box, since here it is the front door — room for its two
+/// header rows, the blank one under them and the question along the
+/// bottom, with the editor keeping its full height.
 pub(super) const BOX_SIZE: (u16, u16) = (92, 18);
 /// The PROJECT PICKER's width, and the most rows it lists before scrolling.
 const PICKER_W: u16 = 64;
@@ -149,7 +149,7 @@ impl HeadCount {
 }
 
 /// What the ARCHIVED VIEW says with nothing in it.
-const NO_ARCHIVED: &str = "nothing archived in this project — ⇧A back to the live sessions";
+const NO_ARCHIVED: &str = "nothing archived in this project — Esc back to the live sessions";
 
 /// The header over the grid: the PROJECT TABS on the left, each with its
 /// status dots, how many cards the grid holds on the right — and how many
@@ -842,14 +842,12 @@ fn draw_bands(
                         Some(strip) => strip.hidden(),
                         None => pb.content.as_ref().map_or(0, |c| c.more),
                     },
-                    expanded: pb.open,
-                    list: app.launcher_list,
                 },
             );
             app.hits.extend(hits);
         }
         if band.cards.is_empty() {
-            draw_empty_band(f, app, g, pb, band, (window, scroll), on && keys);
+            draw_empty_band(f, app, g, pb, (window, scroll), on && keys);
             continue;
         }
         // The cards under the rule: on the band the cursor is on, the
@@ -1000,37 +998,21 @@ fn draw_bands(
     app.hits.push((g.area, HitTarget::PanelBg(Focus::Sessions)));
 }
 
-/// What an EMPTY BAND says under its rule, the root's without the delete
-/// it refuses.
-fn empty_band_hint(app: &App, is_main: bool) -> String {
-    use crate::hints::Hint::Act;
-    use crate::keymap::Action;
-    let mut hints = vec![
-        Act(Action::QuickPrompt, "new agent"),
-        Act(Action::NewTerminal, "terminal"),
-    ];
-    if !is_main {
-        hints.push(Act(Action::Delete, "delete worktree"));
-    }
-    let keys = crate::hints::joined(&app.keymap, &hints, " · ");
-    if keys.is_empty() {
-        "nothing running".to_string()
-    } else {
-        format!("nothing running · {keys}")
-    }
-}
+/// What an EMPTY BAND says under its rule: only that. What can be done
+/// there is the FOOTER's to say, for the band under the cursor
+/// (`ui::footer`), not every empty band's at once.
+const EMPTY_BAND: &str = "nothing running";
 
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
 /// in it, drawn only with **Show all worktrees** on — in place of the row
-/// of cards it has none of: what can be done there, dim, and in the
-/// accent while the cursor is on the band with the keys on the grid.
-/// A click on it is a click on the band (the band's whole area).
+/// of cards it has none of: [`EMPTY_BAND`], dim, and in the accent while
+/// the cursor is on the band with the keys on the grid. A click on it is
+/// a click on the band (the band's whole area).
 fn draw_empty_band(
     f: &mut Frame,
     app: &App,
     g: &crate::launcher::BandsLayout,
     pb: &crate::launcher::PanelBand,
-    band: &crate::launcher::Band,
     (window, scroll): (Rect, u16),
     lit: bool,
 ) {
@@ -1043,11 +1025,10 @@ fn draw_empty_band(
     let Some(placed) = crate::launcher::place(window, scroll, row) else {
         return;
     };
-    let text = empty_band_hint(app, band.is_main);
     let fg = if lit { th.accent } else { th.dim };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!("  {text}"),
+            format!("  {EMPTY_BAND}"),
             Style::default().fg(fg),
         ))),
         placed.rect,
@@ -1185,13 +1166,14 @@ fn draw_strip_arrows(
     }
 }
 
-/// The MORE HINT under a collapsed band's row that left cards off its
-/// edges: `▾ 6 more · Tab: see all 8`, centered on the band's own row
-/// under the cards ([`crate::launcher::MORE_H`]), so a band hiding sessions says so where the eye leaves the
-/// cards rather than only at the far end of its rule. Muted, its key in
-/// the accent while the band holds the keys or the pointer is on it. A
-/// button: a click opens the band as the ACCORDION, the very toggle Tab
-/// runs (`HitTarget::LauncherBandMore`).
+/// The MORE BUTTON under a collapsed band's row that left cards off its
+/// edges: `▾ 6 more · see all 8`, centered on the band's own row under
+/// the cards ([`crate::launcher::MORE_H`]), so a band hiding sessions
+/// says so where the eye leaves the cards rather than only at the far end
+/// of its rule. Muted, its verb in the accent while the band holds the
+/// keys or the pointer is on it. A button: a click opens the band as the
+/// ACCORDION, the very toggle Tab runs (`HitTarget::LauncherBandMore`) —
+/// the key itself is the FOOTER's to name.
 fn draw_strip_more(
     f: &mut Frame,
     app: &mut App,
@@ -1208,10 +1190,9 @@ fn draw_strip_more(
     let th = app.theme;
     let hit = HitTarget::LauncherBandMore(index);
     let hovered = app.hover_crumb.as_ref() == Some(&hit);
-    let key = super::key_hint(app, crate::keymap::Action::FocusNext);
     let (words, does) = (
         format!("▾ {hidden} more · "),
-        format!(": see all {}", band.cards.len()),
+        format!("see all {}", band.cards.len()),
     );
     let key_style = if lit || hovered {
         Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
@@ -1221,8 +1202,7 @@ fn draw_strip_more(
     let text = Style::default().fg(if hovered { th.accent } else { th.muted });
     let line = Line::from(vec![
         Span::styled(words, text),
-        Span::styled(key, key_style),
-        Span::styled(does, text),
+        Span::styled(does, key_style),
     ]);
     let w = (line.width() as u16).min(r.width);
     // Centered under a row of cards; under a LIST, in the column its
@@ -1573,11 +1553,6 @@ fn note_tail_card(app: &mut App, card: &crate::launcher::Card) {
     }
 }
 
-/// The least room a band's rule keeps for its glyph and branch before
-/// the Enter hint at its right end gives way: the mark and the counts
-/// stay, the words go.
-const ENTER_HINT_ROOM: usize = 12;
-
 /// Where a band's rule is being drawn: always on the grid over its
 /// cards — the ACCORDION opens a band in place rather than replacing
 /// the grid with it, so there is only ever the one kind now.
@@ -1588,19 +1563,10 @@ struct BandRule {
     /// The cursor is on the band: its branch goes bold.
     on: bool,
     /// The keys are on the band too — not up on the PROJECT TABS nor
-    /// down in the pane: the rule takes the accent, the cursor mark
-    /// and the Tab hint.
+    /// down in the pane: the rule takes the accent and the cursor mark.
     lit: bool,
     /// Cards its row had no room for — always 0 once the band is open.
     more: usize,
-    /// The band is open as the ACCORDION: its cards are wrapped into
-    /// rows under this rule rather than the collapsed STRIP's one row,
-    /// and the hint at the right end says Tab closes it.
-    expanded: bool,
-    /// The grid is the compact LIST: a collapsed band that already lists
-    /// every entry has nothing for Tab to open, and its rule says nothing
-    /// about it.
-    list: bool,
 }
 
 /// A BAND's rule: the checkout — `⌂ main` or `↳ feat` in the SCOPE
@@ -1610,11 +1576,10 @@ struct BandRule {
 /// off its edges (`▸ 2 more`). On the band the cursor is on the
 /// branch is bold — this is what says which checkout the pane reads,
 /// since no card under it wears the cursor — and for as long as the keys
-/// are on it the rule wears the accent, opens on the CURSOR MARK `❯`
-/// instead of `──`, and says at its right end what Tab does there
-/// (`Tab: see all 8`, `Tab: expand`, or `Tab: collapse` on the one band
-/// that is open); gray, unmarked and silent like the rest once the keys
-/// are up on the PROJECT TABS or down in the pane.
+/// are on it the rule wears the accent and opens on the CURSOR MARK `❯`
+/// instead of `──`; gray and unmarked like the rest once the keys are up
+/// on the PROJECT TABS or down in the pane. What Tab does to it is the
+/// FOOTER's to say.
 /// Returns the rule's hits: the pull request ahead of the rule itself,
 /// so a click on `#42` opens it and one anywhere else lands on the band.
 fn draw_band_rule(
@@ -1626,13 +1591,7 @@ fn draw_band_rule(
 ) -> Vec<(Rect, HitTarget)> {
     let th = app.theme;
     let width = usize::from(r.width);
-    let BandRule {
-        on,
-        lit,
-        more,
-        expanded,
-        ..
-    } = rule;
+    let BandRule { on, lit, more, .. } = rule;
     let edge = if lit { th.accent } else { th.edge };
     let dash = |n: usize| Span::styled("─".repeat(n), Style::default().fg(edge));
 
@@ -1653,36 +1612,9 @@ fn draw_band_rule(
                 Style::default().fg(th.muted),
             ));
         }
-        // The VERB, on the band the keys are on: a titled rule reads as
-        // a divider, and nothing about a divider says a key acts on it,
-        // so the rule under the cursor spells what Tab does at its right
-        // end. It names what the row could not show (`Tab: see all 8`)
-        // when cards hang past the edge, plain `Tab: expand` when they
-        // all fit collapsed, and `Tab: collapse` on the one band already
-        // open. A rule too narrow to keep the branch legible beside the
-        // words drops them: the `❯` at the left still says which band is
-        // selected. Tab is the panels' "next panel" key, which the grid
-        // takes for itself (`event_loop::launcher::handle_action`). With
-        // every band open at once (**Expand all worktrees**) Tab has
-        // nothing to open or fold, and no band says it does.
-        let nothing_to_open = app.launcher_all_open || (rule.list && !expanded && more == 0);
-        if lit && !nothing_to_open {
-            let key = super::key_hint(app, crate::keymap::Action::FocusNext);
-            let does = if expanded {
-                ": collapse".to_string()
-            } else if more > 0 {
-                format!(": see all {}", band.cards.len())
-            } else {
-                ": expand".to_string()
-            };
-            let taken: usize = spans.iter().map(|s| s.width()).sum();
-            let with_hint = 3 + taken + 2 + key.chars().count() + does.chars().count() + 4;
-            if width >= with_hint + ENTER_HINT_ROOM {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(key, Style::default().fg(th.accent)));
-                spans.push(Span::styled(does, Style::default().fg(th.dim)));
-            }
-        }
+        // What Tab does on the band under the cursor — expand it, fold it
+        // back — is the FOOTER's to say (`ui::footer`): a rule is a
+        // divider, and a key spelled on one band of many read as clutter.
         spans
     };
     let right_w: usize = right.iter().map(|s| s.width()).sum();
@@ -3079,261 +3011,284 @@ pub(super) fn crumb_frame(f: &mut Frame, app: &mut App, area: Rect) -> Rect {
     }
 }
 
-/// The view's box, row 0: where the session runs — the project and the
-/// checkout in it — what runs there and on which model, each named with
-/// the chord that changes it, set far enough apart that no two read as
-/// one phrase. The checkout's chord is `^T`: it, or a click on the
-/// branch, drops the WORKTREE PICKER down from it.
+/// The view's box header: everything the launch is made of, each field a
+/// dim word, its value in bold and the key that changes it in the accent
+/// — `project demo ⌘P`, `effort high ⌘Y` — so what Enter is about to
+/// start reads off the box before a key is pressed, and every key on it
+/// is one the box answers to. Two rows: where the session runs — the
+/// project, the checkout in it, the AGENT PRESET wrapping the task when
+/// one is on — over what runs there — the harness (a CLAUDE ACCOUNT as
+/// `Claude (you@example.com)`), its model and its effort. The effort is
+/// always there, `default` while nothing is picked, for every harness
+/// that has one (OpenCode has none, so its box has no effort field).
 ///
-/// Widest form that fits, in order: labelled and airy; labelled and
-/// tight; the values and their chords alone; then the same without the
-/// model, without the agent, and without the worktree. The airy form is
-/// drawn whole or not at all — tighter gaps beat a cut name. The project
-/// is never dropped, only cut — where a session lands is the one thing
-/// worth a whole row on its own — and a long branch is cut before it is.
+/// A key comes from where its handler reads it: Select worktree, Select
+/// model and Cycle effort from the live keymap — a rebind shows at once,
+/// an unbound action shows no key, and a terminal that never sends ⌘
+/// sees the `^` twin — and the project, harness and preset keys from the
+/// box's own table ([`super::task_keys`]).
 ///
-/// A fresh worktree's branch — the one Enter will cut — is drawn in the
-/// green the box's frame turns. A box aimed away from the grid behind it
-/// fires a BACKGROUND LAUNCH: the project is the half that changed, and
-/// nothing on screen will move when Enter lands, so the project is lit.
-/// A PR SESSION's head branch wears no `^T` and is no button: its
-/// checkout is the DAEMON's to pick.
+/// A row too narrow for its fields wraps them onto the next, whole; a
+/// field too wide for a row of its own has its value cut — never its key
+/// — and then gives up its word, and a field that cannot keep even a few
+/// letters of its value is left off. The first field of each row has its
+/// word padded to the widest of them, so the values start in one column.
 ///
-/// Returns the row, each field's own columns within it — the label, the
-/// value and the chord together, never the air between two fields — so a
-/// click there can be given the same picker the chord opens
+/// A fresh worktree's field reads `new worktree <branch>`, in the green
+/// the box's frame turns while Enter will cut it. A box aimed away from
+/// the grid behind it fires a BACKGROUND LAUNCH: the project is the half
+/// that changed, and nothing on screen will move when Enter lands, so the
+/// project is lit. A PR SESSION's head branch wears no key and is no
+/// button: its checkout is the DAEMON's to pick.
+///
+/// Returns the rows, each field's own cells — the word, the value and the
+/// key together, never the air between two fields — so a click there can
+/// be given the same picker the key opens
 /// ([`crate::app::PromptDialog::detail_areas`]), and the branch's own, for
-/// the picker to hang from ([`crate::app::PromptDialog::branch_area`]). A
-/// tier that drops a field hands back no columns for it: what is not drawn
-/// is not a button.
-pub(super) fn detail_line(app: &App, launch: &QuickLaunch, width: u16, th: Theme) -> DetailLine {
-    let details = Details::of(app, launch);
-    let width = usize::from(width);
-    for (labels, gap, fields, cuts) in [
-        (true, DETAIL_GAP, 4, false),
-        (true, DETAIL_TIGHT, 4, true),
-        (false, DETAIL_TIGHT, 4, true),
-        (false, DETAIL_TIGHT, 3, true),
-        (false, DETAIL_TIGHT, 2, true),
-        (false, DETAIL_TIGHT, 1, true),
-    ] {
-        let drawn = details.spans(fields, labels, gap, th);
-        let w = drawn.line.width();
-        if w <= width {
-            return drawn;
-        }
-        // This tier with the branch, then the project, cut to what is left
-        // over — but not past the point where either stops saying which
-        // one it is.
-        if let Some(cut) = details.cut(w - width, fields).filter(|_| cuts) {
-            return cut.spans(fields, labels, gap, th);
-        }
-    }
-    // Narrower than the project and its chord together: cut it to the row.
-    let cut = Details {
-        project: truncate(&details.project, width.saturating_sub(3)),
-        ..details
+/// the WORKTREE PICKER to hang from
+/// ([`crate::app::PromptDialog::branch_area`]). A field left off for room
+/// hands back no cells: what is not drawn is not a button.
+pub(super) fn box_header(
+    app: &App,
+    launch: &QuickLaunch,
+    cfg: &crate::config::Config,
+    width: u16,
+    th: Theme,
+) -> BoxHeader {
+    lay_out(&header_fields(app, launch, cfg, th), usize::from(width), th)
+}
+
+/// [`box_header`]'s answer: the rows, each drawn field's `(field, row,
+/// first column, width)` within them, and the branch's `(row, first
+/// column, width)` — the value and its key — None when it was left off
+/// for room or names a checkout nobody picks.
+#[derive(Debug, Default)]
+pub(super) struct BoxHeader {
+    pub lines: Vec<Line<'static>>,
+    pub fields: Vec<(BoxField, u16, u16, u16)>,
+    pub branch: Option<(u16, u16, u16)>,
+}
+
+/// The air between two fields on a row — wide enough that `demo ⌘P` and
+/// `worktree main` never read as one phrase.
+const FIELD_GAP: usize = 3;
+
+/// Fewest columns a value is cut to — `ma…` — before its field gives up
+/// its word, and then the whole field, instead.
+const MIN_VALUE: usize = 3;
+
+/// One field of [`box_header`], before a row decides where it goes.
+struct HeaderField {
+    field: BoxField,
+    label: &'static str,
+    label_style: Style,
+    value: String,
+    value_style: Style,
+    /// The key that changes it, already spelled; None for a field nothing
+    /// changes or an action left unbound.
+    key: Option<String>,
+    /// A click on it opens its picker — every field but a PR SESSION's
+    /// checkout, which is the DAEMON's to pick.
+    button: bool,
+}
+
+/// The two rows of fields [`box_header`] lays out: where, then what.
+fn header_fields(
+    app: &App,
+    launch: &QuickLaunch,
+    cfg: &crate::config::Config,
+    th: Theme,
+) -> [Vec<HeaderField>; 2] {
+    use super::task_keys::{AGENT, PRESET, PROJECT};
+    let dim = Style::default().fg(th.dim);
+    let bold = |fg| Style::default().fg(fg).add_modifier(Modifier::BOLD);
+    let action_key = |action| crate::hints::key(&app.keymap, action);
+    let field = |field, label, value: String, value_style, key| HeaderField {
+        field,
+        label,
+        label_style: dim,
+        value,
+        value_style,
+        key,
+        button: true,
     };
-    cut.spans(1, false, DETAIL_TIGHT, th)
-}
 
-/// [`detail_line`]'s answer: the row, each drawn field's `(field, first
-/// column, width)` within it, and the branch's `(first column, width)` —
-/// the value and its `^T`, None when it was dropped for room or names a
-/// checkout nobody picks.
-pub(super) struct DetailLine {
-    pub line: Line<'static>,
-    pub fields: Vec<(BoxField, u16, u16)>,
-    pub branch: Option<(u16, u16)>,
-}
-
-/// Shortest a project name is cut to before [`detail_line`] gives up a
-/// whole field instead.
-const MIN_PROJECT: usize = 8;
-
-/// Shortest a branch is cut to before [`detail_line`] starts on the
-/// project.
-const MIN_BRANCH: usize = 12;
-
-/// The gap between two of [`detail_line`]'s fields — wide enough that
-/// `api-server ^P` and `harness claude` never read as one phrase — and the
-/// one a box too narrow for that falls back to.
-const DETAIL_GAP: &str = "   ·   ";
-const DETAIL_TIGHT: &str = " · ";
-
-/// Live keymap spelling for a launch chord, falling back to the box's
-/// original `^` twin when that action has been unbound.
-fn shown_chord(app: &App, action: Action, fallback: &str) -> String {
-    app.keymap
-        .shown_first(action)
-        .map(|c| c.display())
-        .unwrap_or_else(|| fallback.into())
-}
-
-/// What [`detail_line`] names, before a tier decides how much of it fits.
-#[derive(Clone)]
-struct Details {
-    project: String,
-    branch: String,
-    harness: String,
-    model: String,
-    /// Chord beside the worktree — Cursor's workspace picker (`⌘.` / `^.`).
-    worktree_key: String,
-    /// Chord beside the model — Cursor's model picker (`⌘/` / `^/`).
-    model_key: String,
-    /// The branch is the WORKTREE PICKER's button — anything but a PR
-    /// SESSION's head.
-    pickable: bool,
-    /// Enter cuts the branch as a fresh worktree first.
-    fresh: bool,
-    /// The box is aimed away from the grid behind it.
-    background: bool,
-}
-
-impl Details {
-    fn of(app: &App, launch: &QuickLaunch) -> Self {
-        let mut harness = crate::quick_prompt::harness_name(launch.kind, launch.custom.as_deref());
-        // A CLAUDE CLOUD box says so on the button that toggles it.
-        if launch.cloud {
-            harness.push_str(" · cloud");
-        }
-        let mut model = launch
-            .model
-            .clone()
-            .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into());
-        if let Some(effort) = launch.effort.as_deref().filter(|e| !e.is_empty()) {
-            model.push(' ');
-            model.push_str(effort);
-        }
-        let branch = match &launch.pr {
-            Some(pr) => pr.head.clone(),
-            None => crate::quick_prompt::target_branch(app, launch)
-                .unwrap_or_else(|| "(worktree gone)".into()),
-        };
-        Self {
-            project: launch_project(app, launch),
-            branch,
-            harness,
-            model,
-            worktree_key: shown_chord(app, Action::SelectLaunchWorktree, "^T"),
-            model_key: shown_chord(app, Action::SelectModel, "^O"),
-            pickable: launch.pr.is_none(),
-            fresh: launch.is_new_worktree(),
-            background: crate::launcher::project_of(app, &launch.target)
-                .is_some_and(|project| crate::launcher::is_background(app, &project)),
-        }
-    }
-
-    /// These details `over` columns narrower: taken from the branch while
-    /// the tier draws it, down to [`MIN_BRANCH`], then from the project,
-    /// down to [`MIN_PROJECT`]. None when that is not enough.
-    fn cut(&self, over: usize, fields: usize) -> Option<Self> {
-        let branch = self.branch.chars().count();
-        let from_branch = if fields >= 2 {
-            branch.saturating_sub(MIN_BRANCH).min(over)
-        } else {
-            0
-        };
-        let from_project = over - from_branch;
-        let project = self.project.chars().count();
-        if from_project > 0 && project.saturating_sub(from_project) < MIN_PROJECT {
-            return None;
-        }
-        Some(Self {
-            project: truncate(&self.project, project - from_project),
-            branch: truncate(&self.branch, branch - from_branch),
-            ..self.clone()
-        })
-    }
-
-    /// The row at one tier: `fields` of them, each a `value ^key` with the
-    /// word for it ahead when `labels`, held apart by `gap`. Each field's
-    /// columns are measured as its spans are pushed, so a name's own width
-    /// is what the button is worth.
-    fn spans(&self, fields: usize, labels: bool, gap: &str, th: Theme) -> DetailLine {
-        let bold = |fg| Style::default().fg(fg).add_modifier(Modifier::BOLD);
-        let mut spans = Vec::new();
-        let mut hits = Vec::new();
-        let mut branch = None;
-        let mut x = 0usize;
-        let push = |spans: &mut Vec<Span<'static>>, x: &mut usize, span: Span<'static>| {
-            *x += span.width();
-            spans.push(span);
-        };
-        let project_fg = if self.background { th.accent } else { th.text };
-        let branch_fg = if self.fresh { th.ok } else { th.text };
-        for (i, (field, label, value, fg, key)) in [
-            (
-                BoxField::Project,
-                "project",
-                &self.project,
-                project_fg,
-                Some("^P"),
-            ),
-            (
+    let background = crate::launcher::project_of(app, &launch.target)
+        .is_some_and(|project| crate::launcher::is_background(app, &project));
+    let project = field(
+        BoxField::Project,
+        "project",
+        launch_project(app, launch),
+        bold(if background { th.accent } else { th.text }),
+        Some(PROJECT.label()),
+    );
+    let worktree = match &launch.pr {
+        Some(pr) => HeaderField {
+            button: false,
+            ..field(
                 BoxField::Worktree,
                 "worktree",
-                &self.branch,
-                branch_fg,
-                self.pickable.then_some(self.worktree_key.as_str()),
-            ),
-            (
-                BoxField::Agent,
-                "harness",
-                &self.harness,
-                th.text,
-                Some("Tab"),
-            ),
-            (
-                BoxField::Model,
-                "model",
-                &self.model,
-                th.text,
-                Some(self.model_key.as_str()),
-            ),
-        ]
-        .into_iter()
-        .take(fields)
-        .enumerate()
-        {
-            if i > 0 {
-                push(
-                    &mut spans,
-                    &mut x,
-                    Span::styled(gap.to_string(), Style::default().fg(th.edge)),
-                );
+                pr.head.clone(),
+                bold(th.text),
+                None,
+            )
+        },
+        None => {
+            let branch = crate::quick_prompt::target_branch(app, launch)
+                .unwrap_or_else(|| "(worktree gone)".into());
+            let key = action_key(Action::SelectLaunchWorktree);
+            if launch.is_new_worktree() {
+                HeaderField {
+                    label_style: bold(th.ok),
+                    ..field(BoxField::Worktree, "new worktree", branch, bold(th.ok), key)
+                }
+            } else {
+                field(BoxField::Worktree, "worktree", branch, bold(th.text), key)
+            }
+        }
+    };
+    let mut place = vec![project, worktree];
+    if let Some(preset) = &launch.preset {
+        place.push(field(
+            BoxField::Preset,
+            "preset",
+            preset.name.clone(),
+            bold(th.text),
+            Some(PRESET.label()),
+        ));
+    }
+
+    let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
+    let mut agent = harness.display_label().to_string();
+    // A CLAUDE CLOUD box says so on the field that toggles it.
+    if launch.cloud {
+        agent.push_str(crate::app::CLOUD_LABEL);
+    }
+    let model = crate::config::model_row_label(
+        launch
+            .model
+            .as_deref()
+            .unwrap_or(crate::config::DEFAULT_CHOICE),
+        harness.model.catalog,
+    );
+    let mut runs = vec![
+        field(
+            BoxField::Agent,
+            "agent",
+            agent,
+            bold(th.text),
+            Some(AGENT.label()),
+        ),
+        field(
+            BoxField::Model,
+            "model",
+            model,
+            bold(th.text),
+            action_key(Action::SelectModel),
+        ),
+    ];
+    if !crate::config::effort_choices_in(&harness, launch.model.as_deref()).is_empty() {
+        runs.push(field(
+            BoxField::Effort,
+            "effort",
+            launch
+                .effort
+                .clone()
+                .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into()),
+            bold(th.text),
+            action_key(Action::CycleEffort),
+        ));
+    }
+    [place, runs]
+}
+
+/// [`box_header`]'s layout: each group of fields from a fresh row,
+/// wrapping onto the next whenever the row is full.
+fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
+    let label_w = groups
+        .iter()
+        .filter_map(|group| group.first())
+        .map(|f| f.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let key_style = Style::default().fg(th.accent);
+    let mut out = BoxHeader::default();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut x = 0usize;
+    let flush = |out: &mut BoxHeader, row: &mut Vec<Span<'static>>, x: &mut usize| {
+        if !row.is_empty() {
+            out.lines.push(Line::from(std::mem::take(row)));
+        }
+        *x = 0;
+    };
+    for group in groups {
+        flush(&mut out, &mut row, &mut x);
+        for field in group {
+            let key_w = field
+                .key
+                .as_ref()
+                .map_or(0, |k| 1 + Span::raw(k.as_str()).width());
+            let value_w = Span::raw(field.value.as_str()).width();
+            let label_at = |x: usize| {
+                let own = field.label.chars().count();
+                if x == 0 {
+                    own.max(label_w)
+                } else {
+                    own
+                }
+            };
+            // Whole on this row, or whole on a row of its own.
+            if x > 0 && x + FIELD_GAP + label_at(x) + 1 + value_w + key_w > width {
+                flush(&mut out, &mut row, &mut x);
+            }
+            let gap = if x > 0 { FIELD_GAP } else { 0 };
+            let room = width.saturating_sub(x + gap);
+            // The value is cut before the word goes, and the word before
+            // the field does; the key is never cut.
+            let labelled = label_at(x) + 1;
+            let (label, value) = if labelled + value_w + key_w <= room {
+                (Some(labelled), field.value.clone())
+            } else if room >= labelled + MIN_VALUE + key_w {
+                (
+                    Some(labelled),
+                    truncate(&field.value, room - labelled - key_w),
+                )
+            } else if room >= MIN_VALUE.min(value_w) + key_w {
+                (None, truncate(&field.value, room - key_w))
+            } else {
+                continue;
+            };
+            if gap > 0 {
+                row.push(Span::raw(" ".repeat(gap)));
+                x += gap;
             }
             let start = x;
-            if labels {
-                push(
-                    &mut spans,
-                    &mut x,
-                    Span::styled(format!("{label} "), Style::default().fg(th.dim)),
-                );
+            if let Some(w) = label {
+                let text = format!("{:<w$}", field.label, w = w);
+                x += text.chars().count();
+                row.push(Span::styled(text, field.label_style));
             }
             let value_at = x;
-            push(&mut spans, &mut x, Span::styled(value.clone(), bold(fg)));
-            if let Some(key) = key {
-                push(
-                    &mut spans,
-                    &mut x,
-                    Span::styled(format!(" {key}"), Style::default().fg(th.accent)),
-                );
+            x += Span::raw(value.as_str()).width();
+            row.push(Span::styled(value, field.value_style));
+            if let Some(key) = &field.key {
+                let text = format!(" {key}");
+                x += Span::raw(text.as_str()).width();
+                row.push(Span::styled(text, key_style));
             }
-            if field == BoxField::Worktree {
-                if !self.pickable {
-                    continue;
-                }
-                branch = Some((value_at as u16, (x - value_at) as u16));
+            if !field.button {
+                continue;
             }
-            hits.push((field, start as u16, (x - start) as u16));
-        }
-        DetailLine {
-            line: Line::from(spans),
-            fields: hits,
-            branch,
+            let at = out.lines.len() as u16;
+            if field.field == BoxField::Worktree {
+                out.branch = Some((at, value_at as u16, (x - value_at) as u16));
+            }
+            out.fields
+                .push((field.field, at, start as u16, (x - start) as u16));
         }
     }
+    flush(&mut out, &mut row, &mut x);
+    out
 }
 
 /// The PROJECT a launch is aimed at, by name.
@@ -3343,73 +3298,10 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
         .unwrap_or_else(|| "(project gone)".into())
 }
 
-/// The view's box prompt header: what Enter sends on the left, and the
-/// toggle that cuts a fresh worktree, right. A PR SESSION says what the
-/// DAEMON will do with the head branch instead, its checkout not being
-/// ours to flip. Where the launch lands — the project and the checkout in
-/// it — is on the details row above ([`detail_line`]).
-///
-/// Returns the line and the toggle's columns within it, so a click there
-/// can be given the same flip `^N` has
-/// ([`crate::app::PromptDialog::toggle_area`]).
-pub(super) fn target_line(launch: &QuickLaunch, label: &str, width: u16, th: Theme) -> TargetLine {
-    let dim = Style::default().fg(th.dim);
-    // Right: the toggle and its state, or — on a PR SESSION — what the
-    // DAEMON will do with the head branch, there being nothing to flip.
-    let (right, clickable) = if launch.pr.is_some() {
-        (vec![Span::styled("reused or cut on Enter", dim)], false)
-    } else if launch.is_new_worktree() {
-        let on = Style::default().fg(th.ok).add_modifier(Modifier::BOLD);
-        (
-            vec![
-                Span::styled("[✓] new worktree", on),
-                Span::styled(" ^N", Style::default().fg(th.ok)),
-            ],
-            true,
-        )
-    } else {
-        (
-            vec![
-                Span::styled("[ ] new worktree", dim),
-                Span::styled(" ^N", dim),
-            ],
-            true,
-        )
-    };
-    let right_w: usize = right.iter().map(|s| s.width()).sum();
-
-    let width = usize::from(width);
-    let label = truncate(label, width.saturating_sub(right_w + 1));
-    let used = label.chars().count();
-    let mut spans = vec![Span::styled(label, dim)];
-    // The right half goes whole or not at all, as the panels' box's does.
-    let mut toggle = None;
-    if width > used + right_w {
-        let pad = width - used - right_w;
-        spans.push(Span::raw(" ".repeat(pad)));
-        if clickable {
-            toggle = Some(((used + pad) as u16, right_w as u16));
-        }
-        spans.extend(right);
-    }
-    TargetLine {
-        line: Line::from(spans),
-        toggle,
-    }
-}
-
-/// [`target_line`]'s answer: the row, and where its toggle landed in it —
-/// `(first column, width)`, None when it was dropped for room or has
-/// nothing to do.
-pub(super) struct TargetLine {
-    pub line: Line<'static>,
-    pub toggle: Option<(u16, u16)>,
-}
-
-/// The view's box title: what Enter starts. The harness, the model and
-/// the effort are on [`detail_line`] under it, beside the chords that
-/// change them; what is left here is what the box is *for* — an issue, a
-/// pull request, an AGENT PRESET — as the panels' box names them.
+/// The view's box title: what Enter starts. The harness, the model, the
+/// effort and an AGENT PRESET are in [`box_header`] under it, beside the
+/// keys that change them; what is left here is what the box is *for* — an
+/// issue, a pull request, a Claude Cloud task.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
     let mut head = vec!["New session".to_string()];
     if let Some(issue) = &launch.issue {
@@ -3421,31 +3313,10 @@ pub(super) fn box_title(launch: &QuickLaunch) -> String {
     if let Some(linear) = &launch.linear {
         head.push(linear.title());
     }
-    if let Some(preset) = &launch.preset {
-        head.push(preset.name.clone());
-    }
     if launch.cloud {
         head.push("Claude Cloud".into());
     }
     head.join(" · ")
-}
-
-/// The view's box hints, widest that fits in `width`. `^P`, `Tab`, `^O`
-/// and `^N` are not here: each one is now inside the box beside the thing
-/// it changes, and a second copy along the border was most of what made
-/// this box read as a wall of text.
-pub(super) fn box_hint(width: u16) -> &'static str {
-    if width >= 60 {
-        " Enter launch · ⇧Enter newline · ⇧Tab preset · Esc cancel "
-    } else if width >= 43 {
-        " Enter launch · ⇧Tab preset · Esc cancel "
-    } else if width >= 29 {
-        " Enter launch · Esc cancel "
-    } else if width >= 25 {
-        " ↵ launch · Esc cancel "
-    } else {
-        " ↵ · Esc "
-    }
 }
 
 /// Where the view's QUICK PROMPT is drawn — one place, so the PROJECT
@@ -3463,7 +3334,7 @@ pub(super) fn picker_over_box(_app: &App, picker: &ProjectPicker) -> bool {
 
 /// Where the PROJECT PICKER goes, sized to the list it has to show.
 /// Opened from the box, it floats over it: inset inside the box's rect,
-/// so the box's frame, its title and its details row stay on screen
+/// so the box's frame, its title and its header stay on screen
 /// around the list. The list gives up the rows that costs — the box
 /// behind is worth more than four more projects. With no box under it,
 /// it is centered on the screen as any other modal.
@@ -3499,7 +3370,11 @@ pub(super) fn draw_project_picker(f: &mut Frame, app: &mut App, picker: &Project
             picker.projects.len()
         )
     };
-    let inner = render_modal_frame(f, area, title, th);
+    let hints = [
+        crate::hints::Hint::new("Enter", "aim the box there").kept(),
+        crate::hints::Hint::new("Esc", "back to the box"),
+    ];
+    let inner = render_modal_frame(f, area, title, &hints, th);
     if let Some(query_area) = row_rect(inner, 0) {
         let line = search_line(&picker.query, "type a project name…", query_area, th);
         f.render_widget(Paragraph::new(line), query_area);
@@ -3566,7 +3441,7 @@ mod tests {
 
     /// `^P` opens the PROJECT PICKER *over* the box, so the rect it takes
     /// is strictly inside the box's on all four sides — the frame, the
-    /// title and the details row above the list stay on screen however
+    /// title and the header above the list stay on screen however
     /// long the project list is. With no box under it the picker is
     /// centered on the screen, as it always was.
     #[test]
@@ -3605,34 +3480,6 @@ mod tests {
         }
     }
 
-    /// Every tier of the box's hint fits the border it is drawn in.
-    #[test]
-    fn every_box_hint_fits_its_border() {
-        for width in 11..=120u16 {
-            let hint = box_hint(width);
-            assert!(
-                hint.chars().count() + 2 <= width as usize,
-                "{width}: {hint:?}"
-            );
-        }
-        // The chords the box used to repeat along its border now live
-        // beside what they change, so the hint must not name them again.
-        for width in 11..=120u16 {
-            let hint = box_hint(width);
-            for chord in ["^P", "^T", "^O", "^/", "^N", "Tab agent"] {
-                assert!(
-                    !hint.contains(chord),
-                    "{width}: {hint:?} still says {chord}"
-                );
-            }
-        }
-        // And the box at its own size names every key it has.
-        let full = box_hint(BOX_SIZE.0);
-        for key in ["Enter launch", "⇧Enter newline", "⇧Tab preset"] {
-            assert!(full.contains(key), "{full:?} lost {key}");
-        }
-    }
-
     fn a_launch() -> QuickLaunch {
         let cfg = crate::config::Config::default();
         let target =
@@ -3651,8 +3498,9 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// The title is what the box is *for*; the harness, the model and the
-    /// effort moved down beside the chords that change them.
+    /// The title is what the box is *for*; the harness, the model, the
+    /// effort and a preset are in the header, beside the keys that change
+    /// them.
     #[test]
     fn the_box_title_is_what_the_box_is_for() {
         let mut launch = a_launch();
@@ -3661,109 +3509,294 @@ mod tests {
         assert_eq!(box_title(&launch), "New session");
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
+        launch.preset = Some(a_preset("reviewer"));
         assert_eq!(box_title(&launch), "New session");
     }
 
-    /// The details row names all four values and their four chords, and
-    /// fits the box it is drawn in.
+    fn a_preset(name: &str) -> crate::agent_presets::AgentPreset {
+        crate::agent_presets::AgentPreset {
+            name: name.into(),
+            kind: orion_core::AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            prefix: String::new(),
+            postfix: String::new(),
+            skip_task: false,
+        }
+    }
+
+    /// The header at `width`, under the stock config.
+    fn header(app: &App, launch: &QuickLaunch, width: u16) -> BoxHeader {
+        box_header(
+            app,
+            launch,
+            &crate::config::Config::default(),
+            width,
+            Theme::default(),
+        )
+    }
+
+    /// Its rows as plain text.
+    fn rows_of(header: &BoxHeader) -> Vec<String> {
+        header.lines.iter().map(text_of).collect()
+    }
+
+    /// The text `field` was drawn in, read back out of its own cells.
+    fn cells_of(header: &BoxHeader, field: BoxField) -> Option<String> {
+        let rows = rows_of(header);
+        header
+            .fields
+            .iter()
+            .find(|(f, ..)| *f == field)
+            .map(|(_, row, x, w)| {
+                rows[usize::from(*row)]
+                    .chars()
+                    .skip(usize::from(*x))
+                    .take(usize::from(*w))
+                    .collect()
+            })
+    }
+
+    /// The box's header names every field of the launch on two rows —
+    /// where it runs over what runs it — each with the key that changes
+    /// it, and fits the box it is drawn in. The effort is there with
+    /// nothing picked, as `default`.
     #[test]
-    fn the_details_row_carries_every_chord() {
-        let th = Theme::default();
+    fn the_header_names_every_field_with_its_key() {
         let app = App::new();
         let mut launch = a_launch();
         launch.model = None;
         launch.effort = None;
         let inner = BOX_SIZE.0 - 4;
-        let line = detail_line(&app, &launch, inner, th).line;
-        let text = text_of(&line);
-        for want in [
-            "project ",
-            "^P",
-            "worktree ",
-            "^t",
-            "harness ",
-            "claude",
-            "Tab",
-            "model ",
-            "default",
-            "^/",
+        let head = header(&app, &launch, inner);
+        let rows = rows_of(&head);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].starts_with("project "), "{rows:?}");
+        assert!(rows[1].starts_with("agent "), "{rows:?}");
+        for (field, want) in [
+            (BoxField::Project, "project (project gone) ^P"),
+            (BoxField::Worktree, "worktree (worktree gone) ^T"),
+            (BoxField::Agent, "Claude Tab"),
+            (BoxField::Model, "model default ^/"),
+            (BoxField::Effort, "effort default ^Y"),
         ] {
-            assert!(text.contains(want), "{text:?} is missing {want:?}");
+            let cells = cells_of(&head, field).unwrap_or_else(|| panic!("{field:?}: {rows:?}"));
+            assert!(cells.ends_with(want), "{field:?} is {cells:?}");
         }
-        assert!(line.width() <= inner as usize, "{text:?}");
+        assert!(
+            cells_of(&head, BoxField::Preset).is_none(),
+            "no preset, no field"
+        );
+        for line in &head.lines {
+            assert!(line.width() <= usize::from(inner), "{rows:?}");
+        }
 
+        // A picked effort and a Claude alias read as the pickers say them.
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
+        let head = header(&app, &launch, inner);
         assert!(
-            text_of(&detail_line(&app, &launch, inner, th).line).contains("opus high"),
-            "the effort belongs on the model"
+            cells_of(&head, BoxField::Model).is_some_and(|c| c.ends_with("opus · latest ^/")),
+            "{:?}",
+            rows_of(&head)
         );
-
-        // One column short of the airy form: the gaps tighten and every
-        // name stays whole, rather than one name losing its last letter.
-        let airy = detail_line(&app, &launch, 400, th).line.width() as u16;
-        let text = text_of(&detail_line(&app, &launch, airy - 1, th).line);
-        assert!(!text.contains('…'), "{text:?}");
-        assert!(text.contains(" · worktree "), "{text:?}");
+        assert!(
+            cells_of(&head, BoxField::Effort).is_some_and(|c| c.ends_with("effort high ^Y")),
+            "{:?}",
+            rows_of(&head)
+        );
     }
 
-    /// Every field the row draws hands back the columns it was drawn in,
-    /// and those columns hold exactly that field's own text — so a click
-    /// on `harness claude Tab` cannot open the model list. A tier that drops
-    /// a field hands back nothing for it: what is not drawn is no button.
+    /// Every key on the header is one the box answers to: the worktree,
+    /// model and effort keys are spelled from the live keymap — a rebind
+    /// shows at once, an unbound action shows no key at all — and the
+    /// project, harness and preset keys from the box's own table, the one
+    /// its key arm matches.
     #[test]
-    fn every_drawn_detail_hands_back_its_own_columns() {
-        let th = Theme::default();
+    fn the_header_keys_come_from_the_keymap_and_the_box_table() {
+        use crate::keymap::{index_of, KeyChord};
+        let mut app = App::new();
+        let mut launch = a_launch();
+        launch.preset = Some(a_preset("reviewer"));
+        let head = header(&app, &launch, 200);
+        let key = |head: &BoxHeader, field| cells_of(head, field).unwrap_or_default();
+        assert!(key(&head, BoxField::Project)
+            .ends_with(&format!(" {}", super::super::task_keys::PROJECT.label())));
+        assert!(key(&head, BoxField::Agent)
+            .ends_with(&format!(" {}", super::super::task_keys::AGENT.label())));
+        assert!(key(&head, BoxField::Preset)
+            .ends_with(&format!(" {}", super::super::task_keys::PRESET.label())));
+        for (field, action) in [
+            (BoxField::Worktree, Action::SelectLaunchWorktree),
+            (BoxField::Model, Action::SelectModel),
+            (BoxField::Effort, Action::CycleEffort),
+        ] {
+            let want = crate::hints::key(&app.keymap, action).expect("bound by default");
+            assert!(
+                key(&head, field).ends_with(&format!(" {want}")),
+                "{field:?}: {:?}",
+                key(&head, field)
+            );
+        }
+
+        // Rebound: the header follows. Unbound: no key, still a field.
+        let effort = index_of(Action::CycleEffort).unwrap();
+        app.keymap
+            .bind(effort, KeyChord::parse("f7").unwrap(), false);
+        app.keymap.clear(index_of(Action::SelectModel).unwrap());
+        let head = header(&app, &launch, 200);
+        assert!(
+            key(&head, BoxField::Effort).ends_with(" F7"),
+            "{:?}",
+            rows_of(&head)
+        );
+        assert_eq!(
+            key(&head, BoxField::Model),
+            "model default",
+            "{:?}",
+            rows_of(&head)
+        );
+    }
+
+    /// The effort is shown for every harness that has one — `default`
+    /// while nothing is picked — and left off for one that has none, which
+    /// OpenCode is: no field, no button, no key promising a step.
+    #[test]
+    fn the_effort_is_always_shown_where_the_harness_has_one() {
+        let app = App::new();
+        let cfg = crate::config::Config::default();
+        let target = crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+        for kind in [
+            orion_core::AgentKind::Claude,
+            orion_core::AgentKind::Codex,
+            orion_core::AgentKind::Pi,
+        ] {
+            let launch = QuickLaunch::of_kind(target.clone(), kind, None, None, None, &cfg);
+            let effort = cells_of(&header(&app, &launch, 200), BoxField::Effort);
+            assert!(
+                effort
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("effort default")),
+                "{kind:?}: {effort:?}"
+            );
+        }
+        let open = QuickLaunch::of_kind(
+            target,
+            orion_core::AgentKind::OpenCode,
+            None,
+            None,
+            None,
+            &cfg,
+        );
+        let head = header(&app, &open, 200);
+        assert!(
+            cells_of(&head, BoxField::Effort).is_none(),
+            "{:?}",
+            rows_of(&head)
+        );
+        assert!(
+            !rows_of(&head).concat().contains("effort"),
+            "{:?}",
+            rows_of(&head)
+        );
+    }
+
+    /// A CLAUDE ACCOUNT is named as every picker names it — `Claude
+    /// (you@example.com)` — once its sign-in has been read.
+    #[test]
+    fn a_claude_account_is_named_with_its_email() {
+        let home = tempfile::tempdir().unwrap();
+        let two = home.path().join(".claude-2");
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            two.join(".claude.json"),
+            serde_json::json!({"oauthAccount": {"emailAddress": "b@b.co", "accountUuid": "u"}})
+                .to_string(),
+        )
+        .unwrap();
+        let config = home.path().join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let places = crate::claude_accounts::Places {
+            home: Some(home.path().to_path_buf()),
+            default_dir: Some(home.path().join(".claude")),
+            default_record: Some(orion_core::claude_account::Record {
+                file: home.path().join(".claude.json"),
+                legacy: home.path().join(".claude/.config.json"),
+            }),
+        };
+        crate::claude_accounts::with_places(places, || {
+            crate::config::with_config_path(config, || {
+                crate::claude_accounts::refresh_now();
+                let cfg = crate::config::Config::load();
+                let target =
+                    crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+                let launch = QuickLaunch::of_kind(
+                    target,
+                    orion_core::AgentKind::Custom,
+                    Some("claude-2".into()),
+                    None,
+                    None,
+                    &cfg,
+                );
+                let head = box_header(&App::new(), &launch, &cfg, 200, Theme::default());
+                let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+                assert_eq!(agent, "agent   Claude (b@b.co) Tab", "{:?}", rows_of(&head));
+            })
+        });
+    }
+
+    /// Every field the header draws hands back the cells it was drawn in,
+    /// and those cells hold exactly that field's own text — so a click on
+    /// `agent Claude Tab` cannot open the model list — and whatever the
+    /// width, no row overruns it and no key is ever cut: a field gives up
+    /// its value's letters, then its word, then its place, before that.
+    #[test]
+    fn every_field_hands_back_its_own_cells_at_every_width() {
         let app = App::new();
         let mut launch = a_launch();
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
-        for width in 10..=120u16 {
-            let DetailLine {
-                line, fields: hits, ..
-            } = detail_line(&app, &launch, width, th);
-            let text: Vec<char> = text_of(&line).chars().collect();
-            assert!(
-                hits.iter().any(|(f, _, _)| *f == BoxField::Project),
-                "{width}: the project is never dropped"
-            );
-            for (field, x, w) in &hits {
-                let (x, w) = (*x as usize, *w as usize);
-                assert!(x + w <= text.len(), "{width}: {field:?} runs past the row");
-                let cut: String = text[x..x + w].iter().collect();
-                let chord = match field {
+        launch.preset = Some(a_preset("reviewer"));
+        for width in 8..=140u16 {
+            let head = header(&app, &launch, width);
+            let rows = rows_of(&head);
+            for line in &head.lines {
+                assert!(line.width() <= usize::from(width), "{width}: {rows:?}");
+            }
+            for (field, ..) in &head.fields {
+                let cells = cells_of(&head, *field).unwrap();
+                let key = match field {
                     BoxField::Project => "^P",
-                    BoxField::Worktree => "^t",
+                    BoxField::Worktree => "^T",
                     BoxField::Agent => "Tab",
                     BoxField::Model => "^/",
+                    BoxField::Effort => "^Y",
+                    BoxField::Preset => "⇧Tab",
                 };
                 assert!(
-                    cut.ends_with(chord),
-                    "{width}: {field:?} is {cut:?}, which does not end in {chord}"
+                    cells.ends_with(&format!(" {key}")),
+                    "{width}: {field:?} is {cells:?}, which does not end in its whole key"
                 );
                 assert!(
-                    !cut.starts_with(' ') && !cut.contains('·'),
-                    "{width}: {field:?} is {cut:?}, which reaches into the air beside it"
+                    !cells.starts_with(' '),
+                    "{width}: {field:?} is {cells:?}, which reaches into the air beside it"
                 );
             }
-        }
-    }
-
-    /// However narrow the box gets, the details row fits inside it and
-    /// still says which project the launch is aimed at — it gives up a
-    /// whole field before it clips a name in half.
-    #[test]
-    fn the_details_row_fits_every_width() {
-        let th = Theme::default();
-        let app = App::new();
-        let mut launch = a_launch();
-        launch.model = Some("opus".into());
-        launch.effort = Some("high".into());
-        for width in 10..=120u16 {
-            let line = detail_line(&app, &launch, width, th).line;
-            let text = text_of(&line);
-            assert!(line.width() <= width as usize, "{width}: {text:?}");
-            assert!(text.contains("^P"), "{width}: {text:?}");
+            if width >= 60 {
+                assert_eq!(head.fields.len(), 6, "{width}: every field fits: {rows:?}");
+                assert!(
+                    !rows.concat().contains('…'),
+                    "{width}: nothing cut: {rows:?}"
+                );
+            }
         }
     }
 
@@ -4270,7 +4303,7 @@ mod tests {
                 "{card:#?}"
             );
             assert!(
-                card.iter().any(|l| l.contains("C: continue on Claude B")),
+                card.iter().any(|l| l.contains("⇧C continue on Claude B")),
                 "{card:#?}"
             );
             assert!(
@@ -4915,118 +4948,123 @@ mod tests {
         assert!(app.launcher_tabs_more.is_empty());
     }
 
-    /// The prompt header keeps the toggle whatever else it has to drop,
-    /// never overruns its row, and hands back the columns a click on the
-    /// toggle lands in. Where the launch lands is the details row's to
-    /// say: the header names no project and no branch.
+    /// The worktree field is the WORKTREE PICKER's button, and its value
+    /// and key are what the picker hangs from: the cells handed back are
+    /// exactly the branch and its key, inside the field's own. A PR
+    /// SESSION's branch is no button at all and wears no key: its checkout
+    /// is the DAEMON's to pick.
     #[test]
-    fn the_prompt_header_never_drops_the_toggle() {
-        let th = Theme::default();
-        let launch = a_launch();
-        let label = "what should the agent do?";
-        for width in 40..=120u16 {
-            let TargetLine { line, toggle } = target_line(&launch, label, width, th);
-            let text = text_of(&line);
-            assert!(line.width() <= width as usize, "{width}: {text:?}");
-            assert!(text.contains("new worktree"), "{width}: {text:?}");
-            assert!(
-                !text.contains(" / ") && !text.contains("^t"),
-                "{width}: the header carries no checkout crumb: {text:?}"
-            );
-            let (x, w) = toggle.expect("a worktree launch has a toggle to click");
-            assert_eq!(usize::from(x + w), line.width(), "{width}: {text:?}");
-        }
-    }
-
-    /// The branch in the details row is the WORKTREE PICKER's button: the
-    /// columns handed back are exactly the branch and its `^T`, inside the
-    /// `worktree` field's own, however the row had to shrink — and none
-    /// once the field is dropped for room. A PR SESSION's branch is no
-    /// button at all, and wears no `^T`: its checkout is the DAEMON's to
-    /// pick.
-    #[test]
-    fn the_details_row_hands_back_the_branch_button() {
-        let th = Theme::default();
+    fn the_worktree_field_hands_back_the_branch_button() {
         let app = App::new();
-        let mut seen = 0;
-        for width in 10..=120u16 {
-            let details = detail_line(&app, &a_launch(), width, th);
-            let text: Vec<char> = text_of(&details.line).chars().collect();
-            let field = details
+        for width in 12..=120u16 {
+            let head = header(&app, &a_launch(), width);
+            let rows = rows_of(&head);
+            let (row, x, w) = head.branch.unwrap_or_else(|| panic!("{width}: {rows:?}"));
+            let under: String = rows[usize::from(row)]
+                .chars()
+                .skip(usize::from(x))
+                .take(usize::from(w))
+                .collect();
+            assert!(under.ends_with(" ^T"), "{width}: {under:?}");
+            assert!(under.starts_with("(w"), "{width}: {under:?}");
+            let (_, frow, fx, fw) = head
                 .fields
                 .iter()
-                .find(|(f, _, _)| *f == BoxField::Worktree);
-            let Some((x, w)) = details.branch else {
-                let row: String = text.iter().collect();
-                assert!(!row.contains("^t"), "{width}: no button, no ^t");
-                assert!(field.is_none(), "{width}: no branch, no field");
-                continue;
-            };
-            seen += 1;
-            let under: String = text[usize::from(x)..usize::from(x + w)].iter().collect();
+                .find(|(f, ..)| *f == BoxField::Worktree)
+                .copied()
+                .expect("a drawn branch is a field");
             assert!(
-                under.starts_with("(worktree") && under.ends_with(" ^t"),
-                "{width}: {under:?}"
-            );
-            let (_, fx, fw) = field.expect("a drawn branch is a field");
-            assert!(
-                *fx <= x && x + w <= fx + fw,
+                frow == row && fx <= x && x + w <= fx + fw,
                 "{width}: the branch sits inside its field"
             );
         }
-        assert!(seen > 0, "some width has room for the branch");
 
         let pr = a_launch().with_pr(Some(crate::pull_request::PrLaunch {
             url: "https://github.com/o/r/pull/7".into(),
             head: "fix-nav".into(),
             number: 7,
         }));
-        let details = detail_line(&app, &pr, 120, th);
-        let text = text_of(&details.line);
-        assert!(text.contains("worktree fix-nav"), "{text:?}");
-        assert!(!text.contains("^t"), "{text:?}");
-        assert_eq!(details.branch, None);
-        assert!(
-            !details
-                .fields
-                .iter()
-                .any(|(f, _, _)| *f == BoxField::Worktree),
-            "{text:?}"
-        );
+        let head = header(&app, &pr, 120);
+        let rows = rows_of(&head);
+        assert!(rows[0].contains("worktree fix-nav"), "{rows:?}");
+        assert!(!rows[0].contains("^T"), "{rows:?}");
+        assert_eq!(head.branch, None);
+        assert!(cells_of(&head, BoxField::Worktree).is_none(), "{rows:?}");
     }
 
-    /// The branch a fresh worktree will be cut on is drawn in the green
-    /// the box's frame turns, and cut before the project is when even the
-    /// tight row runs short.
+    /// A launch into a fresh worktree reads `new worktree <branch>` in the
+    /// green the box's frame turns — the word and the branch both — and
+    /// the box's own toggle for it is gone: the picker's first row is the
+    /// way to one.
     #[test]
-    fn a_fresh_worktree_branch_is_green_and_cut_first() {
+    fn a_fresh_worktree_reads_new_worktree_in_green() {
         let th = Theme::default();
         let app = App::new();
         let mut launch = a_launch();
         launch.target = crate::quick_prompt::QuickTarget::NewWorktree {
             project: orion_core::ProjectId("p".into()),
-            branch: "yellow-fox-jumps-over-the-lazy-dog".into(),
+            branch: "yellow-fox-jumps".into(),
         };
-        let wide = detail_line(&app, &launch, 400, th).line;
-        let branch = wide
-            .spans
-            .iter()
-            .find(|s| s.content == "yellow-fox-jumps-over-the-lazy-dog")
-            .expect("the branch, whole, on a wide row");
-        assert_eq!(branch.style.fg, Some(th.ok));
-
-        // Five columns short of the tight form — the airy one gave up
-        // whole, as it does — so something has to be cut.
-        let tight = detail_line(&app, &launch, wide.width() as u16 - 1, th).line;
-        let short = tight.width() as u16 - 5;
-        let text = text_of(&detail_line(&app, &launch, short, th).line);
+        let head = header(&app, &launch, 200);
+        let rows = rows_of(&head);
         assert!(
-            text.contains("(project gone)"),
-            "the project kept whole: {text:?}"
+            rows[0].contains("new worktree yellow-fox-jumps ^T"),
+            "{rows:?}"
         );
-        assert!(text.contains("yellow-fox-"), "the branch cut: {text:?}");
-        assert!(!text.contains("lazy-dog"), "the branch cut: {text:?}");
+        assert!(
+            !rows.concat().contains("[ ]") && !rows.concat().contains("^N"),
+            "{rows:?}"
+        );
+        let span = |text: &str| {
+            head.lines[0]
+                .spans
+                .iter()
+                .find(|s| s.content.trim_end() == text)
+                .unwrap_or_else(|| panic!("no {text:?} in {rows:?}"))
+                .style
+                .fg
+        };
+        assert_eq!(span("new worktree"), Some(th.ok));
+        assert_eq!(span("yellow-fox-jumps"), Some(th.ok));
     }
+
+    /// An AGENT PRESET on the launch has a field of its own, on the row of
+    /// where the launch runs, with the `⇧Tab` that picks another — and the
+    /// bottom border drops its own `⇧Tab`, the header carrying it now.
+    #[test]
+    fn a_preset_has_a_field_of_its_own() {
+        let app = App::new();
+        let mut launch = a_launch();
+        let border = |launch: &QuickLaunch| {
+            crate::hints::text(
+                &super::super::task_hints(&crate::app::PromptKind::QuickPrompt(launch.clone())),
+                200,
+            )
+        };
+        assert!(
+            border(&launch).contains("⇧Tab preset"),
+            "{}",
+            border(&launch)
+        );
+        launch.preset = Some(a_preset("reviewer"));
+        let head = header(&app, &launch, BOX_SIZE.0 - 4);
+        assert_eq!(
+            cells_of(&head, BoxField::Preset).as_deref(),
+            Some("preset reviewer ⇧Tab"),
+            "{:?}",
+            rows_of(&head)
+        );
+        assert_eq!(
+            head.fields
+                .iter()
+                .find(|(f, ..)| *f == BoxField::Preset)
+                .map(|(_, row, ..)| *row),
+            Some(0),
+            "on the row of where it runs"
+        );
+        assert!(!border(&launch).contains("⇧Tab"), "{}", border(&launch));
+    }
+
     /// One checkout's BAND, with one session in it, for the rule tests.
     fn a_band(is_main: bool, branch: &str) -> crate::launcher::Band {
         use orion_core::{Agent, AgentId, AgentKind, AgentStatus, WorktreeId};
@@ -5076,8 +5114,6 @@ mod tests {
                 on: false,
                 lit: false,
                 more: 0,
-                expanded: false,
-                list: false,
             },
         )
     }
@@ -5161,20 +5197,18 @@ mod tests {
         assert_eq!(painted(&buf, 0, th.warn).trim(), "+3", "narrow: {text:?}");
     }
 
-    /// The band the keys are on says so, and what Enter does: its rule
-    /// opens on the CURSOR MARK `❯` in the accent where every other
-    /// band's opens on `──`, and past its counts it spells the key —
-    /// `z: see all 8` when cards hang past the row's edge, `z:
-    /// open` when the row showed them all. A titled rule looks like a
-    /// divider, and nothing about a divider says a key acts on it. With
-    /// the cursor on the band but the keys elsewhere (up on the PROJECT
-    /// TABS, down in the pane) the rule is the plain gray one again:
-    /// Enter does something else from there.
+    /// The band the keys are on says so: its rule opens on the CURSOR
+    /// MARK `❯` in the accent where every other band's opens on `──`, and
+    /// counts what hangs past its edge. It spells no key: what Tab does
+    /// to the band under the cursor is the FOOTER's to say
+    /// (`ui::footer`), not a word on one rule of many. With the cursor on
+    /// the band but the keys elsewhere (up on the PROJECT TABS, down in
+    /// the pane) the rule is the plain gray one again.
     #[test]
-    fn the_band_the_keys_are_on_marks_itself_and_says_what_enter_does() {
+    fn the_band_the_keys_are_on_marks_itself_and_spells_no_key() {
         let app = App::new();
         let th = app.theme;
-        let key = crate::ui::key_hint(&app, crate::keymap::Action::FocusNext);
+        let key = crate::hints::key(&app.keymap, crate::keymap::Action::FocusNext).unwrap();
         let mut band = a_band(true, "main");
         let card = band.cards[0].clone();
         band.cards.extend(std::iter::repeat_n(card, 7));
@@ -5183,34 +5217,20 @@ mod tests {
             on: true,
             lit: true,
             more,
-            expanded: false,
-            list: false,
         };
 
         let buf = rule_row_as(&app, &band, 96, lit(6));
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
-        assert!(
-            text.contains(&format!("8 sessions  ▸ 6 more  {key}: see all 8 ──")),
-            "{text:?}"
-        );
-        // The mark and the key in the accent, the checkout still in its
-        // own color and nothing else in it.
+        assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
+        assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
+        // The mark in the accent, the checkout still in its own color.
         let accent = painted(&buf, 0, th.accent);
         assert!(accent.starts_with('❯'), "{accent:?}");
-        assert!(accent.contains(&key), "{accent:?}");
         assert_eq!(painted(&buf, 0, th.root), "⌂ main");
 
-        // Every card on the row: nothing to see more of, so plain `expand`.
-        let buf = rule_row_as(&app, &band, 96, lit(0));
-        let text = row_string(&buf, 0);
-        assert!(
-            text.contains(&format!("8 sessions  {key}: expand ──")),
-            "{text:?}"
-        );
-
         // The cursor's band with the keys elsewhere: bold branch, and
-        // that is all — no mark, no hint, the count as on any band.
+        // that is all — no mark, the count as on any band.
         let buf = rule_row_as(
             &app,
             &band,
@@ -5220,25 +5240,19 @@ mod tests {
                 on: true,
                 lit: false,
                 more: 6,
-                expanded: false,
-                list: false,
             },
         );
         let text = row_string(&buf, 0);
         assert!(text.starts_with("── ⌂ main"), "keys elsewhere: {text:?}");
         assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
-        assert!(!text.contains(&key), "{text:?}");
         assert_eq!(painted(&buf, 0, th.accent), "", "{text:?}");
     }
 
-    /// A rule too narrow to keep the branch legible beside the words
-    /// drops the Enter hint before the branch gives way — the `❯` still
-    /// says which band is selected, and the count still says what hangs
-    /// past the edge. Give it the room and the words are back.
+    /// A narrow rule keeps the cursor mark and the count of what hangs
+    /// past the edge before the branch gives way.
     #[test]
-    fn a_narrow_rule_keeps_the_cursor_mark_and_drops_the_enter_hint() {
+    fn a_narrow_rule_keeps_the_cursor_mark_and_the_count() {
         let app = App::new();
-        let key = crate::ui::key_hint(&app, crate::keymap::Action::FocusNext);
         let mut band = a_band(false, "feat-x");
         let card = band.cards[0].clone();
         band.cards.extend(std::iter::repeat_n(card, 2));
@@ -5247,22 +5261,12 @@ mod tests {
             on: true,
             lit: true,
             more: 2,
-            expanded: false,
-            list: false,
         };
 
         let buf = rule_row_as(&app, &band, 40, rule);
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ↳ feat-x"), "{text:?}");
         assert!(text.contains("3 sessions  ▸ 2 more ──"), "{text:?}");
-        assert!(!text.contains(&key), "{text:?}");
-
-        let buf = rule_row_as(&app, &band, 72, rule);
-        let text = row_string(&buf, 0);
-        assert!(
-            text.contains(&format!("3 sessions  ▸ 2 more  {key}: see all 3 ──")),
-            "{text:?}"
-        );
     }
 
     /// A card's frame carries its status — red asking, blue done unread,

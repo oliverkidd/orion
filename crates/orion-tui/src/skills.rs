@@ -981,8 +981,8 @@ pub(crate) fn land(app: &mut App, ticket: u64, skills: Vec<Skill>) {
 }
 
 /// The selected skill as the file overlays name a file — (folder,
-/// `SKILL.md`, line 1) — for `⌘O`, which hands it to Cursor: the skill's
-/// folder as the window, its SKILL.md open in it.
+/// `SKILL.md`, line 1) — for `⌘O`, which hands it to the OPEN IN APP
+/// editor: the skill's folder as the window, its SKILL.md open in it.
 pub(crate) fn selected_file(view: &SkillsView) -> Option<(PathBuf, String, u64)> {
     view.selected_skill()
         .map(|skill| (skill.dir.clone(), SKILL_FILE.to_string(), 1))
@@ -990,12 +990,36 @@ pub(crate) fn selected_file(view: &SkillsView) -> Option<(PathBuf, String, u64)>
 
 /// The footer's keys, the verbs first: the search row under the title
 /// already says that typing filters.
-pub(crate) fn footer_hint(editor: &str) -> String {
-    format!(
-        "Enter: edit in {editor}  ^a: new  ^d: trash  {}: Cursor  {}: copy path  ^r: refresh  Esc: close",
-        crate::hints::outside_key(),
-        crate::hints::copy_key(),
-    )
+/// The browser's own keys: one table [`handle_key`] matches and
+/// [`hints`] spells, so the bottom border never names a key the browser
+/// does not answer to. The letters are the filter's, so the verbs are
+/// chords — the AGENT PRESETS list's `^A` / `^D`.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const EDIT: Key = Key::new(&["enter"], "edit");
+    pub const NEW: Key = Key::new(&["ctrl+a"], "new");
+    pub const TRASH: Key = Key::new(&["ctrl+d"], "trash");
+    pub const REFRESH: Key = Key::new(&["ctrl+r", "cmd+r"], "refresh");
+    /// `⌘O` is caught before the browser sees it (`overlay_file`); `^O`
+    /// is its twin for a terminal that never sends ⌘.
+    pub const IN_CURSOR: Key = crate::hints::IN_CURSOR;
+    pub const COPY_PATH: Key = crate::hints::COPY_PATH;
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[EDIT, NEW, TRASH, REFRESH, IN_CURSOR, COPY_PATH];
+}
+
+/// The bottom border's keys, for a browser that edits in `editor`.
+pub(crate) fn hints(editor: &str) -> Vec<crate::hints::Hint> {
+    vec![
+        keys::EDIT.hint_as(format!("edit in {editor}")),
+        keys::NEW.hint(),
+        keys::TRASH.hint(),
+        crate::hints::in_app_hint(),
+        keys::COPY_PATH.hint(),
+        keys::REFRESH.hint(),
+        crate::hints::ESC_CLOSE.hint(),
+    ]
 }
 
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
@@ -1012,13 +1036,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let page = view.view_height.max(1) as i32;
     match key.code {
         // Esc closes the browser, filter and all (`closes_on_esc`); the
-        // letters are the filter's, so the verbs are chords — the AGENT
-        // PRESETS list's `^a` / `^d`.
+        // letters are the filter's, so the verbs are the chords of the
+        // [`keys`] table.
         KeyCode::Down if shift => view.scroll_by(1),
         KeyCode::Up if shift => view.scroll_by(-1),
         KeyCode::Down => step(app, 1),
@@ -1029,14 +1052,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
         KeyCode::End => view.scroll = view.max_scroll(),
-        KeyCode::Enter => edit_selected(app),
-        KeyCode::Char('a') if ctrl => open_new_prompt(app),
-        KeyCode::Char('d') if ctrl => confirm_trash(app),
-        KeyCode::Char('r') if ctrl || cmd => list(app),
-        // `⌘O` is caught before the browser sees it (`overlay_file`); `^o`
-        // is its twin for a terminal that never sends ⌘.
-        KeyCode::Char('o') if ctrl => open_outside(app),
-        _ if crate::event_loop::copies_path(&key) => copy_path(app),
+        _ if keys::EDIT.matches(&key) => edit_selected(app),
+        _ if keys::NEW.matches(&key) => open_new_prompt(app),
+        _ if keys::TRASH.matches(&key) => confirm_trash(app),
+        _ if keys::REFRESH.matches(&key) => list(app),
+        _ if keys::IN_CURSOR.matches(&key) => open_outside(app),
+        _ if keys::COPY_PATH.matches(&key) => copy_path(app),
         _ => {
             if view.query.handle_key(&key).changed() {
                 query_changed(app);
@@ -1103,9 +1124,9 @@ fn step(app: &mut App, delta: i32) {
     view.scroll = 0;
 }
 
-/// Enter: the selected skill's SKILL.md in the BUILT-IN EDITOR — beside
-/// its rendered page, as every markdown file opens. The browser stays
-/// under it and reads the folders again when it closes.
+/// Enter: the selected skill's SKILL.md in the BUILT-IN EDITOR — the
+/// browser already shows its rendered page, so Enter is the edit. The
+/// browser stays under it and reads the folders again when it closes.
 fn edit_selected(app: &mut App) {
     let Some(Overlay::Skills(view)) = &app.overlay else {
         return;
@@ -1118,7 +1139,8 @@ fn edit_selected(app: &mut App) {
     crate::event_loop::spawn_editor_modal(app, &editor, &dir, SKILL_FILE, 1, size);
 }
 
-/// `^o`: what `⌘O` does — the skill's folder in Cursor, its SKILL.md open.
+/// `^o`: what `⌘O` does — the skill's folder in the OPEN IN APP editor,
+/// its SKILL.md open.
 fn open_outside(app: &mut App) {
     let Some((dir, file, line)) = app.overlay.as_ref().and_then(|o| match o {
         Overlay::Skills(view) => selected_file(view),
@@ -1308,9 +1330,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &SkillsView, th: Theme) {
     } else {
         head
     };
-    let foot = " Enter: edit  ^a: new  ^d: trash ";
-    let block = panel_block(&title, true, th)
-        .title_bottom(Line::from(Span::styled(foot, Style::default().fg(th.dim))).left_aligned());
+    let block = panel_block(&title, true, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
     if let Some(query_area) = row_rect(list_inner, 0) {
@@ -1327,7 +1347,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &SkillsView, th: Theme) {
                 .user_skills()
                 .map(|dir| tilde(&dir, view.places.home.as_deref()))
                 .unwrap_or_else(|| "~/.claude/skills".into());
-            format!("no skills yet — ^a makes one in {dir}")
+            format!("no skills yet — {} makes one in {dir}", keys::NEW.label())
         };
         empty_list_row(f, rows_area, &text, th);
     } else if visible.is_empty() {
@@ -1377,6 +1397,16 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &SkillsView, th: Theme) {
     let body_lines = lines.len();
     let shown: Vec<Line> = lines.into_iter().skip(scroll as usize).collect();
     f.render_widget(Paragraph::new(shown), body_inner);
+    // The browser's keys, along its bottom edge — under both frames,
+    // clear of the reading pane's scroll position.
+    let reserve = if max_scroll > 0 { 12 } else { 0 };
+    crate::hints::draw_on_border(
+        f,
+        area,
+        &hints(crate::ui::editor_name(&view.editor)),
+        reserve,
+        th,
+    );
 
     if let Some(Overlay::Skills(v)) = &mut app.overlay {
         v.area = area;

@@ -25,7 +25,7 @@ use super::{
     WORKTREE_STILL_CREATING,
 };
 use crate::app::{
-    App, ConfirmDialog, DiffView, Focus, FollowUp, Overlay, PendingAction, SessionRow,
+    App, ConfirmDialog, DiffFocus, DiffView, Focus, FollowUp, Overlay, PendingAction, SessionRow,
 };
 use orion_core::{AgentId, ClientRequest, SessionRef, WorktreeId};
 
@@ -94,16 +94,25 @@ pub(super) fn diff_file(view: &mut DiffView, index: i64) {
     }
 }
 
-/// A row of the DIFF modal's list chosen — a click on it, or Enter on the
-/// cursor's own: the cursor lands there, and a tree directory's row folds
-/// or unfolds as well. On a file's row that is all there is to choose, so
-/// in the flat list this is `diff_file`. The keys are the file list's
-/// from then on, wherever they were.
+/// A row of the DIFF modal's file list chosen — a click on it: the cursor
+/// lands there, and a tree directory's row folds or unfolds as well. The
+/// keys are the file list's from then on, wherever they were.
 pub(super) fn diff_row(view: &mut DiffView, index: i64) {
-    view.commits_focused = false;
+    view.focus = DiffFocus::Files;
     let moved = view.select(index);
     if view.toggle_dir(view.cursor()) || moved {
         crate::git_diff::load_selected_diff(view);
+    }
+}
+
+/// `Enter` on the file list, or a second click on the cursor's row: a
+/// tree directory folds or unfolds; a file hands the keys to its diff, to
+/// be read with `↑`/`↓`.
+pub(super) fn diff_file_chosen(view: &mut DiffView) {
+    if view.selected_dir().is_some() {
+        diff_row(view, view.cursor() as i64);
+    } else if view.selected_file().is_some() {
+        view.focus = DiffFocus::Diff;
     }
 }
 
@@ -141,8 +150,7 @@ pub(super) fn diff_filter_changed(view: &mut DiffView) {
 }
 
 /// Move the DIFF modal's COMMIT LIST cursor to `index` (clamped) and put
-/// that row up when the cursor moved — ↑/↓ on the focused list, `⇧←`/`⇧→`
-/// from anywhere, the wheel over it, a click on a row.
+/// up what that changes — ↑/↓ on the focused list, a click on a row.
 pub(super) fn diff_commit(view: &mut DiffView, index: i64) {
     let Some(list) = &mut view.commits else {
         return;
@@ -152,20 +160,52 @@ pub(super) fn diff_commit(view: &mut DiffView, index: i64) {
     }
 }
 
-/// `⇧←` / `⇧→`: the COMMIT LIST's next row down — older — or up — newer —
-/// without the keys leaving the files. The list runs newest first, so
-/// `⇧←` from the newest commit walks back through the branch.
+/// `⇧←` / `⇧→`, from wherever the keys are: with nothing ticked, the next
+/// commit down — older — or up — newer; with ticks, the step before or
+/// after (`CommitList::step_by`).
 pub(super) fn diff_commit_step(view: &mut DiffView, older: bool) {
-    let Some(list) = &view.commits else {
+    let Some(list) = &mut view.commits else {
         return;
     };
-    let step = if older { 1 } else { -1 };
-    diff_commit(view, list.selected as i64 + step);
+    if list.step_by(older) {
+        crate::commit_list::show_selected(view);
+    }
+}
+
+/// `Space` on the COMMIT LIST: tick the cursor's row, or untick it.
+pub(super) fn diff_tick(view: &mut DiffView) {
+    let Some(list) = &mut view.commits else {
+        return;
+    };
+    list.toggle_tick();
+    crate::commit_list::show_selected(view);
+}
+
+/// `^A` on the COMMIT LIST: every commit ticked, or none.
+pub(super) fn diff_tick_all(view: &mut DiffView) {
+    let Some(list) = &mut view.commits else {
+        return;
+    };
+    list.tick_all();
+    crate::commit_list::show_selected(view);
+}
+
+/// `^G`: the ticked commits TOGETHER, or ONE AT A TIME. Nothing to choose
+/// between with fewer than two ticked.
+pub(super) fn diff_review_mode(view: &mut DiffView) {
+    let Some(list) = &mut view.commits else {
+        return;
+    };
+    if list.ticked.len() < 2 {
+        return;
+    }
+    list.toggle_mode();
+    crate::commit_list::show_selected(view);
 }
 
 /// `Enter` on the focused COMMIT LIST, or a second click on its row: the
-/// `older` row reads the next page; any other is up already, so the keys go
-/// back to its files.
+/// `older` row reads the next page; any other is up already, so the keys
+/// go on to its files.
 pub(super) fn diff_commit_chosen(view: &mut DiffView) {
     let Some(list) = &view.commits else {
         return;
@@ -173,29 +213,34 @@ pub(super) fn diff_commit_chosen(view: &mut DiffView) {
     if list.selected_row() == Some(crate::commit_list::Row::Older) {
         crate::commit_list::show_selected(view);
     } else {
-        view.commits_focused = false;
+        view.focus = DiffFocus::Files;
     }
 }
 
-/// A click on a COMMIT LIST row: the arrow keys landing there — the list
-/// takes the keys and the row goes up — or, on the row the cursor is
-/// already on, `Enter` on it.
-pub(super) fn diff_commit_row(view: &mut DiffView, index: usize) {
-    let already = view
-        .commits
-        .as_ref()
-        .is_some_and(|list| list.selected == index);
-    if already && view.commits_focused {
+/// A click on a COMMIT LIST row: on its box, `Space` there — the row
+/// ticked or unticked; anywhere else the arrows landing there, or, on the
+/// row the cursor is already on, `Enter` on it. The list takes the keys.
+pub(super) fn diff_commit_row(view: &mut DiffView, index: usize, on_box: bool) {
+    let already = view.focus == DiffFocus::Commits
+        && view
+            .commits
+            .as_ref()
+            .is_some_and(|list| list.selected == index);
+    view.focus = DiffFocus::Commits;
+    if on_box {
+        diff_commit(view, index as i64);
+        diff_tick(view);
+    } else if already {
         diff_commit_chosen(view);
-        return;
+    } else {
+        diff_commit(view, index as i64);
     }
-    view.commits_focused = true;
-    diff_commit(view, index as i64);
 }
 
-/// `Tab`: the keys to the COMMIT LIST, or back to the file list.
-pub(super) fn diff_focus_commits(view: &mut DiffView, commits: bool) {
-    view.commits_focused = commits && view.commits.is_some();
+/// `Tab` / `⇧Tab`: the keys to the next panel, in reading order — the
+/// COMMIT LIST, the files, the diff — and round again.
+pub(super) fn diff_focus_next(view: &mut DiffView, forward: bool) {
+    view.focus = view.next_focus(forward);
 }
 
 /// What Enter means on the SETTINGS OVERLAY's selected row, and so what a

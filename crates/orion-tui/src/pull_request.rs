@@ -474,18 +474,10 @@ fn rollup_state(rollup: &serde_json::Value) -> Checks {
 fn checks(rollup: &[serde_json::Value]) -> Checks {
     let mut out = Checks::Absent;
     for entry in rollup {
-        let word = if entry.get("state").is_some() {
-            str_at(entry, "state")
-        } else if str_at(entry, "status") == "COMPLETED" {
-            str_at(entry, "conclusion")
-        } else {
-            str_at(entry, "status")
-        };
-        let one = match word.as_str() {
-            "SUCCESS" | "NEUTRAL" | "SKIPPED" => Checks::Passing,
-            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
-            | "STARTUP_FAILURE" => return Checks::Failing,
-            _ => Checks::Pending,
+        let one = match check_state(&check_word(entry)) {
+            CheckState::Passed | CheckState::Skipped => Checks::Passing,
+            CheckState::Failed => return Checks::Failing,
+            CheckState::Running => Checks::Pending,
         };
         out = match (out, one) {
             (Checks::Pending, _) | (_, Checks::Pending) => Checks::Pending,
@@ -493,6 +485,32 @@ fn checks(rollup: &[serde_json::Value]) -> Checks {
         };
     }
     out
+}
+
+/// One rollup entry's word: a check run's `conclusion` once `COMPLETED`
+/// and its `status` (queued, in progress) until then; a plain commit
+/// status's `state`.
+fn check_word(entry: &serde_json::Value) -> String {
+    if entry.get("state").is_some() {
+        str_at(entry, "state")
+    } else if str_at(entry, "status") == "COMPLETED" {
+        str_at(entry, "conclusion")
+    } else {
+        str_at(entry, "status")
+    }
+}
+
+/// Where a check stands by its word: a skipped or neutral job is done and
+/// is no failure; anything not yet concluded is still running.
+fn check_state(word: &str) -> CheckState {
+    match word {
+        "SUCCESS" => CheckState::Passed,
+        "NEUTRAL" | "SKIPPED" => CheckState::Skipped,
+        "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            CheckState::Failed
+        }
+        _ => CheckState::Running,
+    }
 }
 
 /// Every open pull request on a project's repo, and what it costs to ask.
@@ -734,12 +752,14 @@ pub fn drafts_last(list: &mut [OpenPr]) {
 /// in front of a "loading" flash while it runs.
 const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// The readable contents of one pull request: what it says it does, and
-/// what people said back. Fetched on demand — only for the row the cursor
-/// actually rests on — and cached for the session and across launches,
-/// because this is a second API call on top of the list and the body of a
-/// merged-or-not pull request does not change while you read it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The readable contents of one pull request: what it says it does, what
+/// people said back, and what the PULL REQUEST PAGE's other tabs list —
+/// the files it changes, its commits, its checks and its reviews. Fetched
+/// on demand, in one `gh pr view` — only for the row the cursor actually
+/// rests on — and cached for the session and across launches, because
+/// this is a second API call on top of the list and a pull request does
+/// not change much while you read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrDetail {
     pub number: u64,
     pub url: String,
@@ -764,9 +784,52 @@ pub struct PrDetail {
     /// Issue comments and review submissions in one list, oldest first —
     /// the order they were said in, which is the order they read in.
     pub comments: Vec<PrComment>,
+    /// The files it changes, in GitHub's order — the Changes tab. GitHub
+    /// hands back the first hundred; `changed_files` is the whole count.
+    #[serde(default)]
+    pub files: Vec<PrFile>,
+    /// Its commits, newest first — the Commits tab.
+    #[serde(default)]
+    pub commits: Vec<PrCommit>,
+    /// Every check on its head commit, failed first — the Checks tab.
+    /// [`Health::checks`] is the same list folded to one word.
+    #[serde(default)]
+    pub checks: Vec<PrCheck>,
+    /// GitHub's `reviewDecision`: `APPROVED`, `CHANGES_REQUESTED`,
+    /// `REVIEW_REQUIRED`, or empty on a repo that asks for no review.
+    #[serde(default)]
+    pub review_decision: String,
+    /// Who has been asked for a review and has not given one yet — a
+    /// login, or a team's name.
+    #[serde(default)]
+    pub review_requests: Vec<String>,
 }
 
 impl PrDetail {
+    /// Each reviewer's standing, in the order they first reviewed: their
+    /// latest verdict — an approval or a change request outranks a later
+    /// plain comment, the way GitHub's reviewer list keeps it — and then
+    /// everyone asked who has not answered yet ([`REVIEW_REQUESTED`]).
+    pub fn reviewers(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for c in self.comments.iter().filter(|c| !c.review_state.is_empty()) {
+            let decisive = c.review_state != "COMMENTED";
+            match out.iter_mut().find(|(who, _)| *who == c.author) {
+                Some((_, state)) if decisive || state == "COMMENTED" => {
+                    *state = c.review_state.clone();
+                }
+                Some(_) => {}
+                None => out.push((c.author.clone(), c.review_state.clone())),
+            }
+        }
+        for who in &self.review_requests {
+            if !out.iter().any(|(name, _)| name == who) {
+                out.push((who.clone(), REVIEW_REQUESTED.to_string()));
+            }
+        }
+        out
+    }
+
     /// Whether this pull request still accepts work. A draft counts: it is
     /// open, just not finished. This is the per-row second opinion on the
     /// question [`list`] answers in bulk — when the cursor rests on a row
@@ -802,27 +865,192 @@ impl PrComment {
     }
 }
 
-/// Ask `gh` for one pull request's description and conversation. `number`
-/// picks the PR, so this works from any checkout of the repo — the row the
-/// cursor is on need not be checked out anywhere.
+/// What [`PrDetail::reviewers`] says of someone asked for a review who
+/// has not given one yet.
+pub const REVIEW_REQUESTED: &str = "REQUESTED";
+
+/// One file a pull request changes, as `gh pr view --json files` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+    /// GitHub's word for the change — `ADDED`, `DELETED`, `MODIFIED`,
+    /// `RENAMED`, `COPIED`, `CHANGED` — empty from a `gh` too old to say.
+    #[serde(default)]
+    pub change: String,
+}
+
+impl PrFile {
+    /// The one letter git's porcelain and the DIFF VIEWER's file list
+    /// use: `A`, `D`, `R`, `C`, else `M` — a `gh` that says nothing about
+    /// the change reads as a modification, the commonest one.
+    pub fn status(&self) -> char {
+        match self.change.as_str() {
+            "ADDED" => 'A',
+            "DELETED" => 'D',
+            "RENAMED" => 'R',
+            "COPIED" => 'C',
+            _ => 'M',
+        }
+    }
+}
+
+/// One commit of a pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCommit {
+    /// The full sha (`oid`).
+    pub sha: String,
+    /// The message's first line (`messageHeadline`).
+    pub subject: String,
+    /// The first author's login, else their name.
+    pub author: String,
+    /// When it was authored, RFC 3339.
+    pub at: String,
+}
+
+impl PrCommit {
+    /// The sha cut to the seven characters git abbreviates it to.
+    pub fn short(&self) -> &str {
+        self.sha.get(..7).unwrap_or(&self.sha)
+    }
+}
+
+/// Where one check stands. The order is the Checks tab's: what failed
+/// first, then what is still running, then what passed, then what was
+/// skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CheckState {
+    Failed,
+    Running,
+    Passed,
+    Skipped,
+}
+
+/// One check on a pull request's head commit: a check run (GitHub
+/// Actions, an app) or a plain commit status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCheck {
+    /// A check run's `name`, a commit status's `context`.
+    pub name: String,
+    /// The Actions workflow it ran in; empty for anything else.
+    #[serde(default)]
+    pub workflow: String,
+    pub state: CheckState,
+    /// GitHub's own word — `FAILURE`, `TIMED_OUT`, `IN_PROGRESS`,
+    /// `NEUTRAL` … — for a row that wants more than the state.
+    #[serde(default)]
+    pub word: String,
+    /// RFC 3339 stamps; empty when GitHub gave none.
+    #[serde(default)]
+    pub started: String,
+    #[serde(default)]
+    pub completed: String,
+    /// The check's own page — the run's log, the status's target —
+    /// when it has one a browser can open.
+    #[serde(default)]
+    pub url: String,
+}
+
+impl PrCheck {
+    /// How long it ran, or has been running, as of `now` (unix seconds):
+    /// `45s`, `3m 12s`, `1h 4m`. None without a start to count from.
+    pub fn duration(&self, now: i64) -> Option<String> {
+        // A run not yet started or finished carries GitHub's zero stamp,
+        // `0001-01-01T00:00:00Z`: no stamp at all.
+        let start = rfc3339_secs(&self.started).filter(|at| *at > 0)?;
+        let end = match rfc3339_secs(&self.completed).filter(|at| *at >= start) {
+            Some(end) => end,
+            None if self.state == CheckState::Running => now,
+            None => return None,
+        };
+        Some(duration_label(end.saturating_sub(start)))
+    }
+}
+
+/// The checks of a [`PrDetail`], counted the way the Checks tab's label
+/// says them: how many have not failed and are done, of all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CheckCounts {
+    pub failed: usize,
+    pub running: usize,
+    /// Passed or skipped — done, and not a failure.
+    pub ok: usize,
+    pub total: usize,
+}
+
+impl CheckCounts {
+    pub fn of(checks: &[PrCheck]) -> Self {
+        let mut out = Self {
+            total: checks.len(),
+            ..Self::default()
+        };
+        for check in checks {
+            match check.state {
+                CheckState::Failed => out.failed += 1,
+                CheckState::Running => out.running += 1,
+                CheckState::Passed | CheckState::Skipped => out.ok += 1,
+            }
+        }
+        out
+    }
+}
+
+/// `45s`, `3m 12s`, `1h 4m` — how long a check took.
+pub fn duration_label(secs: i64) -> String {
+    let secs = secs.max(0);
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
+        s => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// Unix seconds of an RFC 3339 stamp as GitHub writes them —
+/// `2026-10-02T23:16:11Z`, or with fractional seconds or an offset. None
+/// for anything else, an empty string included.
+pub fn rfc3339_secs(stamp: &str) -> Option<i64> {
+    let (date, time) = stamp.split_once('T')?;
+    let mut ymd = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    let (clock, zone) = (time.get(..8)?, time.get(8..)?);
+    let mut hms = clock.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+    let (h, min, s) = (hms.next()??, hms.next()??, hms.next()??);
+    // Fractional seconds, then the zone: `Z`, or `±HH:MM`.
+    let zone = zone.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match zone {
+        "" | "Z" | "z" => 0,
+        _ => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let (oh, om) = zone.get(1..)?.split_once(':')?;
+            sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60)
+        }
+    };
+    let (m, d) = (u32::try_from(m).ok()?, u32::try_from(d).ok()?);
+    let days = crate::config::days_from_civil(i32::try_from(y).ok()?, m, d);
+    Some(days * 86_400 + h * 3600 + min * 60 + s - offset)
+}
+
+/// Ask `gh` for one pull request — its description and conversation, and
+/// what the PULL REQUEST PAGE's tabs list: files, commits, checks,
+/// reviews — in one `gh pr view`. `number` picks the PR, so this works
+/// from any checkout of the repo — the row the cursor is on need not be
+/// checked out anywhere.
 pub async fn detail(dir: &Path, number: u64) -> Option<PrDetail> {
     let number = number.to_string();
     let out = gh(
         Some(dir),
-        &[
-            "pr",
-            "view",
-            &number,
-            "--json",
-            "number,url,title,state,isDraft,mergeable,statusCheckRollup,author,\
-             baseRefName,headRefName,additions,deletions,changedFiles,body,\
-             comments,reviews",
-        ],
+        &["pr", "view", &number, "--json", DETAIL_FIELDS],
         TIMEOUT,
     )
     .await?;
     parse_detail(&out)
 }
+
+/// The fields [`detail`] asks `gh pr view` for.
+pub(crate) const DETAIL_FIELDS: &str = "number,url,title,state,isDraft,mergeable,\
+     statusCheckRollup,author,baseRefName,headRefName,additions,deletions,changedFiles,\
+     body,comments,reviews,files,commits,reviewDecision,reviewRequests";
 
 fn parse_detail(json: &str) -> Option<PrDetail> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
@@ -841,7 +1069,95 @@ fn parse_detail(json: &str) -> Option<PrDetail> {
         changed_files: u64_at(&v, "changedFiles"),
         body: str_at(&v, "body"),
         comments: conversation(&v),
+        files: arr_at(&v, "files").iter().filter_map(file_from).collect(),
+        commits: commits_newest_first(&v),
+        checks: check_list(arr_at(&v, "statusCheckRollup")),
+        review_decision: str_at(&v, "reviewDecision"),
+        review_requests: arr_at(&v, "reviewRequests")
+            .iter()
+            .filter_map(|r| {
+                ["login", "name", "slug"]
+                    .iter()
+                    .map(|key| str_at(r, key))
+                    .find(|name| !name.is_empty())
+            })
+            .collect(),
     })
+}
+
+/// One `files` entry; one without a path is dropped.
+fn file_from(v: &serde_json::Value) -> Option<PrFile> {
+    let path = str_at(v, "path");
+    (!path.is_empty()).then(|| PrFile {
+        path,
+        additions: u64_at(v, "additions"),
+        deletions: u64_at(v, "deletions"),
+        change: str_at(v, "changeType"),
+    })
+}
+
+/// The `commits` list, newest first — `gh` lists them oldest first, the
+/// order they were pushed in, and the tab reads from the top.
+fn commits_newest_first(v: &serde_json::Value) -> Vec<PrCommit> {
+    let mut out: Vec<PrCommit> = arr_at(v, "commits")
+        .iter()
+        .filter_map(|c| {
+            let sha = str_at(c, "oid");
+            if sha.is_empty() {
+                return None;
+            }
+            let first = arr_at(c, "authors").first();
+            let author = first
+                .map(|a| match str_at(a, "login") {
+                    login if !login.is_empty() => login,
+                    _ => str_at(a, "name"),
+                })
+                .unwrap_or_default();
+            let at = match str_at(c, "authoredDate") {
+                at if !at.is_empty() => at,
+                _ => str_at(c, "committedDate"),
+            };
+            Some(PrCommit {
+                sha,
+                subject: str_at(c, "messageHeadline"),
+                author,
+                at,
+            })
+        })
+        .collect();
+    out.reverse();
+    out
+}
+
+/// Every check of a `statusCheckRollup`, failed first, then running,
+/// passed and skipped, each group in GitHub's order.
+fn check_list(rollup: &[serde_json::Value]) -> Vec<PrCheck> {
+    let mut out: Vec<PrCheck> = rollup
+        .iter()
+        .map(|entry| {
+            let word = check_word(entry);
+            let name = match str_at(entry, "name") {
+                name if !name.is_empty() => name,
+                _ => str_at(entry, "context"),
+            };
+            let url = ["detailsUrl", "targetUrl"]
+                .iter()
+                .map(|key| str_at(entry, key))
+                .find(|u| u.starts_with("https://") || u.starts_with("http://"))
+                .unwrap_or_default();
+            PrCheck {
+                name,
+                workflow: str_at(entry, "workflowName"),
+                state: check_state(&word),
+                word,
+                started: str_at(entry, "startedAt"),
+                completed: str_at(entry, "completedAt"),
+                url,
+            }
+        })
+        .collect();
+    out.sort_by_key(|check| check.state);
+    out
 }
 
 /// `author.login`, `""` when absent.
@@ -894,6 +1210,30 @@ pub async fn diff(dir: &Path, number: u64) -> Option<String> {
         DIFF_TIMEOUT,
     )
     .await
+}
+
+/// The unified diff of one commit of a pull request, from GitHub — the
+/// commit need not be fetched into any checkout here — in the shape `gh
+/// pr diff` gives a whole pull request. `gh` fills `{owner}` and `{repo}`
+/// from the checkout. `None` when `gh` couldn't answer, or for a sha that
+/// is not one.
+pub async fn commit_diff(dir: &Path, sha: &str) -> Option<String> {
+    if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let path = format!("repos/{{owner}}/{{repo}}/commits/{sha}");
+    gh(
+        Some(dir),
+        &["api", &path, "-H", "Accept: application/vnd.github.diff"],
+        DIFF_TIMEOUT,
+    )
+    .await
+}
+
+/// A commit's page inside its pull request — `…/pull/42/commits/<sha>` —
+/// the URL its diff is fetched, cached and opened under.
+pub fn commit_url(pr_url: &str, sha: &str) -> String {
+    format!("{}/commits/{sha}", pr_url.trim_end_matches('/'))
 }
 
 /// How long a `gh pr comment` may run. The body is small and the call
@@ -1470,6 +1810,184 @@ mod tests {
         assert_eq!(d.comments[0].verdict(), Some("approved"));
         assert_eq!(d.comments[1].author, "steiza");
         assert_eq!(d.comments[1].verdict(), None, "a plain comment has none");
+    }
+
+    /// One `gh pr view` carries every tab of the PULL REQUEST PAGE: the
+    /// files with their change, the commits newest first, the checks
+    /// failed first with their own page, and who stands where on review.
+    #[test]
+    fn a_detail_payload_carries_files_commits_checks_and_reviews() {
+        let d = parse_detail(
+            r#"{
+              "number": 42, "url": "https://github.com/o/r/pull/42", "changedFiles": 2,
+              "files": [
+                {"path": "src/a.rs", "additions": 12, "deletions": 3, "changeType": "MODIFIED"},
+                {"path": "src/new.rs", "additions": 40, "deletions": 0, "changeType": "ADDED"},
+                {"additions": 1}
+              ],
+              "commits": [
+                {"oid": "1111111aaaa", "messageHeadline": "first", "authoredDate": "2026-09-01T10:00:00Z",
+                 "authors": [{"login": "kate", "name": "Kate"}]},
+                {"oid": "2222222bbbb", "messageHeadline": "second", "committedDate": "2026-09-02T10:00:00Z",
+                 "authors": [{"login": "", "name": "Steiza"}]}
+              ],
+              "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED",
+                 "conclusion": "SUCCESS", "startedAt": "2026-10-02T23:16:08Z", "completedAt": "2026-10-02T23:20:22Z",
+                 "detailsUrl": "https://github.com/o/r/actions/runs/1"},
+                {"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS",
+                 "startedAt": "2026-10-02T23:16:08Z", "detailsUrl": "https://github.com/o/r/actions/runs/2"},
+                {"__typename": "StatusContext", "context": "ci/legacy", "state": "FAILURE",
+                 "targetUrl": "javascript:alert(1)"},
+                {"__typename": "CheckRun", "name": "docs", "status": "COMPLETED", "conclusion": "SKIPPED"}
+              ],
+              "reviews": [
+                {"author": {"login": "kate"}, "submittedAt": "2026-09-03T10:00:00Z", "state": "APPROVED", "body": ""},
+                {"author": {"login": "kate"}, "submittedAt": "2026-09-04T10:00:00Z", "state": "COMMENTED", "body": "one more nit"},
+                {"author": {"login": "steiza"}, "submittedAt": "2026-09-04T11:00:00Z", "state": "CHANGES_REQUESTED", "body": "no"}
+              ],
+              "reviewDecision": "CHANGES_REQUESTED",
+              "reviewRequests": [{"__typename": "User", "login": "tidy-dev"}, {"__typename": "Team", "name": "core"}]
+            }"#,
+        )
+        .expect("parsed");
+        let files: Vec<(&str, char)> = d
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status()))
+            .collect();
+        assert_eq!(
+            files,
+            [("src/a.rs", 'M'), ("src/new.rs", 'A')],
+            "a pathless file drops"
+        );
+        assert_eq!((d.files[0].additions, d.files[0].deletions), (12, 3));
+
+        let commits: Vec<(&str, &str, &str)> = d
+            .commits
+            .iter()
+            .map(|c| (c.short(), c.subject.as_str(), c.author.as_str()))
+            .collect();
+        assert_eq!(
+            commits,
+            [
+                ("2222222", "second", "Steiza"),
+                ("1111111", "first", "kate")
+            ],
+            "newest first; a login, else the name"
+        );
+        assert_eq!(
+            d.commits[0].at, "2026-09-02T10:00:00Z",
+            "committed when not authored"
+        );
+
+        let checks: Vec<(&str, CheckState)> = d
+            .checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.state))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("ci/legacy", CheckState::Failed),
+                ("lint", CheckState::Running),
+                ("build", CheckState::Passed),
+                ("docs", CheckState::Skipped),
+            ]
+        );
+        assert_eq!(d.checks[0].url, "", "only http(s) reaches a browser");
+        assert_eq!(d.checks[2].url, "https://github.com/o/r/actions/runs/1");
+        assert_eq!(d.checks[2].workflow, "CI");
+        let now = rfc3339_secs("2026-10-02T23:18:08Z").unwrap();
+        assert_eq!(d.checks[2].duration(now).as_deref(), Some("4m 14s"));
+        assert_eq!(
+            d.checks[1].duration(now).as_deref(),
+            Some("2m 0s"),
+            "running: so far"
+        );
+        assert_eq!(
+            d.checks[3].duration(now),
+            None,
+            "no start, nothing to count"
+        );
+        let mut queued = d.checks[1].clone();
+        queued.started = "0001-01-01T00:00:00Z".into();
+        queued.completed = "0001-01-01T00:00:00Z".into();
+        assert_eq!(
+            queued.duration(now),
+            None,
+            "GitHub's zero stamp is no stamp"
+        );
+        let mut running = d.checks[1].clone();
+        running.completed = "0001-01-01T00:00:00Z".into();
+        assert_eq!(running.duration(now).as_deref(), Some("2m 0s"));
+        assert_eq!(
+            CheckCounts::of(&d.checks),
+            CheckCounts {
+                failed: 1,
+                running: 1,
+                ok: 2,
+                total: 4
+            }
+        );
+        assert_eq!(d.health.checks, Checks::Failing, "the fold agrees");
+
+        assert_eq!(d.review_decision, "CHANGES_REQUESTED");
+        assert_eq!(d.review_requests, ["tidy-dev", "core"]);
+        assert_eq!(
+            d.reviewers(),
+            [
+                ("kate".to_string(), "APPROVED".to_string()),
+                ("steiza".to_string(), "CHANGES_REQUESTED".to_string()),
+                ("tidy-dev".to_string(), REVIEW_REQUESTED.to_string()),
+                ("core".to_string(), REVIEW_REQUESTED.to_string()),
+            ],
+            "a later plain comment keeps kate's approval"
+        );
+    }
+
+    /// The one call asks for every field the tabs read.
+    #[test]
+    fn the_detail_call_asks_for_every_tab() {
+        let fields: Vec<&str> = DETAIL_FIELDS.split(',').map(str::trim).collect();
+        for field in [
+            "body",
+            "comments",
+            "files",
+            "commits",
+            "statusCheckRollup",
+            "reviews",
+            "reviewDecision",
+            "reviewRequests",
+            "changedFiles",
+        ] {
+            assert!(fields.contains(&field), "{field} in {fields:?}");
+        }
+    }
+
+    /// GitHub's stamps read as unix seconds — `Z`, fractions, offsets —
+    /// and anything else is no stamp at all.
+    #[test]
+    fn rfc3339_stamps_read_as_unix_seconds() {
+        assert_eq!(rfc3339_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_secs("2026-10-02T23:16:11Z"), Some(1_790_982_971));
+        assert_eq!(
+            rfc3339_secs("2026-10-02T23:16:11.250Z"),
+            Some(1_790_982_971)
+        );
+        assert_eq!(
+            rfc3339_secs("2026-10-03T01:16:11+02:00"),
+            Some(1_790_982_971)
+        );
+        assert_eq!(rfc3339_secs(""), None);
+        assert_eq!(rfc3339_secs("yesterday"), None);
+        assert_eq!(duration_label(45), "45s");
+        assert_eq!(duration_label(192), "3m 12s");
+        assert_eq!(duration_label(3840), "1h 4m");
+        assert_eq!(
+            commit_url("https://github.com/o/r/pull/42", "abc"),
+            "https://github.com/o/r/pull/42/commits/abc"
+        );
     }
 
     /// Missing optional fields are zeros and empty strings, not a failed

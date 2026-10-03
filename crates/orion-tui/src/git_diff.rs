@@ -37,60 +37,69 @@ impl DiffFile {
     }
 }
 
-/// What the DIFF VIEWER's file list and diffs are of — the COMMIT LIST's
-/// row (`commit_list`) that last landed.
+/// What the DIFF VIEWER's file list and diffs are of — what the COMMIT
+/// LIST's cursor and ticks put on screen (`commit_list::CommitList::showing`)
+/// when its file list last landed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum DiffScope {
     /// The working tree against HEAD, untracked files included: what the
     /// viewer always showed, and still opens on while there is any.
     #[default]
     Uncommitted,
-    /// The working tree against the branch's merge-base with its base —
-    /// everything the branch changed, committed or not (**All changes**).
-    Branch { merge_base: String },
     /// One commit against its first parent; `None` for a root commit,
     /// which is diffed against git's empty tree.
     Commit { sha: String, parent: Option<String> },
+    /// Several ticked rows read TOGETHER: each [`Range`] one stretch of
+    /// the branch, oldest first. One range is one ordinary diff; a file
+    /// two of them touch shows each range's diff in turn (`scoped_diff`).
+    Ranges(Vec<Range>),
 }
 
-/// Line classification for coloring; styling itself lives in ui.rs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiffLineKind {
-    Add,
-    Remove,
-    Hunk,
-    Header,
-    Context,
+/// One stretch of a branch a TOGETHER diff shows: `from` to `to`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Range {
+    pub from: RangeStart,
+    /// Where it ends: a commit, or None for the working tree, untracked
+    /// files included.
+    pub to: Option<String>,
+    /// What the pane calls it where two ranges meet: `1ec007c..dde6cc9`.
+    pub label: String,
 }
 
-pub fn classify_diff_line(line: &str) -> DiffLineKind {
-    const HEADERS: [&str; 11] = [
-        "diff --git",
-        "index ",
-        "new file",
-        "deleted file",
-        "similarity ",
-        "dissimilarity ",
-        "rename ",
-        "copy ",
-        "old mode",
-        "new mode",
-        "Binary files",
-    ];
-    if line.starts_with("+++") || line.starts_with("---") {
-        DiffLineKind::Header
-    } else if line.starts_with('+') {
-        DiffLineKind::Add
-    } else if line.starts_with('-') {
-        DiffLineKind::Remove
-    } else if line.starts_with("@@") {
-        DiffLineKind::Hunk
-    } else if HEADERS.iter().any(|h| line.starts_with(h)) {
-        DiffLineKind::Header
-    } else {
-        DiffLineKind::Context
+/// Where a [`Range`] starts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RangeStart {
+    /// A commit: the first parent of the range's oldest one.
+    Rev(String),
+    /// git's empty tree: the range starts at a root commit.
+    Empty,
+    /// Where the range's end — HEAD, for the working tree — left `base`:
+    /// the range runs from the branch's first commit, merges of the base
+    /// included, and measured from the merge-base those merges add
+    /// nothing of the base's own.
+    MergeBase { base: String },
+}
+
+/// The commit a [`Range`] starts at, asked of git where it has to be.
+fn range_start(root: &Path, range: &Range) -> Result<String, String> {
+    match &range.from {
+        RangeStart::Rev(rev) => Ok(rev.clone()),
+        RangeStart::Empty => empty_tree(root).ok_or_else(|| "git hash-object failed".to_string()),
+        RangeStart::MergeBase { base } => {
+            let tip = range.to.as_deref().unwrap_or("HEAD");
+            let output = run_git(root, &["merge-base", tip, base])?;
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if output.status.success() && !text.is_empty() {
+                Ok(text)
+            } else {
+                Err(format!("no history in common with {base}"))
+            }
+        }
     }
 }
+
+/// What a diff with nothing to show says.
+pub const NO_TEXT: &str = "(no textual changes)";
 
 /// `git -C root`, with the locks git takes on its own initiative switched
 /// off. `git status` and `git diff` refresh the index's stat cache as a
@@ -158,40 +167,70 @@ pub fn parse_status_z(bytes: &[u8]) -> Vec<DiffFile> {
     files
 }
 
-/// The files behind a COMMIT LIST row other than the uncommitted one, in
-/// path order: a commit's against its first parent, or the branch's — its
-/// merge-base against the working tree, tracked changes staged or not and
-/// every untracked file. `Err` is a user-facing message.
+/// The files behind what the COMMIT LIST puts on screen other than the
+/// uncommitted changes, in path order: a commit's against its first
+/// parent, or every file any of a TOGETHER scope's ranges touch — one that
+/// ends at the working tree with its changes staged or not and every
+/// untracked file. `Err` is a user-facing message.
 pub fn scope_files(root: &Path, scope: &DiffScope) -> Result<Vec<DiffFile>, String> {
-    let mut args = vec!["diff", "--name-status", "-z", "-M", "--no-color"];
-    let parent;
     match scope {
-        DiffScope::Uncommitted => return changed_files(root),
-        DiffScope::Branch { merge_base } => args.push(merge_base),
-        DiffScope::Commit { sha, parent: from } => {
-            parent = match from {
+        DiffScope::Uncommitted => changed_files(root),
+        DiffScope::Commit { sha, parent } => {
+            let from = match parent {
                 Some(from) => from.clone(),
                 None => empty_tree(root).ok_or("git hash-object failed")?,
             };
-            args.extend([parent.as_str(), sha.as_str()]);
+            name_status(root, &from, Some(sha))
+        }
+        DiffScope::Ranges(ranges) => {
+            let mut files: Vec<DiffFile> = Vec::new();
+            for range in ranges {
+                let from = range_start(root, range)?;
+                let mut found = name_status(root, &from, range.to.as_deref())?;
+                if range.to.is_none() {
+                    found.extend(
+                        changed_files(root)?
+                            .into_iter()
+                            .filter(DiffFile::is_untracked),
+                    );
+                }
+                for file in found {
+                    match files.iter_mut().find(|f| f.path == file.path) {
+                        Some(seen) => seen.xy[0] = combined_status(seen.xy[0], file.xy[0]),
+                        None => files.push(file),
+                    }
+                }
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            Ok(files)
         }
     }
+}
+
+/// `git diff --name-status` from `from` to `to` (the working tree for
+/// None), renames detected.
+fn name_status(root: &Path, from: &str, to: Option<&str>) -> Result<Vec<DiffFile>, String> {
+    let mut args = vec!["diff", "--name-status", "-z", "-M", "--no-color", from];
+    args.extend(to);
     args.push("--");
     let output = run_git(root, &args)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git diff failed: {}", stderr.trim()));
     }
-    let mut files = parse_name_status_z(&output.stdout);
-    if matches!(scope, DiffScope::Branch { .. }) {
-        files.extend(
-            changed_files(root)?
-                .into_iter()
-                .filter(DiffFile::is_untracked),
-        );
-        files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(parse_name_status_z(&output.stdout))
+}
+
+/// The list's status letter for a file two ranges both touch: added by the
+/// first stays added (unless the second deletes it), deleted by the last
+/// is deleted, and anything else changed it.
+fn combined_status(first: char, then: char) -> char {
+    match (first, then) {
+        (a, b) if a == b => a,
+        (_, 'D') => 'D',
+        ('A', _) | ('?', _) => first,
+        _ => 'M',
     }
-    Ok(files)
 }
 
 /// Parse `git diff --name-status -z`: a status field (`M`, `A`, `D`, `T`,
@@ -264,18 +303,6 @@ pub fn line_changes(root: &Path, files: &[DiffFile]) -> Option<LineChanges> {
     }
     total.added += untracked_lines(root, files);
     Some(total)
-}
-
-/// The files and lines a checkout's working tree changed against `base`
-/// (a commit), as the COMMIT LIST's **All changes** row counts them: the
-/// tracked files from one `git diff <base> --numstat`, and every untracked
-/// one of `files` — the checkout's `changed_files` — read from disk within
-/// the caps above. None when git couldn't say.
-pub fn changes_since(root: &Path, base: &str, files: &[DiffFile]) -> Option<(usize, LineChanges)> {
-    let (tracked, mut lines) = tracked_numstat(root, base)?;
-    let untracked: Vec<DiffFile> = files.iter().filter(|f| f.is_untracked()).cloned().collect();
-    lines.added += untracked_lines(root, &untracked);
-    Some((tracked + untracked.len(), lines))
 }
 
 /// `git diff <base> --numstat`, summed.
@@ -425,20 +452,53 @@ pub fn diff_for(root: &Path, file: &DiffFile, head_ok: bool) -> String {
     diff_between(root, file, head, false)
 }
 
-/// One file's diff under any COMMIT LIST row: [`diff_for`] for the
-/// uncommitted changes, and for the others the same `git diff` taken from
-/// the branch's merge-base, or across one commit — with renames detected,
-/// as the row's file list (`scope_files`) detected them.
+/// One file's diff under any scope: [`diff_for`] for the uncommitted
+/// changes, and for the others the same `git diff` across one commit, or
+/// across each of a TOGETHER scope's ranges — with renames detected, as
+/// the scope's file list (`scope_files`) detected them.
+///
+/// A file one range touches reads as that range's diff and nothing else.
+/// One that two or more touch reads as each range's diff in turn, oldest
+/// first, each behind a `diff_doc::RANGE_MARK` line naming its range: the
+/// commits between them were left out, and a diff that ran across them
+/// would put their changes back in.
 pub fn scoped_diff(root: &Path, scope: &DiffScope, file: &DiffFile, head_ok: bool) -> String {
     match scope {
         DiffScope::Uncommitted => diff_for(root, file, head_ok),
-        DiffScope::Branch { merge_base } => diff_between(root, file, &[merge_base.as_str()], true),
         DiffScope::Commit { sha, parent } => {
             let parent = match parent.clone().or_else(|| empty_tree(root)) {
                 Some(parent) => parent,
                 None => return "git hash-object failed".to_string(),
             };
             diff_between(root, file, &[parent.as_str(), sha.as_str()], true)
+        }
+        DiffScope::Ranges(ranges) => {
+            let mut parts: Vec<(&str, String)> = Vec::new();
+            for range in ranges {
+                // An untracked file is only ever in the working tree.
+                if file.is_untracked() && range.to.is_some() {
+                    continue;
+                }
+                let from = match range_start(root, range) {
+                    Ok(from) => from,
+                    Err(msg) => return msg,
+                };
+                let mut revs = vec![from.as_str()];
+                revs.extend(range.to.as_deref());
+                let text = diff_between(root, file, &revs, true);
+                if text != NO_TEXT {
+                    parts.push((&range.label, text));
+                }
+            }
+            match parts.len() {
+                0 => NO_TEXT.to_string(),
+                1 => parts.remove(0).1,
+                _ => parts
+                    .into_iter()
+                    .map(|(label, text)| format!("{}{label}\n{text}", crate::diff_doc::RANGE_MARK))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }
         }
     }
 }
@@ -487,7 +547,7 @@ fn diff_between(root: &Path, file: &DiffFile, revs: &[&str], renames: bool) -> S
     }
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {
-        return "(no textual changes)".to_string();
+        return NO_TEXT.to_string();
     }
     cap_lines(&text, MAX_DIFF_LINES, false)
 }
@@ -962,47 +1022,98 @@ mod tests {
         assert_eq!(files[0].xy[0], 'A');
         assert!(scoped_diff(&repo, &root, &files[0], true).contains("+old line"));
 
-        let branch = DiffScope::Branch {
-            merge_base: root_sha.clone(),
-        };
+        let branch = DiffScope::Ranges(vec![Range {
+            from: RangeStart::Rev(root_sha.clone()),
+            to: None,
+            label: "the branch".into(),
+        }]);
         let files = scope_files(&repo, &branch).unwrap();
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["second.txt", "tracked.txt", "wip.txt"]);
         assert!(files[2].is_untracked());
         assert!(scoped_diff(&repo, &branch, &files[2], true).contains("+wip"));
-        assert_eq!(
-            changes_since(&repo, &root_sha, &changed_files(&repo).unwrap()),
-            Some((
-                3,
-                LineChanges {
-                    added: 3,
-                    removed: 1
-                }
-            )),
-            "second.txt and wip.txt add a line each, tracked.txt swaps one"
-        );
     }
 
+    /// Two ranges with a commit left out between them: the files are both
+    /// ranges' together, and a file both touch reads as each range's diff
+    /// in turn, behind its label — never the left-out commit's change.
     #[test]
-    fn classify_diff_line_covers_headers_vs_adds() {
-        assert_eq!(classify_diff_line("+added"), DiffLineKind::Add);
-        assert_eq!(classify_diff_line("+++ b/file"), DiffLineKind::Header);
-        assert_eq!(classify_diff_line("-removed"), DiffLineKind::Remove);
-        assert_eq!(classify_diff_line("--- a/file"), DiffLineKind::Header);
-        assert_eq!(classify_diff_line("@@ -1,3 +1,4 @@"), DiffLineKind::Hunk);
-        assert_eq!(
-            classify_diff_line("diff --git a/x b/x"),
-            DiffLineKind::Header
+    fn ranges_with_a_gap_show_each_range_in_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_repo(&dir);
+        let base = head_oid(&repo).unwrap();
+        let step = |text: &str, other: Option<&str>, msg: &str| {
+            std::fs::write(repo.join("tracked.txt"), text).unwrap();
+            if let Some(other) = other {
+                std::fs::write(repo.join(other), "x\n").unwrap();
+            }
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", msg]);
+            head_oid(&repo).unwrap()
+        };
+        let one = step("one\n", Some("a.txt"), "one");
+        let skipped = step("skipped\n", None, "skipped");
+        let three = step("three\n", Some("c.txt"), "three");
+        let scope = DiffScope::Ranges(vec![
+            Range {
+                from: RangeStart::Rev(base),
+                to: Some(one),
+                label: "first".into(),
+            },
+            Range {
+                from: RangeStart::Rev(skipped),
+                to: Some(three),
+                label: "second".into(),
+            },
+        ]);
+        let files = scope_files(&repo, &scope).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "c.txt", "tracked.txt"]);
+        let tracked = files.iter().find(|f| f.path == "tracked.txt").unwrap();
+        let diff = scoped_diff(&repo, &scope, tracked, true);
+        let mark = crate::diff_doc::RANGE_MARK;
+        let first = diff.find(&format!("{mark}first")).expect("the first range");
+        let second = diff
+            .find(&format!("{mark}second"))
+            .expect("the second range");
+        assert!(first < second, "oldest first: {diff}");
+        assert!(diff.contains("+one") && diff.contains("+three"), "{diff}");
+        assert!(
+            !diff.contains("+skipped"),
+            "the left-out commit's line never shows as added: {diff}"
         );
-        assert_eq!(
-            classify_diff_line("index 123..456 100644"),
-            DiffLineKind::Header
-        );
-        assert_eq!(
-            classify_diff_line("Binary files a/x and b/x differ"),
-            DiffLineKind::Header
-        );
-        assert_eq!(classify_diff_line(" context"), DiffLineKind::Context);
+        // A file one range touches is that range's diff alone.
+        let a = files.iter().find(|f| f.path == "a.txt").unwrap();
+        let diff = scoped_diff(&repo, &scope, a, true);
+        assert!(!diff.contains(mark) && diff.contains("+x"), "{diff}");
+    }
+
+    /// A range from the branch's first commit is measured from where its
+    /// end left the base: main merged in on the way adds nothing.
+    #[test]
+    fn a_range_from_the_merge_base_leaves_out_what_a_merge_brought_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_repo(&dir);
+        git(&repo, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(repo.join("mine.txt"), "mine\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "mine"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("theirs.txt"), "theirs\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "theirs"]);
+        git(&repo, &["checkout", "-q", "feat"]);
+        git(&repo, &["merge", "-q", "--no-edit", "main"]);
+        let scope = DiffScope::Ranges(vec![Range {
+            from: RangeStart::MergeBase {
+                base: "main".into(),
+            },
+            to: Some(head_oid(&repo).unwrap()),
+            label: "all".into(),
+        }]);
+        let files = scope_files(&repo, &scope).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["mine.txt"], "theirs.txt came in with the merge");
     }
 
     fn git(repo: &PathBuf, args: &[&str]) {

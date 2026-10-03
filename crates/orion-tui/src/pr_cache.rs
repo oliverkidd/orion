@@ -57,8 +57,11 @@ const DIFFS_DIR: &str = "diffs";
 /// it — `#[serde(default)]` covers those. 2: an open row's `head` is the
 /// checkout's branch (`pull_request::checkout_branch`), not `gh`'s bare
 /// `headRefName` — a fork row cached under 1 would launch its PR SESSION
-/// into whichever checkout of ours shares the fork branch's name.
-const VERSION: u32 = 2;
+/// into whichever checkout of ours shares the fork branch's name. 3: a
+/// body carries the PULL REQUEST PAGE's tabs — files, commits, checks,
+/// reviews — and one cached under 2 would paint a pull request with none
+/// of them, its counts reading zero rather than loading.
+const VERSION: u32 = 3;
 
 /// The document on disk. Keyed the way the app keys the same things:
 /// checkout rows by worktree id, open lists by project id, bodies by URL.
@@ -380,6 +383,7 @@ mod tests {
                 review_state: "APPROVED".into(),
                 body: "nice".into(),
             }],
+            ..Default::default()
         }
     }
 

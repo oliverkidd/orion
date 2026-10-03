@@ -22,6 +22,7 @@ orion config <cmd>         back up, restore or locate this machine's settings
 orion browser              serve this TUI in a web browser via ttyd
 orion ssh <host>           open orion on a remote host over ssh
 orion tunnel <host>        open a remote host's orion in a tab here
+orion doctor               check what orion needs on this machine
 orion upgrade              install the latest published orion
 ```
 
@@ -82,6 +83,41 @@ orion config harnesses         # print the effective harness registry: every har
 ```
 
 See [Configuration](configuration.md#backup-restore-and-other-machines).
+
+## Checking the machine
+
+```sh
+orion doctor             # one line for each thing orion leans on, with the fix for a missing one:
+                          # git, gh (installed and signed in: `gh auth status`), the File editor
+                          # and what really opens when it isn't installed, the Open in app editor,
+                          # Ghostty and orion's keybind block in its config, the CLI of every
+                          # agent turned on, and the LINEAR_API_KEY of the project you are
+                          # standing in — where it was found, never the key. It never installs
+                          # anything; the fix is the command to run (the same ones `i` runs from
+                          # Settings and first-run setup). Exits non-zero only when something
+                          # orion can't do without is missing: git, or any editor to open files in
+orion doctor --json      # the same report as {"ok": …, "checks": [{name, status, detail, fix,
+                          # required}, …]}; status is ok, missing or skipped
+```
+
+```
+  ✓ git               git version 2.54.0
+  ✓ gh                signed in to GitHub
+  ✗ File editor       hx isn't installed — files open in fresh instead
+                      fix: brew install helix
+  ✓ Open in app       auto → Cursor
+  ✓ Ghostty           installed
+  ✗ Ghostty keybinds  orion's block in ~/.config/ghostty/config is out of date
+                      fix: open orion in Ghostty (it rewrites the block), then reload Ghostty's config (⌘⇧,)
+  ✓ Agent claude      ~/.local/bin/claude
+  ✗ Agent codex       `codex` isn't on PATH
+                      fix: brew install --cask codex
+  – Linear            no LINEAR_API_KEY in my-app's .env.local or .env — only the Linear view needs one
+
+Everything orion needs is here.
+```
+
+See [Installing editors and agent CLIs](configuration.md#installing-editors-and-agent-clis).
 
 ## Other machines, other screens
 

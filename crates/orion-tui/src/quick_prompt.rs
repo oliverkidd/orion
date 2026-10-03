@@ -8,11 +8,11 @@
 //! and MODEL / EFFORT the `quick_prompt_kind` SETTING resolves to, which
 //! AGENT PRESET (if any) wraps the text, and the [`QuickTarget`] it lands
 //! in — the selected WORKTREE, or one that does not exist yet — plus the
-//! two pickers that rewrite it for one launch (`Tab`, `Shift+Tab`), the
-//! [`QuickReturn`] they carry so the round trip loses neither the spec
-//! nor the typed text, and the `Ctrl+N` toggle that flips the target
-//! between the selected checkout and a fresh worktree from any panel
-//! (`toggle_new_worktree`). The dialog itself is an ordinary multi-line
+//! two pickers that rewrite it for one launch (`Tab`, `Shift+Tab`) and
+//! the [`QuickReturn`] they — and the box's other pickers, the worktree
+//! one whose first row is a fresh worktree among them — carry so the
+//! round trip loses neither the spec nor the typed text. The dialog
+//! itself is an ordinary multi-line
 //! `PromptDialog` (`PromptKind::QuickPrompt`) drawn by `ui::draw_overlay`,
 //! and the create it ends in goes through `event_loop::create_agent` like
 //! every other session, with the composed text as the STARTING PROMPT
@@ -65,18 +65,19 @@ pub struct QuickLaunch {
     /// The GitHub issue this launch is for, when the box was opened from
     /// the ISSUES MODAL: named in the title, sent to the DAEMON as the
     /// session's persisted context (`CreateAgent::issue_url`), the name
-    /// of the worktree `Ctrl+N` cuts, and the task when the box is sent
-    /// empty. Kept across the box's pickers — the harness and the preset
+    /// of the fresh worktree the WORKTREE PICKER offers, and the task when
+    /// the box is sent empty. Kept across the box's pickers — the harness and the preset
     /// change what runs, not what it is for.
     pub issue: Option<crate::issues::IssueRef>,
     /// The pull request this launch is for, when the box was opened from
     /// a PROJECT OPEN PRS GROUP row (`e` on it): named in the title and
-    /// the target row, and sent to the DAEMON as a PR SESSION
+    /// the header's worktree field, and sent to the DAEMON as a PR SESSION
     /// (`CreatePrAgent`) — it runs in the PROJECT's checkout of the PR's
     /// head branch, reused when one is there and cut by the DAEMON
     /// otherwise, never in `target`, which only names the PROJECT (its
     /// ROOT WORKTREE). Kept across the box's pickers, as the issue is;
-    /// `Ctrl+N` is refused, the checkout being the DAEMON's to pick.
+    /// the WORKTREE PICKER is refused, the checkout being the DAEMON's to
+    /// pick.
     pub pr: Option<PrLaunch>,
     /// The LINEAR issues this launch fixes together, when the box was
     /// opened from ⌘L: named in the title, the name of the worktree a
@@ -245,8 +246,8 @@ pub(crate) fn draft_of_return(back: &QuickReturn) -> Option<QuickDraft> {
 
 /// Open a fresh QUICK PROMPT box on `launch`, taking back the DRAFT the
 /// last abandoned box left — every way into the box but the ones that
-/// carry their own text (a picker's return trip, `Ctrl+N`, a refused
-/// create) comes through here.
+/// carry their own text (a picker's return trip, a refused create) comes
+/// through here.
 ///
 /// The text always comes back: it is the user's, not the target's. The
 /// spec comes back with it only when the parked box was aimed at the same
@@ -557,8 +558,9 @@ impl QuickLaunch {
     }
 
     /// Does Enter cut a fresh worktree before it launches? The box's frame
-    /// turns green and its target row wears a NEW WORKTREE chip while so,
-    /// whether the target came from the WORKTREES PANEL or from `Ctrl+N`.
+    /// turns green and its header reads `new worktree <branch>` while so,
+    /// whether the target came from the WORKTREES PANEL or from the
+    /// WORKTREE PICKER's first row.
     pub fn is_new_worktree(&self) -> bool {
         matches!(self.target, QuickTarget::NewWorktree { .. })
     }
@@ -628,7 +630,7 @@ pub(crate) fn open_for(app: &mut App, target: QuickTarget) {
 
 /// `p` with the Worktrees cursor on an OPEN PRS row: the box for a PR
 /// SESSION on that pull request, titled for it (`Quick prompt · PR #42`),
-/// its target row naming the PR and its head branch. Enter sends one
+/// its header naming the PR's head branch. Enter sends one
 /// `CreatePrAgent` — the typed text its STARTING PROMPT — and, when the
 /// PROJECT has no checkout on the head branch yet, puts the stand-in rows
 /// up at once, nested under the pull request where the DAEMON's real row
@@ -732,56 +734,7 @@ pub(crate) fn backdrop_box(back: &QuickReturn) -> PromptDialog {
     )
 }
 
-/// `Ctrl+N` in the box: flip this one launch between the selected
-/// WORKTREE and a fresh one, from whichever panel `p` was pressed in —
-/// the WORKTREES PANEL's "cut a worktree first" without walking over to
-/// it, and the way back into the checkout under the cursor from there.
-/// Flipping on mints the same random branch `n` would offer — or, for an
-/// ISSUE SESSION, one named after the issue (`issue-15-fix-login`); flipping off
-/// needs a real checkout under the cursor (not an OPEN PRS row, not a
-/// stand-in git is still cutting) and says so while keeping the fresh one
-/// otherwise. A PR SESSION's box has nothing to flip: the DAEMON picks
-/// its checkout (the PR head branch's own), so the key only says so. The
-/// box is rebuilt so its title and frame follow the target, with the
-/// typed text and the caret exactly where they were.
-pub(crate) fn toggle_new_worktree(app: &mut App, launch: QuickLaunch, input: TextInput) {
-    if launch.pr.is_some() {
-        app.flash =
-            Some("quick prompt: a PR session runs in the pull request's own checkout".into());
-        return;
-    }
-    let target = match &launch.target {
-        QuickTarget::NewWorktree { .. } => match app.selected_worktree().map(|w| w.id.clone()) {
-            None => Err("quick prompt: no worktree under the cursor — keeping the new one"),
-            Some(worktree) if app.is_placeholder_worktree(&worktree) => {
-                Err("quick prompt: worktree is still being created — keeping the new one")
-            }
-            Some(worktree) => Ok(QuickTarget::Worktree(worktree)),
-        },
-        QuickTarget::Worktree(id) => match app
-            .tree
-            .worktrees
-            .iter()
-            .find(|w| &w.id == id)
-            .map(|w| w.project_id.clone())
-        {
-            None => Err("quick prompt: worktree no longer exists"),
-            Some(project) => Ok(crate::launcher::fresh_worktree(app, project, &launch)),
-        },
-    };
-    match target {
-        Err(msg) => app.flash = Some(msg.into()),
-        Ok(target) => {
-            let launch = QuickLaunch { target, ..launch };
-            crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
-            if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
-                prompt.input = input;
-            }
-        }
-    }
-}
-
-/// The branch the box's target row names: the selected checkout's, or the
+/// The branch the box's header names: the selected checkout's, or the
 /// one Enter will cut. None only if the selected worktree vanished while
 /// the box was up.
 pub(crate) fn target_branch(app: &App, launch: &QuickLaunch) -> Option<String> {
@@ -1203,8 +1156,8 @@ mod tests {
         };
         assert!(wrapped.launches_empty());
 
-        // `Ctrl+N` rebuilds the launch around a new target; neither
-        // answer changes with it.
+        // The WORKTREE PICKER rebuilds the launch around a new target;
+        // neither answer changes with it.
         let flipped = QuickLaunch {
             target: new_worktree("fix-login"),
             ..plain

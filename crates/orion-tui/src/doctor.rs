@@ -1,0 +1,749 @@
+//! `orion doctor`: what this machine has of what orion leans on, a line
+//! each — git, gh and its sign-in, the **File editor** and what really
+//! opens, the **Open in app** editor, Ghostty and orion's keybind block in
+//! its config, the CLI of every agent turned on, and the project's
+//! `LINEAR_API_KEY` (where it was found, never the key) — with the command
+//! that fixes whatever is missing. It never installs anything itself:
+//! `install.sh` and the onboarding wizard do, with the same commands
+//! (`install`).
+//!
+//! Only git, and an editor files can open in, are required; the exit code
+//! is non-zero only when one of those is missing. Everything is probed
+//! against a [`Machine`] — a PATH, a home, the Applications folders — so
+//! the tests name their own.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::Serialize;
+
+use crate::config::{Config, OutsideTerminal};
+use crate::install::{which, Tools};
+
+/// How a check came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    /// ✓ here and working.
+    Ok,
+    /// ✗ missing, or not working: the fix says what to run.
+    Missing,
+    /// – nothing to check: not in use, or not on this platform.
+    Skipped,
+}
+
+impl Status {
+    fn mark(self) -> &'static str {
+        match self {
+            Status::Ok => "✓",
+            Status::Missing => "✗",
+            Status::Skipped => "–",
+        }
+    }
+}
+
+/// One line of the report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Check {
+    pub name: String,
+    pub status: Status,
+    pub detail: String,
+    /// The command — or the page — that fixes a missing one.
+    pub fix: Option<String>,
+    /// orion can't do its job without it: missing, the exit code says so.
+    pub required: bool,
+}
+
+impl Check {
+    fn new(name: impl Into<String>, status: Status, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status,
+            detail: detail.into(),
+            fix: None,
+            required: false,
+        }
+    }
+
+    fn fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into());
+        self
+    }
+
+    fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+
+    /// Missing, and orion can't do without it.
+    pub fn fails(&self) -> bool {
+        self.required && self.status == Status::Missing
+    }
+}
+
+/// Where the checks look: the PATH programs are found and run on, the
+/// home (Ghostty's config), the folders holding an `Applications` folder,
+/// the directory whose project is checked for Linear, and the variables
+/// that steer the editor and Ghostty's config.
+#[derive(Debug, Clone, Default)]
+pub struct Machine {
+    pub path: OsString,
+    pub home: Option<PathBuf>,
+    pub app_roots: Vec<PathBuf>,
+    pub cwd: PathBuf,
+    pub macos: bool,
+    /// `ORION_EDITOR`.
+    pub editor_env: Option<String>,
+    /// `ORION_GHOSTTY_CONFIG`: another file, or `off`.
+    pub ghostty_config: Option<String>,
+    pub xdg_config_home: Option<PathBuf>,
+}
+
+impl Machine {
+    /// This machine, as orion would see it from this shell.
+    pub fn here() -> Self {
+        let home = orion_core::env::home_dir();
+        let macos = cfg!(target_os = "macos");
+        let mut app_roots = Vec::new();
+        if macos {
+            app_roots.push(PathBuf::from("/"));
+            app_roots.extend(home.clone());
+        }
+        Self {
+            path: std::env::var_os("PATH").unwrap_or_default(),
+            home,
+            app_roots,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            macos,
+            editor_env: orion_core::env::non_empty(orion_core::env::EDITOR),
+            ghostty_config: orion_core::env::non_empty(orion_core::env::GHOSTTY_CONFIG),
+            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        }
+    }
+
+    fn find(&self, program: &str) -> Option<PathBuf> {
+        which(&self.path, program)
+    }
+
+    fn tools(&self) -> Tools {
+        Tools::on(&self.path, false)
+    }
+}
+
+/// How long a probe (`gh auth status` asks GitHub) may take before it
+/// counts as failed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `program args` with `m`'s PATH in `cwd`: whether it succeeded, and
+/// its first line of output. None when it could not be started or ran
+/// past [`PROBE_TIMEOUT`].
+fn probe(m: &Machine, program: &Path, args: &[&str], cwd: &Path) -> Option<(bool, String)> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .env("PATH", &m.path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < PROBE_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut out = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut out);
+    }
+    let first = out.lines().map(str::trim).find(|l| !l.is_empty());
+    Some((status.success(), first.unwrap_or_default().to_string()))
+}
+
+/// Every check, in the report's order.
+pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
+    let mut out = vec![git(m), gh(m), editor(cfg, m), open_in_app(cfg, m)];
+    out.extend(ghostty(cfg, m));
+    out.extend(agents(cfg, m));
+    out.push(linear(m));
+    out
+}
+
+fn git(m: &Machine) -> Check {
+    let fix = if m.macos {
+        "xcode-select --install"
+    } else {
+        "https://git-scm.com/downloads"
+    };
+    match m.find("git") {
+        None => Check::new(
+            "git",
+            Status::Missing,
+            "not on PATH — orion needs git for every project",
+        )
+        .fix(fix)
+        .required(),
+        Some(git) => match probe(m, &git, &["--version"], &m.cwd) {
+            Some((true, version)) => Check::new("git", Status::Ok, version).required(),
+            _ => Check::new(
+                "git",
+                Status::Missing,
+                format!("{} doesn't run", git.display()),
+            )
+            .fix(fix)
+            .required(),
+        },
+    }
+}
+
+/// gh, which pull requests and issues are read with: installed, and
+/// signed in.
+fn gh(m: &Machine) -> Check {
+    let Some(gh) = m.find("gh") else {
+        let fix = match m.tools().brew {
+            Some(_) => "brew install gh".to_string(),
+            None => "https://github.com/cli/cli#installation".to_string(),
+        };
+        return Check::new(
+            "gh",
+            Status::Missing,
+            "not on PATH — pull requests and issues need it",
+        )
+        .fix(fix);
+    };
+    match probe(m, &gh, &["auth", "status"], &m.cwd) {
+        Some((true, _)) => Check::new("gh", Status::Ok, "signed in to GitHub"),
+        _ => Check::new("gh", Status::Missing, "installed, not signed in").fix("gh auth login"),
+    }
+}
+
+/// The **File editor**: the one chosen, and what opens when it is missing.
+fn editor(cfg: &Config, m: &Machine) -> Check {
+    let installed = |program: &str| m.find(program).is_some();
+    let resolved = crate::editor::resolve(m.editor_env.as_deref(), &cfg.editor, installed);
+    let program = resolved
+        .command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let source = if m.editor_env.is_some() {
+        " (ORION_EDITOR)"
+    } else {
+        ""
+    };
+    let fix_for = |editor: &str| {
+        m.tools().editor_plan(editor).map(|plan| {
+            if plan.runnable() {
+                plan.line
+            } else {
+                plan.link.to_string()
+            }
+        })
+    };
+    match (&resolved.missing, installed(&program)) {
+        (None, true) => Check::new(
+            "File editor",
+            Status::Ok,
+            format!("{}{source}", resolved.command),
+        )
+        .required(),
+        (Some(missing), _) => {
+            let mut check = Check::new(
+                "File editor",
+                Status::Missing,
+                format!(
+                    "{missing}{source} isn't installed — files open in {} instead",
+                    resolved.command
+                ),
+            );
+            if let Some(fix) = fix_for(missing) {
+                check = check.fix(fix);
+            }
+            check
+        }
+        (None, false) => {
+            let mut check = Check::new(
+                "File editor",
+                Status::Missing,
+                format!(
+                    "{program}{source} isn't installed, and none of fresh, micro, edit or vim \
+                     is either — no file can open"
+                ),
+            )
+            .required();
+            if let Some(fix) = fix_for(&program).or_else(|| fix_for(crate::editor::DEFAULT_EDITOR))
+            {
+                check = check.fix(fix);
+            }
+            check
+        }
+    }
+}
+
+/// **Open in app**: the app `⌘O` hands a file to, as this machine
+/// resolves the setting.
+fn open_in_app(cfg: &Config, m: &Machine) -> Check {
+    use crate::outside_editor::{resolve, Choice, Places};
+    let places = Places {
+        roots: m.app_roots.clone(),
+        path: Some(m.path.clone()),
+    };
+    let choice = Choice::parse(&cfg.outside_editor);
+    match resolve(choice, &places) {
+        Ok(target) => Check::new(
+            "Open in app",
+            Status::Ok,
+            match choice {
+                Choice::Auto => format!("auto → {}", target.name),
+                _ => target.name.to_string(),
+            },
+        ),
+        Err(why) => Check::new("Open in app", Status::Missing, why)
+            .fix("set Open in app to auto in Settings → General, or install the app"),
+    }
+}
+
+/// Ghostty, on a Mac: installed, and — with **Ghostty keybinds** on —
+/// orion's block current in its config, so ⌘ chords reach orion.
+fn ghostty(cfg: &Config, m: &Machine) -> Vec<Check> {
+    use crate::ghostty_config::{block_state, config_path, BlockState};
+    if !m.macos {
+        return vec![Check::new("Ghostty", Status::Skipped, "macOS only")];
+    }
+    let app = crate::event_loop::ghostty_app_in(&m.app_roots);
+    let wanted = cfg.outside_terminal() == OutsideTerminal::Ghostty;
+    let installed = match (&app, wanted) {
+        (Some(_), _) => Check::new("Ghostty", Status::Ok, "installed"),
+        (None, true) => Check::new(
+            "Ghostty",
+            Status::Missing,
+            "not installed — the outside terminal opens in Terminal.app instead",
+        )
+        .fix("https://ghostty.org/download"),
+        (None, false) => Check::new(
+            "Ghostty",
+            Status::Skipped,
+            "not installed; Terminal.app is the outside terminal",
+        ),
+    };
+    let keybinds = if app.is_none() {
+        None
+    } else if !cfg.ghostty_keybinds {
+        Some(Check::new(
+            "Ghostty keybinds",
+            Status::Skipped,
+            "off in Settings → General — Ghostty's config is left alone",
+        ))
+    } else {
+        let path = match m.ghostty_config.as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("off") => None,
+            Some(v) => Some(PathBuf::from(v)),
+            None => m
+                .home
+                .as_deref()
+                .map(|home| config_path(home, m.xdg_config_home.as_deref())),
+        };
+        Some(match path {
+            None => Check::new(
+                "Ghostty keybinds",
+                Status::Skipped,
+                "ORION_GHOSTTY_CONFIG=off — Ghostty's config is left alone",
+            ),
+            Some(path) => {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let shown = crate::skills::tilde(&path, m.home.as_deref());
+                let fix = "open orion in Ghostty (it rewrites the block), then reload Ghostty's \
+                           config (⌘⇧,)";
+                match block_state(&text, &cfg.keymap()) {
+                    BlockState::Current => Check::new(
+                        "Ghostty keybinds",
+                        Status::Ok,
+                        format!("orion's block is current in {shown}"),
+                    ),
+                    BlockState::Stale => Check::new(
+                        "Ghostty keybinds",
+                        Status::Missing,
+                        format!("orion's block in {shown} is out of date"),
+                    )
+                    .fix(fix),
+                    BlockState::Missing => Check::new(
+                        "Ghostty keybinds",
+                        Status::Missing,
+                        format!("no orion block in {shown} — Ghostty keeps ⌘K, ⌘N, ⌘⇧P…"),
+                    )
+                    .fix(fix),
+                }
+            }
+        })
+    };
+    std::iter::once(installed).chain(keybinds).collect()
+}
+
+/// The CLI of every agent turned on.
+fn agents(cfg: &Config, m: &Machine) -> Vec<Check> {
+    let on: Vec<_> = cfg
+        .raw_harness_registry()
+        .into_iter()
+        .filter(|entry| entry.enabled)
+        .collect();
+    if on.is_empty() {
+        return vec![Check::new(
+            "Agents",
+            Status::Skipped,
+            "none turned on — Settings → Agents",
+        )];
+    }
+    let tools = m.tools();
+    on.into_iter()
+        .map(|entry| {
+            let name = format!("Agent {}", entry.id);
+            let program = entry.program.trim().to_string();
+            match m.find(&program) {
+                Some(path) => Check::new(
+                    name,
+                    Status::Ok,
+                    crate::skills::tilde(&path, m.home.as_deref()),
+                ),
+                None => {
+                    let check =
+                        Check::new(name, Status::Missing, format!("`{program}` isn't on PATH"));
+                    match tools.agent_plan(&program) {
+                        Some(plan) if plan.runnable() => check.fix(plan.line),
+                        Some(plan) => check.fix(plan.link),
+                        None => check,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// The `LINEAR_API_KEY` of the project the current directory is in —
+/// where it was found, never the key.
+fn linear(m: &Machine) -> Check {
+    let root = m
+        .find("git")
+        .and_then(|git| probe(m, &git, &["rev-parse", "--show-toplevel"], &m.cwd))
+        .filter(|(ok, root)| *ok && !root.is_empty())
+        .map_or_else(|| m.cwd.clone(), |(_, root)| PathBuf::from(root));
+    let project = root.file_name().map_or_else(
+        || root.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    match crate::linear::key_source(&root) {
+        Some(source) => Check::new(
+            "Linear",
+            Status::Ok,
+            format!("{project}'s LINEAR_API_KEY {}", source.label()),
+        ),
+        None => Check::new(
+            "Linear",
+            Status::Skipped,
+            format!(
+                "no LINEAR_API_KEY in {project}'s .env.local or .env — only the Linear view needs \
+                 one"
+            ),
+        ),
+    }
+}
+
+/// The report as `orion doctor` prints it: a line a check, its fix under
+/// it, then a word on the whole.
+pub fn render(checks: &[Check]) -> String {
+    let width = checks
+        .iter()
+        .map(|c| c.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for check in checks {
+        out.push_str(&format!(
+            "  {} {:<width$}  {}\n",
+            check.status.mark(),
+            check.name,
+            check.detail
+        ));
+        if let Some(fix) = &check.fix {
+            out.push_str(&format!("    {:<width$}  fix: {fix}\n", ""));
+        }
+    }
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.fails())
+        .map(|c| c.name.as_str())
+        .collect();
+    out.push('\n');
+    if failed.is_empty() {
+        out.push_str("Everything orion needs is here.\n");
+    } else {
+        out.push_str(&format!("orion needs: {}.\n", failed.join(", ")));
+    }
+    out
+}
+
+/// The report as JSON: `{"ok": …, "checks": [{name, status, detail, fix,
+/// required}, …]}`.
+pub fn render_json(checks: &[Check]) -> String {
+    let ok = !checks.iter().any(Check::fails);
+    serde_json::to_string_pretty(&serde_json::json!({ "ok": ok, "checks": checks }))
+        .unwrap_or_default()
+}
+
+/// `orion doctor [--json]`: print the report for this machine and the
+/// config here. True when nothing required is missing.
+pub fn run(json: bool) -> bool {
+    let cfg = Config::load();
+    let checks = checks(&cfg, &Machine::here());
+    if json {
+        println!("{}", render_json(&checks));
+    } else {
+        print!("{}", render(&checks));
+    }
+    !checks.iter().any(Check::fails)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A machine under a temp dir: a `bin` of stub programs as its whole
+    /// PATH, a home, an Applications root, and a project folder.
+    struct Stubs {
+        dir: tempfile::TempDir,
+    }
+
+    impl Stubs {
+        fn new() -> Self {
+            let stubs = Self {
+                dir: tempfile::tempdir().unwrap(),
+            };
+            for sub in ["bin", "home", "root/Applications", "project"] {
+                std::fs::create_dir_all(stubs.dir.path().join(sub)).unwrap();
+            }
+            stubs
+        }
+
+        /// A stub `name` running `body`.
+        fn program(&self, name: &str, body: &str) -> &Self {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.dir.path().join("bin").join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            self
+        }
+
+        fn machine(&self) -> Machine {
+            let root = self.dir.path();
+            Machine {
+                path: std::env::join_paths([root.join("bin")]).unwrap(),
+                home: Some(root.join("home")),
+                app_roots: vec![root.join("root")],
+                cwd: root.join("project"),
+                macos: true,
+                editor_env: None,
+                ghostty_config: None,
+                xdg_config_home: None,
+            }
+        }
+    }
+
+    /// Claude on, everything else off — Grok Build included.
+    fn claude_only(extra: &str) -> Config {
+        let json = format!(
+            r#"{{"claude_enabled": true, "codex_enabled": false, "cursor_enabled": false,
+                "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false,
+                "harnesses": {{"grok": {{"enabled": false}}}}{extra}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn named<'a>(checks: &'a [Check], name: &str) -> &'a Check {
+        checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no {name} in {checks:#?}"))
+    }
+
+    /// Everything there: every line ✓, nothing required missing.
+    #[test]
+    fn a_machine_with_everything_passes() {
+        let stubs = Stubs::new();
+        stubs
+            .program("git", r#"echo "git version 9.9.9""#)
+            .program("gh", "exit 0")
+            .program("fresh", "exit 0")
+            .program("claude", "exit 0");
+        let checks = checks(&claude_only(""), &stubs.machine());
+        assert_eq!(named(&checks, "git").detail, "git version 9.9.9");
+        assert_eq!(named(&checks, "gh").status, Status::Ok);
+        assert_eq!(named(&checks, "File editor").detail, "fresh");
+        assert_eq!(named(&checks, "Agent claude").status, Status::Ok);
+        assert!(!checks.iter().any(Check::fails));
+        let report = render(&checks);
+        assert!(report.contains("✓ git"), "{report}");
+        assert!(
+            report.ends_with("Everything orion needs is here.\n"),
+            "{report}"
+        );
+    }
+
+    /// No git: required, the fix named, the exit code non-zero.
+    #[test]
+    fn missing_git_is_the_one_failure() {
+        let stubs = Stubs::new();
+        stubs.program("fresh", "exit 0");
+        let checks = checks(&claude_only(""), &stubs.machine());
+        let git = named(&checks, "git");
+        assert_eq!(git.status, Status::Missing);
+        assert_eq!(git.fix.as_deref(), Some("xcode-select --install"));
+        assert!(git.fails());
+        assert!(render(&checks).contains("orion needs: git."));
+        let json: serde_json::Value = serde_json::from_str(&render_json(&checks)).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["checks"][0]["status"], "missing");
+    }
+
+    /// gh there but signed out: ✗ with `gh auth login`; gh missing: its
+    /// install, by Homebrew when there is one. Neither is required.
+    #[test]
+    fn gh_is_checked_for_its_sign_in() {
+        let stubs = Stubs::new();
+        stubs.program("git", "echo git").program("gh", "exit 1");
+        let check = gh(&stubs.machine());
+        assert_eq!(check.detail, "installed, not signed in");
+        assert_eq!(check.fix.as_deref(), Some("gh auth login"));
+        assert!(!check.fails());
+
+        let stubs = Stubs::new();
+        stubs.program("brew", "exit 0");
+        assert_eq!(gh(&stubs.machine()).fix.as_deref(), Some("brew install gh"));
+        let stubs = Stubs::new();
+        assert_eq!(
+            gh(&stubs.machine()).fix.as_deref(),
+            Some("https://github.com/cli/cli#installation")
+        );
+    }
+
+    /// The chosen editor missing: what opens instead, and the formula
+    /// that installs it. Nothing at all to open files in: required.
+    #[test]
+    fn the_editor_says_what_really_opens() {
+        let stubs = Stubs::new();
+        stubs.program("vim", "exit 0").program("brew", "exit 0");
+        let check = editor(&claude_only(r#", "editor": "micro""#), &stubs.machine());
+        assert_eq!(check.status, Status::Missing);
+        assert_eq!(
+            check.detail,
+            "micro isn't installed — files open in vim instead"
+        );
+        assert_eq!(check.fix.as_deref(), Some("brew install micro"));
+        assert!(!check.fails(), "vim opens them");
+
+        let stubs = Stubs::new();
+        let check = editor(&claude_only(r#", "editor": "hx""#), &stubs.machine());
+        assert!(check.fails(), "{check:?}");
+        assert_eq!(
+            check.fix.as_deref(),
+            Some("https://docs.helix-editor.com/install.html"),
+            "no Homebrew: the editor's page"
+        );
+
+        let stubs = Stubs::new();
+        stubs.program("nvim", "exit 0");
+        let mut m = stubs.machine();
+        m.editor_env = Some("nvim".into());
+        assert_eq!(editor(&claude_only(""), &m).detail, "nvim (ORION_EDITOR)");
+    }
+
+    /// Every agent turned on, by its CLI — a missing one with its maker's
+    /// installer — and none at all said so.
+    #[test]
+    fn each_agent_on_is_checked_for_its_cli() {
+        let stubs = Stubs::new();
+        stubs.program("claude", "exit 0").program("npm", "exit 0");
+        let mut cfg = claude_only("");
+        cfg.codex_enabled = true;
+        let all = agents(&cfg, &stubs.machine());
+        assert_eq!(all.len(), 2, "{all:#?}");
+        assert_eq!(named(&all, "Agent claude").status, Status::Ok);
+        let codex = named(&all, "Agent codex");
+        assert_eq!(codex.status, Status::Missing);
+        assert_eq!(codex.fix.as_deref(), Some("npm install -g @openai/codex"));
+
+        let none: Config = serde_json::from_str(
+            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false,
+                "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false,
+                "harnesses": {"grok": {"enabled": false}}}"#,
+        )
+        .unwrap();
+        let all = agents(&none, &stubs.machine());
+        assert_eq!(all[0].status, Status::Skipped);
+    }
+
+    /// Ghostty installed, and orion's block in its config: current ✓,
+    /// written for other keys ✗, absent ✗ — each with the way to fix it.
+    #[test]
+    fn ghostty_and_its_keybind_block() {
+        let stubs = Stubs::new();
+        let cfg = claude_only("");
+        let mut m = stubs.machine();
+        let checks = ghostty(&cfg, &m);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Missing, "Ghostty is the default");
+
+        std::fs::create_dir_all(stubs.dir.path().join("root/Applications/Ghostty.app")).unwrap();
+        let file = stubs.dir.path().join("ghostty-config");
+        m.ghostty_config = Some(file.display().to_string());
+        std::fs::write(&file, "font-size = 14\n").unwrap();
+        let checks = ghostty(&cfg, &m);
+        assert_eq!(checks[0].status, Status::Ok);
+        assert_eq!(checks[1].status, Status::Missing);
+        assert!(
+            checks[1].detail.starts_with("no orion block"),
+            "{:?}",
+            checks[1]
+        );
+
+        let current = crate::ghostty_config::with_block("font-size = 14\n", &cfg.keymap());
+        std::fs::write(&file, &current).unwrap();
+        assert_eq!(ghostty(&cfg, &m)[1].status, Status::Ok);
+        std::fs::write(&file, current.replace("super+k", "super+q")).unwrap();
+        assert!(ghostty(&cfg, &m)[1].detail.ends_with("is out of date"));
+
+        m.ghostty_config = Some("off".into());
+        assert_eq!(ghostty(&cfg, &m)[1].status, Status::Skipped);
+        m.macos = false;
+        assert_eq!(ghostty(&cfg, &m)[0].status, Status::Skipped);
+    }
+
+    /// The project's key: where it was found, never what it is.
+    #[test]
+    fn the_linear_key_is_found_and_never_shown() {
+        let stubs = Stubs::new();
+        let m = stubs.machine();
+        std::fs::write(
+            m.cwd.join(".env.local"),
+            "LINEAR_API_KEY=lin_api_never_print_me\n",
+        )
+        .unwrap();
+        let check = linear(&m);
+        assert_eq!(check.status, Status::Ok);
+        assert!(check.detail.contains("found in .env.local"), "{check:?}");
+        let all = vec![check];
+        assert!(!render(&all).contains("never_print_me"));
+        assert!(!render_json(&all).contains("never_print_me"));
+    }
+}

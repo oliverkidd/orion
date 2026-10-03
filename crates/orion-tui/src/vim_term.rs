@@ -1,11 +1,15 @@
-//! Embedded editor modal: a local PTY child (micro, vim, …) rendered inside the TUI.
+//! Embedded editor modal: a local PTY child (micro, Edit, fresh, vim, …)
+//! rendered inside the TUI.
 //!
 //! Unlike agent/terminal sessions (daemon-owned PTYs reached over IPC), the
 //! editor is spawned in-process: it's a short-lived affordance of the
-//! find-in-files overlay, needs no persistence or reattach, and dies with
-//! the client. Output flows reader thread → mpsc → the main loop, which
-//! feeds the vt100 parser here (the daemon's `PtySession` shape, minus the
-//! ring buffer and broadcast).
+//! file overlays, needs no persistence or reattach, and dies with the
+//! client. Output flows reader thread → mpsc → the main loop, which feeds
+//! the vt100 parser here (the daemon's `PtySession` shape, minus the ring
+//! buffer and broadcast) and answers the terminal queries in it the way
+//! the daemon does for a session (`orion_core::kitty`): Microsoft Edit
+//! waits on a DA1 reply and a cursor report before it draws anything, and
+//! fresh pushes kitty keyboard flags its keys are then encoded for.
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use ratatui::layout::Rect;
@@ -40,24 +44,47 @@ pub struct VimTerm {
     pub embedded: bool,
     /// Inner rect from the last draw; `sync_vim_size` resizes to it.
     pub area: Rect,
-    /// The editor quits on Ctrl+Q itself, asking to save first (micro), so
-    /// Ctrl+Q goes to it rather than force-closing the modal.
+    /// Which editor runs here, for its keys hint (`Kind::Other` for a bare
+    /// command).
+    pub kind: crate::editor::Kind,
+    /// The editor quits on Ctrl+Q itself, asking to save first (micro,
+    /// Edit, fresh), so Ctrl+Q goes to it rather than force-closing the
+    /// modal.
     pub quits_itself: bool,
-    /// The file's rendered page beside the editor (a `.md` in the
-    /// floating modal; see `markdown_split`).
-    pub markdown: Option<crate::markdown_split::MarkdownSide>,
     /// The modal runs `claude auth …` for a CLAUDE ACCOUNT rather than an
-    /// editor: there is no file to hand to Cursor, and its exit re-reads
+    /// editor: there is no file to hand to an app, and its exit re-reads
     /// who the accounts are signed in as (`claude_accounts`).
     pub account_auth: bool,
+    /// The modal runs an installer for this program rather than an editor
+    /// (`install`): its exit keeps the modal up, saying whether the
+    /// program is on PATH now, and closing it says so where the user is.
+    pub install: Option<String>,
+    /// The installer exited, and whether its program is on PATH since —
+    /// the modal waits on Enter to close.
+    pub finished: Option<bool>,
+    /// Terminal queries in the output, answered here, and the kitty
+    /// keyboard flags the child has pushed.
+    queries: orion_core::kitty::KittyScanner,
+    /// Keys to type once the editor has drawn ([`Kind::startup_keys`]).
+    ///
+    /// [`Kind::startup_keys`]: crate::editor::Kind::startup_keys
+    startup_keys: Option<&'static [u8]>,
+    /// A mouse press inside the editor is held: its drag and release are
+    /// the editor's wherever the pointer goes.
+    pub mouse_held: bool,
+    /// Output chunks seen, and whether one asked something that was
+    /// answered: the first quiet chunk after that is its first screen.
+    chunks: u64,
+    answered: bool,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 impl VimTerm {
-    /// Spawn `editor +<line> <file>` in the checkout — micro off orion's
-    /// own config dir (`editor`). `Err` is a user-facing flash message.
+    /// Spawn `editor` on `file` at `line` in the checkout, told the line
+    /// its own way — micro and fresh off orion's own config (`editor`).
+    /// `Err` is a user-facing flash message.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_editor(
         editor: &str,
@@ -70,16 +97,18 @@ impl VimTerm {
         tx: UnboundedSender<VimEvent>,
     ) -> Result<Self, String> {
         let title = format!("{file}:{line}");
-        let micro = crate::editor::is_micro(editor);
-        let micro_dir = crate::editor::micro_config_dir();
-        if micro {
-            crate::editor::ensure_micro_config(&micro_dir).map_err(|e| {
-                format!("couldn't set up micro's config in {}: {e}", micro_dir.display())
-            })?;
-        }
+        let kind = crate::editor::Kind::of(editor);
+        let config_root = crate::editor::config_root();
+        crate::editor::ensure_config(editor, &config_root).map_err(|e| {
+            format!(
+                "couldn't set up {}'s config in {}: {e}",
+                crate::editor::program_name(editor),
+                config_root.display()
+            )
+        })?;
         let mut term = Self::spawn_cmd(
             editor,
-            &crate::editor::editor_args(editor, &micro_dir, file, line),
+            &crate::editor::editor_args(editor, &config_root, file, line),
             root,
             title,
             cols,
@@ -87,7 +116,9 @@ impl VimTerm {
             generation,
             tx,
         )?;
-        term.quits_itself = micro;
+        term.kind = kind;
+        term.quits_itself = kind.quits_on_ctrl_q();
+        term.startup_keys = kind.startup_keys();
         term.file = file.to_string();
         term.line = line;
         Ok(term)
@@ -189,18 +220,70 @@ impl VimTerm {
             line: 0,
             embedded: false,
             area: Rect::default(),
+            kind: crate::editor::Kind::Other,
             quits_itself: false,
-            markdown: None,
             account_auth: false,
+            install: None,
+            finished: None,
+            queries: orion_core::kitty::KittyScanner::new(),
+            startup_keys: None,
+            mouse_held: false,
+            chunks: 0,
+            answered: false,
             master: pair.master,
             writer,
             killer,
         })
     }
 
-    /// Feed reader-thread output into the emulator.
+    /// Feed reader-thread output into the emulator, answering the terminal
+    /// queries in it — a cursor report off the screen as it stood just
+    /// past its query — and typing the startup keys once the editor has
+    /// drawn.
     pub fn process(&mut self, data: &[u8]) {
-        self.parser.process(data);
+        use orion_core::kitty::Reply;
+        let actions = self.queries.feed(data);
+        let asked = !actions.replies.is_empty();
+        let mut reply = Vec::new();
+        let mut fed = 0;
+        for answer in actions.replies {
+            match answer {
+                Reply::Bytes(bytes) => reply.extend_from_slice(&bytes),
+                Reply::CursorPosition { at } => {
+                    self.parser.process(&data[fed..at]);
+                    fed = at;
+                    let (row, col) = self.parser.screen().cursor_position();
+                    reply.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+                }
+            }
+        }
+        self.parser.process(&data[fed..]);
+        if !reply.is_empty() {
+            self.input(&reply);
+        }
+        self.chunks += 1;
+        if asked {
+            self.answered = true;
+        } else if self.answered || self.chunks > 1 {
+            if let Some(keys) = self.startup_keys.take() {
+                self.input(keys);
+            }
+        }
+    }
+
+    /// The kitty keyboard flags the editor has pushed (0: legacy keys).
+    pub fn kitty_flags(&self) -> u8 {
+        self.queries.flags()
+    }
+
+    /// The mouse protocol the editor asked for, and whether in SGR
+    /// coordinates.
+    pub fn mouse_mode(&self) -> (vt100::MouseProtocolMode, bool) {
+        let screen = self.parser.screen();
+        (
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr,
+        )
     }
 
     /// Encoded keystrokes (and bracketed pastes) go straight to the child.
@@ -229,7 +312,8 @@ impl VimTerm {
         });
     }
 
-    /// Force-close (the Ctrl+Q hatch); the reader thread reaps the child.
+    /// Force-close (the `Ctrl+\` hatch, and Ctrl+Q for an editor that
+    /// doesn't quit on it); the reader thread reaps the child.
     pub fn kill(&mut self) {
         let _ = self.killer.kill();
     }
@@ -347,6 +431,66 @@ mod tests {
         .await;
     }
 
+    /// Terminal queries are answered from the modal's own screen: DA1, a
+    /// kitty flags query, and a cursor report of where the child's output
+    /// had put the cursor when it asked — what Microsoft Edit waits on
+    /// before it draws. Pushed kitty flags are tracked for the keys.
+    #[tokio::test]
+    async fn terminal_queries_are_answered_from_the_modals_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let script = "stty raw -echo; printf 'abc\\033[6n\\033[c\\033[>5u'; \
+                      dd bs=1 count=11 2>/dev/null | od -An -c | tr -d ' \\n'; sleep 30";
+        let mut term = VimTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), script.into()],
+            dir.path(),
+            "test".into(),
+            80,
+            24,
+            9,
+            tx,
+        )
+        .unwrap();
+        recv_until(&mut rx, &mut term, |t, _| {
+            t.parser.screen().contents().contains("[1;4R")
+        })
+        .await;
+        let shown = term.parser.screen().contents();
+        assert!(shown.contains("033[1;4R033[?6c"), "{shown}");
+        assert_eq!(term.kitty_flags(), 5, "fresh's push");
+        term.kill();
+    }
+
+    /// Microsoft Edit's word wrap goes on with the keys it is typed once
+    /// its first screen is up: after the queries it waited on, never
+    /// mixed into their answers.
+    #[tokio::test]
+    async fn startup_keys_follow_the_first_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let script = "stty raw -echo; printf '\\033[c'; dd bs=1 count=5 2>/dev/null >/dev/null; \
+                      printf 'SCREEN'; dd bs=1 count=2 2>/dev/null | od -An -c | tr -d ' \\n'; \
+                      sleep 30";
+        let mut term = VimTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), script.into()],
+            dir.path(),
+            "test".into(),
+            80,
+            24,
+            4,
+            tx,
+        )
+        .unwrap();
+        term.startup_keys = crate::editor::Kind::Edit.startup_keys();
+        recv_until(&mut rx, &mut term, |t, _| {
+            t.parser.screen().contents().contains("SCREEN033z")
+        })
+        .await;
+        term.kill();
+    }
+
     /// The real micro, where installed: it opens on the asked line off
     /// orion's config dir, and quits on its own Ctrl+Q.
     #[tokio::test]
@@ -356,12 +500,11 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
-        let micro_dir = dir.path().join("micro");
-        crate::editor::ensure_micro_config(&micro_dir).unwrap();
+        crate::editor::ensure_config("micro", dir.path()).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut term = VimTerm::spawn_cmd(
             "micro",
-            &crate::editor::editor_args("micro", &micro_dir, "a.txt", 3),
+            &crate::editor::editor_args("micro", dir.path(), "a.txt", 3),
             dir.path(),
             "test".into(),
             80,

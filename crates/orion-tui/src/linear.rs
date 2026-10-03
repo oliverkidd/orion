@@ -3,11 +3,14 @@
 //! request. From the PULL REQUESTS MODAL the same list attaches a pull
 //! request to the issues you mark (`attachmentLinkGitHubPR`).
 //!
-//! The key is the project's `LINEAR_API_KEY` (`.env` / `.env.local`, then
-//! the process env). Only that one name is read. It is never logged, never
-//! stored, and sent only to `api.linear.app` through `curl --config -`.
-//! Settings → Linear account names whose issues are listed (empty = the
-//! owner of that key).
+//! The key is the project's `LINEAR_API_KEY` (`.env.local`, then `.env`,
+//! then the process env). Only that one name is read. It is never logged,
+//! never stored, never shown, and sent only to `api.linear.app` through
+//! `curl --config -`. Settings → Linear gathers every option: **Link PRs
+//! to Linear**, **Linear account** (whose issues are listed; empty = the
+//! owner of that key), the **Task template**, and where the selected
+//! project's key was found, with **Test connection** asking Linear whose
+//! key it is ([`status_value`], [`test_connection`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -35,7 +38,9 @@ use crate::ui::{
 const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
 const MIN_LIST_W: u16 = crate::pr_modal::MIN_LIST_W;
 const WHEEL_LINES: i32 = crate::pr_modal::WHEEL_LINES;
+#[cfg(not(test))]
 const TIMEOUT_SECS: &str = "20";
+#[cfg(not(test))]
 const LINEAR_URL: &str = "https://api.linear.app/graphql";
 const KEY_NAME: &str = "LINEAR_API_KEY";
 const ENV_FILES: &[&str] = &[".env.local", ".env"];
@@ -201,6 +206,44 @@ pub enum LinearAnswer {
         identifier: String,
         result: Result<(), String>,
     },
+    /// **Test connection**: who the key in `dir` belongs to.
+    Viewer {
+        dir: PathBuf,
+        result: Result<Viewer, String>,
+    },
+}
+
+/// The account a key belongs to, as Linear's `viewer` query names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Viewer {
+    pub name: String,
+    pub email: String,
+}
+
+/// Where **Test connection** stands for one project's key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearTest {
+    Testing,
+    Passed(Viewer),
+    Failed(String),
+}
+
+/// Where a project's `LINEAR_API_KEY` was found — never the key itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// One of the checkout's env files, by name.
+    File(&'static str),
+    /// orion's own environment.
+    Environment,
+}
+
+impl KeySource {
+    pub fn label(self) -> String {
+        match self {
+            KeySource::File(name) => format!("found in {name}"),
+            KeySource::Environment => "found in orion's environment".into(),
+        }
+    }
 }
 
 /// Branch → Linear issues, so a pull request cut from a ⌘L launch can be
@@ -367,6 +410,24 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
 
 pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     match answer {
+        LinearAnswer::Viewer { dir, result } => {
+            let source = key_source(&dir);
+            let test = match result {
+                Ok(viewer) => LinearTest::Passed(viewer),
+                Err(err) => LinearTest::Failed(err),
+            };
+            // The overlay's EXPLANATION line says it in full, where the
+            // row's value column would cut a long error short.
+            if let Some(Overlay::Settings(view)) = &mut app.overlay {
+                match &test {
+                    LinearTest::Passed(_) => view.info(format!("Linear: {}", test_label(&test))),
+                    LinearTest::Failed(err) => view.warn(format!("Linear: {err}")),
+                    LinearTest::Testing => {}
+                }
+            }
+            app.linear_test = Some((dir, source, test));
+            app.dirty = true;
+        }
         LinearAnswer::List { project, list } => {
             app.linear_inflight.remove(&project);
             match list {
@@ -458,14 +519,46 @@ fn spawn_attach(app: &mut App, dir: PathBuf, issue_id: String, identifier: Strin
     });
 }
 
-pub(crate) fn footer_hint(view: &LinearView) -> &'static str {
+/// The LINEAR VIEW's own keys: one table [`handle_key`] matches and
+/// [`hints`] spells.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const MARK: Key = Key::new(&["space"], "mark");
+    pub const CONFIRM: Key = Key::new(&["enter"], "agent on marked");
+    pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
+    pub const BROWSER: Key = Key::new(&["ctrl+o", "cmd+o"], "browser");
+    pub const REFRESH: Key = Key::new(&["ctrl+r", "cmd+r"], "refresh");
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[MARK, CONFIRM, PRESET, BROWSER, REFRESH];
+}
+
+/// The keys along the modal's bottom edge, for browsing or for picking
+/// the issues a pull request attaches to. Esc clears a typed filter first.
+pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
+    use crate::hints::Hint;
+    let esc = if !view.query.is_empty() {
+        "clear"
+    } else if matches!(view.mode, LinearMode::Attach { .. }) {
+        "back"
+    } else {
+        "close"
+    };
     match view.mode {
-        LinearMode::Browse => {
-            "type to filter  Space: mark  Enter: agent on marked  ⇧Tab: preset  ^o: browser  ^r: refresh  Esc: clear / close"
-        }
-        LinearMode::Attach { .. } => {
-            "type to filter  Space: mark  Enter: attach marked to this PR  ^o: browser  Esc: back"
-        }
+        LinearMode::Browse => vec![
+            keys::MARK.hint(),
+            keys::CONFIRM.hint().kept(),
+            keys::PRESET.hint(),
+            keys::BROWSER.hint(),
+            keys::REFRESH.hint(),
+            Hint::new("Esc", esc),
+        ],
+        LinearMode::Attach { .. } => vec![
+            keys::MARK.hint(),
+            keys::CONFIRM.hint_as("attach marked to this PR").kept(),
+            keys::BROWSER.hint(),
+            Hint::new("Esc", esc),
+        ],
     }
 }
 
@@ -483,7 +576,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         return;
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let half = (view.view_height / 2).max(1) as i32;
     let page = view.view_height.max(1) as i32;
@@ -502,12 +594,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
         KeyCode::End => view.scroll = view.max_scroll(),
-        KeyCode::Char(' ') => toggle_mark(app),
-        KeyCode::Enter => confirm(app),
-        KeyCode::BackTab => open_preset(app),
-        KeyCode::Tab if shift => open_preset(app),
-        KeyCode::Char('o') if ctrl || cmd => open_in_browser(app, out),
-        KeyCode::Char('r') if ctrl || cmd => refresh(app),
+        _ if keys::MARK.matches(&key) => toggle_mark(app),
+        _ if keys::CONFIRM.matches(&key) => confirm(app),
+        _ if keys::PRESET.matches(&key) => open_preset(app),
+        _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
+        _ if keys::REFRESH.matches(&key) => refresh(app),
         _ => {
             if view.query.handle_key(&key).changed() {
                 query_changed(app);
@@ -713,21 +804,15 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     let task = expand_template(cfg.linear_template(), &issues);
     let taken = app.project_branches(&project);
     let batch = LinearBatch { issues, task };
-    let target = if cfg.quick_prompt_new_worktree {
-        QuickTarget::NewWorktree {
+    // The project's root, as an issue's box starts; the box's WORKTREE
+    // PICKER offers a fresh worktree named after the batch first.
+    let target = app
+        .root_worktree(&project)
+        .map(QuickTarget::Worktree)
+        .unwrap_or_else(|| QuickTarget::NewWorktree {
             project,
             branch: batch.branch(&taken),
-        }
-    } else {
-        app.root_worktree(&project)
-            .map(QuickTarget::Worktree)
-            .or_else(|| {
-                Some(QuickTarget::NewWorktree {
-                    project,
-                    branch: batch.branch(&taken),
-                })
-            })?
-    };
+        });
     Some(QuickLaunch::from_config(target, &cfg).with_linear(Some(batch)))
 }
 
@@ -819,13 +904,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else {
         head
     };
-    let foot = match view.mode {
-        LinearMode::Browse => " Space: mark  Enter: agent  ⇧Tab: preset  ^o: browser  ^r: refresh ",
-        LinearMode::Attach { .. } => " Space: mark  Enter: attach to this PR  Esc: back ",
-    };
-    let block = panel_block(&title, list_focused, th).title_bottom(
-        Line::from(Span::styled(foot, Style::default().fg(th.dim))).left_aligned(),
-    );
+    let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
     if let Some(query_area) = row_rect(list_inner, 0) {
@@ -910,6 +989,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         Paragraph::new(shown).wrap(Wrap { trim: false }),
         body_inner,
     );
+    // The modal's keys along its bottom edge — none while a box over it
+    // has the keys.
+    if !backdrop {
+        let reserve = if max_scroll > 0 { 12 } else { 0 };
+        crate::hints::draw_on_border(f, area, &hints(view), reserve, th);
+    }
 
     if let Some(Overlay::Linear(v)) = &mut app.overlay {
         v.area = area;
@@ -958,9 +1043,7 @@ fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>
 // ---- Linear HTTP (key never on argv) ----
 
 async fn fetch_assigned(dir: &Path, email: &str) -> Result<Vec<LinearIssue>, String> {
-    let key = read_linear_key(dir).ok_or_else(|| {
-        "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)".to_string()
-    })?;
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let (query, variables) = if email.is_empty() {
         (
             r#"query {
@@ -990,9 +1073,7 @@ async fn fetch_assigned(dir: &Path, email: &str) -> Result<Vec<LinearIssue>, Str
 }
 
 async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> {
-    let key = read_linear_key(dir).ok_or_else(|| {
-        "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)".to_string()
-    })?;
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let json = graphql(
         &key,
         r#"mutation($issueId: String!, $url: String!) {
@@ -1015,6 +1096,49 @@ async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> 
 }
 
 async fn graphql(
+    key: &str,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // A test never reaches Linear: it answers from the stub it set, or
+    // not at all.
+    #[cfg(test)]
+    {
+        let _ = variables;
+        let stub = *GRAPHQL_STUB.lock().unwrap();
+        match stub {
+            Some(stub) => stub(key, query),
+            None => Err("no network in tests".into()),
+        }
+    }
+    #[cfg(not(test))]
+    curl_graphql(key, query, variables).await
+}
+
+/// What a test answers Linear's GraphQL with: `(key, query)` in, the
+/// JSON Linear would have sent back out.
+#[cfg(test)]
+type GraphqlStub = fn(&str, &str) -> Result<serde_json::Value, String>;
+
+/// The stub [`graphql`] answers from under test — none, and it fails.
+#[cfg(test)]
+static GRAPHQL_STUB: std::sync::Mutex<Option<GraphqlStub>> = std::sync::Mutex::new(None);
+
+/// Run `f` with Linear's GraphQL answered by `stub`, one test at a time.
+#[cfg(test)]
+pub(crate) fn with_graphql_stub<T>(stub: GraphqlStub, f: impl FnOnce() -> T) -> T {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    *GRAPHQL_STUB.lock().unwrap() = Some(stub);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    *GRAPHQL_STUB.lock().unwrap() = None;
+    out.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// One GraphQL request to Linear through `curl`, the key on its stdin
+/// config and the body in a temp file, never on argv.
+#[cfg(not(test))]
+async fn curl_graphql(
     key: &str,
     query: &str,
     variables: serde_json::Value,
@@ -1118,8 +1242,10 @@ fn status_rank(kind: &str) -> u8 {
     }
 }
 
+#[cfg(not(test))]
 struct DeleteOnDrop(PathBuf);
 
+#[cfg(not(test))]
 impl Drop for DeleteOnDrop {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -1139,14 +1265,139 @@ fn graphql_error(json: &serde_json::Value) -> Option<String> {
 /// Symlinks are followed only when they stay inside the checkout or its
 /// parent (the usual `../<repo>` layout of a worktree's main folder).
 pub fn read_linear_key(dir: &Path) -> Option<String> {
+    find_key(dir).map(|(key, _)| key)
+}
+
+/// Where [`read_linear_key`] would find the key — what the LINEAR TAB's
+/// **API key** row says. The key is read to know it is there, and dropped.
+pub fn key_source(dir: &Path) -> Option<KeySource> {
+    find_key(dir).map(|(_, source)| source)
+}
+
+fn find_key(dir: &Path) -> Option<(String, KeySource)> {
     for name in ENV_FILES {
-        if let Some(path) = readable_env_file(dir, name) {
-            if let Some(key) = parse_env_key(&std::fs::read_to_string(path).ok()?) {
-                return Some(key);
-            }
+        let Some(path) = readable_env_file(dir, name) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(key) = parse_env_key(&text) {
+            return Some((key, KeySource::File(name)));
         }
     }
-    std::env::var(KEY_NAME).ok().filter(|v| !v.trim().is_empty())
+    std::env::var(KEY_NAME)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|key| (key, KeySource::Environment))
+}
+
+/// The value the LINEAR TAB (and the onboarding wizard's Linear page)
+/// shows on a status row ([`SettingKind::is_status`]) for the selected
+/// project: where its key comes from, and what the last **Test
+/// connection** said. None for any other row. Never the key.
+///
+/// [`SettingKind::is_status`]: crate::config::SettingKind::is_status
+pub fn status_value(app: &App, kind: crate::config::SettingKind) -> Option<String> {
+    use crate::config::SettingKind;
+    if !kind.is_status() {
+        return None;
+    }
+    let Some(project) = app.selected_project() else {
+        return Some("no project selected".into());
+    };
+    let dir = &project.repo_path;
+    Some(match kind {
+        SettingKind::LinearKey => match key_source(dir) {
+            Some(source) => format!("{} · {}", source.label(), project.name),
+            None => format!("not found for {}", project.name),
+        },
+        // The last test of this project's key — while it is still the
+        // key it tested: one found, moved or dropped since says nothing.
+        _ => match &app.linear_test {
+            Some((tested, source, test)) if tested == dir && *source == key_source(dir) => {
+                test_label(test)
+            }
+            _ => "not tested".into(),
+        },
+    })
+}
+
+/// A test's word for the row: `testing…`, `✓ Jane Doe · jane@acme.com`,
+/// `✗ <why>`.
+fn test_label(test: &LinearTest) -> String {
+    match test {
+        LinearTest::Testing => "testing…".into(),
+        LinearTest::Passed(v) => match (v.name.is_empty(), v.email.is_empty()) {
+            (false, false) => format!("✓ {} · {}", v.name, v.email),
+            (false, true) => format!("✓ {}", v.name),
+            (true, _) => format!("✓ {}", v.email),
+        },
+        LinearTest::Failed(err) => format!("✗ {err}"),
+    }
+}
+
+/// **Test connection**: ask Linear, with the selected project's key, who
+/// that key belongs to — the `viewer` query, off the loop. The row says
+/// `testing…` until the answer lands ([`land_answer`]). No key is an
+/// answer at once, with no call made.
+pub(crate) fn test_connection(app: &mut App) {
+    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
+        return;
+    };
+    let Some((key, source)) = find_key(&dir) else {
+        if let Some(Overlay::Settings(view)) = &mut app.overlay {
+            view.warn(format!("Linear: {NO_KEY}"));
+        }
+        app.linear_test = Some((dir, None, LinearTest::Failed(NO_KEY.into())));
+        app.dirty = true;
+        return;
+    };
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    app.linear_test = Some((dir.clone(), Some(source), LinearTest::Testing));
+    app.dirty = true;
+    tokio::spawn(async move {
+        let result = fetch_viewer(&key).await;
+        let _ = tx.send(LinearAnswer::Viewer { dir, result });
+    });
+}
+
+/// What a project with no key says, wherever it is asked.
+const NO_KEY: &str = "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)";
+
+async fn fetch_viewer(key: &str) -> Result<Viewer, String> {
+    let json = graphql(
+        key,
+        "query { viewer { name email } }",
+        serde_json::json!({}),
+    )
+    .await?;
+    parse_viewer(&json)
+}
+
+/// Linear's answer to the `viewer` query: the account's name and email,
+/// or the error it gave.
+fn parse_viewer(json: &serde_json::Value) -> Result<Viewer, String> {
+    if let Some(err) = graphql_error(json) {
+        return Err(err);
+    }
+    let viewer = json
+        .pointer("/data/viewer")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| "Linear returned no account".to_string())?;
+    let field = |key: &str| {
+        viewer
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(Viewer {
+        name: field("name"),
+        email: field("email"),
+    })
 }
 
 fn readable_env_file(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -1242,6 +1493,194 @@ mod tests {
         let link = store.take("eng-12-fix").unwrap();
         assert_eq!(link.identifiers, ["ENG-12"]);
         assert!(store.take("eng-12-fix").is_none());
+    }
+
+    /// A project with `files` written into a fresh checkout, selected.
+    fn app_on(files: &[(&str, &str)]) -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let mut app = App::new();
+        app.tree.projects.push(orion_core::Project {
+            id: ProjectId("p1".into()),
+            name: "demo".into(),
+            repo_path: dir.path().into(),
+            sort_order: 0,
+        });
+        (app, dir)
+    }
+
+    const FAKE_KEY: &str = "lin_api_test_never_shown";
+
+    /// Where the key was found, never what it is: `.env.local` before
+    /// `.env`, then orion's environment — and no key says so.
+    #[test]
+    fn the_key_row_says_where_the_key_is_and_never_what() {
+        use crate::config::SettingKind;
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (app, _dir) = app_on(&[(".env", &line), (".env.local", &line)]);
+        let shown = status_value(&app, SettingKind::LinearKey).unwrap();
+        assert_eq!(shown, "found in .env.local · demo");
+        let (app, _dir) = app_on(&[(".env", &line), (".env.local", "OTHER=1\n")]);
+        let shown = status_value(&app, SettingKind::LinearKey).unwrap();
+        assert_eq!(shown, "found in .env · demo");
+        assert!(!shown.contains(FAKE_KEY));
+        let (app, dir) = app_on(&[(".env", "OTHER=1\n")]);
+        let shown = status_value(&app, SettingKind::LinearKey).unwrap();
+        match std::env::var(KEY_NAME)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            Some(_) => assert_eq!(key_source(dir.path()), Some(KeySource::Environment)),
+            None => assert_eq!(shown, "not found for demo"),
+        }
+        assert_eq!(
+            status_value(&app, SettingKind::LinearTest).as_deref(),
+            Some("not tested")
+        );
+        assert_eq!(
+            status_value(&app, SettingKind::LinearAccount),
+            None,
+            "not a status row"
+        );
+        assert_eq!(
+            status_value(&App::new(), SettingKind::LinearKey).as_deref(),
+            Some("no project selected")
+        );
+    }
+
+    /// **Test connection** asks Linear's `viewer` with the project's key
+    /// — stubbed here: no test reaches Linear — and the row says whose it
+    /// is, or Linear's own error, the settings overlay saying it in full.
+    #[test]
+    fn test_connection_names_the_keys_account_or_the_error() {
+        use crate::config::SettingKind;
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, dir) = app_on(&[(".env", &line)]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let run = |app: &mut App| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            app.linear_tx = Some(tx);
+            rt.block_on(async {
+                test_connection(app);
+                assert_eq!(
+                    status_value(app, SettingKind::LinearTest).as_deref(),
+                    Some("testing…")
+                );
+                let answer = rx.recv().await.expect("an answer");
+                land_answer(app, answer);
+            });
+        };
+        with_graphql_stub(
+            |key, query| {
+                assert_eq!(key, FAKE_KEY, "the project's key, as read");
+                assert!(query.contains("viewer"), "{query}");
+                Ok(
+                    serde_json::json!({"data": {"viewer": {"name": "Jane Doe", "email": "jane@acme.dev"}}}),
+                )
+            },
+            || run(&mut app),
+        );
+        assert_eq!(
+            status_value(&app, SettingKind::LinearTest).as_deref(),
+            Some("✓ Jane Doe · jane@acme.dev")
+        );
+        assert_eq!(
+            app.linear_test.as_ref().map(|(d, ..)| d.as_path()),
+            Some(dir.path())
+        );
+        // A key moved since says nothing about this one.
+        std::fs::rename(dir.path().join(".env"), dir.path().join(".env.local")).unwrap();
+        assert_eq!(
+            status_value(&app, SettingKind::LinearTest).as_deref(),
+            Some("not tested")
+        );
+        std::fs::rename(dir.path().join(".env.local"), dir.path().join(".env")).unwrap();
+
+        app.overlay = Some(Overlay::Settings(crate::app::SettingsView::new(
+            0, 0, false,
+        )));
+        with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"errors": [{"message": "Authentication required"}]})),
+            || run(&mut app),
+        );
+        assert_eq!(
+            status_value(&app, SettingKind::LinearTest).as_deref(),
+            Some("✗ Authentication required")
+        );
+        let Some(Overlay::Settings(view)) = &app.overlay else {
+            panic!("the overlay stays");
+        };
+        assert_eq!(
+            view.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Linear: Authentication required")
+        );
+
+        // No key at all is an answer on the spot, with nothing sent.
+        let (mut bare, _dir) = app_on(&[]);
+        if std::env::var(KEY_NAME).is_err() {
+            test_connection(&mut bare);
+            assert_eq!(
+                status_value(&bare, SettingKind::LinearTest),
+                Some(format!("✗ {NO_KEY}"))
+            );
+        }
+    }
+
+    /// The LINEAR TAB drawn: every row — the switch on by default, the
+    /// account, the template, where the key is and the test — and the
+    /// key's value nowhere on screen.
+    #[test]
+    fn the_linear_tab_draws_every_row_and_never_the_key() {
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, _dir) = app_on(&[(".env", &line)]);
+        let tab = crate::config::SETTINGS_TABS
+            .iter()
+            .position(|t| t.title == "Linear")
+            .expect("a Linear tab");
+        let config = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(config.path().join("config.json"), || {
+            app.overlay = Some(Overlay::Settings(crate::app::SettingsView::new(
+                tab, 0, false,
+            )));
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+            term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let screen: String = (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect();
+            for needle in [
+                " Linear ",
+                "Link PRs to Linear",
+                "[on]",
+                "Linear account",
+                "[the key's owner]",
+                "Task template",
+                "[default]",
+                "Connection",
+                "API key",
+                "[found in .env · demo]",
+                "Test connection",
+                "[not tested]",
+                "Enter toggle",
+            ] {
+                assert!(screen.contains(needle), "{needle}:\n{screen}");
+            }
+            assert!(
+                !screen.contains(FAKE_KEY),
+                "the key is never shown:\n{screen}"
+            );
+        });
     }
 
     #[test]

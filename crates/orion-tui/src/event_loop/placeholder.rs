@@ -577,8 +577,8 @@ fn forget_worktree(app: &mut App, id: &WorktreeId) {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        buffer_text, hse, press, seed_feat_worktree, seed_open_prs, seed_tree, with_config_json,
-        with_default_config, with_seeded_presets, worktree_branches,
+        buffer_text, hse, pick_fresh_worktree, press, seed_feat_worktree, seed_open_prs, seed_tree,
+        with_config_json, with_default_config, with_seeded_presets, worktree_branches,
     };
     use super::super::{
         fire_pending_prewarm, handle_server_event, handle_terminal_event, paste_into_overlay,
@@ -597,8 +597,8 @@ mod tests {
     /// `p` on the WORKTREES PANEL with the cursor on `feat`, "Fix auth"
     /// typed, Enter pressed. Returns the branch the box offered, the
     /// stand-in ids the intent carries, and the request id of the
-    /// `CreateWorktree` it sent. `p` opens on the checkout (the
-    /// new-worktree SETTING is off) and `^N` flips it to a fresh one.
+    /// `CreateWorktree` it sent. `p` opens on the checkout and the
+    /// WORKTREE PICKER's first row aims it at a fresh one.
     fn stage_launch(app: &mut App, out: &mut Vec<ClientRequest>) -> (String, PlaceholderRows, u64) {
         seed_tree(app);
         seed_feat_worktree(app, "w2", "feat");
@@ -609,7 +609,7 @@ mod tests {
             Some("feat")
         );
         press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
-        press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
+        pick_fresh_worktree(app, out);
         let branch = match &app.overlay {
             Some(Overlay::Prompt(prompt)) => match &prompt.kind {
                 PromptKind::QuickPrompt(launch) => match &launch.target {

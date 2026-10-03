@@ -143,6 +143,9 @@ fn overlay_name(app: &App) -> &'static str {
     if app.vim.is_some() {
         return "Editor";
     }
+    if app.page.is_some() {
+        return "Page";
+    }
     match &app.overlay {
         None => "none",
         Some(Overlay::Menu(_)) => "Menu",

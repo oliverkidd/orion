@@ -1,6 +1,6 @@
-//! The DIFF VIEWER's COMMIT LIST: the branch's own commits, newest first,
-//! so a branch an agent landed as several commits reads one commit at a
-//! time.
+//! The DIFF VIEWER's COMMIT LIST: what the branch added, newest first, each
+//! commit a row with a box to tick, so a branch an agent landed as several
+//! commits reads one commit at a time — or several at once.
 //!
 //! **What the branch is measured against** is where orion cuts its
 //! worktrees from (`git::add_worktree_off_default` in the DAEMON): the
@@ -8,19 +8,44 @@
 //! origin's copy first, then a local one — else `origin/HEAD`, else the
 //! branch the ROOT WORKTREE is on, which is what a worktree is cut from in
 //! a repo with no origin. The DAEMON fetches before it cuts; this reads
-//! what the checkout already has and never touches the network. The
-//! branch's own commits are `git log <merge-base>..HEAD` — HEAD is all it
-//! needs, so a detached checkout lists the same way.
+//! what the checkout already has and never touches the network.
 //!
-//! **The rows**, top to bottom: **All changes** — the merge-base against
-//! the working tree, everything the branch changed, committed or not —
-//! while the branch has a commit of its own; **Uncommitted changes**, the
-//! view the DIFF VIEWER always was, while the checkout is dirty; the
-//! commits; and `… N older commits` past the last page read. Each row is a
-//! [`DiffScope`]: choosing one lists its files ([`show_selected`]) and every
-//! diff walked under it is taken against it (`git_diff::scoped_diff`). The
-//! scope on screen changes only when its file list is in hand, so the
-//! files listed and the diffs read for them always agree.
+//! **The branch's own commits** are `git log --first-parent --no-merges
+//! <merge-base>..HEAD`. Following first parents walks the line the branch
+//! was committed on and never steps into the history of a branch merged
+//! into it; `--no-merges` leaves out the merges themselves. So a branch
+//! that merged `main` in to keep up lists what it added and nothing that
+//! came in with `main`. HEAD is all it needs, so a detached checkout lists
+//! the same way.
+//!
+//! **The rows**, top to bottom: **Uncommitted changes** while the checkout
+//! is dirty, the commits, and `… N older commits` past the last page read.
+//!
+//! **What is on screen** ([`CommitList::showing`]): with nothing ticked,
+//! the row under the cursor — `⇧←`/`⇧→` walk it from the files. Ticked
+//! rows are read TOGETHER, as one diff, or ONE AT A TIME, stepped through
+//! oldest first (`commit 2 of 3`). A clean checkout opens with every
+//! commit ticked: the whole branch, what its pull request shows; a dirty
+//! one opens on its uncommitted changes, nothing ticked. Nothing is
+//! remembered from one opening to the next.
+//!
+//! **Together, with gaps** ([`CommitList::ranges`]). Ticked rows that sit
+//! side by side on the branch read as one range, `git diff <parent of the
+//! oldest> <newest>` — the working tree, when the uncommitted changes are
+//! the newest. A row left unticked between two, or a merge, starts another
+//! range: a diff across it would put back what was left out. A file that
+//! two ranges touch reads as each range's diff in turn under its label
+//! (`git_diff::scoped_diff`), never as a net diff that would have to
+//! pretend the gap's commits never happened. The one exception is a run
+//! that reaches down to the branch's first commit: it is measured from
+//! the merge-base at its newest end, so it stays one range across the
+//! merges of the base inside it, and with every commit ticked it is
+//! exactly the branch's diff.
+//!
+//! Each choice is a [`DiffScope`] whose file list is read before it goes up
+//! ([`show_selected`]), and every diff walked under it is taken against it
+//! (`git_diff::scoped_diff`), so the files listed and the diffs read for
+//! them always agree.
 //!
 //! **A long branch is read a page at a time.** The first [`COMMIT_PAGE`]
 //! commits, with their counts, come back with the viewer's own listing
@@ -28,11 +53,12 @@
 //! the cursor reaches it. Every read here is a BACKGROUND READ
 //! (`view_jobs`), inline only in a view built without a handle.
 
-use crate::app::{clamp_selection, window_start, DiffView};
-use crate::git_diff::{run_git, DiffFile, DiffScope, LineChanges};
+use crate::app::{clamp_selection, DiffView};
+use crate::diff_doc::Head;
+use crate::git_diff::{run_git, DiffFile, DiffScope, LineChanges, Range, RangeStart};
 use crate::view_jobs::{Answer, DiffListing};
 use ratatui::layout::Rect;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -42,10 +68,17 @@ use std::sync::Arc;
 /// branch is never diffed whole to show the top of it.
 pub const COMMIT_PAGE: usize = 50;
 
+/// The most commits a TOGETHER head names one by one before it says how
+/// many more there are.
+const HEAD_ITEMS: usize = 12;
+
 /// `git log`'s format: a record mark, the fields between field marks, and
 /// an end mark after the body, where `--numstat` takes over. Control
 /// characters no name, subject or message carries, so nothing is quoted.
 const LOG_FORMAT: &str = "--format=%x1e%H%x1f%h%x1f%P%x1f%aN%x1f%at%x1f%s%x1f%b%x1d";
+
+/// The branch's own line: first parents only, merges left out.
+const OWN_LINE: [&str; 2] = ["--first-parent", "--no-merges"];
 
 /// The fields [`LOG_FORMAT`] separates, the body last: split no further,
 /// so a body that holds the separator stays whole.
@@ -75,7 +108,7 @@ pub struct Commit {
     /// The message past its subject; empty for a one-line message.
     pub body: String,
     /// None for a merge: `git log` diffs no merge, so it has no counts of
-    /// its own to show.
+    /// its own to show. The list never shows one, but a page can carry it.
     pub stat: Option<Stat>,
 }
 
@@ -84,7 +117,7 @@ impl Commit {
         self.parents.len() > 1
     }
 
-    /// What choosing this commit shows: it against its first parent.
+    /// What reading this commit alone shows: it against its first parent.
     pub fn scope(&self) -> DiffScope {
         DiffScope::Commit {
             sha: self.sha.clone(),
@@ -97,20 +130,27 @@ impl Commit {
         crate::hosts::ago_label(now_ms - self.time.saturating_mul(1000))
     }
 
-    /// The commit's message as the diff pane heads each of its files with
-    /// it: who and when, the subject, and the body.
-    pub fn header(&self, now_ms: i64) -> Vec<String> {
+    /// Short sha, who and when: the dim line over a commit's subject.
+    pub fn meta(&self, now_ms: i64) -> String {
         let mut meta = vec![self.short.clone(), self.author.clone(), self.ago(now_ms)];
-        if self.is_merge() {
-            meta.push("merge, shown against its first parent".to_string());
-        }
         meta.retain(|part| !part.is_empty());
-        let mut lines = vec![meta.join(" · "), String::new(), self.subject.clone()];
+        meta.join(" · ")
+    }
+
+    /// The commit's message as the REVIEW HEAD over each of its files: its
+    /// subject — after `lead`, `commit 2 of 3` stepping one at a time — who
+    /// and when, and the body.
+    pub fn head(&self, now_ms: i64, lead: Option<&str>) -> Vec<Head> {
+        let title = match lead {
+            Some(lead) => format!("{lead} · {}", self.subject),
+            None => self.subject.clone(),
+        };
+        let mut head = vec![Head::Title(title), Head::Meta(self.meta(now_ms))];
         if !self.body.is_empty() {
-            lines.push(String::new());
-            lines.extend(self.body.lines().map(str::to_string));
+            head.push(Head::Blank);
+            head.extend(self.body.lines().map(|l| Head::Prose(l.to_string())));
         }
-        lines
+        head
     }
 }
 
@@ -124,12 +164,13 @@ pub struct CommitListing {
     /// Where HEAD left the base; None with no base, an unborn HEAD, or no
     /// history in common.
     pub merge_base: Option<String>,
-    /// Commits since the merge-base, however many of them were read.
+    /// HEAD's commit: what the uncommitted changes sit on.
+    pub head: Option<String>,
+    /// The branch's own commits since the merge-base, however many of them
+    /// were read.
     pub total: usize,
     /// The first page of them, newest first.
     pub commits: Vec<Commit>,
-    /// The **All changes** row's counts.
-    pub branch: Option<Stat>,
     /// The **Uncommitted changes** row's counts; None while the checkout is
     /// clean, and then that row is not there.
     pub uncommitted: Option<Stat>,
@@ -137,7 +178,7 @@ pub struct CommitListing {
 
 /// Read the COMMIT LIST for the checkout at `root`, whose uncommitted
 /// changes `git status` found to be `uncommitted`: the base, the merge-base,
-/// the first page of commits and the counts of the rows above them.
+/// the first page of commits and the uncommitted row's counts.
 pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> CommitListing {
     let mut listing = CommitListing {
         uncommitted: (!uncommitted.is_empty()).then(|| Stat {
@@ -147,7 +188,8 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
         ..CommitListing::default()
     };
     // An unborn HEAD has no commit to list and nothing to merge-base.
-    if crate::git_diff::head_oid(root).is_none() {
+    listing.head = crate::git_diff::head_oid(root);
+    if listing.head.is_none() {
         return listing;
     }
     listing.base = resolve_base(root, base_setting);
@@ -162,13 +204,6 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
         });
         // A log that listed nothing leaves nothing to page through.
         listing.total = if listing.commits.is_empty() { 0 } else { total };
-        listing.branch =
-            crate::git_diff::changes_since(root, &merge_base, uncommitted).map(|(files, lines)| {
-                Stat {
-                    files,
-                    lines: Some(lines),
-                }
-            });
     }
     listing.merge_base = Some(merge_base);
     listing
@@ -218,11 +253,14 @@ fn merge_base(root: &Path, base: &str) -> Option<String> {
     git_line(root, &["merge-base", "HEAD", base])
 }
 
-/// How many commits HEAD has past `merge_base` — no diffs, so it costs the
-/// same for three commits as for three hundred.
+/// How many of its own commits HEAD has past `merge_base` — no diffs, so
+/// it costs the same for three commits as for three hundred.
 fn count_since(root: &Path, merge_base: &str) -> usize {
     let range = format!("{merge_base}..HEAD");
-    git_line(root, &["rev-list", "--count", &range])
+    let mut args = vec!["rev-list", "--count"];
+    args.extend(OWN_LINE);
+    args.push(&range);
+    git_line(root, &args)
         .and_then(|n| n.parse().ok())
         .unwrap_or(0)
 }
@@ -235,32 +273,55 @@ fn git_line(root: &Path, args: &[&str]) -> Option<String> {
     (output.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// One page of the branch's commits, newest first: the `skip` newest left
-/// out, [`COMMIT_PAGE`] at most, each with its counts. `Err` is a
+/// One page of the branch's own commits, newest first: the `skip` newest
+/// left out, [`COMMIT_PAGE`] at most, each with its counts. `Err` is a
 /// user-facing message.
 pub fn read_page(root: &Path, merge_base: &str, skip: usize) -> Result<Vec<Commit>, String> {
     let range = format!("{merge_base}..HEAD");
     let max = format!("--max-count={COMMIT_PAGE}");
     let skip = format!("--skip={skip}");
-    let output = run_git(
-        root,
-        &[
-            "log",
-            LOG_FORMAT,
-            "--numstat",
-            "--no-color",
-            "--no-show-signature",
-            &max,
-            &skip,
-            &range,
-            "--",
-        ],
-    )?;
+    let mut args = vec![
+        "log",
+        LOG_FORMAT,
+        "--numstat",
+        "--no-color",
+        "--no-show-signature",
+    ];
+    args.extend(OWN_LINE);
+    args.extend([max.as_str(), skip.as_str(), range.as_str(), "--"]);
+    let output = run_git(root, &args)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git log failed: {}", stderr.trim()));
     }
     Ok(parse_log(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// One commit of the repo at `root`, by any name git takes for one — the
+/// way into the viewer for a pull request's commit (`event_loop::
+/// open_pr_review`). None when the repo has no such commit.
+pub fn read_commit(root: &Path, rev: &str) -> Option<Commit> {
+    let spec = format!("{rev}^{{commit}}");
+    let output = run_git(
+        root,
+        &[
+            "log",
+            "-1",
+            LOG_FORMAT,
+            "--numstat",
+            "--no-color",
+            "--no-show-signature",
+            &spec,
+            "--",
+        ],
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_log(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .next()
 }
 
 /// Parse [`LOG_FORMAT`] with `--numstat`: per commit, a record mark, its
@@ -320,11 +381,10 @@ fn numstat_stat(text: &str) -> Stat {
     }
 }
 
-/// One row of the COMMIT LIST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One row of the COMMIT LIST. Ordered top to bottom: the uncommitted
+/// changes, the commits newest first, the `older` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Row {
-    /// **All changes**: the merge-base against the working tree.
-    Branch,
     /// **Uncommitted changes**: the working tree against HEAD.
     Uncommitted,
     /// The commit at this index of `CommitList::commits`.
@@ -333,27 +393,48 @@ pub enum Row {
     Older,
 }
 
+/// What the COMMIT LIST puts on screen ([`CommitList::showing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Showing {
+    /// One row: the cursor's with nothing ticked, the only ticked one, or
+    /// the step ONE AT A TIME is on.
+    Row(Row),
+    /// Two or more ticked rows read TOGETHER, top to bottom.
+    Together(Vec<Row>),
+}
+
 /// The COMMIT LIST in an open DIFF VIEWER: what [`CommitListing`] read,
-/// the cursor, and the page in flight.
+/// the cursor, the ticks, and the page in flight.
 #[derive(Debug, Clone, Default)]
 pub struct CommitList {
-    /// False until the listing lands; the strip says `reading commits…`.
+    /// False until the listing lands; the list says `reading commits…`.
     pub loaded: bool,
     pub base: Option<String>,
     pub merge_base: Option<String>,
+    pub head: Option<String>,
     pub total: usize,
     /// Newest first. Shared with every frame's clone of the view rather
     /// than copied into it.
     pub commits: Arc<Vec<Commit>>,
-    pub branch: Option<Stat>,
     pub uncommitted: Option<Stat>,
     /// Index into the rows ([`CommitList::row`]).
     pub selected: usize,
+    /// The ticked rows: never the `older` row.
+    pub ticked: BTreeSet<Row>,
+    /// Ticked rows read ONE AT A TIME rather than TOGETHER.
+    pub one_at_a_time: bool,
+    /// The ticked row ONE AT A TIME is on.
+    pub step: Option<Row>,
     /// The next page in flight, by ticket.
     pub paging: Option<u64>,
-    /// The strip, and its rows, as last drawn — for the pointer.
+    /// The first row on screen, as last drawn, and the cursor it was
+    /// scrolled away from by the wheel: until the cursor moves, the list
+    /// stays where the wheel put it.
+    pub top: usize,
+    pub pinned_at: Option<usize>,
+    /// The panel, and each row's rect as last drawn, for the pointer.
     pub area: Rect,
-    pub list_area: Rect,
+    pub hits: Vec<(Rect, usize)>,
 }
 
 impl CommitList {
@@ -362,25 +443,24 @@ impl CommitList {
         Self::default()
     }
 
-    /// The listing landed. The cursor starts on what the view shows first:
-    /// the uncommitted changes while there are any, else the branch's.
+    /// The listing landed. A dirty checkout opens on its uncommitted
+    /// changes, nothing ticked; a clean one with every commit ticked, read
+    /// together — the whole branch — the cursor on the newest.
     pub fn from_listing(listing: CommitListing) -> Self {
         let mut list = Self {
             loaded: true,
             base: listing.base,
             merge_base: listing.merge_base,
+            head: listing.head,
             total: listing.total,
             commits: Arc::new(listing.commits),
-            branch: listing.branch,
             uncommitted: listing.uncommitted,
             ..Self::default()
         };
-        list.selected = list.index_of(Row::Uncommitted).unwrap_or(0);
+        if list.uncommitted.is_none() {
+            list.ticked = (0..list.commits.len()).map(Row::Commit).collect();
+        }
         list
-    }
-
-    fn has_branch(&self) -> bool {
-        !self.commits.is_empty() && self.merge_base.is_some()
     }
 
     /// Whether commits past the last page read are still to come.
@@ -389,25 +469,17 @@ impl CommitList {
     }
 
     pub fn row_count(&self) -> usize {
-        usize::from(self.has_branch())
-            + usize::from(self.uncommitted.is_some())
-            + self.commits.len()
-            + usize::from(self.has_older())
+        usize::from(self.uncommitted.is_some()) + self.commits.len() + usize::from(self.has_older())
     }
 
     /// The row at `index`, top to bottom.
     pub fn row(&self, index: usize) -> Option<Row> {
         let mut i = index;
-        for (present, row) in [
-            (self.has_branch(), Row::Branch),
-            (self.uncommitted.is_some(), Row::Uncommitted),
-        ] {
-            if present {
-                if i == 0 {
-                    return Some(row);
-                }
-                i -= 1;
+        if self.uncommitted.is_some() {
+            if i == 0 {
+                return Some(Row::Uncommitted);
             }
+            i -= 1;
         }
         if i < self.commits.len() {
             return Some(Row::Commit(i));
@@ -416,82 +488,437 @@ impl CommitList {
     }
 
     pub fn index_of(&self, row: Row) -> Option<usize> {
-        (0..self.row_count()).find(|&i| self.row(i) == Some(row))
+        let first = usize::from(self.uncommitted.is_some());
+        match row {
+            Row::Uncommitted => self.uncommitted.is_some().then_some(0),
+            Row::Commit(i) => (i < self.commits.len()).then_some(first + i),
+            Row::Older => self.has_older().then_some(first + self.commits.len()),
+        }
     }
 
     pub fn selected_row(&self) -> Option<Row> {
         self.row(self.selected)
     }
 
-    /// Clamped absolute selection; true when it moved.
+    /// Clamped absolute cursor; true when it moved. ONE AT A TIME, landing
+    /// on a ticked row steps onto it.
     pub fn select(&mut self, index: i64) -> bool {
         let clamped = clamp_selection(index, self.row_count());
         let changed = clamped != self.selected;
         self.selected = clamped;
+        if self.one_at_a_time {
+            if let Some(row) = self.selected_row().filter(|r| self.ticked.contains(r)) {
+                self.step = Some(row);
+            }
+        }
         changed
     }
 
-    /// What choosing `row` shows; None for the `older` row, which is a
-    /// page to read rather than something to show.
-    pub fn scope_of(&self, row: Row) -> Option<DiffScope> {
+    /// The ticked rows, oldest first: the order ONE AT A TIME steps in.
+    pub fn steps(&self) -> Vec<Row> {
+        self.ticked.iter().rev().copied().collect()
+    }
+
+    /// Whether every commit read so far is ticked — the list's "all".
+    pub fn all_ticked(&self) -> bool {
+        !self.commits.is_empty()
+            && (0..self.commits.len()).all(|i| self.ticked.contains(&Row::Commit(i)))
+    }
+
+    /// Tick the row under the cursor, or untick it. ONE AT A TIME, a step
+    /// unticked from under the reader hands the steps to its older
+    /// neighbour (the newer one when it was the oldest).
+    pub fn toggle_tick(&mut self) {
+        let Some(row) = self.selected_row().filter(|r| *r != Row::Older) else {
+            return;
+        };
+        if !self.ticked.remove(&row) {
+            self.ticked.insert(row);
+            return;
+        }
+        if self.step == Some(row) {
+            let steps = self.steps();
+            self.step = steps
+                .iter()
+                .rev()
+                .find(|r| **r > row)
+                .or_else(|| steps.iter().find(|r| **r < row))
+                .copied();
+        }
+    }
+
+    /// `^A`: every commit ticked — or, when they all are already, nothing
+    /// at all. The uncommitted row keeps its tick on the way up: whether
+    /// the working tree belongs with the commits is the reader's call.
+    pub fn tick_all(&mut self) {
+        if self.all_ticked() {
+            self.ticked.clear();
+            self.step = None;
+        } else {
+            self.ticked.extend((0..self.commits.len()).map(Row::Commit));
+        }
+    }
+
+    /// `^G`: TOGETHER and ONE AT A TIME, the other way round. Stepping
+    /// starts on the cursor's row when it is ticked, else on the oldest.
+    pub fn toggle_mode(&mut self) {
+        self.one_at_a_time = !self.one_at_a_time;
+        if self.one_at_a_time {
+            let here = self.selected_row().filter(|r| self.ticked.contains(r));
+            self.step = here.or_else(|| self.steps().first().copied());
+            self.follow_step();
+        }
+    }
+
+    /// `⇧←` / `⇧→`: older or newer. With nothing ticked the cursor walks
+    /// the list. ONE AT A TIME, the step walks the ticked rows. TOGETHER,
+    /// it starts stepping: `⇧→` on the oldest — commit 1 — `⇧←` on the
+    /// newest. True when what is on screen changed.
+    pub fn step_by(&mut self, older: bool) -> bool {
+        let steps = self.steps();
+        if steps.is_empty() {
+            let delta = if older { 1 } else { -1 };
+            return self.select(self.selected as i64 + delta);
+        }
+        if steps.len() == 1 {
+            return false;
+        }
+        if !self.one_at_a_time {
+            self.one_at_a_time = true;
+            self.step = if older { steps.last() } else { steps.first() }.copied();
+            self.follow_step();
+            return true;
+        }
+        let at = self
+            .step
+            .and_then(|s| steps.iter().position(|r| *r == s))
+            .unwrap_or(0);
+        let next = if older {
+            at.checked_sub(1)
+        } else {
+            (at + 1 < steps.len()).then_some(at + 1)
+        };
+        match next {
+            Some(next) => {
+                self.step = Some(steps[next]);
+                self.follow_step();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The cursor onto the step, so the list's highlight is the commit on
+    /// screen.
+    fn follow_step(&mut self) {
+        if let Some(index) = self.step.and_then(|s| self.index_of(s)) {
+            self.selected = index;
+        }
+    }
+
+    /// ONE AT A TIME's place: `(k, n)`, commit `k` of the `n` ticked.
+    pub fn step_place(&self) -> Option<(usize, usize)> {
+        if !self.one_at_a_time {
+            return None;
+        }
+        let steps = self.steps();
+        let at = steps.iter().position(|r| Some(*r) == self.step)?;
+        (steps.len() > 1).then_some((at + 1, steps.len()))
+    }
+
+    /// What goes on screen: with nothing ticked, the cursor's row (none on
+    /// the `older` row, which is a page to read); one ticked row, that
+    /// row; more, all of them TOGETHER or the step ONE AT A TIME is on.
+    pub fn showing(&self) -> Option<Showing> {
+        let steps = self.steps();
+        match steps.len() {
+            0 => self
+                .selected_row()
+                .filter(|r| *r != Row::Older)
+                .map(Showing::Row),
+            1 => Some(Showing::Row(steps[0])),
+            _ if self.one_at_a_time => {
+                let step = self.step.filter(|s| steps.contains(s)).unwrap_or(steps[0]);
+                Some(Showing::Row(step))
+            }
+            _ => Some(Showing::Together(self.ticked.iter().copied().collect())),
+        }
+    }
+
+    /// Whether `row`'s changes are in the diff on screen.
+    pub fn on_screen(&self, row: Row) -> bool {
+        match self.showing() {
+            Some(Showing::Row(shown)) => shown == row,
+            Some(Showing::Together(rows)) => rows.contains(&row),
+            None => false,
+        }
+    }
+
+    /// What reading `row` alone shows; None for the `older` row.
+    fn scope_of_row(&self, row: Row) -> Option<DiffScope> {
         match row {
-            Row::Branch => Some(DiffScope::Branch {
-                merge_base: self.merge_base.clone()?,
-            }),
             Row::Uncommitted => Some(DiffScope::Uncommitted),
             Row::Commit(i) => self.commits.get(i).map(Commit::scope),
             Row::Older => None,
         }
     }
 
-    /// The commit a scope is of, when it is one of this list's.
-    pub fn commit_of(&self, scope: &DiffScope) -> Option<&Commit> {
-        match scope {
-            DiffScope::Commit { sha, .. } => self.commits.iter().find(|c| &c.sha == sha),
-            _ => None,
+    /// The scope behind what [`CommitList::showing`] says is on screen.
+    pub fn scope_of(&self, showing: &Showing) -> Option<DiffScope> {
+        match showing {
+            Showing::Row(row) => self.scope_of_row(*row),
+            Showing::Together(rows) => Some(DiffScope::Ranges(self.ranges(rows))),
         }
     }
 
-    /// First row of the strip's stateless follow-window.
-    pub fn window_start(&self, height: usize) -> usize {
-        window_start(self.selected, height)
+    /// Whether the row at list index `newer` sits right on the one at
+    /// `older` — the next row down — with nothing between them on the
+    /// branch: no merge left out of the list.
+    fn sits_on(&self, newer: usize, older: usize) -> bool {
+        if older != newer + 1 {
+            return false;
+        }
+        let parent = match self.row(newer) {
+            Some(Row::Uncommitted) => self.head.as_ref(),
+            Some(Row::Commit(i)) => self.commits[i].parents.first(),
+            _ => None,
+        };
+        match self.row(older) {
+            Some(Row::Commit(i)) => parent == Some(&self.commits[i].sha),
+            _ => false,
+        }
+    }
+
+    /// The ranges a TOGETHER diff of `rows` reads, oldest first — see the
+    /// module doc for where one range ends and the next begins.
+    pub fn ranges(&self, rows: &[Row]) -> Vec<Range> {
+        let mut index: Vec<usize> = rows.iter().filter_map(|r| self.index_of(*r)).collect();
+        index.sort_unstable();
+        index.reverse();
+        // The branch's first commit is the list's last — once every page
+        // is in, or with every commit read so far ticked, standing in for
+        // the ones not read yet.
+        let first_commit = self
+            .commits
+            .len()
+            .checked_sub(1)
+            .and_then(|i| self.index_of(Row::Commit(i)));
+        let from_the_start = first_commit.is_some()
+            && index.first() == first_commit.as_ref()
+            && (!self.has_older() || self.all_ticked());
+        let mut runs: Vec<(Vec<usize>, bool)> = Vec::new();
+        for (n, &i) in index.iter().enumerate() {
+            if let Some((run, tail)) = runs.last_mut() {
+                let below = *run.last().expect("a run holds a row");
+                if below == i + 1 && (*tail || self.sits_on(i, below)) {
+                    run.push(i);
+                    continue;
+                }
+            }
+            runs.push((vec![i], n == 0 && from_the_start));
+        }
+        runs.into_iter()
+            .map(|(run, tail)| self.range_of(&run, tail))
+            .collect()
+    }
+
+    /// One run of rows (list indices, oldest first) as a [`Range`].
+    fn range_of(&self, run: &[usize], from_the_start: bool) -> Range {
+        let (oldest, newest) = (run[0], run[run.len() - 1]);
+        let commit = |index: usize| match self.row(index) {
+            Some(Row::Commit(i)) => self.commits.get(i),
+            _ => None,
+        };
+        let to = commit(newest).map(|c| c.sha.clone());
+        let at_head = to.is_none() || to == self.head;
+        let from = match (from_the_start, &self.base, &self.merge_base) {
+            (true, _, Some(merge_base)) if at_head => RangeStart::Rev(merge_base.clone()),
+            (true, Some(base), _) => RangeStart::MergeBase { base: base.clone() },
+            _ => match commit(oldest) {
+                Some(c) => c
+                    .parents
+                    .first()
+                    .map_or(RangeStart::Empty, |p| RangeStart::Rev(p.clone())),
+                // Only the uncommitted changes: they sit on HEAD.
+                None => RangeStart::Rev(self.head.clone().unwrap_or_else(|| "HEAD".into())),
+            },
+        };
+        let name =
+            |index: usize| commit(index).map_or("working tree".to_string(), |c| c.short.clone());
+        let commits = run.iter().filter(|i| commit(**i).is_some()).count();
+        let label = match (run.len(), commits) {
+            (1, 0) => "the uncommitted changes".to_string(),
+            (1, _) => name(oldest),
+            (_, n) => {
+                let noun = if n == 1 { "commit" } else { "commits" };
+                format!("{}..{} · {n} {noun}", name(oldest), name(newest))
+            }
+        };
+        Range { from, to, label }
+    }
+
+    /// The REVIEW HEAD over each file of what `showing` puts on screen: a
+    /// commit's message — `commit 2 of 3 · …` stepping one at a time — or,
+    /// read together, what was ticked.
+    pub fn head(&self, showing: &Showing, now_ms: i64) -> Vec<Head> {
+        let lead = self.step_place().map(|(k, n)| format!("commit {k} of {n}"));
+        match showing {
+            Showing::Row(Row::Commit(i)) => self
+                .commits
+                .get(*i)
+                .map(|c| c.head(now_ms, lead.as_deref()))
+                .unwrap_or_default(),
+            Showing::Row(Row::Uncommitted) => match lead {
+                Some(lead) => vec![
+                    Head::Title(format!("{lead} · the uncommitted changes")),
+                    Head::Meta("the working tree against HEAD, untracked files included".into()),
+                ],
+                None => Vec::new(),
+            },
+            Showing::Row(Row::Older) => Vec::new(),
+            Showing::Together(rows) => self.together_head(rows, now_ms),
+        }
+    }
+
+    fn together_head(&self, rows: &[Row], now_ms: i64) -> Vec<Head> {
+        let ranges = self.ranges(rows);
+        let commits = rows.iter().filter(|r| matches!(r, Row::Commit(_))).count();
+        let dirty = rows.contains(&Row::Uncommitted);
+        let whole = self.all_ticked();
+        let base = self.base.as_deref().unwrap_or("its base");
+        let mut title = if whole {
+            format!("The whole branch since {base}")
+        } else {
+            format!("{commits} commits together")
+        };
+        if dirty {
+            title.push_str(" and the uncommitted changes");
+        }
+        let mut head = vec![Head::Title(title)];
+        if whole {
+            let noun = if self.total == 1 { "commit" } else { "commits" };
+            head.push(Head::Meta(format!(
+                "{} {noun}, as its pull request would show them",
+                self.total.max(commits)
+            )));
+        }
+        if ranges.len() > 1 {
+            head.push(Head::Meta(format!(
+                "in {} ranges — something unticked sits between them — so a file two of them touch shows each range's diff in turn",
+                ranges.len()
+            )));
+        }
+        head.push(Head::Blank);
+        let pad = self.commits.first().map_or(7, |c| {
+            unicode_width::UnicodeWidthStr::width(c.short.as_str())
+        });
+        for row in rows.iter().take(HEAD_ITEMS) {
+            head.push(match row {
+                Row::Commit(i) => {
+                    let c = &self.commits[*i];
+                    Head::Item {
+                        sha: c.short.clone(),
+                        text: format!("{} · {}", c.subject, c.ago(now_ms)),
+                    }
+                }
+                _ => Head::Item {
+                    sha: " ".repeat(pad),
+                    text: "the uncommitted changes".into(),
+                },
+            });
+        }
+        if rows.len() > HEAD_ITEMS {
+            head.push(Head::Meta(format!(
+                "… and {} more",
+                rows.len() - HEAD_ITEMS
+            )));
+        }
+        head
+    }
+
+    /// The first row of the list on screen for a panel whose rows take
+    /// `heights` (one entry per row) and `avail` lines: where the wheel
+    /// left it while the cursor hasn't moved since, else the last top moved
+    /// just enough to show the cursor's row whole.
+    pub fn window_top(&self, heights: &[usize], avail: usize) -> usize {
+        let len = heights.len();
+        // The furthest top that still fills the panel.
+        let mut max_top = len.saturating_sub(1);
+        let mut used = 0;
+        for (i, h) in heights.iter().enumerate().rev() {
+            used += h;
+            if used > avail {
+                break;
+            }
+            max_top = i;
+        }
+        let mut top = self.top.min(max_top);
+        if self.pinned_at == Some(self.selected) {
+            return top;
+        }
+        let cursor = self.selected.min(len.saturating_sub(1));
+        if cursor < top {
+            top = cursor;
+        }
+        while top < cursor && heights[top..=cursor].iter().sum::<usize>() > avail {
+            top += 1;
+        }
+        top
+    }
+
+    /// The wheel over the list: its rows scroll, the cursor stays.
+    pub fn wheel(&mut self, delta: i64) {
+        let last = self.row_count().saturating_sub(1) as i64;
+        self.top = (self.top as i64 + delta).clamp(0, last) as usize;
+        self.pinned_at = Some(self.selected);
     }
 }
 
-/// Put the COMMIT LIST read with the viewer's opening into `view`. A
-/// checkout with nothing uncommitted has its branch's changes put up
-/// instead, the cursor on **All changes**.
+/// Put the COMMIT LIST read with the viewer's opening into `view` and put
+/// up what it opens on: a clean checkout's whole branch, ticked.
 pub fn install(view: &mut DiffView, listing: CommitListing) {
-    view.commits = Some(CommitList::from_listing(listing));
-    if view.files.is_empty() && view.scope == DiffScope::Uncommitted {
-        show_selected(view);
-    }
+    view.commits = Some(Box::new(CommitList::from_listing(listing)));
+    show_selected(view);
 }
 
-/// The COMMIT LIST's cursor moved: put its row up. The `older` row asks
-/// for the next page; any other for its file list — unless it is the scope
-/// on screen already, with no other row's list asked for since.
+/// The COMMIT LIST's cursor, ticks or mode changed: put up what it now
+/// says is on screen. The `older` row under the cursor asks for the next
+/// page; anything else for its file list — unless it is the scope on
+/// screen already, with no other asked for since, when only the head over
+/// it changes (`commit 2 of 3` became `2 of 4`).
 pub fn show_selected(view: &mut DiffView) {
     let Some(list) = &view.commits else {
         return;
     };
-    let Some(row) = list.selected_row() else {
+    if list.selected_row() == Some(Row::Older) {
+        request_page(view);
+    }
+    let Some(list) = &view.commits else {
         return;
     };
-    if row == Row::Older {
-        request_page(view);
+    let Some(showing) = list.showing() else {
         return;
-    }
-    let Some(scope) = list.scope_of(row) else {
+    };
+    let Some(scope) = list.scope_of(&showing) else {
         return;
     };
     if scope == view.scope && view.listing.is_none() {
+        let head = list.head(&showing, crate::app::now_ms());
+        if head != view.head {
+            view.set_head(head);
+        }
         return;
     }
     request_scope(view, scope);
 }
 
-/// Ask for a row's file list. The files and the diff on screen stay up
+/// Put `scope` up in a view with no COMMIT LIST of its own — one commit of
+/// a pull request — once its file list is read.
+pub fn show_scope(view: &mut DiffView, scope: DiffScope) {
+    request_scope(view, scope);
+}
+
+/// Ask for a scope's file list. The files and the diff on screen stay up
 /// meanwhile — `view_jobs::STALE_GRACE`, then [`listing_slow`] — and the
 /// answer lands in [`land_scope`].
 fn request_scope(view: &mut DiffView, scope: DiffScope) {
@@ -513,9 +940,9 @@ fn request_scope(view: &mut DiffView, scope: DiffScope) {
     });
 }
 
-/// A row's file list: the uncommitted changes the way `g` reads them —
-/// `read_listing`, the stored ✓ marks restored — and any other row's
-/// through `scope_files`.
+/// A scope's file list: the uncommitted changes the way `g` reads them —
+/// `read_listing`, the stored ✓ marks restored — and any other through
+/// `scope_files`.
 fn read_scope(root: &Path, scope: &DiffScope) -> Result<DiffListing, String> {
     if *scope == DiffScope::Uncommitted {
         return crate::git_diff::read_listing(root);
@@ -528,15 +955,15 @@ fn read_scope(root: &Path, scope: &DiffScope) -> Result<DiffListing, String> {
     })
 }
 
-/// A row's file list came back. When it is the one the view waits on, its
-/// scope becomes the one on screen: the files replaced — the filter kept,
+/// A scope's file list came back. When it is the one the view waits on,
+/// it becomes the scope on screen: the files replaced — the filter kept,
 /// so a typed path follows the reader from commit to commit — the cursor
-/// home on the first unreviewed file, a commit's message put up as the
-/// diff's header, and that file's diff read.
+/// home on the first unreviewed file, the REVIEW HEAD for what is on
+/// screen put over the diff, and that file's diff read.
 ///
 /// The uncommitted changes' ✓ marks are stored on disk and come back with
-/// their listing; any other row's are kept for as long as the modal is up,
-/// put away while another row is on screen and brought back with it.
+/// their listing; any other scope's are kept for as long as the modal is
+/// up, put away while another is on screen and brought back with it.
 pub fn land_scope(
     view: &mut DiffView,
     ticket: u64,
@@ -571,13 +998,14 @@ pub fn land_scope(
             files
         }
     };
-    let now = crate::app::now_ms();
-    view.header = view
-        .commits
-        .as_ref()
-        .and_then(|list| list.commit_of(&view.scope))
-        .map(|commit| commit.header(now))
-        .unwrap_or_default();
+    // A view with no COMMIT LIST keeps the head it was opened with.
+    if let Some(list) = &view.commits {
+        let now = crate::app::now_ms();
+        view.head = list
+            .showing()
+            .map(|showing| list.head(&showing, now))
+            .unwrap_or_default();
+    }
     view.header_read = false;
     // A diff read under the last scope must never land under this one's
     // name: a fresh id drops it, and the cache was of that scope too.
@@ -592,15 +1020,17 @@ pub fn land_scope(
     }
 }
 
-/// A row's file list has outlasted `view_jobs::STALE_GRACE`: the last
-/// row's files come down and the list says `reading changes…`, rather
-/// than leave them under the new row's name.
+/// A scope's file list has outlasted `view_jobs::STALE_GRACE`: the last
+/// scope's files come down and the list says `reading changes…`, rather
+/// than leave them under the new one's name.
 pub fn listing_slow(view: &mut DiffView, ticket: u64) {
     if view.listing != Some(ticket) || view.files.is_empty() {
         return;
     }
     view.waiting = None;
-    view.header.clear();
+    if view.commits.is_some() {
+        view.head.clear();
+    }
     view.replace_files(Vec::new());
     view.show_diff(None, "loading…".to_string(), false);
 }
@@ -636,10 +1066,10 @@ fn request_page(view: &mut DiffView) {
     }
 }
 
-/// The next page of commits came back. It joins the list, and a cursor
-/// that was waiting on the `older` row — now the page's first commit —
-/// has that commit put up. A page that read nothing (or failed) ends the
-/// list where it is.
+/// The next page of commits came back. It joins the list — ticked, when
+/// every commit before it was: "all" still means all — and a cursor that
+/// was waiting on the `older` row, now the page's first commit, has that
+/// put up. A page that read nothing (or failed) ends the list where it is.
 pub fn land_page(view: &mut DiffView, ticket: u64, result: Result<Vec<Commit>, String>) {
     let Some(list) = &mut view.commits else {
         return;
@@ -648,8 +1078,16 @@ pub fn land_page(view: &mut DiffView, ticket: u64, result: Result<Vec<Commit>, S
         return;
     }
     list.paging = None;
+    let all = list.all_ticked();
     match result {
-        Ok(page) if !page.is_empty() => Arc::make_mut(&mut list.commits).extend(page),
+        Ok(page) if !page.is_empty() => {
+            let from = list.commits.len();
+            Arc::make_mut(&mut list.commits).extend(page);
+            if all {
+                list.ticked
+                    .extend((from..list.commits.len()).map(Row::Commit));
+            }
+        }
         Ok(_) => list.total = list.commits.len(),
         Err(err) => {
             tracing::warn!("{err}");
@@ -712,6 +1150,16 @@ mod tests {
         git(repo, &["commit", "-qm", message]);
     }
 
+    /// `main` moves on and is merged into `feat`, which then carries on —
+    /// and `origin/main` follows, as a fetch would have it.
+    fn merge_main(repo: &Path, file: &str) {
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, file, "main's\n", &format!("main: {file}"));
+        git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(repo, &["checkout", "-q", "feat"]);
+        git(repo, &["merge", "-q", "--no-edit", "main"]);
+    }
+
     #[test]
     fn parse_log_reads_fields_body_and_counts() {
         let text = "\x1eaaa111\x1faaa\x1fppp\x1fTess\x1f1700000000\x1fAdd retry\x1fWhy:\n- the hook drops\n\n\x1d\n\n3\t1\tsrc/a.rs\n-\t-\tlogo.png\n10\t0\tsrc/{old => new}.rs\n\
@@ -755,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_is_who_and_when_then_the_whole_message() {
+    fn the_head_is_the_subject_then_who_and_when_then_the_body() {
         let commit = Commit {
             sha: "abc".into(),
             short: "abc".into(),
@@ -767,20 +1215,24 @@ mod tests {
             stat: None,
         };
         assert_eq!(
-            commit.header(1_000_000 + 3 * 3_600_000),
-            vec!["abc · Tess · 3h ago", "", "Add retry", "", "- one", "- two"]
+            commit.head(1_000_000 + 3 * 3_600_000, None),
+            vec![
+                Head::Title("Add retry".into()),
+                Head::Meta("abc · Tess · 3h ago".into()),
+                Head::Blank,
+                Head::Prose("- one".into()),
+                Head::Prose("- two".into()),
+            ]
         );
         let bare = Commit {
             body: String::new(),
-            parents: vec!["p1".into(), "p2".into()],
             ..commit
         };
         assert_eq!(
-            bare.header(1_000_000),
+            bare.head(1_000_000, Some("commit 2 of 3")),
             vec![
-                "abc · Tess · just now · merge, shown against its first parent",
-                "",
-                "Add retry"
+                Head::Title("commit 2 of 3 · Add retry".into()),
+                Head::Meta("abc · Tess · just now".into()),
             ]
         );
     }
@@ -845,8 +1297,7 @@ mod tests {
     }
 
     /// The commits since the base, newest first with their counts, and the
-    /// rows above them: the whole branch counted to the working tree, its
-    /// untracked file included, and the uncommitted changes.
+    /// uncommitted row's counts.
     #[test]
     fn read_lists_the_branch_and_counts_its_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -859,6 +1310,7 @@ mod tests {
 
         let listing = read(&repo, "", &dirty);
         assert_eq!(listing.base.as_deref(), Some("origin/main"));
+        assert_eq!(listing.head, crate::git_diff::head_oid(&repo));
         assert_eq!(listing.total, 2);
         let subjects: Vec<&str> = listing.commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, ["add b", "add a"], "newest first");
@@ -871,17 +1323,6 @@ mod tests {
                     removed: 0
                 })
             })
-        );
-        assert_eq!(
-            listing.branch,
-            Some(Stat {
-                files: 3,
-                lines: Some(LineChanges {
-                    added: 5,
-                    removed: 0
-                })
-            }),
-            "a.txt's one line, b.txt's and new.txt's three"
         );
         assert_eq!(
             listing.uncommitted,
@@ -899,6 +1340,44 @@ mod tests {
         let detached = read(&repo, "", &dirty);
         assert_eq!(detached.total, 2);
         assert_eq!(detached.commits[0].subject, "add b");
+    }
+
+    /// The owner's rule: only what the branch added. A merge of `main`
+    /// into the branch is not listed, and neither is anything that came in
+    /// with it — before the merge or after `main` moved on again.
+    #[test]
+    fn merges_and_what_they_brought_in_are_never_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = branch_repo(&dir);
+        commit(&repo, "a.txt", "a\n", "mine: a");
+        merge_main(&repo, "m1.txt");
+        commit(&repo, "b.txt", "b\n", "mine: b");
+        merge_main(&repo, "m2.txt");
+        commit(&repo, "c.txt", "c\n", "mine: c");
+        // `main` moves on once more, not merged: still not the branch's.
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, "m3.txt", "m3\n", "main: m3");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "feat"]);
+
+        let listing = read(&repo, "", &[]);
+        let subjects: Vec<&str> = listing.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["mine: c", "mine: b", "mine: a"]);
+        assert_eq!(listing.total, 3, "the count agrees with the log");
+        assert!(listing.commits.iter().all(|c| !c.is_merge()));
+
+        // Read together, all three are the branch's own diff: none of
+        // main's files.
+        let mut view = DiffView::new(repo.clone(), "feat".into(), Vec::new(), true);
+        install(&mut view, listing);
+        let paths: Vec<&str> = view.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "b.txt", "c.txt"]);
+        // `mine: b` alone sits on a merge: its parent, not main's commits.
+        select(&mut view, Row::Commit(1));
+        view.commits.as_mut().unwrap().tick_all();
+        show_selected(&mut view);
+        let paths: Vec<&str> = view.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["b.txt"]);
     }
 
     #[test]
@@ -921,7 +1400,8 @@ mod tests {
     }
 
     /// A long branch is read a page at a time: the first page with the
-    /// listing, the next when the `older` row is reached.
+    /// listing, the next when the `older` row is reached — ticked like the
+    /// rest when every commit before it was.
     #[test]
     fn a_long_branch_is_read_a_page_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
@@ -939,44 +1419,69 @@ mod tests {
         install(&mut view, listing);
         let list = view.commits.as_ref().unwrap();
         assert_eq!(list.row(list.row_count() - 1), Some(Row::Older));
+        assert!(list.all_ticked(), "a clean checkout opens on all of it");
 
         // The cursor reaches the `older` row: the page is read (inline,
-        // with no jobs) and the cursor is on its first commit, shown.
+        // with no jobs) and joins the list ticked.
         let last = view.commits.as_ref().unwrap().row_count() as i64 - 1;
         view.commits.as_mut().unwrap().select(last);
         show_selected(&mut view);
         let list = view.commits.as_ref().unwrap();
         assert_eq!(list.commits.len(), COMMIT_PAGE + 3);
         assert!(!list.has_older());
+        assert!(list.all_ticked(), "all still means all");
         let Some(Row::Commit(i)) = list.selected_row() else {
             panic!("the cursor is on a commit");
         };
         assert_eq!(list.commits[i].subject, "c2");
+
+        // Nothing ticked, the cursor's commit is what is on screen.
+        view.commits.as_mut().unwrap().tick_all();
+        show_selected(&mut view);
+        let list = view.commits.as_ref().unwrap();
         assert_eq!(view.scope, list.commits[i].scope());
     }
 
-    fn list_of(commits: usize, dirty: bool, total: usize) -> CommitList {
+    /// `n` commits chained parent to child, newest first, HEAD on the
+    /// newest; `merge_after` puts a merge (left out of the list, as `git
+    /// log --no-merges` leaves it) between commit `k` and the one under it.
+    fn list_with(
+        commits: usize,
+        dirty: bool,
+        total: usize,
+        merge_after: Option<usize>,
+    ) -> CommitList {
         let commit = |n: usize| Commit {
             sha: format!("sha{n}"),
             short: format!("s{n}"),
-            parents: vec![format!("sha{}", n + 1)],
+            parents: vec![if merge_after == Some(n) {
+                format!("merge{n}")
+            } else {
+                format!("sha{}", n + 1)
+            }],
             author: "Tess".into(),
             time: 0,
             subject: format!("commit {n}"),
             body: String::new(),
             stat: None,
         };
-        CommitList::from_listing(CommitListing {
+        let mut list = CommitList::from_listing(CommitListing {
             base: Some("origin/main".into()),
             merge_base: Some("mb".into()),
+            head: Some("sha0".into()),
             total,
             commits: (0..commits).map(commit).collect(),
-            branch: None,
             uncommitted: dirty.then(Stat::default),
-        })
+        });
+        list.ticked.clear();
+        list
     }
 
-    /// The rows run All, Uncommitted, the commits newest first, then the
+    fn list_of(commits: usize, dirty: bool, total: usize) -> CommitList {
+        list_with(commits, dirty, total, None)
+    }
+
+    /// The rows run Uncommitted, the commits newest first, then the
     /// `older` row; each is missing when there is nothing behind it.
     #[test]
     fn the_rows_are_only_the_ones_with_something_behind_them() {
@@ -986,65 +1491,252 @@ mod tests {
         let full = list_of(2, true, 5);
         assert_eq!(
             rows(&full),
-            [
-                Row::Branch,
-                Row::Uncommitted,
-                Row::Commit(0),
-                Row::Commit(1),
-                Row::Older
-            ]
+            [Row::Uncommitted, Row::Commit(0), Row::Commit(1), Row::Older]
         );
-        assert_eq!(
-            full.selected_row(),
-            Some(Row::Uncommitted),
-            "a dirty checkout opens on it"
-        );
-        assert_eq!(full.row(5), None);
-
+        assert_eq!(full.row(4), None);
+        for (i, row) in rows(&full).into_iter().enumerate() {
+            assert_eq!(full.index_of(row), Some(i));
+        }
         let clean = list_of(2, false, 2);
-        assert_eq!(rows(&clean), [Row::Branch, Row::Commit(0), Row::Commit(1)]);
-        assert_eq!(
-            clean.selected_row(),
-            Some(Row::Branch),
-            "a clean one on the branch"
-        );
-
-        let nothing_ahead = list_of(0, true, 0);
-        assert_eq!(
-            rows(&nothing_ahead),
-            [Row::Uncommitted],
-            "no All without a commit"
-        );
+        assert_eq!(rows(&clean), [Row::Commit(0), Row::Commit(1)]);
+        assert_eq!(clean.index_of(Row::Older), None);
+        assert_eq!(rows(&list_of(0, true, 0)), [Row::Uncommitted]);
         assert_eq!(CommitList::reading().row_count(), 0);
     }
 
+    /// What a fresh list opens on: a dirty checkout's uncommitted changes,
+    /// nothing ticked; a clean one's every commit, read together.
     #[test]
-    fn each_row_names_what_it_shows() {
-        let list = list_of(2, true, 3);
+    fn a_dirty_checkout_opens_on_its_changes_and_a_clean_one_on_the_branch() {
+        let dirty = CommitList::from_listing(CommitListing {
+            uncommitted: Some(Stat::default()),
+            commits: list_of(2, false, 2).commits.to_vec(),
+            ..CommitListing::default()
+        });
+        assert!(dirty.ticked.is_empty());
+        assert_eq!(dirty.showing(), Some(Showing::Row(Row::Uncommitted)));
+
+        let clean = CommitList::from_listing(CommitListing {
+            total: 2,
+            commits: list_of(2, false, 2).commits.to_vec(),
+            ..CommitListing::default()
+        });
+        assert!(clean.all_ticked());
         assert_eq!(
-            list.scope_of(Row::Branch),
-            Some(DiffScope::Branch {
-                merge_base: "mb".into()
-            })
+            clean.showing(),
+            Some(Showing::Together(vec![Row::Commit(0), Row::Commit(1)]))
+        );
+        assert_eq!(clean.selected_row(), Some(Row::Commit(0)));
+    }
+
+    /// Ticking and the two ways to read what is ticked: nothing ticked is
+    /// the cursor's row; ticked rows read together, or one at a time,
+    /// oldest first, the cursor riding along; `^A` all and none.
+    #[test]
+    fn ticks_read_together_or_one_at_a_time() {
+        let mut list = list_of(4, true, 4);
+        list.select(2);
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(1))));
+        assert!(list.step_by(true), "⇧← walks the cursor older");
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
+
+        // Tick commits 0 and 2, and the uncommitted changes.
+        list.toggle_tick();
+        list.select(1);
+        list.toggle_tick();
+        list.select(0);
+        list.toggle_tick();
+        assert_eq!(
+            list.showing(),
+            Some(Showing::Together(vec![
+                Row::Uncommitted,
+                Row::Commit(0),
+                Row::Commit(2)
+            ]))
+        );
+        assert!(list.on_screen(Row::Commit(2)) && !list.on_screen(Row::Commit(1)));
+        list.select(3);
+        assert_eq!(
+            list.showing(),
+            Some(Showing::Together(vec![
+                Row::Uncommitted,
+                Row::Commit(0),
+                Row::Commit(2)
+            ])),
+            "the cursor only aims the ticks now"
+        );
+
+        // ⇧→ from together starts stepping at the oldest.
+        assert!(list.step_by(false));
+        assert!(list.one_at_a_time);
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
+        assert_eq!(list.step_place(), Some((1, 3)));
+        assert_eq!(
+            list.selected_row(),
+            Some(Row::Commit(2)),
+            "the cursor rides along"
+        );
+        assert!(list.step_by(false));
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(0))));
+        assert!(list.step_by(false));
+        assert_eq!(list.step_place(), Some((3, 3)));
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Uncommitted)));
+        assert!(!list.step_by(false), "the newest ends it");
+        assert!(list.step_by(true));
+        assert_eq!(list.step_place(), Some((2, 3)));
+        assert_eq!(
+            list.head(&list.showing().unwrap(), 0)[0],
+            Head::Title("commit 2 of 3 · commit 0".into())
+        );
+
+        // Unticking the step hands it to its older neighbour.
+        list.toggle_tick();
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
+        assert_eq!(list.step_place(), Some((1, 2)));
+        // Landing the cursor on a ticked row steps onto it; an unticked one
+        // leaves the step where it is.
+        list.select(2);
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
+        list.select(0);
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Uncommitted)));
+
+        // ^G: back to together; ^A ticks every commit, then none at all.
+        list.toggle_mode();
+        assert!(!list.one_at_a_time);
+        list.tick_all();
+        assert!(list.all_ticked());
+        assert!(
+            list.ticked.contains(&Row::Uncommitted),
+            "kept on the way up"
+        );
+        list.tick_all();
+        assert!(list.ticked.is_empty());
+        assert_eq!(list.showing(), Some(Showing::Row(Row::Uncommitted)));
+    }
+
+    /// Where a TOGETHER diff's ranges begin and end: side by side is one
+    /// range from the oldest's parent; a row left out, or a merge, starts
+    /// another; a run down to the branch's first commit is measured from
+    /// the merge-base, across merges; the uncommitted changes end a range
+    /// at the working tree.
+    #[test]
+    fn ticked_rows_become_ranges_split_at_gaps_and_merges() {
+        let rev = |s: &str| RangeStart::Rev(s.into());
+        let list = list_of(5, true, 5);
+        let ranges = list.ranges(&[Row::Commit(1), Row::Commit(2)]);
+        assert_eq!(
+            ranges,
+            [Range {
+                from: rev("sha3"),
+                to: Some("sha1".into()),
+                label: "s2..s1 · 2 commits".into(),
+            }]
+        );
+        let ranges = list.ranges(&[Row::Commit(0), Row::Commit(2)]);
+        assert_eq!(ranges.len(), 2, "commit 1 left out between them");
+        assert_eq!(
+            (ranges[0].from.clone(), ranges[0].to.clone()),
+            (rev("sha3"), Some("sha2".into()))
         );
         assert_eq!(
-            list.scope_of(Row::Uncommitted),
-            Some(DiffScope::Uncommitted)
+            (ranges[1].from.clone(), ranges[1].to.clone()),
+            (rev("sha1"), Some("sha0".into()))
         );
+        assert_eq!(ranges[1].label, "s0");
+
+        let ranges = list.ranges(&[Row::Uncommitted, Row::Commit(0)]);
+        assert_eq!(ranges.len(), 1, "the working tree sits on HEAD");
+        assert_eq!(ranges[0].to, None);
+        assert_eq!(ranges[0].from, rev("sha1"));
+        assert_eq!(ranges[0].label, "s0..working tree · 1 commit");
+        let ranges = list.ranges(&[Row::Uncommitted]);
+        assert_eq!(ranges[0].from, rev("sha0"));
+
+        // Down to the first commit: from the merge-base, HEAD's known one.
+        let ranges = list.ranges(&[Row::Commit(3), Row::Commit(4)]);
         assert_eq!(
-            list.scope_of(Row::Commit(1)),
-            Some(DiffScope::Commit {
-                sha: "sha1".into(),
-                parent: Some("sha2".into())
-            })
+            ranges[0].from,
+            RangeStart::MergeBase {
+                base: "origin/main".into()
+            },
+            "not at HEAD: asked of git"
         );
-        assert_eq!(list.scope_of(Row::Older), None);
-        let scope = list.scope_of(Row::Commit(0)).unwrap();
+        let all: Vec<Row> = (0..5).map(Row::Commit).collect();
+        assert_eq!(list.ranges(&all)[0].from, rev("mb"));
+
+        // A merge between commits 1 and 2 splits them — except in a run
+        // that reaches the first commit.
+        let merged = list_with(4, false, 4, Some(1));
+        assert_eq!(merged.ranges(&[Row::Commit(1), Row::Commit(2)]).len(), 2);
+        let all: Vec<Row> = (0..4).map(Row::Commit).collect();
+        assert_eq!(merged.ranges(&all).len(), 1, "the whole branch is one diff");
+
+        // With pages still unread, a run to the last commit read is not
+        // from the start — unless every commit read is ticked.
+        let paged = list_of(3, false, 9);
+        assert_eq!(paged.ranges(&[Row::Commit(2)])[0].from, rev("sha3"));
+        let all: Vec<Row> = (0..3).map(Row::Commit).collect();
+        let mut paged = paged;
+        paged.ticked = all.iter().copied().collect();
+        assert_eq!(paged.ranges(&all)[0].from, rev("mb"));
+    }
+
+    /// The head over a TOGETHER diff says what was ticked: the whole
+    /// branch, or how many, each commit named — and, with a gap, that the
+    /// ranges come in turn.
+    #[test]
+    fn the_together_head_names_what_was_ticked() {
+        let mut list = list_of(3, false, 3);
+        list.tick_all();
+        let head = list.head(&list.showing().unwrap(), 0);
         assert_eq!(
-            list.commit_of(&scope).map(|c| c.subject.as_str()),
-            Some("commit 0")
+            head[0],
+            Head::Title("The whole branch since origin/main".into())
         );
-        assert_eq!(list.index_of(Row::Commit(0)), Some(2));
+        assert!(head.contains(&Head::Item {
+            sha: "s2".into(),
+            text: "commit 2 · just now".into()
+        }));
+        list.select(1);
+        list.toggle_tick();
+        let head = list.head(&list.showing().unwrap(), 0);
+        assert_eq!(head[0], Head::Title("2 commits together".into()));
+        assert!(
+            matches!(&head[1], Head::Meta(m) if m.starts_with("in 2 ranges")),
+            "{head:?}"
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_list_until_the_cursor_moves() {
+        let mut list = list_of(10, false, 10);
+        let heights = vec![3; 10];
+        assert_eq!(list.window_top(&heights, 9), 0);
+        list.select(5);
+        assert_eq!(
+            list.window_top(&heights, 9),
+            3,
+            "just enough to show the cursor"
+        );
+        list.top = 3;
+        list.wheel(4);
+        assert_eq!(
+            list.window_top(&heights, 9),
+            7,
+            "the wheel moved it, the cursor did not"
+        );
+        list.wheel(10);
+        assert_eq!(
+            list.window_top(&heights, 9),
+            7,
+            "no further than a full panel"
+        );
+        list.select(6);
+        assert_eq!(
+            list.window_top(&heights, 9),
+            6,
+            "the cursor moved: it follows again"
+        );
     }
 
     // ---- against a real checkout, through a view with no jobs ----
@@ -1067,9 +1759,9 @@ mod tests {
         show_selected(view);
     }
 
-    /// A clean checkout with commits opens on the whole branch; a commit's
-    /// row lists exactly its files, renames and deletes too, with its
-    /// message over the diff.
+    /// A clean checkout opens on its whole branch; with nothing ticked a
+    /// commit's row lists exactly its files, renames and deletes too, with
+    /// its message over the diff.
     #[test]
     fn a_commit_shows_exactly_its_own_files_under_its_message() {
         let dir = tempfile::tempdir().unwrap();
@@ -1084,26 +1776,25 @@ mod tests {
         );
 
         let mut view = opened(&repo);
-        assert_eq!(
-            view.scope,
-            DiffScope::Branch {
-                merge_base: view.commits.as_ref().unwrap().merge_base.clone().unwrap()
-            },
-            "nothing uncommitted: the branch's changes"
+        assert!(
+            matches!(&view.scope, DiffScope::Ranges(r) if r.len() == 1),
+            "nothing uncommitted: the branch's changes, {:?}",
+            view.scope
         );
         assert_eq!(paths(&view), ["a.txt", "b.txt", "moved.txt"]);
-        assert!(
-            view.header.is_empty(),
-            "the branch has no message of its own"
+        assert_eq!(
+            view.head[0],
+            Head::Title("The whole branch since origin/main".into())
         );
 
+        view.commits.as_mut().unwrap().tick_all();
         select(&mut view, Row::Commit(0));
         assert_eq!(paths(&view), ["b.txt", "moved.txt"]);
         let moved = view.files.iter().find(|f| f.path == "moved.txt").unwrap();
         assert_eq!(moved.orig_path.as_deref(), Some("base.txt"));
         assert_eq!(moved.xy[0], 'R');
-        assert_eq!(view.header[2], "move base, add b");
-        assert_eq!(view.header[4], "- the body");
+        assert_eq!(view.head[0], Head::Title("move base, add b".into()));
+        assert_eq!(view.head[3], Head::Prose("- the body".into()));
         assert!(view.diff.contains("+beta"), "{}", view.diff);
         assert_eq!(view.scroll, 0, "the first file opens on the message");
 
@@ -1112,12 +1803,41 @@ mod tests {
         view.select(1);
         crate::git_diff::load_selected_diff(&mut view);
         assert!(view.diff.contains("rename from base.txt"), "{}", view.diff);
-        assert_eq!(view.scroll as usize, view.header_rows());
+        assert_eq!(view.scroll, view.head_rows());
+        assert_eq!(view.doc.facts.status, Some("renamed"));
 
         select(&mut view, Row::Commit(1));
         assert_eq!(paths(&view), ["a.txt"]);
         assert!(view.diff.contains("+alpha"));
         assert_eq!(view.scroll, 0, "a new commit opens on its message");
+    }
+
+    /// ONE AT A TIME through a real branch: each step's own files under
+    /// `commit k of n`.
+    #[test]
+    fn stepping_one_at_a_time_reads_each_ticked_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = branch_repo(&dir);
+        commit(&repo, "a.txt", "a\n", "add a");
+        commit(&repo, "b.txt", "b\n", "add b");
+        commit(&repo, "c.txt", "c\n", "add c");
+        let mut view = opened(&repo);
+        assert_eq!(paths(&view), ["a.txt", "b.txt", "c.txt"]);
+        // Untick the middle one: a and c, together, in two ranges.
+        select(&mut view, Row::Commit(1));
+        view.commits.as_mut().unwrap().toggle_tick();
+        show_selected(&mut view);
+        assert_eq!(paths(&view), ["a.txt", "c.txt"]);
+        assert!(matches!(&view.scope, DiffScope::Ranges(r) if r.len() == 2));
+
+        view.commits.as_mut().unwrap().toggle_mode();
+        show_selected(&mut view);
+        assert_eq!(paths(&view), ["a.txt"], "commit 1 of 2 is the oldest");
+        assert_eq!(view.head[0], Head::Title("commit 1 of 2 · add a".into()));
+        view.commits.as_mut().unwrap().step_by(false);
+        show_selected(&mut view);
+        assert_eq!(paths(&view), ["c.txt"]);
+        assert_eq!(view.head[0], Head::Title("commit 2 of 2 · add c".into()));
     }
 
     /// ✓ marks taken on a commit last while the modal is up: put away
@@ -1152,7 +1872,7 @@ mod tests {
         });
     }
 
-    /// An answer for a row the cursor has since left is dropped; the one
+    /// An answer for a scope the list has since left is dropped; the one
     /// it waits on lands.
     #[test]
     fn a_stale_listing_never_lands() {

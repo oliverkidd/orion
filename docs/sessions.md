@@ -27,8 +27,8 @@ and its effort is the `--thinking` level, `off` through `max`).
 In those submenus you type to filter — `opus` narrows the rows to the Opus families, `↑`/`↓` move, `Backspace` widens, `Esc` clears — and the preset editor's Harness / Model / Effort rows take the same type-ahead.
 `Enter` anywhere takes your configured defaults. On the
 Claude row — and on any row of the Claude model and effort lists under it, whose title then reads
-`Claude model · cloud` — `Tab` toggles Cloud mode, the footer naming the key and the state it is in
-(`Tab: cloud off`): enter the task in the wrapped editor
+`Claude model · cloud` — `Tab` toggles Cloud mode, the menu's bottom border naming the key and the
+state it is in (`Tab cloud off`): enter the task in the wrapped editor
 (`Shift+Enter`, `Option+Enter` or `Ctrl+J` adds a line) and orion launches `claude --cloud=<task>` — the value binds
 with `=` and never a space, because `--cloud` takes an *optional* value, so a separate argv item starting
 with `--` would be read as another Claude flag instead. The CLI creates the session, prints its URL and
@@ -105,7 +105,7 @@ one included.
 ## AGENT PRESETS
 
 If you keep starting the same kind of session with the same framing, save it as an **agent preset**:
-**Agent presets** (the command palette, or `⇧Tab` in the quick prompt) lists them, and the launch lands in that card's checkout. Type to find one by name: letters
+**Agent presets** (the command palette, or `⇧Tab` in the quick prompt) lists them, and the launch lands in that card's checkout — its last row says which, and `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
 model and effort submenus. `Ctrl+a` opens a small form — name, harness, model, effort, **Text**
 (which side of the task the preset's text goes: `prefix`, `postfix` or `prefix & postfix`, with a
@@ -273,30 +273,39 @@ orion opens on a GRID of session cards — no modal over it, ever, on any launch
 is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first thing you type is the task.
 
 - **The box** starts on the selected project and in the checkout under the cursor — the worktree
-  whose band the cursor is on, open or collapsed; the root branch with nothing selected, a
-  fresh worktree with **New worktree** on under **Quick prompt** — launching
-  the harness, model and effort the Agents tab defaults name — the row at the top of the box spells
-  them out, `project demo ^P · worktree main ^T · harness claude Tab · model opus high ^O`, the branch
-  in green while Enter will cut it as a fresh worktree.
-  `^P` puts the PROJECT PICKER over it — literally over it: the list floats inside the box, which
-  stays on screen under it with its title, its details row and the task already typed into it, so
+  whose band the cursor is on, open or collapsed; the root branch with nothing selected —
+  launching the harness, model and effort the Agents tab defaults name. Its header spells them out,
+  each field beside the key that changes it, where the launch runs over what runs it:
+  `project demo ⌘P   worktree main ⌘.` over
+  `agent Claude (you@example.com) Tab   model opus · latest ⌘/   effort high ⌘Y`. The effort is
+  always there — `default` until one is picked — for every harness that has one; an AGENT PRESET on
+  the box adds its own `preset … ⇧Tab` field; and a fresh worktree reads `new worktree <branch>` in
+  green, the frame turning green with it. The keys are the ones the box answers to, the worktree,
+  model and effort ones spelled from your keymap (`^T`, `^/`, `^Y` where the terminal never sends ⌘);
+  on a narrow screen the fields wrap onto more rows rather than lose a key. What `Enter` sends is
+  the dim line along the bottom of the frame, right above its keys.
+  `⌘P` puts the PROJECT PICKER over it — literally over it: the list floats inside the box, which
+  stays on screen under it with its title, its header and the task already typed into it, so
   aiming the launch never costs you sight of what you are launching. Every project on the machine is
   in the list, the most recently worked in first, narrowed as you type; Enter aims the box there
   with your text kept. Aiming the box is not navigation — the grid behind it stays on the project
   you are working in, so a prompt fired at another project is a **background launch**: the session
-  starts over there and nothing on screen moves — no tab is added, none is lit. The details row
-  lights the project when the box is aimed away, and the footer names it once Enter lands.
-  `^T` drops the WORKTREE PICKER down from the branch the box names — a fresh worktree, then every
-  checkout the project has, the one the box is aimed at ticked — and picks where this one launch
-  runs, never switching a checkout's branch. `^O` opens the harness's model list straight away
-  (`→` on a model reaches its efforts) and `Tab` the harness picker — all three over the box, as
-  the project picker is, so the task stays in front of you while you pick what will run it. `Tab` again on the picker's Claude row — or in the Claude model list `^O` opens — is the new-session
-  picker's Claude Cloud toggle: the box comes back as a cloud one (`harness claude · cloud`) and
-  Enter sends your text as the cloud task — not offered in a box for an issue or a pull request. `⇧Tab` takes a preset, and `^N` flips between a fresh
-  worktree and the project's own checkout — the choice sticks for the next box. None of the four
-  needs the chord: the details row is a row of buttons, and a click on `project …`, `worktree …`,
-  `harness …` or `model …` — or on the `[ ] new worktree` toggle across from the question — opens
-  exactly what the chord printed beside it opens, box and task still in front of you. Enter
+  starts over there and nothing on screen moves — no tab is added, none is lit. The header lights
+  the project when the box is aimed away, and the footer names it once Enter lands.
+  `⌘.` drops the WORKTREE PICKER down from the branch the box names — **+ new worktree** first,
+  then every checkout the project has, the one the box is aimed at ticked — and picks where this
+  one launch runs, never switching a checkout's branch; a fresh worktree is that first row, the
+  box's own toggle for it gone. `⌘/` opens the harness's model list straight away (`→` on a model
+  reaches its efforts), `⌘Y` steps the effort in place — `default`, then the harness's list, round
+  again — and `Tab` opens the harness picker — the lists over the box, as the project picker is,
+  so the task stays in front of you while you pick what will run it. The three keymap keys work
+  with any of the box's pickers open over it, and none of them closes the box. `Tab` again on the
+  picker's Claude row — or in the Claude model list `⌘/` opens — is the new-session picker's Claude
+  Cloud toggle: the box comes back as a cloud one (`agent Claude · cloud`) and Enter sends your text
+  as the cloud task — not offered in a box for an issue or a pull request. `⇧Tab` takes a preset; a
+  model or effort picked afterwards for the same harness keeps it. None of it needs the key: the
+  header is a row of buttons, and a click on a field opens what the key printed beside it opens — on
+  `effort`, the model's effort list — box and task still in front of you. Enter
   launches, and the cursor and the pane land on the new card as it goes up in its band, the grid
   scrolling to it and the keys still on the grid. Turn off **Follow new** under **Quick prompt** in
   Settings → Agents and nothing you were looking at moves instead: the cursor and the pane stay on
@@ -362,8 +371,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   into **BANDS**, one per checkout that has something running in it — the root first, then the
   rest most recently worked in first; a checkout with nothing running has no band — unless
   **Show all worktrees** (Settings → Sessions, on by default) is on, when every checkout gets
-  one: an EMPTY BAND, its rule over a single line, `nothing running · p: new session · t:
-  terminal · ⌫: delete worktree`. `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
+  one: an EMPTY BAND, its rule over a single line, `nothing running` — what can be done there is
+  the footer's to say once the cursor is on it (`⌘N new agent · t terminal · ⌫ delete worktree`,
+  and `→ focus PR` beside the pull request the pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
   that checkout, and `Backspace` (or **Delete worktree** in its right-click menu) deletes it behind the
   worktree's own confirm; the root's band offers no delete, since the root is never deleted. With the
   setting on, deleting a worktree's last card never asks about the worktree: the band stays,
@@ -377,14 +387,12 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   `↗ #42 Polish the nav  ready` in the colors the PR rows wear (red for conflicts or failing checks,
   purple once merged), a link while the pointer rests on it — and, at its right end, how many
   sessions and terminals are under it and how many cards the row had no room for (`▸ 2 more`).
-  The band the keys are on opens on `❯` where the rest open on `──`, and past its counts says
-  what Tab does there — `Tab: see all 8` with cards past the edge, `Tab: expand` when the row
-  showed them all, `Tab: collapse` on the one band open as an accordion, every card of it wrapped
-  into rows under the rule — since a titled rule reads as a divider until something says a key
-  acts on it.
-  A collapsed band whose row left cards off its edges says so again on the row of air under the
-  cards, centered — `▾ 2 more · Tab: see all 8` — where the eye leaves the row; a click on it
-  opens the band as Tab does.
+  The band the keys are on opens on `❯` where the rest open on `──`, and the FOOTER says what
+  Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every card
+  of it wrapped into rows under the rule.
+  A collapsed band whose row left cards off its edges says so on the row of air under the cards,
+  centered — `▾ 2 more · see all 8` — where the eye leaves the row; a click on it opens the band as
+  Tab does.
   The cards under it are the checkout's sessions, then its terminals as cards two columns wide,
   gap included, so their output has room — a one-column grid gives them the one (`❯ shell-1`
   with what runs in it, then the last lines its shell printed, asked of the daemon
@@ -440,7 +448,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   its status dot and name, what it runs on, its last prompt — then its terminals, the shell's last
   line where a session has its prompt, the names and harnesses in columns down the band. Each band
   starts collapsed on its 3 most recent sessions (the one the cursor is on stays listed too,
-  wherever it sits), with `▾ 2 more · Tab: see all 5` on the line under them; `Tab`, or a click on
+  wherever it sits), with `▾ 2 more · see all 5` on the line under them; `Tab`, or a click on
   that line, opens the band to every entry and `Tab` or `Esc` folds it back — one band open at a
   time, as with the cards. A band that already lists everything has nothing to open, and `Tab`
   there says so. `↑` and `↓` walk the lines as one column, off a band's last line onto the next
@@ -448,7 +456,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
 - **Every worktree open.** Settings → Appearance → **Expand all worktrees** (`expand_all_worktrees`,
   off by default) lays every band out open at once — each worktree's sessions and terminals wrapped
   into rows under its rule, or every line of the compact list — so there is no accordion: `Tab`, and
-  a second click on a rule, open and fold nothing (the footer says so), no rule offers a `Tab:` verb,
+  a second click on a rule, open and fold nothing (the footer says so), the footer offers no `Tab` verb,
   and `Esc` has no band to close. `←`/`→` walk a row, `↑`/`↓` walk down every worktree's rows as one
   column — off a band's last row onto the next band's first, in the column the cursor was in. Which
   band `Tab` last opened is kept, and comes back open when the setting is switched off.
@@ -597,13 +605,12 @@ intact, so nothing typed is lost. Labels, assignees and milestones stay GitHub's
 
 Two keys put an agent on the issue. `Enter` opens the QUICK PROMPT for it — the same box
 `⌘N` opens anywhere, titled `Quick prompt · issue #15 (claude · opus)`, launching the `Agent` row's
-harness from Settings → Agents on the PROJECT's ROOT WORKTREE, whatever card the cursor is on — or
-on a fresh worktree named after the issue, with `New worktree` on under **Quick prompt**. `Shift+Tab` opens the AGENT PRESETS list as a picker instead — the box's own key for it — over
+harness from Settings → Agents on the PROJECT's ROOT WORKTREE, whatever card the cursor is on. `Shift+Tab` opens the AGENT PRESETS list as a picker instead — the box's own key for it — over
 the modal, which stays up under it (`Esc` goes back to the issue), and `Enter` on a preset hands the same box back with that preset's harness, model, effort and
-prefix/postfix applied. Inside the box `Tab` and `Shift+Tab` still switch the harness or the preset
-and `Ctrl+N` still flips to a fresh worktree — named `issue-15-fix-login-redirect` here, the number
-first and the title slugified, rather than a random name — and the issue survives every one of those
-round trips. Send the box empty and the task is `Fix GitHub issue #15: <title> (<url>)`. The box
+prefix/postfix applied. Inside the box `Tab` and `Shift+Tab` still switch the harness or the preset,
+and the WORKTREE PICKER's first row (`⌘.`) is a fresh worktree — named `issue-15-fix-login-redirect`
+here, the number first and the title slugified, rather than a random name — and the issue survives
+every one of those round trips. Send the box empty and the task is `Fix GitHub issue #15: <title> (<url>)`. The box
 goes up over the modal rather than in its place — the list and the issue you were reading stay on
 screen under it. `Esc`, or a click outside the box, puts you back in the modal on the same row; the
 launch closes the modal as well, back onto the grid with the new session's card up in its band —
@@ -624,8 +631,11 @@ ordinary agent from then on: auto-title, hooks, status, resume.
 `v` is the ISSUES MODAL for pull requests: the selected PROJECT's open pull requests
 down the left of a modal — newest first with the drafts sunk below the
 finished ones, and drafts listed even while `hide_draft_prs` keeps them out of the `⌘K` jump list — and the one
-under the cursor read on the right, as the pane reads a pull request: state, checks and mergeability,
-author, branches and size, the description rendered as markdown, then the conversation. A row reads
+under the cursor read on the right as the pane reads a pull request, its [PULL REQUEST
+PAGE](keys.md#the-pull-request-page): number and title, state, mergeability, author, branches and
+size over the tabs — **Description** (the body rendered as markdown, then the conversation),
+**Changes**, **Commits**, **Checks** and **Reviews**, each with its count or verdict. `⇧←`/`⇧→` walk
+the tabs and `⇧↑`/`⇧↓` a listing's rows. A row reads
 the way the pull request on a band's rule does — a draft dimmed with a `draft` badge, one GitHub says
 cannot merge red end to end with `conflicts` or `failing` — and the modal opens on the pull request
 the pane is reading (after a `⌘K` jump onto one), when it reads one.
@@ -635,7 +645,8 @@ already keeps warm (and remembers across launches), so the modal opens on them a
 than thirty seconds is asked for again underneath, and the cursor follows its pull request by URL
 when the answer reorders the rows or retires one. The reading pane shares the pane's fetch: a pull
 request read in one is read in the other, and resting on a row for a moment fetches its body (`gh pr
-view`) the same way. `Ctrl+r` asks for the list and the row's body again now.
+view` — one call for the body and every tab) the same way. `Ctrl+r` asks for the list and the row's
+body again now.
 
 The keys are the ISSUES MODAL's, and the QUICK PROMPT box's: the list filters as you type, narrowing
 the rows to the fuzzy matches of `#42 title`, `Esc` clears the filter before a second `Esc` closes,
@@ -651,7 +662,9 @@ you back on the pull request you opened it on, and the launch closes the modal o
 new session's card up in its band as the ISSUES MODAL's launch leaves it. `Ctrl+c` (or `Ctrl+y`) opens the
 COMMENT BOX on the pull request and comes back to the modal on the row — after `Enter` posts, after
 `Esc`, and after a post `gh` refused, with your text back in the box — `Ctrl+g` opens the pull request's
-whole diff, `Ctrl+o` — or a click on the `↗ open in browser` button pinned right on the reading pane's
-frame — opens it in the browser and marks it read on the way out, and `Esc` closes the
+whole diff — on the Changes tab at the file under the cursor, on Commits that commit's own diff, and a
+click on a file or a commit does the same — `Ctrl+o` — or a click on the `↗ open in browser` button pinned right on the reading pane's
+frame — opens it in the browser and marks it read on the way out (on the Checks tab, and on a click on
+a check, the check's own page), and `Esc` closes the
 modal (twice, with a filter typed). The hotkey is
 rebindable (`pull_requests`).

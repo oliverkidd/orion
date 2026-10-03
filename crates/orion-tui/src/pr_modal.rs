@@ -25,16 +25,19 @@
 //! the project's open list (`App::open_prs`) — kept warm on the OPEN PRS
 //! beat and remembered across launches (`pr_cache`) — so the modal paints
 //! at once, and opening it on a list older than [`FRESH`] asks again
-//! underneath. The reading pane is the PR PREVIEW's (`pr_preview::lines`),
-//! its body and conversation fetched on the pane's debounce into the same
-//! `App::pr_detail`, so a pull request read in one is read in the other.
+//! underneath. The reading side is the PULL REQUEST PAGE the pane shows
+//! (`pr_preview`) — its tabs walked with `⇧←`/`⇧→`, a listing's rows with
+//! `⇧↑`/`⇧↓`, `^G` opening the diff of the file or commit under the
+//! cursor and `^O` the check — fetched on the pane's debounce into the
+//! same `App::pr_detail`, so a pull request read in one is read in the
+//! other.
 
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use orion_core::{ClientRequest, ProjectId};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
@@ -42,8 +45,8 @@ use ratatui::Frame;
 use crate::app::{
     clamp_selection, window_start, App, HitTarget, Overlay, PendingPrDetail, PromptKind,
 };
-use crate::pr_preview::fit;
-use crate::pull_request::{OpenPr, PrDetail};
+use crate::pr_preview::{Nav, PrTab};
+use crate::pull_request::OpenPr;
 use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -61,8 +64,6 @@ pub(crate) const FRESH: std::time::Duration = crate::issues::FRESH;
 /// are fetched — the pane's own debounce, so walking the list with `j`
 /// fetches only the rows actually paused on.
 pub(crate) const DETAIL_DEBOUNCE: std::time::Duration = crate::event_loop::PR_DETAIL_DEBOUNCE;
-/// Left inset of the reading pane's own lines — the PR PREVIEW's.
-const INDENT: &str = crate::pr_preview::INDENT;
 /// The list column's share of the modal, and its floor. The ISSUES MODAL
 /// is laid out the same.
 pub(crate) const LIST_PCT: u16 = 38;
@@ -87,12 +88,15 @@ pub struct PullRequestsView {
     /// cursor on it, and one that retired it lands on its neighbour
     /// ([`list_changed`]).
     pub selected_url: Option<String>,
-    /// Top visible line of the reading pane.
+    /// Top visible line of the reading side's body, under its head.
     pub scroll: u16,
-    /// The reading pane's height and total line count as of the last draw,
-    /// for paging and clamping.
+    /// The reading side's body height and total line count as of the last
+    /// draw, for paging and clamping.
     pub view_height: u16,
     pub body_lines: usize,
+    /// The PULL REQUEST PAGE's tab and row cursor, and where its tabs and
+    /// rows landed for the mouse.
+    pub tabs: crate::pr_preview::PrTabs,
     /// Whole modal rect, written back during draw so clicks outside close.
     pub area: Rect,
     /// The list rows and the reading pane, for wheel and click routing.
@@ -127,6 +131,7 @@ impl PullRequestsView {
             scroll: 0,
             view_height: 0,
             body_lines: 0,
+            tabs: Default::default(),
             area: Rect::default(),
             list_area: Rect::default(),
             body_area: Rect::default(),
@@ -340,6 +345,7 @@ pub(crate) fn list_changed(app: &mut App) {
     view.selected_url = url;
     if moved {
         view.scroll = 0;
+        view.tabs.rewind();
         schedule_detail(app);
     }
     app.dirty = true;
@@ -361,6 +367,7 @@ fn select(app: &mut App, index: i64) {
         view.selected = next;
         view.selected_url = url;
         view.scroll = 0;
+        view.tabs.rewind();
     }
     schedule_detail(app);
     app.dirty = true;
@@ -554,61 +561,114 @@ pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 // ---- keys and mouse ----
 
+/// The row under the reading side's cursor, acted on — `^G` on a file or
+/// a commit, `^O` on a check (`pr_preview::run_act`). False with nothing
+/// to act on there: a tab of prose, or a body still on its way.
+fn act_on_row(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return false;
+    };
+    let tabs = view.tabs.clone();
+    let Some(pr) = selected_pr(app) else {
+        return false;
+    };
+    let Some(act) = app
+        .pr_detail
+        .get(&pr.url)
+        .and_then(|detail| crate::pr_preview::row_act(detail, &tabs))
+    else {
+        return false;
+    };
+    crate::pr_preview::run_act(app, pr.number, &pr.url, &pr.label(), act, out);
+    true
+}
+
+/// `^G`: the diff of what the reading side has under its cursor — the
+/// file on Changes, the commit on Commits — else the whole pull request's.
+fn diff(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let on = match &app.overlay {
+        Some(Overlay::PullRequests(view)) => view.tabs.tab,
+        _ => return,
+    };
+    if matches!(on, PrTab::Changes | PrTab::Commits) && act_on_row(app, out) {
+        return;
+    }
+    if let Some(pr) = selected_pr(app) {
+        crate::event_loop::request_pr_diff_for(app, pr.number, pr.url.clone(), pr.label());
+    }
+}
+
+/// `^O`: the check under the cursor on Checks, else the pull request.
+fn browser(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let on = match &app.overlay {
+        Some(Overlay::PullRequests(view)) => view.tabs.tab,
+        _ => return,
+    };
+    if on == PrTab::Checks && act_on_row(app, out) {
+        return;
+    }
+    open_in_browser(app, out);
+}
+
+/// Show `tab` on the reading side, its body from the top.
+fn switch_tab(view: &mut PullRequestsView, tab: PrTab) {
+    if view.tabs.switch(tab) {
+        view.scroll = 0;
+    }
+}
+
 /// Keys in the PULL REQUESTS MODAL. The filter is always live, so
 /// letters type — the modal's own hotkey and `q` among them — and the
 /// verbs are chords; only Esc closes, once the filter is clear.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    use crate::pr_preview::keys as page;
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let half = (view.view_height / 2).max(1) as i32;
-    let page = view.view_height.max(1) as i32;
+    let max = view.max_scroll();
     match key.code {
         // Two-stage escape, like every fuzzy overlay: a typed filter is
         // cleared before the second Esc closes the modal.
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
         KeyCode::Esc => close(app),
-        // Shift+↑/↓ scroll the pane a line; ↑/↓ walk the rows the filter
-        // leaves, Ctrl+n/p mirroring them.
-        KeyCode::Down if shift => view.scroll_by(1),
-        KeyCode::Up if shift => view.scroll_by(-1),
+        // The reading side's tabs, ⇧←/⇧→ round either end.
+        KeyCode::Left | KeyCode::Right if page::MODAL_TABS.matches(&key) => {
+            let delta = if key.code == KeyCode::Right { 1 } else { -1 };
+            let tab = view.tabs.tab.step(delta);
+            switch_tab(view, tab);
+        }
+        // Shift+↑/↓ walk a listing's rows, or scroll prose a line; ↑/↓
+        // walk the rows the filter leaves, Ctrl+n/p mirroring them.
+        KeyCode::Down if shift => view.tabs.navigate(Nav::Line(1), &mut view.scroll, max),
+        KeyCode::Up if shift => view.tabs.navigate(Nav::Line(-1), &mut view.scroll, max),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
         KeyCode::Char('n') if ctrl => step(app, 1),
         KeyCode::Char('p') if ctrl => step(app, -1),
-        // The reading pane scrolls on the DIFF VIEWER's keys. Ctrl+u is
-        // the line editor's kill-to-start while something is typed; only
-        // with an empty filter does it scroll.
+        // The reading side scrolls on the DIFF VIEWER's keys — a listing
+        // walks its rows by the page. Ctrl+u is the line editor's
+        // kill-to-start while something is typed; only with an empty
+        // filter does it scroll.
         KeyCode::Char('d') if ctrl => view.scroll_by(half),
         KeyCode::Char('u') if ctrl && view.query.is_empty() => view.scroll_by(-half),
-        KeyCode::PageDown => view.scroll_by(page),
-        KeyCode::PageUp => view.scroll_by(-page),
-        KeyCode::Home => view.scroll = 0,
-        KeyCode::End => view.scroll = view.max_scroll(),
+        KeyCode::PageDown => view.tabs.navigate(Nav::Page(1), &mut view.scroll, max),
+        KeyCode::PageUp => view.tabs.navigate(Nav::Page(-1), &mut view.scroll, max),
+        KeyCode::Home => view.tabs.navigate(Nav::Top, &mut view.scroll, max),
+        KeyCode::End => view.tabs.navigate(Nav::Bottom, &mut view.scroll, max),
         // The launches are the QUICK PROMPT box's own keys: Enter prompts,
         // Tab picks a harness, Shift+Tab a preset (a shifted Tab under the
         // kitty protocol is the same key).
-        KeyCode::Enter => open_prompt_for_selected(app),
-        KeyCode::BackTab => open_preset_for_selected(app),
-        KeyCode::Tab if shift => open_preset_for_selected(app),
-        KeyCode::Tab => open_harness_picker_for_selected(app),
-        // `Ctrl+y` is the grid's `y` (reply) as a chord, the letters being
-        // the filter's.
-        KeyCode::Char('c') | KeyCode::Char('y') if ctrl => open_comment_for_selected(app),
-        KeyCode::Char('g') if ctrl => {
-            if let Some(pr) = selected_pr(app) {
-                crate::event_loop::request_pr_diff_for(app, pr.number, pr.url.clone(), pr.label());
-            }
-        }
-        KeyCode::Char('o') if ctrl => open_in_browser(app, out),
-        KeyCode::Char('r') if ctrl => refresh(app),
-        KeyCode::Char('l')
-            if ctrl || key.modifiers.contains(KeyModifiers::SUPER) =>
-        {
-            crate::linear::open_attach(app);
-        }
+        _ if keys::PROMPT.matches(&key) => open_prompt_for_selected(app),
+        _ if keys::PRESET.matches(&key) => open_preset_for_selected(app),
+        _ if keys::HARNESS.matches(&key) => open_harness_picker_for_selected(app),
+        _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
+        _ if keys::DIFF.matches(&key) => diff(app, out),
+        _ if keys::BROWSER.matches(&key) => browser(app, out),
+        _ if keys::REFRESH.matches(&key) => refresh(app),
+        _ if keys::LINEAR.matches(&key) => crate::linear::open_attach(app),
         // Everything else feeds the always-live fuzzy filter, which edits
         // like a terminal line (see text_input).
         _ => {
@@ -621,12 +681,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
 }
 
 /// Mouse in the PULL REQUESTS MODAL: the wheel moves the cursor over the
-/// rows the filter leaves and scrolls the reading pane over it, a click on
+/// rows the filter leaves and scrolls the reading side over it, a click on
 /// a row selects it (a launch is `Enter`, not a click — the row is
 /// something to read first), a double-click on a row opens that pull
 /// request in the browser — the very open `Ctrl+o` and the `↗ open in
-/// browser` button run — and a click outside closes (`overlay_close`);
-/// everything else is swallowed.
+/// browser` button run — a click on a tab shows it, a click on a file, a
+/// commit or a check is `^G` or `^O` on it, and a click outside closes
+/// (`overlay_close`); everything else is swallowed.
 pub(crate) fn handle_mouse(
     app: &mut App,
     mouse: MouseEvent,
@@ -638,6 +699,18 @@ pub(crate) fn handle_mouse(
     };
     let over_body = view.body_area.contains(mouse_pos);
     let on_button = view.browser_area.contains(mouse_pos);
+    let on_tab = view
+        .tabs
+        .tab_hits
+        .iter()
+        .find(|(rect, _)| rect.contains(mouse_pos))
+        .map(|(_, tab)| *tab);
+    let on_row = view
+        .tabs
+        .row_hits
+        .iter()
+        .find(|(rect, _)| rect.contains(mouse_pos))
+        .map(|(_, row)| *row);
     match mouse.kind {
         MouseEventKind::ScrollUp if over_body => view.scroll_by(-WHEEL_LINES),
         MouseEventKind::ScrollDown if over_body => view.scroll_by(WHEEL_LINES),
@@ -646,6 +719,17 @@ pub(crate) fn handle_mouse(
         // The `↗ open in browser` button, before the rows: the very open
         // `Ctrl+o` runs.
         MouseEventKind::Down(MouseButton::Left) if on_button => open_in_browser(app, out),
+        MouseEventKind::Down(MouseButton::Left) if on_tab.is_some() => {
+            if let Some(tab) = on_tab {
+                switch_tab(view, tab);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if on_row.is_some() => {
+            if let Some(row) = on_row {
+                view.tabs.select(row);
+            }
+            act_on_row(app, out);
+        }
         MouseEventKind::Down(MouseButton::Left) => {
             let list = view.list_area;
             let first = view.window_start(list.height as usize);
@@ -670,64 +754,73 @@ pub(crate) fn handle_mouse(
     app.dirty = true;
 }
 
-/// The footer's key line for the modal.
-pub(crate) fn footer_hint() -> &'static str {
-    "type to filter  ↑/↓ ^n/^p: pull request  PgUp/PgDn ^d/^u: read  Enter: prompt an agent  Tab: harness  ⇧Tab: preset  ^c/^y: comment  ^g: diff  ^o: browser  ^r: refresh  Esc: clear / close"
+/// The PULL REQUESTS MODAL's own keys: one table [`handle_key`] matches
+/// and [`hints`] spells — the reading side's tabs and rows from the PULL
+/// REQUEST PAGE's (`pr_preview::keys`). The letters are the filter's, so
+/// the verbs are chords — the ISSUES MODAL's, where the two do the same
+/// thing.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    /// The launches are the QUICK PROMPT box's own keys: Enter prompts,
+    /// Tab picks a harness, ⇧Tab a preset.
+    pub const PROMPT: Key = crate::issues::keys::PROMPT;
+    pub const HARNESS: Key = Key::new(&["tab"], "harness");
+    pub const PRESET: Key = crate::issues::keys::PRESET;
+    pub const COMMENT: Key = crate::issues::keys::COMMENT;
+    pub const DIFF: Key = Key::new(&["ctrl+g"], "diff");
+    pub const BROWSER: Key = crate::issues::keys::BROWSER;
+    pub const REFRESH: Key = crate::issues::keys::REFRESH;
+    pub const READ: Key = crate::issues::keys::READ;
+    /// Linear issues to attach the pull request to.
+    pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
+    pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
+    pub const ROWS: Key = crate::pr_preview::keys::MODAL_ROWS;
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[
+        PROMPT, HARNESS, PRESET, COMMENT, DIFF, BROWSER, REFRESH, READ, LINEAR, TABS, ROWS,
+    ];
+}
+
+/// The keys along the modal's bottom edge — `^G` and `^O` named for what
+/// they reach on the tab showing. Esc clears a typed filter before it
+/// closes.
+pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
+    let tab = view.tabs.tab;
+    let mut hints = vec![keys::PROMPT.hint().kept(), keys::TABS.hint()];
+    if tab.lists() {
+        hints.push(keys::ROWS.hint());
+    }
+    hints.extend([
+        keys::HARNESS.hint(),
+        keys::PRESET.hint(),
+        keys::COMMENT.hint(),
+        match tab {
+            PrTab::Changes => keys::DIFF.hint_as("diff the file"),
+            PrTab::Commits => keys::DIFF.hint_as("diff the commit"),
+            _ => keys::DIFF.hint(),
+        },
+        if tab == PrTab::Checks {
+            keys::BROWSER.hint_as("open the check")
+        } else {
+            keys::BROWSER.hint()
+        },
+        keys::READ.hint(),
+        keys::LINEAR.hint(),
+        keys::REFRESH.hint(),
+        crate::hints::Hint::new(
+            "Esc",
+            if view.query.is_empty() {
+                "close"
+            } else {
+                "clear"
+            },
+        ),
+    ]);
+    hints
 }
 
 // ---- drawing ----
-
-/// The reading pane as styled lines: the PR PREVIEW once the body has
-/// landed, the row's own headline and a word on the fetch until then —
-/// and, while a comment of yours is on its way, a line saying so.
-pub fn lines(
-    pr: &OpenPr,
-    detail: Option<&PrDetail>,
-    failed: bool,
-    posting: bool,
-    width: usize,
-    th: Theme,
-) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(th.dim);
-    let mut out = match detail {
-        Some(detail) => crate::pr_preview::lines(detail, width, th),
-        None => {
-            let mut out = vec![
-                fit(
-                    vec![
-                        Span::styled(format!("{INDENT}#{} ", pr.number), dim),
-                        Span::styled(
-                            pr.title.clone(),
-                            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-                        ),
-                    ],
-                    width,
-                ),
-                Line::from(""),
-            ];
-            let message = if failed {
-                "couldn't read this pull request — is gh installed and logged in? o still opens it in the browser."
-            } else {
-                "reading it…"
-            };
-            let wrap_w = width.saturating_sub(INDENT.len() + 1).max(20);
-            out.extend(
-                crate::pr_preview::wrap(message, wrap_w)
-                    .into_iter()
-                    .map(|l| Line::from(Span::styled(format!("{INDENT}{l}"), dim))),
-            );
-            out
-        }
-    };
-    if posting {
-        out.push(Line::from(""));
-        out.push(Line::from(Span::styled(
-            format!("{INDENT}── posting your comment… ──"),
-            dim,
-        )));
-    }
-    out
-}
 
 /// One list row's spans: `#42` dim, the title in the group row's color
 /// (`pr_row::look` — dimmed for a draft, red for a pull request GitHub
@@ -829,14 +922,7 @@ pub(crate) fn draw(
         count,
         if inflight { ", refreshing…" } else { "" }
     );
-    let block = panel_block(&title, !backdrop, th).title_bottom(
-        Line::from(Span::styled(
-            // The launches; the footer spells out the rest.
-            " Enter: prompt  Tab: harness  ⇧Tab: preset ",
-            Style::default().fg(th.dim),
-        ))
-        .left_aligned(),
-    );
+    let block = panel_block(&title, !backdrop, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
     // The always-live filter on the list's first line, the rows under it.
@@ -849,10 +935,11 @@ pub(crate) fn draw(
     // under the filter, never only in a title a narrow list would cut:
     // rows that stopped refreshing look exactly like current ones (#106).
     if stale {
+        let retry = keys::REFRESH.label();
         let note = if rows.is_empty() {
-            "couldn't ask GitHub (^r retries)"
+            format!("couldn't ask GitHub ({retry} retries)")
         } else {
-            "couldn't refresh (^r retries)"
+            format!("couldn't refresh ({retry} retries)")
         };
         if let Some(note_area) = row_rect(rows_area, 0) {
             let note = Span::styled(note, Style::default().fg(th.warn));
@@ -885,38 +972,50 @@ pub(crate) fn draw(
         );
     }
 
-    // ---- right: the reading pane ----
+    // ---- right: the reading side, the PULL REQUEST PAGE ----
     let current = cursor.and_then(|i| rows.get(i));
     // The frame names the number; the headline inside carries the title.
     let body_title = match current {
         Some(pr) => format!("Pull request #{}", pr.number),
         None => "Pull request".to_string(),
     };
-    let lines: Vec<Line> = match current {
-        Some(pr) => lines(
-            pr,
-            app.pr_detail.get(&pr.url),
-            app.pr_detail_failed.contains(&pr.url),
-            app.pr_comment_inflight.contains(&pr.url),
-            body_a.width.saturating_sub(2) as usize,
-            th,
-        ),
-        None => Vec::new(),
-    };
-    let mut block = panel_block(&body_title, false, th);
+    let block = panel_block(&body_title, false, th);
     let body_inner = block.inner(body_a);
-    let max_scroll = (lines.len() as u16).saturating_sub(body_inner.height.max(1));
-    let scroll = view.scroll.min(max_scroll);
-    if max_scroll > 0 {
-        block = block.title_bottom(
-            Line::from(Span::styled(
-                format!(" {}/{} ", scroll + 1, lines.len()),
-                Style::default().fg(th.dim),
-            ))
-            .right_aligned(),
+    f.render_widget(block, body_a);
+    let mut tabs = view.tabs.clone();
+    let drawn = current.map(|pr| {
+        let input = crate::pr_preview::PageInput {
+            number: pr.number,
+            title: &pr.title,
+            detail: app.pr_detail.get(&pr.url),
+            failed: app.pr_detail_failed.contains(&pr.url),
+            posting: app.pr_comment_inflight.contains(&pr.url),
+            browser_key: keys::BROWSER.label(),
+            diff_key: keys::DIFF.label(),
+            now: orion_core::clock::now_secs() as i64,
+        };
+        let page = crate::pr_preview::page(&input, &tabs, !backdrop, body_inner.width as usize, th);
+        crate::pr_preview::draw(f, body_inner, &page, &mut tabs, view.scroll)
+    });
+    // Where the body is read to, on the bottom border, once it scrolls.
+    let (scroll, lines, body_h) = drawn.map_or((0, 0, 0), |d| (d.scroll, d.lines, d.body.height));
+    let max_scroll = (lines as u16).saturating_sub(body_h.max(1));
+    if max_scroll > 0 && body_a.height > 0 {
+        let at = Line::from(Span::styled(
+            format!(" {}/{} ", scroll + 1, lines),
+            Style::default().fg(th.dim),
+        ))
+        .right_aligned();
+        f.render_widget(
+            Paragraph::new(at),
+            Rect {
+                x: body_a.x + 1,
+                y: body_a.y + body_a.height - 1,
+                width: body_a.width.saturating_sub(2),
+                height: 1,
+            },
         );
     }
-    f.render_widget(block, body_a);
     // The `↗ open in browser` button over the top border, once the block
     // has drawn it — only with a row to open.
     let browser_area = match current {
@@ -929,8 +1028,12 @@ pub(crate) fn draw(
         ),
         None => Rect::default(),
     };
-    let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
-    f.render_widget(Paragraph::new(shown), body_inner);
+    // The modal's keys along its bottom edge — none while a box over it
+    // has the keys: its own border says them.
+    if !backdrop {
+        let reserve = if max_scroll > 0 { 12 } else { 0 };
+        crate::hints::draw_on_border(f, area, &hints(view), reserve, th);
+    }
 
     // Write-back (draw works on a clone): the rects the mouse hit-tests,
     // the pane's size for paging, and the clamped cursor and scroll.
@@ -940,8 +1043,9 @@ pub(crate) fn draw(
         v.cursor_row = cursor_row;
         v.body_area = body_inner;
         v.browser_area = browser_area;
-        v.view_height = body_inner.height;
-        v.body_lines = lines.len();
+        v.view_height = body_h;
+        v.body_lines = lines;
+        v.tabs = tabs;
         // A cursor the filter had to move (see `cursor_index`) is settled
         // onto its row, URL and all, so a refresh follows that one.
         if let Some(index) = cursor {
@@ -957,7 +1061,7 @@ pub(crate) fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pull_request::{Checks, Health, PrLaunch};
+    use crate::pull_request::{Checks, Health, PrDetail, PrLaunch};
     use crate::quick_prompt::QuickTarget;
     use orion_core::WorktreeId;
 
@@ -1366,7 +1470,7 @@ mod tests {
             );
             assert!(screen.contains("New session · PR #41"), "the box over it");
             assert!(
-                screen.contains("Esc: back to pull requests"),
+                screen.contains("Esc back to pull requests"),
                 "and says where Esc goes"
             );
 
@@ -1407,6 +1511,7 @@ mod tests {
             changed_files: 2,
             body: "Stops the login bounce.".into(),
             comments: vec![],
+            ..Default::default()
         }
     }
 
@@ -1449,6 +1554,124 @@ mod tests {
         assert!(posting.contains("posting your comment…"), "{posting}");
     }
 
+    /// The reading side is the PULL REQUEST PAGE: its tabs over the body,
+    /// walked with ⇧←/⇧→ round either end — ↑/↓ still the list's — a
+    /// listing's rows with ⇧↑/⇧↓; `^G` diffs the file or the commit under
+    /// the cursor and `^O` opens the check, and the border names each by
+    /// what it reaches there, from the modal's own table. A click on a tab
+    /// shows it and a click on a row acts on it. Moving to another pull
+    /// request rewinds the rows and keeps the tab.
+    #[test]
+    fn the_reading_side_walks_the_pages_tabs_and_rows() {
+        use crate::pr_preview::PrTab;
+        use crate::pull_request::{CheckState, PrCheck, PrCommit, PrFile};
+        let (mut app, _) = app_with(
+            vec![pr(42, "Fix login", false), pr(41, "Spike", false)],
+            true,
+        );
+        let url = "https://github.com/o/r/pull/42".to_string();
+        let mut d = detail(42, "Fix login");
+        d.files = ["src/login.rs", "src/auth.rs"]
+            .iter()
+            .map(|path| PrFile {
+                path: path.to_string(),
+                additions: 2,
+                deletions: 1,
+                change: "MODIFIED".into(),
+            })
+            .collect();
+        d.commits = vec![PrCommit {
+            sha: "abcdef0123".into(),
+            subject: "Stop the bounce".into(),
+            author: "kate".into(),
+            at: String::new(),
+        }];
+        d.checks = vec![PrCheck {
+            name: "test".into(),
+            workflow: String::new(),
+            state: CheckState::Failed,
+            word: "FAILURE".into(),
+            started: String::new(),
+            completed: String::new(),
+            url: "https://github.com/o/r/actions/runs/9".into(),
+        }];
+        app.pr_detail.insert(url.clone(), d);
+        open(&mut app);
+        let shot = screen(&mut app, 140, 34);
+        assert!(
+            shot.contains("Description   Changes 2   Commits 1   ✗ Checks 0/1   Reviews"),
+            "{shot}"
+        );
+        assert!(shot.contains("Stops the login bounce."), "{shot}");
+        assert!(shot.contains("⇧←/⇧→ tabs"), "{shot}");
+
+        let mut out = Vec::new();
+        handle_key(&mut app, shifted(KeyCode::Left), &mut out);
+        assert_eq!(view(&app).tabs.tab, PrTab::Reviews, "round the left end");
+        handle_key(&mut app, shifted(KeyCode::Right), &mut out);
+        handle_key(&mut app, shifted(KeyCode::Right), &mut out);
+        assert_eq!(view(&app).tabs.tab, PrTab::Changes);
+        assert!(view(&app).query.is_empty(), "the filter never saw them");
+        let shot = screen(&mut app, 140, 34);
+        assert!(shot.contains("▌M src/login.rs  +2 −1"), "{shot}");
+        assert!(shot.contains("^G diff the file"), "{shot}");
+        crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+        handle_key(&mut app, shifted(KeyCode::Down), &mut out);
+        assert_eq!(view(&app).tabs.row(), 1);
+        handle_key(&mut app, ctrl('g'), &mut out);
+        assert_eq!(
+            app.pr_diff_at,
+            Some((url.clone(), "src/auth.rs".to_string()))
+        );
+
+        // ^O on Checks: the check, not the pull request.
+        handle_key(&mut app, shifted(KeyCode::Right), &mut out);
+        handle_key(&mut app, shifted(KeyCode::Right), &mut out);
+        assert_eq!(view(&app).tabs.tab, PrTab::Checks);
+        screen(&mut app, 140, 34);
+        crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+        handle_key(&mut app, ctrl('o'), &mut out);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("opened github.com/o/r/actions/runs/9")
+        );
+
+        // The mouse: a tab's label, then a row.
+        let (changes, _) = view(&app)
+            .tabs
+            .tab_hits
+            .iter()
+            .find(|(_, tab)| *tab == PrTab::Changes)
+            .copied()
+            .expect("the Changes label");
+        let click = |at: Position| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let at = Position::new(changes.x + 1, changes.y);
+        handle_mouse(&mut app, click(at), at, &mut out);
+        assert_eq!(view(&app).tabs.tab, PrTab::Changes);
+        screen(&mut app, 140, 34);
+        app.pr_diff_at = None;
+        let (row, index) = view(&app).tabs.row_hits[0];
+        assert_eq!(index, 0);
+        let at = Position::new(row.x + 2, row.y);
+        handle_mouse(&mut app, click(at), at, &mut out);
+        assert_eq!(app.pr_diff_at, Some((url, "src/login.rs".to_string())));
+
+        // Another pull request: the rows rewind, the tab stays.
+        handle_key(&mut app, shifted(KeyCode::Down), &mut out);
+        handle_key(&mut app, key(KeyCode::Down), &mut out);
+        assert_eq!(
+            (view(&app).tabs.tab, view(&app).tabs.row()),
+            (PrTab::Changes, 0)
+        );
+        let shot = screen(&mut app, 140, 34);
+        assert!(shot.contains("Changes …"), "#41 still loading: {shot}");
+    }
+
     /// An empty list says whether GitHub is still being asked or has said
     /// nothing is open.
     #[test]
@@ -1475,7 +1698,7 @@ mod tests {
 
         app.open_prs_failed.insert(project.clone());
         let stale = screen(&mut app, 100, 20);
-        assert!(stale.contains("couldn't refresh (^r retries)"), "{stale}");
+        assert!(stale.contains("couldn't refresh (^R retries)"), "{stale}");
         assert!(stale.contains("#42 Fix login"), "{stale}");
         assert_eq!(
             view(&app).list_area.y,
@@ -1570,9 +1793,11 @@ mod tests {
             true,
         );
         open(&mut app);
-        assert!(footer_hint().starts_with("type to filter"));
+        let esc = |app: &App| hints(view(app)).last().map(|h| h.does.clone());
+        assert_eq!(esc(&app).as_deref(), Some("close"));
         type_str(&mut app, "login");
         assert_eq!(view(&app).query.as_str(), "login");
+        assert_eq!(esc(&app).as_deref(), Some("clear"), "Esc clears first");
         let shot = screen(&mut app, 120, 40);
         assert!(shot.contains("(2/3)"), "{shot}");
         assert!(

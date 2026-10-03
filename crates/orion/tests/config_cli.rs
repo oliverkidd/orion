@@ -63,7 +63,7 @@ fn a_backup_restores_into_another_machines_settings() {
     );
     put(
         &old.path().join("config.local.json"),
-        json!({"editor": "nano"}),
+        json!({"editor": "emacs"}),
     );
     put(
         &old.path().join("agent_presets.json"),

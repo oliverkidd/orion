@@ -237,6 +237,9 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
         )));
         lines.push(Line::from(""));
     }
+    // The ways into a project, each spelled from the live keymap: what
+    // Enter opens, and the jump list (`⌘K`), whose rows are every project
+    // and whose last row opens a folder. HOME leads with its way back.
     let key = |k: &str, label: &str| {
         vec![
             Span::styled(
@@ -246,23 +249,32 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(format!(" {label}"), Style::default().fg(th.dim)),
         ]
     };
+    let sep = || Span::styled("   ·   ", Style::default().fg(th.dim));
+    let enter = crate::hints::key_or(&app.keymap, crate::keymap::Action::Activate, "Enter");
+    let jump = crate::hints::key(&app.keymap, crate::keymap::Action::Palette);
     let mut hint = Vec::new();
-    if !app.tree.has_projects() {
+    if app.home {
+        // The way back down is the footer's to say, as it is everywhere
+        // off the grid; the body offers the way elsewhere.
+        if let Some(jump) = &jump {
+            hint.extend(key(jump, "jump to any project"));
+        }
+    } else if !app.tree.has_projects() {
         // Started inside a repo, that repo is one key away; anywhere else
-        // `o` browses for one. Nothing here asks for anything but a folder.
+        // Enter asks for a folder. Nothing here asks for anything but one.
         match app.launch_repo_name() {
             Some(name) => {
-                hint.extend(key("Enter", &format!("open {name}")));
-                hint.push(Span::styled("   ·   ", Style::default().fg(th.dim)));
-                hint.extend(key("o", "another folder"));
+                hint.extend(key(&enter, &format!("open {name}")));
+                if let Some(jump) = &jump {
+                    hint.push(sep());
+                    hint.extend(key(jump, "another folder"));
+                }
             }
-            None => hint.extend(key("n / o", "create your first project")),
+            None => hint.extend(key(&enter, "open your first project")),
         }
-        hint.push(Span::styled("   ·   ", Style::default().fg(th.dim)));
-        hint.extend(key("?", "help"));
     } else if app.projects_closed {
-        // Every tab closed: the projects are all still there, so `+`
-        // lists them; Enter still opens the repo orion was started in.
+        // Every tab closed: the projects are all still there, so the jump
+        // list has them; Enter still opens the repo orion was started in.
         let here = app.launch_repo.as_deref().and_then(|path| {
             app.tree
                 .project_at_path(path)
@@ -270,14 +282,14 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
                 .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()))
         });
         if let Some(name) = here {
-            hint.extend(key("Enter", &format!("open {name}")));
-            hint.push(Span::styled("   ·   ", Style::default().fg(th.dim)));
+            hint.extend(key(&enter, &format!("open {name}")));
         }
-        hint.extend(key("+", "your projects"));
-        hint.push(Span::styled("   ·   ", Style::default().fg(th.dim)));
-        hint.extend(key("o", "another folder"));
-        hint.push(Span::styled("   ·   ", Style::default().fg(th.dim)));
-        hint.extend(key("?", "help"));
+        if let Some(jump) = &jump {
+            if !hint.is_empty() {
+                hint.push(sep());
+            }
+            hint.extend(key(jump, "your projects, or another folder"));
+        }
     }
     lines.push(Line::from(hint));
 
@@ -292,9 +304,15 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
 
     draw_sky(f.buffer_mut(), area, text, t, th.accent);
     f.render_widget(Paragraph::new(lines).centered(), text);
-    // A click anywhere lands focus back on the (invisible) projects panel,
-    // where `n` creates the first project.
-    app.hits.push((area, HitTarget::PanelBg(Focus::Projects)));
+    // A click anywhere on HOME goes back down to the grid, as Esc does;
+    // on the first-run splash it lands focus on the (invisible) projects
+    // panel, where Enter opens the first project.
+    let hit = if app.home {
+        HitTarget::FooterHome
+    } else {
+        HitTarget::PanelBg(Focus::Projects)
+    };
+    app.hits.push((area, hit));
 }
 
 /// The constellation and its starfield across `area`, `t` seconds into

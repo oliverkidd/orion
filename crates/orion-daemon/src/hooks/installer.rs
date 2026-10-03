@@ -204,6 +204,70 @@ fn managed_group(endpoint: &str, event: &str, matcher: Option<&str>) -> Value {
     Value::Object(group)
 }
 
+/// The checkout-local files the installers here write, as `info/exclude`
+/// lines: orion's, not the project's.
+const EXCLUDED: &[&str] = &[
+    ".claude/settings.local.json",
+    ".cursor/hooks.json",
+    ".cursor/rules/orion-title.mdc",
+];
+
+/// The comment [`exclude_managed_files`] writes above its lines.
+const EXCLUDE_MARK: &str = "# orion's hook files (orion keeps these here)";
+
+/// Keep [`EXCLUDED`] in the clone's own `info/exclude` — shared by every
+/// worktree of the clone, never committed — so a checkout an agent runs in
+/// never shows orion's files in `git status` or the CHANGES view. Lines
+/// already there (the user's, or an earlier run's) are not repeated, and a
+/// directory git can't place (no `.git`) is left alone.
+pub fn exclude_managed_files(cwd: &Path) -> Result<()> {
+    let Some(common) = git_common_dir(cwd) else {
+        return Ok(());
+    };
+    let path = common.join("info").join("exclude");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let have: std::collections::HashSet<&str> = existing.lines().map(str::trim).collect();
+    let missing: Vec<&str> = EXCLUDED
+        .iter()
+        .copied()
+        .filter(|line| !have.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut text = existing.clone();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !have.contains(EXCLUDE_MARK) {
+        text.push_str(EXCLUDE_MARK);
+        text.push('\n');
+    }
+    for line in missing {
+        text.push_str(line);
+        text.push('\n');
+    }
+    let dir = path.parent().context("exclude path without a parent")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))
+}
+
+/// The clone's shared git dir for checkout `cwd`: `<cwd>/.git` for the
+/// main checkout; for a linked worktree, the dir its `.git` file names,
+/// followed through that dir's `commondir`.
+fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
+    let dot = cwd.join(".git");
+    if dot.is_dir() {
+        return Some(dot);
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    let gitdir = cwd.join(text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim());
+    match std::fs::read_to_string(gitdir.join("commondir")) {
+        Ok(common) => Some(gitdir.join(common.trim())),
+        Err(_) => Some(gitdir),
+    }
+}
+
 /// Merge orion's managed hooks for Claude Code into
 /// `<cwd>/.claude/settings.local.json`, plus the permission rule that lets
 /// the auto-title `orion rename` run unprompted.
@@ -494,6 +558,41 @@ On the first user message of a new conversation:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The main checkout's `.git` and a linked worktree's `.git` file both
+    /// lead to the clone's one `info/exclude`; the lines go in once, under
+    /// the mark, after whatever the user had there.
+    #[test]
+    fn managed_files_are_excluded_once_for_every_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("app");
+        let git = main.join(".git");
+        std::fs::create_dir_all(git.join("info")).unwrap();
+        std::fs::write(git.join("info/exclude"), "# mine\n.envrc").unwrap();
+        let linked = tmp.path().join("app-worktrees/feat");
+        let admin = git.join("worktrees/feat");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+
+        exclude_managed_files(&linked).unwrap();
+        exclude_managed_files(&main).unwrap();
+        let text = std::fs::read_to_string(git.join("info/exclude")).unwrap();
+        assert!(text.starts_with("# mine\n.envrc\n"), "{text}");
+        for line in EXCLUDED {
+            assert_eq!(text.lines().filter(|l| l == line).count(), 1, "{text}");
+        }
+        assert_eq!(text.matches(EXCLUDE_MARK).count(), 1, "{text}");
+    }
+
+    /// A directory that isn't a checkout gets nothing written anywhere.
+    #[test]
+    fn a_directory_without_git_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        exclude_managed_files(tmp.path()).unwrap();
+        assert!(!tmp.path().join(".git").exists());
+    }
 
     /// The exact one-liners that land in users' config files. Pinned
     /// verbatim so the shared curl prelude can be factored without a byte

@@ -11,13 +11,19 @@ real repository. Anything else is "couldn't ask" (exit 1) — exactly what orion
   gh pr view --json …                     → fixtures/pr-view-<cwd basename>.json, else exit 1 (no PR on this branch)
   gh pr view <n> --json …                 → fixtures/pr-<n>.json, else exit 1
   gh pr diff <n>                          → fixtures/pr-<n>.diff, else exit 1
+  gh api repos/{owner}/{repo}/commits/<sha> -H "Accept: …diff"
+                                          → fixtures/commit-<sha>.diff, else exit 1
   gh api user --jq .login                 → fixtures/user (a login on one line), else "shot-user"
   gh issue list --state open … --json …   → fixtures/issue-list.json
   gh issue view <n> --json …              → fixtures/issue-<n>.json, else exit 1
+
+ORION_GH_DELAY=<seconds> holds every `gh pr view <n>` back that long, so a driver can see a pull
+request's page while it is still loading.
 """
 import json
 import os
 import sys
+import time
 
 FIX = os.environ.get("ORION_GH_FIXTURES") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fixtures")
 
@@ -75,6 +81,7 @@ def main(argv):
         rest = [a for a in argv[2:] if not a.startswith("--")]
         number = next((a for a in rest if a.isdigit()), None)
         if number:
+            time.sleep(float(os.environ.get("ORION_GH_DELAY") or 0))
             return emit("pr-%s.json" % number)
         return emit("pr-view-%s.json" % os.path.basename(os.getcwd()))
     if argv[:2] == ["pr", "diff"]:
@@ -85,6 +92,9 @@ def main(argv):
     if argv[:2] == ["issue", "view"]:
         number = next((a for a in argv[2:] if a.isdigit()), None)
         return emit("issue-%s.json" % number) if number else 1
+    if argv[:1] == ["api"] and len(argv) > 1 and "/commits/" in argv[1]:
+        sha = argv[1].rsplit("/", 1)[-1]
+        return emit("commit-%s.diff" % sha) if sha.isalnum() else 1
     if argv[:2] == ["api", "user"]:
         path = os.path.join(FIX, "user")
         print(open(path).read().strip() if os.path.isfile(path) else "shot-user")

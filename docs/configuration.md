@@ -21,7 +21,7 @@ writes a key it holds back into it, so changing that setting here keeps it local
 into `config.json`:
 
 ```json
-{ "editor": "nano", "prewarm_agents": false }
+{ "editor": "vim", "prewarm_agents": false }
 ```
 
 Both halves of orion read the two files. The TUI owns most keys; the DAEMON owns
@@ -43,16 +43,18 @@ convenience stores: missing or malformed reads as empty.
 
 ## Every setting
 
-Seventy keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key
+Seventy-five keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key
 exists only in the file, so it is hand-edit-only. Most rows toggle or cycle on `Enter` / `←` / `→`; a
 *typed* row (`worktree_base_branch`, the Project tab's **Run command**) opens a one-line prompt on
-`Enter` instead, pre-filled with the stored value, and an empty answer puts its default back. The Agents tab groups its rows under **Quick
+`Enter` instead, pre-filled with the stored value, and an empty answer puts its default back — the
+Linear tab's **Task template**, which runs over lines, a multi-row box (`⇧Enter` breaks a line). The Agents tab groups its rows under **Quick
 prompt**, **Claude accounts** (see [Claude accounts](#claude-accounts)), then one header per harness —
 **Claude (you@example.com)**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, **OpenCode** — so a harness's rows read `Enabled` / `Model` /
 `Effort` under its name rather than repeating it. The **Project** tab is the one tab whose rows are
 not orion's but one project's: the project the grid is scoped to, named with its path on
 the tab's first line, and each row there reads and writes that project's own entry under `projects`
-— so the same row shows a different value on the next project over. The **Experimental** tab holds
+— so the same row shows a different value on the next project over. The **Linear** tab gathers every
+Linear option in one place ([Linear](#linear)). The **Experimental** tab holds
 behaviors that change how the tree is worked; every switch there is off by default.
 
 | Key | Type | Default | Overlay | What it does |
@@ -60,13 +62,17 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `palette_enter_attaches` | bool | `true` | General | `Enter` on a session in the jump list (`⌘K`) attaches and focuses the TERMINAL PANE. Off, `Enter` only lands on the card and previews it — except on a session that NEEDS FEEDBACK (the red row), which attaches either way, since the only thing to do with a jump to a question is answer it. `Ctrl+o` / `Ctrl+f` still pick open / focus explicitly either way. The `.` / `,` attention jump lands the same way this setting says, red rows included. |
 | `git_init_on_create` | bool | `true` | — (retired) | Through 0.37, **git init new projects** (Settings → General): DAEMON-owned, off left a directory the ADD PROJECT BROWSER (`o`) created without a repository, and the add then failed. Every project is a git repository now: a folder the browser creates is always `git init`ed, and opening an existing folder in no repository asks in a CONFIRM DIALOG whether to `git init` it — `y` inits it and opens it, `n` leaves it alone. So nothing reads the key and no tab edits it; the TUI still loads and writes it back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `worktree_base_branch` | string | `""` | General | DAEMON-owned WORKTREE BASE BRANCH: where every new WORKTREE nobody named a base for starts — a bare `orion worktree`, the QUICK PROMPT's auto-created one (`orion worktree --base` always wins). Empty, shown as `auto` in the overlay, is origin's own default branch: `origin/HEAD` freshly fetched, normally `origin/main`. A name — `master`, `develop` — is resolved the way `--base` resolves one: origin is fetched and origin's copy of that branch (`origin/master`) is the start point, untracked, never the checkout's local branch of that name, which is only as new as its last pull; a branch origin lacks that the checkout has locally is used as named. The setting is one name for every project, so a repo with no branch of that name at all does not fail the launch: it falls back to `origin/HEAD` as if the key were empty, and `daemon.log` says which repo ignored it. A leading `origin/` is dropped (`origin/master` means `master`); a tag or SHA is not a branch and falls back too — name those with `--base`. Typed, not cycled: `Enter` on the row opens a prompt, an empty answer puts `auto` back. |
-| `editor` | string | `"micro"` | General | The BUILT-IN EDITOR every file opens in — Go to file (`⌘P`), the TREE BROWSER (`⌘B`), find in files (`⌘⇧F`) and ⌥click — invoked as `<editor> +<line> <file>`. `micro` runs off orion's own config dir (`<data dir>/micro`, made on first use with `Ctrl+D` bound to add the next match as another cursor), never your `~/.config/micro`, and quits on its own `Ctrl+Q` after asking to save; without micro installed the default falls back to `vim`. The overlay cycles `micro`, `vim`, `nvim`, `nano`, `emacs`, `hx`; any command passes through verbatim, so a hand edit can name one the picker doesn't. A `.md` file opens as the MARKDOWN SPLIT, the editor beside its rendered page ([Keys](keys.md#the-built-in-editor)). `ORION_EDITOR` overrides it for the process. |
+| `editor` | string | `"fresh"` | General | **File editor**: the BUILT-IN EDITOR every file opens in — Go to file (`⌘P`), the TREE BROWSER (`⌘B`), find in files (`⌘⇧F`), ⌥click, a MARKDOWN PAGE's `Enter`. The overlay cycles the VS Code-style editors first — `fresh`, `micro`, `edit` (Microsoft Edit) — then `vim`, `nvim`, `hx`, `emacs`, its hint naming the ones installed; any command passes through verbatim, so a hand edit can name one the picker doesn't. Each is told the line its own way: micro `<file> +<line>`, Edit, fresh and Helix `<file>:<line>`, the rest `+<line> <file>`. micro, Edit and fresh quit on their own `Ctrl+Q` after asking to save; `Ctrl+\` force-closes any of them ([Keys](keys.md#the-built-in-editor)). Text wraps: `micro` runs off orion's own config dir (`<data dir>/micro`, never your `~/.config/micro`), made on first use with `Ctrl+D` bound to add the next match as another cursor, the keys the Mac editing chords become ([Keys](keys.md#the-built-in-editor)) and `softwrap`/`wordwrap` on — a binding or setting already in its `bindings.json`/`settings.json` is left as it is — and orion presses Edit's `Alt+Z` (its word wrap, which no setting turns on) once Edit has drawn; fresh, vim and emacs wrap by default. `fresh` runs off orion's own config file too (`fresh --config <data dir>/fresh/config.json --no-upgrade-check --no-restore`, never your `~/.config/fresh/config.json`): just the one file — no menu bar, tab bar, scrollbar, file explorer, workspace dock (its `orchestrator` plugin off) or restored session, no whitespace dots, `~` lines, edge fade or animation, no update checks — a status bar of the cursor, the cursor count and fresh's messages on the left and the language on the right, the `default` keymap, and fresh's `dark` theme (VS Code's Dark+ colours) on orion's own background (`use_terminal_bg`). fresh loads a theme file only from `~/.config/fresh/themes`, which orion never writes to, so a theme of orion's own palette isn't possible; set `theme` in that file to pick another built-in. As with micro, a key you set there — at any depth — is left as it is. A chosen editor that isn't installed is never swapped in silence: the first installed of `fresh`, `micro`, `edit` and `vim` opens instead, the footer says so the first time, and the row reads `nvim — not installed, opens fresh`; `i` on the row installs it ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)), and `install.sh` puts fresh on a machine that has none of fresh, micro and Edit. A `.md` file opens as its rendered MARKDOWN PAGE, `Enter` there editing it ([Keys](keys.md#the-markdown-page)). `ORION_EDITOR` overrides it for the process. |
+| `outside_editor` | string | `"auto"` | General | **Open in app**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, the skills browser, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode`, `sublime`, `zed`, or `default` (macOS `open`, whatever the system opens that kind of file with). `auto` is the first of Cursor, VS Code, Sublime Text and Zed installed, else the system default; the row shows which (`auto · Cursor`) and its hint lists the ones installed. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`, `Zed.app/Contents/MacOS/cli`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` and `zed` with `<file>:<line>`); `open -a` and the system default open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
 | `link_env_files` | bool | `true` | General | DAEMON-owned ENV LINKS (**Link .env files**): every new WORKTREE, one an agent moves into, and one made outside orion that the sync adopts gets the main checkout's git-ignored `.env*` files (`.env`, `.env.local`, `apps/web/.env.development`, …) as symlinks at the same paths, so each checkout runs against the clone's secrets and local settings. A tracked file (a committed `.env.example`) and anything under `node_modules` are left alone, and a path that already exists in the worktree is never replaced. Off links nothing new; links already made stay. |
 | `outside_terminal` | string | `"ghostty"` | General | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
-| `ghostty_keybinds` | bool | `true` | General | GHOSTTY KEYBINDS: keep a marked block in Ghostty's config that unbinds `⌘⇧P`, `⌘N` and `⌘,` from Ghostty so orion's command palette, new agent and settings reach it. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
-| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard has been seen. While it is false, orion opens the wizard over the grid at startup: which agents to turn on and their default models, the worktree defaults (**Link .env files**, **New agent in a new worktree**), Linear (assignee, **Link PRs to Linear**), and the outside terminal with its Ghostty keybinds. `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
-| `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal, so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
+| `ghostty_keybinds` | bool | `true` | General | GHOSTTY KEYBINDS: keep a marked block in Ghostty's config that releases every ⌘ chord orion's keymap uses — your rebinds included — so none of them is swallowed by Ghostty. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
+| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); the outside terminal with its Ghostty keybinds; then what was chosen, and the keys to press next. `i` installs a missing CLI or editor ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
+| `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal (or the MARKDOWN PAGE), so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
 | `ssh_sync_config` | bool | `true` | General | SETTINGS SYNC: `orion ssh` and `orion tunnel` send this machine's `config.json` and AGENT PRESETS along, and the remote orion merges them into its own settings before it starts — so a remote is set up the way this machine is on every connect, without reconfiguring it. Its `config.local.json` still wins there, and its projects, sessions and SSH HOSTS FILE stay its own. `--no-sync-config` leaves the settings behind for one connection. See [Backup, restore and other machines](#backup-restore-and-other-machines). |
+| `linear_auto_attach` | bool | `true` | Linear | **Link PRs to Linear**: a branch a `⌘L` launch cut is remembered, and when the project's open list first shows a pull request on it, orion attaches the pull request to each of its Linear issues through Linear's API (`attachmentLinkGitHubPR`). The link is orion's, so it holds when the branch name carries no issue ID — the case Linear's own GitHub integration misses — and Linear keeps one attachment per pull request, so an issue that is linked twice still shows it once. Off, nothing is remembered or attached. |
+| `linear_assignee_email` | string | `""` | Linear (config.local.json) | **Linear account**: whose open issues `⌘L` lists. Empty, shown as `the key's owner`, is the owner of the project's `LINEAR_API_KEY`; an email names another member of the workspace, for a key a team shares. A typed row. Always written to `config.local.json`, so `orion ssh` never carries it to a remote. |
+| `linear_task_template` | string | `""` | Linear | **Task template**: the task `⌘L`'s `Enter` fills the QUICK PROMPT with for the issues picked. `{issues}` becomes each issue's ID, title, link and description, `{ids}` the IDs comma-separated, `{first_id}` the first one. Empty, shown as `default`, is the built-in template — one commit per issue, one pull request titled `"{ids}: …"` whose description starts `Fixes {ids}`. `Enter` on the row opens a multi-row box on the template the box would get, the default spelled out; sending the default back unchanged keeps it the default. |
 | `skip_session_naming` | bool | `false` | — (retired) | Through 0.30, **Skip starting prompt**: on, new AGENTS launched straight from the NEW SESSION PICKER instead of stopping at a task box first. Every launch now goes through the QUICK PROMPT (`⌘N`, or **New session** after its harness pick), whose `Enter` on an empty box starts the CLI bare, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `confirm_on_archive` | bool | `false` | — (retired) | Through 0.34, **Confirm on archive**: on, `a` and the row menu's **Archive** asked in a CONFIRM DIALOG before archiving a session; off, the default, archived at once. Every archive asks now, whatever the key says — the dialog names the session and says `u` brings it back — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `session_idle_timeout` | string | `"5m"` | Sessions | DAEMON-owned IDLE TIMEOUT: how long a session in a WORKTREE no client is viewing goes unwatched before the IDLE REAPER kills its PTY. See the values below. |
@@ -90,7 +96,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `hide_draft_prs` | bool | `false` | Appearance | Leave draft pull requests out of the grid's PR & ISSUE COUNTS and the jump list's (`⌘K`) pull-request rows, so browsing what's open shows only the rows asking for a reviewer; the PULL REQUESTS MODAL lists drafts either way. A view filter, not a fetch filter: the open-list lookup still fetches the drafts and the PR CACHE still holds them, so `shown` brings them back at once and a draft marked ready joins the rows on the refresh that says so. Sessions and the pull request under their cards are never hidden. |
 | `card_line_changes` | bool | `false` | — (retired) | Through 0.37, **Card line counts** (Settings → Appearance): on, each GRID card followed its checkout's changed-file count with the lines behind it. Every card does now — `↳ feat +3 files +120 -45`, the added in the DIFF VIEWER's green and the removed in its red, counted as the DIFF VIEWER shows them (tracked files against HEAD, staged or not, and every line of an untracked file as added; a binary file, or an untracked one over 1 MiB, adds nothing) by one `git diff --numstat` beside each `git status` the file count already runs; on a narrow card the word `files` goes first, then the lines, before the branch gives up a letter — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `projects` | object | `{}` | Project | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Project** tab — `{"projects": {"/Users/me/src/app": {"run_command": "npm run dev", "open_command": "open http://localhost:3000"}}}`. Two rows: **Run command** (`run_command`, string, default `""`) is the RUN COMMAND **Run** (a card's or the project tab's right-click menu) starts in *that project's* worktrees — the same shell line a `.orion.json` `run` would carry, and the way to set one without committing a file; while it is set, **Run** runs it and never opens the file, and empty (shown as `.orion.json`) hands the decision back to the checkout's PROJECT FILE, so a project that has one needs nothing here. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer puts `.orion.json` back. The DAEMON reads it fresh at each **Run**. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same precedence over the file's `open` and the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. The tab edits the selected project and names it on its first line; with no project in the tree its rows read `n/a`. A project with no entry reads as the defaults (an empty command in each row), and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty `run_command` or `open_command` is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
-| `hide_root_worktree` | bool | `false` | — (retired) | Through 0.27 one switch for every project (**Hide root worktree**, Settings → Experimental), then through 0.35 the fallback for a project whose `projects` entry had no **Hide root worktree** row of its own: on, that project's ROOT WORKTREE was left out of everything the grid launched into. The root is always listed now — a launch that must not land in the shared checkout cuts a fresh worktree instead (`^N` in the QUICK PROMPT, or `quick_prompt_new_worktree`) — so this build never reads the key, here or inside an entry, and no tab edits it; both are still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
+| `hide_root_worktree` | bool | `false` | — (retired) | Through 0.27 one switch for every project (**Hide root worktree**, Settings → Experimental), then through 0.35 the fallback for a project whose `projects` entry had no **Hide root worktree** row of its own: on, that project's ROOT WORKTREE was left out of everything the grid launched into. The root is always listed now — a launch that must not land in the shared checkout cuts a fresh worktree instead (**+ new worktree** in the QUICK PROMPT's WORKTREE PICKER, `⌘.`) — so this build never reads the key, here or inside an entry, and no tab edits it; both are still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `hide_projects` | bool | `false` | — (retired) | Through 0.37, **Projects panel** (Settings → Appearance): on, the Projects panel of the old three-panel layout started collapsed to its rail. The GRID has no panels, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `hide_worktrees` | bool | `false` | — (retired) | Through 0.37, **Worktrees panel**: the same switch for the Worktrees panel. Never read, no row, loaded and written back as stored. |
 | `hide_sessions` | bool | `false` | — (retired) | Through 0.37, **Sessions panel**: the same switch for the Sessions panel. Never read, no row, loaded and written back as stored. |
@@ -102,7 +108,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `pi`, `muse`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **Agent** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. The NEW SESSION PICKER opens on it too, and with **Remember harness** on (Experimental) every picker-walked launch rewrites it. |
 | `quick_prompt_focus` | bool | `false` | Agents | QUICK PROMPT FOCUS: whether a QUICK PROMPT launch enters and locks the new session's TERMINAL PANE. Off, the keys stay on the grid, and where the cursor goes is `follow_new_session`'s. On, it outranks that key: a launch that enters the new session's pane has to go there. Only the QUICK PROMPT reads it — every other launch takes the pane. |
 | `follow_new_session` | bool | `true` | Agents | FOLLOW NEW SESSION (**Follow new**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: entering its terminal is `quick_prompt_focus`'s. It covers every QUICK PROMPT: `⌘N`, **New session**'s box, **Duplicate session** on a card, and the boxes the ISSUES MODAL and the PULL REQUESTS MODAL open. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way; so does every launch while `quick_prompt_focus` is on. Terminals (`t`) always come up in the pane. |
-| `quick_prompt_new_worktree` | bool | `false` | Agents | QUICK PROMPT NEW WORKTREE: whether each new QUICK PROMPT starts aimed at a fresh worktree (a random branch off the **Worktree base branch**) instead of the checkout under the grid's cursor. `Ctrl+N` in the box flips only that box; the next one starts from this again. Off by default, so `⌘N` starts in the checkout under the cursor — the worktree whose band is selected, or the one the grid is inside — and on the project's root branch with nothing selected (`Esc` off the band). |
+| `quick_prompt_new_worktree` | bool | `false` | — (retired) | Through 0.42, **New worktree** under **Quick prompt** (Settings → Agents, and the onboarding wizard's Worktrees page): on, every QUICK PROMPT started aimed at a fresh worktree, and the box's `[ ] new worktree` toggle (`^N`) flipped one launch. Every box starts in the checkout under the grid's cursor now — the project's root branch with nothing selected — and a fresh worktree is the first row of the box's WORKTREE PICKER (`⌘.` / `^T`, **+ new worktree**), so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `claude_enabled` | bool | `false` | Agents | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW SESSION PICKER and the PR SESSION picker, and skips the standing PREWARM POOL slot; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until the ONBOARDING wizard or this tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
 | `codex_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Codex, same rules. |
 | `cursor_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Cursor, same rules. |
@@ -123,7 +129,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `muse_effort` | string | `"default"` | Agents | Reserved until the `muse` CLI documents a reasoning flag. Stored, never sent. |
 | `opencode_model` | string | `"default"` | Agents | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-sonnet-5`, …); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
 | `custom_harnesses` | array | `[]` | Agents | Extra CLIs the NEW SESSION PICKER offers after the built-ins, each with its own Agents tab section (Enabled and Model rows). Each entry is `{id, program}` plus options: `label` (picker text, defaults to the id), `enabled` (default `true`), `model` (default `"default"` = the CLI's pick, else passed verbatim), `model_flag` (default `"--model"`), and `hooks` (a built-in dialect the program speaks: `claude`, `codex`, `cursor`, `pi` or `opencode` — with one set the sessions report status, prompts and permission waits exactly like that harness, including title sync and auto-title for `claude`; without one they stay process-based, running while the PTY is live and never waiting-on-you). Ids use lowercase letters, digits and hyphens and must not collide with a built-in. Legacy: new harnesses belong in `harnesses`, where they also gain resume, effort, system-prompt and hook-dialect rows. Invalid entries never launch — the picker hides them and the daemon refuses them with the reason. |
-| `harnesses` | object | `{}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the **New session** picker, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
+| `harnesses` | object | `{"grok": {"enabled": false}}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the **New session** picker, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
 | `claude_accounts` | array | `[]` | Agents | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as. `enabled: false` switches one off (written only while off). The Agents tab's **Claude accounts** section and first-run onboarding add, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `keybindings` | object | `{}` | Hotkeys | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "ctrl+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. Only rows that differ from the defaults are written. |
 | `prewarm_agents` | bool | `true` | Sessions | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`), and the memory modal (**Memory usage**) groups it under **warm spares**. Off drains the pool on the DAEMON's next sweep (within 30 s). |
@@ -131,38 +137,112 @@ behaviors that change how the tree is worked; every switch there is off by defau
 
 ### Outside terminal and Ghostty keybinds
 
-Ghostty claims a lot of ⌘ chords for itself and never passes them to the program inside it. orion's
-defaults use several of them — `⌘⇧P` (command palette), `⌘N` (new agent), `⌘,` (settings), `⌘P`
-(go to file), `⌘O` (open), `⌘R`, `⌘F`, `⌘L` (Linear), and the new-agent box's `⌘/` (model), `⇧⌘/`
-(effort) and `⌘.` (worktree) — so with `ghostty_keybinds` on, orion keeps this block in Ghostty's
-config:
+Ghostty claims a lot of ⌘ chords for itself and never passes them to the program inside it — `⌘K`
+clears the screen, `⌘N` opens a window, `⌘⇧P` is its own palette, `⌘F` searches, `⌘J` scrolls to the
+selection. So with `ghostty_keybinds` on (the default), orion keeps a block in Ghostty's config that
+releases **every ⌘ chord its keymap answers to** — derived from the keymap itself, your
+rebinds in `keybindings` included, so a chord orion uses can never be swallowed by Ghostty. A rebind
+in Settings → Hotkeys rewrites the block at once: the new ⌘ chord is released and the one it replaced
+goes back to Ghostty. A few chords are never taken whatever the keymap says: `⌘C`, `⌘V`, `⌘Q`, `⌘W`,
+`⌘T`, `⌘⇧T`, `⌘Enter` and the tab and window keys (`⌘1`–`⌘9`, `⌘⇧W`, …) stay Ghostty's. The
+BUILT-IN EDITOR's chords are released whatever the keymap says ([Keys](keys.md#the-built-in-editor)):
+`⌘Z`, `⌘⇧Z`, `⌘D`, `⌘A`, `⌘X`, and the Mac editing chords — `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓`, which
+were Ghostty's jump to prompt, `⌥⌘↑`/`⌥⌘↓`, which were its split up and down (`⌥⌘←`/`⌥⌘→` stay its
+split left and right), and `⌘⇧L`. `⌘←`/`⌘→` are not taken: Ghostty types `^A`/`^E` for them, which a
+shell outside orion still needs and the editor reads as the line's ends. With the default keymap the
+block reads:
 
 ```
 # >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>
-keybind = super+shift+p=unbind
-keybind = super+n=unbind
-keybind = super+,=unbind
-keybind = super+p=unbind
-keybind = super+o=unbind
+keybind = super+k=unbind
+keybind = super+e=unbind
 keybind = super+r=unbind
-keybind = super+f=unbind
 keybind = super+l=unbind
+keybind = super+i=unbind
+keybind = super+n=unbind
 keybind = super+/=unbind
+keybind = super+y=unbind
 keybind = super+shift+/=unbind
 keybind = super+.=unbind
+keybind = super+p=unbind
+keybind = super+shift+f=unbind
+keybind = super+b=unbind
+keybind = super+s=unbind
+keybind = super+j=unbind
+keybind = super+f=unbind
+keybind = super+g=unbind
+keybind = super+,=unbind
+keybind = super+shift+p=unbind
+keybind = super+o=unbind
+keybind = super+z=unbind
+keybind = super+shift+z=unbind
+keybind = super+d=unbind
+keybind = super+a=unbind
+keybind = super+x=unbind
+keybind = super+arrow_up=unbind
+keybind = super+arrow_down=unbind
+keybind = super+shift+arrow_up=unbind
+keybind = super+shift+arrow_down=unbind
+keybind = super+alt+arrow_up=unbind
+keybind = super+alt+arrow_down=unbind
+keybind = super+shift+l=unbind
 # <<< orion keybinds <<<
 ```
 
-It is written at startup and whenever the Settings row changes, only on a local Mac and only while
-Ghostty is in use — orion running inside it, or `outside_terminal` set to `ghostty` with Ghostty
-installed. The file is the first non-empty one of
-`~/Library/Application Support/com.mitchellh.ghostty/config.ghostty`, `…/config`,
+— one line per ⌘ chord, in the order the actions are listed and the editor's after them, Ghostty's spelling (`⌘?` is the key it is
+typed with, `super+shift+/`). A chord macOS keeps for itself never reaches Ghostty to be released at
+all: `⇧⌘/` opens every app's Help menu, which is why **Cycle effort** (`cycle_effort`) leads with `⌘Y`
+(`^Y` its twin) and keeps `⇧⌘/` only behind it. It is written at startup, whenever the Ghostty rows in Settings change
+and whenever the keymap does, only on a local Mac and only while Ghostty is in use — orion running
+inside it, or `outside_terminal` set to `ghostty` with Ghostty installed. The file is the first
+non-empty one of `~/Library/Application Support/com.mitchellh.ghostty/config.ghostty`, `…/config`,
 `$XDG_CONFIG_HOME/ghostty/config.ghostty` and `…/config` (`~/.config` when `XDG_CONFIG_HOME` is
 unset), else the first. Everything outside the block is yours and is never touched, and a block that
 already says the right thing is not rewritten. Ghostty reads its config at launch and on its own
 reload (`⌘⇧,`); the footer says when one is needed. `ORION_GHOSTTY_CONFIG` names another file, or
 `off` to never write one. Turning the setting off stops orion writing; the block already there stays
 until you delete it.
+
+### Installing editors and agent CLIs
+
+orion runs programs it does not ship: the editor behind the BUILT-IN EDITOR, and a CLI per harness.
+`install.sh` makes sure of three after orion itself: git, which it stops without; an editor with VS
+Code's keys — fresh, unless fresh, micro or Microsoft Edit is already there (`brew install
+fresh-editor`; without Homebrew, on Linux, the quick-install script fresh's README links, its
+universal build linked into the install dir, and on a Mac — or should that fail — the one micro's
+README links, run in the install dir); and gh, which pull
+requests and issues are read with (`brew install gh`, else a pointer to its install page). It says
+nothing about what is already there, and `--no-deps` (`curl … | sh -s -- --no-deps`) or
+`ORION_NO_DEPS=1` skips the step.
+
+Inside orion, `i` on a row whose program isn't on PATH — first-run setup's Agents and Editor steps,
+Settings → General's **File editor**, a Claude account's row or a harness's **Enabled** row on the
+Agents tab — shows the command that installs it, and `Enter` runs it in the editor modal, the
+installer's own output on screen (`Ctrl+Q` stops it). When it exits the modal stays, its title
+saying whether the program is on PATH now, until `Enter`; the rows read PATH as they draw. An
+installer that puts its program somewhere new and adds that to your shell profile leaves orion's
+own PATH as it was: start orion again from a new shell. Nothing is installed unasked, and `orion
+doctor` ([Commands](commands.md#checking-the-machine)) names the same commands without running
+them.
+
+| Program | Command | Documented at |
+|---|---|---|
+| fresh | `brew install fresh-editor` | [github.com/sinelaw/fresh](https://github.com/sinelaw/fresh#installation) |
+| micro | `brew install micro` | [github.com/zyedidia/micro](https://github.com/zyedidia/micro#installation) |
+| Microsoft Edit (`edit`) | `brew install msedit` | [github.com/microsoft/edit](https://github.com/microsoft/edit) |
+| nvim | `brew install neovim` | [neovim INSTALL.md](https://github.com/neovim/neovim/blob/master/INSTALL.md) |
+| hx | `brew install helix` | [docs.helix-editor.com](https://docs.helix-editor.com/install.html) |
+| emacs | `brew install emacs` | [gnu.org/software/emacs](https://www.gnu.org/software/emacs/download.html) |
+| Claude (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` | [code.claude.com](https://code.claude.com/docs/en/setup) |
+| Codex (`codex`) | `brew install --cask codex`, or without Homebrew `npm install -g @openai/codex` | [github.com/openai/codex](https://github.com/openai/codex) |
+| Cursor (`cursor-agent`) | `curl https://cursor.com/install -fsS \| bash` | [cursor.com/docs/cli](https://cursor.com/docs/cli/installation) |
+| Pi (`pi`) | `curl -fsSL https://pi.dev/install.sh \| sh` | [pi.dev](https://pi.dev) |
+| Muse (`muse`) | `curl -fsSL https://dev.meta.ai/install.sh \| bash` | [dev.meta.ai](https://dev.meta.ai) |
+| Grok Build (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | [docs.x.ai](https://docs.x.ai/build/overview) |
+| OpenCode (`opencode`) | `curl -fsSL https://opencode.ai/install \| bash` | [opencode.ai/docs](https://opencode.ai/docs/) |
+
+Without Homebrew an editor's row names its install page instead and runs nothing. vim has no
+installer here: macOS ships it, and it is the last fallback.
 
 ### Prewarming
 
@@ -316,12 +396,29 @@ with `"claude-b": {…}` gone from `harnesses` (the wrapper can go too). orion d
 hand-written entry for you: **Add account** refuses an id `harnesses` already defines and points
 here.
 
-Grok Build launches `grok` and starts off: a config with no `harnesses` map at all is seeded with
-`"grok": {"enabled": false}`, and its Enabled toggle is stored under `harnesses.grok.enabled`. Set `harnesses.grok.model_default` and `effort_default` in config.json
+Grok Build launches `grok` and starts off: a config with no `harnesses` map at all — `{}`, or a
+file from before the map — reads as `"grok": {"enabled": false}`, and its Enabled toggle is stored
+under `harnesses.grok.enabled`. A `harnesses` map that is there is read as written. Set `harnesses.grok.model_default` and `effort_default` in config.json
 to pass `--model` and `--reasoning-effort`; unset values use the CLI defaults. The picker offers
 only `default` unless you configure `models` and `efforts` lists in that same block.
 `--rules` carries additional system guidance and `--resume` accepts a stored session ID, but
 automatic session-ID capture and managed hooks are not yet supported. Status is process-based.
+
+### Linear
+
+Settings → **Linear** is every Linear option in one place, and the onboarding wizard's Linear page
+draws the same rows:
+
+| Row | Default | What it is |
+|---|---|---|
+| **Link PRs to Linear** | on | `linear_auto_attach` — the pull request a `⌘L` launch opens is attached to its issues through the API. Linear keeps one attachment per pull request, so it never duplicates, and the link does not depend on the branch name carrying an issue ID |
+| **Linear account** | the key's owner | `linear_assignee_email` — whose issues `⌘L` lists; `Enter` types an email |
+| **Task template** | default | `linear_task_template` — the task a `⌘L` launch starts with; `Enter` edits it in a multi-row box |
+| **API key** | — | read-only: where the selected project's `LINEAR_API_KEY` was found — `found in .env.local · demo`, `found in .env · demo`, `found in orion's environment · demo`, or `not found for demo`. The lookup is the one every Linear call makes: the checkout's `.env.local`, then its `.env`, then orion's own environment. The value is never shown, logged or stored |
+| **Test connection** | not tested | `Enter` sends Linear's `viewer` query with that key and the row reads whose it is — `✓ Jane Doe · jane@acme.dev` — or why not — `✗ Authentication required`; the explanation line under the rows says it in full. A key that moves or changes since reads `not tested` again |
+
+Only `LINEAR_API_KEY` is read from an env file. It goes to `api.linear.app` alone, on `curl`'s
+standard input (`--config -`), never on a command line.
 
 ### What `session_idle_timeout` accepts
 

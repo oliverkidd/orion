@@ -127,9 +127,11 @@ pub struct TreeBrowser {
     /// file contents, or a child listing for a directory.
     pub preview: String,
     /// `preview` split into syntax-highlighted (kind, text) runs per line;
-    /// styling itself lives in ui.rs (the `classify_diff_line` rule).
+    /// styling itself lives in ui.rs (`token_style`).
     pub preview_lines: Vec<Vec<(TokenKind, String)>>,
-    /// Cached line count of `preview`, for scroll clamping.
+    /// Cached line count of `preview`, for scroll clamping — written back
+    /// by the draw as the count its wrapped rows clamp against, so the
+    /// last screenful of a file with long lines is reachable.
     pub preview_line_count: usize,
     /// Whether `preview` is real file contents — the case that earns a
     /// line-number gutter. False for directory listings and placeholders.

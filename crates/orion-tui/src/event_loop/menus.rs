@@ -55,7 +55,14 @@ pub(super) fn open_command_palette(app: &mut App) {
         .iter()
         .filter(|spec| listed(spec.action))
         .map(|spec| {
-            let mut item = MenuItem::new(spec.label, MenuAction::RunAction(spec.action));
+            // The editor row is named after the app it opens.
+            let label = match spec.action {
+                Action::OpenInCursor => {
+                    format!("Open checkout in {}", crate::outside_editor::hint_name())
+                }
+                _ => spec.label.to_string(),
+            };
+            let mut item = MenuItem::new(label, MenuAction::RunAction(spec.action));
             if let Some(hint) = row_hint(app, spec.action) {
                 item = item.with_hint(hint);
             }
@@ -65,12 +72,14 @@ pub(super) fn open_command_palette(app: &mut App) {
     app.overlay = Some(filtered_menu("Command", items));
 }
 
-/// The OPEN MENU's rows: where `⌘O` can take what the cursor is on.
+/// The OPEN MENU's rows: where `⌘O` can take what the cursor is on. The
+/// editor row is named after the OPEN IN APP editor (`Checkout in VS
+/// Code`) when the menu opens.
 const OPEN_ROWS: &[(Action, &str)] = &[
     (Action::OpenRepo, "Repository on GitHub"),
     (Action::OpenPullRequest, "Pull request on GitHub"),
     (Action::OpenIssue, "Issue on GitHub"),
-    (Action::OpenInCursor, "Checkout in Cursor"),
+    (Action::OpenInCursor, "Checkout in"),
     (Action::OpenOutsideTerminal, "Terminal in the checkout"),
     (Action::OpenWorktree, "Open command"),
 ];
@@ -81,7 +90,13 @@ pub(super) fn open_outside_menu(app: &mut App) {
     let items = OPEN_ROWS
         .iter()
         .map(|(action, label)| {
-            let mut item = MenuItem::new(*label, MenuAction::RunAction(*action));
+            let label = match action {
+                Action::OpenInCursor => {
+                    format!("{label} {}", crate::outside_editor::hint_name())
+                }
+                _ => label.to_string(),
+            };
+            let mut item = MenuItem::new(label, MenuAction::RunAction(*action));
             if let Some(hint) = row_hint(app, *action) {
                 item = item.with_hint(hint);
             }
@@ -128,7 +143,7 @@ mod tests {
         assert!(
             menu_hints(&app)
                 .iter()
-                .any(|(label, hint)| label == "Go to file" && hint.as_deref() == Some("^p"))
+                .any(|(label, hint)| label == "Go to file" && hint.as_deref() == Some("^P"))
         );
         assert!(rows.iter().all(|(_, action)| match action {
             MenuAction::RunAction(action) => listed(*action),
