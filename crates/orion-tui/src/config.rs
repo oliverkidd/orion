@@ -61,7 +61,10 @@ impl OutsideTerminal {
 
     /// A stored word back to its app; anything unknown is the default.
     pub fn parse(word: &str) -> Self {
-        if word.trim().eq_ignore_ascii_case(OutsideTerminal::Terminal.as_str()) {
+        if word
+            .trim()
+            .eq_ignore_ascii_case(OutsideTerminal::Terminal.as_str())
+        {
             OutsideTerminal::Terminal
         } else {
             OutsideTerminal::Ghostty
@@ -1754,8 +1757,9 @@ impl Config {
             if LOCAL_KEYS.contains(&key.as_str()) {
                 root.remove(&key);
                 let at_default = defaults.get(&key) == Some(&value);
-                let already_held =
-                    local_root.as_ref().is_some_and(|held| held.contains_key(&key));
+                let already_held = local_root
+                    .as_ref()
+                    .is_some_and(|held| held.contains_key(&key));
                 // Stay out of `config.local.json` until the user sets the
                 // key (or it was already there). An empty Linear email
                 // is the default — "owner of the key" — and must not
@@ -2000,10 +2004,20 @@ impl Config {
     /// so is anything whose program is missing from PATH. The daemon
     /// stays authoritative at launch.
     pub fn offered_harnesses(&self) -> Vec<(AgentKind, Option<String>)> {
+        self.offered_harnesses_where(program_installed)
+    }
+
+    /// [`Config::offered_harnesses`] with the "is it installed" check
+    /// passed in, so a test can name its own PATH instead of swapping the
+    /// process-wide one under every other test's `git`.
+    fn offered_harnesses_where(
+        &self,
+        installed: impl Fn(&str) -> bool,
+    ) -> Vec<(AgentKind, Option<String>)> {
         let all = self.harness_registry();
         orion_core::harness::usable(&all)
             .into_iter()
-            .filter(|entry| !self.hide_uninstalled_harnesses || program_installed(&entry.program))
+            .filter(|entry| !self.hide_uninstalled_harnesses || installed(&entry.program))
             .map(|entry| match AgentKind::parse(&entry.id) {
                 Some(kind) => (kind, None),
                 None => (AgentKind::Custom, Some(entry.id.clone())),
@@ -2729,14 +2743,17 @@ fn resolve_editor(env: Option<&str>, configured: &str, micro_installed: bool) ->
 /// fast check behind `hide_uninstalled_harnesses`, for built-ins and
 /// customs alike.
 pub fn program_installed(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| program_on(&paths, program))
+}
+
+/// Whether `program` is a file in one of the directories `paths` lists,
+/// PATH-style.
+fn program_on(paths: &std::ffi::OsStr, program: &str) -> bool {
     let program = program.trim();
     if program.is_empty() {
         return false;
     }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    for dir in std::env::split_paths(&paths) {
+    for dir in std::env::split_paths(paths) {
         let candidate = dir.join(program);
         if candidate.is_file() {
             return true;
@@ -4804,8 +4821,6 @@ mod tests {
         // is on PATH, built-ins and customs alike.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("agy"), "").unwrap();
-        let prior = std::env::var_os("PATH");
-        std::env::set_var("PATH", dir.path());
         let hiding = Config {
             hide_uninstalled_harnesses: true,
             ..serde_json::from_str::<Config>(
@@ -4816,12 +4831,8 @@ mod tests {
             )
             .unwrap()
         };
-        let offered = hiding.offered_harnesses();
-        if let Some(prior) = prior {
-            std::env::set_var("PATH", prior);
-        } else {
-            std::env::remove_var("PATH");
-        }
+        let offered =
+            hiding.offered_harnesses_where(|program| program_on(dir.path().as_os_str(), program));
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0], (AgentKind::Custom, Some("agy".into())));
     }
