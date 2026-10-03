@@ -37,6 +37,22 @@ impl DiffFile {
     }
 }
 
+/// What the DIFF VIEWER's file list and diffs are of — the COMMIT LIST's
+/// row (`commit_list`) that last landed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum DiffScope {
+    /// The working tree against HEAD, untracked files included: what the
+    /// viewer always showed, and still opens on while there is any.
+    #[default]
+    Uncommitted,
+    /// The working tree against the branch's merge-base with its base —
+    /// everything the branch changed, committed or not (**All changes**).
+    Branch { merge_base: String },
+    /// One commit against its first parent; `None` for a root commit,
+    /// which is diffed against git's empty tree.
+    Commit { sha: String, parent: Option<String> },
+}
+
 /// Line classification for coloring; styling itself lives in ui.rs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffLineKind {
@@ -142,6 +158,73 @@ pub fn parse_status_z(bytes: &[u8]) -> Vec<DiffFile> {
     files
 }
 
+/// The files behind a COMMIT LIST row other than the uncommitted one, in
+/// path order: a commit's against its first parent, or the branch's — its
+/// merge-base against the working tree, tracked changes staged or not and
+/// every untracked file. `Err` is a user-facing message.
+pub fn scope_files(root: &Path, scope: &DiffScope) -> Result<Vec<DiffFile>, String> {
+    let mut args = vec!["diff", "--name-status", "-z", "-M", "--no-color"];
+    let parent;
+    match scope {
+        DiffScope::Uncommitted => return changed_files(root),
+        DiffScope::Branch { merge_base } => args.push(merge_base),
+        DiffScope::Commit { sha, parent: from } => {
+            parent = match from {
+                Some(from) => from.clone(),
+                None => empty_tree(root).ok_or("git hash-object failed")?,
+            };
+            args.extend([parent.as_str(), sha.as_str()]);
+        }
+    }
+    args.push("--");
+    let output = run_git(root, &args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git diff failed: {}", stderr.trim()));
+    }
+    let mut files = parse_name_status_z(&output.stdout);
+    if matches!(scope, DiffScope::Branch { .. }) {
+        files.extend(
+            changed_files(root)?
+                .into_iter()
+                .filter(DiffFile::is_untracked),
+        );
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    Ok(files)
+}
+
+/// Parse `git diff --name-status -z`: a status field (`M`, `A`, `D`, `T`,
+/// or `R100` / `C75` with a score), then the path — and for a rename or a
+/// copy two paths, the original first. The status letter fills the first
+/// porcelain column, so the list's gutter reads and colours as it does for
+/// a staged change.
+pub fn parse_name_status_z(bytes: &[u8]) -> Vec<DiffFile> {
+    let mut files = Vec::new();
+    let mut fields = bytes
+        .split(|b| *b == 0)
+        .map(|f| String::from_utf8_lossy(f).into_owned());
+    while let Some(status) = fields.next() {
+        let Some(code) = status.chars().next() else {
+            continue;
+        };
+        let Some(first) = fields.next() else {
+            break;
+        };
+        let (path, orig_path) = if matches!(code, 'R' | 'C') {
+            (fields.next().unwrap_or_default(), Some(first))
+        } else {
+            (first, None)
+        };
+        files.push(DiffFile {
+            path,
+            orig_path,
+            xy: [code, ' '],
+        });
+    }
+    files
+}
+
 /// Lines added and removed across a checkout's uncommitted changes, as the
 /// DIFF VIEWER shows them: tracked files against HEAD, staged or not, and
 /// every line of an untracked file as added. What the LAUNCHER VIEW's cards
@@ -183,8 +266,25 @@ pub fn line_changes(root: &Path, files: &[DiffFile]) -> Option<LineChanges> {
     Some(total)
 }
 
+/// The files and lines a checkout's working tree changed against `base`
+/// (a commit), as the COMMIT LIST's **All changes** row counts them: the
+/// tracked files from one `git diff <base> --numstat`, and every untracked
+/// one of `files` — the checkout's `changed_files` — read from disk within
+/// the caps above. None when git couldn't say.
+pub fn changes_since(root: &Path, base: &str, files: &[DiffFile]) -> Option<(usize, LineChanges)> {
+    let (tracked, mut lines) = tracked_numstat(root, base)?;
+    let untracked: Vec<DiffFile> = files.iter().filter(|f| f.is_untracked()).cloned().collect();
+    lines.added += untracked_lines(root, &untracked);
+    Some((tracked + untracked.len(), lines))
+}
+
 /// `git diff <base> --numstat`, summed.
 fn tracked_line_changes(root: &Path, base: &str) -> Option<LineChanges> {
+    tracked_numstat(root, base).map(|(_, lines)| lines)
+}
+
+/// `git diff <base> --numstat`: how many files, and their lines summed.
+fn tracked_numstat(root: &Path, base: &str) -> Option<(usize, LineChanges)> {
     let output = run_git(
         root,
         &[
@@ -201,7 +301,7 @@ fn tracked_line_changes(root: &Path, base: &str) -> Option<LineChanges> {
     output
         .status
         .success()
-        .then(|| parse_numstat_z(&output.stdout))
+        .then(|| count_numstat_z(&output.stdout))
 }
 
 /// Git's empty tree in this repo's hash, for an unborn HEAD to diff from.
@@ -217,6 +317,12 @@ fn empty_tree(root: &Path) -> Option<String> {
 /// a rename or copy `added\tremoved\t\0old\0new\0`. A binary file reads
 /// `-\t-` and adds nothing.
 pub fn parse_numstat_z(bytes: &[u8]) -> LineChanges {
+    count_numstat_z(bytes).1
+}
+
+/// [`parse_numstat_z`], with the number of files the records name.
+fn count_numstat_z(bytes: &[u8]) -> (usize, LineChanges) {
+    let mut files = 0;
     let mut total = LineChanges::default();
     let mut fields = bytes.split(|b| *b == 0);
     while let Some(field) = fields.next() {
@@ -226,6 +332,7 @@ pub fn parse_numstat_z(bytes: &[u8]) -> LineChanges {
         else {
             continue;
         };
+        files += 1;
         total.added += added.parse::<u64>().unwrap_or(0);
         total.removed += removed.parse::<u64>().unwrap_or(0);
         if path.is_empty() {
@@ -234,7 +341,7 @@ pub fn parse_numstat_z(bytes: &[u8]) -> LineChanges {
             fields.next();
         }
     }
-    total
+    (files, total)
 }
 
 /// Every line of the untracked `files`, read from disk within the caps
@@ -314,6 +421,32 @@ pub fn head_oid(root: &Path) -> Option<String> {
 /// Diff text for one file. Never fails: errors become the displayed text so
 /// the modal survives a repo vanishing out from under it.
 pub fn diff_for(root: &Path, file: &DiffFile, head_ok: bool) -> String {
+    let head: &[&str] = if head_ok { &["HEAD"] } else { &[] };
+    diff_between(root, file, head, false)
+}
+
+/// One file's diff under any COMMIT LIST row: [`diff_for`] for the
+/// uncommitted changes, and for the others the same `git diff` taken from
+/// the branch's merge-base, or across one commit — with renames detected,
+/// as the row's file list (`scope_files`) detected them.
+pub fn scoped_diff(root: &Path, scope: &DiffScope, file: &DiffFile, head_ok: bool) -> String {
+    match scope {
+        DiffScope::Uncommitted => diff_for(root, file, head_ok),
+        DiffScope::Branch { merge_base } => diff_between(root, file, &[merge_base.as_str()], true),
+        DiffScope::Commit { sha, parent } => {
+            let parent = match parent.clone().or_else(|| empty_tree(root)) {
+                Some(parent) => parent,
+                None => return "git hash-object failed".to_string(),
+            };
+            diff_between(root, file, &[parent.as_str(), sha.as_str()], true)
+        }
+    }
+}
+
+/// `git diff <revs> -- <file>`: against the working tree for one rev (or
+/// none, the index), between the two for two. An untracked file is read
+/// against `/dev/null` whatever the revs.
+fn diff_between(root: &Path, file: &DiffFile, revs: &[&str], renames: bool) -> String {
     let output = if file.is_untracked() {
         // --no-index exits 1 when the files differ; only >= 2 is an error.
         run_git(
@@ -329,8 +462,9 @@ pub fn diff_for(root: &Path, file: &DiffFile, head_ok: bool) -> String {
         )
     } else {
         let mut args = vec!["diff"];
-        if head_ok {
-            args.push("HEAD");
+        args.extend(revs);
+        if renames {
+            args.push("-M");
         }
         args.extend(["--no-color", "--no-ext-diff", "--", &file.path]);
         if let Some(orig) = &file.orig_path {
@@ -398,20 +532,38 @@ pub fn read_listing(root: &Path) -> Result<crate::view_jobs::DiffListing, String
         files,
         head,
         reviewed,
+        commits: None,
     })
+}
+
+/// What opening the DIFF VIEWER on a checkout reads: [`read_listing`], and
+/// the COMMIT LIST beside it (`commit_list::read`), measured against the
+/// `worktree_base_branch` SETTING's `base_setting`. One job rather than
+/// two, so the view never has to decide what an empty `git status` means
+/// before it knows whether the branch has commits to show instead.
+pub fn read_opening(
+    root: &Path,
+    base_setting: &str,
+) -> Result<crate::view_jobs::DiffListing, String> {
+    let mut listing = read_listing(root)?;
+    listing.commits = Some(crate::commit_list::read(root, base_setting, &listing.files));
+    Ok(listing)
 }
 
 /// Put a listing into the view that was opened ahead of it (or built for
 /// it): the files, HEAD, the marks — narrowed by whatever the filter holds
 /// by now, reviewed files sunk, so the modal lands on the first unreviewed
-/// file — and that file's diff.
+/// file — and that file's diff. The COMMIT LIST read with it goes up too,
+/// and a checkout with nothing uncommitted opens on the branch's changes
+/// instead (`commit_list::install`).
 ///
 /// A view opened on the badge's list (`event_loop::open_diff_view`) already
 /// shows files, and maybe a reader who has moved among them: they stay on
 /// the file they are on, wherever the fresh list puts it, and its diff is
 /// read again only if it is no longer the same entry. A reader who has not
 /// moved gets what a fresh open gives — the first unreviewed file.
-pub fn fill_view(view: &mut DiffView, listing: crate::view_jobs::DiffListing) {
+pub fn fill_view(view: &mut DiffView, mut listing: crate::view_jobs::DiffListing) {
+    let commits = listing.commits.take();
     let moved = !view.at_home() || view.scroll != 0;
     let before = view.selected_file().cloned();
     let head_ok = listing.head.is_some();
@@ -449,6 +601,9 @@ pub fn fill_view(view: &mut DiffView, listing: crate::view_jobs::DiffListing) {
     if head_changed || view.selected_file() != before.as_ref() {
         load_selected_diff(view);
     }
+    if let Some(commits) = commits {
+        crate::commit_list::install(view, commits);
+    }
 }
 
 /// Reload `view.diff` for the currently selected file and reset the scroll.
@@ -456,7 +611,8 @@ pub fn fill_view(view: &mut DiffView, listing: crate::view_jobs::DiffListing) {
 /// `prefetched` instead of shelling out — there is no local commit to ask
 /// git about, and the text is already in hand. A directory row of the
 /// tree list has no diff of its own: the pane lists what changed under
-/// it.
+/// it. Every diff is taken against the COMMIT LIST row on screen
+/// (`DiffView::scope`).
 ///
 /// A view with BACKGROUND READS never waits on git here. A file this modal
 /// has read before is on screen on this keypress, out of `DiffView::cache`,
@@ -468,7 +624,16 @@ pub fn fill_view(view: &mut DiffView, listing: crate::view_jobs::DiffListing) {
 pub fn load_selected_diff(view: &mut DiffView) {
     view.waiting = None;
     let Some(file) = view.selected_file().cloned() else {
-        let summary = view.dir_summary().unwrap_or_default();
+        let summary = match view.dir_summary() {
+            Some(summary) => summary,
+            // A row whose list came back empty — an empty commit — says so
+            // under its message; a filter that hides every file leaves the
+            // pane blank.
+            None if view.files.is_empty() && view.listing.is_none() => {
+                view.empty_note().to_string()
+            }
+            None => String::new(),
+        };
         view.show_diff(None, summary, false);
         return;
     };
@@ -481,7 +646,7 @@ pub fn load_selected_diff(view: &mut DiffView) {
         return;
     }
     let Some(jobs) = view.jobs.clone() else {
-        let diff = diff_for(&view.root, &file, view.head_ok);
+        let diff = scoped_diff(&view.root, &view.scope, &file, view.head_ok);
         view.show_diff(Some(&file.path), diff, false);
         return;
     };
@@ -501,11 +666,12 @@ fn request_diff(
     prefetch: bool,
 ) {
     let (root, head_ok, id) = (view.root.clone(), view.head_ok, view.id);
+    let scope = view.scope.clone();
     let work = move || {
         Some(crate::view_jobs::Answer::DiffText {
             view: id,
             ticket,
-            diff: diff_for(&root, &file, head_ok),
+            diff: scoped_diff(&root, &scope, &file, head_ok),
             path: file.path,
             prefetch,
         })
@@ -552,8 +718,10 @@ pub fn land_diff(
 }
 
 /// The diff in flight has outlasted the grace the last file's text was kept
-/// for: say so, rather than leave one file's diff under another's name.
+/// for: say so, rather than leave one file's diff under another's name. A
+/// COMMIT LIST row's file list that has is `commit_list::listing_slow`'s.
 pub fn diff_slow(view: &mut DiffView, ticket: u64) {
+    crate::commit_list::listing_slow(view, ticket);
     if view.waiting == Some(ticket)
         && view.shown.as_deref() != view.selected_file().map(|f| f.path.as_str())
     {
@@ -579,6 +747,7 @@ mod tests {
             files: paths.iter().map(|p| modified(p)).collect(),
             head: Some("abc123".into()),
             reviewed: reviewed.iter().map(|p| (p.to_string(), 1)).collect(),
+            commits: None,
         }
     }
 
@@ -730,6 +899,88 @@ mod tests {
         assert_eq!(files[4].path, "renamed.rs");
         assert_eq!(files[4].orig_path.as_deref(), Some("original.rs"));
         assert!(files[0].orig_path.is_none());
+    }
+
+    /// A rename's score is dropped and its two paths read original first;
+    /// the status letter lands in the first column, as a staged change's.
+    #[test]
+    fn parse_name_status_z_reads_renames_and_scores() {
+        let bytes = b"M\0src/a.rs\0A\0new.rs\0R087\0old.rs\0moved.rs\0D\0gone.rs\0";
+        let files = parse_name_status_z(bytes);
+        let summary: Vec<(String, Option<&str>, char)> = files
+            .iter()
+            .map(|f| (f.path.clone(), f.orig_path.as_deref(), f.xy[0]))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("src/a.rs".to_string(), None, 'M'),
+                ("new.rs".to_string(), None, 'A'),
+                ("moved.rs".to_string(), Some("old.rs"), 'R'),
+                ("gone.rs".to_string(), None, 'D'),
+            ]
+        );
+        assert!(files.iter().all(|f| f.xy[1] == ' '));
+        assert!(parse_name_status_z(b"").is_empty());
+    }
+
+    /// Against a real checkout: a commit's files and diffs are that commit's
+    /// alone, a root commit's are read from the empty tree, and the
+    /// branch's run from its merge-base to the working tree, untracked
+    /// files and all.
+    #[test]
+    fn scope_files_and_scoped_diff_from_real_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_repo(&dir);
+        let root_sha = head_oid(&repo).unwrap();
+        std::fs::write(repo.join("tracked.txt"), "new line\n").unwrap();
+        std::fs::write(repo.join("second.txt"), "two\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "second"]);
+        let second = head_oid(&repo).unwrap();
+        std::fs::write(repo.join("wip.txt"), "wip\n").unwrap();
+
+        let commit = DiffScope::Commit {
+            sha: second,
+            parent: Some(root_sha.clone()),
+        };
+        let files = scope_files(&repo, &commit).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["second.txt", "tracked.txt"]);
+        let diff = scoped_diff(&repo, &commit, &files[1], true);
+        assert!(
+            diff.contains("-old line") && diff.contains("+new line"),
+            "{diff}"
+        );
+
+        let root = DiffScope::Commit {
+            sha: root_sha.clone(),
+            parent: None,
+        };
+        let files = scope_files(&repo, &root).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].xy[0], 'A');
+        assert!(scoped_diff(&repo, &root, &files[0], true).contains("+old line"));
+
+        let branch = DiffScope::Branch {
+            merge_base: root_sha.clone(),
+        };
+        let files = scope_files(&repo, &branch).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["second.txt", "tracked.txt", "wip.txt"]);
+        assert!(files[2].is_untracked());
+        assert!(scoped_diff(&repo, &branch, &files[2], true).contains("+wip"));
+        assert_eq!(
+            changes_since(&repo, &root_sha, &changed_files(&repo).unwrap()),
+            Some((
+                3,
+                LineChanges {
+                    added: 3,
+                    removed: 1
+                }
+            )),
+            "second.txt and wip.txt add a line each, tracked.txt swaps one"
+        );
     }
 
     #[test]

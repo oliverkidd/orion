@@ -394,8 +394,17 @@ pub enum TabBody {
     Agents,
 }
 
+/// The Agents tab's section listing every CLAUDE ACCOUNT, between the
+/// head and the per-harness sections ([`Config::account_rows`]).
+pub const ACCOUNTS_GROUP: &str = "Claude accounts";
+
+/// What **Continue on** says after an account signed in as the session's
+/// own email ([`Config::continue_targets`]).
+pub const SAME_ACCOUNT: &str = " · same account";
+
 /// The Agents tab's static head: the cross-harness quick-prompt rows. The
-/// per-harness sections below them are generated from the registry (see
+/// CLAUDE ACCOUNTS section and the per-harness sections below them are
+/// generated from the registry (see [`Config::account_rows`] and
 /// [`Config::agent_rows`]).
 pub const AGENTS_HEAD: &[SettingSpec] = &[
     SettingSpec {
@@ -488,6 +497,17 @@ pub enum HarnessField {
     Enabled,
     Model,
     Effort,
+}
+
+/// One row of the Agents tab's CLAUDE ACCOUNTS section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountRow {
+    /// A Claude account, by registry id: built-in Claude (the default
+    /// account), a `claude_accounts` entry, or a hand-written harness
+    /// whose `env` pins a config dir.
+    Account(String),
+    /// **Add account**: a new config dir and its entry.
+    Add,
 }
 
 impl HarnessField {
@@ -879,7 +899,10 @@ pub fn tab_len(tab: usize) -> usize {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
         Some(TabBody::Values(settings) | TabBody::Project(settings)) => settings.len(),
         Some(TabBody::Hotkeys) => crate::keymap::ACTIONS.len(),
-        Some(TabBody::Agents) => AGENTS_HEAD.len() + Config::load().agent_rows().len(),
+        Some(TabBody::Agents) => {
+            let cfg = Config::load();
+            AGENTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
+        }
         None => 0,
     }
 }
@@ -896,10 +919,17 @@ pub fn setting_at(tab: usize, index: usize) -> Option<&'static SettingSpec> {
 /// registry, like the tab itself.
 pub fn locate_agent(id: &str, field: HarnessField) -> Option<(usize, usize)> {
     let tab = agents_tab();
-    let rows = Config::load().agent_rows();
-    rows.iter()
+    let cfg = Config::load();
+    cfg.agent_rows()
+        .iter()
         .position(|(row_id, row_field)| row_id == id && *row_field == field)
-        .map(|i| (tab, AGENTS_HEAD.len() + i))
+        .map(|i| (tab, cfg.agent_rows_from() + i))
+}
+
+/// Where the Agents tab's CLAUDE ACCOUNTS section starts, as `(tab, row)`:
+/// its first row, the default account's, right under the head.
+pub fn locate_accounts() -> (usize, usize) {
+    (agents_tab(), AGENTS_HEAD.len())
 }
 
 /// The row declared for `kind`, wherever it sits — for anything that
@@ -954,6 +984,9 @@ pub enum SettingsRow {
     Setting(usize),
     /// Label + chord list for `keymap::ACTIONS[index]`.
     Hotkey(usize),
+    /// A line of warning under the rows it is about — the Agents tab's
+    /// same-account note under its CLAUDE ACCOUNTS. Not selectable.
+    Note(String),
 }
 
 impl SettingsRow {
@@ -988,11 +1021,18 @@ pub fn settings_rows(tab: usize) -> Vec<SettingsRow> {
         Some(TabBody::Agents) => {
             let cfg = Config::load();
             let head = AGENTS_HEAD.iter().map(|s| s.group.to_string());
+            let accounts = cfg.account_rows();
+            let section = accounts.iter().map(|_| ACCOUNTS_GROUP.to_string());
             let rows = cfg.agent_rows();
-            let groups = rows
-                .iter()
-                .map(|(id, _)| cfg.effective_harness_by_id(id).display_label().to_string());
-            grouped(head.chain(groups), SettingsRow::Setting)
+            let groups = rows.iter().map(|(id, _)| cfg.section_title(id));
+            let mut out = grouped(head.chain(section).chain(groups), SettingsRow::Setting);
+            // The same-account warning, under the accounts it is about.
+            let last = SettingsRow::Setting(AGENTS_HEAD.len() + accounts.len() - 1);
+            if let Some(at) = out.iter().position(|row| *row == last) {
+                let notes = cfg.account_notes().into_iter().map(SettingsRow::Note);
+                out.splice(at + 1..at + 1, notes);
+            }
+            out
         }
         None => Vec::new(),
     }
@@ -1403,9 +1443,18 @@ pub struct Config {
     /// [`Config::harness_registry`]; the Agents tab, the `n` picker, the
     /// `e` presets, spawn and hooks all read the merged rows. A hand edit
     /// that breaks one entry refuses its launches with the reason, never
-    /// the whole file (see `orion_core::settings`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// the whole file (see `orion_core::settings`). Written even when
+    /// empty: a save patches only the keys it writes, so a map emptied by
+    /// removing its last entry (an account's deltas, say) has to be.
+    #[serde(default)]
     pub harnesses: BTreeMap<String, orion_core::harness::HarnessOverride>,
+    /// CLAUDE ACCOUNTS beyond the default one (`claude_accounts`): each a
+    /// Claude Code config dir under a stable id, `{"id": "claude-2",
+    /// "config_dir": "~/.claude-2"}`, launched as Claude's own row with
+    /// `CLAUDE_CONFIG_DIR` pointing there ([`Config::harness_registry`]).
+    /// The Agents tab's **Claude accounts** section and first-run
+    /// onboarding add and remove them; empty by default.
+    pub claude_accounts: Vec<orion_core::claude_account::ClaudeAccount>,
     /// Which AGENT KIND the QUICK PROMPT hotkey launches. Its model and
     /// effort come from that kind's own defaults above, so the setting is
     /// one name, not a third model/effort pair. Read through
@@ -1604,6 +1653,7 @@ impl Default for Config {
             hide_uninstalled_harnesses: false,
             custom_harnesses: Vec::new(),
             harnesses: default_harnesses(),
+            claude_accounts: Vec::new(),
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
             quick_prompt_focus: false,
             follow_new_session: true,
@@ -1834,15 +1884,38 @@ impl Config {
         )
     }
 
-    /// The effective registry this config reads: the compiled-in known
-    /// harnesses with the `harnesses` map applied, then the legacy
+    /// The effective registry this config reads, every Claude account
+    /// named after who it is signed in as — `Claude (a@b.co)`
+    /// ([`crate::claude_accounts::label`]) — which is the name every
+    /// picker, the Agents tab, onboarding, presets and **Continue on**
+    /// show. See [`Config::raw_harness_registry`] for the rows themselves.
+    pub fn harness_registry(&self) -> Vec<HarnessDescriptor> {
+        let mut all = self.raw_harness_registry();
+        for entry in &mut all {
+            if let Some(record) = crate::claude_accounts::record_of(entry) {
+                entry.label = crate::claude_accounts::label(&entry.label, &record);
+            }
+        }
+        all
+    }
+
+    /// The effective registry as launches read it: the compiled-in known
+    /// harnesses with the `harnesses` map applied — Claude's extra
+    /// accounts (`claude_accounts`) right after it — then the legacy
     /// `custom_harnesses` list, then map-only new ids — plus, for
     /// built-ins, the legacy per-harness keys (`claude_model`,
     /// `codex_enabled`, …) wherever the map stays silent on that field.
     /// The map wins where both speak; the Agents tab writes the legacy
-    /// keys for built-ins, so its edits apply without a migration.
-    pub fn harness_registry(&self) -> Vec<HarnessDescriptor> {
-        let mut all = orion_core::harness::registry(&self.harnesses, &self.custom_harnesses);
+    /// keys for built-ins, so its edits apply without a migration. An
+    /// account takes Claude's model and effort defaults, legacy keys
+    /// included, until its own map entry names one. What `orion config
+    /// harnesses` prints: labels as written, no email.
+    pub fn raw_harness_registry(&self) -> Vec<HarnessDescriptor> {
+        let mut all = orion_core::harness::registry(
+            &self.harnesses,
+            &self.custom_harnesses,
+            &self.claude_accounts,
+        );
         for entry in &mut all {
             if orion_core::harness::builtin(&entry.id).is_none() {
                 continue;
@@ -1866,7 +1939,31 @@ impl Config {
                 }
             }
         }
+        let claude = all
+            .iter()
+            .find(|entry| entry.id == AgentKind::Claude.as_str())
+            .map(|claude| (claude.model.default.clone(), claude.effort.default.clone()));
+        if let Some((model, effort)) = claude {
+            for entry in &mut all {
+                if !self.is_extra_account(&entry.id) {
+                    continue;
+                }
+                let over = self.harnesses.get(&entry.id);
+                if over.and_then(|o| o.model_default.as_ref()).is_none() {
+                    entry.model.default = model.clone();
+                }
+                if over.and_then(|o| o.effort_default.as_ref()).is_none() {
+                    entry.effort.default = effort.clone();
+                }
+            }
+        }
         all
+    }
+
+    /// Whether `id` is a `claude_accounts` entry's — an account orion
+    /// added, and so one it may remove.
+    pub fn is_extra_account(&self, id: &str) -> bool {
+        self.claude_accounts.iter().any(|a| a.id.trim() == id)
     }
 
     /// The legacy per-harness keys for a built-in id, as
@@ -2068,6 +2165,39 @@ impl Config {
         .as_descriptor()
     }
 
+    /// Where `agent`'s Claude session can be carried on — **Continue on**
+    /// another account: `(registry id, label)` for every other enabled
+    /// Claude-dialect harness that resumes and keeps its sessions where
+    /// orion can see them ([`orion_core::harness::continue_targets`]), in
+    /// registry order. Empty for a session off Claude's dialect, a Cloud
+    /// row and an archived one — none of which has anything to move. An
+    /// account signed in as the session's own email is listed as what it
+    /// is — `Claude (a@b.co) · same account`, whose limit is this one's.
+    pub fn continue_targets(&self, agent: &orion_core::Agent) -> Vec<(String, String)> {
+        if agent.cloud_session_id.is_some() || agent.archived {
+            return Vec::new();
+        }
+        let from = self.effective_harness(agent.kind, agent.custom_harness.as_deref());
+        if agent.kind != AgentKind::Claude && !from.claude_like() {
+            return Vec::new();
+        }
+        let all = self.harness_registry();
+        let email = crate::claude_accounts::email_of(&from);
+        orion_core::harness::continue_targets(&all, &from.id)
+            .into_iter()
+            .map(|entry| {
+                let mut label = entry.display_label().to_string();
+                let same = crate::claude_accounts::email_of(entry)
+                    .zip(email.as_deref())
+                    .is_some_and(|(theirs, ours)| theirs.eq_ignore_ascii_case(ours));
+                if same {
+                    label.push_str(SAME_ACCOUNT);
+                }
+                (entry.id.clone(), label)
+            })
+            .collect()
+    }
+
     /// `(id, field)` rows below the Agents head, in registry order: every
     /// entry, enabled or not, valid or not (broken rows show their reason
     /// so they can be fixed); Effort only while the harness offers effort.
@@ -2084,11 +2214,165 @@ impl Config {
     }
 
     /// The harness row at a tab-local Agents index, or None while the
-    /// index lands on the static head.
+    /// index lands on the static head or the CLAUDE ACCOUNTS section.
     pub fn agent_row(&self, index: usize) -> Option<(String, HarnessField)> {
         self.agent_rows()
             .into_iter()
+            .nth(index.checked_sub(self.agent_rows_from())?)
+    }
+
+    /// The tab-local Agents index the first harness row sits at: under
+    /// the head and the CLAUDE ACCOUNTS section.
+    pub fn agent_rows_from(&self) -> usize {
+        AGENTS_HEAD.len() + self.account_rows().len()
+    }
+
+    /// The CLAUDE ACCOUNTS section's rows, below the Agents head: every
+    /// Claude account in registry order — the default one, built-in
+    /// Claude, first; on or off — then **Add account**.
+    pub fn account_rows(&self) -> Vec<AccountRow> {
+        let mut rows: Vec<AccountRow> = self
+            .raw_harness_registry()
+            .into_iter()
+            .filter(HarnessDescriptor::is_claude_account)
+            .map(|entry| AccountRow::Account(entry.id))
+            .collect();
+        rows.push(AccountRow::Add);
+        rows
+    }
+
+    /// The CLAUDE ACCOUNTS row at a tab-local Agents index, or None off
+    /// the section.
+    pub fn account_row(&self, index: usize) -> Option<AccountRow> {
+        self.account_rows()
+            .into_iter()
             .nth(index.checked_sub(AGENTS_HEAD.len())?)
+    }
+
+    /// The Agents tab's section title for a harness: its label, and for a
+    /// CLAUDE ACCOUNT other than the default one its config dir too, so
+    /// two accounts signed in as one email still head two sections.
+    pub fn section_title(&self, id: &str) -> String {
+        let entry = self.effective_harness_by_id(id);
+        let label = entry.display_label().to_string();
+        match entry.pinned_claude_config_dir() {
+            Some(dir) if entry.is_claude_account() && AgentKind::parse(id).is_none() => {
+                format!("{label} · {}", crate::claude_accounts::tilde(&dir))
+            }
+            _ => label,
+        }
+    }
+
+    /// What a CLAUDE ACCOUNTS row says beside its name: on or off, its
+    /// config dir, and who it is signed in as — or which account it
+    /// shares its email with. The **Add account** row says where a new
+    /// one would go.
+    pub fn account_value(&self, row: &AccountRow) -> String {
+        match row {
+            AccountRow::Add => self.next_account_dir(),
+            AccountRow::Account(id) => match self.account_status(id) {
+                Some((enabled, dir, state)) => format!("{} · {dir} · {state}", on_off(enabled)),
+                None => "n/a".into(),
+            },
+        }
+    }
+
+    /// [`Config::account_value`] without the switch, for the onboarding
+    /// page's narrower rows — it lists the switches a page before.
+    pub fn account_brief(&self, row: &AccountRow) -> String {
+        match row {
+            AccountRow::Add => self.next_account_dir(),
+            AccountRow::Account(id) => match self.account_status(id) {
+                Some((_, dir, state)) => format!("{dir} · {state}"),
+                None => "n/a".into(),
+            },
+        }
+    }
+
+    /// Where **Add account** would put a new account, unnamed.
+    fn next_account_dir(&self) -> String {
+        crate::claude_accounts::plan_new(self, "")
+            .map(|new| crate::claude_accounts::tilde(&new.dir))
+            .unwrap_or_else(|_| "n/a".into())
+    }
+
+    /// Account `id`'s switch, config dir and sign-in as the rows say them:
+    /// `signed in`, `not signed in`, or `same as ~/.claude` when another
+    /// account is signed in as its email.
+    fn account_status(&self, id: &str) -> Option<(bool, String, String)> {
+        let all = self.harness_registry();
+        let entry = all.iter().find(|entry| entry.id == id)?;
+        let dir = crate::claude_accounts::dir_of(entry)
+            .map_or_else(|| "?".into(), |d| crate::claude_accounts::tilde(&d));
+        let record = crate::claude_accounts::record_of(entry);
+        let state = match record.as_ref().and_then(crate::claude_accounts::state_of) {
+            None => "checking…".to_string(),
+            Some(crate::claude_accounts::SignIn::Out) => "not signed in".to_string(),
+            Some(crate::claude_accounts::SignIn::As(email)) => {
+                let twin = all.iter().find(|other| {
+                    other.id != entry.id
+                        && crate::claude_accounts::email_of(other)
+                            .is_some_and(|e| e.eq_ignore_ascii_case(&email))
+                });
+                match twin.and_then(crate::claude_accounts::dir_of) {
+                    Some(other) => format!("same as {}", crate::claude_accounts::tilde(&other)),
+                    None => "signed in".to_string(),
+                }
+            }
+        };
+        Some((entry.enabled, dir, state))
+    }
+
+    /// The hint under a CLAUDE ACCOUNTS row: which account it is and where
+    /// it lives — the keys line under it says what its keys do.
+    pub fn account_hint(&self, row: &AccountRow) -> String {
+        let id = match row {
+            AccountRow::Add => {
+                let from = crate::claude_accounts::default_dir(self)
+                    .map_or_else(|| "~/.claude".into(), |d| crate::claude_accounts::tilde(&d));
+                return format!(
+                    "A new config dir with its own login; then asks whether to share {from}'s \
+                     CLAUDE.md, settings, skills…"
+                );
+            }
+            AccountRow::Account(id) => id,
+        };
+        let entry = self.effective_harness_by_id(id);
+        let dir = crate::claude_accounts::dir_of(&entry)
+            .map_or_else(|| "?".into(), |d| crate::claude_accounts::tilde(&d));
+        if AgentKind::parse(id) == Some(AgentKind::Claude) {
+            format!(
+                "The default account, in Claude Code's own {dir} — sign in again to switch logins"
+            )
+        } else if self.is_extra_account(id) {
+            format!("{id}, in {dir} — an email typed at sign-in fills Claude's login page")
+        } else {
+            format!("config.json's harnesses entry {id}, in {dir} — edit the file to remove it")
+        }
+    }
+
+    /// The warning lines under the CLAUDE ACCOUNTS section: a
+    /// `claude_accounts` entry the registry left out, and why — a hand
+    /// edit's — then one block per email two or more accounts are signed
+    /// in as.
+    pub fn account_notes(&self) -> Vec<String> {
+        let all = self.harness_registry();
+        let left_out = self.claude_accounts.iter().filter_map(|account| {
+            let kept = all.iter().any(|entry| {
+                entry.id == account.id.trim()
+                    && entry.pinned_claude_config_dir() == Some(account.dir())
+            });
+            (!kept).then(|| {
+                let why = account.problem().unwrap_or_else(|| {
+                    format!("Claude account id `{}` is taken", account.id.trim())
+                });
+                format!("⚠ claude_accounts: {why} — left out")
+            })
+        });
+        let same = crate::claude_accounts::same_account_groups(&all)
+            .into_iter()
+            .flat_map(|(email, dirs)| crate::claude_accounts::same_account_warning(&email, &dirs));
+        left_out.chain(same).collect()
     }
 
     /// The value an Agents harness row shows.
@@ -2161,6 +2445,9 @@ impl Config {
         if let Some(spec) = AGENTS_HEAD.get(index) {
             return spec.hint.to_string();
         }
+        if let Some(row) = self.account_row(index) {
+            return self.account_hint(&row);
+        }
         match self.agent_row(index) {
             Some((id, field)) => self.agent_hint(&id, field),
             None => String::new(),
@@ -2227,6 +2514,14 @@ impl Config {
             .find(|entry| entry.id == id)
         {
             entry.enabled = enabled;
+            return;
+        }
+        if let Some(account) = self
+            .claude_accounts
+            .iter_mut()
+            .find(|account| account.id.trim() == id)
+        {
+            account.enabled = enabled;
             return;
         }
         self.harness_override_mut(id).enabled = Some(enabled);
@@ -2329,12 +2624,54 @@ impl Config {
         self.enabled_kinds().first().copied().unwrap_or(configured)
     }
 
+    /// The harness the QUICK PROMPT launches, as a picker row names one:
+    /// `(kind, None)` for a built-in ([`Config::quick_prompt_kind`]), and
+    /// `(Custom, Some(id))` while `quick_prompt_kind` names another CLAUDE
+    /// ACCOUNT that is on and launches — so `⌘N` can start on any
+    /// account. One switched off or gone since steps aside as a built-in
+    /// does, and an older build reading the id falls back to Claude.
+    pub fn quick_prompt_harness(&self) -> (AgentKind, Option<String>) {
+        let name = self.quick_prompt_kind.trim();
+        if AgentKind::parse(name).is_none()
+            && self.raw_harness_registry().iter().any(|entry| {
+                entry.id == name
+                    && entry.enabled
+                    && entry.problem().is_none()
+                    && entry.is_claude_account()
+            })
+        {
+            return (AgentKind::Custom, Some(name.to_string()));
+        }
+        (self.quick_prompt_kind(), None)
+    }
+
+    /// What the Agents tab's **Agent** row cycles through: every built-in
+    /// harness by the name the file stores, with the other CLAUDE
+    /// ACCOUNTS — by registry id — right after `claude`.
+    pub fn quick_prompt_choices(&self) -> Vec<String> {
+        let accounts: Vec<String> = self
+            .raw_harness_registry()
+            .into_iter()
+            .filter(|entry| entry.is_claude_account() && AgentKind::parse(&entry.id).is_none())
+            .map(|entry| entry.id)
+            .collect();
+        let mut out = Vec::new();
+        for name in agent_kind_names() {
+            let claude = name == AgentKind::Claude.as_str();
+            out.push(name);
+            if claude {
+                out.extend(accounts.iter().cloned());
+            }
+        }
+        out
+    }
+
     /// The harness the NEW SESSION PICKER (and the PR SESSION picker)
     /// starts on: the last launch's while REMEMBER HARNESS is on — read
-    /// through [`Config::quick_prompt_kind`], so one switched off since
+    /// through [`Config::quick_prompt_harness`], so one switched off since
     /// steps aside — and None, the first row, while it is off.
-    pub fn remembered_kind(&self) -> Option<AgentKind> {
-        self.remember_harness.then(|| self.quick_prompt_kind())
+    pub fn remembered_harness(&self) -> Option<(AgentKind, Option<String>)> {
+        self.remember_harness.then(|| self.quick_prompt_harness())
     }
 
     /// REMEMBER HARNESS (Settings → Experimental): make `kind` — and a
@@ -2343,10 +2680,10 @@ impl Config {
     /// TAB's own rows: `quick_prompt_kind`, and that harness's Model /
     /// Effort (the registry entry's, keyed by the kind name or the
     /// custom id). An explicit `"default"` pick lands as the row's own
-    /// `default`. The QUICK PROMPT names only built-in kinds, so a custom
-    /// entry is remembered by its Model / Effort rows alone. Returns
-    /// whether anything changed, so the caller saves only then; nothing
-    /// moves while the switch is off.
+    /// `default`. The QUICK PROMPT names built-in kinds and CLAUDE
+    /// ACCOUNTS, so any other custom entry is remembered by its Model /
+    /// Effort rows alone. Returns whether anything changed, so the caller
+    /// saves only then; nothing moves while the switch is off.
     pub fn remember_launch(
         &mut self,
         kind: AgentKind,
@@ -2363,11 +2700,12 @@ impl Config {
             (kind, _) => kind.as_str().to_string(),
         };
         let mut changed = false;
-        if kind != AgentKind::Custom && self.quick_prompt_kind != kind.as_str() {
-            self.quick_prompt_kind = kind.as_str().into();
+        let before = self.effective_harness_by_id(&id);
+        let quick = kind != AgentKind::Custom || before.is_claude_account();
+        if quick && self.quick_prompt_kind != id {
+            self.quick_prompt_kind = id.clone();
             changed = true;
         }
-        let before = self.effective_harness_by_id(&id);
         if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
             if before.model.default != model {
                 self.set_harness_model(&id, model.into());
@@ -2487,7 +2825,14 @@ impl Config {
             }
             SettingKind::RememberHarness => on_off(self.remember_harness).into(),
             SettingKind::HideUninstalledHarnesses => on_off(self.hide_uninstalled_harnesses).into(),
-            SettingKind::QuickPromptKind => self.quick_prompt_kind.clone(),
+            // Another CLAUDE ACCOUNT reads as the name it goes by.
+            SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
+                (AgentKind::Custom, Some(id)) => self
+                    .effective_harness_by_id(&id)
+                    .display_label()
+                    .to_string(),
+                _ => self.quick_prompt_kind.clone(),
+            },
             SettingKind::QuickPromptFocus => on_off(self.quick_prompt_focus).into(),
             SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
             SettingKind::QuickPromptNewWorktree => on_off(self.quick_prompt_new_worktree).into(),
@@ -2504,6 +2849,12 @@ impl Config {
         if tab == agents_tab() {
             if let Some(spec) = AGENTS_HEAD.get(index) {
                 self.cycle_kind(spec.kind, delta);
+            } else if let Some(row) = self.account_row(index) {
+                // An account row's ←/→ is its switch; its Enter signs it
+                // in (`event_loop`), and Add has nothing to cycle.
+                if let AccountRow::Account(id) = row {
+                    self.cycle_agent_row(&id, HarnessField::Enabled, delta);
+                }
             } else if let Some((id, field)) = self.agent_row(index) {
                 self.cycle_agent_row(&id, field, delta);
             }
@@ -2619,7 +2970,7 @@ impl Config {
             }
             SettingKind::QuickPromptKind => {
                 self.quick_prompt_kind =
-                    cycle_owned(&self.quick_prompt_kind, &agent_kind_names(), step);
+                    cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
             }
             SettingKind::QuickPromptFocus => {
                 self.quick_prompt_focus = !self.quick_prompt_focus;
@@ -2857,6 +3208,14 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Whether this test thread pinned the config to a file of its own —
+/// what a read of anything the config names (an account's sign-in) needs
+/// first, so no test reads the developer's.
+#[cfg(test)]
+pub fn config_pinned() -> bool {
+    CONFIG_PATH_OVERRIDE.with(|p| p.borrow().is_some())
+}
+
 #[cfg(test)]
 pub fn with_config_path<T>(path: PathBuf, f: impl FnOnce() -> T) -> T {
     CONFIG_PATH_OVERRIDE.with(|slot| {
@@ -3050,7 +3409,7 @@ mod tests {
         cfg.agent_rows()
             .iter()
             .position(|(row_id, row_field)| row_id == id && *row_field == field)
-            .map(|i| (tab, AGENTS_HEAD.len() + i))
+            .map(|i| (tab, cfg.agent_rows_from() + i))
     }
 
     /// The first compatibility rule in docs/configuration.md: a key, once
@@ -4436,7 +4795,7 @@ mod tests {
         assert!(!cfg.remember_harness, "a pick is one session's by default");
         assert_eq!(cfg.value_label(SettingKind::RememberHarness), "off");
         assert_eq!(
-            cfg.remembered_kind(),
+            cfg.remembered_harness(),
             None,
             "off: the picker starts on its first row"
         );
@@ -4451,7 +4810,7 @@ mod tests {
         cfg.cycle(tab, row, 0);
         assert!(cfg.remember_harness);
         assert_eq!(cfg.value_label(SettingKind::RememberHarness), "on");
-        assert_eq!(cfg.remembered_kind(), Some(AgentKind::Claude));
+        assert_eq!(cfg.remembered_harness(), Some((AgentKind::Claude, None)));
         cfg.cycle(tab, row, 1);
         assert!(!cfg.remember_harness, "either arrow toggles it back");
         cfg.cycle(tab, row, -1);
@@ -4584,7 +4943,7 @@ mod tests {
         // The harness alone: the rows it did not drill into stay put.
         assert!(cfg.remember_launch(AgentKind::Codex, None, None, None));
         assert_eq!(cfg.quick_prompt_kind(), AgentKind::Codex);
-        assert_eq!(cfg.remembered_kind(), Some(AgentKind::Codex));
+        assert_eq!(cfg.remembered_harness(), Some((AgentKind::Codex, None)));
         assert_eq!(cfg.codex_model, DEFAULT_CHOICE, "no model was picked");
         assert_eq!(cfg.codex_effort, DEFAULT_CHOICE);
         assert!(
@@ -4777,6 +5136,67 @@ mod tests {
         assert_eq!(saved["harnesses"]["grok"]["enabled"], false);
         assert_eq!(saved["harnesses"]["grok"]["model_default"], "model-id");
         assert_eq!(saved["harnesses"]["grok"]["effort_default"], "high");
+    }
+
+    /// A second Claude account's `env` survives the Agents tab saving its
+    /// section — the map is written back typed — and makes it a place a
+    /// Claude session can be carried to; a Codex row has nowhere to go.
+    #[test]
+    fn a_second_accounts_env_survives_a_save_and_makes_it_a_target() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"harnesses": {"claude-b": {"label": "Claude B", "program": "claude",
+                "hooks": "claude", "resume_flag": "--resume",
+                "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}}}}"#,
+        )
+        .unwrap();
+        cfg.set_harness_model("claude-b", "opus".into());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["harnesses"]["claude-b"]["env"]["CLAUDE_CONFIG_DIR"],
+            "~/.claude-b"
+        );
+        let loaded = load_from(&path);
+        let agent = |kind: AgentKind, custom: Option<&str>| orion_core::Agent {
+            id: orion_core::AgentId("a".into()),
+            worktree_id: orion_core::WorktreeId("w".into()),
+            name: "a".into(),
+            status: orion_core::AgentStatus::NeedsFeedback,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind,
+            custom_harness: custom.map(str::to_string),
+            model: None,
+            effort: None,
+            session_id: Some("sid".into()),
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: true,
+            issue_url: None,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        };
+        assert_eq!(
+            loaded.continue_targets(&agent(AgentKind::Claude, None)),
+            vec![("claude-b".to_string(), "Claude B".to_string())]
+        );
+        assert_eq!(
+            loaded.continue_targets(&agent(AgentKind::Custom, Some("claude-b"))),
+            vec![("claude".to_string(), "Claude".to_string())]
+        );
+        assert!(loaded
+            .continue_targets(&agent(AgentKind::Codex, None))
+            .is_empty());
+        let cloud = orion_core::Agent {
+            cloud_session_id: Some("session_01".into()),
+            ..agent(AgentKind::Claude, None)
+        };
+        assert!(loaded.continue_targets(&cloud).is_empty());
     }
 
     #[test]
@@ -5229,9 +5649,11 @@ mod tests {
                 match row {
                     SettingsRow::Header(title) => sections.push((title, Vec::new())),
                     SettingsRow::Setting(i) => {
-                        let label = match AGENTS_HEAD.get(i) {
-                            Some(spec) => spec.label.to_string(),
-                            None => cfg
+                        let label = match (AGENTS_HEAD.get(i), cfg.account_row(i)) {
+                            (Some(spec), _) => spec.label.to_string(),
+                            (None, Some(AccountRow::Account(id))) => id,
+                            (None, Some(AccountRow::Add)) => "Add account".to_string(),
+                            (None, None) => cfg
                                 .agent_row(i)
                                 .map(|(_, field)| field.label().to_string())
                                 .expect("every Agents row resolves"),
@@ -5243,7 +5665,9 @@ mod tests {
                             .push(label);
                     }
                     SettingsRow::Blank => assert!(!sections.is_empty(), "no leading blank"),
-                    SettingsRow::Project | SettingsRow::Hotkey(_) => unreachable!(),
+                    SettingsRow::Project | SettingsRow::Hotkey(_) | SettingsRow::Note(_) => {
+                        unreachable!()
+                    }
                 }
             }
             assert_eq!(
@@ -5258,6 +5682,10 @@ mod tests {
                             "New worktree".to_string(),
                             "Hide missing CLIs".to_string()
                         ]
+                    ),
+                    (
+                        "Claude accounts".to_string(),
+                        vec!["claude".to_string(), "Add account".to_string()]
                     ),
                     (
                         "Claude".to_string(),
@@ -5359,6 +5787,7 @@ mod tests {
                     sections,
                     vec![
                         "Quick prompt",
+                        "Claude accounts",
                         "Claude",
                         "Codex",
                         "Cursor",
@@ -5375,7 +5804,10 @@ mod tests {
                 let (_, effort_row) =
                     locate_agent("agy", HarnessField::Effort).expect("its effort row shows");
                 assert_eq!(cfg.agent_value("agy", HarnessField::Effort), "default");
-                assert_eq!(tab_len(tab), AGENTS_HEAD.len() + cfg.agent_rows().len());
+                assert_eq!(
+                    tab_len(tab),
+                    AGENTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
+                );
                 // ... and the picker offers it after the built-ins.
                 let offered = cfg.offered_harnesses();
                 assert_eq!(

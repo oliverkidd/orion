@@ -26,8 +26,8 @@ into `config.json`:
 
 Both halves of orion read the two files. The TUI owns most keys; the DAEMON owns
 `worktree_base_branch`, `session_idle_timeout`, `prewarm_agents` and `prewarm_sessions`, reads
-`custom_harnesses` and `harnesses` beside the TUI (spawn and resume go through them), and reads one
-key out of each `projects` entry, `run_command`. Each side
+`custom_harnesses`, `harnesses` and `claude_accounts` beside the TUI (spawn and resume go through
+them), and reads one key out of each `projects` entry, `run_command`. Each side
 deserializes only its own fields and ignores the rest, and both load
 them fresh on every use — so a hand edit applies without restarting either. No key is required: a
 missing file is all defaults, an unknown field is skipped, a value this build can't read costs only
@@ -43,11 +43,12 @@ convenience stores: missing or malformed reads as empty.
 
 ## Every setting
 
-Sixty-six keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key
+Seventy keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key
 exists only in the file, so it is hand-edit-only. Most rows toggle or cycle on `Enter` / `←` / `→`; a
 *typed* row (`worktree_base_branch`, the Project tab's **Run command**) opens a one-line prompt on
 `Enter` instead, pre-filled with the stored value, and an empty answer puts its default back. The Agents tab groups its rows under **Quick
-prompt**, **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build** and **OpenCode** headers, so a harness's rows read `Enabled` / `Model` /
+prompt**, **Claude accounts** (see [Claude accounts](#claude-accounts)), then one header per harness —
+**Claude (you@example.com)**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, **OpenCode** — so a harness's rows read `Enabled` / `Model` /
 `Effort` under its name rather than repeating it. The **Project** tab is the one tab whose rows are
 not orion's but one project's: the project the grid is scoped to, named with its path on
 the tab's first line, and each row there reads and writes that project's own entry under `projects`
@@ -63,6 +64,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `link_env_files` | bool | `true` | General | DAEMON-owned ENV LINKS (**Link .env files**): every new WORKTREE, one an agent moves into, and one made outside orion that the sync adopts gets the main checkout's git-ignored `.env*` files (`.env`, `.env.local`, `apps/web/.env.development`, …) as symlinks at the same paths, so each checkout runs against the clone's secrets and local settings. A tracked file (a committed `.env.example`) and anything under `node_modules` are left alone, and a path that already exists in the worktree is never replaced. Off links nothing new; links already made stay. |
 | `outside_terminal` | string | `"ghostty"` | General | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
 | `ghostty_keybinds` | bool | `true` | General | GHOSTTY KEYBINDS: keep a marked block in Ghostty's config that unbinds `⌘⇧P`, `⌘N` and `⌘,` from Ghostty so orion's command palette, new agent and settings reach it. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
+| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard has been seen. While it is false, orion opens the wizard over the grid at startup: which agents to turn on and their default models, the worktree defaults (**Link .env files**, **New agent in a new worktree**), Linear (assignee, **Link PRs to Linear**), and the outside terminal with its Ghostty keybinds. `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
 | `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal, so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
 | `ssh_sync_config` | bool | `true` | General | SETTINGS SYNC: `orion ssh` and `orion tunnel` send this machine's `config.json` and AGENT PRESETS along, and the remote orion merges them into its own settings before it starts — so a remote is set up the way this machine is on every connect, without reconfiguring it. Its `config.local.json` still wins there, and its projects, sessions and SSH HOSTS FILE stay its own. `--no-sync-config` leaves the settings behind for one connection. See [Backup, restore and other machines](#backup-restore-and-other-machines). |
 | `skip_session_naming` | bool | `false` | — (retired) | Through 0.30, **Skip starting prompt**: on, new AGENTS launched straight from the NEW SESSION PICKER instead of stopping at a task box first. Every launch now goes through the QUICK PROMPT (`⌘N`, or **New session** after its harness pick), whose `Enter` on an empty box starts the CLI bare, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
@@ -97,16 +99,16 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `show_key_combos` | bool | `false` | — (retired) | Through 0.37, **Key combo display** (Settings → Experimental): on, each key pressed on the grid was spelled at the bottom left of the screen with what it did. The KEY COMBO DISPLAY is always on now, whatever the key says — every press shows, `j - Move down`, and clears itself three seconds on ([Keys](keys.md#chips-and-readouts)) — so this build never reads it and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `remember_harness` | bool | `false` | Experimental | REMEMBER HARNESS: a launch walked through the NEW SESSION PICKER (**New session**), the PR SESSION picker or the QUICK PROMPT's `Tab` picker makes its harness the default the next launch starts on — the picker opens on that row and `⌘N` launches it — and a model or effort drilled into through the submenus becomes that harness's own Model / Effort default. It writes the Agents tab's own rows (`quick_prompt_kind`, `<kind>_model`, `<kind>_effort`), so the tab always shows what the next launch will be; a pick that already is the default writes nothing, and an AGENT PRESET launch changes nothing, its harness being the preset's. Off, a pick is one session's: the NEW SESSION PICKER keeps opening on the `quick_prompt_kind` harness and the PR SESSION picker on its first row. See [Sessions](sessions.md#the-new-session-picker). |
 | `pr_issue_counts` | bool | `true` | — (retired) | Through 0.37, **PR & issue counts** (Settings → Experimental): off, the GRID's header dropped the `3 prs · 2 issues` beside the session count and the other projects' issues were never swept. The header always counts now — what is waiting on a repo is read off it without opening `v` or `i`, a click on either count opens that list, a count is left out until its list has landed, and a list cut off at the fetch cap counts `100+` — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `pi`, `muse`, `grok` or `opencode`. Its model and effort come from that kind's own defaults below, so this is one name, not a third pair. A kind switched off here is stepped around. The NEW SESSION PICKER opens on it too, and with **Remember harness** on (Experimental) every picker-walked launch rewrites it. |
+| `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `pi`, `muse`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **Agent** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. The NEW SESSION PICKER opens on it too, and with **Remember harness** on (Experimental) every picker-walked launch rewrites it. |
 | `quick_prompt_focus` | bool | `false` | Agents | QUICK PROMPT FOCUS: whether a QUICK PROMPT launch enters and locks the new session's TERMINAL PANE. Off, the keys stay on the grid, and where the cursor goes is `follow_new_session`'s. On, it outranks that key: a launch that enters the new session's pane has to go there. Only the QUICK PROMPT reads it — every other launch takes the pane. |
 | `follow_new_session` | bool | `true` | Agents | FOLLOW NEW SESSION (**Follow new**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: entering its terminal is `quick_prompt_focus`'s. It covers every QUICK PROMPT: `⌘N`, **New session**'s box, **Duplicate session** on a card, and the boxes the ISSUES MODAL and the PULL REQUESTS MODAL open. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way; so does every launch while `quick_prompt_focus` is on. Terminals (`t`) always come up in the pane. |
 | `quick_prompt_new_worktree` | bool | `false` | Agents | QUICK PROMPT NEW WORKTREE: whether each new QUICK PROMPT starts aimed at a fresh worktree (a random branch off the **Worktree base branch**) instead of the checkout under the grid's cursor. `Ctrl+N` in the box flips only that box; the next one starts from this again. Off by default, so `⌘N` starts in the checkout under the cursor — the worktree whose band is selected, or the one the grid is inside — and on the project's root branch with nothing selected (`Esc` off the band). |
-| `claude_enabled` | bool | `true` | Agents | HARNESS TOGGLE. Off leaves Claude out of the NEW SESSION PICKER and the PR SESSION picker, and skips the standing PREWARM POOL slot; existing sessions keep attaching and resuming. The last kind left on cannot be switched off. |
-| `codex_enabled` | bool | `true` | Agents | HARNESS TOGGLE for Codex, same rules. |
-| `cursor_enabled` | bool | `true` | Agents | HARNESS TOGGLE for Cursor, same rules. |
-| `pi_enabled` | bool | `true` | Agents | HARNESS TOGGLE for Pi, same rules. |
-| `muse_enabled` | bool | `true` | Agents | HARNESS TOGGLE for Muse, same rules. Muse has no managed hooks yet, so its status stays process-based (running while the PTY is live, no waiting-on-you detection). |
-| `opencode_enabled` | bool | `true` | Agents | HARNESS TOGGLE for OpenCode, same rules. |
+| `claude_enabled` | bool | `false` | Agents | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW SESSION PICKER and the PR SESSION picker, and skips the standing PREWARM POOL slot; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until the ONBOARDING wizard or this tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
+| `codex_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Codex, same rules. |
+| `cursor_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Cursor, same rules. |
+| `pi_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Pi, same rules. |
+| `muse_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Muse, same rules. Muse has no managed hooks yet, so its status stays process-based (running while the PTY is live, no waiting-on-you detection). |
+| `opencode_enabled` | bool | `false` | Agents | HARNESS TOGGLE for OpenCode, same rules. |
 | `hide_uninstalled_harnesses` | bool | `false` | Agents | When on, the NEW SESSION PICKER lists only enabled harnesses whose CLI is found on PATH. Off by default: a login shell can see CLIs a plain PATH lookup misses, and the daemon re-checks through the login shell at launch anyway. |
 | `claude_model` | string | `"default"` | Agents | Default `--model` for new Claude sessions. The literal `"default"` is the sentinel meaning *don't pass the flag, let the CLI pick* — it is what you see in a fresh file, not a missing value. Overlay list: `fable`, `opus`, `sonnet`, `haiku` — unless `claude_models` below or Claude Code's own `availableModels` allowlist replaces it; any other string is passed through verbatim. |
 | `claude_models` | array of strings | `[]` | — (hand-edited) | The Claude model rows every picker offers (the NEW SESSION PICKER and QUICK PROMPT submenus, the AGENTS TAB, the PRESET EDITOR) in place of the built-in aliases, verbatim, `"default"` always first: `["claude-sonnet-5", "us.anthropic.claude-opus-5-v1:0"]`. For an organization that restricts models (Claude Code refuses `--model sonnet` with *Model "sonnet" is restricted by your organization's settings. Using claude-sonnet-5 instead.*) or a provider whose ids the aliases don't reach (Bedrock, Vertex, a gateway; on Bedrock `sonnet` even means Sonnet 4.5). Empty, the list follows Claude Code's `availableModels` when one is on disk — `~/.claude/remote-settings.json` (server-managed cache), the macOS MDM profile, `managed-settings.json` and `managed-settings.d/` in the system directory, then `~/.claude/settings.json`, read once at TUI start — else the aliases. A hand edit here applies without a restart. |
@@ -121,22 +123,33 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `muse_effort` | string | `"default"` | Agents | Reserved until the `muse` CLI documents a reasoning flag. Stored, never sent. |
 | `opencode_model` | string | `"default"` | Agents | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-sonnet-5`, …); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
 | `custom_harnesses` | array | `[]` | Agents | Extra CLIs the NEW SESSION PICKER offers after the built-ins, each with its own Agents tab section (Enabled and Model rows). Each entry is `{id, program}` plus options: `label` (picker text, defaults to the id), `enabled` (default `true`), `model` (default `"default"` = the CLI's pick, else passed verbatim), `model_flag` (default `"--model"`), and `hooks` (a built-in dialect the program speaks: `claude`, `codex`, `cursor`, `pi` or `opencode` — with one set the sessions report status, prompts and permission waits exactly like that harness, including title sync and auto-title for `claude`; without one they stay process-based, running while the PTY is live and never waiting-on-you). Ids use lowercase letters, digits and hyphens and must not collide with a built-in. Legacy: new harnesses belong in `harnesses`, where they also gain resume, effort, system-prompt and hook-dialect rows. Invalid entries never launch — the picker hides them and the daemon refuses them with the reason. |
-| `harnesses` | object | `{}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the **New session** picker, AGENT PRESETS, spawn, resume and hooks all read the merged rows. A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. |
+| `harnesses` | object | `{}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the **New session** picker, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
+| `claude_accounts` | array | `[]` | Agents | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as. `enabled: false` switches one off (written only while off). The Agents tab's **Claude accounts** section and first-run onboarding add, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `keybindings` | object | `{}` | Hotkeys | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "ctrl+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. Only rows that differ from the defaults are written. |
 | `prewarm_agents` | bool | `true` | Sessions | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`), and the memory modal (**Memory usage**) groups it under **warm spares**. Off drains the pool on the DAEMON's next sweep (within 30 s). |
 | `prewarm_sessions` | bool | `true` | Sessions | DAEMON-owned SESSION PREWARM: boot a WORKTREE's dead sessions when your selection rests on it, so attaching shows an already-booted screen instead of a booting shell. **Costs idle shell/CLI processes for sessions you may never open.** Off — for a machine with less memory to spare — landing on a worktree boots nothing: a session forks only when your cursor lands on its row or you attach to it, one at a time; sessions already up stay until the IDLE REAPER takes them. |
 
 ### Outside terminal and Ghostty keybinds
 
-Ghostty claims a few ⌘ chords for itself and never passes them to the program inside it. orion's
-defaults use three of them — `⌘⇧P` (command palette), `⌘N` (new agent) and `⌘,` (settings) — so with
-`ghostty_keybinds` on, orion keeps this block in Ghostty's config:
+Ghostty claims a lot of ⌘ chords for itself and never passes them to the program inside it. orion's
+defaults use several of them — `⌘⇧P` (command palette), `⌘N` (new agent), `⌘,` (settings), `⌘P`
+(go to file), `⌘O` (open), `⌘R`, `⌘F`, `⌘L` (Linear), and the new-agent box's `⌘/` (model), `⇧⌘/`
+(effort) and `⌘.` (worktree) — so with `ghostty_keybinds` on, orion keeps this block in Ghostty's
+config:
 
 ```
 # >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>
 keybind = super+shift+p=unbind
 keybind = super+n=unbind
 keybind = super+,=unbind
+keybind = super+p=unbind
+keybind = super+o=unbind
+keybind = super+r=unbind
+keybind = super+f=unbind
+keybind = super+l=unbind
+keybind = super+/=unbind
+keybind = super+shift+/=unbind
+keybind = super+.=unbind
 # <<< orion keybinds <<<
 ```
 
@@ -191,18 +204,120 @@ resume, hooks and the Agents tab section all follow, with no rebuild.
 }
 ```
 
-Nullable rows (`program`, `model_flag`, `permissions_flag`, `hooks`, …) clear with `null` —
+Nullable rows (`program`, `model_flag`, `permissions_flag`, `hooks`, `env`, …) clear with `null` —
 `"claude": {"hooks": null}` runs Claude with process-based status and no title sync. A row that
-stops making sense (an empty program, a resume flag plus a resume subcommand, an unknown dialect)
-refuses its launches with the reason while every other harness keeps working. The per-harness keys
+stops making sense (an empty program, a resume flag plus a resume subcommand, an unknown dialect,
+an `env` name a shell can't export) refuses its launches with the reason while every other harness
+keeps working. The per-harness keys
 the Agents tab edits (`claude_model`, `codex_enabled`, …) keep working as a fallback wherever the
 map stays silent. Omit the map entirely and you get every built-in, enabled, with its defaults —
 including ones a later orion adds. Like every other object key, a `harnesses` map in
 `config.local.json` replaces the whole map from `config.json` rather than merging per harness,
 so keep machine-specific overrides in one layer.
 
-Grok Build is enabled by default and launches `grok`. Its Enabled toggle is stored under
-`harnesses.grok.enabled`. Set `harnesses.grok.model_default` and `effort_default` in config.json
+`env` gives a harness's CLI environment variables of its own, on top of yours: a map of names to
+values, a leading `~/` expanded. They are set on the session's process and exported again after
+your login shell's profile has run, so an rc file that exports the same name cannot undo them. A
+map replaces the row's whole `env`; `null` clears it. A name a shell can't export, or one of
+orion's own `ORION_*` session variables, refuses the harness's launches with the reason.
+
+A second Claude account needs none of this: it is one `claude_accounts` entry
+([below](#claude-accounts)), which is built-in Claude's row with `CLAUDE_CONFIG_DIR` set for you. A
+hand-written entry whose `env` pins `CLAUDE_CONFIG_DIR` still works and counts as an account — it
+is named after its email (`Claude B (b@example.com)` when it has a label), listed and signed in from
+the Agents tab, and offered by **Continue on** — but every flag Claude's row carries is yours to
+copy, and to keep in step. A `program` that is a wrapper script exporting the variable itself still
+launches and resumes as it always has, but orion only knows a harness's config dir through `env`:
+such an entry is no account, gets none of a Claude session's transcript checks, and is never a
+**Continue on** target.
+
+### Claude accounts
+
+Claude Code keeps everything an account is — its login, its settings, every transcript — in one
+config dir: `CLAUDE_CONFIG_DIR`, `~/.claude` when unset. A second subscription is the same `claude`
+pointed at another dir, so that is all a CLAUDE ACCOUNT is here:
+
+```json
+{
+  "claude_accounts": [
+    { "id": "claude-2", "config_dir": "~/.claude-2" }
+  ]
+}
+```
+
+Built-in Claude is the DEFAULT ACCOUNT, in Claude Code's own default dir (orion's
+`$CLAUDE_CONFIG_DIR`, else `~/.claude`); each entry adds one more. An entry becomes a harness that
+*is* Claude's row — the program, model and effort flags, `--resume`, the system prompt, the hooks,
+the model list, whatever `harnesses.claude` changes — plus `CLAUDE_CONFIG_DIR`, so a later change to
+Claude's row reaches every account and nothing is copied by hand. It also takes Claude's model and
+effort defaults until its own Model / Effort rows on the Agents tab are changed, which write
+`harnesses.<id>`. The `id` is what its sessions point back at, so it stays put; lowercase letters,
+digits and hyphens, never a built-in's. `enabled: false` switches one off like any harness. The
+list is this machine's logins: an export carries it, but `orion ssh` and `orion tunnel` leave it
+behind, as they leave `harnesses`, so a remote keeps its own accounts. An entry an older orion reads
+is an unknown key it leaves alone: its sessions refuse to start there ("custom harness `claude-2` is
+no longer defined") and nothing is lost.
+
+**Named after who they are.** Everywhere an account is listed — the NEW SESSION PICKER, the QUICK
+PROMPT's `Tab` list, the Agents tab, onboarding, the preset editor, **Continue on** and the card a
+usage limit stops — it reads `Claude (you@example.com)`, `Claude (not signed in)` before its first
+login; an entry with a `label` of its own keeps it, `Claude B (b@example.com)`. Short of room — a
+card, a list row, the quick prompt's `harness` field, a preset's line — it is the email alone, and
+only while the machine has more than one account; with one, `claude` says it all. The email is
+Claude Code's own record, `oauthAccount.emailAddress` in `.claude.json`: inside the config dir for an
+account (as Claude Code keeps it whenever `CLAUDE_CONFIG_DIR` is set, `~/.claude` named that way
+included), in the home dir — `~/.claude.json` — for the default account. orion reads that one field
+and nothing else from the file, off the TUI's loop: a file's size and mtime are checked every few
+seconds and it is parsed again only when they move, and at once after a sign-in from orion.
+
+**The Agents tab** (`s`, then the Agents tab, or **Claude accounts** in the COMMAND PALETTE) lists
+every account under **Claude accounts**, the default first: its name, `on` or `off`, its dir, and
+`signed in`, `not signed in` or `same as ~/.claude`. On an account's row:
+
+| Key | Action |
+|---|---|
+| `Enter` | sign it in, or in again: asks for the email to sign in as — it fills Claude's login page; empty leaves the choice to the browser — then runs Claude Code's own `claude auth login [--email …]` with the account's `CLAUDE_CONFIG_DIR`, in the editor modal over the overlay. The browser finishes it; the row says who it is once the modal closes. `Ctrl+Q` closes it early |
+| `o` | sign it out, behind a confirm: `claude auth logout` in the same modal. Its dir keeps its settings and transcripts |
+| `←` / `→` | switch it on or off — the same switch as its section's **Enabled** row further down |
+| `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk, `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |
+
+**Add account** asks for a short name — `work` makes `claude-work` in `~/.claude-work`, nothing
+makes the next `claude-2`, `claude-3` … whose dir is not there yet; a name whose dir already exists
+adopts it, login and all — then, when the default account has any of it, asks whether to share its
+setup: `CLAUDE.md`, `settings.json`, `skills`, `agents`, `commands`, `plugins` and
+`keybindings.json` are linked from the default dir into the new one (`Enter` / `y`; `n` starts it
+empty). Only those, only the ones that exist, and never over anything the new dir already holds —
+never its login (`.claude.json`, the credentials), `projects`, history, sessions or caches, which are
+what make it another account. Being links, an edit in either account is an edit in both. Then
+`Enter` on its row signs it in. First-run onboarding has the same step right after Agents (while
+Claude is on there): the same rows, `Enter` on an account to sign it in, `Enter` on **Add account**
+for the same two questions, and the same warning.
+
+**One login, twice.** claude.ai's browser sign-in approves whichever account the browser is
+signed in to, so a second dir signed in from the same browser silently becomes the first account
+again — one subscription, one usage limit, and **Continue on** gaining nothing. The Agents tab,
+onboarding and **Continue on** flag it: `same as ~/.claude` on the row and a warning under the
+accounts (`⚠ ~/.claude and ~/.claude-2 are signed in as one account`), and `· same account` on a
+**Continue on** row. To fix it, `Enter` on one and sign it in again from a private browser window
+(or after signing out of claude.ai), or type the other account's email, which runs
+`claude auth login --email <other>`.
+
+**From a hand-written entry.** A second account set up as a `harnesses` entry — a wrapper script
+in `program` that exports `CLAUDE_CONFIG_DIR`, all of Claude's flags copied beside it — becomes one
+line. Keep its id, so its sessions follow it, and delete the entry:
+
+```json
+{
+  "claude_accounts": [{ "id": "claude-b", "config_dir": "~/.claude-b" }]
+}
+```
+
+with `"claude-b": {…}` gone from `harnesses` (the wrapper can go too). orion does not rewrite a
+hand-written entry for you: **Add account** refuses an id `harnesses` already defines and points
+here.
+
+Grok Build launches `grok` and starts off: a config with no `harnesses` map at all is seeded with
+`"grok": {"enabled": false}`, and its Enabled toggle is stored under `harnesses.grok.enabled`. Set `harnesses.grok.model_default` and `effort_default` in config.json
 to pass `--model` and `--reasoning-effort`; unset values use the CLI defaults. The picker offers
 only `default` unless you configure `models` and `efforts` lists in that same block.
 `--rules` carries additional system guidance and `--resume` accepts a stored session ID, but

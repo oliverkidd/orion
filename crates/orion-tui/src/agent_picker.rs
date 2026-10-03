@@ -158,17 +158,23 @@ pub(crate) fn kind_rows(
 }
 
 /// The label a picker row shows: the registry entry's label for a known
-/// id (falling back to the id when it carries none), the kind name
-/// otherwise — including a custom id the registry no longer names.
+/// id (falling back to the id when it carries none) — a CLAUDE ACCOUNT's
+/// `Claude (a@b.co)`, built-in Claude's included — and the kind name
+/// otherwise, including for a custom id the registry no longer names.
 pub(crate) fn harness_label(kind: AgentKind, custom: Option<&str>) -> String {
     let cfg = Config::load();
-    match (kind, custom) {
-        (AgentKind::Custom, Some(id))
-            if cfg.harness_registry().iter().any(|entry| entry.id == id) =>
-        {
-            cfg.effective_harness_by_id(id).display_label().to_string()
-        }
-        _ => kind_label(kind).to_string(),
+    let id = match (kind, custom) {
+        (AgentKind::Custom, Some(id)) => id,
+        (AgentKind::Custom, None) => return kind_label(kind).to_string(),
+        _ => kind.as_str(),
+    };
+    match cfg
+        .harness_registry()
+        .into_iter()
+        .find(|entry| entry.id == id)
+    {
+        Some(entry) => entry.display_label().to_string(),
+        None => kind_label(kind).to_string(),
     }
 }
 
@@ -187,8 +193,8 @@ pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
     } = picker;
     let hover = hover
         .or_else(|| {
-            cfg.remembered_kind()
-                .map(|kind| HarnessRow { kind, custom: None })
+            cfg.remembered_harness()
+                .map(|(kind, custom)| HarnessRow { kind, custom })
         })
         .and_then(|wanted| {
             rows.iter().position(|row| {
@@ -233,11 +239,23 @@ pub(crate) fn pr_session_menu_rows(worktree: WorktreeId, pr: &OpenPr) -> Vec<Men
     )
 }
 
-/// The same badge against a config already in hand.
+/// The same badge against a config already in hand. A CLAUDE ACCOUNT
+/// says what it says on every card — the email, with more than one
+/// account about ([`crate::claude_accounts::short_name`]), else its id —
+/// never its whole `Claude (a@b.co)` label, which a card has no room for.
 pub(crate) fn session_harness_badge_in(agent: &Agent, cfg: &Config) -> String {
+    if let Some(name) =
+        crate::claude_accounts::short_name(agent.kind, agent.custom_harness.as_deref())
+    {
+        return name;
+    }
     match (agent.kind, agent.custom_harness.as_deref()) {
         (AgentKind::Custom, Some(id)) => {
-            cfg.effective_harness_by_id(id).display_label().to_string()
+            let entry = cfg.effective_harness_by_id(id);
+            if entry.is_claude_account() {
+                return id.to_string();
+            }
+            entry.display_label().to_string()
         }
         _ => agent.kind.as_str().to_string(),
     }

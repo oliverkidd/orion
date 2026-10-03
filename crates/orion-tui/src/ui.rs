@@ -363,6 +363,11 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
 /// the force close where the editor has no Ctrl+Q of its own, ⌘O, and a
 /// MARKDOWN SPLIT's Ctrl+T.
 pub(crate) fn editor_modal_hint(vim: &crate::vim_term::VimTerm) -> String {
+    // A `claude auth` run closes itself when it is done; there is no file
+    // for Cursor.
+    if vim.account_auth {
+        return "the browser finishes it — Ctrl+Q: close".into();
+    }
     let mut hint = String::from(if vim.quits_itself {
         "Ctrl+S: save  Ctrl+Q: quit  Ctrl+D: next match"
     } else {
@@ -888,25 +893,40 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // answers: yes takes both, no takes the card alone, and
             // cancel keeps the card alive. The dialog is sized to the
             // legend too, so the three never wrap.
-            let three_way = matches!(
-                confirm.action,
-                crate::app::PendingAction::ThenDeleteWorktree { offered: true, .. }
-            );
-            let legend = if three_way {
-                Line::from(vec![
-                    Span::styled("[Enter/y] yes, both", Style::default().fg(th.err)),
-                    Span::raw("   "),
-                    Span::styled("[n] no, the card only", Style::default().fg(th.err)),
-                    Span::raw("   "),
-                    Span::styled("[Esc] cancel", Style::default().fg(th.dim)),
-                ])
+            // A CLAUDE ACCOUNTS add asks a question that loses nothing
+            // either way, so its frame and answers wear the accent, not
+            // the red; a removal's third answer sends the dir to the Trash.
+            let tone = if confirm.action.destructive() {
+                th.err
             } else {
-                Line::from(vec![
-                    Span::styled("[Enter/y] confirm", Style::default().fg(th.err)),
-                    Span::raw("   "),
-                    Span::styled("[Esc/n] cancel", Style::default().fg(th.dim)),
-                ])
+                th.accent
             };
+            let answers: &[(&str, Color)] = match confirm.action {
+                crate::app::PendingAction::ThenDeleteWorktree { offered: true, .. } => &[
+                    ("[Enter/y] yes, both", th.err),
+                    ("[n] no, the card only", th.err),
+                    ("[Esc] cancel", th.dim),
+                ],
+                crate::app::PendingAction::AddClaudeAccount(_) => &[
+                    ("[Enter/y] share it", th.accent),
+                    ("[n] start empty", th.accent),
+                    ("[Esc] cancel", th.dim),
+                ],
+                crate::app::PendingAction::RemoveClaudeAccount { .. } => &[
+                    ("[Enter/y] remove, keep the dir", th.err),
+                    ("[t] dir to the Trash too", th.err),
+                    ("[Esc/n] cancel", th.dim),
+                ],
+                _ => &[("[Enter/y] confirm", th.err), ("[Esc/n] cancel", th.dim)],
+            };
+            let mut legend = Vec::new();
+            for (i, (answer, fg)) in answers.iter().enumerate() {
+                if i > 0 {
+                    legend.push(Span::raw("   "));
+                }
+                legend.push(Span::styled(*answer, Style::default().fg(*fg)));
+            }
+            let legend = Line::from(legend);
             let longest = msg_lines
                 .iter()
                 .map(|l| l.chars().count())
@@ -920,10 +940,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(th.err))
+                .border_style(Style::default().fg(tone))
                 .title(Span::styled(
                     format!(" {} ", confirm.title),
-                    Style::default().fg(th.err),
+                    Style::default().fg(tone),
                 ));
             let inner = block.inner(area);
             f.render_widget(block, area);
@@ -1099,6 +1119,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Act(&[FindFile]), "go to file (⌘C / ^y: copy)"),
                         (Act(&[Grep]), "find in files (git grep)"),
                         (Act(&[TreeBrowser]), "file tree browser"),
+                        (Act(&[Skills]), "skills: read, edit, trash"),
                     ],
                 ),
                 (
@@ -1133,6 +1154,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Act(&[SelectLaunchWorktree]), "Select worktree"),
                         (Act(&[NewTerminal]), "terminal in the checkout"),
                         (Act(&[FollowUp]), "follow-up prompt to the agent"),
+                        (Act(&[ContinueOn]), "continue on another account"),
                         (Act(&[Rename]), "rename the session"),
                         (
                             Act(&[Archive, ToggleArchived]),
@@ -1318,6 +1340,12 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
                         )));
                     }
+                    crate::config::SettingsRow::Note(text) => {
+                        lines.push(Line::from(Span::styled(
+                            truncate(&format!("   {text}"), inner.width as usize),
+                            Style::default().fg(th.warn),
+                        )));
+                    }
                     crate::config::SettingsRow::Project => match &project {
                         Some((name, path)) => {
                             let name = format!(" {name}");
@@ -1341,13 +1369,23 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         // static spec, and a PROJECT TAB row reads the
                         // selected project's entry.
                         let (label, value, prefix) = if tab == crate::config::agents_tab() {
-                            match crate::config::AGENTS_HEAD.get(*i) {
-                                Some(spec) => (
-                                    spec.label.to_string(),
-                                    cfg.value_label(spec.kind),
-                                    "",
-                                ),
-                                None => {
+                            match (crate::config::AGENTS_HEAD.get(*i), cfg.account_row(*i)) {
+                                (Some(spec), _) => {
+                                    (spec.label.to_string(), cfg.value_label(spec.kind), "")
+                                }
+                                // A CLAUDE ACCOUNT goes by its email; a
+                                // long one is cut to the label column.
+                                (None, Some(row)) => {
+                                    let label = match &row {
+                                        crate::config::AccountRow::Account(id) => cfg
+                                            .effective_harness_by_id(id)
+                                            .display_label()
+                                            .to_string(),
+                                        crate::config::AccountRow::Add => "Add account".into(),
+                                    };
+                                    (truncate(&label, label_w - 1), cfg.account_value(&row), "")
+                                }
+                                (None, None) => {
                                     let (id, field) = cfg.agent_row(*i).expect(
                                         "settings_rows indexes the Agents tab's harness rows",
                                     );
@@ -1781,6 +1819,21 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::Diff(view) => {
             let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
             f.render_widget(Clear, area);
+            // Top: the COMMIT LIST, as tall as its rows up to a cap; the
+            // file list and the diff share what is left.
+            let strip_h = view
+                .commits
+                .as_ref()
+                .map_or(0, |list| commit_strip_height(list, area.height));
+            let [strip_a, panes_a] =
+                Layout::vertical([Constraint::Length(strip_h), Constraint::Min(0)]).areas(area);
+            let strip_list = match &view.commits {
+                Some(list) if strip_h > 0 => {
+                    draw_commit_strip(f, list, view.commits_focused, strip_a, th)
+                }
+                _ => Rect::default(),
+            };
+            let files_focused = !view.commits_focused;
             // Cap first, floor second: on a tiny screen the file list keeps
             // its minimum and SPLIT_PANE_LAYOUT_MIN squeezes the diff pane
             // instead.
@@ -1792,7 +1845,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 Constraint::Length(files_w),
                 Constraint::Min(SPLIT_PANE_LAYOUT_MIN),
             ])
-            .areas(area);
+            .areas(panes_a);
 
             // Left: changed-file list — flat paths, or the directory tree
             // (`Ctrl+t`); a stateless follow-window keeps the selected row
@@ -1808,14 +1861,16 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 files_title.push_str(&format!(" · {}✓", view.reviewed.len()));
             }
             // The hint names the list `Ctrl+t` leads to, not the one up.
-            let block = panel_block(&files_title, true, th).title_bottom(Line::from(Span::styled(
-                if view.tree.is_some() {
-                    " ^t: flat list "
-                } else {
-                    " ^t: tree "
-                },
-                Style::default().fg(th.dim),
-            )));
+            let block = panel_block(&files_title, files_focused, th).title_bottom(Line::from(
+                Span::styled(
+                    if view.tree.is_some() {
+                        " ^t: flat list "
+                    } else {
+                        " ^t: tree "
+                    },
+                    Style::default().fg(th.dim),
+                ),
+            ));
             let files_inner = block.inner(files_a);
             f.render_widget(block, files_a);
 
@@ -1828,6 +1883,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
 
             if view.listing.is_some() && view.files.is_empty() {
                 empty_list_row(f, list_inner, "reading changes…", th);
+            } else if view.files.is_empty() {
+                empty_list_row(f, list_inner, "no files changed", th);
             } else if view.row_count() == 0 {
                 empty_list_row(f, list_inner, NO_MATCHES, th);
             }
@@ -1875,7 +1932,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                                 ));
                             }
                         }
-                        render_row(f, row_area, spans, i == view.selected, true, th);
+                        render_row(f, row_area, spans, i == view.selected, files_focused, th);
                     }
                 }
                 // The TREE BROWSER's rows behind the flat list's gutter: a
@@ -1909,21 +1966,34 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             let positions = visible_positions(&r.positions, &shown, &node.name);
                             spans.extend(fuzzy_highlight_spans(&shown, positions, th));
                         }
-                        render_row(f, row_area, spans, i == tree.selected, true, th);
+                        render_row(f, row_area, spans, i == tree.selected, files_focused, th);
                     }
                 }
             }
 
             // Right: the selected file's diff, scrolled — or, on a tree
-            // directory's row, the list of what changed under it.
+            // directory's row, the list of what changed under it. The title
+            // names the COMMIT LIST row it is taken under.
             let sel_path = match view.selected_dir() {
                 Some(dir) => format!("{dir}/"),
                 None => view.selected_path().unwrap_or("").to_string(),
             };
             let sel_reviewed = view.reviewed.contains_key(&sel_path);
+            let under = match &view.scope {
+                crate::git_diff::DiffScope::Uncommitted => String::new(),
+                crate::git_diff::DiffScope::Branch { .. } => " · all changes".to_string(),
+                scope @ crate::git_diff::DiffScope::Commit { sha, .. } => {
+                    let short = view
+                        .commits
+                        .as_ref()
+                        .and_then(|list| list.commit_of(scope))
+                        .map_or_else(|| sha.chars().take(7).collect(), |c| c.short.clone());
+                    format!(" @ {short}")
+                }
+            };
             let title = truncate(
                 &format!(
-                    "{}: {}{}",
+                    "{}{under}: {}{}",
                     view.branch,
                     sel_path,
                     if sel_reviewed { " ✓" } else { "" }
@@ -1947,14 +2017,35 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 );
             }
             f.render_widget(block, diff_a);
+            // A commit's message heads the diff in colours of its own — a
+            // body line that starts with `-` is prose, not a removed line —
+            // with a rule under it, scrolled with the diff.
+            let height = diff_inner.height as usize;
+            let header_rows = view.header_rows();
+            let mut lines: Vec<Line> = (scroll as usize..header_rows.min(scroll as usize + height))
+                .map(|i| match view.header.get(i) {
+                    Some(text) => Line::from(Span::styled(
+                        text.clone(),
+                        match i {
+                            0 => Style::default().fg(th.dim),
+                            2 => Style::default().add_modifier(Modifier::BOLD),
+                            _ => Style::default(),
+                        },
+                    )),
+                    None => Line::from(Span::styled(
+                        "─".repeat(diff_inner.width as usize),
+                        Style::default().fg(th.dim),
+                    )),
+                })
+                .collect();
             // Only the rows in view are styled: a diff runs to 20 000
             // lines, and building a `Line` for each of them on every frame
             // was most of what scrolling a large one cost.
-            let lines: Vec<Line> = view
+            let body = view
                 .diff
                 .lines()
-                .skip(scroll as usize)
-                .take(diff_inner.height as usize)
+                .skip((scroll as usize).saturating_sub(header_rows))
+                .take(height - lines.len())
                 .map(|l| {
                     let style = match classify_diff_line(l) {
                         DiffLineKind::Add => Style::default().fg(th.ok),
@@ -1964,8 +2055,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         DiffLineKind::Context => Style::default(),
                     };
                     Line::from(Span::styled(l.to_string(), style))
-                })
-                .collect();
+                });
+            lines.extend(body);
             f.render_widget(Paragraph::new(lines), diff_inner);
 
             // Write-back (draw works on a clone): page size for key paging,
@@ -1976,6 +2067,14 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 v.list_area = list_inner;
                 v.area = area;
                 v.files_width = files_w;
+                if let Some(list) = &mut v.commits {
+                    list.area = if strip_h > 0 {
+                        strip_a
+                    } else {
+                        Rect::default()
+                    };
+                    list.list_area = strip_list;
+                }
             }
         }
         Overlay::Palette(palette) => {
@@ -2366,6 +2465,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::PullRequests(view) => crate::pr_modal::draw(f, app, &view, th, false),
         Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
+        Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
@@ -2775,6 +2875,20 @@ fn settings_keys_hint(view: &crate::app::SettingsView) -> &'static str {
     if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
         return "Enter: type a value (empty = default)  R: reset all  Esc: close";
     }
+    if view.tab == crate::config::agents_tab() {
+        let cfg = crate::config::Config::load();
+        match cfg.account_row(view.selected) {
+            Some(crate::config::AccountRow::Add) => return "Enter: add an account  Esc: close",
+            // Only an account orion added is orion's to remove.
+            Some(crate::config::AccountRow::Account(id)) if cfg.is_extra_account(&id) => {
+                return "Enter: sign in  o: sign out  ⌫: remove  ←/→: on/off  Esc: close";
+            }
+            Some(crate::config::AccountRow::Account(_)) => {
+                return "Enter: sign in  o: sign out  ←/→: on/off  Esc: close";
+            }
+            None => {}
+        }
+    }
     "Enter: toggle  ←/→: cycle  R: reset all  Esc: close"
 }
 
@@ -2942,6 +3056,195 @@ pub(crate) fn render_modal_frame<'a>(
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
+}
+
+/// The most rows the DIFF VIEWER's COMMIT LIST shows before it scrolls:
+/// **All changes**, **Uncommitted changes** and the four newest commits.
+const COMMIT_STRIP_ROWS: u16 = 6;
+
+/// The COMMIT LIST's height in a modal `modal_h` rows tall: its rows and
+/// borders, never more than a third of the modal — and none at all where a
+/// third is too little to show a row.
+fn commit_strip_height(list: &crate::commit_list::CommitList, modal_h: u16) -> u16 {
+    let rows = (list.row_count() as u16).clamp(1, COMMIT_STRIP_ROWS);
+    match (rows + 2).min(modal_h / 3) {
+        h if h < 3 => 0,
+        h => h,
+    }
+}
+
+/// The DIFF VIEWER's COMMIT LIST across the top of the modal: its title
+/// says what the branch is measured against, and each row what it is and
+/// how much it changed. The rows' rect, for the pointer.
+fn draw_commit_strip(
+    f: &mut Frame,
+    list: &crate::commit_list::CommitList,
+    focused: bool,
+    area: Rect,
+    th: Theme,
+) -> Rect {
+    let title = match (&list.base, list.merge_base.is_some()) {
+        _ if !list.loaded => "Commits".to_string(),
+        (Some(base), true) if list.commits.is_empty() => format!("Commits · none ahead of {base}"),
+        (Some(base), false) => format!("Commits · no history in common with {base}"),
+        (None, _) => "Commits · no base branch to compare with".to_string(),
+        (Some(base), true) if list.has_older() => {
+            format!(
+                "Commits ({}/{}) · since {base}",
+                list.commits.len(),
+                list.total
+            )
+        }
+        (Some(base), true) => format!("Commits ({}) · since {base}", list.total),
+    };
+    let hint = if focused {
+        " ⇧←/⇧→: older/newer · tab: files "
+    } else {
+        " ⇧←/⇧→: older/newer · tab: commits "
+    };
+    let block = panel_block(&title, focused, th)
+        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(th.dim))));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if !list.loaded {
+        empty_list_row(f, inner, "reading commits…", th);
+        return inner;
+    }
+    let now = crate::app::now_ms();
+    let start = list.window_start(inner.height as usize);
+    for (row, i) in (start..list.row_count()).enumerate() {
+        let (Some(row_area), Some(entry)) = (row_rect(inner, row), list.row(i)) else {
+            break;
+        };
+        // The selection marker takes the first column.
+        let width = (row_area.width as usize).saturating_sub(1);
+        let spans = commit_row_spans(list, entry, width, now, th);
+        render_row(f, row_area, spans, i == list.selected, focused, th);
+    }
+    inner
+}
+
+/// Columns a commit's subject keeps before the author, then the time, give
+/// theirs up to it.
+const MIN_SUBJECT_W: usize = 16;
+
+/// One COMMIT LIST row, `width` columns: what it is on the left — a
+/// commit's short sha and subject — and on the right who and when, then
+/// how much it changed. A narrow row gives up the author first, then the
+/// time, then the counts, before the subject shrinks.
+fn commit_row_spans(
+    list: &crate::commit_list::CommitList,
+    row: crate::commit_list::Row,
+    width: usize,
+    now: i64,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    use crate::commit_list::Row;
+    let dim = Style::default().fg(th.dim);
+    let (sha, label, meta, stat) = match row {
+        Row::Branch => (None, "All changes".to_string(), Vec::new(), list.branch),
+        Row::Uncommitted => (
+            None,
+            "Uncommitted changes".to_string(),
+            Vec::new(),
+            list.uncommitted,
+        ),
+        Row::Commit(i) => {
+            let commit = &list.commits[i];
+            let mut meta = vec![commit.author.clone(), commit.ago(now)];
+            meta.retain(|part| !part.is_empty());
+            (
+                Some(commit.short.clone()),
+                commit.subject.clone(),
+                meta,
+                commit.stat,
+            )
+        }
+        Row::Older => {
+            let text = match list.paging {
+                Some(_) => "reading older commits…".to_string(),
+                None => format!("… {} older commits", list.total - list.commits.len()),
+            };
+            return vec![Span::styled(truncate(&text, width), dim)];
+        }
+    };
+    let merge = matches!(row, Row::Commit(i) if list.commits[i].is_merge());
+    let mut counts: Vec<Span<'static>> = Vec::new();
+    if let Some(stat) = stat {
+        let noun = if stat.files == 1 { "file" } else { "files" };
+        counts.push(Span::styled(
+            format!("{} {noun}", stat.files),
+            Style::default().fg(th.muted),
+        ));
+        if let Some(lines) = stat.lines {
+            counts.push(Span::styled(
+                format!("  +{}", lines.added),
+                Style::default().fg(th.ok),
+            ));
+            counts.push(Span::styled(
+                format!(" -{}", lines.removed),
+                Style::default().fg(th.err),
+            ));
+        }
+    } else if merge {
+        counts.push(Span::styled("merge", dim));
+    }
+    let span_w = |spans: &[Span]| {
+        spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>()
+    };
+    let sha_w = sha.as_ref().map_or(0, |s| s.chars().count() + 1);
+    let left_min = sha_w + label.chars().count().min(MIN_SUBJECT_W);
+    // Who and when, then when alone, then nothing; then the counts go.
+    let mut meta_text = meta.join(" · ");
+    let fits = |meta: &str, counts: usize| {
+        let meta = meta.chars().count();
+        left_min
+            + [meta, counts]
+                .iter()
+                .filter(|w| **w > 0)
+                .map(|w| w + 2)
+                .sum::<usize>()
+            <= width
+    };
+    if !fits(&meta_text, span_w(&counts)) {
+        meta_text = meta.last().cloned().unwrap_or_default();
+    }
+    if !fits(&meta_text, span_w(&counts)) {
+        meta_text.clear();
+    }
+    if !fits(&meta_text, span_w(&counts)) {
+        counts.clear();
+    }
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if !meta_text.is_empty() {
+        right.push(Span::styled(meta_text, dim));
+    }
+    if !counts.is_empty() {
+        if !right.is_empty() {
+            right.push(Span::raw("  "));
+        }
+        right.extend(counts);
+    }
+    let right_w = span_w(&right);
+    let gap = if right_w > 0 { 2 } else { 0 };
+    let label = truncate(&label, width.saturating_sub(sha_w + right_w + gap));
+    let mut spans = Vec::new();
+    if let Some(sha) = sha {
+        spans.push(Span::styled(
+            format!("{sha} "),
+            Style::default().fg(th.accent),
+        ));
+    }
+    let used = sha_w + label.chars().count();
+    spans.push(Span::raw(label));
+    if right_w > 0 {
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w))));
+        spans.extend(right);
+    }
+    spans
 }
 
 /// A dim one-line placeholder on the first row of an otherwise empty list,
@@ -3975,10 +4278,22 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         )
     } else if let Some(Overlay::Diff(view)) = &app.overlay {
         Span::styled(
-            if view.tree.is_some() {
-                "type: filter  ↑/↓: move  ←/→: fold  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: flat list  Esc: close"
-            } else {
-                "type: filter  ↑/↓: file  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: tree  Esc: close"
+            match (view.commits.is_some(), view.commits_focused, view.tree.is_some()) {
+                (_, true, _) => {
+                    "↑/↓: commit  Enter/Tab: its files  ⇧↑/↓: scroll  type: filter files  Esc: close"
+                }
+                (true, false, true) => {
+                    "type: filter  ↑/↓: move  ←/→: fold  ⇧←/→: commit  Tab: commits  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: flat list  Esc: close"
+                }
+                (true, false, false) => {
+                    "type: filter  ↑/↓: file  ⇧←/→: commit  Tab: commits  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: tree  Esc: close"
+                }
+                (false, _, true) => {
+                    "type: filter  ↑/↓: move  ←/→: fold  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: flat list  Esc: close"
+                }
+                (false, _, false) => {
+                    "type: filter  ↑/↓: file  ⇧↑/↓: scroll  Ctrl+r: reviewed  Ctrl+t: tree  Esc: close"
+                }
             },
             Style::default().fg(th.dim),
         )
@@ -4060,6 +4375,11 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     } else if let Some(Overlay::Linear(view)) = &app.overlay {
         Span::styled(
             crate::linear::footer_hint(view),
+            Style::default().fg(th.dim),
+        )
+    } else if let Some(Overlay::Skills(view)) = &app.overlay {
+        Span::styled(
+            crate::skills::footer_hint(editor_name(&view.editor)),
             Style::default().fg(th.dim),
         )
     } else if let Some(Overlay::BranchSwitch(view)) = &app.overlay {
@@ -4168,6 +4488,14 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             k(Action::FocusRight),
         );
         let tabs = format!("{}{}", k(Action::PrevProjectTab), k(Action::NextProjectTab));
+        // A session under the cursor stopped on a usage limit: the way on
+        // is the first thing worth naming after opening it.
+        let carry_on = app
+            .selected_session()
+            .filter(|a| a.limit_reached().is_some())
+            .and_then(|a| {
+                crate::launcher::continue_does(&crate::config::Config::load().continue_targets(&a))
+            });
         let list = if app.show_archived {
             // The ARCHIVED VIEW is a different list with different
             // verbs on it: there is nothing to attach, prompt or
@@ -4182,9 +4510,11 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
                 Act(Action::Quit, "quit"),
             ]
         } else {
-            vec![
-                Lit(&move_keys, "move"),
-                Act(Action::Activate, "open"),
+            let mut list = vec![Lit(&move_keys, "move"), Act(Action::Activate, "open")];
+            if let Some(does) = &carry_on {
+                list.push(Act(Action::ContinueOn, does));
+            }
+            list.extend([
                 Act(Action::QuickPrompt, "new agent"),
                 Lit(&tabs, "project tabs"),
                 Act(Action::PaneTabs, "terminals"),
@@ -4195,7 +4525,8 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
                 Act(Action::CommandPalette, "commands"),
                 Act(Action::Settings, "settings"),
                 Act(Action::Quit, "quit"),
-            ]
+            ]);
+            list
         };
         Span::styled(
             crate::hints::line(&app.keymap, &list),

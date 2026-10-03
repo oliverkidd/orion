@@ -46,10 +46,12 @@ const CONFIG: &str = "config";
 const PRESETS: &str = "agent_presets";
 const HOSTS: &str = "ssh_hosts";
 
-/// `config.json` keys that name programs the daemon executes. They never
-/// leave the machine over `orion ssh`: a remote keeps its own harness
-/// table, so a forwarded config can never repoint what the remote runs.
-const EXEC_KEYS: [&str; 2] = ["harnesses", "custom_harnesses"];
+/// `config.json` keys that make the daemon's harness table: the programs it
+/// executes, and the Claude accounts — this machine's logins — it runs
+/// them as. They never leave the machine over `orion ssh`: a remote keeps
+/// its own harness table, so a forwarded config can never repoint what the
+/// remote runs.
+const EXEC_KEYS: [&str; 3] = ["harnesses", "custom_harnesses", "claude_accounts"];
 
 /// Each section, with the name its file has in a data dir.
 const SECTIONS: [(&str, &str); 3] = [
@@ -553,10 +555,11 @@ pub fn run(op: ConfigOp) -> Result<()> {
         }
         ConfigOp::Harnesses => {
             // The registry as launches read it: the compiled-in rows with
-            // the `harnesses` map, the legacy list and the legacy keys
-            // folded in. Copy a row into config.json `harnesses` to
+            // the `harnesses` map, the legacy list, the Claude accounts
+            // and the legacy keys folded in — labels as written, never an
+            // account's email. Copy a row into config.json `harnesses` to
             // override it field by field (`null` clears a nullable row).
-            let registry = crate::config::Config::load().harness_registry();
+            let registry = crate::config::Config::load().raw_harness_registry();
             let mut text = serde_json::to_string_pretty(&registry)?;
             text.push('\n');
             std::io::stdout()
@@ -678,6 +681,7 @@ mod tests {
                 "theme": "ocean",
                 "harnesses": {"grok": {"program": "/tmp/evil"}},
                 "custom_harnesses": [{"id": "x", "program": "/tmp/evil"}],
+                "claude_accounts": [{"id": "claude-2", "config_dir": "~/.claude-2"}],
             }),
         );
 
@@ -691,6 +695,8 @@ mod tests {
         assert!(warnings[0].contains("harnesses"), "{warnings:?}");
         assert!(remote["config"].get("harnesses").is_none());
         assert!(remote["config"].get("custom_harnesses").is_none());
+        assert!(remote["config"].get("claude_accounts").is_none());
+        assert!(backup["config"].get("claude_accounts").is_some());
         assert_eq!(remote["config"]["theme"], "ocean");
     }
 

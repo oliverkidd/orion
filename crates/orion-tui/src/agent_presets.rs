@@ -48,13 +48,11 @@ pub struct AgentPreset {
 
 impl AgentPreset {
     /// `claude · opus · high` / `codex · gpt-5.5` / `cursor` — the kind plus
-    /// whichever of model and effort the preset pins.
+    /// whichever of model and effort the preset pins; a CLAUDE ACCOUNT's
+    /// email in place of the kind on a machine with more than one.
     pub fn spec_label(&self) -> String {
-        let harness = self
-            .custom_harness
-            .as_deref()
-            .unwrap_or_else(|| self.kind.as_str());
-        let mut parts = vec![harness.to_string()];
+        let harness = crate::quick_prompt::harness_name(self.kind, self.custom_harness.as_deref());
+        let mut parts = vec![harness];
         parts.extend(self.model.iter().cloned());
         parts.extend(self.effort.iter().cloned());
         parts.join(" · ")

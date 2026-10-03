@@ -688,6 +688,8 @@ pub(super) fn handle_action(
         Action::OpenIssue => open_issue(app, out),
         // `⇧P` on a card: another session with its settings, nothing typed.
         Action::DuplicateSession => duplicate_session(app),
+        // `⇧C` on a card: the Claude session carried onto another account.
+        Action::ContinueOn => continue_on(app),
         // The fold is a preference the view keeps, and its key is the way
         // out of the pane first ([`fold_key`]).
         Action::ToggleLauncherPane => {
@@ -932,6 +934,129 @@ pub(super) fn duplicate_agent(app: &mut App, id: AgentId) {
     .with_issue(issue)
     .with_cloud(agent.cloud_session_id.is_some());
     crate::quick_prompt::reopen(app, launch, "");
+}
+
+/// What `⇧C` says with no card under the cursor to carry over.
+const NO_CARD_TO_CONTINUE: &str =
+    "no card selected — ↑/↓ onto a Claude session to continue it elsewhere";
+
+/// **Continue on Claude B**, one row per account `targets` names, for
+/// session `a`: what its right-click menu and `⇧C`'s list offer.
+pub(super) fn continue_items(
+    a: &orion_core::Agent,
+    targets: Vec<(String, String)>,
+) -> Vec<MenuItem> {
+    targets
+        .into_iter()
+        .map(|(harness, label)| {
+            MenuItem::new(
+                format!("Continue on {label}"),
+                MenuAction::ContinueOn {
+                    id: a.id.clone(),
+                    harness,
+                    label,
+                },
+            )
+        })
+        .collect()
+}
+
+/// `⇧C` on a card, and **Continue on another account** in the COMMAND
+/// PALETTE: the accounts the Claude session under the cursor can be
+/// carried onto, as a small menu over the grid — the choice is the
+/// confirmation, since going ends the CLI running there. A row with
+/// nowhere to go says why instead: a terminal, a Cloud or archived
+/// session, one off Claude's dialect, or no second account set up.
+///
+/// INPUT PARITY: a row of the list is the right-click menu's own
+/// `MenuAction::ContinueOn`, ending in the same [`continue_on_harness`].
+pub(super) fn continue_on(app: &mut App) {
+    let aimed = !(app.launcher_grid() && app.launcher_unaimed);
+    let Some(agent) = app.selected_session().filter(|_| aimed) else {
+        app.flash = Some(NO_CARD_TO_CONTINUE.into());
+        return;
+    };
+    let why_not = if agent.cloud_session_id.is_some() {
+        Some("a Claude Cloud session runs on the account that launched it")
+    } else if agent.archived {
+        Some("archived — unarchive it first")
+    } else {
+        None
+    };
+    if let Some(why) = why_not {
+        app.flash = Some(why.into());
+        return;
+    }
+    let cfg = crate::config::Config::load();
+    let from = cfg.effective_harness(agent.kind, agent.custom_harness.as_deref());
+    if agent.kind != orion_core::AgentKind::Claude && !from.claude_like() {
+        app.flash = Some(format!(
+            "only a Claude session moves to another account — this one runs {}",
+            from.display_label()
+        ));
+        return;
+    }
+    let targets = cfg.continue_targets(&agent);
+    if targets.is_empty() {
+        app.flash = Some(
+            "no other Claude account to continue on — add one in Settings → Agents → \
+             Claude accounts"
+                .into(),
+        );
+        return;
+    }
+    // Going to an account signed in as this one's email gains nothing:
+    // the menu marks it, and the footer says how to fix it.
+    if targets
+        .iter()
+        .any(|(_, label)| label.ends_with(crate::config::SAME_ACCOUNT))
+    {
+        app.flash = Some(
+            "⚠ an account marked \"same account\" is signed in as this session's email — \
+             one limit; sign it in as the other in Settings → Agents → Claude accounts"
+                .into(),
+        );
+    }
+    app.overlay = Some(Overlay::Menu(ContextMenu {
+        title: Some(format!("Continue {} on", agent.name)),
+        filter: None,
+        items: continue_items(&agent, targets),
+        at: None,
+        hover: 0,
+        area: ratatui::layout::Rect::default(),
+        parent: None,
+    }));
+}
+
+/// Carry session `id` onto harness `harness` (`label` to the user): the
+/// DAEMON stops it, copies its conversation into that account and
+/// resumes it there (`ClientRequest::ContinueAgentOn`). The footer says
+/// it is going, then where it went — or why it could not.
+pub(super) fn continue_on_harness(
+    app: &mut App,
+    id: AgentId,
+    harness: String,
+    label: String,
+    out: &mut Vec<ClientRequest>,
+) {
+    let name = app
+        .tree
+        .agents
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "the session".into());
+    app.flash = Some(format!("moving {name} to {label}…"));
+    super::send_with(
+        app,
+        out,
+        crate::app::PendingIntent::Note(format!("{name} continues on {label}")),
+        |req_id| ClientRequest::ContinueAgentOn {
+            req_id,
+            id,
+            harness,
+        },
+    );
 }
 
 /// The issue an ISSUE SESSION's card was started from, as the box carries
@@ -2525,6 +2650,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -2565,6 +2691,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -2617,6 +2744,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -6481,7 +6609,7 @@ mod tests {
             let terminal = draw(&mut app);
             assert_eq!(tab_cursor_drawn(&app, &terminal), "web");
             assert!(
-                buffer_text(&terminal).contains("switch project"),
+                buffer_text(&terminal).contains("x: close tab"),
                 "{}",
                 buffer_text(&terminal)
             );
@@ -6489,7 +6617,7 @@ mod tests {
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             let terminal = draw(&mut app);
             assert_eq!(tab_cursor_drawn(&app, &terminal), "");
-            assert!(!buffer_text(&terminal).contains("switch project"));
+            assert!(!buffer_text(&terminal).contains("x: close tab"));
         });
     }
 
@@ -7696,6 +7824,7 @@ mod tests {
                         alive: true,
                         issue_url: None,
                         recent_prompts: Vec::new(),
+                        usage_limit: None,
                     }),
                 },
             );
@@ -8774,6 +8903,156 @@ mod tests {
             assert!(sent.is_empty(), "{sent:?}");
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_TO_DUPLICATE));
+        });
+    }
+
+    /// A second Claude account, as config.json writes one: a Claude
+    /// harness with its own `CLAUDE_CONFIG_DIR`.
+    const SECOND_ACCOUNT: &str = r#"{"harnesses": {"claude-b": {"label": "Claude B",
+        "program": "claude", "hooks": "claude", "resume_flag": "--resume",
+        "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}}}}"#;
+
+    /// The rows of the menu that is up.
+    fn menu_labels(app: &App) -> Vec<String> {
+        match &app.overlay {
+            Some(Overlay::Menu(menu)) => menu.items.iter().map(|i| i.label.clone()).collect(),
+            other => panic!("expected a menu, got {other:?}"),
+        }
+    }
+
+    /// `⇧C` on a Claude card lists the accounts the session can be
+    /// carried onto, and Enter on one sends the move — nothing before.
+    /// INPUT PARITY: the card's right-click menu offers the same row
+    /// beside Restart, and sends the same request. The Ack names where
+    /// the session went.
+    #[test]
+    fn shift_c_carries_a_claude_session_onto_another_account() {
+        with_config_json(SECOND_ACCOUNT, || {
+            let mut by_key = two_sessions();
+            draw(&mut by_key);
+            let card = by_key.selected_session().expect("a card under the cursor");
+            assert!(key(&mut by_key, KeyCode::Char('C'), KeyModifiers::SHIFT).is_empty());
+            assert_eq!(menu_labels(&by_key), ["Continue on Claude B"]);
+            let sent = key(&mut by_key, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
+            let req = match sent.as_slice() {
+                [ClientRequest::ContinueAgentOn {
+                    req_id,
+                    id,
+                    harness,
+                }] => {
+                    assert_eq!(id, &card.id);
+                    assert_eq!(harness, "claude-b");
+                    *req_id
+                }
+                other => panic!("one ContinueAgentOn: {other:?}"),
+            };
+            hse(
+                &mut by_key,
+                ServerEvent::Ack {
+                    req_id: req,
+                    created: None,
+                },
+            );
+            assert_eq!(
+                by_key.flash.as_deref(),
+                Some(format!("{} continues on Claude B", card.name).as_str())
+            );
+
+            let mut by_menu = two_sessions();
+            draw(&mut by_menu);
+            right_click_card(&mut by_menu);
+            let rows = menu_labels(&by_menu);
+            let restart = rows.iter().position(|l| l == "Restart").expect("Restart");
+            assert_eq!(rows[restart + 1], "Continue on Claude B", "{rows:?}");
+            for _ in 0..=restart {
+                key(&mut by_menu, KeyCode::Down, KeyModifiers::NONE);
+            }
+            let by_menu_sent = key(&mut by_menu, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                matches!(
+                    by_menu_sent.as_slice(),
+                    [ClientRequest::ContinueAgentOn { id, harness, .. }]
+                        if id == &card.id && harness == "claude-b"
+                ),
+                "{by_menu_sent:?}"
+            );
+        });
+    }
+
+    /// With nowhere to go `⇧C` says why and sends nothing: no second
+    /// account set up, or a session that is not Claude's.
+    #[test]
+    fn shift_c_with_nowhere_to_go_says_why() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            assert!(key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).is_empty());
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(
+                app.flash
+                    .as_deref()
+                    .is_some_and(|f| f.contains("Settings → Agents → Claude accounts")),
+                "{:?}",
+                app.flash
+            );
+        });
+        with_config_json(SECOND_ACCOUNT, || {
+            let mut app = two_sessions();
+            draw(&mut app);
+            let mut agent = app.selected_session().expect("a card under the cursor");
+            agent.kind = AgentKind::Codex;
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Agent(agent),
+                },
+            );
+            assert!(key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).is_empty());
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("only a Claude session moves to another account — this one runs Codex")
+            );
+            right_click_card(&mut app);
+            assert!(
+                !menu_labels(&app)
+                    .iter()
+                    .any(|l| l.starts_with("Continue on")),
+                "a Codex card has no Claude account to go to"
+            );
+        });
+    }
+
+    /// The red edge of a session stopped on a usage limit rings like any
+    /// other, and its desktop notification says what it is waiting on.
+    #[test]
+    fn a_usage_limit_alerts_as_the_limit() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            let mut agent = app.tree.agents[0].clone();
+            agent.usage_limit = Some(orion_core::UsageLimit {
+                reason: orion_core::LimitReason::RateLimit,
+                message: None,
+            });
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Agent(agent.clone()),
+                },
+            );
+            assert!(app.pending_feedback.is_empty(), "not red yet: no alert");
+            hse(
+                &mut app,
+                ServerEvent::StatusChanged {
+                    agent: agent.id.clone(),
+                    status: AgentStatus::NeedsFeedback,
+                    changed_at: crate::app::now_ms(),
+                    unseen: false,
+                },
+            );
+            assert_eq!(app.pending_feedback.len(), 1);
+            assert_eq!(app.pending_feedback[0].limit, Some("limit reached"));
         });
     }
 

@@ -53,7 +53,8 @@
   drops any `NO_COLOR` / `FORCE_COLOR` it inherited. An agent launch runs through your login shell
   (`$SHELL -l -i -c 'unset …; export …; claude …'`) so it sees your real PATH — and your aliases and
   functions: a `claude` that `.zshrc` reroutes through a wrapper launches exactly as it does when typed
-  — and restates all three after your profile has run. Claude Code takes a stray `NO_COLOR` —
+  — and restates all three after your profile has run, along with the harness's own `env` (a second
+  Claude account's `CLAUDE_CONFIG_DIR`), so a profile can't undo it. Claude Code takes a stray `NO_COLOR` —
   exported by the agent shell the daemon was first started from, or by a login-only profile no
   interactive terminal sources — as "no colour" and paints its whole UI in the default foreground while
   the TUI around it stays coloured; the TUI still honours its own `NO_COLOR` on the way out, so a user
@@ -85,6 +86,20 @@
   is a standing `--base` for every worktree nobody names one for — `master` for a repo whose
   default branch is not what origin says, or that has no origin — resolved the same way, and
   falling back to `origin/HEAD` in a repo that has no branch of that name.
+- **A branch reads one commit at a time — the COMMIT LIST.** The DIFF VIEWER (`⌘E`) lists the
+  checkout's own commits, newest first: `git log <merge-base>..HEAD`, measured against the base
+  worktrees are cut from — the `worktree_base_branch` SETTING's branch (origin's copy first), else
+  `origin/HEAD`, else the branch the ROOT WORKTREE is on — as the checkout last fetched it, since
+  the list never fetches. HEAD is all it needs, so a detached checkout lists the same way. Above
+  the commits sit **All changes** — the merge-base against the working tree, untracked files
+  included — and, while the checkout is dirty, **Uncommitted changes**, the view `⌘E` always
+  opened on and still does while there is any. Picking a row re-lists the files for it, and every
+  diff walked is taken against that row; a commit's against its first parent, its message heading
+  each diff. The list is read in the same background job as the viewer's `git status`, and a
+  branch past 50 commits is read 50 at a time, the next page when the cursor reaches `… N older
+  commits` — `git log` diffs each commit it lists to count its lines, so three hundred commits
+  are never diffed to show six. A pull request's diff has no commit list: `gh pr diff` hands it
+  over whole, and a commit at a time would be a `gh` call per commit.
 - **Worktrees made outside orion show up anyway — WORKTREE SYNC.** Every 2 s the DAEMON mtime-probes
   the git files a worktree operation touches — the repo's shared `.git/HEAD`, the `.git/worktrees`
   directory, and each linked checkout's own `HEAD` — and only when the newest of those stamps has moved
@@ -133,7 +148,8 @@
   dying) / `opencode --session <session-id>` / `grok --resume <session-id>` (orion does not capture
   Grok's id yet, so there is rarely one to resume); `muse` always boots fresh (no resume flag mapped yet). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
   resume reads on the first prompt — so a CLI booted and never used resumes as nothing. Claude
-  ids are checked against the transcripts on disk before the spawn, and one with none boots fresh;
+  ids are checked against the transcripts on disk before the spawn — in the config dir a harness's
+  `env` pins, for a second Claude account — and one with none boots fresh;
   any resume that exits with an error within 10 s of its spawn is respawned fresh, unless its Claude
   transcript is still there (then the id is kept, and the pane shows why the CLI quit). A Claude
   session sent to Claude's own background (`/background`) is the exception to resuming: its worker
@@ -167,6 +183,15 @@
   box came back, but the session is anything but done. So orion treats an IDLE PROMPT as a hold —
   exactly the hold a gated `Stop` gets — whenever any subagent is still tracked, and only a set that
   has gone quiet is ever presumed orphaned and finished on the strength of it.
+- **…and the USAGE LIMIT, which is a stop that waits on you.** A Claude turn that ends on an API
+  error fires `StopFailure` instead of `Stop`. When the error is the account's — a usage limit, a
+  billing stop, a held account — the row goes red with the limit recorded on it as the reason,
+  ahead of the status edge, so the FEEDBACK SOUND's desktop notification can name it; any other
+  error ends the turn like a `Stop`. The stopped turn's own progress clear and the idle
+  notification a minute later leave the row red; the next prompt or foreground tool call — Claude
+  Code's own continuation at the reset among them — takes it out of red, and the limit with it.
+  **Continue on** carries the session to another Claude account: its transcript is copied into
+  that harness's config dir and resumed there. See [Sessions](sessions.md#usage-limits-and-a-second-account).
 - **The STOP GATE's four graces, on a 30 s tick.** A `Stop` (or an IDLE PROMPT) is held while
   `SubagentStart`s outnumber `SubagentStop`s, and a recheck every 30 s — fixed in the DAEMON, with no
   knob to turn it down — decides what becomes of the hold. Once the set drains and stays empty for
@@ -191,12 +216,13 @@
   dialog. Inside 5 s of the row leaving red that notification is taken as the echo it is and
   ignored; a genuinely new dialog announces itself through `PermissionRequest` or `PreToolUse`
   first, never through that notification alone.
-- **Which of those signals you get depends on the harness.** Claude is installed with all nine hook
+- **Which of those signals you get depends on the harness.** Claude is installed with all ten hook
   groups — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`, `Notification`, a
   `PreToolUse` on `AskUserQuestion`, an unmatched `PostToolUse` (the question's answer, a permission
   prompt's approval, and the cwd probe that re-homes a session that moves seconds later instead of
-  at the turn's `Stop`), plus `SubagentStart` and `SubagentStop`. Codex gets six of them: no
-  `Notification` and neither `*ToolUse` group, because it has no `AskUserQuestion` tool and its native
+  at the turn's `Stop`), `SubagentStart` and `SubagentStop`, plus `StopFailure` (the USAGE LIMIT).
+  Codex gets six of them: no `Notification`, no `StopFailure` and neither `*ToolUse` group, because
+  it has no `AskUserQuestion` tool and its native
   `PermissionRequest` already covers waiting on you — which also means a Codex row approved out of a
   permission prompt stays red until the turn ends. Cursor gets five camelCase events —
   `sessionStart`, `beforeSubmitPrompt`, `stop`, `subagentStart`, `subagentStop` — and no permission

@@ -137,10 +137,18 @@ pub enum Action {
     /// the box on the Agents tab defaults; the shifted key opens it on
     /// the card.
     DuplicateSession,
+    /// `Shift+C`: **Continue on** another Claude account — the Claude
+    /// session under the cursor, conversation and all, carried onto
+    /// another Claude-dialect harness and resumed there. Opens the list of
+    /// the accounts it can go to.
+    ContinueOn,
     // files
     FindFile,
     Grep,
     TreeBrowser,
+    /// `⌘S`: the SKILLS BROWSER — every agent skill on the machine, read,
+    /// edited and moved to the Trash.
+    Skills,
     // terminal
     UnlockTerminal,
     // general
@@ -160,6 +168,9 @@ pub enum Action {
     SelectProjectTab(u8),
     Hosts,
     Settings,
+    /// The settings overlay on the Agents tab's CLAUDE ACCOUNTS: who each
+    /// Claude Code login is, signing one in or out, adding another.
+    ClaudeAccounts,
     Metrics,
     Help,
     /// `⌘/`: pick the model for a new agent — searchable, like Cursor.
@@ -598,6 +609,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         defaults: &[],
     },
+    ActionSpec {
+        action: Action::ContinueOn,
+        id: "continue_on",
+        label: "Continue on another account",
+        hint: "Carry the Claude session under the cursor onto another Claude account (Settings → Agents → Claude accounts), conversation and all, and resume it there; for a session stopped at a usage limit",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["shift+c"],
+    },
     // ---- FILES ----
     ActionSpec {
         action: Action::FindFile,
@@ -627,6 +647,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "FILES",
         scope: Scope::Global,
         defaults: &["cmd+b", "ctrl+b"],
+    },
+    ActionSpec {
+        action: Action::Skills,
+        id: "skills",
+        label: "Skills",
+        hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^d moves it to the Trash",
+        group: "FILES",
+        scope: Scope::Global,
+        defaults: &["cmd+s", "ctrl+s"],
     },
     // ---- TERMINAL ----
     ActionSpec {
@@ -687,6 +716,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["s", "cmd+,"],
+    },
+    ActionSpec {
+        action: Action::ClaudeAccounts,
+        id: "claude_accounts",
+        label: "Claude accounts",
+        hint: "Settings → Agents → Claude accounts: who each Claude Code login is signed in as, sign one in or out, add another",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Metrics,

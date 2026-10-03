@@ -52,6 +52,17 @@ pub struct DiffListing {
     /// The reviewed ✓ marks that still apply — each stored mark checked
     /// against the file's diff as it is now.
     pub reviewed: HashMap<String, u64>,
+    /// The COMMIT LIST, read with the listing a `g` opens on
+    /// (`git_diff::read_opening`); None for every later listing.
+    pub commits: Option<crate::commit_list::CommitListing>,
+}
+
+impl DiffListing {
+    /// Nothing for the DIFF VIEWER to show: no uncommitted change, and no
+    /// commit on the branch since its base.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.commits.as_ref().is_none_or(|c| c.commits.is_empty())
+    }
 }
 
 #[derive(Debug)]
@@ -69,6 +80,19 @@ pub enum Answer {
         ticket: u64,
         result: Result<DiffListing, String>,
     },
+    /// The files behind a COMMIT LIST row (`commit_list::request_scope`):
+    /// one commit's, the whole branch's, or the uncommitted changes' read
+    /// as `g` reads them, marks and all.
+    ScopeFiles {
+        ticket: u64,
+        scope: crate::git_diff::DiffScope,
+        result: Result<DiffListing, String>,
+    },
+    /// The COMMIT LIST's next page of older commits.
+    CommitPage {
+        ticket: u64,
+        result: Result<Vec<crate::commit_list::Commit>, String>,
+    },
     /// One file's diff text. `prefetch` is the row after the cursor, read
     /// ahead: it goes into the view's cache and is not shown.
     DiffText {
@@ -82,6 +106,11 @@ pub enum Answer {
     Preview {
         ticket: u64,
         preview: Box<crate::tree_browser::Preview>,
+    },
+    /// The SKILLS BROWSER's folders, read.
+    Skills {
+        ticket: u64,
+        skills: Vec<crate::skills::Skill>,
     },
     /// [`STALE_GRACE`] is up on `ticket`.
     Slow { ticket: u64 },

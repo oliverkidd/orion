@@ -4,9 +4,10 @@
 //! the user's config adds a `harnesses` map of [`HarnessOverride`]s over
 //! it — disable one, repoint a program, rename a flag, or define a whole
 //! new CLI — and [`registry`] merges the two (plus the legacy
-//! [`CustomHarness`] list) into the effective [`HarnessDescriptor`]s every
-//! surface reads: the `n` picker, the `e` presets, spawn and resume, hooks,
-//! and the Agents tab. Adding a CLI is a config edit; the verification is
+//! [`CustomHarness`] list and the `claude_accounts` list, each account a
+//! copy of Claude's row in its own config dir) into the effective
+//! [`HarnessDescriptor`]s every surface reads: the `n` picker, the `e`
+//! presets, spawn and resume, hooks, and the Agents tab. Adding a CLI is a config edit; the verification is
 //! that every behavior below is data, with the four genuinely bespoke arg
 //! shapings (Cursor's composed model id, Codex's `-c` config pair and its
 //! positional resume, OpenCode's `--prompt` flag, Cloud's `--cloud=`)
@@ -18,9 +19,11 @@
 //! branches on it directly anymore; it resolves to a descriptor first.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::claude_account::ClaudeAccount;
 use crate::AgentKind;
 
 /// A model id the pickers offer, verbatim, before the `default` sentinel
@@ -159,6 +162,13 @@ pub struct HarnessDescriptor {
     pub label: String,
     /// The CLI orion launches, resolved on PATH through the login shell.
     pub program: String,
+    /// Environment the CLI is launched with, on top of the user's own —
+    /// `CLAUDE_CONFIG_DIR` pointing a second Claude account at its own
+    /// config dir, say. Restated after the login shell's profile has run,
+    /// so a profile exporting the same name cannot undo it; a leading
+    /// `~/` is expanded ([`HarnessDescriptor::launch_env`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Whether the picker and presets offer this harness.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -292,6 +302,89 @@ impl HarnessDescriptor {
         self.hook_dialect() == Some(AgentKind::Claude)
     }
 
+    /// The `env` rows as the spawn sets them, a leading `~/` expanded
+    /// against `$HOME`: the value reaches the CLI single-quoted, where no
+    /// shell would expand it.
+    pub fn launch_env(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .map(|(name, value)| (name.clone(), expand_home(value)))
+            .collect()
+    }
+
+    /// The Claude config dir `env` pins this harness's CLI to — its
+    /// `CLAUDE_CONFIG_DIR`, expanded. The one config dir orion can be sure
+    /// of: the spawn restates it after the user's profile. A `program`
+    /// wrapper that exports the variable itself is invisible here.
+    pub fn pinned_claude_config_dir(&self) -> Option<PathBuf> {
+        let dir = self.env.get(crate::env::CLAUDE_CONFIG_DIR)?.trim();
+        (!dir.is_empty()).then(|| PathBuf::from(expand_home(dir)))
+    }
+
+    /// Where a Claude-dialect harness's sessions keep their transcripts:
+    /// the dir `env` pins, else the one this process would use itself
+    /// ([`crate::paths::claude_config_dir`]). None off the Claude dialect.
+    pub fn claude_config_dir(&self) -> Option<PathBuf> {
+        if !self.claude_like() {
+            return None;
+        }
+        self.pinned_claude_config_dir()
+            .or_else(crate::paths::claude_config_dir)
+    }
+
+    /// Whether this harness is a CLAUDE ACCOUNT orion can see into: it
+    /// speaks Claude's dialect and its config dir is known — built-in
+    /// Claude's own, or one `env` pins (a `claude_accounts` entry, or a
+    /// hand-written `harnesses` entry). A `program` wrapper that exports
+    /// `CLAUDE_CONFIG_DIR` itself still launches, but is not one: nothing
+    /// says which dir, or which login, it runs under.
+    pub fn is_claude_account(&self) -> bool {
+        self.claude_like()
+            && (AgentKind::parse(&self.id) == Some(AgentKind::Claude)
+                || self.pinned_claude_config_dir().is_some())
+    }
+
+    /// Where Claude Code records who this account is signed in as
+    /// ([`crate::claude_account::Record`]): its pinned dir's, or — for
+    /// built-in Claude launched without one — this process's. None for a
+    /// harness that is no Claude account.
+    pub fn account_record(&self) -> Option<crate::claude_account::Record> {
+        if !self.is_claude_account() {
+            return None;
+        }
+        crate::claude_account::Record::of(self.pinned_claude_config_dir().as_deref())
+    }
+
+    /// Whether a Claude session can be continued on this harness — **Continue
+    /// on**: it is a Claude account orion can see into
+    /// ([`Self::is_claude_account`]), resumes a stored session id, and
+    /// launches. A wrapper script that sets `CLAUDE_CONFIG_DIR` itself keeps
+    /// launching, but nothing could be copied to where it would look.
+    pub fn takes_claude_sessions(&self) -> bool {
+        self.is_claude_account() && self.resumes() && self.problem().is_none()
+    }
+
+    /// Whether a session moved onto this harness keeps `model`: one it
+    /// lists, any id at all when a runtime catalogue (Claude's own model
+    /// list) or no list stands behind its model flag.
+    pub fn offers_model(&self, model: &str) -> bool {
+        self.model.flag.is_some()
+            && (self.model.catalog.is_some()
+                || self.model.models.is_empty()
+                || self.model.models.iter().any(|entry| entry.id == model))
+    }
+
+    /// [`Self::offers_model`] for the reasoning effort: a harness that
+    /// takes one at all, and lists this one or lists none.
+    pub fn offers_effort(&self, effort: &str) -> bool {
+        let takes = self.effort.flag.is_some()
+            || self.effort.config_key.is_some()
+            || self.compose_model_effort;
+        self.effort.offered
+            && takes
+            && (self.effort.efforts.is_empty() || self.effort.efforts.iter().any(|e| e == effort))
+    }
+
     /// Why this descriptor is unusable, or None when it launches. The
     /// picker hides broken entries; create paths refuse them with this.
     pub fn problem(&self) -> Option<String> {
@@ -348,8 +441,45 @@ impl HarnessDescriptor {
                 }
             }
         }
+        for name in self.env.keys() {
+            if !is_env_name(name) {
+                return Some(format!(
+                    "harness `{}` env `{name}`: name a variable with letters, digits and underscores, not starting with a digit",
+                    self.id.trim()
+                ));
+            }
+            if crate::env::AGENT_SESSION_VARS.contains(&name.as_str()) {
+                return Some(format!(
+                    "harness `{}` env `{name}`: orion sets that one on every session itself",
+                    self.id.trim()
+                ));
+            }
+        }
         None
     }
+}
+
+/// `value` with a leading `~/` (or a bare `~`) expanded against `$HOME`;
+/// anything else, and every value with no home to expand against, as is.
+pub(crate) fn expand_home(value: &str) -> String {
+    let rest = match value.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+        _ => return value.to_string(),
+    };
+    match crate::env::home_dir() {
+        Some(home) => format!("{}{rest}", home.display()),
+        None => value.to_string(),
+    }
+}
+
+/// A name a POSIX shell can `export`: letters, digits and underscores,
+/// not starting with a digit.
+fn is_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn models(ids: &[&str]) -> Vec<ModelEntry> {
@@ -370,6 +500,7 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
         id: id.trim().to_string(),
         label: String::new(),
         program: String::new(),
+        env: BTreeMap::new(),
         enabled: true,
         model: ModelSpec::default(),
         effort: EffortSpec::default(),
@@ -644,6 +775,10 @@ pub struct HarnessOverride {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Clearable::is_keep")]
     pub program: Clearable<String>,
+    /// The CLI's own environment, whole: a map replaces the row's, `null`
+    /// clears it.
+    #[serde(default, skip_serializing_if = "Clearable::is_keep")]
+    pub env: Clearable<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Clearable::is_keep")]
     pub model_flag: Clearable<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -701,6 +836,11 @@ impl HarnessDescriptor {
             Clearable::Keep => {}
             Clearable::Clear => self.program.clear(),
             Clearable::Set(program) => self.program = program,
+        }
+        match &over.env {
+            Clearable::Keep => {}
+            Clearable::Clear => self.env.clear(),
+            Clearable::Set(env) => self.env = env.clone(),
         }
         over.model_flag.apply_to(&mut self.model.flag);
         if let Some(default) = over.model_default.as_deref() {
@@ -809,6 +949,7 @@ impl CustomHarness {
             id: self.id.clone(),
             label: self.label.clone(),
             program: self.program.clone(),
+            env: BTreeMap::new(),
             enabled: self.enabled,
             model: ModelSpec {
                 flag: Some(self.model_flag.clone()),
@@ -860,13 +1001,21 @@ impl CustomHarness {
 }
 
 /// The effective registry both halves of orion read: the built-ins in
-/// [`AgentKind::ALL`] order with the `harnesses` map applied, then the
-/// legacy list in order (each with its map deltas), then map-only new ids
-/// in key order. Callers hide entries that are disabled or [`problem`][HarnessDescriptor::problem]-broken;
+/// [`AgentKind::ALL`] order with the `harnesses` map applied — Claude's
+/// extra accounts right after it — then the legacy list in order (each with
+/// its map deltas), then map-only new ids in key order. Callers hide
+/// entries that are disabled or [`problem`][HarnessDescriptor::problem]-broken;
 /// see [`usable`].
+///
+/// An account is Claude's effective row in its own config dir
+/// ([`ClaudeAccount::descriptor`]), and the map's entry for its id is
+/// deltas over that, as for a built-in. An account whose entry is broken,
+/// or whose id a built-in, a legacy entry or an earlier account already
+/// holds, is left out (the TUI's Agents tab names it and why).
 pub fn registry(
     overrides: &BTreeMap<String, HarnessOverride>,
     customs: &[CustomHarness],
+    accounts: &[ClaudeAccount],
 ) -> Vec<HarnessDescriptor> {
     let mut out: Vec<HarnessDescriptor> = builtins()
         .into_iter()
@@ -877,6 +1026,18 @@ pub fn registry(
             descriptor
         })
         .collect();
+    let accounts = registered_accounts(accounts, customs);
+    if let Some(at) = out.iter().position(|entry| entry.id == "claude") {
+        let claude = out[at].clone();
+        let rows = accounts.iter().map(|account| {
+            let mut descriptor = account.descriptor(&claude);
+            if let Some(over) = overrides.get(&descriptor.id) {
+                descriptor.apply(over);
+            }
+            descriptor
+        });
+        out.splice(at + 1..at + 1, rows.collect::<Vec<_>>());
+    }
     for entry in customs {
         let mut descriptor = entry.as_descriptor();
         if let Some(over) = overrides.get(&descriptor.id) {
@@ -886,7 +1047,13 @@ pub fn registry(
     }
     let mut extra: Vec<&String> = overrides
         .keys()
-        .filter(|id| builtin(id).is_none() && !customs.iter().any(|entry| &entry.id == *id))
+        .filter(|id| {
+            builtin(id).is_none()
+                && !customs.iter().any(|entry| &entry.id == *id)
+                && !accounts
+                    .iter()
+                    .any(|account| account.id.trim() == id.as_str())
+        })
         .collect();
     extra.sort();
     for id in extra {
@@ -894,6 +1061,7 @@ pub fn registry(
             id: id.clone(),
             label: String::new(),
             program: String::new(),
+            env: BTreeMap::new(),
             enabled: true,
             model: ModelSpec::default(),
             effort: EffortSpec::default(),
@@ -922,6 +1090,25 @@ pub fn registry(
     out
 }
 
+/// The `claude_accounts` entries the registry carries: valid ones, each id
+/// once, none a legacy entry already holds.
+fn registered_accounts<'a>(
+    accounts: &'a [ClaudeAccount],
+    customs: &[CustomHarness],
+) -> Vec<&'a ClaudeAccount> {
+    let mut kept: Vec<&ClaudeAccount> = Vec::new();
+    for account in accounts {
+        let id = account.id.trim();
+        if account.problem().is_none()
+            && !customs.iter().any(|entry| entry.id.trim() == id)
+            && !kept.iter().any(|other| other.id.trim() == id)
+        {
+            kept.push(account);
+        }
+    }
+    kept
+}
+
 /// Every entry the picker and presets offer: enabled and valid, in
 /// registry order. Invalid entries are left out (create paths refuse them
 /// with their reason); the Agents tab still lists them so they can be
@@ -929,6 +1116,21 @@ pub fn registry(
 pub fn usable(all: &[HarnessDescriptor]) -> Vec<&HarnessDescriptor> {
     all.iter()
         .filter(|entry| entry.enabled && entry.problem().is_none())
+        .collect()
+}
+
+/// Every harness a Claude session on `from` (a registry id) can be
+/// continued on — **Continue on** another account: enabled, not
+/// `from` itself, and [`HarnessDescriptor::takes_claude_sessions`], in
+/// registry order. What the TUI offers; the DAEMON asks
+/// `takes_claude_sessions` alone, since `enabled` gates the pickers, never
+/// a request.
+pub fn continue_targets<'a>(
+    all: &'a [HarnessDescriptor],
+    from: &str,
+) -> Vec<&'a HarnessDescriptor> {
+    all.iter()
+        .filter(|entry| entry.enabled && entry.id != from && entry.takes_claude_sessions())
         .collect()
 }
 
@@ -1075,7 +1277,7 @@ mod tests {
             },
         );
         let customs = vec![custom("zed")];
-        let all = registry(&overrides, &customs);
+        let all = registry(&overrides, &customs, &[]);
         let ids: Vec<&str> = all.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -1102,7 +1304,7 @@ mod tests {
                 ..HarnessOverride::default()
             },
         );
-        let all = registry(&overrides, &[]);
+        let all = registry(&overrides, &[], &[]);
         let agy = all.iter().find(|entry| entry.id == "agy").unwrap();
         assert!(agy.effort.offered);
         assert_eq!(agy.problem(), None);
@@ -1134,7 +1336,7 @@ mod tests {
 
     #[test]
     fn resolve_names_missing_and_broken_entries() {
-        let all = registry(&BTreeMap::new(), &[custom("agy")]);
+        let all = registry(&BTreeMap::new(), &[custom("agy")], &[]);
         assert_eq!(resolve(&all, AgentKind::Claude, None).unwrap().id, "claude");
         assert_eq!(
             resolve(&all, AgentKind::Custom, Some("agy"))
@@ -1146,7 +1348,7 @@ mod tests {
         assert!(resolve(&all, AgentKind::Custom, None).is_err());
         let mut broken = custom("broken");
         broken.program = "  ".into();
-        let all = registry(&BTreeMap::new(), &[broken]);
+        let all = registry(&BTreeMap::new(), &[broken], &[]);
         assert!(resolve(&all, AgentKind::Custom, Some("broken")).is_err());
         assert_eq!(usable(&all).len(), 7, "the broken entry is hidden");
     }
@@ -1165,5 +1367,251 @@ mod tests {
         };
         assert_eq!(claude_hooks.problem(), None);
         assert_eq!(claude_hooks.hook_dialect(), Some(crate::AgentKind::Claude));
+    }
+
+    /// The second Claude account as config.json writes it: `env` merges
+    /// over the row like any other field, `null` clears it, and
+    /// `orion config harnesses` prints it.
+    #[test]
+    fn env_rides_the_override_and_null_clears_it() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "claude-b".to_string(),
+            serde_json::from_value::<HarnessOverride>(serde_json::json!({
+                "label": "Claude B",
+                "program": "claude",
+                "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"},
+                "hooks": "claude",
+                "resume_flag": "--resume",
+                "catalog": "claude",
+            }))
+            .unwrap(),
+        );
+        let all = registry(&overrides, &[], &[]);
+        let b = all.iter().find(|entry| entry.id == "claude-b").unwrap();
+        assert_eq!(b.problem(), None);
+        assert_eq!(b.env["CLAUDE_CONFIG_DIR"], "~/.claude-b");
+        let printed = serde_json::to_value(b).unwrap();
+        assert_eq!(printed["env"]["CLAUDE_CONFIG_DIR"], "~/.claude-b");
+        // A row without one prints none.
+        let claude = serde_json::to_value(builtin("claude").unwrap()).unwrap();
+        assert!(claude.get("env").is_none());
+
+        let mut cleared = b.clone();
+        cleared.apply(&serde_json::from_value(serde_json::json!({"env": null})).unwrap());
+        assert!(cleared.env.is_empty());
+        let mut replaced = b.clone();
+        replaced.apply(&serde_json::from_value(serde_json::json!({"env": {"FOO": "1"}})).unwrap());
+        assert_eq!(replaced.env.keys().collect::<Vec<_>>(), ["FOO"]);
+    }
+
+    #[test]
+    fn env_names_a_shell_cannot_export_or_orion_owns_are_problems() {
+        for name in [
+            "",
+            "1ABC",
+            "MY-VAR",
+            "A B",
+            "ORION_AGENT_ID",
+            "ORION_API_TOKEN",
+        ] {
+            let mut descriptor = builtin("claude").unwrap();
+            descriptor.env.insert(name.into(), "x".into());
+            assert!(descriptor.problem().is_some(), "{name:?}");
+        }
+        let mut descriptor = builtin("claude").unwrap();
+        descriptor.env.insert("_MY_VAR2".into(), "x".into());
+        assert_eq!(descriptor.problem(), None);
+    }
+
+    #[test]
+    fn launch_env_expands_a_leading_home() {
+        let home = crate::env::home_dir().unwrap();
+        let mut descriptor = builtin("claude").unwrap();
+        for (name, value) in [
+            ("CLAUDE_CONFIG_DIR", "~/.claude-b"),
+            ("BARE", "~"),
+            ("PLAIN", "/opt/x"),
+            ("TILDE_USER", "~other/x"),
+            ("MIDDLE", "a~/b"),
+        ] {
+            descriptor.env.insert(name.into(), value.into());
+        }
+        let env: BTreeMap<String, String> = descriptor.launch_env().into_iter().collect();
+        assert_eq!(
+            env["CLAUDE_CONFIG_DIR"],
+            format!("{}/.claude-b", home.display())
+        );
+        assert_eq!(env["BARE"], home.display().to_string());
+        assert_eq!(env["PLAIN"], "/opt/x");
+        assert_eq!(env["TILDE_USER"], "~other/x", "only the user's own home");
+        assert_eq!(env["MIDDLE"], "a~/b");
+        assert_eq!(
+            descriptor.pinned_claude_config_dir(),
+            Some(home.join(".claude-b"))
+        );
+        assert_eq!(descriptor.claude_config_dir(), Some(home.join(".claude-b")));
+        // Unpinned, a Claude row's dir is this process's; off the dialect,
+        // there is none.
+        let claude = builtin("claude").unwrap();
+        assert_eq!(claude.pinned_claude_config_dir(), None);
+        assert_eq!(
+            claude.claude_config_dir(),
+            crate::paths::claude_config_dir()
+        );
+        assert_eq!(builtin("codex").unwrap().claude_config_dir(), None);
+    }
+
+    /// **Continue on**: every other enabled Claude-dialect harness that
+    /// resumes and keeps its sessions where orion can see them — built-in
+    /// Claude, or one whose `env` pins a config dir. A wrapper, a harness
+    /// off the dialect, one that boots fresh, and a switched-off one are
+    /// not offered.
+    #[test]
+    fn continue_targets_are_the_other_claude_accounts() {
+        let account = |id: &str, extra: serde_json::Value| {
+            let mut over = serde_json::json!({
+                "program": "claude",
+                "hooks": "claude",
+                "resume_flag": "--resume",
+            });
+            over.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            (
+                id.to_string(),
+                serde_json::from_value::<HarnessOverride>(over).unwrap(),
+            )
+        };
+        let overrides: BTreeMap<String, HarnessOverride> = [
+            account("claude-b", serde_json::json!({"env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}})),
+            account("claude-c", serde_json::json!({"env": {"CLAUDE_CONFIG_DIR": "~/.claude-c"}, "enabled": false})),
+            account("claude-d", serde_json::json!({"env": {"CLAUDE_CONFIG_DIR": "~/.claude-d"}, "resume_flag": null})),
+            account("wrapper", serde_json::json!({"program": "/home/me/bin/claude-b"})),
+        ]
+        .into_iter()
+        .collect();
+        let all = registry(&overrides, &[], &[]);
+        let ids = |from: &str| -> Vec<String> {
+            continue_targets(&all, from)
+                .into_iter()
+                .map(|entry| entry.id.clone())
+                .collect()
+        };
+        assert_eq!(ids("claude"), ["claude-b"]);
+        assert_eq!(ids("claude-b"), ["claude"]);
+        assert_eq!(ids("wrapper"), ["claude", "claude-b"]);
+    }
+
+    /// `claude_accounts` entries are Claude's effective row in their own
+    /// dirs, listed right after it; the map's entry for an account's id is
+    /// deltas over that row, never a second harness; and an entry that
+    /// can't be an account — broken, or an id already taken — stays out.
+    #[test]
+    fn claude_accounts_are_claude_in_their_own_dirs() {
+        let account = |id: &str, dir: &str| ClaudeAccount {
+            id: id.into(),
+            config_dir: dir.into(),
+            enabled: true,
+        };
+        let overrides: BTreeMap<String, HarnessOverride> = [
+            (
+                "claude".to_string(),
+                serde_json::from_value(serde_json::json!({
+                    "program": "/opt/claude",
+                    "enabled": false,
+                    "label": "Work",
+                }))
+                .unwrap(),
+            ),
+            (
+                "claude-2".to_string(),
+                serde_json::from_value(serde_json::json!({"model_default": "opus"})).unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let accounts = [
+            account("claude-2", "~/.claude-2"),
+            account("claude-2", "~/.claude-again"),
+            account("agy", "~/.claude-agy"),
+            account("Bad Id", "~/.claude-bad"),
+            account("claude-3", "/srv/claude-3"),
+        ];
+        let all = registry(&overrides, &[custom("agy")], &accounts);
+        let ids: Vec<&str> = all.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "claude", "claude-2", "claude-3", "codex", "cursor", "pi", "muse", "grok",
+                "opencode", "agy"
+            ]
+        );
+        let two = &all[1];
+        assert_eq!(
+            two.program, "/opt/claude",
+            "Claude's row, overrides and all"
+        );
+        assert!(two.enabled, "the account's own switch, not Claude's");
+        assert_eq!(two.label, "", "named after its email, not Claude's label");
+        assert_eq!(
+            two.env["CLAUDE_CONFIG_DIR"], "~/.claude-2",
+            "the first entry wins"
+        );
+        assert_eq!(two.default_model(), Some("opus"), "its map entry applied");
+        assert_eq!(all[2].env["CLAUDE_CONFIG_DIR"], "/srv/claude-3");
+        assert_eq!(
+            all.last().unwrap().program,
+            "agy",
+            "the legacy entry kept its id"
+        );
+        assert!(all.iter().all(|entry| entry.problem().is_none()));
+        assert!(two.is_claude_account() && two.takes_claude_sessions());
+        assert_eq!(
+            two.account_record().unwrap().file,
+            crate::env::home_dir()
+                .unwrap()
+                .join(".claude-2")
+                .join(".claude.json")
+        );
+        assert!(!all.last().unwrap().is_claude_account());
+        let ids = |from: &str| -> Vec<String> {
+            let mut enabled = all.clone();
+            enabled[0].enabled = true;
+            continue_targets(&enabled, from)
+                .into_iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("claude"), ["claude-2", "claude-3"]);
+        assert_eq!(ids("claude-3"), ["claude", "claude-2"]);
+    }
+
+    #[test]
+    fn a_moved_session_keeps_the_model_and_effort_its_target_offers() {
+        let claude = builtin("claude").unwrap();
+        assert!(claude.offers_model("opus"));
+        assert!(
+            claude.offers_model("claude-opus-5[1m]"),
+            "the catalogue takes any id"
+        );
+        assert!(claude.offers_effort("high"));
+        assert!(!claude.offers_effort("minimal"));
+        let mut listed = claude.clone();
+        listed.model.catalog = None;
+        assert!(listed.offers_model("sonnet"));
+        assert!(!listed.offers_model("claude-opus-5[1m]"));
+        listed.model.flag = None;
+        assert!(!listed.offers_model("sonnet"), "no flag, no model");
+        let legacy = CustomHarness {
+            hooks: Some("claude".into()),
+            ..custom("agy")
+        }
+        .as_descriptor();
+        assert!(
+            legacy.offers_model("opus"),
+            "an empty list passes ids verbatim"
+        );
+        assert!(!legacy.offers_effort("high"), "no Effort row, no effort");
     }
 }

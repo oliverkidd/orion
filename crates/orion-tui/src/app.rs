@@ -301,6 +301,15 @@ pub enum MenuAction {
     /// settings — `launcher::duplicate_agent`, what `⇧P` runs on the card
     /// under the cursor. Carries the id, as the row's other verbs do.
     DuplicateAgent(AgentId),
+    /// **Continue on** another account: carry this Claude session onto the
+    /// harness `harness` (a registry id) — another account — and resume
+    /// it there (`ClientRequest::ContinueAgentOn`). `label` is what the
+    /// footer names once it has gone.
+    ContinueOn {
+        id: AgentId,
+        harness: String,
+        label: String,
+    },
     EditLink(LinkId),
     DeleteLink(LinkId),
     DeleteWorktree(WorktreeId),
@@ -683,10 +692,54 @@ pub enum PendingAction {
         worktree: WorktreeId,
         quick: Option<Box<crate::quick_prompt::QuickReturn>>,
     },
+    /// `^d` in the SKILLS BROWSER: move the skill folder `dir` — its
+    /// symlinks resolved — to the Trash. Both answers put the browser back,
+    /// read afresh.
+    TrashSkill {
+        view: Box<crate::skills::SkillsView>,
+        dir: std::path::PathBuf,
+        name: String,
+    },
     /// `R` in the settings overlay: rewrite config.json from the defaults
     /// (every setting and every hotkey), then reopen the overlay on them.
     ResetSettings,
+    /// **Add account**, its name typed: create it, sharing the default
+    /// account's setup (`Enter`/`y`) or not (`n`). Every answer reopens
+    /// the settings overlay.
+    AddClaudeAccount(crate::claude_accounts::NewAccount),
+    /// `o` on a CLAUDE ACCOUNTS row: `claude auth logout` for account
+    /// `id`, in the editor modal over the settings overlay.
+    SignOutClaude {
+        id: String,
+    },
+    /// `⌫` on an added account's row: take it out of config.json —
+    /// keeping its config dir (`Enter`/`y`), or moving it to the Trash
+    /// (`t`). Every answer reopens the settings overlay.
+    RemoveClaudeAccount {
+        id: String,
+    },
     Quit,
+}
+
+impl PendingAction {
+    /// Whether the dialog asks about losing something — the red frame
+    /// every confirm wears but **Add account**'s question, which loses
+    /// nothing either way.
+    pub fn destructive(&self) -> bool {
+        !matches!(self, PendingAction::AddClaudeAccount(_))
+    }
+
+    /// Whether the dialog stands in for the settings overlay, which every
+    /// answer — Esc too — puts back.
+    pub fn from_settings(&self) -> bool {
+        matches!(
+            self,
+            PendingAction::ResetSettings
+                | PendingAction::AddClaudeAccount(_)
+                | PendingAction::SignOutClaude { .. }
+                | PendingAction::RemoveClaudeAccount { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -809,6 +862,24 @@ pub enum PromptKind {
         view: crate::issues::IssuesView,
         issue: crate::issues::IssueRef,
     },
+    /// `^a` in the SKILLS BROWSER: a new skill's name. Enter makes the
+    /// folder and its SKILL.md and opens it in the editor; Esc, or an empty
+    /// name, puts the browser back.
+    NewSkill {
+        view: Box<crate::skills::SkillsView>,
+    },
+    /// Enter on a CLAUDE ACCOUNTS row (Settings → Agents): the email to
+    /// sign account `id` in as, which fills Claude's login page — empty
+    /// leaves the choice to the browser. Enter runs `claude auth login` in
+    /// the editor modal over the settings overlay; Esc puts the overlay
+    /// back.
+    ClaudeSignIn {
+        id: String,
+    },
+    /// Enter on **Add account**: the new account's short name — empty for
+    /// the next `claude-N`. Enter asks whether to share the default
+    /// account's setup with it; Esc puts the overlay back.
+    AddClaudeAccount,
 }
 
 impl PromptKind {
@@ -1098,6 +1169,28 @@ pub struct DiffView {
     /// the tree's — `selected` and `matches` stay current underneath, so
     /// toggling back lands on a list that is already right.
     pub tree: Option<crate::diff_tree::DiffTree>,
+    /// The COMMIT LIST across the top (`commit_list`): the branch's commits
+    /// since its base, under **All changes** and **Uncommitted changes**.
+    /// `None` for a pull request's view, which has no local branch to list.
+    pub commits: Option<crate::commit_list::CommitList>,
+    /// What the file list and every diff are of: the COMMIT LIST row whose
+    /// file list last landed (`commit_list::land_scope`).
+    pub scope: crate::git_diff::DiffScope,
+    /// `Tab` gave the keys to the COMMIT LIST: `↑`/`↓` walk its rows and
+    /// `Enter` hands them back to the files.
+    pub commits_focused: bool,
+    /// A commit's message, heading the diff of each of its files (one entry
+    /// per line, drawn apart from the diff's own colouring); empty under
+    /// every other row.
+    pub header: Vec<String>,
+    /// Whether this scope has shown a file yet: the first opens at the top,
+    /// on the header; every later one at its own first line, the header a
+    /// scroll up.
+    pub header_read: bool,
+    /// ✓ marks taken under a row that is not on screen — a commit's, the
+    /// branch's — kept for as long as the modal is up and brought back
+    /// with their row. The uncommitted changes' are on disk instead.
+    pub scope_marks: HashMap<crate::git_diff::DiffScope, HashMap<String, u64>>,
 }
 
 /// The most diff text a DIFF VIEWER keeps beyond the one on screen. Two
@@ -1119,6 +1212,7 @@ impl DiffView {
         let mut view = Self::new(root, branch, Vec::new(), true);
         view.jobs = Some(jobs);
         view.listing = Some(listing);
+        view.commits = Some(crate::commit_list::CommitList::reading());
         view
     }
 
@@ -1146,12 +1240,50 @@ impl DiffView {
 
     /// Put `diff` on screen as the diff of `path`. `keep_scroll` is a
     /// re-read of the file already showing: the reader's place is kept.
+    /// Under a commit's message the first file opens on the message and
+    /// every later one past it (`header_read`).
     pub fn show_diff(&mut self, path: Option<&str>, diff: String, keep_scroll: bool) {
-        self.diff_line_count = diff.lines().count();
+        self.diff_line_count = diff.lines().count() + self.header_rows();
         self.diff = diff;
         self.shown = path.map(str::to_string);
         if !keep_scroll {
-            self.scroll = 0;
+            self.scroll = if self.header_read {
+                self.header_rows() as u16
+            } else {
+                0
+            };
+        }
+        if path.is_some() {
+            self.header_read = true;
+        }
+    }
+
+    /// The rows the commit message takes above the diff: its lines and the
+    /// rule under them, or none.
+    pub fn header_rows(&self) -> usize {
+        match self.header.len() {
+            0 => 0,
+            n => n + 1,
+        }
+    }
+
+    /// What the diff pane says for a COMMIT LIST row with no file in it.
+    pub fn empty_note(&self) -> &'static str {
+        match self.scope {
+            crate::git_diff::DiffScope::Uncommitted => "(no uncommitted changes)",
+            crate::git_diff::DiffScope::Branch { .. } => "(no changes since the branch's base)",
+            crate::git_diff::DiffScope::Commit { .. } => "(an empty commit: it changes no file)",
+        }
+    }
+
+    /// Where the file list and the diff sit: the modal under the COMMIT
+    /// LIST, as last drawn — what the files/diff border's grab zone spans.
+    pub fn panes_area(&self) -> Rect {
+        let top = self.commits.as_ref().map_or(0, |list| list.area.height);
+        Rect {
+            y: self.area.y + top,
+            height: self.area.height.saturating_sub(top),
+            ..self.area
         }
     }
 
@@ -1183,6 +1315,12 @@ impl DiffView {
             shown: None,
             cache: Vec::new(),
             tree: None,
+            commits: None,
+            scope: crate::git_diff::DiffScope::Uncommitted,
+            commits_focused: false,
+            header: Vec::new(),
+            header_read: false,
+            scope_marks: HashMap::new(),
         };
         view.apply_filter();
         view
@@ -1912,6 +2050,8 @@ pub enum Overlay {
     /// `⌘L`: the LINEAR VIEW — the open Linear issues assigned to the
     /// user, picked to fix together or to attach a pull request to.
     Linear(crate::linear::LinearView),
+    /// `⌘S`: the SKILLS BROWSER — every agent skill on the machine.
+    Skills(crate::skills::SkillsView),
     /// `c`: the BRANCH SWITCHER — the ROOT WORKTREE onto another branch.
     BranchSwitch(crate::branch_switch::BranchSwitchView),
     /// `^P` in the LAUNCHER VIEW's box: the PROJECT PICKER.
@@ -2129,6 +2269,9 @@ pub enum PendingIntent {
     /// A row renamed, archived, unarchived or deleted on the keypress
     /// (`event_loop::optimistic`): put it back on Error.
     Undo(Undo),
+    /// Flash this once the DAEMON has done it (an Error flashes its own
+    /// reason instead).
+    Note(String),
     None,
 }
 
@@ -3064,6 +3207,10 @@ pub struct FeedbackAlert {
     /// `<project> · <branch>`, the worktree it runs in; empty when the tree
     /// no longer holds them.
     pub place: String,
+    /// What the session is waiting on when it is not a question: the label
+    /// of the usage limit it stopped on (`limit reached`), from
+    /// `Agent::limit_reached`.
+    pub limit: Option<&'static str>,
 }
 
 /// The FOLLOW-UP COMPOSER: the box a session card grows when it is
@@ -3582,6 +3729,13 @@ pub struct App {
     /// Stamp for the current editor spawn, so a closed editor's buffered
     /// events can't touch its successor.
     pub vim_generation: u64,
+    /// Where a CLAUDE ACCOUNTS read off the loop says a name changed; the
+    /// main loop installs it (`claude_accounts::request_refresh`). None in
+    /// a unit test, which reads inline.
+    pub accounts_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// When the accounts were last asked to be read, so the slow beat
+    /// spaces its reads out.
+    pub accounts_polled: Option<std::time::Instant>,
     /// Changed-file count of the selected worktree's checkout (staged +
     /// unstaged + untracked), the worktree panel's bottom badge. Keyed by
     /// worktree so a selection change can't show another checkout's count;
@@ -3939,6 +4093,8 @@ impl App {
             vim: None,
             vim_tx: None,
             vim_generation: 0,
+            accounts_tx: None,
+            accounts_polled: None,
             git_changes: None,
             git_changes_inflight: None,
             worktree_changes: HashMap::new(),
@@ -5618,6 +5774,7 @@ mod tests {
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             })
             .collect();
         app
@@ -5906,6 +6063,7 @@ mod tests {
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         });
         app.tree.agents.push(Agent {
             id: AgentId("a2".into()),
@@ -6139,6 +6297,7 @@ mod tests {
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             });
         }
 

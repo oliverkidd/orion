@@ -54,8 +54,19 @@
 //!   it — a death still terminates it — and the respawn starts over as a
 //!   launch. Without the hold the card fell to the bottom of the grid for
 //!   the seconds between the Stop and the respawned CLI's first hook.
+//! - A turn Claude ends on a usage limit fires `StopFailure`, not `Stop`
+//!   (the hook receiver turns the limit ones into `UsageLimit`, the rest
+//!   into a `Stop`). That is a session waiting on you as surely as a
+//!   question is — only for another account or the reset — so it goes to
+//!   `needs_feedback` with the limit recorded as the reason. The stopped
+//!   turn's own progress clear and the idle notification are not news
+//!   there, so they leave it red; anything that moves the session — a
+//!   prompt, a foreground tool call, Claude's own continuation at the
+//!   reset — takes the row out of red, and the limit with it. One rule
+//!   keeps the two together: a limit is recorded only while the row is
+//!   red.
 
-use orion_core::AgentStatus;
+use orion_core::{AgentStatus, LimitReason, UsageLimit};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -122,6 +133,14 @@ pub enum HookEvent {
     Progress {
         busy: bool,
     },
+    /// The turn stopped on the account rather than the work: Claude's
+    /// `StopFailure` on a usage limit, a billing stop or a held account,
+    /// or its wait for the reset ending without continuing. `reason` and
+    /// `message` become the row's [`UsageLimit`].
+    UsageLimit {
+        reason: LimitReason,
+        message: Option<String>,
+    },
 }
 
 /// The tools whose call means the turn is waiting on you: Claude's
@@ -149,6 +168,10 @@ impl HookEvent {
 pub enum Effect {
     SetStatus(AgentStatus),
     SaveSessionId(String),
+    /// Record the usage limit the row is red over, or clear it. A record
+    /// comes ahead of the `SetStatus` into red, so a client learns why
+    /// before it rings; a clear comes after the `SetStatus` out of it.
+    SetUsageLimit(Option<UsageLimit>),
 }
 
 /// Who raised the dialog the agent is waiting on: the foreground turn, or
@@ -267,6 +290,10 @@ pub struct AgentStatusMachine {
     /// that arrives meanwhile holds at `running`: the respawn that follows
     /// it carries the work straight on (`hold_for_relocation`).
     relocating: bool,
+    /// Set while the row is red over a usage limit (`HookEvent::UsageLimit`)
+    /// rather than a dialog: the stopped turn's echoes leave it red, and
+    /// leaving red clears the limit the row records.
+    limited: bool,
 }
 
 impl AgentStatusMachine {
@@ -285,7 +312,19 @@ impl AgentStatusMachine {
             feedback_left_at: None,
             launch_idle_pending: false,
             relocating: false,
+            limited: false,
         }
+    }
+
+    /// The machine for a row the store has red over a usage limit
+    /// (`Agent::limit_reached`): seeded lazily like any other, it must
+    /// know the limit is there to clear it when the row moves on.
+    pub fn at_limit(mut self, limited: bool) -> Self {
+        self.limited = limited && self.status == AgentStatus::NeedsFeedback;
+        if self.limited {
+            self.waiting_on = Some(Origin::Foreground);
+        }
+        self
     }
 
     /// The machine for a row created `running` before its CLI booted: a
@@ -401,8 +440,22 @@ impl AgentStatusMachine {
                     // only with nothing in flight and no dialog open, so it
                     // means the turn really is over — see `mark_idle`.
                     Some("idle_prompt") => self.mark_idle(now, &mut effects),
-                    // Every other notification type (auth, quota, nested
-                    // fleet sessions) is none of our business.
+                    // Claude carried the task on by itself once usage came
+                    // back — at the reset, or sooner: the session moves.
+                    Some("quota_auto_resume_fired") if self.limited => {
+                        self.set_status(AgentStatus::Running, &mut effects);
+                    }
+                    // The limit reset while the machine slept, and Claude
+                    // waits for an Enter instead of carrying on: still
+                    // waiting on you, but no longer on the account.
+                    Some("quota_auto_resume_stale") => {
+                        self.lift_limit(&mut effects);
+                        self.wait_on(Origin::Foreground, false, &mut effects);
+                    }
+                    // Every other notification type (auth, nested fleet
+                    // sessions) is none of our business. The wait for a
+                    // reset that ended without continuing arrives as a
+                    // `UsageLimit` (the hook receiver maps it).
                     _ => {}
                 }
             }
@@ -482,6 +535,9 @@ impl AgentStatusMachine {
                     // and the turn has not started, let alone ended.
                     // Swallowed once — the reprieve is spent now, so the
                     // `0` that really ends the turn lands below.
+                } else if self.limited {
+                    // The clear of the turn the usage limit stopped: that
+                    // end is the limit's, already on the row.
                 } else if matches!(
                     self.status,
                     AgentStatus::Running | AgentStatus::NeedsFeedback
@@ -515,11 +571,20 @@ impl AgentStatusMachine {
                     self.set_status(status, &mut effects);
                 }
             }
+            HookEvent::UsageLimit { reason, message } => {
+                self.reach_limit(UsageLimit { reason, message }, &mut effects);
+            }
         }
         if was_waiting && self.status != AgentStatus::NeedsFeedback {
             self.waiting_on = None;
             self.question_open = false;
             self.feedback_left_at = Some(now);
+        }
+        // A limit is only ever the reason a row is red: whatever took it
+        // out of red — a prompt, a tool call, the CLI ending — took the
+        // limit with it.
+        if self.status != AgentStatus::NeedsFeedback {
+            self.lift_limit(&mut effects);
         }
         effects
     }
@@ -654,11 +719,16 @@ impl AgentStatusMachine {
     /// still tracked the agent stays at running exactly as a gated `Stop`
     /// would — `tick` finishes it once they drain, or once they have been
     /// quiet for `SUBAGENT_QUIET_GRACE`.
+    ///
+    /// A row red over a usage limit stays red: parked at the input box is
+    /// exactly where the limit left it, and nothing has been answered.
     fn mark_idle(&mut self, now: Instant, effects: &mut Vec<Effect>) {
-        if !matches!(
-            self.status,
-            AgentStatus::Running | AgentStatus::NeedsFeedback
-        ) {
+        if self.limited
+            || !matches!(
+                self.status,
+                AgentStatus::Running | AgentStatus::NeedsFeedback
+            )
+        {
             return;
         }
         if self.hold_for_relocation(effects) {
@@ -696,6 +766,41 @@ impl AgentStatusMachine {
         }
         self.set_status(AgentStatus::Running, effects);
         true
+    }
+
+    /// The turn stopped on a usage limit (or Claude gave up waiting for its
+    /// reset): red, with the limit recorded as the reason — recorded first,
+    /// so the status edge that rings the FEEDBACK SOUND already knows why.
+    /// The turn is over, so no Stop or subagent hold is pending, and the
+    /// foreground is what an answer — the next prompt, the next tool call —
+    /// will come from. A row already red over a limit only takes the newer
+    /// words. A relocation waiting on this turn's end holds it at running,
+    /// as it holds a Stop: the respawn reports its own limit if it meets
+    /// one. A dead row is never revived by a laggard POST.
+    fn reach_limit(&mut self, limit: UsageLimit, effects: &mut Vec<Effect>) {
+        if matches!(
+            self.status,
+            AgentStatus::Terminated | AgentStatus::Disconnected
+        ) || self.hold_for_relocation(effects)
+        {
+            return;
+        }
+        self.stop_held = false;
+        self.drain_idle_since = None;
+        self.subagent_alive_at = None;
+        self.finished_at = None;
+        self.waiting_on = Some(Origin::Foreground);
+        self.question_open = false;
+        self.limited = true;
+        effects.push(Effect::SetUsageLimit(Some(limit)));
+        self.set_status(AgentStatus::NeedsFeedback, effects);
+    }
+
+    /// The row is no longer red over a usage limit: drop the record.
+    fn lift_limit(&mut self, effects: &mut Vec<Effect>) {
+        if std::mem::take(&mut self.limited) {
+            effects.push(Effect::SetUsageLimit(None));
+        }
     }
 
     fn set_status(&mut self, status: AgentStatus, effects: &mut Vec<Effect>) {
@@ -1934,5 +2039,191 @@ mod tests {
         );
         let fx = m.handle(HookEvent::Stop, Some("s1"), now + Duration::from_secs(1));
         assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
+    }
+
+    fn limit(reason: LimitReason) -> HookEvent {
+        HookEvent::UsageLimit {
+            reason,
+            message: Some("You've hit your session limit · resets 3:45pm".into()),
+        }
+    }
+
+    /// Where the row's limit went in `fx`: `Some(Some(_))` recorded,
+    /// `Some(None)` cleared, `None` untouched.
+    fn limit_of(fx: &[Effect]) -> Option<Option<UsageLimit>> {
+        fx.iter().rev().find_map(|e| match e {
+            Effect::SetUsageLimit(limit) => Some(limit.clone()),
+            _ => None,
+        })
+    }
+
+    /// A turn Claude stopped on a usage limit is a session waiting on you:
+    /// red, with the limit recorded first — so a client already knows why
+    /// when the status edge rings — and the stopped turn's own echoes (its
+    /// progress clear, the idle notification a minute on) leave it red.
+    #[test]
+    fn a_usage_limit_turns_the_row_red_with_the_limit_as_its_reason() {
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        let now = t0();
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        let fx = m.handle(limit(LimitReason::RateLimit), Some("s1"), now);
+        assert_eq!(
+            fx,
+            vec![
+                Effect::SetUsageLimit(Some(UsageLimit {
+                    reason: LimitReason::RateLimit,
+                    message: Some("You've hit your session limit · resets 3:45pm".into()),
+                })),
+                Effect::SetStatus(AgentStatus::NeedsFeedback),
+            ],
+            "recorded ahead of the red edge"
+        );
+        assert!(
+            progress(&mut m, false, now).is_empty(),
+            "the turn's own clear"
+        );
+        assert!(idle(&mut m, now + Duration::from_secs(60)).is_empty());
+        assert!(prompt_notification(&mut m, now + Duration::from_secs(61)).is_empty());
+        assert_eq!(m.status(), AgentStatus::NeedsFeedback);
+        assert!(m.tick(now + DRAIN_GRACE * 2).is_empty());
+        // Claude's own words change, the reason stays recorded.
+        let fx = m.handle(limit(LimitReason::RateLimit), Some("s1"), now);
+        assert!(matches!(limit_of(&fx), Some(Some(_))));
+        assert_eq!(status_of(&fx), None);
+    }
+
+    /// The limit clears the moment the session moves again — the next
+    /// prompt, a foreground tool call — and after the status edge out of
+    /// red, so no client ever shows a running row as limited. Another
+    /// session's or a subagent's traffic is not the session moving.
+    #[test]
+    fn the_next_prompt_or_tool_call_clears_the_limit() {
+        let now = t0();
+        let moves: [(HookEvent, Option<&str>); 3] = [
+            (HookEvent::UserPromptSubmit, Some("s1")),
+            (tool("Bash", None, false), Some("s1")),
+            (tool("Edit", None, true), Some("s1")),
+        ];
+        for (event, sid) in moves {
+            let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+            m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+            m.handle(limit(LimitReason::BillingError), Some("s1"), now);
+            assert!(m
+                .handle(tool("Bash", Some("sub1"), true), Some("s1"), now)
+                .is_empty());
+            assert!(m
+                .handle(tool("Bash", None, true), Some("someone-elses"), now)
+                .is_empty());
+            let fx = m.handle(event.clone(), sid, now);
+            assert_eq!(
+                fx.iter()
+                    .filter(|e| !matches!(e, Effect::SaveSessionId(_)))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![
+                    Effect::SetStatus(AgentStatus::Running),
+                    Effect::SetUsageLimit(None),
+                ],
+                "{event:?}"
+            );
+            // Cleared once: the next red is a plain one.
+            let fx = m.handle(
+                HookEvent::PermissionRequest { subagent_id: None },
+                Some("s1"),
+                now,
+            );
+            assert_eq!(limit_of(&fx), None);
+        }
+    }
+
+    /// Claude carrying the task on by itself at the reset moves the
+    /// session; the reset arriving while the machine slept leaves it
+    /// waiting on an Enter — red, but no longer over the account. The
+    /// CLI ending takes the limit with the red.
+    #[test]
+    fn claudes_own_continuation_and_the_cli_ending_clear_the_limit() {
+        let now = t0();
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        m.handle(limit(LimitReason::RateLimit), Some("s1"), now);
+        let fired = HookEvent::Notification {
+            notification_type: Some("quota_auto_resume_fired".into()),
+        };
+        let fx = m.handle(fired.clone(), Some("s1"), now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::Running));
+        assert_eq!(limit_of(&fx), Some(None));
+        // Nothing to carry on from a row that was not at a limit.
+        assert!(m.handle(fired, Some("s1"), now).is_empty());
+
+        m.handle(limit(LimitReason::RateLimit), Some("s1"), now);
+        let fx = m.handle(
+            HookEvent::Notification {
+                notification_type: Some("quota_auto_resume_stale".into()),
+            },
+            Some("s1"),
+            now,
+        );
+        assert_eq!(fx, vec![Effect::SetUsageLimit(None)]);
+        assert_eq!(m.status(), AgentStatus::NeedsFeedback);
+        let fx = m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::Running));
+        assert_eq!(limit_of(&fx), None, "nothing left to clear");
+
+        m.handle(limit(LimitReason::AccountOnHold), Some("s1"), now);
+        let fx = m.handle(HookEvent::SessionEnded { exit_code: Some(0) }, None, now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
+        assert_eq!(limit_of(&fx), Some(None));
+    }
+
+    /// The progress clear usually beats the hook's POST to the daemon: the
+    /// row goes green for a moment, then red with the limit. A dead row is
+    /// never revived by a laggard POST, and a relocation waiting on the
+    /// turn's end holds it at running like a Stop.
+    #[test]
+    fn a_limit_after_the_progress_clear_or_on_a_dead_row() {
+        let now = t0();
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        assert_eq!(
+            status_of(&progress(&mut m, false, now)),
+            Some(AgentStatus::Finished)
+        );
+        let fx = m.handle(limit(LimitReason::RateLimit), Some("s1"), now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::NeedsFeedback));
+        assert!(matches!(limit_of(&fx), Some(Some(_))));
+
+        for dead in [AgentStatus::Terminated, AgentStatus::Disconnected] {
+            let mut m = AgentStatusMachine::new(dead, Some("s1".into()));
+            assert!(m
+                .handle(limit(LimitReason::RateLimit), Some("s1"), now)
+                .is_empty());
+        }
+
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        m.set_relocating(true);
+        assert!(m
+            .handle(limit(LimitReason::RateLimit), Some("s1"), now)
+            .is_empty());
+        assert_eq!(m.status(), AgentStatus::Running);
+    }
+
+    /// A machine seeded from a row the store has red over a limit (the
+    /// daemon's machines are made lazily) clears it when the row moves.
+    #[test]
+    fn a_seeded_machine_knows_its_row_is_at_a_limit() {
+        let now = t0();
+        let mut m =
+            AgentStatusMachine::new(AgentStatus::NeedsFeedback, Some("s1".into())).at_limit(true);
+        assert!(progress(&mut m, false, now).is_empty());
+        let fx = m.handle(tool("Read", None, true), Some("s1"), now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::Running));
+        assert_eq!(limit_of(&fx), Some(None));
+        // A row that is not red has no limit to clear, whatever the store
+        // still held.
+        let mut m =
+            AgentStatusMachine::new(AgentStatus::Finished, Some("s1".into())).at_limit(true);
+        let fx = m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        assert_eq!(limit_of(&fx), None);
     }
 }

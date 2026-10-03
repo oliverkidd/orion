@@ -4461,3 +4461,356 @@ exit 0
     wait_for_exit(&mut daemon);
     assert_eq!(runs(), "1");
 }
+
+/// `curl` one Claude hook from inside an agent's own PTY, with the env the
+/// daemon gave it — the path a real hook takes. `body` is the JSON payload.
+fn hook_from_pty(event: &str, body: &str) -> Vec<u8> {
+    format!(
+        "curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+         -H 'Content-Type: application/json' -d '{body}' \
+         \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent={event}\" >/dev/null\n"
+    )
+    .into_bytes()
+}
+
+/// The agent row `id` as the newest upsert for it in `events` carries it.
+fn upserted_agent<'a>(
+    events: &'a [ServerEvent],
+    id: &orion_core::AgentId,
+) -> Option<&'a orion_core::Agent> {
+    events.iter().rev().find_map(|e| match e {
+        ServerEvent::EntityUpserted {
+            entity: Entity::Agent(a),
+        } if &a.id == id => Some(a),
+        _ => None,
+    })
+}
+
+/// Where in `events` agent `id` changed to `status`, if it did.
+fn status_change_at(
+    events: &[ServerEvent],
+    id: &orion_core::AgentId,
+    status: orion_core::AgentStatus,
+) -> Option<usize> {
+    events.iter().position(|e| {
+        matches!(e, ServerEvent::StatusChanged { agent, status: s, .. }
+            if agent == id && *s == status)
+    })
+}
+
+/// A Claude turn that stops on a usage limit fires `StopFailure`, not
+/// `Stop`: the managed hook is installed, and its POST turns the row red
+/// with the limit — Claude's own words — recorded on the row ahead of the
+/// red edge, where a client that connects afterwards (a TUI restarted)
+/// reads it off its Snapshot. The next prompt moves the session, and the
+/// limit goes with the red. Any other API error ends the turn like a Stop.
+#[tokio::test]
+async fn stop_failure_on_a_usage_limit_turns_the_row_red_until_it_moves() {
+    use orion_core::AgentStatus;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let mut daemon = env.spawn_daemon();
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "limited", 2).await;
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["hooks"]["StopFailure"][0]["_orionManaged"],
+        serde_json::json!(true),
+        "the managed StopFailure hook is installed"
+    );
+
+    let sref = SessionRef::Agent(agent_id.clone());
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: sref.clone(),
+            from_seq: None,
+            cols: 120,
+            rows: 30,
+        },
+    )
+    .await
+    .unwrap();
+    let input = |data: Vec<u8>| ClientRequest::Input {
+        session: sref.clone(),
+        data,
+    };
+
+    write_frame(
+        &mut c,
+        &input(hook_from_pty(
+            "UserPromptSubmit",
+            r#"{"session_id":"sess-1","prompt":"go"}"#,
+        )),
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &agent_id, AgentStatus::Running).is_some()
+    })
+    .await;
+
+    write_frame(
+        &mut c,
+        &input(hook_from_pty(
+            "StopFailure",
+            r#"{"session_id":"sess-1","error":"rate_limit","last_assistant_message":"You have hit your session limit · resets 3:45pm"}"#,
+        )),
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &agent_id, AgentStatus::NeedsFeedback).is_some()
+    })
+    .await;
+    let limited = upserted_agent(&events, &agent_id).expect("the limit rides an upsert");
+    let limit = limited.usage_limit.clone().expect("the limit is recorded");
+    assert_eq!(limit.reason, orion_core::LimitReason::RateLimit);
+    assert_eq!(
+        limit.message.as_deref(),
+        Some("You have hit your session limit · resets 3:45pm")
+    );
+    let recorded_at = events
+        .iter()
+        .position(|e| {
+            matches!(e, ServerEvent::EntityUpserted { entity: Entity::Agent(a) }
+                if a.id == agent_id && a.usage_limit.is_some())
+        })
+        .unwrap();
+    assert!(
+        recorded_at < status_change_at(&events, &agent_id, AgentStatus::NeedsFeedback).unwrap(),
+        "the reason lands before the red edge: {events:#?}"
+    );
+
+    // A TUI started now reads the limit off its Snapshot.
+    let mut c2 = connect(&env.sock()).await;
+    handshake(&mut c2).await;
+    let snapshot = subscribe(&mut c2).await;
+    let Some(ServerEvent::Snapshot { agents, .. }) = snapshot.last() else {
+        panic!("no snapshot: {snapshot:#?}");
+    };
+    let row = agents.iter().find(|a| a.id == agent_id).unwrap();
+    assert_eq!(row.status, AgentStatus::NeedsFeedback);
+    assert_eq!(row.limit_reached(), Some(&limit));
+    drop(c2);
+
+    // The next prompt moves the session: out of red, the limit with it.
+    write_frame(
+        &mut c,
+        &input(hook_from_pty(
+            "UserPromptSubmit",
+            r#"{"session_id":"sess-1","prompt":"again"}"#,
+        )),
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        upserted_agent(evs, &agent_id).is_some_and(|a| a.usage_limit.is_none())
+    })
+    .await;
+    assert!(status_change_at(&events, &agent_id, AgentStatus::Running).is_some());
+
+    // An API error that is not a limit ends the turn like a Stop.
+    write_frame(
+        &mut c,
+        &input(hook_from_pty(
+            "StopFailure",
+            r#"{"session_id":"sess-1","error":"overloaded"}"#,
+        )),
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &agent_id, AgentStatus::Finished).is_some()
+    })
+    .await;
+    assert!(
+        upserted_agent(&events, &agent_id).is_none_or(|a| a.usage_limit.is_none()),
+        "{events:#?}"
+    );
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
+/// **Continue on**: a Claude session carried onto a second account — a
+/// registry harness whose `env` points `CLAUDE_CONFIG_DIR` at its own
+/// config dir. Its transcript and the folder beside it are copied to the
+/// same place under that dir (the source kept), the row switches to the
+/// harness, and the respawned CLI runs with that dir in its environment.
+/// A move that has nothing to carry, or nowhere to carry it, is refused
+/// before anything stops.
+#[tokio::test]
+async fn continue_on_carries_the_session_onto_the_other_account() {
+    use orion_core::AgentStatus;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let account_a = env.tmp.path().join("claude-a");
+    let account_b = env.tmp.path().join("claude-b");
+    env.write_config(
+        &serde_json::json!({
+            "harnesses": {
+                "claude-b": {
+                    "label": "Claude B",
+                    "program": "claude",
+                    "hooks": "claude",
+                    "resume_flag": "--resume",
+                    "catalog": "claude",
+                    "env": {"CLAUDE_CONFIG_DIR": account_b.to_str().unwrap()},
+                }
+            }
+        })
+        .to_string(),
+    );
+    // The daemon's own Claude config dir is built-in Claude's account.
+    let mut daemon = env.spawn_daemon_with(
+        "/bin/sh",
+        &[(env::CLAUDE_CONFIG_DIR, account_a.to_str().unwrap())],
+    );
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "moving", 2).await;
+    let fresh_id = create_agent_get_id(&mut c, &worktree.id, "fresh", 3).await;
+
+    let sref = SessionRef::Agent(agent_id.clone());
+    let attach = ClientRequest::Attach {
+        session: sref.clone(),
+        from_seq: None,
+        cols: 120,
+        rows: 30,
+    };
+    write_frame(&mut c, &attach).await.unwrap();
+    write_frame(
+        &mut c,
+        &ClientRequest::Input {
+            session: sref.clone(),
+            data: hook_from_pty(
+                "UserPromptSubmit",
+                r#"{"session_id":"sid-1","prompt":"go"}"#,
+            ),
+        },
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &agent_id, AgentStatus::Running).is_some()
+    })
+    .await;
+    let continue_on =
+        |req_id: u64, id: &orion_core::AgentId, harness: &str| ClientRequest::ContinueAgentOn {
+            req_id,
+            id: id.clone(),
+            harness: harness.into(),
+        };
+    let refusal = |events: &[ServerEvent], req_id: u64| match find_ack(events, req_id) {
+        Some(ServerEvent::Error { message, .. }) => message.clone(),
+        other => panic!("expected a refusal: {other:?}"),
+    };
+
+    // Its transcript is not written yet: nothing to move, nothing stops.
+    write_frame(&mut c, &continue_on(10, &agent_id, "claude-b"))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| find_ack(evs, 10).is_some()).await;
+    assert!(
+        refusal(&events, 10).contains("no transcript"),
+        "{events:#?}"
+    );
+    // A session that never ran a turn has no conversation to carry.
+    write_frame(&mut c, &continue_on(11, &fresh_id, "claude-b"))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| find_ack(evs, 11).is_some()).await;
+    assert!(
+        refusal(&events, 11).contains("no conversation"),
+        "{events:#?}"
+    );
+    // Codex is not a Claude account.
+    write_frame(&mut c, &continue_on(12, &agent_id, "codex"))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| find_ack(evs, 12).is_some()).await;
+    assert!(refusal(&events, 12).contains("dialect"), "{events:#?}");
+
+    let slug = account_a.join("projects").join("-repo");
+    std::fs::create_dir_all(slug.join("sid-1").join("subagents")).unwrap();
+    std::fs::write(slug.join("sid-1.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(
+        slug.join("sid-1").join("subagents").join("agent-x.jsonl"),
+        "{\"type\":\"assistant\"}\n",
+    )
+    .unwrap();
+
+    write_frame(&mut c, &continue_on(13, &agent_id, "claude-b"))
+        .await
+        .unwrap();
+    // The reply and the broadcast travel apart: wait for both.
+    let events = read_events_until(&mut c, SPAWN_CHAIN_TIMEOUT, |evs| {
+        matches!(find_ack(evs, 13), Some(ServerEvent::Error { .. }))
+            || (find_ack(evs, 13).is_some()
+                && upserted_agent(evs, &agent_id).is_some_and(|a| a.kind == AgentKind::Custom))
+    })
+    .await;
+    assert!(
+        matches!(find_ack(&events, 13), Some(ServerEvent::Ack { .. })),
+        "{events:#?}"
+    );
+    let moved_slug = account_b.join("projects").join("-repo");
+    assert_eq!(
+        std::fs::read_to_string(moved_slug.join("sid-1.jsonl")).unwrap(),
+        "{\"type\":\"user\"}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(moved_slug.join("sid-1/subagents/agent-x.jsonl")).unwrap(),
+        "{\"type\":\"assistant\"}\n"
+    );
+    assert!(slug.join("sid-1.jsonl").is_file(), "the source is kept");
+    let moved = upserted_agent(&events, &agent_id).expect("the row's upsert");
+    assert_eq!(moved.kind, AgentKind::Custom);
+    assert_eq!(moved.custom_harness.as_deref(), Some("claude-b"));
+    assert_eq!(moved.name, "moving");
+    assert_eq!(moved.session_id.as_deref(), Some("sid-1"));
+    assert_eq!(moved.status, AgentStatus::Finished);
+    assert!(!moved.unseen && moved.alive, "{moved:#?}");
+    assert!(
+        status_change_at(&events, &agent_id, AgentStatus::Finished).is_none(),
+        "a move is an upsert, never the edge that rings the DONE SOUND"
+    );
+
+    // The respawned CLI runs under the account's own config dir.
+    write_frame(&mut c, &attach).await.unwrap();
+    write_frame(
+        &mut c,
+        &ClientRequest::Input {
+            session: sref.clone(),
+            data: b"echo \"CFG=[$CLAUDE_CONFIG_DIR]\"\n".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    let want = format!("CFG=[{}]", account_b.display());
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        String::from_utf8_lossy(&collected_output(evs)).contains(&want)
+    })
+    .await;
+
+    // Already there: refused.
+    write_frame(&mut c, &continue_on(14, &agent_id, "claude-b"))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| find_ack(evs, 14).is_some()).await;
+    assert!(
+        refusal(&events, 14).contains("already runs on Claude B"),
+        "{events:#?}"
+    );
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}

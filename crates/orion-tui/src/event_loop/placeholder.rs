@@ -216,6 +216,7 @@ pub(super) fn stage_agent(
         alive: false,
         issue_url: None,
         recent_prompts: Vec::new(),
+        usage_limit: None,
     });
     if let Some(i) = project.and_then(|id| {
         app.project_rows()
@@ -684,6 +685,7 @@ mod tests {
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         }
     }
 

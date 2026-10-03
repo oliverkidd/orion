@@ -28,7 +28,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
-use orion_core::AgentId;
+use orion_core::{AgentId, LimitReason};
 use serde::Deserialize;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -175,6 +175,22 @@ pub struct HookPayload {
     pub cwd: Option<String>,
     /// Cursor sends no `cwd`; its first workspace root plays the role.
     pub workspace_roots: Option<Vec<String>>,
+    /// `StopFailure`'s error type (`rate_limit`, `overloaded`, …). Read as
+    /// any JSON so a CLI that posts an `error` object on some other event
+    /// can never fail the whole payload — only a string is taken.
+    pub error: Option<serde_json::Value>,
+    /// `StopFailure`'s detail (`429 Too Many Requests`), when it has one.
+    pub error_details: Option<serde_json::Value>,
+    /// On `StopFailure`, the error text the conversation shows — `You've
+    /// hit your session limit · resets 3:45pm`.
+    pub last_assistant_message: Option<serde_json::Value>,
+    /// A `Notification`'s text.
+    pub message: Option<serde_json::Value>,
+}
+
+/// A payload field as text, when the CLI sent a string there at all.
+fn text_field(value: &Option<serde_json::Value>) -> Option<&str> {
+    value.as_ref()?.as_str()
 }
 
 impl HookPayload {
@@ -192,6 +208,20 @@ impl HookPayload {
 
     fn subagent_id(&self) -> Option<String> {
         self.agent_id.clone().or_else(|| self.subagent_id.clone())
+    }
+
+    /// What Claude said about the limit, on one line: the error text the
+    /// conversation shows, else the API's detail, else a notification's
+    /// own words.
+    fn limit_message(&self) -> Option<String> {
+        [
+            &self.last_assistant_message,
+            &self.error_details,
+            &self.message,
+        ]
+        .into_iter()
+        .filter_map(text_field)
+        .find_map(crate::prompt_history::condense)
     }
 }
 
@@ -213,8 +243,32 @@ pub fn parse_event(hook_event: &str, payload: &HookPayload) -> Option<HookEvent>
         "PermissionRequest" => HookEvent::PermissionRequest {
             subagent_id: payload.subagent_id(),
         },
+        // Claude's wait for a usage limit to reset ended without carrying
+        // the task on (turned off, the reset moved past a day, the
+        // continuation kept hitting the limit): the session sits at the
+        // limit, as a StopFailure on one leaves it.
+        "Notification"
+            if payload.notification_type.as_deref()
+                == Some(LimitReason::QuotaWaitEnded.as_str()) =>
+        {
+            HookEvent::UsageLimit {
+                reason: LimitReason::QuotaWaitEnded,
+                message: payload.limit_message(),
+            }
+        }
         "Notification" => HookEvent::Notification {
             notification_type: payload.notification_type.clone(),
+        },
+        // The turn ended on an API error instead of a Stop. A usage limit
+        // stops the session on its account, waiting on you for the reset
+        // or another account (`LimitReason::of_stop_failure`); any other
+        // error ends the turn like the Stop it replaced.
+        "StopFailure" => match text_field(&payload.error).and_then(LimitReason::of_stop_failure) {
+            Some(reason) => HookEvent::UsageLimit {
+                reason,
+                message: payload.limit_message(),
+            },
+            None => HookEvent::Stop,
         },
         "PreToolUse" => HookEvent::PreToolUse {
             tool_name: payload.tool_name.clone(),
@@ -511,6 +565,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         store
             .insert_agent_with_auto_title(&agent("pending"), true)
@@ -833,5 +888,78 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    /// What Claude fires instead of `Stop` when a turn ends on an API
+    /// error: a usage limit becomes the row's red reason, with Claude's own
+    /// words, and any other error ends the turn like the Stop it replaced.
+    /// The wait for a reset ending without continuing is the same limit.
+    #[test]
+    fn stop_failure_on_a_usage_limit_is_a_limit_and_any_other_a_stop() {
+        let parse = |event: &str, body: &str| {
+            parse_event(event, &serde_json::from_str::<HookPayload>(body).unwrap())
+        };
+        for reason in [
+            LimitReason::RateLimit,
+            LimitReason::BillingError,
+            LimitReason::AccountOnHold,
+        ] {
+            let body = format!(
+                r#"{{"session_id":"s1","error":"{}","error_details":"429 Too Many Requests",
+                    "last_assistant_message":"You've hit your session limit\n · resets 3:45pm"}}"#,
+                reason.as_str()
+            );
+            assert_eq!(
+                parse("StopFailure", &body),
+                Some(HookEvent::UsageLimit {
+                    reason,
+                    message: Some("You've hit your session limit · resets 3:45pm".into()),
+                })
+            );
+        }
+        // No conversation text: the API's detail stands in.
+        assert_eq!(
+            parse(
+                "StopFailure",
+                r#"{"error":"rate_limit","error_details":"429 Too Many Requests"}"#
+            ),
+            Some(HookEvent::UsageLimit {
+                reason: LimitReason::RateLimit,
+                message: Some("429 Too Many Requests".into()),
+            })
+        );
+        for body in [
+            r#"{"error":"overloaded","last_assistant_message":"API Error: Overloaded"}"#,
+            r#"{"error":"authentication_failed"}"#,
+            r#"{"error":{"type":"rate_limit"}}"#,
+            r#"{}"#,
+        ] {
+            assert_eq!(parse("StopFailure", body), Some(HookEvent::Stop), "{body}");
+        }
+        // An `error` object on another event never costs the payload.
+        let payload: HookPayload =
+            serde_json::from_str(r#"{"session_id":"s1","error":{"code":1},"cwd":"/w"}"#).unwrap();
+        assert_eq!(payload.session_id().as_deref(), Some("s1"));
+
+        assert_eq!(
+            parse(
+                "Notification",
+                r#"{"notification_type":"quota_auto_resume_disabled",
+                    "message":"Automatic continue stopped after repeated usage-limit hits"}"#
+            ),
+            Some(HookEvent::UsageLimit {
+                reason: LimitReason::QuotaWaitEnded,
+                message: Some("Automatic continue stopped after repeated usage-limit hits".into()),
+            })
+        );
+        assert_eq!(
+            parse(
+                "Notification",
+                r#"{"notification_type":"quota_auto_resume_fired","message":"x"}"#
+            ),
+            Some(HookEvent::Notification {
+                notification_type: Some("quota_auto_resume_fired".into()),
+            })
+        );
     }
 }

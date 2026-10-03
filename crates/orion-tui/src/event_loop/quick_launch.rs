@@ -360,6 +360,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );

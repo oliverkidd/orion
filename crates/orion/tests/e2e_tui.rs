@@ -26,11 +26,15 @@ const ENTER: &[u8] = b"\r";
 const TAB: &[u8] = b"\t";
 const ESC: &[u8] = &[0x1b];
 const DOWN: &[u8] = b"\x1b[B";
+const SHIFT_LEFT: &[u8] = b"\x1b[1;2D";
+const SHIFT_RIGHT: &[u8] = b"\x1b[1;2C";
 const CTRL_Q: &[u8] = &[0x11];
 const CTRL_R: &[u8] = &[0x12];
 const CTRL_E: &[u8] = &[0x05];
 const CTRL_N: &[u8] = &[0x0e];
 const CTRL_U: &[u8] = &[0x15];
+const CTRL_S: &[u8] = &[0x13];
+const CTRL_D: &[u8] = &[0x04];
 /// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
 const COMMANDS: &[u8] = b":";
 
@@ -39,6 +43,25 @@ const PROJECT_MENU_ROW: &str = "Remove from list";
 /// Terminal pane input-locked: keys forward to the PTY, and Esc is the
 /// way back out to the grid's cards.
 const FOOTER_TERMINAL_LOCKED: &str = "Esc: back to the card";
+
+/// A data dir as a user who finished first-run setup leaves it: the
+/// ONBOARDING wizard already seen (it would cover the grid every test
+/// drives) and the agents it offers switched on, which a fresh install
+/// leaves off.
+fn seed_onboarded_config(data_dir: &std::path::Path) {
+    std::fs::create_dir_all(data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("config.local.json"),
+        r#"{"onboarded": true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        data_dir.join("config.json"),
+        r#"{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
+            "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true}"#,
+    )
+    .unwrap();
+}
 
 struct TuiHarness {
     writer: Box<dyn Write + Send>,
@@ -69,6 +92,7 @@ impl TuiHarness {
         let data_dir = PathBuf::from(format!("/tmp/oriontui-data-{pid}-{seq}"));
         let _ = std::fs::remove_dir_all(&runtime_dir);
         let _ = std::fs::remove_dir_all(&data_dir);
+        seed_onboarded_config(&data_dir);
         let repos = tempfile::tempdir().unwrap();
 
         let pty = native_pty_system()
@@ -767,6 +791,75 @@ fn tui_git_diff_modal() {
     tui.wait_for_text("no changes in main");
 }
 
+/// The DIFF VIEWER's COMMIT LIST end to end: a clean checkout with commits
+/// of its own opens on the whole branch instead of saying "no changes";
+/// `Tab` and `↓` walk to one commit and show exactly its files under its
+/// message; `⇧←`/`⇧→` step older and newer from the files; and a dirty
+/// checkout opens on its uncommitted changes, as it always did.
+#[test]
+fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
+    let mut tui = TuiHarness::spawn();
+    let repo = tui.make_repo("commits-proj");
+    // `origin/HEAD` on the first commit: what a worktree the DAEMON cut
+    // from origin sees.
+    repo_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo_git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    std::fs::write(repo.join("alpha.txt"), "alpha line\n").unwrap();
+    repo_git(&repo, &["add", "."]);
+    repo_git(
+        &repo,
+        &["commit", "-m", "add alpha", "-m", "the alpha body"],
+    );
+    std::fs::write(repo.join("beta.txt"), "beta line\n").unwrap();
+    repo_git(&repo, &["add", "."]);
+    repo_git(&repo, &["commit", "-m", "add beta"]);
+
+    tui.wait_for_text("create your first project");
+    add_project(&mut tui, &repo, "commits-proj");
+
+    // ---- nothing uncommitted: the whole branch, its commits listed ----
+    tui.send(CTRL_E);
+    tui.wait_for_text("Commits (2) · since origin/main");
+    tui.wait_for_selected("All changes");
+    tui.wait_for_text("Files (2)");
+    tui.wait_for_text("+alpha line");
+
+    // ---- Tab, ↓: the newest commit, exactly its files ----
+    tui.send(TAB);
+    tui.send(DOWN);
+    tui.wait_for_text("Files (1)");
+    tui.wait_for_text("+beta line");
+    tui.wait_for_gone("+alpha line");
+
+    // ---- Enter hands the keys back; ⇧← is the commit before, its
+    // message over its diff; ⇧→ the one after ----
+    tui.send(ENTER);
+    tui.send(SHIFT_LEFT);
+    tui.wait_for_text("the alpha body");
+    tui.wait_for_text("+alpha line");
+    tui.wait_for_gone("+beta line");
+    tui.send(SHIFT_RIGHT);
+    tui.wait_for_text("+beta line");
+    tui.wait_for_gone("the alpha body");
+    tui.send(ESC);
+    tui.wait_for_gone("Commits (");
+
+    // ---- something uncommitted: the view it always was, on top ----
+    std::fs::write(repo.join("wip.txt"), "wip line\n").unwrap();
+    tui.send(CTRL_E);
+    tui.wait_for_selected("Uncommitted changes");
+    tui.wait_for_text("+wip line");
+    tui.send(ESC);
+    tui.wait_for_gone("Commits (");
+}
+
 /// The BRANCH SWITCHER end to end: `c` lists the repo's branches, typing
 /// narrows them, `Enter` moves the root checkout on disk and the flash says
 /// where it landed; a dirty checkout stops on the prompt instead, where `s`
@@ -831,6 +924,92 @@ fn tui_branch_switcher_moves_the_root_checkout() {
         "{}",
         String::from_utf8_lossy(&stashes.stdout)
     );
+}
+
+/// A skill folder: `<root>/<name>/SKILL.md`, its frontmatter and a body.
+fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"),
+    )
+    .unwrap();
+}
+
+/// The SKILLS BROWSER over a home of the test's own: `^S` lists the user's
+/// skills and the checkout's — the user's folder reached through a
+/// symlink, as `~/.claude/skills` → `~/.cursor/skills` is on a Mac set up
+/// for both, and listed once — typing narrows them by description, the
+/// page reads the one under the cursor, `^d` moves one to that home's
+/// Trash behind a confirm, and Esc closes the browser.
+#[test]
+fn tui_skills_browser_lists_filters_reads_and_trashes() {
+    let home = tempfile::tempdir().unwrap();
+    let cursor_skills = home.path().join(".cursor/skills");
+    std::fs::create_dir_all(&cursor_skills).unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&cursor_skills, home.path().join(".claude/skills")).unwrap();
+    write_skill(
+        &cursor_skills,
+        "release-notes",
+        "Writes the changelog from merged pull requests",
+        "# Release notes\n\nGroup the merged pull requests by label.",
+    );
+    write_skill(&cursor_skills, "simplify", "Cleans up a diff", "# Simplify");
+    let mut tui = TuiHarness::spawn_with_env(&[
+        ("HOME", home.path().display().to_string()),
+        ("CLAUDE_CONFIG_DIR", String::new()),
+        ("CODEX_HOME", String::new()),
+        ("XDG_DATA_HOME", String::new()),
+    ]);
+    let repo = tui.make_repo("skills-proj");
+    write_skill(
+        &repo.join(".claude/skills"),
+        "deploy",
+        "Ships the app to staging",
+        "# Deploy",
+    );
+
+    tui.wait_for_text("create your first project");
+    add_project(&mut tui, &repo, "skills-proj");
+
+    // Three, not five: `.claude/skills` and `.cursor/skills` are one folder.
+    tui.send(CTRL_S);
+    tui.wait_for_text("Skills — skills-proj (3)");
+    tui.wait_for_selected("release-notes");
+    tui.wait_for_text("simplify");
+
+    // ---- a description narrows the list; the page follows the cursor ----
+    tui.type_str("staging");
+    tui.wait_for_text("Skills — skills-proj (1/3)");
+    tui.wait_for_selected("deploy");
+    tui.wait_for_text("Ships the app to staging");
+    tui.wait_for_text("project · ");
+    tui.send(CTRL_U);
+    tui.type_str("changelog");
+    tui.wait_for_selected("release-notes");
+    tui.wait_for_text("Group the merged pull requests by label.");
+    tui.wait_for_gone("deploy");
+
+    // ---- ^d asks, naming the folder; yes moves it to the Trash ----
+    tui.send(CTRL_U);
+    tui.wait_for_text("Skills — skills-proj (3)");
+    tui.send(CTRL_D);
+    tui.wait_for_text("Move the skill 'release-notes' to the Trash?");
+    tui.send(ENTER);
+    tui.wait_for_text("moved release-notes to the Trash");
+    tui.wait_for_text("Skills — skills-proj (2)");
+    let trashed = if cfg!(target_os = "macos") {
+        home.path().join(".Trash/release-notes")
+    } else {
+        home.path().join(".local/share/Trash/files/release-notes")
+    };
+    assert!(trashed.join("SKILL.md").is_file(), "in the Trash, whole");
+    assert!(!cursor_skills.join("release-notes").exists());
+
+    tui.send(ESC); // closes, filter and all
+    tui.wait_for_gone("Skills — skills-proj");
 }
 
 /// An SGR mouse report as the terminal would send it: `button` (0 = left,

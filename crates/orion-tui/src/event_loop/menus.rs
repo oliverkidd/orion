@@ -29,7 +29,7 @@ fn listed(action: Action) -> bool {
 /// The keys this terminal can press for `action`, when it has any.
 fn row_hint(app: &App, action: Action) -> Option<String> {
     let keys = app.keymap.shown_label(action);
-    (keys != crate::keymap::UNBOUND).then(|| keys)
+    (keys != crate::keymap::UNBOUND).then_some(keys)
 }
 
 /// A centered TYPE-AHEAD menu over `items`, titled `title`.

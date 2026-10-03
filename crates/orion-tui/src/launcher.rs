@@ -1399,6 +1399,42 @@ pub fn last_prompt(agent: &Agent) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+/// What carries a Claude session onto another account, in the words its
+/// card and the footer use, for the accounts `targets` names
+/// (`Config::continue_targets`): `continue on Claude B` when there is one,
+/// `continue on another account` when there are several. None with
+/// nowhere to go.
+pub fn continue_does(targets: &[(String, String)]) -> Option<String> {
+    match targets {
+        [] => None,
+        [(_, label)] => Some(format!("continue on {label}")),
+        _ => Some("continue on another account".into()),
+    }
+}
+
+/// The line a card stopped on a usage limit carries under Claude's words:
+/// [`continue_does`] under the key the live keymap gives it (`⇧C:
+/// continue on Claude B`), or the right-click menu's way to it when the
+/// action has no key.
+pub fn continue_hint(
+    keymap: &crate::keymap::Keymap,
+    targets: &[(String, String)],
+) -> Option<String> {
+    let does = continue_does(targets)?;
+    let keyed = crate::hints::line(
+        keymap,
+        &[crate::hints::Hint::Act(
+            crate::keymap::Action::ContinueOn,
+            &does,
+        )],
+    );
+    Some(if keyed.is_empty() {
+        format!("right-click: {does}")
+    } else {
+        keyed
+    })
+}
+
 // ---- the PROJECT DROPDOWN's list ----
 
 /// One project as the PROJECT DROPDOWN lists it.
@@ -1924,6 +1960,7 @@ mod tests {
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         }
     }
 

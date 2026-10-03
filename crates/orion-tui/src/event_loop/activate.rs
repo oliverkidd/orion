@@ -97,8 +97,10 @@ pub(super) fn diff_file(view: &mut DiffView, index: i64) {
 /// A row of the DIFF modal's list chosen — a click on it, or Enter on the
 /// cursor's own: the cursor lands there, and a tree directory's row folds
 /// or unfolds as well. On a file's row that is all there is to choose, so
-/// in the flat list this is `diff_file`.
+/// in the flat list this is `diff_file`. The keys are the file list's
+/// from then on, wherever they were.
 pub(super) fn diff_row(view: &mut DiffView, index: i64) {
+    view.commits_focused = false;
     let moved = view.select(index);
     if view.toggle_dir(view.cursor()) || moved {
         crate::git_diff::load_selected_diff(view);
@@ -136,6 +138,64 @@ pub(super) fn diff_filter_changed(view: &mut DiffView) {
     if view.apply_filter() {
         crate::git_diff::load_selected_diff(view);
     }
+}
+
+/// Move the DIFF modal's COMMIT LIST cursor to `index` (clamped) and put
+/// that row up when the cursor moved — ↑/↓ on the focused list, `⇧←`/`⇧→`
+/// from anywhere, the wheel over it, a click on a row.
+pub(super) fn diff_commit(view: &mut DiffView, index: i64) {
+    let Some(list) = &mut view.commits else {
+        return;
+    };
+    if list.select(index) {
+        crate::commit_list::show_selected(view);
+    }
+}
+
+/// `⇧←` / `⇧→`: the COMMIT LIST's next row down — older — or up — newer —
+/// without the keys leaving the files. The list runs newest first, so
+/// `⇧←` from the newest commit walks back through the branch.
+pub(super) fn diff_commit_step(view: &mut DiffView, older: bool) {
+    let Some(list) = &view.commits else {
+        return;
+    };
+    let step = if older { 1 } else { -1 };
+    diff_commit(view, list.selected as i64 + step);
+}
+
+/// `Enter` on the focused COMMIT LIST, or a second click on its row: the
+/// `older` row reads the next page; any other is up already, so the keys go
+/// back to its files.
+pub(super) fn diff_commit_chosen(view: &mut DiffView) {
+    let Some(list) = &view.commits else {
+        return;
+    };
+    if list.selected_row() == Some(crate::commit_list::Row::Older) {
+        crate::commit_list::show_selected(view);
+    } else {
+        view.commits_focused = false;
+    }
+}
+
+/// A click on a COMMIT LIST row: the arrow keys landing there — the list
+/// takes the keys and the row goes up — or, on the row the cursor is
+/// already on, `Enter` on it.
+pub(super) fn diff_commit_row(view: &mut DiffView, index: usize) {
+    let already = view
+        .commits
+        .as_ref()
+        .is_some_and(|list| list.selected == index);
+    if already && view.commits_focused {
+        diff_commit_chosen(view);
+        return;
+    }
+    view.commits_focused = true;
+    diff_commit(view, index as i64);
+}
+
+/// `Tab`: the keys to the COMMIT LIST, or back to the file list.
+pub(super) fn diff_focus_commits(view: &mut DiffView, commits: bool) {
+    view.commits_focused = commits && view.commits.is_some();
 }
 
 /// What Enter means on the SETTINGS OVERLAY's selected row, and so what a

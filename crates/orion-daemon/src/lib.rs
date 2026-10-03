@@ -1,6 +1,7 @@
 pub mod attach;
 pub mod claude_bg;
 pub mod config;
+pub mod continue_on;
 pub mod env_links;
 pub mod git;
 pub mod hooks;

@@ -289,6 +289,15 @@ pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
     }
 }
 
+/// What the box calls the harness it launches: its id — `claude`, a
+/// custom entry's — or, for a CLAUDE ACCOUNT on a machine with more than
+/// one, the email it is signed in as
+/// ([`crate::claude_accounts::short_name`]).
+pub fn harness_name(kind: AgentKind, custom: Option<&str>) -> String {
+    crate::claude_accounts::short_name(kind, custom)
+        .unwrap_or_else(|| custom.unwrap_or_else(|| kind.as_str()).to_string())
+}
+
 impl QuickLaunch {
     /// The launch the `quick_prompt_kind` SETTING describes: that harness
     /// plus its own MODEL / EFFORT defaults from the AGENTS TAB, no preset.
@@ -296,7 +305,12 @@ impl QuickLaunch {
     /// other launch surface does — the daemon joins the two into one
     /// `--model` id.
     pub fn from_config(target: QuickTarget, cfg: &Config) -> Self {
-        let kind = cfg.quick_prompt_kind();
+        // A CLAUDE ACCOUNT named there launches on its own defaults, which
+        // `of_kind` reads off its registry row.
+        let (kind, custom) = cfg.quick_prompt_harness();
+        if custom.is_some() {
+            return Self::of_kind(target, kind, custom, None, None, cfg);
+        }
         Self::of_kind(
             target,
             kind,
@@ -467,8 +481,8 @@ impl QuickLaunch {
     /// `Quick prompt · PR #42 · reviewer (claude · opus)`,
     /// `Quick prompt (claude · cloud · opus)`.
     pub fn title(&self) -> String {
-        let harness = self.custom.as_deref().unwrap_or_else(|| self.kind.as_str());
-        let opts: Vec<&str> = std::iter::once(harness)
+        let harness = harness_name(self.kind, self.custom.as_deref());
+        let opts: Vec<&str> = std::iter::once(harness.as_str())
             .chain(self.cloud.then_some("cloud"))
             .chain(self.model.as_deref())
             .chain(self.effort.as_deref())

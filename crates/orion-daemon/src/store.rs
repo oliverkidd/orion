@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use orion_core::clock::now_ms;
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, Link, LinkId, PrSeen, Project, ProjectId, PromptEntry,
-    TerminalId, TerminalTab, Worktree, WorktreeId, RECENT_PROMPTS_KEPT,
+    TerminalId, TerminalTab, UsageLimit, Worktree, WorktreeId, RECENT_PROMPTS_KEPT,
 };
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
@@ -327,6 +327,13 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE temp.project_merge;
     DROP TABLE temp.worktree_home;
     DROP TABLE temp.worktree_merge;
+    ",
+    // 29: the usage limit a Claude session stopped on (`Agent::usage_limit`),
+    // as JSON — set beside `needs_feedback` from the StopFailure hook,
+    // cleared as the row leaves it. Nullable: every existing row has none,
+    // and an older build reads the row as the red one it is.
+    "
+    ALTER TABLE agents ADD COLUMN usage_limit TEXT;
     ",
 ];
 
@@ -764,6 +771,36 @@ impl Store {
         Ok(())
     }
 
+    /// Record the usage limit the session stopped on, or clear it. Returns
+    /// whether the row changed, so the caller broadcasts only a real flip
+    /// — clearing a row with nothing recorded writes nothing.
+    pub fn set_agent_usage_limit(&self, id: &AgentId, limit: Option<&UsageLimit>) -> Result<bool> {
+        let json = limit.map(serde_json::to_string).transpose()?;
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE agents SET usage_limit = ?2 WHERE id = ?1 AND usage_limit IS NOT ?2",
+            params![id.as_str(), json],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Put the row on another harness — **Continue on** — with the model
+    /// and effort it launches with there. Name, worktree, session id and
+    /// launch context stay as they are.
+    pub fn set_agent_harness(
+        &self,
+        id: &AgentId,
+        kind: AgentKind,
+        custom_harness: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE agents SET kind = ?2, custom_harness = ?3, model = ?4, effort = ?5 WHERE id = ?1",
+            params![id.as_str(), kind.as_str(), custom_harness, model, effort],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_agent(&self, id: &AgentId) -> Result<()> {
         self.delete_by_id("agents", id.as_str())
     }
@@ -779,8 +816,11 @@ impl Store {
             .map(AgentId)
             .collect();
         drop(stmt);
+        // A usage limit is the reason a row is red, and a disconnected row
+        // is not: it goes with the status (the CLI's own wait for the
+        // reset died with it too).
         conn.execute(
-            "UPDATE agents SET status = 'disconnected', status_changed_at = ?1 WHERE status IN ('running', 'needs_feedback')",
+            "UPDATE agents SET status = 'disconnected', status_changed_at = ?1, usage_limit = NULL WHERE status IN ('running', 'needs_feedback')",
             params![now_ms()],
         )?;
         Ok(ids)
@@ -1032,7 +1072,7 @@ const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_orde
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
                              archived_at, unseen, cloud_session_id, recent_prompts, custom_harness, \
-                             issue_url";
+                             issue_url, usage_limit";
 const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command";
 const LINK_COLUMNS: &str = "id, worktree_id, url, sort_order";
 
@@ -1078,6 +1118,7 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         issue_url: r.get(16)?,
         recent_prompts: parse_prompts(r.get::<_, Option<String>>(14)?.as_deref()),
         custom_harness: r.get(15)?,
+        usage_limit: parse_usage_limit(r.get::<_, Option<String>>(17)?.as_deref()),
     })
 }
 
@@ -1110,6 +1151,13 @@ fn parse_prompts(json: Option<&str>) -> Vec<PromptEntry> {
         .into_iter()
         .filter(|p| !crate::prompt_history::is_injected(&p.text))
         .collect()
+}
+
+/// The `usage_limit` column: NULL is no limit, and so is a column that
+/// will not parse (a hand edit, a newer build's shape) — a row never
+/// fails to load over it.
+fn parse_usage_limit(json: Option<&str>) -> Option<UsageLimit> {
+    serde_json::from_str(json?).ok()
 }
 
 /// `alive` is daemon state, filled in by the registry like the agent's.
@@ -1175,6 +1223,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         let pr_url = "https://github.com/oliverkidd/orion/pull/42";
         store
@@ -1199,6 +1248,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         store.insert_agent(&codex_agent).unwrap();
         let cursor_agent = Agent {
@@ -1220,6 +1270,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         store.insert_agent(&cursor_agent).unwrap();
         let issue_url = "https://github.com/oliverkidd/orion/issues/15";
@@ -1242,6 +1293,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         store
             .insert_agent_with_launch_context(&issue_agent, true, None, Some(issue_url))
@@ -1284,6 +1336,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         store.insert_agent(&custom).unwrap();
         let (_, _, reloaded, _) = store.load_tree().unwrap();
@@ -1793,6 +1846,7 @@ mod tests {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
 
         // Default-named session: pending until the agent titles it, and the
@@ -1881,6 +1935,7 @@ mod tests {
                     alive: false,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 },
                 true,
             )
@@ -2010,9 +2065,24 @@ mod tests {
                     alive: false,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 })
                 .unwrap();
         }
+        // The red row is red over a usage limit: the limit goes with it.
+        let limited = AgentId("agent-c".into());
+        let limit = UsageLimit {
+            reason: orion_core::LimitReason::RateLimit,
+            message: Some("You've hit your session limit · resets 3:45pm".into()),
+        };
+        assert!(store.set_agent_usage_limit(&limited, Some(&limit)).unwrap());
+        assert!(
+            !store.set_agent_usage_limit(&limited, Some(&limit)).unwrap(),
+            "the same limit again changes nothing"
+        );
+        let agent = store.get_agent(&limited).unwrap().unwrap();
+        assert_eq!(agent.usage_limit.as_ref(), Some(&limit));
+        assert_eq!(agent.limit_reached(), Some(&limit));
         let swept = store.sweep_disconnected().unwrap();
         assert_eq!(swept.len(), 2);
         let (_, _, agents, _) = store.load_tree().unwrap();
@@ -2029,6 +2099,96 @@ mod tests {
                 .filter(|a| a.status == AgentStatus::Finished)
                 .count(),
             1
+        );
+        assert!(agents.iter().all(|a| a.usage_limit.is_none()));
+        assert!(
+            !store.set_agent_usage_limit(&limited, None).unwrap(),
+            "clearing a row with nothing recorded writes nothing"
+        );
+    }
+
+    /// **Continue on** puts the row on another harness: kind, registry id,
+    /// model and effort change together, and nothing else does.
+    #[test]
+    fn set_agent_harness_switches_the_row_and_keeps_the_rest() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_project(&Project {
+                id: ProjectId("p".into()),
+                name: "p".into(),
+                repo_path: "/tmp/p".into(),
+                sort_order: 0,
+            })
+            .unwrap();
+        store
+            .insert_worktree(&Worktree {
+                id: WorktreeId("w".into()),
+                project_id: ProjectId("p".into()),
+                path: "/tmp/p".into(),
+                branch: "main".into(),
+                is_main: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let id = AgentId("a".into());
+        store
+            .insert_agent(&Agent {
+                id: id.clone(),
+                worktree_id: WorktreeId("w".into()),
+                name: "Fix Login".into(),
+                status: AgentStatus::NeedsFeedback,
+                archived: false,
+                archived_at: 0,
+                unseen: false,
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+                session_id: Some("sid".into()),
+                cloud_session_id: None,
+                sort_order: 0,
+                status_changed_at: 0,
+                alive: false,
+                issue_url: None,
+                recent_prompts: Vec::new(),
+                usage_limit: None,
+            })
+            .unwrap();
+        store
+            .set_agent_harness(&id, AgentKind::Custom, Some("claude-b"), Some("opus"), None)
+            .unwrap();
+        let moved = store.get_agent(&id).unwrap().unwrap();
+        assert_eq!(moved.kind, AgentKind::Custom);
+        assert_eq!(moved.custom_harness.as_deref(), Some("claude-b"));
+        assert_eq!(moved.model.as_deref(), Some("opus"));
+        assert_eq!(moved.effort, None);
+        assert_eq!(moved.name, "Fix Login");
+        assert_eq!(moved.session_id.as_deref(), Some("sid"));
+        // And back: a built-in carries no registry id.
+        store
+            .set_agent_harness(&id, AgentKind::Claude, None, None, None)
+            .unwrap();
+        let back = store.get_agent(&id).unwrap().unwrap();
+        assert_eq!((back.kind, back.custom_harness), (AgentKind::Claude, None));
+    }
+
+    /// A `usage_limit` column a hand edit (or a newer build) left in a
+    /// shape this build can't read is no limit, never a row that fails to
+    /// load.
+    #[test]
+    fn an_unreadable_usage_limit_reads_as_none() {
+        assert_eq!(parse_usage_limit(None), None);
+        assert_eq!(parse_usage_limit(Some("not json")), None);
+        assert_eq!(
+            parse_usage_limit(Some(r#"{"reason":"a_reason_from_a_newer_build"}"#)),
+            None
+        );
+        assert_eq!(
+            parse_usage_limit(Some(r#"{"reason":"rate_limit","extra":1}"#)),
+            Some(UsageLimit {
+                reason: orion_core::LimitReason::RateLimit,
+                message: None,
+            })
         );
     }
 
@@ -2076,6 +2236,7 @@ mod tests {
                 alive: false,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             };
             store.insert_agent(&agent).unwrap();
             agent.id
@@ -2176,6 +2337,7 @@ mod tests {
                 alive: false,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             })
             .unwrap();
         let entry = |n: usize| PromptEntry {

@@ -55,6 +55,12 @@ pub struct Config {
     /// [`orion_core::harness::registry`]; a broken entry refuses its
     /// launches with the reason, never the whole daemon.
     pub harnesses: BTreeMap<String, orion_core::harness::HarnessOverride>,
+    /// CLAUDE ACCOUNTS beyond the default one (`claude_accounts`): each
+    /// a config dir under a stable id, launched as Claude's own row with
+    /// `CLAUDE_CONFIG_DIR` pointing there. The TUI's Agents tab and
+    /// first-run onboarding edit the list; the daemon spawns, resumes and
+    /// continues sessions on it through the registry.
+    pub claude_accounts: Vec<orion_core::claude_account::ClaudeAccount>,
     /// PROJECT SETTINGS: one entry per project set up differently from the
     /// rest, keyed by the project's repo path as the store holds it. The
     /// TUI's Project tab owns the map; the daemon reads the one key in it
@@ -84,6 +90,7 @@ impl Default for Config {
             link_env_files: true,
             custom_harnesses: Vec::new(),
             harnesses: BTreeMap::new(),
+            claude_accounts: Vec::new(),
             projects: BTreeMap::new(),
         }
     }
@@ -196,6 +203,23 @@ mod tests {
             Some("npm run dev"),
             "the project's run command reads"
         );
+    }
+
+    /// `claude_accounts` reads as the TUI writes it: two keys an entry,
+    /// `enabled` only when off.
+    #[test]
+    fn claude_accounts_read_as_ids_and_dirs() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"claude_accounts": [
+                {"id": "claude-2", "config_dir": "~/.claude-2"},
+                {"id": "claude-work", "config_dir": "/srv/claude", "enabled": false}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.claude_accounts.len(), 2);
+        assert!(cfg.claude_accounts[0].enabled);
+        assert!(!cfg.claude_accounts[1].enabled);
+        assert!(Config::default().claude_accounts.is_empty());
     }
 
     #[test]

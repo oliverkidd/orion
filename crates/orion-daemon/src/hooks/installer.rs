@@ -79,6 +79,11 @@ const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     ("PostToolUse", None),
     ("SubagentStart", None),
     ("SubagentStop", None),
+    // What Claude fires *instead of* Stop when the turn ends on an API
+    // error. No matcher: a usage limit (`rate_limit`, `billing_error`,
+    // `account_on_hold`) turns the row red with the limit as the reason,
+    // and every other error ends the turn like the Stop it replaced.
+    ("StopFailure", None),
 ];
 
 /// Codex has no Notification hook and no AskUserQuestion tool; its native
@@ -548,6 +553,16 @@ mod tests {
         assert!(notification[0].get("matcher").is_none());
         let pre = &settings["hooks"]["PreToolUse"];
         assert_eq!(pre[0]["matcher"], json!("AskUserQuestion"));
+        // StopFailure carries none either: every API error ends the turn,
+        // and a usage limit is one of them.
+        let failure = &settings["hooks"]["StopFailure"];
+        assert_eq!(failure.as_array().unwrap().len(), 1);
+        assert!(failure[0].get("matcher").is_none());
+        assert_eq!(failure[0]["_orionManaged"], json!(true));
+        assert!(failure[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=StopFailure"));
     }
 
     #[test]
@@ -785,6 +800,10 @@ mod tests {
                 "hooks": {
                     "Stop": [
                         { "hooks": [{ "type": "command", "command": "say done" }] }
+                    ],
+                    "StopFailure": [
+                        { "matcher": "rate_limit",
+                          "hooks": [{ "type": "command", "command": "say limit" }] }
                     ]
                 }
             }))
@@ -793,12 +812,18 @@ mod tests {
         .unwrap();
 
         install_claude_hooks(tmp.path()).unwrap();
+        install_claude_hooks(tmp.path()).unwrap();
         let settings = read_settings(tmp.path());
         assert_eq!(settings["permissions"]["allow"][0], json!("Bash(ls:*)"));
         let stop = settings["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "user group + orion group");
         assert_eq!(stop[0]["hooks"][0]["command"], json!("say done"));
         assert_eq!(stop[1]["_orionManaged"], json!(true));
+        let failure = settings["hooks"]["StopFailure"].as_array().unwrap();
+        assert_eq!(failure.len(), 2, "user group + orion group");
+        assert_eq!(failure[0]["matcher"], json!("rate_limit"));
+        assert_eq!(failure[0]["hooks"][0]["command"], json!("say limit"));
+        assert_eq!(failure[1]["_orionManaged"], json!(true));
     }
 
     #[test]

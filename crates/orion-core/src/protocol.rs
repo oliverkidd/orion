@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Max IPC frame size (length prefix sanity bound).
 pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
@@ -269,6 +269,22 @@ pub enum ClientRequest {
     RestartAgent {
         req_id: u64,
         id: AgentId,
+    },
+    /// **Continue on** another account: carry a Claude-dialect session onto
+    /// another Claude-dialect harness. The daemon stops its PTY,
+    /// copies its transcript (`projects/<slug>/<id>.jsonl`, and the `<id>/`
+    /// folder beside it) from the session's Claude config dir to the same
+    /// place under `harness`'s — never over a different file, never
+    /// deleting the source — switches the row to `harness` (name, worktree,
+    /// and the model and effort `harness` offers, kept), and resumes the
+    /// stored session id there. Refused for a Cloud row, an archived one,
+    /// a session with no transcript to move, and a `harness` (registry id)
+    /// that cannot take one ([`crate::harness::HarnessDescriptor::takes_claude_sessions`]).
+    /// Answered with `Ack`; the row reaches every client as an upsert.
+    ContinueAgentOn {
+        req_id: u64,
+        id: AgentId,
+        harness: String,
     },
     /// Queue a message on the Claude Cloud session a row launched
     /// (`claude -p <message> --cloud <id>`). Fire-and-forget by nature: the

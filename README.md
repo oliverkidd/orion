@@ -40,11 +40,13 @@ orion replaces the reading with a grid and a color. Every session is a card — 
 | **One grid, every session** | Project tabs across the top, a band per worktree, a card per session, and the live terminal of the card under the cursor. `j`/`k` walk the bands, `Enter` steps into the pane, `Esc` hands the keys back (`⇧Esc` is the agent's Esc). |
 | **A daemon that owns the PTYs** | Quit the TUI, shut the laptop, come back tomorrow. The agents never stopped. |
 | **Status dots you read instead of screens** | ● yellow mid-turn, ● blue finished and unread, ● green finished and read, ● red waiting on you. |
+| **Claude accounts** | Add a second Claude login in Settings → Agents (or at first run): its own config dir, your `CLAUDE.md`, settings and skills shared, signed in from inside orion. Each is named after its email, `Claude (you@example.com)`, and two signed in as one are flagged. A session that hits its usage limit goes red with Claude's reset time; `⇧C` carries it, conversation and all, onto the other account. |
 | **A task box, not a picker** | `⌘N` opens the quick prompt: type the task, `Enter`, and an agent is working on it. |
 | **Real git worktrees** | `⌘N` in the box flips the launch onto a fresh `git worktree`. Ignored `.env*` files from the main checkout are symlinked in by default. Delete asks before losing uncommitted work. |
 | **Linear, assigned to you** | `⌘L` lists issues assigned to you. Space marks, Enter starts one agent on the set and asks for a single PR. From the PR modal, `⌘L` attaches the selected pull request. Put `LINEAR_API_KEY` in the project's `.env` or `.env.local`. |
 | **Ghostty by default** | Settings picks Ghostty or Terminal.app. Stolen Command chords are unbound in Ghostty's config so they reach orion — reload with `⌘⇧,` after the first launch. |
-| **Diff, find, grep, browse** | `⌘E` the diff, `⌘P` the file finder, `⌘⇧F` grep, `⌘B` the tree. Markdown renders in place. `⌘O` opens the file in your editor (Cursor, VS Code, or whatever Settings → File editor names). |
+| **Diff, find, grep, browse** | `⌘E` the diff — uncommitted, the whole branch, or one commit at a time (`⇧←`/`⇧→`) — `⌘P` the file finder, `⌘⇧F` grep, `⌘B` the tree. Markdown renders in place. `⌘O` opens the file in your editor (Cursor, VS Code, or whatever Settings → File editor names). |
+| **Your skills, browsable** | `⌘S` lists every agent skill on the machine — yours, the project's, Cursor's and Codex's, installed plugins' — searchable by name and description, each read in place. `Enter` edits one, `^A` starts a new one, `^D` moves one to the Trash. |
 | **It follows you** | `orion ssh <host>` opens orion there. `orion tunnel <host>` puts that machine's TUI in a browser tab. |
 
 ## Supported harnesses
@@ -113,9 +115,9 @@ cd ~/code/my-app
 orion
 ```
 
-The splash appears. `Enter` adds the repo as your first project and opens the grid. Or register one first: `orion add ~/code/my-app`.
+The first launch opens a short setup: which agents to turn on (they all start off), worktree defaults, Linear and the outside terminal. `Esc` skips it, and Settings (`⌘,`) changes any of it later. Then the splash: `Enter` adds the repo as your first project and opens the grid. Or register one first: `orion add ~/code/my-app`.
 
-**2. Start an agent.** `⌘N` (`Ctrl+N` if the terminal never sends ⌘) opens the quick prompt. Type the task, `Enter`. `Tab` picks the harness, `⌘T` the checkout, `⌘P` the project.
+**2. Start an agent.** `⌘N` (`Ctrl+N` if the terminal never sends ⌘) opens the quick prompt. Type the task, `Enter`. `Tab` picks the harness, `⌘/` the model, `⌘.` the checkout, `⌘P` the project.
 
 **3. Read the grid.** `↑` / `↓` walk the bands. `Enter` steps into the pane. `Esc` leaves it. `Space` on a card sends the next turn without opening the session. `q` quits the TUI; sessions keep running in the daemon.
 

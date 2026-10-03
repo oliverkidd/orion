@@ -381,6 +381,10 @@ async fn main_loop(
     // spawns (VimEvent generations keep them apart).
     let (vim_tx, mut vim_rx) = tokio::sync::mpsc::unbounded_channel::<VimEvent>();
     app.vim_tx = Some(vim_tx);
+    // CLAUDE ACCOUNTS: who each is signed in as, read off the loop
+    // (`claude_accounts::request_refresh`); a name that changed lands here.
+    let (accounts_tx, mut accounts_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    app.accounts_tx = Some(accounts_tx);
     // The INPUT LATENCY PROBE (`ORION_PERF_LOG`); None outside a
     // measurement run.
     let mut perf = crate::perf::Perf::from_env();
@@ -441,6 +445,10 @@ async fn main_loop(
                 // And one other project's — the pass that keeps every
                 // row's count warm, `sweep_open_prs` for issues.
                 crate::issues::sweep_others(&mut app);
+                // Who each CLAUDE ACCOUNT is signed in as, on a slower
+                // beat of its own: a `/login` typed in a session's pane
+                // renames its account here.
+                crate::claude_accounts::request_refresh(&mut app, false);
                 // Whatever the answers above changed since the last tick
                 // goes to disk, off the loop; the next launch paints from it.
                 if let Some((cache, store, live)) = crate::pr_cache::take_flush(&mut app) {
@@ -611,6 +619,12 @@ async fn main_loop(
                 // Never None: app.vim_tx keeps a sender alive.
                 if let Some(ev) = ev {
                     handle_vim_event(&mut app, ev);
+                }
+            }
+            changed = accounts_rx.recv() => {
+                // Never None: `app.accounts_tx` keeps a sender alive.
+                if changed.is_some() {
+                    app.dirty = true;
                 }
             }
             answer = pr_rx.recv() => {
@@ -2400,16 +2414,22 @@ fn handle_vim_event(app: &mut App, ev: VimEvent) {
 /// it — hands the tree browser its preview back with the (possibly
 /// just-edited) file reloaded. The FILE TABS re-read the file whether the
 /// editor was theirs or floating over them, and land the cursor on the
-/// strip — the level Ctrl+Q steps back to.
+/// strip — the level Ctrl+Q steps back to. The SKILLS BROWSER reads its
+/// folders again, and a `claude auth` run the CLAUDE ACCOUNTS.
 fn close_vim(app: &mut App) {
     let from_tree = app
         .vim
         .as_ref()
         .is_some_and(|v| v.embedded || v.markdown.is_some());
+    let account_auth = app.vim.as_ref().is_some_and(|v| v.account_auth);
     app.vim = None;
+    if account_auth {
+        crate::claude_accounts::auth_closed(app);
+    }
     match &mut app.overlay {
         Some(Overlay::Tree(view)) if from_tree => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
+        Some(Overlay::Skills(_)) => crate::skills::editor_closed(app),
         _ => {}
     }
 }
@@ -2680,6 +2700,9 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     if matches!(&app.overlay, Some(Overlay::Linear(_))) {
         return crate::linear::paste(app, text);
     }
+    if matches!(&app.overlay, Some(Overlay::Skills(_))) {
+        return crate::skills::paste(app, text);
+    }
     let Some(overlay) = &mut app.overlay else {
         return false;
     };
@@ -2717,6 +2740,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         }
         Overlay::Diff(view) => {
             view.filter.insert_str(text);
+            view.commits_focused = false;
             activate::diff_filter_changed(view);
         }
         // The query, or the commit message while that is being typed.
@@ -2986,8 +3010,9 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Tree(_)
         | Overlay::FileTabs(_)
         | Overlay::Metrics(_)
-        |         Overlay::ProjectPicker(_) => true,
-        Overlay::Onboard(view) => !view.editing_email,
+        | Overlay::Skills(_)
+        | Overlay::ProjectPicker(_) => true,
+        Overlay::Onboard(view) => !view.asking(),
         _ => false,
     }
 }
@@ -3275,6 +3300,7 @@ fn dispatch_action(
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
+        Action::ClaudeAccounts => open_claude_accounts(app, None),
         Action::Metrics => open_metrics(app, out),
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
@@ -3530,6 +3556,7 @@ fn dispatch_action(
         Action::OpenPullRequest => launcher::open_pull_request(app, out),
         Action::OpenIssue => launcher::open_issue(app, out),
         Action::DuplicateSession => launcher::duplicate_session(app),
+        Action::ContinueOn => launcher::continue_on(app),
         Action::OpenOutsideTerminal => open_outside_terminal(app),
         Action::OpenInCursor => open_checkout_in_cursor(app),
         Action::OpenOutside => menus::open_outside_menu(app),
@@ -3545,6 +3572,7 @@ fn dispatch_action(
         Action::FindFile => open_file_finder(app),
         Action::Grep => open_grep_view(app),
         Action::TreeBrowser => open_tree_browser(app),
+        Action::Skills => crate::skills::open(app),
         // New shell terminal, spawned in the worktree's directory.
         // (Cmd+T never reaches a TUI — the emulator opens its own tab.)
         Action::NewTerminal => create_terminal_for_context(app, out),
@@ -3643,7 +3671,12 @@ fn cycle_effort(app: &mut App) {
         Some(b) => (b.launch.kind, b.launch.custom.clone(), b.launch.model.clone()),
         None => {
             let cfg = crate::config::Config::load();
-            (cfg.quick_prompt_kind(), None, cfg.default_model(cfg.quick_prompt_kind()))
+            let (kind, custom) = cfg.quick_prompt_harness();
+            let model = cfg
+                .effective_harness(kind, custom.as_deref())
+                .default_model()
+                .map(str::to_string);
+            (kind, custom, model)
         }
     };
     let id = custom
@@ -3866,6 +3899,35 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 .unwrap_or_default();
             ("Edit link".into(), "URL".into(), current)
         }
+        PromptKind::NewSkill { view } => (
+            "New skill".into(),
+            crate::skills::new_skill_label(view).into(),
+            String::new(),
+        ),
+        PromptKind::ClaudeSignIn { id } => (
+            format!(
+                "Sign in · {}",
+                crate::config::Config::load()
+                    .effective_harness_by_id(id)
+                    .display_label()
+            )
+            .into(),
+            "email to sign in as — fills Claude's login page (empty = choose in the browser)"
+                .into(),
+            String::new(),
+        ),
+        PromptKind::AddClaudeAccount => {
+            let cfg = crate::config::Config::load();
+            let next = crate::claude_accounts::plan_new(&cfg, "").map_or_else(
+                |_| "~/.claude-2".into(),
+                |new| crate::claude_accounts::tilde(&new.dir),
+            );
+            (
+                "Add a Claude account".into(),
+                format!("short name — its config dir is ~/.claude-<name> (empty = {next})").into(),
+                String::new(),
+            )
+        }
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -3917,9 +3979,11 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Quit
             | Action::Help
             | Action::Settings
+            | Action::ClaudeAccounts
             | Action::Metrics
             | Action::Hosts
             | Action::AgentPresets
+            | Action::Skills
     )
 }
 
@@ -4150,7 +4214,7 @@ fn ghostty_app_in(roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
 
 /// `⌘C`, or `^Y` in a terminal that never sends ⌘: copy the path under
 /// a file overlay's cursor.
-fn copies_path(key: &KeyEvent) -> bool {
+pub(crate) fn copies_path(key: &KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::SUPER),
         KeyCode::Char('y') => key.modifiers.contains(KeyModifiers::CONTROL),
@@ -4186,6 +4250,7 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
                 1,
             )
         }),
+        Some(Overlay::Skills(view)) => crate::skills::selected_file(view),
         _ => None,
     }
 }
@@ -4204,7 +4269,7 @@ fn open_in_cursor(cli: &std::path::Path, root: &std::path::Path, file: &str, lin
 /// window at the line. Over ssh — Cursor would open on the remote
 /// machine's screen — or with no Cursor installed, the built-in editor
 /// opens it instead, as Enter would.
-fn open_file_outside(app: &mut App, root: &std::path::Path, file: &str, line: u64) {
+pub(crate) fn open_file_outside(app: &mut App, root: &std::path::Path, file: &str, line: u64) {
     let cli = crate::editor::cursor_cli().filter(|_| !app.is_remote);
     if let Some(cli) = cli {
         app.flash = Some(if open_in_cursor(&cli, root, file, line) {
@@ -4418,17 +4483,23 @@ fn load_worktree_files(
 /// the pruned set is written back. Restored marks sink to the bottom, so
 /// the modal opens on the first unreviewed file.
 ///
+/// The same read lists the branch's commits since its base for the COMMIT
+/// LIST (`git_diff::read_opening`), so a checkout with nothing uncommitted
+/// but commits of its own opens on those instead of saying "no changes".
+///
 /// A checkout the changed-files badge already knows to be clean is told so
 /// on the spot instead of being shown a modal that closes again; the badge
 /// can be two seconds behind an agent, so git is still asked, and the
-/// modal opens after all if it disagrees (`App::diff_probe`).
+/// modal opens after all if it disagrees — or if the branch has commits to
+/// show (`App::diff_probe`).
 fn open_diff_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
     };
+    let base = crate::config::Config::load().worktree_base_branch;
     let Some(jobs) = app.view_jobs.clone() else {
         // No loop to land an answer on (unit tests): read inline.
-        match crate::git_diff::read_listing(&path) {
+        match crate::git_diff::read_opening(&path, &base) {
             Ok(listing) => show_diff_listing(app, path, branch, listing),
             Err(msg) => app.flash = Some(msg),
         }
@@ -4464,7 +4535,7 @@ fn open_diff_view(app: &mut App) {
     jobs.run(move || {
         Some(crate::view_jobs::Answer::DiffListing {
             ticket,
-            result: crate::git_diff::read_listing(&path),
+            result: crate::git_diff::read_opening(&path, &base),
         })
     });
 }
@@ -4477,7 +4548,7 @@ fn show_diff_listing(
     branch: String,
     listing: crate::view_jobs::DiffListing,
 ) {
-    if listing.files.is_empty() {
+    if listing.is_empty() {
         app.flash = Some(format!("no changes in {branch}"));
         return;
     }
@@ -4586,6 +4657,20 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         }
         Answer::Files { ticket, result } => land_worktree_files(app, ticket, result),
         Answer::DiffListing { ticket, result } => land_diff_listing(app, ticket, result),
+        Answer::ScopeFiles {
+            ticket,
+            scope,
+            result,
+        } => {
+            if let Some(Overlay::Diff(view)) = &mut app.overlay {
+                crate::commit_list::land_scope(view, ticket, scope, result);
+            }
+        }
+        Answer::CommitPage { ticket, result } => {
+            if let Some(Overlay::Diff(view)) = &mut app.overlay {
+                crate::commit_list::land_page(view, ticket, result);
+            }
+        }
         Answer::DiffText {
             view: id,
             ticket,
@@ -4602,6 +4687,7 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             Some(Overlay::FileTabs(view)) => view.land_preview(ticket, *preview),
             _ => {}
         },
+        Answer::Skills { ticket, skills } => crate::skills::land(app, ticket, skills),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
             app.flash = Some(flash);
@@ -4651,7 +4737,8 @@ fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, S
 /// `git status` came back for a `g`: fill the DIFF VIEWER that opened ahead
 /// of it — or close it, saying why, when there is nothing to show — or, for
 /// the checkout that was told "no changes" off the badge, open it after all
-/// when git found some and nothing else has taken the screen since.
+/// when git found some, or the branch has commits to show, and nothing
+/// else has taken the screen since.
 fn land_diff_listing(
     app: &mut App,
     ticket: u64,
@@ -4663,7 +4750,7 @@ fn land_diff_listing(
     };
     if let Some((_, path, branch)) = probe {
         if let Ok(listing) = result {
-            if !listing.files.is_empty() && app.overlay.is_none() && app.vim.is_none() {
+            if !listing.is_empty() && app.overlay.is_none() && app.vim.is_none() {
                 app.flash = None;
                 show_diff_listing(app, path, branch, listing);
             }
@@ -4675,7 +4762,7 @@ fn land_diff_listing(
         _ => return,
     };
     match result {
-        Ok(listing) if !listing.files.is_empty() => {
+        Ok(listing) if !listing.is_empty() => {
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
                 crate::git_diff::fill_view(view, listing);
             }
@@ -4913,7 +5000,8 @@ fn handle_vim_key(app: &mut App, key: KeyEvent) {
         close_vim(app);
         return;
     }
-    if is_cmd_o(&key) {
+    // ⌘O hands an editor's file to Cursor; a `claude auth` run has none.
+    if is_cmd_o(&key) && !vim.account_auth {
         open_editor_file_in_cursor(app);
         return;
     }
@@ -5412,6 +5500,15 @@ fn menu_items_for_session(a: &orion_core::Agent) -> Vec<MenuItem> {
 /// menu is where they go.
 fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> {
     let mut items = menu_items_for_session(a);
+    // A Claude session's other accounts, beside Restart: **Continue on
+    // Claude B** carries the conversation over and resumes it there.
+    if let Some(at) = items
+        .iter()
+        .position(|item| matches!(item.action, MenuAction::RestartAgent(_)))
+    {
+        let targets = crate::config::Config::load().continue_targets(a);
+        items.splice(at + 1..at + 1, launcher::continue_items(a, targets));
+    }
     // The card's pull request and the issue it was started from, what `⇧V`
     // and `⇧I` open (`launcher::open_pull_request`, `launcher::open_issue`):
     // ahead of the trailing Delete on an archived card, which keeps no
@@ -5934,6 +6031,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
+        Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
@@ -6012,7 +6110,12 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 };
                 // A typed setting's prompt stood in for the overlay: Esc
                 // keeps the old value and puts the overlay back on its row.
-                let back_to_settings = matches!(prompt.kind, PromptKind::SettingText { .. });
+                let back_to_settings = matches!(
+                    prompt.kind,
+                    PromptKind::SettingText { .. }
+                        | PromptKind::ClaudeSignIn { .. }
+                        | PromptKind::AddClaudeAccount
+                );
                 // The comment box stood in for the ISSUES MODAL: Esc puts
                 // the modal back on its row, the comment unposted.
                 let back_to_issues = match &prompt.kind {
@@ -6022,6 +6125,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // And the PULL REQUESTS MODAL's, the same way.
                 let back_to_prs = match &prompt.kind {
                     PromptKind::PrComment { back, .. } => back.clone(),
+                    _ => None,
+                };
+                // A new skill's name stood in for the SKILLS BROWSER.
+                let back_to_skills = match &prompt.kind {
+                    PromptKind::NewSkill { view } => Some(view.clone()),
                     _ => None,
                 };
                 // A QUICK PROMPT opened over either modal stood on it: Esc
@@ -6044,6 +6152,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     crate::issues::reopen(app, view);
                 } else if let Some(view) = back_to_prs {
                     crate::pr_modal::reopen(app, *view);
+                } else if let Some(view) = back_to_skills {
+                    crate::skills::reopen(app, *view);
                 } else if let Some(under) = back_to_modal {
                     under.reopen(app);
                 } else if let Some((worktree, name)) = back_to_presets {
@@ -6173,11 +6283,29 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 app.overlay = None;
                 run_pending_action(app, *first, out);
             }
+            // **Add account**'s "no": add it, sharing nothing.
+            KeyCode::Char('n') if matches!(confirm.action, PendingAction::AddClaudeAccount(_)) => {
+                let PendingAction::AddClaudeAccount(new) = confirm.action.clone() else {
+                    unreachable!("guarded above");
+                };
+                app.overlay = None;
+                add_claude_account(app, new, false);
+            }
+            // A removed account's config dir to the Trash too.
+            KeyCode::Char('t')
+                if matches!(confirm.action, PendingAction::RemoveClaudeAccount { .. }) =>
+            {
+                let PendingAction::RemoveClaudeAccount { id } = confirm.action.clone() else {
+                    unreachable!("guarded above");
+                };
+                app.overlay = None;
+                remove_claude_account(app, &id, true);
+            }
             KeyCode::Esc | KeyCode::Char('n') => {
-                // Backing out lands where you were: a settings reset
-                // reopens the overlay, a preset delete the presets list —
-                // not the panels.
-                let to_settings = matches!(confirm.action, PendingAction::ResetSettings);
+                // Backing out lands where you were: a dialog the settings
+                // overlay opened reopens it, a preset delete the presets
+                // list, a skill's the SKILLS BROWSER — not the panels.
+                let to_settings = confirm.action.from_settings();
                 let to_presets = match &confirm.action {
                     PendingAction::DeleteAgentPreset {
                         index,
@@ -6186,9 +6314,15 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     } => Some((*index, worktree.clone(), quick.clone())),
                     _ => None,
                 };
+                let to_skills = match &confirm.action {
+                    PendingAction::TrashSkill { view, .. } => Some((**view).clone()),
+                    _ => None,
+                };
                 app.overlay = None;
                 if to_settings {
                     reopen_settings(app);
+                } else if let Some(view) = to_skills {
+                    crate::skills::reopen(app, view);
                 } else if let Some((index, worktree, quick)) = to_presets {
                     crate::preset_overlays::reopen_presets_list(
                         app,
@@ -6223,6 +6357,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             // the flat list and the tree alike; the diff pages on PgUp/PgDn.
             let half = (view.list_area.height / 2).max(1) as i64;
             let page = view.view_height.max(1) as i32;
+            let commits = view.commits.as_ref().map(|list| list.selected as i64);
             match key.code {
                 // Esc closes the modal, filter and all (`closes_on_esc`).
                 KeyCode::Char('d') if ctrl => {
@@ -6238,10 +6373,17 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // Reviewed files sink to the bottom; marking advances to the
                 // next file and unmarking to the next still-marked file, so
                 // held Ctrl+r sweeps either way (see
-                // `DiffView::toggle_reviewed`).
+                // `DiffView::toggle_reviewed`). Only the uncommitted
+                // changes' marks are stored: a commit's or the branch's
+                // live as long as the modal (`DiffView::scope_marks`), and
+                // a pull request has no checkout to store them under.
                 KeyCode::Char('r') if ctrl => {
                     if let Some(changed) = view.toggle_reviewed() {
-                        crate::review::store_marks(&view.root, &view.head_key, &view.reviewed);
+                        if view.scope == crate::git_diff::DiffScope::Uncommitted
+                            && view.prefetched.is_none()
+                        {
+                            crate::review::store_marks(&view.root, &view.head_key, &view.reviewed);
+                        }
                         if changed {
                             crate::git_diff::load_selected_diff(view);
                         }
@@ -6254,8 +6396,31 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     activate::diff_tree_toggled(view);
                     app.diff_tree = view.tree.is_some();
                 }
+                // Tab hands the keys to the COMMIT LIST and back.
+                KeyCode::Tab | KeyCode::BackTab if commits.is_some() => {
+                    activate::diff_focus_commits(view, !view.commits_focused)
+                }
+                // ⇧←/⇧→ step to the older / newer row of the COMMIT LIST
+                // from wherever the keys are — the diff's own keys, beside
+                // the ⇧↑/⇧↓ that scroll it.
+                KeyCode::Left if shift && commits.is_some() => {
+                    activate::diff_commit_step(view, true)
+                }
+                KeyCode::Right if shift && commits.is_some() => {
+                    activate::diff_commit_step(view, false)
+                }
                 KeyCode::Down if shift => view.scroll_by(1),
                 KeyCode::Up if shift => view.scroll_by(-1),
+                // With the COMMIT LIST focused, ↑/↓ walk its rows, each
+                // putting its files up, and Enter hands the keys back to
+                // them.
+                KeyCode::Down if view.commits_focused => {
+                    activate::diff_commit(view, commits.unwrap_or(0) + 1)
+                }
+                KeyCode::Up if view.commits_focused => {
+                    activate::diff_commit(view, commits.unwrap_or(0) - 1)
+                }
+                KeyCode::Enter if view.commits_focused => activate::diff_commit_chosen(view),
                 KeyCode::Down => activate::diff_file(view, view.cursor() as i64 + 1),
                 KeyCode::Up => activate::diff_file(view, view.cursor() as i64 - 1),
                 // The tree folds on the TREE BROWSER's keys: →/← open and
@@ -6272,9 +6437,12 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 KeyCode::Home => view.scroll = 0,
                 KeyCode::End => view.scroll = view.max_scroll(),
                 // Everything else feeds the always-on fuzzy filter, which
-                // edits like a terminal line (see text_input).
+                // edits like a terminal line (see text_input). The filter
+                // is the file list's: typing takes the keys back from the
+                // COMMIT LIST.
                 _ => {
                     if view.filter.handle_key(&key).changed() {
+                        view.commits_focused = false;
                         activate::diff_filter_changed(view);
                     }
                 }
@@ -6457,6 +6625,15 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let tabs = crate::config::tab_count();
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // A CLAUDE ACCOUNTS row's own verbs: `o` signs it out, `⌫` removes it.
+    let account = || {
+        !on_tabs
+            && tab == crate::config::agents_tab()
+            && matches!(
+                crate::config::Config::load().account_row(selected),
+                Some(crate::config::AccountRow::Account(_))
+            )
+    };
 
     let cmd = match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => SettingsCmd::Close,
@@ -6489,6 +6666,8 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up if selected == 0 => SettingsCmd::FocusTabs,
         KeyCode::Char('k') | KeyCode::Up => SettingsCmd::Move(selected - 1),
         KeyCode::Enter | KeyCode::Char(' ') => activate::settings_row_cmd(hotkeys, selected),
+        KeyCode::Char('o') if account() => SettingsCmd::SignOut(selected),
+        KeyCode::Backspace | KeyCode::Delete if account() => SettingsCmd::RemoveAccount(selected),
         KeyCode::Char('a') | KeyCode::Char('+') if hotkeys => SettingsCmd::Capture { add: true },
         KeyCode::Backspace | KeyCode::Delete if hotkeys => SettingsCmd::ResetHotkey,
         KeyCode::Char('x') if hotkeys => SettingsCmd::ClearHotkey,
@@ -6546,6 +6725,8 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
             }
         }
         SettingsCmd::Apply(i, delta) => apply_setting_at(app, tab, i, delta),
+        SettingsCmd::SignOut(i) => confirm_sign_out(app, i),
+        SettingsCmd::RemoveAccount(i) => confirm_remove_account(app, i),
         SettingsCmd::Capture { add } => {
             if let Some(view) = settings_mut(app) {
                 view.capture = Some(crate::app::HotkeyCapture {
@@ -6617,6 +6798,10 @@ enum SettingsCmd {
     EnterList,
     Move(usize),
     Apply(usize, i32),
+    /// `o` on a CLAUDE ACCOUNTS row.
+    SignOut(usize),
+    /// `⌫` on a CLAUDE ACCOUNTS row.
+    RemoveAccount(usize),
     Capture { add: bool },
     ResetHotkey,
     ClearHotkey,
@@ -6766,6 +6951,26 @@ fn save_config(app: &mut App, cfg: &crate::config::Config) -> bool {
 }
 
 fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
+    // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
+    // the email that fills Claude's login page; ←/→ are its switch, which
+    // the cycle below flips like any harness's. **Add account** asks for
+    // the new one's name.
+    if tab == crate::config::agents_tab() {
+        use crate::config::AccountRow;
+        match (crate::config::Config::load().account_row(index), delta) {
+            (Some(AccountRow::Account(id)), 0) => {
+                return open_prompt(app, PromptKind::ClaudeSignIn { id });
+            }
+            (Some(AccountRow::Add), 0) => return open_prompt(app, PromptKind::AddClaudeAccount),
+            (Some(AccountRow::Add), _) => {
+                if let Some(view) = settings_mut(app) {
+                    view.info("Enter: name a new account");
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
     if let Some(spec) = crate::config::setting_at(tab, index) {
         // A PROJECT TAB row edits the selected project's entry — every
         // one of them typed. With no project to edit — an empty tree —
@@ -6879,6 +7084,149 @@ fn open_settings(app: &mut App) {
         app.forget_settings_focus();
     }
     reopen_settings(app);
+}
+
+/// The settings overlay on the Agents tab's CLAUDE ACCOUNTS section, the
+/// cursor on account `id`'s row — the default account's when None or
+/// gone. **Claude accounts** in the COMMAND PALETTE, and where an add or a
+/// removal lands.
+pub(crate) fn open_claude_accounts(app: &mut App, id: Option<&str>) {
+    use crate::config::AccountRow;
+    let (tab, first) = crate::config::locate_accounts();
+    let row = id
+        .and_then(|id| {
+            crate::config::Config::load()
+                .account_rows()
+                .iter()
+                .position(|row| matches!(row, AccountRow::Account(have) if have == id))
+        })
+        .map_or(first, |at| first + at);
+    app.settings_tab = tab;
+    app.remember_settings_row(tab, row);
+    app.settings_on_tabs = false;
+    reopen_settings(app);
+}
+
+/// `o` on a CLAUDE ACCOUNTS row: sign it out, behind a confirm that
+/// stands in for the overlay — both answers put it back.
+fn confirm_sign_out(app: &mut App, index: usize) {
+    let cfg = crate::config::Config::load();
+    let Some(crate::config::AccountRow::Account(id)) = cfg.account_row(index) else {
+        return;
+    };
+    let entry = cfg.effective_harness_by_id(&id);
+    let dir = crate::claude_accounts::dir_of(&entry)
+        .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
+    app.remember_settings_row(crate::config::agents_tab(), index);
+    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
+        title: "Sign out".into(),
+        message: format!(
+            "Sign {} out of Claude Code?\n{dir} keeps its settings and transcripts; its sessions \
+             can't\nreach Claude until it is signed in again.",
+            entry.display_label()
+        ),
+        action: PendingAction::SignOutClaude { id },
+        area: ratatui::layout::Rect::default(),
+    }));
+}
+
+/// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
+/// config.json, behind a confirm asking whether its config dir goes to
+/// the Trash too — kept unless `t` says so. The default account and a
+/// hand-written `harnesses` entry are not orion's to remove: the notice
+/// says what to do instead.
+fn confirm_remove_account(app: &mut App, index: usize) {
+    let cfg = crate::config::Config::load();
+    let Some(crate::config::AccountRow::Account(id)) = cfg.account_row(index) else {
+        return;
+    };
+    if !cfg.is_extra_account(&id) {
+        let why = if AgentKind::parse(&id) == Some(AgentKind::Claude) {
+            "the default account stays — ←/→ switches it off".to_string()
+        } else {
+            format!("{id} is a harnesses entry in config.json — edit the file to remove it")
+        };
+        if let Some(view) = settings_mut(app) {
+            view.warn(why);
+        }
+        return;
+    }
+    let entry = cfg.effective_harness_by_id(&id);
+    let dir = crate::claude_accounts::dir_of(&entry)
+        .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
+    app.remember_settings_row(crate::config::agents_tab(), index);
+    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
+        title: "Remove account".into(),
+        message: format!(
+            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. {dir} — its \
+             login,\nsettings and transcripts — stays on disk unless it goes to the Trash.",
+            entry.display_label()
+        ),
+        action: PendingAction::RemoveClaudeAccount { id },
+        area: ratatui::layout::Rect::default(),
+    }));
+}
+
+/// **Add account**, its name typed: ask whether to share the default
+/// account's setup — when it has any to share — then add it.
+fn ask_to_share(app: &mut App, name: &str) {
+    let cfg = crate::config::Config::load();
+    let new = match crate::claude_accounts::plan_new(&cfg, name) {
+        Ok(new) => new,
+        Err(why) => {
+            reopen_settings(app);
+            if let Some(view) = settings_mut(app) {
+                view.warn(why);
+            }
+            return;
+        }
+    };
+    let shared = crate::claude_accounts::shareable(&cfg);
+    if shared.is_empty() {
+        return add_claude_account(app, new, false);
+    }
+    let from = crate::claude_accounts::default_dir(&cfg)
+        .map_or_else(|| "~/.claude".into(), |d| crate::claude_accounts::tilde(&d));
+    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
+        title: "Add a Claude account".into(),
+        message: format!(
+            "Add {} in {}, and share {from}'s setup with it?\nLinked, so an edit in either \
+             account is an edit in both: {}.\nIts login, history and transcripts stay its own.",
+            new.id,
+            crate::claude_accounts::tilde(&new.dir),
+            shared.join(", ")
+        ),
+        action: PendingAction::AddClaudeAccount(new),
+        area: ratatui::layout::Rect::default(),
+    }));
+}
+
+/// Add `new` — sharing the default account's setup when `share` says so
+/// — and land on its row, the notice saying what happened.
+fn add_claude_account(app: &mut App, new: crate::claude_accounts::NewAccount, share: bool) {
+    let result = crate::claude_accounts::add(&new, share);
+    open_claude_accounts(app, Some(&new.id));
+    crate::claude_accounts::request_refresh(app, true);
+    if let Some(view) = settings_mut(app) {
+        match result {
+            Ok(note) => view.info(note),
+            Err(why) => view.warn(why),
+        }
+    }
+}
+
+/// Remove account `id` — its config dir to the Trash when `trash` says
+/// so — and land back on the section.
+fn remove_claude_account(app: &mut App, id: &str, trash: bool) {
+    let result = crate::claude_accounts::remove(id, trash);
+    open_claude_accounts(app, None);
+    crate::claude_accounts::request_refresh(app, true);
+    if let Some(view) = settings_mut(app) {
+        match result {
+            Ok(note) => view.info(note),
+            Err(why) => view.warn(why),
+        }
+    }
 }
 
 /// Swap a session picker for the settings overlay parked on that
@@ -7079,6 +7427,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         PromptKind::NewWorktree { .. }
         | PromptKind::RenameProject { .. }
         | PromptKind::SettingText { .. }
+        | PromptKind::ClaudeSignIn { .. }
+        | PromptKind::AddClaudeAccount
         | PromptKind::AgentPresetTask { .. } => true,
         PromptKind::QuickPrompt(launch) => launch.launches_empty(),
         _ => false,
@@ -7096,6 +7446,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     under.reopen(app);
                 }
             }
+            PromptKind::NewSkill { view } => crate::skills::reopen(app, (**view).clone()),
             _ => {}
         }
         app.flash = Some("cancelled: empty input".into());
@@ -7262,6 +7613,14 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                 url: value,
             });
         }
+        PromptKind::NewSkill { view } => crate::skills::create(app, *view, &value),
+        // The overlay goes back under the modal, so the account's row
+        // says who it is signed in as once `claude auth login` exits.
+        PromptKind::ClaudeSignIn { id } => {
+            reopen_settings(app);
+            crate::claude_accounts::sign_in(app, &id, Some(&value));
+        }
+        PromptKind::AddClaudeAccount => ask_to_share(app, &value),
     }
 }
 
@@ -7344,7 +7703,16 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                 index,
             );
         }
+        PendingAction::TrashSkill { view, dir, name } => crate::skills::trash(app, *view, dir, name),
         PendingAction::ResetSettings => reset_settings(app),
+        PendingAction::AddClaudeAccount(new) => add_claude_account(app, new, true),
+        PendingAction::SignOutClaude { id } => {
+            // The overlay goes back under the modal, so its row reads the
+            // account again once `claude auth logout` exits.
+            reopen_settings(app);
+            crate::claude_accounts::sign_out(app, &id);
+        }
+        PendingAction::RemoveClaudeAccount { id } => remove_claude_account(app, &id, false),
         PendingAction::Quit => app.should_quit = true,
     }
 }
@@ -7545,6 +7913,9 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::SendCloudMessage(id) => open_prompt(app, PromptKind::CloudMessage { id }),
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
+        MenuAction::ContinueOn { id, harness, label } => {
+            launcher::continue_on_harness(app, id, harness, label, out)
+        }
         MenuAction::RenameAgent(id) => open_prompt(app, PromptKind::RenameAgent { id }),
         MenuAction::ArchiveAgent(id) => archive_agent(app, id),
         MenuAction::UnarchiveAgent(id) => activate::unarchive(app, id, out),
@@ -9260,7 +9631,7 @@ fn select_word_at(app: &mut App, cell: (u16, u16)) {
 /// OSC 52 is also the fallback for a local host with no display tool, and it
 /// is silently dropped by terminals that do not implement it (Terminal.app),
 /// so the flash names the route it took rather than claiming success.
-fn copy_and_flash(app: &mut App, text: &str, label: &str) {
+pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
     // Unit tests exercise the copy flows; don't clobber the developer's real
     // clipboard, and don't depend on their terminal or their $SSH_TTY.
     if cfg!(test) {
@@ -9429,7 +9800,8 @@ fn pointer_wants_resize(app: &App, column: u16, row: u16) -> bool {
     }
     match &app.overlay {
         Some(Overlay::Diff(view)) => {
-            view.files_drag.is_some() || on_vsplit(view.splitter_x(), view.area, column, row)
+            view.files_drag.is_some()
+                || on_vsplit(view.splitter_x(), view.panes_area(), column, row)
         }
         Some(Overlay::Tree(view)) => {
             view.files_drag.is_some() || on_vsplit(view.splitter_x(), view.area, column, row)
@@ -9689,13 +10061,35 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         return;
     }
     // Diff modal: the wheel over the file list walks its cursor a row a
-    // notch (↑/↓'s own step), anywhere else it scrolls the diff; a click on
-    // a file-list row selects that file (and folds or unfolds a tree
-    // directory's), a drag on the files/diff border resizes the file list;
-    // everything else is swallowed.
+    // notch (↑/↓'s own step), over the COMMIT LIST its cursor, anywhere
+    // else it scrolls the diff; a click on a file-list row selects that file
+    // (and folds or unfolds a tree directory's), one on a COMMIT LIST row
+    // puts that row up, a drag on the files/diff border resizes the file
+    // list; everything else is swallowed.
     if let Some(Overlay::Diff(view)) = &mut app.overlay {
-        let over_files = view.area.contains(mouse_pos) && mouse.column < view.splitter_x();
+        let commits = view.commits.as_ref().map(|list| {
+            let first = list.window_start(list.list_area.height as usize);
+            (
+                list.area,
+                list.list_area,
+                first,
+                list.row_count(),
+                list.selected,
+            )
+        });
+        let over_commits = commits.is_some_and(|(area, ..)| area.contains(mouse_pos));
+        let over_files = view.panes_area().contains(mouse_pos) && mouse.column < view.splitter_x();
         match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if over_commits => {
+                let step = if mouse.kind == MouseEventKind::ScrollUp {
+                    -1
+                } else {
+                    1
+                };
+                let selected = commits.map_or(0, |(.., selected)| selected as i64);
+                activate::diff_commit(view, selected + step);
+                app.dirty = true;
+            }
             MouseEventKind::ScrollUp if over_files => {
                 activate::diff_file(view, view.cursor() as i64 - 1);
                 app.dirty = true;
@@ -9716,9 +10110,16 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // Border grab zone: the two touching border cells at the
                 // files/diff boundary.
                 let bx = view.splitter_x();
-                if on_vsplit(bx, view.area, mouse.column, mouse.row) {
+                if on_vsplit(bx, view.panes_area(), mouse.column, mouse.row) {
                     view.files_drag = Some(bx as i32 - mouse.column as i32);
                     return;
+                }
+                if let Some((_, list, first, len, _)) = commits {
+                    if let Some(index) = crate::list_hit::row_at(list, first, len, mouse_pos) {
+                        activate::diff_commit_row(view, index);
+                        app.dirty = true;
+                        return;
+                    }
                 }
                 let area = view.list_area;
                 let first = view.window_start(area.height as usize);
@@ -9894,6 +10295,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Linear(_))) {
         crate::linear::handle_mouse(app, mouse, mouse_pos, out);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Skills(_))) {
+        crate::skills::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::BranchSwitch(_))) {
@@ -10656,7 +11061,8 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                         _ => placeholder::discard_pr(app, &placeholder, out),
                     }
                 }
-                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _) => {
+                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _)
+                | (Some(PendingIntent::Note(note)), _) => {
                     app.flash = Some(note);
                 }
                 (
@@ -11440,6 +11846,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -11469,6 +11876,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -11646,6 +12054,7 @@ mod tests {
             vec![FeedbackAlert {
                 session: "agent-2".into(),
                 place: "demo · main".into(),
+                limit: None,
             }]
         );
         assert!(!app.pending_ding, "waiting on the user is not done");
@@ -12225,6 +12634,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -12757,7 +13167,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter: open a folder"), "{text}");
+        assert!(text.contains("create your first project"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
         assert!(text.contains("q: quit"), "{text}");
         for dead in ["d: remove", "m: menu", "/: search"] {
@@ -12774,7 +13184,7 @@ mod tests {
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("new agent"), "{text}");
-        assert!(!text.contains("open a folder"), "{text}");
+        assert!(!text.contains("create your first project"), "{text}");
     }
 
     /// A tempdir holding `ws/alpha` (a git repo) and `ws/beta` (not one),
@@ -12798,7 +13208,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter: open alpha"), "{text}");
+        assert!(text.contains("Enter open alpha"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
 
         let mut out = Vec::new();
@@ -12821,7 +13231,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter: open a folder"), "{text}");
+        assert!(text.contains("create your first project"), "{text}");
         let mut out = Vec::new();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         let Some(Overlay::Prompt(p)) = &app.overlay else {
@@ -16192,6 +16602,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             }
         };
@@ -16247,6 +16658,7 @@ diff --git a/src/c.rs b/src/c.rs
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             }),
         };
         // A long-running turn outranks a more recent finish, because a
@@ -16329,6 +16741,7 @@ diff --git a/src/c.rs b/src/c.rs
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             }),
         };
         hse(
@@ -16389,6 +16802,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -16457,6 +16871,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -17508,7 +17923,7 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected model submenu");
             };
-            assert_eq!(menu.items[3].label, "sonnet ✓");
+            assert_eq!(menu.items[3].label, "sonnet · latest ✓");
             assert_eq!(menu.hover, 3, "hover starts on the configured model");
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
@@ -17592,6 +18007,20 @@ diff --git a/src/c.rs b/src/c.rs
             .to_string()
     }
 
+    /// The model id the hovered row of a model submenu launches with — not
+    /// its label, which may dress the id up (`opus · latest`).
+    fn hovered_model(app: &App) -> String {
+        let Some(Overlay::Menu(menu)) = &app.overlay else {
+            panic!("expected a menu, got {:?}", app.overlay);
+        };
+        match &menu.items[menu.hover].action {
+            MenuAction::NewAgentOfKind {
+                model: Some(model), ..
+            } => model.clone(),
+            other => panic!("expected a model row, got {other:?}"),
+        }
+    }
+
     /// With the switch on, the harness picked on `n` — and a model drilled
     /// into through `→` — become the AGENTS TAB defaults: the next picker
     /// opens on that harness with its `✓` on that model, and the QUICK
@@ -17649,7 +18078,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(menu.title.as_deref(), Some("Claude model"));
             assert!(menu.items.len() >= 2, "{:?}", menu.items);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let picked = hovered_choice(&app);
+            let picked = hovered_model(&app);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 matches!(
@@ -17678,7 +18107,16 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("{:?}", app.overlay);
             };
-            assert_eq!(menu.items[menu.hover].label, format!("{picked} ✓"));
+            assert_eq!(
+                menu.items[menu.hover].label,
+                format!(
+                    "{} ✓",
+                    crate::config::model_row_label(
+                        &picked,
+                        Some(orion_core::harness::HarnessCatalog::Claude)
+                    )
+                )
+            );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
         });
     }
@@ -18659,6 +19097,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: false,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -19184,6 +19623,7 @@ diff --git a/src/c.rs b/src/c.rs
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         })
     }
 
@@ -20671,6 +21111,7 @@ diff --git a/src/c.rs b/src/c.rs
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
 
         // a1 is the selected session; its upsert lands under w2.
@@ -20862,6 +21303,7 @@ diff --git a/src/c.rs b/src/c.rs
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         })
     }
 
@@ -22261,6 +22703,235 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
+    /// `test_repo` with `origin/HEAD` on its first commit — what a worktree
+    /// the DAEMON cut sees — and two commits of its own on top of it.
+    fn repo_with_commits(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let repo = test_repo(dir);
+        run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        run_git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        std::fs::write(repo.join("b.txt"), "bee\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "add b"]);
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        run_git(
+            &repo,
+            &["commit", "-am", "edit a", "-m", "- why it changed"],
+        );
+        repo
+    }
+
+    fn diff_paths(app: &App) -> Vec<String> {
+        diff_view(app)
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect()
+    }
+
+    /// `⌘E` on the checkout `seed_repo_tree` put under the cursor.
+    fn open_changes(app: &mut App, out: &mut Vec<ClientRequest>) {
+        press(app, KeyCode::Char('e'), KeyModifiers::CONTROL, out);
+    }
+
+    fn commit_row(app: &App) -> Option<crate::commit_list::Row> {
+        diff_view(app).commits.as_ref()?.selected_row()
+    }
+
+    /// `⌘E` on a clean checkout whose branch has commits of its own opens on
+    /// the whole branch — where it used to say "no changes" — with the
+    /// commits listed across the top.
+    #[test]
+    fn ctrl_e_on_a_clean_branch_opens_on_its_commits() {
+        use crate::commit_list::Row;
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = repo_with_commits(&dir);
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            let mut out = Vec::new();
+            open_changes(&mut app, &mut out);
+            assert!(
+                matches!(
+                    diff_view(&app).scope,
+                    crate::git_diff::DiffScope::Branch { .. }
+                ),
+                "{:?}",
+                diff_view(&app).scope
+            );
+            assert_eq!(diff_paths(&app), ["a.txt", "b.txt"]);
+            assert_eq!(commit_row(&app), Some(Row::Branch));
+
+            let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let screen = buffer_text(&terminal);
+            for needle in [
+                "Commits (2) · since origin/main",
+                "All changes",
+                "2 files  +2 -1",
+                "edit a",
+                "1 file  +1 -0",
+                "main · all changes: a.txt",
+            ] {
+                assert!(screen.contains(needle), "{needle:?}\n{screen}");
+            }
+            assert!(app.flash.is_none(), "{:?}", app.flash);
+        });
+    }
+
+    /// The COMMIT LIST's keys: `Tab` gives it the keys and `↓` walks it,
+    /// each commit's own files up as the cursor lands; `Enter` hands the
+    /// keys back; `⇧←`/`⇧→` step older and newer from the files; typing is
+    /// the files' filter again.
+    #[test]
+    fn the_commit_list_walks_and_steps_one_commit_at_a_time() {
+        use crate::commit_list::Row;
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = repo_with_commits(&dir);
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            let mut out = Vec::new();
+            open_changes(&mut app, &mut out);
+
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert!(diff_view(&app).commits_focused);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Commit(0)));
+            assert_eq!(diff_paths(&app), ["a.txt"]);
+            let view = diff_view(&app);
+            assert_eq!(view.header[2], "edit a", "the message heads the diff");
+            assert_eq!(view.header[4], "- why it changed");
+            assert!(view.diff.contains("+edited"), "{}", view.diff);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Commit(1)));
+            assert_eq!(diff_paths(&app), ["b.txt"]);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Commit(1)), "the oldest ends it");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(!diff_view(&app).commits_focused, "Enter: the files' keys");
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Commit(0)), "⇧→: newer");
+            assert_eq!(diff_paths(&app), ["a.txt"]);
+            assert!(!diff_view(&app).commits_focused, "the keys stay put");
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Branch));
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Branch), "the top ends it");
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
+            assert_eq!(commit_row(&app), Some(Row::Commit(1)), "⇧←: older");
+
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('b'), KeyModifiers::NONE, &mut out);
+            let view = diff_view(&app);
+            assert!(!view.commits_focused, "typing is the files' filter");
+            assert_eq!(view.filter, "b");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none());
+            assert!(out.is_empty(), "the commit list never talks to the daemon");
+        });
+    }
+
+    /// `^R` on a commit's file marks it for as long as the modal is up and
+    /// stores nothing: the checkout's stored marks are its uncommitted
+    /// changes', and a commit's would replace them.
+    #[test]
+    fn a_mark_on_a_commit_is_never_stored() {
+        use crate::commit_list::Row;
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("reviewed.json");
+        crate::review::with_store_path(store, || {
+            with_default_config(|| {
+                let repo = repo_with_commits(&dir);
+                std::fs::write(repo.join("wip.txt"), "wip\n").unwrap();
+                let mut app = App::new();
+                seed_repo_tree(&mut app, &repo);
+                let mut out = Vec::new();
+                let ctrl_r = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                    press(app, KeyCode::Char('r'), KeyModifiers::CONTROL, out)
+                };
+                open_changes(&mut app, &mut out);
+                assert_eq!(commit_row(&app), Some(Row::Uncommitted), "dirty: as it was");
+                assert_eq!(diff_paths(&app), ["wip.txt"]);
+                ctrl_r(&mut app, &mut out);
+
+                press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
+                assert_eq!(commit_row(&app), Some(Row::Commit(0)));
+                ctrl_r(&mut app, &mut out);
+                assert!(diff_view(&app).reviewed.contains_key("a.txt"));
+
+                let head = crate::git_diff::head_oid(&repo).unwrap();
+                let stored = crate::review::load_marks(&repo, &head);
+                assert!(stored.contains_key("wip.txt"), "{stored:?}");
+                assert!(!stored.contains_key("a.txt"), "{stored:?}");
+            })
+        });
+    }
+
+    /// INPUT PARITY: a click on a COMMIT LIST row is the arrows landing
+    /// there — the list takes the keys and the row's files go up — a second
+    /// click on it is `Enter`, and the wheel over the list walks it.
+    #[test]
+    fn a_click_on_a_commit_row_is_the_arrows_landing_there() {
+        use crate::commit_list::Row;
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = repo_with_commits(&dir);
+            let mut out = Vec::new();
+            let mut open = || {
+                let mut app = App::new();
+                seed_repo_tree(&mut app, &repo);
+                open_changes(&mut app, &mut out);
+                app
+            };
+            let mut by_key = open();
+            let mut by_click = open();
+            press(&mut by_key, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            press(&mut by_key, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut by_key, KeyCode::Down, KeyModifiers::NONE, &mut out);
+
+            let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut by_click)).unwrap();
+            let (x, y) = find_cell(&terminal, "add b");
+            let click = mev(MouseEventKind::Down(MouseButton::Left), x, y);
+            handle_mouse(&mut by_click, click, &mut out);
+            let state = |app: &App| {
+                let view = diff_view(app);
+                (
+                    view.scope.clone(),
+                    diff_paths(app),
+                    commit_row(app),
+                    view.commits_focused,
+                    view.header.clone(),
+                    view.diff.clone(),
+                )
+            };
+            assert_eq!(state(&by_click), state(&by_key));
+
+            handle_mouse(&mut by_click, click, &mut out);
+            assert!(
+                !diff_view(&by_click).commits_focused,
+                "a second click is Enter"
+            );
+            handle_mouse(&mut by_click, mev(MouseEventKind::ScrollUp, x, y), &mut out);
+            assert_eq!(
+                commit_row(&by_click),
+                Some(Row::Commit(0)),
+                "the wheel walks it"
+            );
+            assert_eq!(diff_paths(&by_click), ["a.txt"]);
+            assert!(out.is_empty());
+        });
+    }
+
     #[test]
     fn diff_modal_ctrl_u_clears_filter_before_moving() {
         let mut app = App::new();
@@ -22586,6 +23257,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -22611,6 +23283,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: false,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -22925,6 +23598,7 @@ diff --git a/src/c.rs b/src/c.rs
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         for a in [
             agent("ask", "w2", AgentStatus::NeedsFeedback, false),
@@ -23381,6 +24055,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -23826,6 +24501,9 @@ diff --git a/src/c.rs b/src/c.rs
             "Follow new",
             "New worktree",
             "Hide missing CLIs",
+            "Claude accounts",
+            "Claude",
+            "Add account",
             "Claude",
             "Enabled",
             "Model",
@@ -23849,13 +24527,12 @@ diff --git a/src/c.rs b/src/c.rs
             "the old flat labels are gone:\n{text}"
         );
 
-        // Headers and blanks are not rows the cursor can land on: five ↓
-        // from the first row reach Claude's Enabled row, not a header.
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        // Headers and blanks are not rows the cursor can land on: seven ↓
+        // from the first row — the head's five, the CLAUDE ACCOUNTS
+        // section's two — reach Claude's Enabled row, not a header.
+        for _ in 0..7 {
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        }
         let (_, claude_enabled) = locate_agent("claude", HarnessField::Enabled).unwrap();
         assert_eq!(settings_view(&app).selected, claude_enabled);
 
@@ -23863,6 +24540,258 @@ diff --git a/src/c.rs b/src/c.rs
         let (x, y) = find_cell(&terminal, "Codex");
         click(&mut app, x, y, &mut out);
         assert_eq!(settings_view(&app).selected, claude_enabled);
+    }
+
+    // ---- CLAUDE ACCOUNTS on the Agents tab ----
+
+    /// A temp home holding the default account (signed in as `a@b.co`, its
+    /// record in `~/.claude.json`) and `claude-2` in `~/.claude-2`, the
+    /// config pinned beside them and the accounts read once — the loop's
+    /// first beat. `f` gets the home.
+    fn with_two_accounts<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path();
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::create_dir_all(root.join(".claude-2")).unwrap();
+        std::fs::write(
+            root.join(".claude.json"),
+            r#"{"oauthAccount": {"emailAddress": "a@b.co"}}"#,
+        )
+        .unwrap();
+        let config = root.join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": root.join(".claude-2").display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let places = crate::claude_accounts::Places {
+            home: Some(root.to_path_buf()),
+            default_dir: Some(root.join(".claude")),
+            default_record: Some(orion_core::claude_account::Record {
+                file: root.join(".claude.json"),
+                legacy: root.join(".claude/.config.json"),
+            }),
+        };
+        crate::claude_accounts::with_places(places, || {
+            crate::config::with_config_path(config, || {
+                crate::claude_accounts::refresh_now();
+                f(root)
+            })
+        })
+    }
+
+    /// The settings overlay on the CLAUDE ACCOUNTS row `at` (0 = the
+    /// default account).
+    fn open_account_row(app: &mut App, at: usize, out: &mut Vec<ClientRequest>) {
+        let (tab, first) = crate::config::locate_accounts();
+        open_settings_on(app, tab, out);
+        for _ in 0..first + at {
+            press(app, KeyCode::Char('j'), KeyModifiers::NONE, out);
+        }
+        assert_eq!(settings_view(app).selected, first + at);
+    }
+
+    /// Enter on an account asks for the email to sign in as, then runs
+    /// Claude Code's own `claude auth login` for its dir in the modal —
+    /// the overlay back underneath, to say who it is once that exits.
+    #[test]
+    fn enter_on_an_account_signs_it_in_as_the_email_typed() {
+        with_two_accounts(|root| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 1, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::ClaudeSignIn { id: "claude-2".into() }),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "c@d.co", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            let ran = crate::claude_accounts::take_ran();
+            assert_eq!(ran.len(), 1);
+            assert_eq!(ran[0].args, ["auth", "login", "--email", "c@d.co"]);
+            assert_eq!(
+                ran[0].env,
+                [(
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    root.join(".claude-2").display().to_string()
+                )]
+            );
+            // Esc on the email backs out to the row, nothing run.
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                settings_view(&app).selected,
+                crate::config::AGENTS_HEAD.len() + 1
+            );
+            assert!(crate::claude_accounts::take_ran().is_empty());
+        });
+    }
+
+    /// `o` signs an account out behind a confirm; `Esc` there changes
+    /// nothing and lands back on the row.
+    #[test]
+    fn o_signs_an_account_out_behind_a_confirm() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 0, &mut out);
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                if c.action == PendingAction::SignOutClaude { id: "claude".into() }));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert!(crate::claude_accounts::take_ran().is_empty());
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            let ran = crate::claude_accounts::take_ran();
+            assert_eq!(ran.len(), 1);
+            assert_eq!(ran[0].args, ["auth", "logout"]);
+            assert!(ran[0].env.is_empty(), "the default account's own dir");
+        });
+    }
+
+    /// `⌫` removes an added account behind a confirm that keeps its dir
+    /// unless asked; the default account is not orion's to remove.
+    #[test]
+    fn backspace_removes_an_added_account_and_keeps_its_dir() {
+        with_two_accounts(|root| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 0, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert!(settings_view(&app)
+                .notice
+                .as_ref()
+                .is_some_and(|(n, _)| n.contains("the default account stays")));
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                if c.action == PendingAction::RemoveClaudeAccount { id: "claude-2".into() }));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert!(crate::config::Config::load().claude_accounts.is_empty());
+            assert!(root.join(".claude-2").is_dir(), "kept unless asked");
+            assert_eq!(
+                settings_view(&app).selected,
+                crate::config::AGENTS_HEAD.len(),
+                "back on the section"
+            );
+        });
+    }
+
+    /// **Add account**: a name, then whether to share the default
+    /// account's setup — `n` adds it empty — and the cursor lands on it.
+    #[test]
+    fn add_account_names_it_then_asks_to_share() {
+        with_two_accounts(|root| {
+            std::fs::write(root.join(".claude/CLAUDE.md"), "be terse").unwrap();
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 2, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p))
+                if p.kind == PromptKind::AddClaudeAccount));
+            type_text(&mut app, "work", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                if matches!(&c.action, PendingAction::AddClaudeAccount(new) if new.id == "claude-work")));
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
+            let cfg = crate::config::Config::load();
+            assert_eq!(cfg.claude_accounts.last().unwrap().id, "claude-work");
+            assert!(root.join(".claude-work").is_dir());
+            assert!(
+                !root.join(".claude-work/CLAUDE.md").exists(),
+                "started empty"
+            );
+            assert_eq!(
+                settings_view(&app).selected,
+                crate::config::AGENTS_HEAD.len() + 2,
+                "on its own row"
+            );
+            // A name the registry already holds is refused in the notice.
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            type_text(&mut app, "2", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(settings_view(&app)
+                .notice
+                .as_ref()
+                .is_some_and(|(n, _)| n.contains("`claude-2` is already a harness")));
+        });
+    }
+
+    /// ←/→ on an account is its switch, as on any harness's Enabled row.
+    #[test]
+    fn arrows_on_an_account_switch_it() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 1, &mut out);
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert!(!crate::config::Config::load().claude_accounts[0].enabled);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(crate::config::Config::load().claude_accounts[0].enabled);
+        });
+    }
+
+    /// The section as drawn: each account by its email and dir, and one
+    /// email twice flagged with its fix.
+    #[test]
+    fn the_accounts_section_draws_names_and_the_same_account_warning() {
+        with_two_accounts(|root| {
+            std::fs::write(
+                root.join(".claude-2/.claude.json"),
+                r#"{"oauthAccount": {"emailAddress": "a@b.co"}, "x": 1}"#,
+            )
+            .unwrap();
+            crate::claude_accounts::refresh_now();
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 0, &mut out);
+            let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            for needle in [
+                "Claude accounts",
+                "Claude (a@b.co)",
+                "[on · ~/.claude · same as ~/.claude-2]",
+                "[on · ~/.claude-2 · same as ~/.claude]",
+                "Add account",
+                "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
+                "private browser window",
+                "Claude (a@b.co) · ~/.claude-2",
+                "Enter: sign in  o: sign out",
+            ] {
+                assert!(text.contains(needle), "{needle}:\n{text}");
+            }
+        });
+    }
+
+    /// **Claude accounts** in the COMMAND PALETTE opens the section.
+    #[test]
+    fn the_palette_opens_the_accounts_section() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            run_action(&mut app, crate::keymap::Action::ClaudeAccounts);
+            let view = settings_view(&app);
+            assert_eq!(
+                (view.tab, view.selected, view.on_tabs),
+                (
+                    crate::config::agents_tab(),
+                    crate::config::AGENTS_HEAD.len(),
+                    false
+                )
+            );
+        });
     }
 
     // ---- settings tabs & hotkeys ----
@@ -25699,6 +26628,7 @@ diff --git a/src/c.rs b/src/c.rs
                         alive: true,
                         issue_url: None,
                         recent_prompts: Vec::new(),
+                        usage_limit: None,
                     }),
                 },
             );
@@ -25772,6 +26702,7 @@ diff --git a/src/c.rs b/src/c.rs
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         })
     }
 
@@ -26395,6 +27326,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -26462,6 +27394,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -27267,6 +28200,7 @@ diff --git a/src/c.rs b/src/c.rs
                         alive: true,
                         issue_url: None,
                         recent_prompts: Vec::new(),
+                        usage_limit: None,
                     }),
                 },
             );
@@ -28696,6 +29630,7 @@ diff --git a/src/c.rs b/src/c.rs
                         alive: true,
                         issue_url: None,
                         recent_prompts: Vec::new(),
+                        usage_limit: None,
                     }),
                 },
             );
@@ -30606,6 +31541,7 @@ diff --git a/src/c.rs b/src/c.rs
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 }),
             },
         );
@@ -31240,6 +32176,14 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "Skills",
+                |app| {
+                    seed_tree(app);
+                    run_action(app, crate::keymap::Action::Skills);
+                },
+                None,
+            ),
+            (
                 "BranchSwitch",
                 |app| {
                     seed_tree(app);
@@ -31444,6 +32388,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Issues(_) => "Issues",
             Overlay::PullRequests(_) => "PullRequests",
             Overlay::Linear(_) => "Linear",
+            Overlay::Skills(_) => "Skills",
             Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
@@ -31475,7 +32420,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 21, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 22, "a variant came or went: {seen:?}");
         });
     }
 

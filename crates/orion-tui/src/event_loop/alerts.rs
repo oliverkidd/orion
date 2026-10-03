@@ -51,6 +51,7 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId) -> Option<FeedbackAlert> {
     Some(FeedbackAlert {
         session: a.name.clone(),
         place,
+        limit: a.limit_reached().map(orion_core::UsageLimit::label),
     })
 }
 
@@ -85,10 +86,14 @@ pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
 
 /// The notifier to run for `alert`, as a program and its argv — never a
 /// shell line, so the only quoting is AppleScript's own. macOS shows
-/// *orion* / *`<session>` needs feedback* / *`<project> · <branch>`*;
+/// *orion* / *`<session>` needs feedback* / *`<project> · <branch>`* —
+/// *`<session>`: limit reached* for one stopped on a usage limit;
 /// `notify-send` gets the same as app name, summary and body.
 fn notifier_command(alert: &FeedbackAlert, macos: bool) -> (&'static str, Vec<String>) {
-    let summary = format!("{} needs feedback", alert.session);
+    let summary = match alert.limit {
+        Some(limit) => format!("{}: {limit}", alert.session),
+        None => format!("{} needs feedback", alert.session),
+    };
     if macos {
         let mut script = format!(
             "display notification {} with title \"orion\" subtitle {}",
@@ -136,6 +141,7 @@ mod tests {
         FeedbackAlert {
             session: session.into(),
             place: place.into(),
+            limit: None,
         }
     }
 
@@ -185,6 +191,14 @@ mod tests {
                 "demo · main"
             ]
         );
+
+        // A session stopped on a usage limit says so instead.
+        let limited = FeedbackAlert {
+            limit: Some("limit reached"),
+            ..alert("Fix Login", "demo · main")
+        };
+        let (_, args) = notifier_command(&limited, false);
+        assert_eq!(args[1], "Fix Login: limit reached");
     }
 
     /// The bell path writes exactly one BEL through the backend; `off` is

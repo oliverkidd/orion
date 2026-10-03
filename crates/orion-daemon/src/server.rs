@@ -536,6 +536,28 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 ClientRequest::RestartAgent { req_id, id } => {
                     reply_done(&out_tx, req_id, daemon.restart_agent(&id).await).await;
                 }
+                ClientRequest::ContinueAgentOn {
+                    req_id,
+                    id,
+                    harness,
+                } => {
+                    // A transcript runs to megabytes and the respawn is a
+                    // login shell: off the request loop, and off the async
+                    // workers, so this connection's keystrokes never wait
+                    // on the copy.
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            daemon.continue_agent_on(&id, &harness)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(anyhow::anyhow!("continuing the session failed: {e}"))
+                        });
+                        reply_done(&out_tx, req_id, result).await;
+                    });
+                }
                 ClientRequest::SendCloudMessage {
                     req_id,
                     id,

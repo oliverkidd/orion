@@ -1526,6 +1526,18 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
                 } else {
                     spans.push(Span::raw(value));
                 }
+                // A CLAUDE ACCOUNT's id says which dir, its email whose
+                // login: with more than one account, the row says both.
+                if *field == PresetField::Kind {
+                    if let Some(email) =
+                        crate::claude_accounts::short_name(editor.kind, editor.custom.as_deref())
+                    {
+                        spans.push(Span::styled(
+                            format!("  {email}"),
+                            Style::default().fg(th.dim),
+                        ));
+                    }
+                }
                 if *field == PresetField::Text {
                     let what = match editor.text {
                         PresetText::Prefix => "  one box, sent before your task",

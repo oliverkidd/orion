@@ -164,9 +164,7 @@ impl TitleState {
         match self.kind {
             AgentKind::Claude => true,
             AgentKind::Custom => {
-                let config = crate::config::Config::load();
-                let all =
-                    orion_core::harness::registry(&config.harnesses, &config.custom_harnesses);
+                let all = crate::registry::harness_registry();
                 orion_core::harness::resolve(&all, self.kind, self.custom_harness.as_deref())
                     .map(|descriptor| descriptor.claude_like())
                     .unwrap_or(false)
@@ -401,6 +399,7 @@ mod tests {
                     alive: false,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 },
                 true,
             )

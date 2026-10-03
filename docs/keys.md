@@ -36,11 +36,15 @@ reload (`⌘⇧,`).
 | Action | Key | Twin | What it opens |
 |---|---|---|---|
 | New agent | `⌘N`, `⌘I` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
+| Select model | `⌘/` | `^/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
+| Cycle effort | `⇧⌘/`, `⌘?` | `^Y` | step the model's effort (high, low, …) in the QUICK PROMPT and the Agents tab default |
+| Select worktree | `⌘.` | `^T` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree** |
 | Jump to… | `⌘K` | `^K` | fuzzy jump across every project, worktree, session and open pull request (below); its last row opens a folder as a project |
 | Go to file | `⌘P` | `^P` | the FILE FINDER for the selected worktree |
 | Find in files | `⌘⇧F` | `^⇧F`, `⇧F` | `git grep` into the same modal (`^⇧F` needs the kitty protocol, so `⇧F` is bound for every other terminal) |
 | File tree browser | `⌘B` | `^B` | the TREE BROWSER |
-| Changes | `⌘E` | `^E` | the DIFF VIEWER for the selected worktree, or the diff of the pull request the pane is reading |
+| Skills | `⌘S` | `^S` | the SKILLS BROWSER: every agent skill on the machine, to read, edit or trash (below) |
+| Changes | `⌘E` | `^E` | the DIFF VIEWER for the selected worktree — its uncommitted changes, the whole branch, or one commit at a time — or the diff of the pull request the pane is reading |
 | Command palette | `⌘⇧P` | `^⇧P`, `:` | every action by name, with its key; `:` is vim's command line, the key a stock terminal delivers |
 | Open outside orion | `⌘O` | `^O` | the OPEN MENU: the repo, pull request or issue on GitHub, the checkout in Cursor, a terminal in the checkout, the checkout's open command |
 | Reload from GitHub | `⌘R` | `^R` | ask `gh` again now for the project's open pull requests and issues, the selected worktree's pull request and the one the pane is reading |
@@ -72,6 +76,7 @@ or `Esc` folds it back.
 | `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `a` unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again comes back |
 | `Backspace` | delete the card under the cursor, behind a confirm. On the last live card of a linked worktree the confirm asks about the checkout too — `y` deletes both, `n` the card only, `Esc` keeps the card. A checkout with uncommitted or untracked work asks once more before it goes, counting the files it would lose (commits on its branch are kept), so nothing is lost by accident. On an EMPTY BAND it asks to delete the worktree itself; on a terminal's chip it closes the terminal and kills its shell |
 | `c` | the BRANCH SWITCHER for the project's root checkout (below) |
+| `⇧C` | **continue on another account**: the Claude session under the cursor, conversation and all, carried onto another Claude account and resumed there — a list of the accounts it can go to, `Enter` goes. For a session stopped at a usage limit (see [Sessions](sessions.md#usage-limits-and-a-second-account)) |
 | `i` | the ISSUES MODAL for the selected project (below) |
 | `v` | the PULL REQUESTS MODAL for the selected project (below) |
 | `.` / `,` | next / previous session in attention order — waiting on you first, then running, then the unread finishes, then the rest by last interaction — wrapping at both ends, in any project. Landing on an UNSEEN finish reads it |
@@ -82,9 +87,9 @@ or `Esc` folds it back.
 
 The actions with no key of their own — **New session** (harness picker first), **Agent presets**,
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts**,
-**Memory usage**, **Keyboard shortcuts**, **Open a folder as a project** — are in the COMMAND
-PALETTE and, where they apply to a card, its right-click menu. Bind any of them in Settings →
-Hotkeys.
+**Memory usage**, **Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts** — are
+in the COMMAND PALETTE and, where they apply to a card, its right-click menu. Bind any of them in
+Settings → Hotkeys.
 
 ### The locked pane
 
@@ -134,10 +139,11 @@ PALETTE's **Comment on pull request** comments on it, and `PgUp`/`PgDn`, `Home`/
 
 | View | Keys |
 |---|---|
-| **Changes** (`⌘E`) | Changed files down the left, the diff on the right, with a live fuzzy filter. `↑`/`↓` walk the files, `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll the diff, and `^D`/`^U` move half the file list (`^U` kills the typed filter first). `^R` marks a file reviewed ✓ and sinks it to the bottom — orion-side bookkeeping only, cleared when HEAD moves or the file changes again. `^T` folds the file list into a directory tree and back (`←`/`→` fold, `Enter` flips a directory), and the choice is remembered. With the pane reading a pull request it shows that pull request's diff, fetched with `gh pr diff`. `Esc` closes |
+| **Changes** (`⌘E`) | The COMMIT LIST across the top, changed files down the left, the diff on the right, with a live fuzzy filter. The list is the branch's commits since its base, newest first — short sha, subject, author, age, files and lines — under **All changes** (the whole branch, committed or not) and **Uncommitted changes** (while the checkout is dirty: what `⌘E` opens on then, and a clean checkout opens on All changes). `⇧←`/`⇧→` step to the older / newer row without leaving the files, so a branch reads one commit at a time: each commit shows exactly its own files, its message heading the diff. `Tab` gives the list the keys — `↑`/`↓` walk it, `Enter` or `Tab` hands them back, typing filters the files again — and a click on a row picks it. `↑`/`↓` walk the files, `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll the diff, and `^D`/`^U` move half the file list (`^U` kills the typed filter first). `^R` marks a file reviewed ✓ and sinks it to the bottom — orion-side bookkeeping only: on the uncommitted changes it is stored until HEAD moves or the file changes again, on a commit or All changes it lasts while the modal is open. `^T` folds the file list into a directory tree and back (`←`/`→` fold, `Enter` flips a directory), and the choice is remembered. With the pane reading a pull request it shows that pull request's diff, fetched whole with `gh pr diff` and without a commit list. `Esc` closes |
 | **Go to file** (`⌘P`) | Fuzzy finder over the worktree. `Enter` opens the file in the BUILT-IN EDITOR (below), `⌘C` (or `^Y`) copies the path — ready to paste into an agent — and `⌘O` opens the file in Cursor at its line |
 | **Find in files** (`⌘⇧F`) | `git grep` into the same modal; `Enter` opens the hit at its line, `⌘C`/`^Y` and `⌘O` as in Go to file |
 | **File tree** (`⌘B`) | Tree on the left, syntax-highlighted preview on the right (a markdown file as a rendered page; `^R` flips it to the source and back), and an always-live filter. `→` expands a directory and `←` collapses it; `Enter` folds a directory, and on a file loads it into the preview. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll the preview. `⌘C`/`^Y` copies the selected path, `⌘O` opens it in Cursor, and dragging the tree/preview border resizes the tree |
+| **Skills** (`⌘S`) | Every agent skill on the machine in one list, nothing picked for a launch — agents find their skills themselves. Yours (`~/.claude/skills`, or `$CLAUDE_CONFIG_DIR/skills`), the selected checkout's (its `.claude/skills`, `.cursor/skills`, `.codex/skills`, `.agents/skills`), `~/.cursor/skills`, `~/.codex/skills` (`$CODEX_HOME`) and `~/.agents/skills`, and installed Claude Code plugins' — each row badged `user`, `project`, `cursor`, `codex`, `agents` or `plugin`. A folder reached twice (`~/.claude/skills` a symlink to `~/.cursor/skills`) is listed once. Type to filter by name and description; `↑`/`↓` (or `^N`/`^P`) walk the matches, and the right pane reads the one under the cursor: its frontmatter on a line or two, the SKILL.md as a rendered page, its other files. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll it. `Enter` (or a click on the row the cursor is on) edits the SKILL.md in the BUILT-IN EDITOR beside its page, `⌘O` opens the skill's folder in Cursor, and `⌘C`/`^Y` copies the SKILL.md's path. `^A` names a new skill and opens `~/.claude/skills/<name>/SKILL.md`, written from a stub. `^D` moves the skill's folder — its symlinks resolved — to the Trash behind a confirm that names it: `~/.Trash` on macOS, the freedesktop.org Trash elsewhere, never a delete. A plugin's skills are read-only and refuse it. `^R` reads the folders again, as closing the editor does. `Esc` closes |
 | **GitHub issues** (`i`) | The project's open issues, newest first, the one under the cursor read on the right with its comments. Type to filter by `#15 title`; `↑`/`↓` (or `^N`/`^P`) walk the matches; `Esc` clears the filter before a second `Esc` closes. `PgUp`/`PgDn` and `⇧↑`/`⇧↓` read; `^O` — or the pane's `↗ open in browser` button — opens it in the browser; `^R` asks GitHub again. `^C` (or `^Y`) comments, `^E` edits the title and description in place. `Enter` opens the QUICK PROMPT for an ISSUE SESSION on it (sent empty, the task is `Fix GitHub issue #15: <title>`), `⇧Tab` picks an AGENT PRESET for it, and `^N` in the box cuts a fresh `issue-15-<title-slug>` worktree |
 | **GitHub pull requests** (`v`) | The project's open pull requests, newest first with the drafts below, the one under the cursor read on the right. Filters as the issues modal does, with the same two-stage `Esc`. `^R` refreshes, `^C`/`^Y` comments, `^G` opens its diff, `^O` (or a double-click) opens it in the browser. `⌘L` flips to Linear issues to attach this PR. `Enter` opens the QUICK PROMPT for a PR SESSION on it, `⇧Tab` launches an AGENT PRESET, `Tab` picks a harness and starts one bare — all in the project's checkout of the PR's head branch |
 | **Linear issues** (`⌘L`) | Open Linear issues assigned to you (Settings → Linear account; empty = the owner of the project's `LINEAR_API_KEY`). Type to filter; `Space` marks; `Enter` starts one agent on the marked set in one worktree, with a task that asks for one PR; `⇧Tab` picks a preset. From a pull request, `⌘L` attaches the PR to the marked issues |
@@ -196,7 +202,10 @@ the rows, and `←`/`→` cycle the selected row's value. On a HOTKEYS TAB row, 
 captures a chord, `a` or `+` captures a *second* chord beside it, `Backspace`/`Delete` puts the
 default back, `x` unbinds it, and `Esc` cancels a capture. A chord another action already owns is
 not taken silently: the row names who has it and a second `Enter` moves it. A ⚠ on a row means the
-chord can't reach orion from this terminal; `R` resets every binding (with a confirmation).
+chord can't reach orion from this terminal; `R` resets every binding (with a confirmation). On the
+Agents tab's **Claude accounts** rows, `Enter` signs the account in (asking for the email first),
+`o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter` on **Add
+account** names a new one ([Configuration](configuration.md#claude-accounts)).
 
 ## Typed fields
 

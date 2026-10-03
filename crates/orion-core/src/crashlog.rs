@@ -49,7 +49,7 @@ fn timestamp() -> String {
 }
 
 /// Seconds since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`.
-fn format_timestamp(secs: u64) -> String {
+pub fn format_timestamp(secs: u64) -> String {
     let (y, m, d) = civil_from_days((secs / SECS_PER_DAY) as i64);
     let tod = secs % SECS_PER_DAY;
     format!(

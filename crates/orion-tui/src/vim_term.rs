@@ -46,6 +46,10 @@ pub struct VimTerm {
     /// The file's rendered page beside the editor (a `.md` in the
     /// floating modal; see `markdown_split`).
     pub markdown: Option<crate::markdown_split::MarkdownSide>,
+    /// The modal runs `claude auth …` for a CLAUDE ACCOUNT rather than an
+    /// editor: there is no file to hand to Cursor, and its exit re-reads
+    /// who the accounts are signed in as (`claude_accounts`).
+    pub account_auth: bool,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -101,6 +105,24 @@ impl VimTerm {
         generation: u64,
         tx: UnboundedSender<VimEvent>,
     ) -> Result<Self, String> {
+        Self::spawn_cmd_env(program, args, &[], cwd, title, cols, rows, generation, tx)
+    }
+
+    /// [`Self::spawn_cmd`] with `env` set on the child, on top of this
+    /// process's own — a Claude account's `CLAUDE_CONFIG_DIR` for its
+    /// `claude auth login`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_cmd_env(
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+        title: String,
+        cols: u16,
+        rows: u16,
+        generation: u64,
+        tx: UnboundedSender<VimEvent>,
+    ) -> Result<Self, String> {
         let cols = cols.max(2);
         let rows = rows.max(2);
         let pair = native_pty_system()
@@ -119,6 +141,9 @@ impl VimTerm {
         // every session pane is (see `orion_core::env::PANE_TERM`).
         cmd.env("TERM", orion_core::env::PANE_TERM);
         cmd.env("COLORTERM", orion_core::env::PANE_COLORTERM);
+        for (name, value) in env {
+            cmd.env(name, value);
+        }
 
         let mut child = pair
             .slave
@@ -166,6 +191,7 @@ impl VimTerm {
             area: Rect::default(),
             quits_itself: false,
             markdown: None,
+            account_auth: false,
             master: pair.master,
             writer,
             killer,
@@ -264,6 +290,32 @@ mod tests {
             matches!(ev, VimEvent::Exited { generation: 1 })
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn env_reaches_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut term = VimTerm::spawn_cmd_env(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "printf \"DIR:$CLAUDE_CONFIG_DIR\"; sleep 30".into(),
+            ],
+            &[("CLAUDE_CONFIG_DIR".into(), "/tmp/claude-two".into())],
+            dir.path(),
+            "test".into(),
+            80,
+            24,
+            5,
+            tx,
+        )
+        .unwrap();
+        recv_until(&mut rx, &mut term, |t, _| {
+            t.parser.screen().contents().contains("DIR:/tmp/claude-two")
+        })
+        .await;
+        term.kill();
     }
 
     #[tokio::test]

@@ -1408,6 +1408,17 @@ fn draw_list_row(
             let a = &row.agent;
             let look = session_look(app, a, selected, th);
             let quiet_or = |live: Color| if a.archived { look.quiet } else { live };
+            // A session stopped on a usage limit says what Claude said
+            // about it where the prompt goes — its badge already names it.
+            let (text_mark, text) = match a.limit_reached().and_then(|l| l.message.as_deref()) {
+                Some(message) => ("", message.to_string()),
+                None => (
+                    "› ",
+                    crate::launcher::last_prompt(a)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            };
             Entry {
                 lead: look.dot,
                 name: a.name.clone(),
@@ -1415,10 +1426,8 @@ fn draw_list_row(
                 ramp: look.ramp,
                 runs: runs_on_line(a, cfg),
                 runs_style: Style::default().fg(quiet_or(th.dim)),
-                text_mark: "› ",
-                text: crate::launcher::last_prompt(a)
-                    .unwrap_or_default()
-                    .to_string(),
+                text_mark,
+                text,
                 text_style: Style::default().fg(quiet_or(th.muted)),
                 badge: look.ago,
                 badge_style: look.ago_style,
@@ -2225,15 +2234,21 @@ fn draw_card(
 
     // The last thing it was asked to do, on the prompt's own `›` (which
     // `hide_card_marks` leaves off), over the card's last rows rather than
-    // clipped at the first.
+    // clipped at the first. A session stopped on a usage limit says what
+    // Claude said about it there instead, and how to carry it on.
     let mut lines = vec![first, second];
     lines.resize(crate::launcher::CARD_HEAD_H as usize, Vec::new());
-    lines.extend(prompt_lines(
-        crate::launcher::last_prompt(a).unwrap_or_default(),
-        width,
-        (!app.hide_card_marks).then(|| quiet_or(dim)),
-        quiet_or(prompt),
-    ));
+    let mark = (!app.hide_card_marks).then(|| quiet_or(dim));
+    match a.limit_reached().filter(|_| !pending) {
+        Some(limit) => lines.extend(limit_lines(app, a, limit, width, cfg, (mark, dim, prompt))),
+        None => lines.extend(prompt_lines(
+            crate::launcher::last_prompt(a).unwrap_or_default(),
+            width,
+            mark,
+            quiet_or(prompt),
+            crate::launcher::PROMPT_LINES,
+        )),
+    }
 
     for (i, spans) in lines.into_iter().enumerate() {
         if spans.is_empty() {
@@ -2369,6 +2384,9 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     } else {
         Style::default().fg(th.text).add_modifier(Modifier::BOLD)
     };
+    // A session stopped on a usage limit says so where its age goes, in
+    // the red its frame is: the reason it is waiting on you.
+    let limit = a.limit_reached().filter(|_| !pending);
     // How long ago it was filed, on an archived card, rather than when its
     // turn last moved: the status behind it stopped being news the moment
     // it was put away. A row archived before the stamp existed carries 0
@@ -2377,12 +2395,16 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
         ago_badge(a.archived_at)
     } else if pending {
         PENDING_SESSION_BADGE.to_string()
+    } else if let Some(limit) = limit {
+        format!(" {}", limit.label())
     } else if a.unseen {
         " done".to_string()
     } else {
         ago_badge(a.status_changed_at)
     };
-    let ago_style = if a.unseen && !pending && !archived {
+    let ago_style = if limit.is_some() {
+        Style::default().fg(th.err)
+    } else if a.unseen && !pending && !archived {
         Style::default().fg(th.done)
     } else {
         Style::default().fg(quiet)
@@ -2429,16 +2451,18 @@ fn draw_list_empty(f: &mut Frame, app: &mut App, area: Rect, what: &str) {
 
 /// The prompt block at the foot of a card: the `›` on its first row and
 /// the sentence wrapped under it, indented to the same column, over at
-/// most [`crate::launcher::PROMPT_LINES`] rows — so a card is a fixed
-/// height whatever it was asked to do. A prompt longer than that is cut
-/// on the last of them with an ellipsis; an empty one draws nothing.
-/// `mark` is the `›`'s color, `None` (HIDE CARD MARKS) to leave it off
-/// and start every row in its column.
+/// most `keep` rows — [`crate::launcher::PROMPT_LINES`] for a prompt, so a
+/// card is a fixed height whatever it was asked to do. A prompt longer
+/// than that is cut on the last of them with an ellipsis; an empty one
+/// draws nothing. `mark` is the `›`'s color, `None` (HIDE CARD MARKS, or
+/// text that is not a prompt) to leave it off and start every row in its
+/// column.
 fn prompt_lines(
     prompt: &str,
     width: usize,
     mark: Option<Color>,
     text: Color,
+    keep: usize,
 ) -> Vec<Vec<Span<'static>>> {
     const MARK: &str = "› ";
     let indent = if mark.is_some() {
@@ -2451,7 +2475,6 @@ fn prompt_lines(
         return Vec::new();
     }
     let wrapped = crate::pr_preview::wrap(prompt, body);
-    let keep = crate::launcher::PROMPT_LINES;
     let cut = wrapped.len() > keep;
     wrapped
         .into_iter()
@@ -2473,14 +2496,54 @@ fn prompt_lines(
         .collect()
 }
 
+/// Where a card stopped on a usage limit puts its prompt: Claude's own
+/// words about the limit — the reset time, when it named one — else the
+/// last prompt as ever, and on the row under them the way out, the key
+/// that carries the session onto another account
+/// ([`crate::launcher::continue_hint`]) when there is one to go to.
+/// `mark`, `dim` and `text` are the card's prompt colors.
+fn limit_lines(
+    app: &App,
+    a: &orion_core::Agent,
+    limit: &orion_core::UsageLimit,
+    width: usize,
+    cfg: &mut Option<crate::config::Config>,
+    (mark, dim, text): (Option<Color>, Color, Color),
+) -> Vec<Vec<Span<'static>>> {
+    let targets = cfg
+        .get_or_insert_with(crate::config::Config::load)
+        .continue_targets(a);
+    let hint = crate::launcher::continue_hint(&app.keymap, &targets);
+    let keep = crate::launcher::PROMPT_LINES - usize::from(hint.is_some());
+    let mut lines = match limit.message.as_deref() {
+        Some(message) => prompt_lines(message, width, None, text, keep),
+        None => prompt_lines(
+            crate::launcher::last_prompt(a).unwrap_or_default(),
+            width,
+            mark,
+            text,
+            keep,
+        ),
+    };
+    if let Some(hint) = hint {
+        lines.push(vec![Span::styled(
+            truncate(&hint, width),
+            Style::default().fg(dim),
+        )]);
+    }
+    lines
+}
+
 /// The harness (and model) a session runs on, as the PANE's breadcrumb
 /// names it: `claude opus`. A Claude Cloud row says `cloud` — the sandbox
-/// is the harness that matters there. The card adds the reasoning effort
-/// through [`runs_on_line`].
+/// is the harness that matters there — and a CLAUDE ACCOUNT, on a machine
+/// with more than one, the email it is signed in as: `a@b.co opus`. The
+/// card adds the reasoning effort through [`runs_on_line`].
 ///
 /// `cfg` is the frame's CONFIG.JSON slot, filled on the first card that
-/// needs it: only a CUSTOM harness's label comes out of the file, so a
-/// grid of built-ins never opens it at all.
+/// needs it: only a CUSTOM harness's label comes out of the file — an
+/// account's email is the last read's — so a grid of built-ins never
+/// opens it at all.
 /// What a card's branch row says about its checkout's uncommitted changes,
 /// beside a branch `branch` characters long in `room`: the file count —
 /// ` +3 files`, or ` +3` — and, with `lines` counted, the lines behind it,
@@ -2516,11 +2579,14 @@ fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
     if a.cloud_session_id.is_some() {
         return "cloud".into();
     }
-    let mut out = if a.kind == orion_core::AgentKind::Custom {
-        let cfg = cfg.get_or_insert_with(crate::config::Config::load);
-        crate::agent_picker::session_harness_badge_in(a, cfg)
-    } else {
-        a.kind.as_str().to_string()
+    let short = crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref());
+    let mut out = match short {
+        Some(name) => name,
+        None if a.kind == orion_core::AgentKind::Custom => {
+            let cfg = cfg.get_or_insert_with(crate::config::Config::load);
+            crate::agent_picker::session_harness_badge_in(a, cfg)
+        }
+        None => a.kind.as_str().to_string(),
     };
     if let Some(model) = a.model.as_deref().filter(|m| !m.is_empty()) {
         out.push(' ');
@@ -3126,11 +3192,7 @@ struct Details {
 
 impl Details {
     fn of(app: &App, launch: &QuickLaunch) -> Self {
-        let mut harness = launch
-            .custom
-            .as_deref()
-            .unwrap_or_else(|| launch.kind.as_str())
-            .to_string();
+        let mut harness = crate::quick_prompt::harness_name(launch.kind, launch.custom.as_deref());
         // A CLAUDE CLOUD box says so on the button that toggles it.
         if launch.cloud {
             harness.push_str(" · cloud");
@@ -3753,6 +3815,7 @@ mod tests {
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             })
             .collect();
         app
@@ -4162,6 +4225,87 @@ mod tests {
             .position(|l| l.contains("s0"))
             .expect("the session's card");
         assert!(lines[row + 1].contains("claude"), "{:?}", lines[row + 1]);
+    }
+
+    /// A session stopped on a usage limit says so wherever the grid draws
+    /// it: `limit reached` where its age goes, in the red its frame is,
+    /// Claude's own words where its prompt goes, and on a card the key
+    /// that carries it onto the other account under them. A limit the
+    /// row still records once it has left red says nothing.
+    #[test]
+    fn a_session_at_a_usage_limit_names_it_and_the_way_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"harnesses": {"claude-b": {"label": "Claude B", "program": "claude",
+                "hooks": "claude", "resume_flag": "--resume",
+                "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}}}}"#,
+        )
+        .unwrap();
+        crate::config::with_config_path(path, || {
+            let mut app = a_tree();
+            select(&mut app, "api");
+            let th = app.theme;
+            app.tree.agents[0].status = orion_core::AgentStatus::NeedsFeedback;
+            app.tree.agents[0].recent_prompts = vec![orion_core::PromptEntry {
+                text: "fix the login redirect".into(),
+                submitted_at: 0,
+            }];
+            app.tree.agents[0].usage_limit = Some(orion_core::UsageLimit {
+                reason: orion_core::LimitReason::RateLimit,
+                message: Some("session limit · resets 3:45pm".into()),
+            });
+            let body = Rect::new(0, 0, 100, 30);
+            let lines = drawn_lines(&mut app, body);
+            let row = lines
+                .iter()
+                .position(|l| l.contains("s0"))
+                .expect("the session's card");
+            assert!(lines[row].contains("limit reached"), "{:?}", lines[row]);
+            let card = &lines[row..row + crate::launcher::CARD_TEXT_H as usize];
+            assert!(
+                card.iter()
+                    .any(|l| l.contains("session limit · resets 3:45pm")),
+                "{card:#?}"
+            );
+            assert!(
+                card.iter().any(|l| l.contains("C: continue on Claude B")),
+                "{card:#?}"
+            );
+            assert!(
+                !card.iter().any(|l| l.contains("fix the login redirect")),
+                "Claude's words stand where the prompt was: {card:#?}"
+            );
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| draw(f, &mut app, body)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let x = lines[row].find("limit reached").unwrap();
+            let x = lines[row][..x].chars().count() as u16;
+            assert_eq!(
+                buf.cell((x, row as u16)).unwrap().fg,
+                th.err,
+                "the label is the frame's red"
+            );
+
+            app.launcher_list = true;
+            let lines = drawn_lines(&mut app, body);
+            let line = lines
+                .iter()
+                .find(|l| l.contains("s0"))
+                .expect("the session's line");
+            assert!(
+                line.contains("limit reached") && line.contains("session limit"),
+                "{line:?}"
+            );
+
+            app.launcher_list = false;
+            app.tree.agents[0].status = orion_core::AgentStatus::Running;
+            let lines = drawn_lines(&mut app, body);
+            assert!(!lines.iter().any(|l| l.contains("limit reached")));
+            assert!(lines.iter().any(|l| l.contains("fix the login redirect")));
+        });
     }
 
     /// GitHub issue numbers on cards are retired: even with the stored
@@ -4911,6 +5055,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 },
                 project: "orion".into(),
                 branch: branch.into(),
@@ -5146,6 +5291,7 @@ mod tests {
             alive: true,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         let th = Theme::by_name("amber");
         let mut app = App::new();
@@ -5254,6 +5400,7 @@ mod tests {
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             },
             project: "orion".into(),
             branch: "feat-x".into(),
@@ -5309,6 +5456,7 @@ mod tests {
                 alive: true,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             },
             project: "orion".into(),
             branch: "feat-x".into(),
@@ -5459,6 +5607,7 @@ mod tests {
                     alive: true,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 },
                 project: "orion".into(),
                 branch: "main".into(),

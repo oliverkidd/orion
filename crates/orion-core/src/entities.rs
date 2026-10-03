@@ -242,9 +242,100 @@ pub struct Agent {
     /// the bottom. Empty for every row that predates the capture.
     #[serde(default)]
     pub recent_prompts: Vec<PromptEntry>,
+    /// Why a Claude session is waiting on you when the answer is its
+    /// account, not a question: the usage limit it stopped on (see
+    /// [`UsageLimit`]). Recorded with the turn into
+    /// [`AgentStatus::NeedsFeedback`] and dropped as the row leaves it;
+    /// read it through [`Agent::limit_reached`].
+    #[serde(default)]
+    pub usage_limit: Option<UsageLimit>,
+}
+
+/// A Claude session stopped on its account rather than its work: a usage
+/// limit, a billing stop, an account on hold. The DAEMON records one from
+/// Claude Code's `StopFailure` hook — or from the notification that ends
+/// its wait for a reset without continuing — and only ever beside the turn
+/// going to NEEDS FEEDBACK, so the row is red with a reason; the next
+/// prompt or tool call that moves the session takes both away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// What stopped it.
+    pub reason: LimitReason,
+    /// Claude's own line about it, on one line — `You've hit your session
+    /// limit · resets 3:45pm`. None when the hook carried none.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl UsageLimit {
+    /// The few words a card and a list line say it in.
+    pub fn label(&self) -> &'static str {
+        match self.reason {
+            LimitReason::AccountOnHold => "account on hold",
+            LimitReason::RateLimit | LimitReason::BillingError | LimitReason::QuotaWaitEnded => {
+                "limit reached"
+            }
+        }
+    }
+}
+
+/// Why a Claude session stopped on its account, under the names Claude
+/// Code gives them — which are also how the row stores them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitReason {
+    /// `StopFailure`'s `rate_limit`: a usage limit — the session's, the
+    /// week's, a model family's.
+    RateLimit,
+    /// `StopFailure`'s `billing_error`: a spend limit reached, or credits
+    /// run out.
+    BillingError,
+    /// `StopFailure`'s `account_on_hold`.
+    AccountOnHold,
+    /// The `quota_auto_resume_disabled` notification: Claude's wait for
+    /// a usage limit to reset ended without carrying the task on.
+    #[serde(rename = "quota_auto_resume_disabled")]
+    QuotaWaitEnded,
+}
+
+impl LimitReason {
+    /// Claude Code's own name for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LimitReason::RateLimit => "rate_limit",
+            LimitReason::BillingError => "billing_error",
+            LimitReason::AccountOnHold => "account_on_hold",
+            LimitReason::QuotaWaitEnded => "quota_auto_resume_disabled",
+        }
+    }
+
+    /// The reason a `StopFailure` error type names, when it stops the
+    /// session on its account — a usage limit, a billing stop, a held
+    /// account, none of which another try on the same account gets past.
+    /// `overloaded`, `server_error` and the rest are an API having a bad
+    /// moment; `authentication_failed` is a `/login` away on the same
+    /// account. None for those.
+    pub fn of_stop_failure(error: &str) -> Option<Self> {
+        Some(match error {
+            "rate_limit" => LimitReason::RateLimit,
+            "billing_error" => LimitReason::BillingError,
+            "account_on_hold" => LimitReason::AccountOnHold,
+            _ => return None,
+        })
+    }
 }
 
 impl Agent {
+    /// The usage limit this session is stopped on, while it is: a red,
+    /// unarchived row that has one recorded. A recorded limit on any other
+    /// row is a moment stale — its clearing upsert is on the way — and
+    /// says nothing.
+    pub fn limit_reached(&self) -> Option<&UsageLimit> {
+        self.usage_limit
+            .as_ref()
+            .filter(|_| self.status == AgentStatus::NeedsFeedback && !self.archived)
+    }
+
     /// Where this row's Claude Cloud session lives in the browser, when it
     /// has one — the page the CLI printed as `View:` on creation, without
     /// its tracking query.

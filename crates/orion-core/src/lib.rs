@@ -1,3 +1,4 @@
+pub mod claude_account;
 pub mod clock;
 pub mod codec;
 pub mod crashlog;

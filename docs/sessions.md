@@ -8,7 +8,9 @@ Everything that can start an AGENT, and what each launch path does differently.
 
 Run **New session** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
 run — **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
-switched off on the settings overlay's Agents tab and drops out of the menu entirely. Turn on `Hide missing CLIs`
+switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
+listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
+ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). Turn on `Hide missing CLIs`
 on the Agents tab and the menu lists only enabled harnesses whose CLI is found on PATH (the daemon still
 checks through the login shell at launch). Your own CLIs join the menu too: add them to config.json
 `custom_harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
@@ -73,10 +75,12 @@ harness with that in mind, especially in the ROOT WORKTREE.
 
 The same choice reaches the STATUS DOT, because an AGENT can only report what its hook set can see.
 Claude installs the full set — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`,
-`Notification` (which is where the idle prompt comes from), `PreToolUse` on `AskUserQuestion` and an
-unmatched `PostToolUse` — so a Claude row walks the whole range of states, red NEEDS FEEDBACK
-included, and leaves red the moment you answer: a question's answer is its own tool's `PostToolUse`,
-and an approved permission prompt shows up as the gated tool running, whichever tool it was. Codex
+`Notification` (which is where the idle prompt comes from), `PreToolUse` on `AskUserQuestion`, an
+unmatched `PostToolUse` and `StopFailure` (a turn that ends on an API error, a usage limit among
+them — see [below](#usage-limits-and-a-second-account)) — so a Claude row walks the whole range of
+states, red NEEDS FEEDBACK included, and leaves red the moment you answer: a question's answer is its
+own tool's `PostToolUse`, and an approved permission prompt shows up as the gated tool running,
+whichever tool it was. Codex
 has no `Notification` hook and no `AskUserQuestion` tool, but its native `PermissionRequest` is
 installed, so the red state stays reachable there (and, with no `PostToolUse` to say you approved,
 a Codex row stays red until the turn ends). Cursor has no `PermissionRequest` hook to install,
@@ -208,6 +212,60 @@ Prompts orion composes itself, such as a PR SESSION's scope or the note a `orion
 relocation reopens on, are left out, and so are blank ones. A click on the line lands on the card,
 archived cards show none, and a session created before the feature simply has nothing to show until
 its next prompt.
+
+## Usage limits and a second account
+
+A Claude session that hits its subscription's usage limit stops mid-task, and without help it would
+look like any session that finished. Claude Code ends such a turn with a `StopFailure` hook instead
+of a `Stop`, and orion installs one beside the others. When its error is a usage limit
+(`rate_limit`), a billing stop (`billing_error`) or a held account (`account_on_hold`), the row goes
+to red NEEDS FEEDBACK with the limit as its reason: the card says `limit reached` (`account on
+hold` for a held account) where its age goes, Claude's own words where its last prompt goes — `You've
+hit your session limit · resets 3:45pm` — and the list layout says the same in its columns. It counts
+everywhere a question would: the project tab's red count, the `.` / `,` attention walk, the FEEDBACK
+SOUND and the desktop notification (`Fix Login: limit reached`), and the idle reaper leaves it alone,
+since Claude Code waits in the open session to carry the task on at the reset. Any other API error
+(`overloaded`, a server error) ends the turn like a `Stop`.
+
+The limit is the reason the row is red, so it lasts exactly as long as the red does. The next prompt
+or tool call — yours, or the continuation Claude Code sends itself at the reset — moves the session
+and takes the limit away with the red; so does the CLI ending. When the limit reset while the
+machine slept and Claude waits for an `Enter`, the row stays red without the limit. A TUI restarted
+meanwhile shows it as it was: the limit is kept on the session's row in the DAEMON. A DAEMON restart
+ends the CLI, and Claude's wait for the reset with it, so the row comes back gray, without the limit.
+
+A second Claude account is one more Claude Code config dir with a login of its own: **Add
+account** under **Claude accounts** on the settings overlay's Agents tab (or **Claude accounts** in
+the COMMAND PALETTE, or the step first-run onboarding has right after Agents) makes the dir, offers to
+share your setup with it — `CLAUDE.md`, settings, skills, agents, commands, plugins, as links — and
+`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account is named
+after the email it is signed in as, `Claude (you@example.com)`, and on a machine with more than one
+a card says which its session runs on by that email (`you@example.com opus high`) where it would
+say `claude`. See [Configuration](configuration.md#claude-accounts) for the `claude_accounts` entry
+behind it, signing in and out, and removing one.
+
+Two accounts signed in to the same claude.ai login are one subscription with one limit — the
+browser sign-in approves whichever account the browser is signed in to, so it is easy to end up
+there. The Agents tab and onboarding flag it under the accounts, with the fix: sign one in again from
+a private browser window, or with the other email.
+
+With a second account set up, a Claude session can go on there: **Continue on Claude
+(b@example.com)**, one row per account, in the card's right-click menu beside **Restart** — and
+`⇧C` on the card or **Continue on another account** in the COMMAND PALETTE, which list the accounts
+it can go to. An account signed in as the session's own email is listed as what it is, `Claude
+(you@example.com) · same account`, and the footer says how to fix it: going there would only meet
+the same limit.
+A card stopped on a limit names the way under Claude's words: `⇧C: continue on Claude
+(b@example.com)`. Going stops the session's CLI, copies its transcript —
+`projects/<slug>/<id>.jsonl` in the config dir its harness uses, and the `<id>/` folder beside it
+with its subagents' transcripts and its title — to the
+same place under the other account's config dir, switches the card to that harness (name, worktree,
+and the model and effort that harness offers, kept), and resumes the conversation there. The CLI
+comes back at its input box: type `continue`, or whatever the next turn is. The source is never
+deleted, and a file the destination already holds is never overwritten unless it is an older copy
+of the same transcript — a session carried back to an account it ran on before. A session with no
+conversation yet, a transcript orion can't find, a Claude Cloud session or an archived one is
+refused with the reason in the footer, before anything stops.
 
 ## The GRID
 

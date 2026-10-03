@@ -10,6 +10,7 @@ use crate::store::Store;
 use crate::worktree_hooks::{self, HookContext, WorktreeHook};
 use anyhow::{bail, Context, Result};
 use orion_core::env;
+use orion_core::harness::HarnessDescriptor;
 use orion_core::project_file::{self, ProjectCommand};
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, PrewarmInfo,
@@ -125,7 +126,7 @@ pub enum WorktreeDelete {
 
 pub struct Daemon {
     sessions: Mutex<HashMap<SessionRef, Arc<PtySession>>>,
-    status_machines: Mutex<HashMap<AgentId, AgentStatusMachine>>,
+    pub(crate) status_machines: Mutex<HashMap<AgentId, AgentStatusMachine>>,
     pub hook_env: HookEnv,
     /// Shared with the hook HTTP server, which reads agent rows to decide
     /// auto-title injection.
@@ -175,7 +176,7 @@ pub struct Daemon {
     /// Attach (the request loop) and the worktree prewarm sweep (its own
     /// task) can both reach for the same dead session; without this they
     /// would both miss the registry and fork two CLIs, orphaning one.
-    spawn_gate: Mutex<()>,
+    pub(crate) spawn_gate: Mutex<()>,
     /// The worktree prewarm sweep currently running, so a newer one can
     /// cancel it. Walking the project tabs fires a sweep per step, and
     /// only the project the cursor rests on is worth warming.
@@ -250,8 +251,11 @@ impl Daemon {
                     // Lazily seed from the persisted row.
                     match self.store.get_agent(agent_id) {
                         Ok(Some(agent)) => {
-                            let machine = slot
-                                .insert(AgentStatusMachine::new(agent.status, agent.session_id));
+                            let limited = agent.limit_reached().is_some();
+                            let machine = slot.insert(
+                                AgentStatusMachine::new(agent.status, agent.session_id)
+                                    .at_limit(limited),
+                            );
                             machine.set_relocating(relocating);
                             Outcome::Effects(machine.handle(
                                 event,
@@ -325,6 +329,21 @@ impl Daemon {
                 Effect::SaveSessionId(sid) => {
                     if let Err(e) = self.store.set_agent_session_id(agent_id, Some(&sid)) {
                         tracing::warn!(error = %e, "persist session id failed");
+                    }
+                }
+                // The reason the row is red rides the row itself, so an
+                // upsert carries it — ahead of the StatusChanged that
+                // turns it red, which a client rings on.
+                Effect::SetUsageLimit(limit) => {
+                    match self.store.set_agent_usage_limit(agent_id, limit.as_ref()) {
+                        Ok(true) => {
+                            if let Some(limit) = &limit {
+                                tracing::info!(agent = %agent_id, reason = limit.reason.as_str(), "session stopped on a usage limit");
+                            }
+                            self.try_broadcast_agent(agent_id);
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(error = %e, "persist usage limit failed"),
                     }
                 }
             }
@@ -1171,6 +1190,7 @@ impl Daemon {
             alive: false,
             issue_url: issue_url.clone(),
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         self.store.insert_agent_with_launch_context(
             &agent,
@@ -1342,6 +1362,7 @@ impl Daemon {
             alive: false,
             issue_url: None,
             recent_prompts: Vec::new(),
+            usage_limit: None,
         };
         self.spawn_agent_session(&agent, &worktree, DEFAULT_COLS, DEFAULT_ROWS)?;
         tracing::info!(agent = %agent.id, kind = kind.as_str(), worktree = %worktree.branch, "prewarmed agent session");
@@ -1664,7 +1685,9 @@ impl Daemon {
     /// held end finish the turn after all.
     pub fn complete_pending_move(self: &Arc<Self>, id: &AgentId, event: &HookEvent) {
         let turn_over = match event {
-            HookEvent::Stop => true,
+            // A turn stopped on a usage limit is over too: the respawn
+            // meets the limit again, and says so, from the target.
+            HookEvent::Stop | HookEvent::UsageLimit { .. } => true,
             HookEvent::Notification { notification_type } => {
                 notification_type.as_deref() == Some("idle_prompt")
             }
@@ -1985,10 +2008,17 @@ impl Daemon {
             .context("worktree not found")?;
 
         let cmd_override = std::env::var(env::AGENT_CMD).ok();
+        // The account that launched the cloud session is the one that can
+        // reach it: the row's harness `env` (its CLAUDE_CONFIG_DIR) rides
+        // along, as it did on the launch.
+        let launch_env = resolve_harness(agent.kind, agent.custom_harness.as_deref())
+            .map(|harness| harness.launch_env())
+            .unwrap_or_default();
         let (program, args) = match cmd_override.as_deref() {
             Some(over) => (over.to_string(), Vec::new()),
             None => login_shell_wrap(
                 &orion_core::shell::user_shell(),
+                &launch_env,
                 "claude",
                 &[
                     "-p".to_string(),
@@ -2364,7 +2394,7 @@ impl Daemon {
         }
     }
 
-    fn spawn_agent_session(
+    pub(crate) fn spawn_agent_session(
         self: &Arc<Self>,
         agent: &Agent,
         worktree: &Worktree,
@@ -2394,11 +2424,14 @@ impl Daemon {
     ) -> Result<Arc<PtySession>> {
         // A session the user sent to Claude's background (`/background`)
         // can't be resumed, only attached to — see `claude_bg`. The probe
-        // costs a login shell, so it hides behind the one-`stat` hint.
-        let attach = if cloud_task.is_none() && self.claude_job_hint(agent) {
-            self.claude_background_id(agent)
-        } else {
-            None
+        // costs a login shell, so it hides behind the one-`stat` hint. A
+        // row whose harness no longer resolves looks for nothing: the
+        // spawn below refuses it with the reason.
+        let attach = match resolve_harness(agent.kind, agent.custom_harness.as_deref()) {
+            Ok(harness) if cloud_task.is_none() && self.claude_job_hint(agent, &harness) => {
+                self.claude_background_id(agent, &harness)
+            }
+            _ => None,
         };
         self.spawn_agent_pty(
             agent,
@@ -2476,16 +2509,20 @@ impl Daemon {
         // A Claude session id with no transcript behind it — a CLI nobody
         // sent a prompt, or a session Claude's cleanup has deleted — resumes
         // into "No conversation found" and a dead pane: boot fresh instead.
-        // An override (tests) never resumes, so it skips the look.
+        // Looked for where the harness keeps its transcripts, a second
+        // account's own config dir included (`claude_projects_roots`). An
+        // override (tests) never resumes, so it skips the look.
         let unresumable;
         let agent = match agent.session_id.as_deref() {
             Some(sid)
-                if agent.kind == AgentKind::Claude
-                    && cloud_task.is_none()
+                if cloud_task.is_none()
                     && cmd_override.is_none()
                     && attach.is_none()
-                    && claude_transcript_exists(&self.claude_projects_dirs(), sid)
-                        == Some(false) =>
+                    && self
+                        .claude_projects_roots(agent, &harness)
+                        .is_some_and(|roots| {
+                            claude_transcript_exists(&roots, sid) == Some(false)
+                        }) =>
             {
                 tracing::info!(agent = %agent.id, session = %sid, "no Claude transcript for the session — spawning fresh");
                 if let Err(e) = self.store.set_agent_session_id(&agent.id, None) {
@@ -2572,26 +2609,36 @@ impl Daemon {
         // the same env as a Terminal.app tab (~/.zprofile, ~/.zshrc,
         // path_helper) instead of the daemon's inherited-at-boot env, and
         // resolves the CLI the way a typed command would — an alias or
-        // function in those files wins over the binary on PATH.
-        // Overrides (tests) stay verbatim.
+        // function in those files wins over the binary on PATH. The
+        // harness's own `env` goes on the PTY and is restated after the
+        // profile, so an rc file exporting the same name cannot undo it.
+        // Overrides (tests) stay verbatim, the `env` on the PTY alone.
+        let launch_env = harness.launch_env();
         let (program, args) = if cmd_override.is_some() {
             (program, args)
         } else {
-            login_shell_wrap(&orion_core::shell::user_shell(), &program, &args)
+            login_shell_wrap(
+                &orion_core::shell::user_shell(),
+                &launch_env,
+                &program,
+                &args,
+            )
         };
 
+        let mut session_env = launch_env;
+        session_env.extend([
+            (env::AGENT_ID.into(), agent.id.to_string()),
+            (
+                env::API_URL.into(),
+                format!("http://127.0.0.1:{}", self.hook_env.port),
+            ),
+            (env::API_TOKEN.into(), self.hook_env.token.clone()),
+        ]);
         let spec = SpawnSpec {
             program,
             args,
             cwd: worktree.path.clone(),
-            env: vec![
-                (env::AGENT_ID.into(), agent.id.to_string()),
-                (
-                    env::API_URL.into(),
-                    format!("http://127.0.0.1:{}", self.hook_env.port),
-                ),
-                (env::API_TOKEN.into(), self.hook_env.token.clone()),
-            ],
+            env: session_env,
             scrub_env: env::AGENT_SESSION_VARS,
             cols,
             rows,
@@ -2650,18 +2697,22 @@ impl Daemon {
         let Some(sid) = agent.session_id.take() else {
             return;
         };
-        // A Claude transcript still on disk says the id is good and the CLI
-        // quit over something else — a bad flag, a login: keep the id for
-        // the next attach, and the pane keeps the CLI's reason.
-        if agent.kind == AgentKind::Claude
-            && claude_transcript_exists(&self.claude_projects_dirs(), &sid) == Some(true)
-        {
+        // A Claude transcript still on disk — where the row's harness keeps
+        // them — says the id is good and the CLI quit over something else,
+        // a bad flag, a login: keep the id for the next attach, and the
+        // pane keeps the CLI's reason.
+        let harness = resolve_harness(agent.kind, agent.custom_harness.as_deref()).ok();
+        let transcript_kept = harness.as_ref().is_some_and(|harness| {
+            self.claude_projects_roots(&agent, harness)
+                .is_some_and(|roots| claude_transcript_exists(&roots, &sid) == Some(true))
+        });
+        if let (true, Some(harness)) = (transcript_kept, &harness) {
             // One reason Claude refuses a good id: the session runs in its
             // background daemon now, and only `claude attach` opens it. The
             // spawn's own look missed it — its job-dir hint is Claude's
             // private layout, free to move — so this one asks outright.
             agent.session_id = Some(sid);
-            if let Some(attach) = self.claude_background_id(&agent) {
+            if let Some(attach) = self.claude_background_id(&agent, harness) {
                 let Ok(Some(worktree)) = self.store.get_worktree(&agent.worktree_id) else {
                     return;
                 };
@@ -2713,11 +2764,12 @@ impl Daemon {
     /// Whether Claude keeps a background job under `agent`'s session id —
     /// the cheap look that earns [`Self::claude_background_id`] its probe.
     /// The job dirs sit beside the projects dirs, in the same config dir.
-    fn claude_job_hint(&self, agent: &Agent) -> bool {
+    fn claude_job_hint(&self, agent: &Agent, harness: &HarnessDescriptor) -> bool {
         let Some(sid) = claude_resumable_session(agent) else {
             return false;
         };
-        self.claude_projects_dirs()
+        self.claude_projects_roots(agent, harness)
+            .unwrap_or_default()
             .iter()
             .filter_map(|projects| projects.parent())
             .any(|config| claude_bg::job_hint(config, sid))
@@ -2725,19 +2777,49 @@ impl Daemon {
 
     /// The id `claude attach` takes for `agent`'s session, when `claude
     /// agents --json` lists it as a background session. The listing runs
-    /// through the login shell the agent itself would: the same `claude`,
-    /// the same `CLAUDE_CONFIG_DIR`.
-    fn claude_background_id(&self, agent: &Agent) -> Option<String> {
+    /// through the login shell the agent itself would: the harness's own
+    /// CLI, under its own `env` — the same `CLAUDE_CONFIG_DIR`.
+    fn claude_background_id(&self, agent: &Agent, harness: &HarnessDescriptor) -> Option<String> {
         let sid = claude_resumable_session(agent)?;
+        self.claude_projects_roots(agent, harness)?;
         let listing = ["agents".to_string(), "--json".to_string()];
         let (program, args) = login_shell_wrap(
             &orion_core::shell::user_shell(),
-            agent.kind.cli_program(),
+            &harness.launch_env(),
+            harness.program.trim(),
             &listing,
         );
         let id = claude_bg::probe(&program, &args, sid)?;
         tracing::info!(agent = %agent.id, session = %sid, attach = %id, "Claude session runs in the background");
         Some(id)
+    }
+
+    /// Where `agent`'s Claude transcripts may sit, when its harness lets
+    /// orion know — the roots the resume safeguards look in: the transcript
+    /// checked before `--resume`, the transcript a failed resume is judged
+    /// by, the background job a resume would be refused over. One dir when
+    /// the harness's `env` pins `CLAUDE_CONFIG_DIR` (a second account, built
+    /// on Claude's dialect or built-in Claude itself), since the spawn
+    /// restates that after the profile; built-in Claude otherwise looks
+    /// wherever its hooks have reported and in this process's default
+    /// ([`Self::claude_projects_dirs`]). None for every other harness, and
+    /// for a Claude-dialect wrapper that sets `CLAUDE_CONFIG_DIR` itself:
+    /// its transcripts are where only it knows, so it resumes unguarded,
+    /// as it always has.
+    pub(crate) fn claude_projects_roots(
+        &self,
+        agent: &Agent,
+        harness: &HarnessDescriptor,
+    ) -> Option<Vec<PathBuf>> {
+        let builtin = agent.kind == AgentKind::Claude;
+        if !builtin && !harness.claude_like() {
+            return None;
+        }
+        match harness.pinned_claude_config_dir() {
+            Some(dir) => Some(vec![dir.join("projects")]),
+            None if builtin => Some(self.claude_projects_dirs()),
+            None => None,
+        }
     }
 
     /// Every Claude projects dir a transcript may sit in: the ones this
@@ -2964,11 +3046,12 @@ impl Daemon {
     }
 }
 
-/// The session id a spawn of `agent` would hand `claude --resume` — the
-/// only kind of session Claude can have sent to its background. None under
-/// the `ORION_AGENT_CMD` override (tests), which never resumes.
+/// The session id a spawn of `agent` would hand `--resume` — a Claude one
+/// whenever [`Daemon::claude_projects_roots`] names somewhere to look for
+/// it, which is what the callers ask first. None under the
+/// `ORION_AGENT_CMD` override (tests), which never resumes.
 fn claude_resumable_session(agent: &Agent) -> Option<&str> {
-    if agent.kind != AgentKind::Claude || std::env::var(env::AGENT_CMD).is_ok() {
+    if std::env::var(env::AGENT_CMD).is_ok() {
         return None;
     }
     agent.session_id.as_deref()
@@ -3060,7 +3143,7 @@ fn agent_spawn_command(
 /// no legacy entries — what a fresh install launches.
 #[cfg(test)]
 fn test_registry() -> Vec<orion_core::harness::HarnessDescriptor> {
-    harness_registry_in(&std::collections::BTreeMap::new(), &[])
+    harness_registry_in(&std::collections::BTreeMap::new(), &[], &[])
 }
 
 /// The pinned descriptor `kind` launches as in spawn tests.
@@ -3275,7 +3358,7 @@ fn validate_starting_prompt(raw: &str) -> Result<String> {
 
 /// Why a Cloud row's restart and attach are refused: the agent has no
 /// local session, and the pane's panel already says where it does run.
-const CLOUD_ROW_NO_LOCAL_SESSION: &str =
+pub(crate) const CLOUD_ROW_NO_LOCAL_SESSION: &str =
     "this session runs in Claude Cloud — open it in the browser";
 
 /// Trim and bounds-check text handed to the Claude CLI as one argv item —
@@ -3438,13 +3521,18 @@ fn cli_missing_message(program: &str) -> String {
 }
 
 /// The effective harness registry from the current config: the
-/// compiled-in known harnesses with the `harnesses` map applied, then the
-/// legacy `custom_harnesses` list, then map-only new ids. Every launch,
-/// resume and hook install resolves through here, so a config edit (not a
-/// rebuild) is what adds a CLI.
-fn harness_registry() -> Vec<orion_core::harness::HarnessDescriptor> {
+/// compiled-in known harnesses with the `harnesses` map applied — Claude's
+/// extra accounts (`claude_accounts`) beside it — then the legacy
+/// `custom_harnesses` list, then map-only new ids. Every launch, resume and
+/// hook install resolves through here, so a config edit (not a rebuild) is
+/// what adds a CLI.
+pub(crate) fn harness_registry() -> Vec<orion_core::harness::HarnessDescriptor> {
     let config = crate::config::Config::load();
-    harness_registry_in(&config.harnesses, &config.custom_harnesses)
+    harness_registry_in(
+        &config.harnesses,
+        &config.custom_harnesses,
+        &config.claude_accounts,
+    )
 }
 
 /// [`harness_registry`] against an explicit config, so tests can pin the
@@ -3452,8 +3540,9 @@ fn harness_registry() -> Vec<orion_core::harness::HarnessDescriptor> {
 fn harness_registry_in(
     overrides: &std::collections::BTreeMap<String, orion_core::harness::HarnessOverride>,
     customs: &[orion_core::harness::CustomHarness],
+    accounts: &[orion_core::claude_account::ClaudeAccount],
 ) -> Vec<orion_core::harness::HarnessDescriptor> {
-    orion_core::harness::registry(overrides, customs)
+    orion_core::harness::registry(overrides, customs, accounts)
 }
 
 /// The descriptor a launch or row runs as: built-ins by kind, customs by
@@ -3461,7 +3550,7 @@ fn harness_registry_in(
 /// its reason before anything spawns. An `enabled` switch gates the
 /// picker, never an existing row — a harness switched off after its
 /// sessions were created keeps running them.
-fn resolve_harness(
+pub(crate) fn resolve_harness(
     kind: AgentKind,
     id: Option<&str>,
 ) -> Result<orion_core::harness::HarnessDescriptor> {
@@ -3509,8 +3598,30 @@ fn resolve_harness_in(
 /// foreground while the TUI around it stays coloured (#37). The spawn sets
 /// the same three against the daemon's inherited environment; this covers
 /// the profile's.
-fn login_shell_wrap(shell: &str, program: &str, args: &[String]) -> (String, Vec<String>) {
-    let mut line = command_word(program);
+///
+/// `env` is the CLI's own environment — a harness's `env`, single-quoted
+/// into one `export` after the prelude, so after the profile too: a
+/// `CLAUDE_CONFIG_DIR` an rc file exports is replaced by the harness's,
+/// never the other way round. The names were checked by
+/// [`orion_core::harness::HarnessDescriptor::problem`] before any spawn.
+fn login_shell_wrap(
+    shell: &str,
+    env: &[(String, String)],
+    program: &str,
+    args: &[String],
+) -> (String, Vec<String>) {
+    let mut line = String::new();
+    if !env.is_empty() {
+        line.push_str("export");
+        for (name, value) in env {
+            line.push(' ');
+            line.push_str(name);
+            line.push('=');
+            line.push_str(&orion_core::shell::single_quote(value));
+        }
+        line.push_str("; ");
+    }
+    line.push_str(&command_word(program));
     for arg in args {
         line.push(' ');
         line.push_str(&orion_core::shell::single_quote(arg));
@@ -3895,6 +4006,7 @@ mod tests {
         let all = harness_registry_in(
             &std::collections::BTreeMap::new(),
             std::slice::from_ref(&agy),
+            &[],
         );
         let harness = test_custom_harness(&all, "agy");
         let (program, args, resumed) = agent_spawn_command_with(
@@ -3916,7 +4028,7 @@ mod tests {
             model_flag: "-m".into(),
             ..agy.clone()
         };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[gemini]);
+        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[gemini], &[]);
         let harness = test_custom_harness(&all, "agy");
         let (_, args, _) = agent_spawn_command_with(
             &harness,
@@ -3957,7 +4069,7 @@ mod tests {
                 ..HarnessOverride::default()
             },
         );
-        let all = harness_registry_in(&overrides, &[agy]);
+        let all = harness_registry_in(&overrides, &[agy], &[]);
         let harness = test_custom_harness(&all, "agy");
         assert_eq!(
             harness.hook_dialect(),
@@ -4003,7 +4115,7 @@ mod tests {
                 ..HarnessOverride::default()
             },
         );
-        let all = harness_registry_in(&overrides, &[]);
+        let all = harness_registry_in(&overrides, &[], &[]);
         let grok = test_custom_harness(&all, "grok");
         assert_eq!(grok.problem(), None);
 
@@ -4063,6 +4175,7 @@ mod tests {
         let all = harness_registry_in(
             &std::collections::BTreeMap::new(),
             std::slice::from_ref(&agy),
+            &[],
         );
         // Built-ins resolve by kind, whatever the id says.
         assert_eq!(
@@ -4081,7 +4194,7 @@ mod tests {
             program: String::new(),
             ..agy.clone()
         };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[broken]);
+        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[broken], &[]);
         let err = resolve_harness_in(AgentKind::Custom, Some("agy"), &all).unwrap_err();
         assert!(err.to_string().contains("no program"), "{err}");
         // The usable entry resolves, disabled or not: a harness switched
@@ -4090,12 +4203,51 @@ mod tests {
             enabled: false,
             ..agy.clone()
         };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[off]);
+        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[off], &[]);
         assert_eq!(
             resolve_harness_in(AgentKind::Custom, Some("agy"), &all)
                 .unwrap()
                 .program,
             "agy"
+        );
+    }
+
+    /// A `claude_accounts` entry launches and resumes exactly as built-in
+    /// Claude does — its own `--resume`, its model and effort flags — in
+    /// its own config dir, which the spawn exports after the profile.
+    #[test]
+    fn a_claude_account_launches_as_claude_in_its_own_dir() {
+        let account = orion_core::claude_account::ClaudeAccount {
+            id: "claude-2".into(),
+            config_dir: "/home/me/.claude-2".into(),
+            enabled: true,
+        };
+        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[], &[account]);
+        let harness = resolve_harness_in(AgentKind::Custom, Some("claude-2"), &all).unwrap();
+        assert_eq!(harness.program, "claude");
+        assert_eq!(
+            harness.launch_env(),
+            [(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/me/.claude-2".to_string()
+            )]
+        );
+        let (program, args, resumed) = agent_spawn_command_with(
+            &harness,
+            Some("sid-2"),
+            Some(Path::new(TEST_CWD)),
+            Some("opus"),
+            Some("high"),
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(program, "claude");
+        assert!(resumed);
+        assert_eq!(
+            args,
+            ["--resume", "sid-2", "--model", "opus", "--effort", "high"]
         );
     }
 
@@ -4573,6 +4725,7 @@ mod tests {
     fn login_shell_wrap_quotes_args_and_leaves_the_command_word_bare() {
         let (program, args) = login_shell_wrap(
             "/bin/zsh",
+            &[],
             "claude",
             &["--resume".to_string(), "sid-1".to_string()],
         );
@@ -4587,10 +4740,10 @@ mod tests {
             ]
         );
         // Single quotes in an arg survive the wrapping.
-        let (_, args) = login_shell_wrap("/bin/zsh", "echo", &["it's".to_string()]);
+        let (_, args) = login_shell_wrap("/bin/zsh", &[], "echo", &["it's".to_string()]);
         assert_eq!(args[3], format!(r"{PANE_ENV} echo 'it'\''s'"));
         // A command word that isn't a plain name is quoted like an argument.
-        let (_, args) = login_shell_wrap("/bin/zsh", "my tool", &[]);
+        let (_, args) = login_shell_wrap("/bin/zsh", &[], "my tool", &[]);
         assert_eq!(args[3], format!("{PANE_ENV} 'my tool'"));
     }
 
@@ -4603,6 +4756,7 @@ mod tests {
     fn login_shell_wrap_lets_the_shell_resolve_the_command() {
         let (_, args) = login_shell_wrap(
             "/bin/sh",
+            &[],
             "claude",
             &["--resume".to_string(), "sid-1".to_string()],
         );
@@ -4639,6 +4793,7 @@ mod tests {
         std::fs::write(home.path().join(".zshrc"), "alias claude='echo routed'\n").unwrap();
         let (program, args) = login_shell_wrap(
             "zsh",
+            &[],
             "claude",
             &["--resume".to_string(), "sid-1".to_string()],
         );
@@ -4669,6 +4824,7 @@ mod tests {
     fn login_shell_wrap_restates_the_pane_after_the_profile() {
         let (_, args) = login_shell_wrap(
             "/bin/sh",
+            &[],
             "sh",
             &[
                 "-c".to_string(),
@@ -4722,6 +4878,97 @@ mod tests {
         assert!(
             dirs.contains(&PathBuf::from("/cfg/alt/projects")),
             "{dirs:?}"
+        );
+    }
+
+    /// A harness's `env` is exported after the prelude — after the
+    /// profile — so a `CLAUDE_CONFIG_DIR` the user's rc files set cannot
+    /// undo the one a second account's harness pins, and a value with a
+    /// quote in it arrives whole.
+    #[test]
+    fn login_shell_wrap_exports_the_harness_env_after_the_profile() {
+        let (_, args) = login_shell_wrap(
+            "/bin/sh",
+            &[
+                ("CLAUDE_CONFIG_DIR".into(), "/home/me/.claude-b".into()),
+                ("ORION_TEST_QUOTED".into(), "it's here".into()),
+            ],
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"printf '%s|%s|%s' "$CLAUDE_CONFIG_DIR" "$ORION_TEST_QUOTED" "$TERM""#
+                    .to_string(),
+            ],
+        );
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&args[3])
+            .env("CLAUDE_CONFIG_DIR", "/home/me/.claude")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "/home/me/.claude-b|it's here|xterm-256color",
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // No env, no export: the line is the CLI's alone.
+        let (_, args) = login_shell_wrap("/bin/sh", &[], "claude", &["--resume".into()]);
+        assert_eq!(args[3], format!("{PANE_ENV} claude '--resume'"));
+    }
+
+    /// The resume safeguards look for a Claude session's transcript where
+    /// its harness keeps them: a second account's own config dir when its
+    /// `env` pins one, built-in Claude's usual places otherwise — and
+    /// nowhere for a wrapper whose config dir only it knows, or a harness
+    /// off Claude's dialect.
+    #[test]
+    fn claude_projects_roots_follow_the_harness_env() {
+        let daemon = test_daemon();
+        let agent = |kind: AgentKind, custom: Option<&str>| Agent {
+            id: AgentId("a1".into()),
+            worktree_id: WorktreeId("w".into()),
+            name: "a".into(),
+            status: AgentStatus::Fresh,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind,
+            custom_harness: custom.map(str::to_string),
+            model: None,
+            effort: None,
+            session_id: Some("sid".into()),
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: false,
+            issue_url: None,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        };
+        let claude = orion_core::harness::builtin("claude").unwrap();
+        let builtin = agent(AgentKind::Claude, None);
+        assert_eq!(
+            daemon.claude_projects_roots(&builtin, &claude),
+            Some(daemon.claude_projects_dirs())
+        );
+        let mut wrapper = claude.clone();
+        wrapper.id = "claude-b".into();
+        wrapper.program = "/home/me/bin/claude-b".into();
+        let custom = agent(AgentKind::Custom, Some("claude-b"));
+        assert_eq!(daemon.claude_projects_roots(&custom, &wrapper), None);
+        let mut pinned = wrapper.clone();
+        pinned
+            .env
+            .insert("CLAUDE_CONFIG_DIR".into(), "/home/me/.claude-b".into());
+        assert_eq!(
+            daemon.claude_projects_roots(&custom, &pinned),
+            Some(vec![PathBuf::from("/home/me/.claude-b/projects")])
+        );
+        let codex = orion_core::harness::builtin("codex").unwrap();
+        assert_eq!(
+            daemon.claude_projects_roots(&agent(AgentKind::Codex, None), &codex),
+            None
         );
     }
 
@@ -5433,6 +5680,7 @@ mod tests {
                 alive: false,
                 issue_url: None,
                 recent_prompts: Vec::new(),
+                usage_limit: None,
             })
             .unwrap();
     }
@@ -5712,6 +5960,7 @@ mod tests {
                     alive: false,
                     issue_url: None,
                     recent_prompts: Vec::new(),
+                    usage_limit: None,
                 },
                 true,
             )
