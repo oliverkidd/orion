@@ -1,0 +1,18 @@
+/target
+
+# orion-managed agent hook files installed at agent spawn
+/.codex/
+/.cursor/hooks.json
+/.cursor/rules/orion-title.mdc
+/.claude/settings.local.json
+
+# Local-only files — do not commit
+CLAUDE.local.md
+design-screenshots/
+.DS_Store
+
+# orion-managed git worktrees for agent sessions
+/.claude/worktrees/
+
+# python tooling under scripts/
+__pycache__/

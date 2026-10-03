@@ -1,0 +1,4 @@
+# p on the grid, then ^N: the QUICK PROMPT aimed at a fresh worktree.
+Tab
+p
+C-n

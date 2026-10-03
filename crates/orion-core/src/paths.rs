@@ -1,0 +1,202 @@
+use crate::env;
+use std::path::{Path, PathBuf};
+
+/// The settings files' names in the data dir. Their loaders, the SETTINGS
+/// BUNDLE and `orion config path` all spell them from here.
+pub const CONFIG_FILE_NAME: &str = "config.json";
+pub const CONFIG_LOCAL_FILE_NAME: &str = "config.local.json";
+pub const PRESETS_FILE_NAME: &str = "agent_presets.json";
+pub const SSH_HOSTS_FILE_NAME: &str = "ssh_hosts.json";
+
+/// Where the runtime dir lands when neither override nor `XDG_RUNTIME_DIR`
+/// is set. World-writable, so the per-uid subdir is what carries mode 0700.
+const FALLBACK_RUNTIME_ROOT: &str = "/tmp";
+
+/// Runtime dir holding the socket + pidfile. Mode 0700 — this is the auth
+/// boundary, same model as tmux. `ORION_RUNTIME_DIR` overrides (tests,
+/// parallel instances).
+pub fn runtime_dir() -> PathBuf {
+    if let Some(dir) = env::non_empty(env::RUNTIME_DIR) {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = env::non_empty("XDG_RUNTIME_DIR") {
+        return PathBuf::from(dir).join("orion");
+    }
+    let uid = libc_geteuid();
+    Path::new(FALLBACK_RUNTIME_ROOT).join(format!("orion-{uid}"))
+}
+
+// Avoid a libc dependency in this dep-light crate for one call.
+fn libc_geteuid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
+}
+
+pub fn socket_path() -> PathBuf {
+    runtime_dir().join("daemon.sock")
+}
+
+pub fn pidfile_path() -> PathBuf {
+    runtime_dir().join("daemon.pid")
+}
+
+/// Fingerprint of the binary the running daemon was launched from, written
+/// by the daemon at startup. Installers compare it against the binary they
+/// just installed to tell an up-to-date daemon from a stale one.
+pub fn buildstamp_path() -> PathBuf {
+    runtime_dir().join("daemon.build")
+}
+
+/// The platform's per-user dirs for this app (`~/Library/Application
+/// Support/dev.orion.orion` on macOS, `~/.local/share/orion` on Linux).
+fn project_dirs() -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("dev", "orion", "orion")
+}
+
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = env::non_empty(env::DATA_DIR) {
+        return PathBuf::from(dir);
+    }
+    project_dirs()
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| env::home_dir().unwrap_or_default().join(".orion"))
+}
+
+pub fn db_path() -> PathBuf {
+    data_dir().join("orion.db")
+}
+
+/// User settings file (JSON) — the portable layer, which backups and
+/// `orion ssh` carry. Lives beside the DB so `ORION_DATA_DIR` isolates it
+/// for tests and parallel instances too; `ORION_CONFIG_FILE` moves this one
+/// file alone (a leading `~/` is expanded, since a quoted value never is).
+pub fn config_path() -> PathBuf {
+    match env::non_empty(env::CONFIG_FILE) {
+        Some(file) => match file.strip_prefix("~/") {
+            Some(rest) => env::home_dir().unwrap_or_default().join(rest),
+            None => PathBuf::from(file),
+        },
+        None => data_dir().join(CONFIG_FILE_NAME),
+    }
+}
+
+/// This machine's settings, layered over [`config_path`] key by key: never
+/// exported, forwarded or overwritten by an import. Stays in the data dir
+/// when `ORION_CONFIG_FILE` moves the portable file.
+pub fn config_local_path() -> PathBuf {
+    data_dir().join(CONFIG_LOCAL_FILE_NAME)
+}
+
+/// Claude Code's config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    env::non_empty(env::CLAUDE_CONFIG_DIR)
+        .map(PathBuf::from)
+        .or_else(|| env::home_dir().map(|home| home.join(".claude")))
+}
+
+pub fn log_dir() -> PathBuf {
+    // Tests and parallel instances override the data dir; keep their logs
+    // beside their data instead of the real user's state dir.
+    if env::non_empty(env::DATA_DIR).is_some() {
+        return data_dir().join("state");
+    }
+    project_dirs()
+        .map(|d| {
+            d.state_dir()
+                .map(|s| s.to_path_buf())
+                .unwrap_or_else(|| d.data_dir().join("state"))
+        })
+        .unwrap_or_else(|| data_dir().join("state"))
+}
+
+pub fn daemon_log_path() -> PathBuf {
+    log_dir().join("daemon.log")
+}
+
+pub fn tui_log_path() -> PathBuf {
+    log_dir().join("tui.log")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Restores an env var to what it was when the guard was made, so a
+    /// failed assertion can't leak an override into the next test.
+    struct EnvRestore(&'static str, Option<std::ffi::OsString>);
+    impl EnvRestore {
+        fn new(var: &'static str) -> Self {
+            Self(var, std::env::var_os(var))
+        }
+    }
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    // One test owns both override vars: env is process-global, and splitting
+    // this into several `#[test]`s would race them across threads.
+    #[test]
+    fn overrides_win_only_when_non_empty() {
+        let _restore = (
+            EnvRestore::new(crate::env::RUNTIME_DIR),
+            EnvRestore::new(crate::env::DATA_DIR),
+            EnvRestore::new(crate::env::CONFIG_FILE),
+        );
+        std::env::remove_var(crate::env::CONFIG_FILE);
+        let runtime = std::env::temp_dir().join(format!("orion-paths-rt-{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("orion-paths-data-{}", std::process::id()));
+
+        std::env::set_var(crate::env::RUNTIME_DIR, &runtime);
+        std::env::set_var(crate::env::DATA_DIR, &data);
+        assert_eq!(runtime_dir(), runtime);
+        assert_eq!(socket_path(), runtime.join("daemon.sock"));
+        assert_eq!(pidfile_path(), runtime.join("daemon.pid"));
+        assert_eq!(buildstamp_path(), runtime.join("daemon.build"));
+        assert_eq!(data_dir(), data);
+        assert_eq!(db_path(), data.join("orion.db"));
+        assert_eq!(config_path(), data.join("config.json"));
+        assert_eq!(config_local_path(), data.join("config.local.json"));
+        // Logs follow the data override so isolated instances keep their
+        // logs beside their state.
+        assert_eq!(log_dir(), data.join("state"));
+        assert_eq!(daemon_log_path(), data.join("state").join("daemon.log"));
+        assert_eq!(tui_log_path(), data.join("state").join("tui.log"));
+
+        // The config file override moves that one file; the local layer and
+        // everything else stay in the data dir.
+        let dotfile = std::env::temp_dir().join("dotfiles").join("orion.json");
+        std::env::set_var(crate::env::CONFIG_FILE, &dotfile);
+        assert_eq!(config_path(), dotfile);
+        assert_eq!(config_local_path(), data.join("config.local.json"));
+        assert_eq!(db_path(), data.join("orion.db"));
+        std::env::set_var(crate::env::CONFIG_FILE, "~/dotfiles/orion.json");
+        assert_eq!(
+            config_path(),
+            crate::env::home_dir()
+                .unwrap()
+                .join("dotfiles")
+                .join("orion.json")
+        );
+        std::env::set_var(crate::env::CONFIG_FILE, "");
+        assert_eq!(config_path(), data.join("config.json"));
+
+        std::env::set_var(crate::env::RUNTIME_DIR, "");
+        std::env::set_var(crate::env::DATA_DIR, "");
+        assert_ne!(runtime_dir(), runtime, "empty override must fall through");
+        assert_ne!(data_dir(), data, "empty override must fall through");
+        assert_ne!(log_dir(), data.join("state"));
+        assert!(
+            runtime_dir().is_absolute() && data_dir().is_absolute(),
+            "defaults are absolute: {} / {}",
+            runtime_dir().display(),
+            data_dir().display()
+        );
+    }
+}

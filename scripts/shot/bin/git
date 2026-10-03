@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# A stand-in `git` for the SCREENSHOT HARNESS: the real git, except that `worktree add` first sleeps
+# ORION_SHOT_SLOW_GIT_SECS seconds when that is set — the window in which a QUICK PROMPT's stand-in
+# WORKTREE and SESSION rows are on screen, which a real `git worktree add` on the demo repo closes in
+# milliseconds. ORION_SHOT_SLOW_GIT_MATCH names another subcommand to slow instead (`ls-files`,
+# `status`): the window in which a BACKGROUND READ's modal is up ahead of its listing. Unset (every
+# other scene), it is exactly git.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+real=""
+IFS=: read -ra dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+  [ "$d" = "$HERE" ] && continue
+  if [ -x "$d/git" ]; then real="$d/git"; break; fi
+done
+[ -n "$real" ] || { echo "shot git: no real git on PATH" >&2; exit 1; }
+if [ -n "${ORION_SHOT_SLOW_GIT_SECS:-}" ]; then
+  case " $* " in *" ${ORION_SHOT_SLOW_GIT_MATCH:-worktree add} "*) sleep "$ORION_SHOT_SLOW_GIT_SECS";; esac
+fi
+exec "$real" "$@"

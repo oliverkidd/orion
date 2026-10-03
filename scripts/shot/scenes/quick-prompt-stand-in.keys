@@ -1,0 +1,7 @@
+# p on the grid, ^N for a fresh worktree, a task typed, Enter — captured while git is still
+# cutting the checkout (run with ORION_SHOT_SLOW_GIT_SECS=6): the stand-in WORKTREE and SESSION rows.
+Tab
+p
+C-n
+Add a retry to the login redirect
+Enter
