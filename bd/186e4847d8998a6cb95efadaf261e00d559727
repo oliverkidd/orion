@@ -1,0 +1,19 @@
+DELETE-LATER.md
+  s_361dd8a5088283::t_5b27ea4b37cab2 39-47,50-69,73-75,77-82,86-98,104-109,111-112,118,122,124-125,127-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bd186e4847d8998a6cb95efadaf261e00d559727",
+  "prompts": {},
+  "sessions": {
+    "s_361dd8a5088283": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8285f4b9-0c18-4c31-85bd-7dd265da27e0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
