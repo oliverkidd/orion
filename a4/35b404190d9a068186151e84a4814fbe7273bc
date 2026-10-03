@@ -1,0 +1,22 @@
+crates/orion-tui/src/config.rs
+  s_361dd8a5088283::t_636b3e6f609fa5 2703-2708,2713
+  s_361dd8a5088283::t_be89c01de871b0 1967-1976,1980
+  s_361dd8a5088283::t_272ad973d33ed9 4802-4803
+  s_361dd8a5088283::t_ecbd5f5d351590 64-67,1720-1722
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a435b404190d9a068186151e84a4814fbe7273bc",
+  "prompts": {},
+  "sessions": {
+    "s_361dd8a5088283": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8285f4b9-0c18-4c31-85bd-7dd265da27e0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
