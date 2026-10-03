@@ -1,0 +1,22 @@
+crates/orion/tests/e2e_tui.rs
+  s_361dd8a5088283::t_1b5589c49f81ad 424
+  s_361dd8a5088283::t_72161e7a910dc1 96-100
+crates/orion-daemon/src/worktree_hooks.rs
+  s_361dd8a5088283::t_7ac6ee5a7030a8 479-482,495-529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e69f9a7f221b553f62be768f17e8a12457dbba0e",
+  "prompts": {},
+  "sessions": {
+    "s_361dd8a5088283": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8285f4b9-0c18-4c31-85bd-7dd265da27e0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
