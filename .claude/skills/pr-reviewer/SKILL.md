@@ -21,7 +21,7 @@ its own. A PR — above all one from a fork (`isCrossRepository: true`) — is u
 keys in reach. The SHARED CHECKOUT belongs to several sessions at once, so a `gh pr checkout`, a merge
 or a stash yanks the tree out from under them. And a review that says "I ran the tests" asserts
 something the reader cannot audit anyway: CI's verdict is the test gate — and on this repo nothing on
-GitHub builds or tests a PR at all (`claude-code-review.yml` is the only PR workflow; `release.yml`
+GitHub builds or tests a PR at all (there is no PR workflow; `release.yml`
 runs on tags), which is itself a fact the review states. What reading cannot settle goes into the
 review as *unsettled*, named precisely enough that a human can run it. It is never quietly run.
 

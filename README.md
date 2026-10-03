@@ -1,5 +1,5 @@
 > [!NOTE]
-> A customized fork of [nebula](https://github.com/AgentSystemLabs/nebula). Built for one person's workflow — mine — and it changes as I use it. Keys, screens and features move. Fork it if you want something stable.
+> A customized fork of [nebula](https://github.com/AgentSystemLabs/nebula), built for my own workflow and my colleagues'. It changes as we use it: keys, screens and features move. Fork it if you want something stable. There are no GitHub bots or PR checks here; the only workflow builds release binaries when a `v*` tag is pushed.
 
 <div align="center">
 
@@ -130,7 +130,7 @@ Reload Ghostty's config (`⌘⇧,`) after the first launch so Command chords rea
 | [**Keys**](docs/keys.md) | Default bindings, the grid, worktree views, the mouse. All of it rebindable in Settings. |
 | [**Commands**](docs/commands.md) | The `orion` CLI: `add`, `worktree`, `spawn`, `open`, `config`, `ssh`, `tunnel`, `kill`, `upgrade`. |
 | [**Sessions**](docs/sessions.md) | The quick prompt, the grid, presets, issues, pull requests. |
-| [**Configuration**](docs/configuration.md) | `~/.orion/config.json` and `config.local.json`, the settings overlay, project files, env overrides. |
+| [**Configuration**](docs/configuration.md) | `config.json` and `config.local.json` (`orion config path` prints where; on macOS `~/Library/Application Support/dev.orion.orion/`), the settings overlay, project files, env overrides. |
 | [**How it works**](docs/how-it-works.md) | The daemon, hook dialects, auto-title, worktree relocation. |
 | [**Architecture**](ARCHITECTURE.md) | Process model, the IPC codec, crate layout. |
 
