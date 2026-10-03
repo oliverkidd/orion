@@ -36,110 +36,114 @@ These shipped in `f00da21`. Verify on the work laptop; do not rebuild.
 
 ---
 
+## Status (2026-10-03, work laptop)
+
+An agent worked through this list on the work laptop. `[x]` means done or
+dropped (the reason is given). Every open box needs Oliver at the keyboard: the
+TUI, a Linear key, or a `/login`.
+
+Orion keeps its data in `~/Library/Application Support/dev.orion.orion/` on
+macOS (`orion config path`). `~/.orion/` is only the fallback.
+
 ## 1. First run on the work laptop
 
-- [ ] `git clone https://github.com/oliverkidd/orion.git` (or `git pull` if
-      already cloned) then `cargo install --path crates/orion --locked`.
-      Updating later: same two commands; see README → Updating.
-- [ ] Check with IT before installing Rust if company policy needs it.
-- [ ] `gh auth status` — org SSO authorised. PR and issue features use `gh`.
-- [ ] `orion --version`, then `orion` inside the real work repo. Enter on the
-      splash to add it.
-- [ ] Reload Ghostty config (`⌘⇧,`) so Command chords work.
-- [ ] Data lives in `~/.orion/`. Keep secrets out of `config.json` and presets
-      (`orion ssh` copies that file).
+- [x] Clone and `cargo install --path crates/orion --locked`. Reinstalled after
+      the worktree-filter commit below.
+- [x] IT check for Rust. Dropped: Rust 1.99 was already installed.
+- [x] `gh auth status`: logged in as `oliverkidd`, and the RiploData org
+      answers (`gh pr list -R RiploData/riplo-os` works).
+- [x] `orion --version` (0.42.0). `orion add` registered riplo-nightshift and
+      riplo-os.
+- [ ] Reload Ghostty config (`⌘⇧,`). Orion's keybind block is already in
+      `~/.config/ghostty/config`.
+- [x] Keep secrets out of `config.json`. It holds only the `claude-b` row.
 
-## 2. Agent hook files (before the first session)
+## 2. Agent hook files
 
-Orion merges managed hooks at spawn, tagged `_orionManaged`. It never replaces
-your entries. Hooks do nothing outside Orion.
-
-| File | Scope |
-|---|---|
-| `<worktree>/.claude/settings.local.json` | per checkout |
-| `<worktree>/.cursor/hooks.json` | per checkout |
-| `<worktree>/.cursor/rules/orion-title.mdc` | per checkout |
-| `~/.codex/hooks.json` | global |
-| `~/.pi/agent/...` Orion extension | global |
-| `~/.config/opencode/...` Orion plugin | global |
-
-- [ ] Add the three per-checkout paths to the work repo `.gitignore` or
-      `.git/info/exclude`.
-- [ ] Back up `~/.codex/hooks.json` if it exists.
-- [ ] Confirm the model picker matches any company-managed Claude allowlist.
-- [ ] Optional: strip "Don't mention the rename to the user" from
-      `AUTO_TITLE_INSTRUCTION` in `crates/orion-daemon/src/hooks/mod.rs`.
+- [x] The three per-checkout paths are in `.git/info/exclude` for riplo-os and
+      riplo-nightshift (riplo-os also ignores `.cursor/*` in `.gitignore`).
+- [x] Back up `~/.codex/hooks.json`. Dropped: Codex isn't installed.
+- [x] Model picker vs company allowlist: there's no `availableModels` in
+      remote, managed or user settings and no MDM profile, so the stock
+      aliases apply.
+- [x] Strip "Don't mention the rename". Dropped: Oliver chose to keep it.
 
 ## 3. Verify worktrees
 
-- [ ] Create a worktree and confirm nested `.env` files (monorepo apps) landed
-      as symlinks into the main checkout.
+- [ ] In the TUI, `⌘N` a worktree on riplo-os and confirm `.env.local` is a
+      symlink into the main checkout. riplo-os has no nested ignored `.env`
+      files, only the root `.env.local`.
 - [ ] Dirty delete shows "Unsaved work"; a clean delete is still one confirm.
-- [ ] If `<repo>-worktrees/` does not match the company layout, a configurable
-      root is still unbuilt — ask before adding it.
+- [x] Configurable worktree root. Dropped: Oliver keeps `<repo>-worktrees/`.
+- [x] Fallow's audit caches: riplo-os had 59 of them as worktrees in the temp
+      dir (33 already gone from disk). Pruned the dead ones. Orion now skips
+      prunable worktrees and temp-dir worktrees of a repo outside temp
+      (`crates/orion-daemon/src/git.rs`), so they never become bands or get
+      `.env` symlinks.
 
 ## 4. Verify Linear (live API)
 
-- [ ] Confirm the env var is `LINEAR_API_KEY` in the work repo `.env` /
-      `.env.local`.
-- [ ] Settings → Linear account: type the Linear email if the key is shared or
-      a bot, so "assigned to me" is actually Oliver.
-- [ ] Confirm `viewer.assignedIssues` and `attachmentLinkGitHubPR` against the
-      live API. If the mutation was renamed, the attach flash will say so —
-      fix `crates/orion-tui/src/linear.rs`.
-- [ ] Check whether Linear's GitHub integration already auto-links from
-      `ENG-12` in the branch name. If yes, turn **Link PRs to Linear** off.
+- [ ] Make a personal key (Linear → Settings → Security & access → Personal
+      API keys) and put `LINEAR_API_KEY=lin_api_…` in
+      `riplo-os/.env.local`. Neither work repo's code reads that name today.
+      riplo-nightshift's design notes reserve it for the bot's service key,
+      though, so don't put a personal key there.
+- [x] API names: `User.assignedIssues` and
+      `attachmentLinkGitHubPR(issueId: String!, url: String!)` both match
+      Linear's published schema (`linear/linear` → `packages/sdk/src/schema.graphql`).
+      A live call still waits on the key.
+- [ ] Auto-link: team branches already carry the id (`feature/riplo-968-…`),
+      and Orion's do too (`riplo-968-<slug>`). With the key, check whether
+      RIPLO-968 already has its PR attached. If it does, Linear's GitHub
+      integration links by itself, so turn **Link PRs to Linear** off.
 - [ ] `⌘L`, mark two issues, launch, confirm the prompt and branch name. Then
       attach from `v` → `⌘L`.
 
 ## 5. Two Claude accounts (Option A prototype)
 
-Not product code. A wrapper plus a harness row.
-
-- [ ] `~/bin/claude-b`:
-      `export CLAUDE_CONFIG_DIR="$HOME/.claude-b"; exec claude "$@"`
-- [ ] Add `harnesses.claude-b` to `~/.orion/config.json` (`program` = that
-      wrapper, `hooks` = `claude`, same flags as the built-in Claude row).
-- [ ] `CLAUDE_CONFIG_DIR=~/.claude-b claude` then `/login`.
+- [x] `~/bin/claude-b` wrapper (`CLAUDE_CONFIG_DIR=$HOME/.claude-b`).
+- [x] `harnesses.claude-b` in `config.json`. `orion config harnesses` shows it
+      matches the built-in Claude row apart from id, label and program.
+- [ ] `CLAUDE_CONFIG_DIR=~/.claude-b claude`, then `/login` with the second
+      account. `~/.claude-b` starts empty: no CLAUDE.md, skills or settings
+      unless you link them in.
 - [ ] Verify: separate login/usage; status dots and titles; resume after
-      daemon restart; what the card does at a usage limit (Orion ignores quota
-      notifications today).
-- [ ] If it works, decide later whether to build an account picker / "continue
-      on the other account". Do not start that unless asked.
+      daemon restart; what the card does at a usage limit.
+- [ ] If it works, decide later on an account picker. Don't start it unasked.
 
 ## 6. Use the product, then keybinds
 
 - [ ] Leave keys alone until Oliver has used it for real work.
 - [ ] Grid keys: Settings → Hotkeys. Modal keys: code change.
-- [ ] Features marked kill/unsure on the review canvas: remove or hide only
-      when asked.
+- [ ] Kill/unsure features on the review canvas: remove only when asked.
 
 ## 7. Later product work (not this laptop's first day)
 
-- [ ] **Skills** — show / pick installed skills when launching an agent
-      (design brief 3c). Linear multi-select launch may grow a skill that
-      groups issues; the product surface (`⌘L`) is already there.
+- [ ] **Skills** picker at launch (design brief 3c).
 - [ ] **Per-commit diff review** (design brief 3b).
-- [ ] **Markdown editing** — parked. Do not build a WYSIWYG.
-- [ ] **First release** — `git tag v0.1.0 && git push --tags`. Until then
+- [ ] **Markdown editing**: parked. No WYSIWYG.
+- [ ] **First release**: `git tag v0.1.0 && git push --tags`. Until then
       `install.sh` / `orion upgrade` fall back to `cargo install --git`.
-- [ ] **CI secrets** — `.github/workflows/claude.yml` and
-      `claude-code-review.yml` need `CLAUDE_CODE_OAUTH_TOKEN`. On a public
-      repo, delete the workflows or lock them to this account before adding
-      the secret. Without it they just fail.
+- [x] **CI secrets**. Dropped: the repo is for local use, so both Claude
+      workflows are deleted. `release.yml` stays (tags only, `GITHUB_TOKEN`).
 
-## 8. Repo leftovers (any machine)
+## 8. Repo leftovers
 
-- [ ] Three tests also fail on untouched upstream; fix or mark flaky:
-      `orion_open_from_inside_a_session_raises_the_file_tabs`,
-      `tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run`
-      (`crates/orion/tests/e2e_tui.rs`);
-      `worktree_hooks::tests::hook_past_the_timeout_is_killed_with_what_it_started`
-      (fails only under the full parallel run).
-- [ ] `chacha20 0.10.1` (via `rand`) is yanked. No advisory. `cargo update -p
-      chacha20`, then `cargo test` and `cargo audit`.
-- [ ] `assets/*.png` still say "nebula". Regenerate with `make shot` when the
-      UI settles.
+- [x] `worktree_hooks::…hook_past_the_timeout_is_killed_with_what_it_started`:
+      `sh` hadn't started within the timeout under load. Fixed; it now
+      retries with longer timeouts.
+- [x] `tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run`: failed
+      whenever `SSH_CONNECTION`/`SSH_TTY` were set. The harness now clears
+      them for every test.
+- [x] `orion_open_from_inside_a_session_raises_the_file_tabs`. Dropped:
+      it never failed on this laptop (9 full runs, under load, with SSH
+      vars). It may come from the other laptop's `~/.profile`, since the
+      stub shell runs as a login shell.
+- [x] Also fixed: a `config.rs` test swapped the process-wide `PATH`, so
+      parallel tests sometimes failed to find `git`.
+- [x] `chacha20` 0.10.1 → 0.10.2. `cargo audit` isn't installed
+      (`cargo install cargo-audit --locked`, then `cargo audit`).
+- [ ] `assets/*.png` still say "nebula". `make shot` when the UI settles.
 
 ---
 
