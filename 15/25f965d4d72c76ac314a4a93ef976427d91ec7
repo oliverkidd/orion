@@ -1,0 +1,32 @@
+scripts/shot/scenes/list-two-lines.setup.sh
+  s_a262a63ccc92d8::t_d5daaaea1d718c 1-10
+scripts/shot/scenes/prompt-mention.keys
+  s_a262a63ccc92d8::t_e4cf55c148fc75 3
+  s_a262a63ccc92d8::t_3c69f22ecf81a8 1
+  s_a262a63ccc92d8::t_3e38237c798318 2
+scripts/shot/scenes/prompt-mode-plan.keys
+  s_a262a63ccc92d8::t_3e38237c798318 1,3
+  s_a262a63ccc92d8::t_3c69f22ecf81a8 2,4-5
+scripts/shot/scenes/list-two-lines.keys
+  s_a262a63ccc92d8::t_044c12a33c920a 3,7,15-17
+  s_a262a63ccc92d8::t_cd96a01c6ea059 1-2
+  s_a262a63ccc92d8::t_d5daaaea1d718c 4-6,8-14
+scripts/shot/scenes/prompt-mention.setup.sh
+  s_a262a63ccc92d8::t_3c69f22ecf81a8 1-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1525f965d4d72c76ac314a4a93ef976427d91ec7",
+  "prompts": {},
+  "sessions": {
+    "s_a262a63ccc92d8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d0d082b5-5cd9-4aaf-941f-714800c48cb1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
