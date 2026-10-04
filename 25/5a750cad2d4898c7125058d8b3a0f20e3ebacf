@@ -1,0 +1,61 @@
+crates/orion-core/src/project_file.rs
+  s_27e49c94cc9cf2::t_1e355fe5425dae 148-149
+crates/orion-daemon/src/env_links.rs
+  s_27e49c94cc9cf2::t_0b6e18e4d12d6f 113-117,127-135,151-154,157-160,175-178
+crates/orion-daemon/src/hooks/installer.rs
+  s_27e49c94cc9cf2::t_6e93534706f8c9 577-581
+crates/orion-daemon/src/open_files.rs
+  s_27e49c94cc9cf2::t_35be5a3e465ade 24
+crates/orion-daemon/src/registry.rs
+  s_27e49c94cc9cf2::t_00a41a43e58116 791-792,835-836,2510-2513,6665,6674-6677
+crates/orion-daemon/src/store.rs
+  s_27e49c94cc9cf2::t_eceb5686645e2d 1442,1486,1542,1576,1628,1714
+crates/orion-fuzzy/src/lib.rs
+  s_27e49c94cc9cf2::t_0cbb17df123940 353
+crates/orion-tui/src/branch_name.rs
+  s_27e49c94cc9cf2::t_68897c97ffe218 30-33
+crates/orion-tui/src/branch_switch.rs
+  s_27e49c94cc9cf2::t_7b0c35db343284 2998-3001
+crates/orion-tui/src/config.rs
+  s_27e49c94cc9cf2::t_357bb2808201b7 169-172,4623
+crates/orion-tui/src/editor.rs
+  s_27e49c94cc9cf2::t_20c9b673bbc037 535-538
+crates/orion-tui/src/event_loop/menus.rs
+  s_27e49c94cc9cf2::t_7b1a8b9e393518 138-141,143
+crates/orion-tui/src/event_loop/placeholder.rs
+  s_27e49c94cc9cf2::t_25f454245c6fec 1337-1340,1424-1427,1513-1516,2202-2207
+crates/orion-tui/src/ipc.rs
+  s_27e49c94cc9cf2::t_c29e719798f782 331-333
+crates/orion-tui/src/linear.rs
+  s_27e49c94cc9cf2::t_5274911208671b 314-320,328-332,380,408-411,414-417,805-808,1001,1169-1170,1196-1199,1201-1202,1231-1235,1480-1483,1495-1498,1505-1508
+crates/orion-tui/src/palette.rs
+  s_27e49c94cc9cf2::t_078a35b6435cd8 582-585
+crates/orion-tui/src/quick_prompt.rs
+  s_27e49c94cc9cf2::t_22cc235ae21298 557-560
+crates/orion-tui/src/ui.rs
+  s_27e49c94cc9cf2::t_bb26fb975b341a 351-354,357-361,1060-1062,1065-1068
+crates/orion/src/tunnel.rs
+  s_27e49c94cc9cf2::t_55538c56edaaba 386
+crates/orion/src/upgrade.rs
+  s_27e49c94cc9cf2::t_e3dc3f7f4b1684 13
+crates/orion/tests/e2e_pty.rs
+  s_27e49c94cc9cf2::t_cd770bcd119361 4134
+crates/orion/tests/e2e_tui.rs
+  s_27e49c94cc9cf2::t_41e8f77bc2e3ad 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "255a750cad2d4898c7125058d8b3a0f20e3ebacf",
+  "prompts": {},
+  "sessions": {
+    "s_27e49c94cc9cf2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "61e54bd1-342f-4c43-84ad-6275fbe58156",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
