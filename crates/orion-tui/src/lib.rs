@@ -85,12 +85,37 @@ pub fn run_doctor(json: bool) -> bool {
     doctor::run(json)
 }
 
+pub use event_loop::Exit;
+
 /// Entry point for the TUI client. Terminal setup/teardown lives here so the
-/// binary crate stays a thin arg-parser. `Some(entry)` means the user picked
-/// a recent ssh host — the terminal is restored and the caller should exec
-/// `orion ssh` at it.
-pub fn run_tui() -> Result<Option<hosts::HostEntry>> {
+/// binary crate stays a thin arg-parser. The [`Exit`] says what the caller
+/// does next, the terminal already restored: nothing, exec `orion ssh` at
+/// a recent host, or [`restart`].
+pub fn run_tui() -> Result<Exit> {
     runtime()?.block_on(event_loop::run_app())
+}
+
+/// **Restart orion** (`⌘⇧R`), once the TUI has quit and restored the
+/// terminal: stop the daemon and every session in it, as `orion kill`
+/// does, then exec this binary again with the arguments it was started
+/// with. The new client finds no daemon and spawns a fresh one from the
+/// binary on disk — a rebuilt or upgraded orion included. Agents resume
+/// their conversation on their next attach; terminals start a new shell.
+/// Only returns when the exec fails.
+pub fn restart() -> Result<()> {
+    use anyhow::Context as _;
+    use std::os::unix::process::CommandExt as _;
+    eprintln!("orion: restarting…");
+    runtime()?.block_on(ipc::kill_daemon())?;
+    let mut args = std::env::args_os();
+    // argv[0] over `current_exe`: a binary replaced since launch is the
+    // one wanted, and Linux spells the old one `… (deleted)`.
+    let program = match args.next() {
+        Some(arg0) => std::path::PathBuf::from(arg0),
+        None => std::env::current_exe().context("resolve current_exe")?,
+    };
+    let err = std::process::Command::new(&program).args(args).exec();
+    Err(err).with_context(|| format!("restart {}", program.display()))
 }
 
 /// Post-upgrade daemon handoff: shut the daemon down only when it holds no

@@ -730,6 +730,9 @@ pub enum PendingAction {
         id: String,
     },
     Quit,
+    /// **Restart orion** (`⌘⇧R`): quit, stop the daemon and every session
+    /// in it, and start the binary again (`App::restart`).
+    Restart,
 }
 
 impl PendingAction {
@@ -3499,6 +3502,9 @@ pub struct App {
     /// after teardown the binary execs `orion ssh` at it, replacing this
     /// process with a fresh connection.
     pub pending_ssh: Option<crate::hosts::HostEntry>,
+    /// Set with `should_quit` by **Restart orion**: after teardown the
+    /// binary stops the daemon and execs itself afresh (`crate::restart`).
+    pub restart: bool,
     pub flash: Option<String>,
     /// The newest release published on GitHub (`0.22.0`) when it is newer
     /// than this build — the footer's `⇡ v0.22.0` beside the version
@@ -4165,6 +4171,7 @@ impl App {
             dirty: true,
             should_quit: false,
             pending_ssh: None,
+            restart: false,
             flash: None,
             update_available: None,
             edge_tap: None,

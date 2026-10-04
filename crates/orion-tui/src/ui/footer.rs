@@ -153,8 +153,13 @@ pub(crate) fn hints(app: &App) -> Vec<Hint> {
         list.extend([
             act(km, Action::CommandPalette, "commands"),
             act(km, Action::Settings, "settings"),
-            act(km, Action::Quit, "quit"),
         ]);
+        // HOME is where orion is restarted from: the daemon and every
+        // session in it, behind a confirm.
+        if app.home {
+            list.push(act(km, Action::Restart, "restart orion"));
+        }
+        list.push(act(km, Action::Quit, "quit"));
         list
     } else if !app.launcher_grid() || app.focus == Focus::Terminal {
         pane_hints(app)
@@ -308,6 +313,18 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
         .flatten()
 }
 
+/// [`act`] for a key pressed from inside a LOCKED PANE, where only a ⌘
+/// chord reaches orion — the `^` twins are the agent's there. None in a
+/// terminal that never sends ⌘ ([`crate::keymap::cmd_shown`]), or for an
+/// action with no ⌘ chord, so the footer never names a key the agent
+/// would get instead.
+fn from_lock(km: &crate::keymap::Keymap, action: Action, does: &str) -> Option<Hint> {
+    let shown = km.shown_first(action)?;
+    (crate::keymap::cmd_shown() && shown.mods.contains(crossterm::event::KeyModifiers::SUPER))
+        .then(|| act(km, action, does))
+        .flatten()
+}
+
 /// The PANE's hints — the session in it, full-screen or beside the
 /// cards, or the page it reads — led by the way back out.
 fn pane_hints(app: &App) -> Vec<Option<Hint>> {
@@ -347,6 +364,7 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
                 Action::ToggleFullScreen,
                 if full { "normal size" } else { "full screen" },
             ),
+            from_lock(km, Action::ClosePane, "close"),
             Some(Hint::new("drag", drag)),
             Some(Hint::new("⌥click", "open link")),
         ];

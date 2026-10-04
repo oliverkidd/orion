@@ -7,7 +7,8 @@
 //! ([`unbinds`]), plus the editing chords the built-in editor takes
 //! ([`EDITOR_CHORDS`]), and nothing orion does not use. A few Ghostty chords are
 //! never taken whatever the keymap says ([`NEVER_RELEASED`]): copy, paste,
-//! quit, and the window and tab keys.
+//! quit, and the window and tab keys — all but ⌘W, which orion answers
+//! itself, closing the agent or terminal in front rather than the window.
 //!
 //! The lines live in one marked block orion owns and rewrites in place.
 //! Everything outside it is the user's and is never touched, and a block
@@ -21,13 +22,14 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 /// The Ghostty chords orion never releases, in Ghostty's spelling, even
-/// with an action rebound onto one: copy, paste, quit, close, new tab, the
-/// tab digits and the window keys stay Ghostty's.
+/// with an action rebound onto one: copy, paste, quit, new tab, the tab
+/// digits and the window keys stay Ghostty's. Plain ⌘W is not among them:
+/// a stray one used to close the whole orion window, so orion takes it
+/// (`Action::ClosePane`) and ⌘⇧W stays the way to close the window.
 pub const NEVER_RELEASED: &[&str] = &[
     "super+c",
     "super+v",
     "super+q",
-    "super+w",
     "super+shift+w",
     "super+alt+w",
     "super+alt+shift+w",
@@ -47,7 +49,8 @@ pub const NEVER_RELEASED: &[&str] = &[
 ];
 
 /// First and last line of the block orion owns.
-const BEGIN: &str = "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
+const BEGIN: &str =
+    "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
 const END: &str = "# <<< orion keybinds <<<";
 
 /// `chord` in Ghostty's trigger spelling — `super+shift+p`, `super+/`,
@@ -324,7 +327,10 @@ pub fn ensure_for(cfg: &crate::config::Config) -> Option<String> {
             path.display()
         )),
         Ok(false) => None,
-        Err(e) => Some(format!("couldn't update Ghostty's config {}: {e}", path.display())),
+        Err(e) => Some(format!(
+            "couldn't update Ghostty's config {}: {e}",
+            path.display()
+        )),
     }
 }
 
@@ -385,7 +391,9 @@ mod tests {
                 "super+k",
                 "super+e",
                 "super+r",
+                "super+u",
                 "super+l",
+                "super+w",
                 "super+i",
                 "super+n",
                 "super+/",
@@ -400,6 +408,7 @@ mod tests {
                 "super+f",
                 "super+g",
                 "super+,",
+                "super+shift+r",
                 "super+shift+p",
                 "super+o",
             ]
@@ -501,10 +510,10 @@ mod tests {
         // A rebind rewrites it.
         let mut rebound = keymap.clone();
         let index = crate::keymap::index_of(crate::keymap::Action::Skills).unwrap();
-        rebound.bind(index, KeyChord::parse("cmd+u").unwrap(), false);
+        rebound.bind(index, KeyChord::parse("cmd+shift+u").unwrap(), false);
         assert!(ensure(&path, &rebound).unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("keybind = super+u=unbind"));
+        assert!(text.contains("keybind = super+shift+u=unbind"));
         // ⌘S stays released all the same: it is the editor's save.
         assert!(text.contains("keybind = super+s=unbind"));
     }

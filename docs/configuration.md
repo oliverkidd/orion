@@ -356,7 +356,7 @@ every account under **Claude accounts**, the default first: its name, `on` or `o
 
 | Key | Action |
 |---|---|
-| `Enter` | sign it in, or in again: asks for the email to sign in as — it fills Claude's login page; empty leaves the choice to the browser — then runs Claude Code's own `claude auth login [--email …]` with the account's `CLAUDE_CONFIG_DIR`, in the editor modal over the overlay. The browser finishes it; the row says who it is once the modal closes. `Ctrl+Q` closes it early |
+| `Enter` | sign it in, or in again: asks for the email to sign in as — it fills Claude's login page; empty leaves the choice to the browser — then runs Claude Code's own `claude auth login [--email …]` with the account's `CLAUDE_CONFIG_DIR`, in the editor modal over the overlay. On a Mac the login page opens in a private window (see below). The browser finishes it; the row says who it is once the modal closes. When it can't — the page shows a code instead — paste the code into the modal and press `Enter`. `Ctrl+Q` closes it early |
 | `o` | sign it out, behind a confirm: `claude auth logout` in the same modal. Its dir keeps its settings and transcripts |
 | `←` / `→` | switch it on or off — the same switch as its section's **Enabled** row further down |
 | `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk, `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |
@@ -378,9 +378,16 @@ signed in to, so a second dir signed in from the same browser silently becomes t
 again — one subscription, one usage limit, and **Continue on** gaining nothing. The Agents tab,
 onboarding and **Continue on** flag it: `same as ~/.claude` on the row and a warning under the
 accounts (`⚠ ~/.claude and ~/.claude-2 are signed in as one account`), and `· same account` on a
-**Continue on** row. To fix it, `Enter` on one and sign it in again from a private browser window
-(or after signing out of claude.ai), or type the other account's email, which runs
-`claude auth login --email <other>`.
+**Continue on** row. To fix it, `Enter` on one and sign it in again as the other account, typing
+its email if you like (`claude auth login --email <other>`).
+
+On a Mac, orion sidesteps the trap: its sign-in sets Claude Code's `BROWSER` to a small script
+(`claude-sign-in-browser` in orion's data dir) that opens the login page in a private window — the
+default browser's when it has one (Chrome, Firefox, Brave, Edge, Vivaldi, Chromium, Opera), else the
+first of those installed (Safari has no private window to open from the command line), else the
+page opens as before. A private window is signed in to nobody, so claude.ai asks who is signing in,
+and its redirect back to `claude auth login` finishes the sign-in with no code to paste. Elsewhere,
+sign in from a private browser window yourself, or sign out of claude.ai first.
 
 **From a hand-written entry.** A second account set up as a `harnesses` entry — a wrapper script
 in `program` that exports `CLAUDE_CONFIG_DIR`, all of Claude's flags copied beside it — becomes one
