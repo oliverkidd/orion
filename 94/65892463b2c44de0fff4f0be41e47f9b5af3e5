@@ -1,0 +1,83 @@
+docs/keys.md
+  s_bade1cedfe9480::t_598e042f4543c4 431-433
+docs/sessions.md
+  s_bade1cedfe9480::t_598e042f4543c4 241-248
+docs/configuration.md
+  s_bade1cedfe9480::t_b5b8ef39d9835c 51-52
+  s_bade1cedfe9480::t_598e042f4543c4 134,324-325,337-338,346-351,365,368,370-374,383-396
+  s_bade1cedfe9480::t_067f19ac05f55b 397
+crates/orion-tui/src/ui.rs
+  s_bade1cedfe9480::t_f32989c24a8633 1613-1616,1624-1626
+  s_bade1cedfe9480::t_73cb22b7e6f2d7 562-564,3021-3023,3035-3036,3096-3102,3104-3108
+crates/orion-tui/src/onboard.rs
+  s_bade1cedfe9480::t_e33ce4e9e87c28 898-901
+  s_bade1cedfe9480::t_41770e3cb218c7 2042-2043
+  s_bade1cedfe9480::t_4b662533b8322d 828
+  s_bade1cedfe9480::t_89cab65060c81f 2026-2041,2044-2045
+  s_bade1cedfe9480::t_7ae4c9fa9886a0 1514-1515
+  s_bade1cedfe9480::t_7807554691ac49 327,396,818,1470,1508,1667
+crates/orion-tui/src/config.rs
+  s_bade1cedfe9480::t_7e9f9b5ac70e47 398-402,513-516,1103-1106,1110-1116,2348-2350,2352-2363,2399,2403,2418,2472-2473,2476
+  s_bade1cedfe9480::t_324424cd82275c 6091
+  s_bade1cedfe9480::t_4bb866928a5899 2474-2475
+  s_bade1cedfe9480::t_12d091263d4ec9 3334-3344
+  s_bade1cedfe9480::t_1fd4d79a53f067 2477-2478
+crates/orion-tui/src/event_loop.rs
+  s_bade1cedfe9480::t_258e61fe1c8872 4187-4191,4195-4217,6649-6650,7184-7190,7192-7193,7226,7228-7230,7289-7296,7389-7390,7393,7553-7554,7568-7577,7757-7761,7764-7767,7787-7789,7817-7834,7838-7839,7853,7862-7867,7876-7930,8131-8132,8325-8326,8419
+  s_bade1cedfe9480::t_095748f8b98049 26016-26163,26172-26183,26185,26188-26192
+  s_bade1cedfe9480::t_541df8b3002b66 26164-26171
+  s_bade1cedfe9480::t_41770e3cb218c7 26184,26186-26187
+  s_bade1cedfe9480::t_28e44f94aaa7c6 26009
+crates/orion-tui/src/app.rs
+  s_bade1cedfe9480::t_bd46deae74c290 727-729,733-738,759,898-900,902-914
+crates/orion-daemon/src/registry.rs
+  s_bade1cedfe9480::t_0db73bfd8c4892 4230
+crates/orion-core/src/claude_account.rs
+  s_bade1cedfe9480::t_4ddd3e400de68f 39-46
+  s_bade1cedfe9480::t_858aa9318baa0c 26-28
+  s_bade1cedfe9480::t_058a83bff71a05 102-105,109
+  s_bade1cedfe9480::t_c3d9828c3d0b8f 218-242
+  s_bade1cedfe9480::t_3cd58a229a3ae1 282-289
+  s_bade1cedfe9480::t_e30a923c6a972d 195
+crates/orion-tui/src/claude_accounts.rs
+  s_bade1cedfe9480::t_09a26a80005532 925-926,934,938-951
+  s_bade1cedfe9480::t_1ea347dc1adb0b 805-807,814
+  s_bade1cedfe9480::t_5b89a9b9ddc2c9 642-643,649,652-656,661,665,668
+  s_bade1cedfe9480::t_573aaa42287688 1845,1850-1851
+  s_bade1cedfe9480::t_41770e3cb218c7 752-754,918-923,1729-1732,1758-1761,1797-1800,1804-1808,1812-1819,1846-1849,1886-1889,1938-1942,1949-1952,1997-1999,2053-2056,2062-2065,2067-2070
+  s_bade1cedfe9480::t_0498747e4fe115 118-123,134,144-146
+  s_bade1cedfe9480::t_09aa4a4eb3a96c 687,700-751,755-770,772
+  s_bade1cedfe9480::t_fbb703e6a52dd8 771,773-786
+  s_bade1cedfe9480::t_80fabc9643bc74 379-392,394-396,399,411-415
+  s_bade1cedfe9480::t_96fbf738964a0a 1051,1055-1062
+  s_bade1cedfe9480::t_622bf91a1fcb54 989-992
+  s_bade1cedfe9480::t_686ab6b38b5a8d 3-5,11-13,15-29
+  s_bade1cedfe9480::t_e017353e2c43cc 212-217,223-233,235-236,239,243-248,260-262
+  s_bade1cedfe9480::t_0b91546a79fe2d 264-265,787,830,835-839,847-857,861-917,924,927-933,935-937,952-953,955,960,962-988,993-1002
+  s_bade1cedfe9480::t_d71c819031b7c8 954,956-959,961
+  s_bade1cedfe9480::t_609d168f043264 147,1695-1728,1733-1757,1762-1796,1801-1803,1809-1811,1820-1844,1852-1885,1890-1937,1943-1948,1953-1996,2000-2052,2057-2061,2066,2071-2076
+  s_bade1cedfe9480::t_a8f139dfec4234 263
+  s_bade1cedfe9480::t_35dafb399fa8b6 788
+  s_bade1cedfe9480::t_375593c4fbf407 1003
+crates/orion-core/src/harness.rs
+  s_bade1cedfe9480::t_62ec5824c063ac 1515
+  s_bade1cedfe9480::t_6ee28e4026cfcc 1557
+README.md
+  s_bade1cedfe9480::t_598e042f4543c4 43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9465892463b2c44de0fff4f0be41e47f9b5af3e5",
+  "prompts": {},
+  "sessions": {
+    "s_bade1cedfe9480": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5fd22d2c-adcd-4390-a2ae-0701d7233d43",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
