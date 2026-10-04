@@ -1,0 +1,35 @@
+crates/orion-tui/src/theme.rs
+  s_2af6c493ddb56f::t_817ff5081d06c6 261-317
+  s_2af6c493ddb56f::t_e99d9d8bb53106 253-260
+scripts/shot/scenes/sky-home-slate.setup.sh
+  s_2af6c493ddb56f::t_4c5b456c0301c6 1
+  s_2af6c493ddb56f::t_eed892fc775c22 2-3
+scripts/shot/scenes/sky-home-slate.keys
+  s_2af6c493ddb56f::t_4c5b456c0301c6 1-2
+  s_2af6c493ddb56f::t_eed892fc775c22 3-6
+crates/orion-tui/src/splash.rs
+  s_2af6c493ddb56f::t_f2df3acce99c8a 2-6,12-13,38-39,50-53,57,115-116,118-123,127-128,130-131,141,143-145,149,161-165,196-200,207,212,458-460,466,480,573,594,602-604,606,612,617-624,629-630,659,664-669,678-686,692-694,696,700-702
+  s_2af6c493ddb56f::t_5e44ac8b51689b 586,588,590,687-691
+  s_2af6c493ddb56f::t_e99d9d8bb53106 22,124-126,237-238,240-251,263,265,273,283-284,306,331,476,482-484,487-489,528,530-549,570,579,581-584,591-593,609,648
+  s_2af6c493ddb56f::t_413ef26742a1c3 7-11,40-49,54-56,58-59,70-100,117,129,132-140,142,146-148,150-160,234-236,239,252,257,435,440-448,467-475,481,485-486,492-527,578,587,589,595,600-601,605,613,657-658,663,670-677,695,697-699,703-704
+  s_2af6c493ddb56f::t_1a6022d5bfb0b4 529
+crates/orion-tui/src/ui/launcher_view.rs
+  s_2af6c493ddb56f::t_e99d9d8bb53106 1984-1985,2506
+  s_2af6c493ddb56f::t_9dd4cbbf9e34c0 3426
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cdf7aa30c9b0d26a1cc312a1f4a312d671f1af86",
+  "prompts": {},
+  "sessions": {
+    "s_2af6c493ddb56f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a34e981e-ed22-4e3d-8fdd-5f8b95c4e532",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
