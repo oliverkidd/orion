@@ -11068,17 +11068,18 @@ mod tests {
                 vec![0, 1, 2],
                 "the three most recent, newest first"
             );
+            let row_h = crate::launcher::LIST_ROW_H;
             for (_, r) in &entries {
-                assert_eq!(r.height, 1, "one line an entry");
+                assert_eq!(r.height, row_h, "two lines an entry");
             }
             assert!(
-                entries.windows(2).all(|w| w[1].1.y == w[0].1.y + 1),
+                entries.windows(2).all(|w| w[1].1.y == w[0].1.y + row_h),
                 "stacked one under the other: {entries:?}"
             );
             let hint = app
                 .hit_rect(&HitTarget::LauncherBandMore(0))
                 .expect("a line counting the rest");
-            assert_eq!(hint.y, entries[2].1.y + 1, "right under the last entry");
+            assert_eq!(hint.y, entries[2].1.y + row_h, "right under the last entry");
             let buf = term.backend().buffer();
             let text: String = (hint.x..hint.x + hint.width)
                 .map(|x| buf[(x, hint.y)].symbol().to_string())

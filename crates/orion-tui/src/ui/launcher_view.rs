@@ -1308,15 +1308,9 @@ fn draw_list_band(
         };
         let card = &band.cards[i];
         let selected = on && at == Some(i);
-        draw_list_row(
-            f.buffer_mut(),
-            app,
-            placed.rect,
-            card,
-            (selected, selected && lit),
-            cols,
-            cfg,
-        );
+        draw_cut(f, placed, |buf, r| {
+            draw_list_row(buf, app, r, card, (selected, selected && lit), cols, cfg);
+        });
         note_tail_card(app, card);
         app.hits.push((
             placed.rect,
@@ -1344,14 +1338,16 @@ fn draw_list_band(
     }
 }
 
-/// One entry of the compact LIST, on one line: the cursor mark, the
-/// status dot and name a card heads with, what it runs on, and the last
-/// thing it was asked — `›` as on the card — or, for a terminal, the last
-/// line its shell printed; how long since it moved (or `exited`) at the
-/// right. `cols` are the band's name and runs-on column widths, so the
-/// entries line up. `(selected, lit)`: the cursor's entry wears the mark,
-/// ([`LIST_MARK`]), and the FOCUSED PANEL TINT across the line while the
-/// grid holds the keys.
+/// One entry of the compact LIST, on two lines. The first is what it is:
+/// the cursor mark, the status dot and name a card heads with, what it
+/// runs on, and how long since it moved (or `exited`) at the right. The
+/// second, under the name, is the last thing it was asked — `›` as on
+/// the card, in the text colour so it is what the eye lands on — or, for
+/// a terminal, the last line its shell printed. `cols` are the band's
+/// name and runs-on column widths, so the entries line up. `(selected,
+/// lit)`: the cursor's entry wears the mark ([`LIST_MARK`]) down both
+/// lines, and the FOCUSED PANEL TINT across them while the grid holds
+/// the keys.
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1365,10 +1361,12 @@ fn draw_list_row(
     let width = usize::from(r.width);
     // A bar rather than the rule's `❯`: a shell's own glyph is `❯`, one
     // column over, and the two would read as one mark.
-    let mark = if selected {
-        Span::styled(LIST_MARK, Style::default().fg(th.accent))
-    } else {
-        Span::raw("  ")
+    let mark = || {
+        if selected {
+            Span::styled(LIST_MARK, Style::default().fg(th.accent))
+        } else {
+            Span::raw("  ")
+        }
     };
     struct Entry {
         lead: Span<'static>,
@@ -1408,7 +1406,7 @@ fn draw_list_row(
                 runs_style: Style::default().fg(quiet_or(th.dim)),
                 text_mark,
                 text,
-                text_style: Style::default().fg(quiet_or(th.muted)),
+                text_style: Style::default().fg(quiet_or(th.text)),
                 badge: look.ago,
                 badge_style: look.ago_style,
             }
@@ -1443,52 +1441,58 @@ fn draw_list_row(
             badge_style: Style::default().fg(th.err),
         },
     };
-    let mut spans = vec![mark, e.lead];
-    let mut room = width.saturating_sub(usize::from(LIST_LEAD));
-    // The badge at the right end, while the name keeps a few letters.
+    let room = width.saturating_sub(usize::from(LIST_LEAD));
+
+    // The first line: name, runs-on, and the badge at the right end —
+    // the badge while the name keeps a few letters.
+    let mut head = vec![mark(), e.lead];
+    let mut name_room = room;
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
-    let keep_badge = badge_w > 0 && room >= badge_w + 1 + 8;
+    let keep_badge = badge_w > 0 && name_room >= badge_w + 1 + 8;
     if keep_badge {
-        room -= badge_w + 1;
+        name_room -= badge_w + 1;
     }
-    let name_w = name_col.max(1).min(room);
+    let name_w = name_col.max(1).min(name_room);
     let name = truncate(&e.name, name_w);
     let mut used = name.chars().count();
-    spans.extend(status_name_spans(
+    head.extend(status_name_spans(
         name,
         e.name_style,
         e.ramp,
         app.sweep_phase(),
     ));
-    // What it runs on, in the band's column, and the prompt after it —
-    // each only where there is room for a few letters of it.
+    // What it runs on, in the band's column, only where there is room
+    // for a few letters of it.
     let runs_at = name_w + LIST_GAP;
-    if !e.runs.is_empty() && room >= runs_at + 6 {
-        let runs_w = runs_col.min(room - runs_at);
-        let runs = truncate(&e.runs, runs_w);
-        spans.push(Span::raw(" ".repeat(runs_at - used)));
+    if !e.runs.is_empty() && name_room >= runs_at + 6 {
+        let runs = truncate(&e.runs, runs_col.min(name_room - runs_at));
+        head.push(Span::raw(" ".repeat(runs_at - used)));
         used = runs_at + runs.chars().count();
-        spans.push(Span::styled(runs, e.runs_style));
-        let text_at = runs_at + runs_w + LIST_GAP;
-        let text_mark_w = e.text_mark.chars().count();
-        if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
-            let text = truncate(&e.text, room - text_at - text_mark_w);
-            spans.push(Span::raw(" ".repeat(text_at - used)));
-            spans.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
-            used = text_at + text_mark_w + text.chars().count();
-            spans.push(Span::styled(text, e.text_style));
-        }
+        head.push(Span::styled(runs, e.runs_style));
     }
     if keep_badge {
-        spans.push(Span::raw(" ".repeat(room.saturating_sub(used) + 1)));
-        spans.push(Span::styled(badge, e.badge_style));
+        head.push(Span::raw(" ".repeat(name_room.saturating_sub(used) + 1)));
+        head.push(Span::styled(badge, e.badge_style));
     }
-    let mut line = Paragraph::new(Line::from(spans));
+
+    // The second line, under the name: the prompt across the rest of the
+    // row.
+    let mut body = vec![mark(), Span::raw("  ")];
+    let text_mark_w = e.text_mark.chars().count();
+    if !e.text.is_empty() && room > text_mark_w {
+        body.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
+        body.push(Span::styled(
+            truncate(&e.text, room - text_mark_w),
+            e.text_style,
+        ));
+    }
+
+    let mut lines = Paragraph::new(vec![Line::from(head), Line::from(body)]);
     if lit {
-        line = line.style(Style::default().bg(th.focus_tint));
+        lines = lines.style(Style::default().bg(th.focus_tint));
     }
-    line.render(r, buf);
+    lines.render(r, buf);
 }
 
 /// Draw something the window's edges may cut — a card half scrolled off
@@ -4323,13 +4327,15 @@ mod tests {
 
             app.launcher_list = true;
             let lines = drawn_lines(&mut app, body);
-            let line = lines
+            let row = lines
                 .iter()
-                .find(|l| l.contains("s0"))
+                .position(|l| l.contains("s0"))
                 .expect("the session's line");
+            assert!(lines[row].contains("limit reached"), "{:?}", lines[row]);
             assert!(
-                line.contains("limit reached") && line.contains("session limit"),
-                "{line:?}"
+                lines[row + 1].contains("session limit"),
+                "Claude's words on the line under it: {:?}",
+                lines[row + 1]
             );
 
             app.launcher_list = false;

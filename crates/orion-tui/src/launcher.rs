@@ -424,8 +424,9 @@ pub const MORE_H: u16 = 1;
 /// the sessions come newest first ([`rows`]) — before the `▾ N more` row;
 /// Tab (the ACCORDION) opens the rest.
 pub const LIST_RECENT: usize = 3;
-/// One entry of the LIST: a session or a terminal on a single line.
-pub const LIST_ROW_H: u16 = 1;
+/// One entry of the LIST: a session or a terminal on two lines — what it
+/// is and runs on over what it was last asked.
+pub const LIST_ROW_H: u16 = 2;
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
 /// in it, on the grid only with **Show all worktrees** on — saying what
 /// can be done there, in place of a row of cards it has none of.
@@ -944,7 +945,7 @@ pub struct PanelBand {
     pub rule_y: u16,
     /// The band's cards wrapped into rows under its rule, on the open
     /// band; None collapsed, where the STRIP draws its one row. In the
-    /// LIST layout every band has one — its entries stacked a line apiece
+    /// LIST layout every band has one — its entries stacked two lines apiece
     /// ([`list_layout`]) — and `open` says which is showing them all.
     pub content: Option<ExpandedLayout>,
     /// The band is the one open as the ACCORDION.
@@ -1046,7 +1047,7 @@ fn lay_out_panel(body: Rect, bands: &[Band], open: impl Fn(&Band) -> bool) -> Pa
 }
 
 /// [`panel_layout`] for the compact LIST: every band its rule over its
-/// entries stacked a line apiece ([`list_layout`]) — all of them on the
+/// entries stacked two lines apiece ([`list_layout`]) — all of them on the
 /// band `expanded` names, or on every band with `all_open` (**Expand all
 /// worktrees**), the [`LIST_RECENT`] most recent on the rest, and on the
 /// band the cursor is on (`pin`) its card too wherever it sits, so the
@@ -1273,8 +1274,8 @@ pub fn expanded_layout(body: Rect, band: &Band) -> ExpandedLayout {
     }
 }
 
-/// `band` as the compact LIST lays it out under its rule: one line per
-/// card, the band's full width, in the band's own order — its sessions
+/// `band` as the compact LIST lays it out under its rule: one entry
+/// ([`LIST_ROW_H`]) per card, the band's full width, in the band's own order — its sessions
 /// newest first, then its terminals — one column `j`/`k` walk. `open`
 /// lists every card; collapsed it lists the first [`LIST_RECENT`], then
 /// `pin` (the cursor's card) when that is further down, and says how
