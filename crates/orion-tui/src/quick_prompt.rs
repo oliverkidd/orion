@@ -1,6 +1,6 @@
 //! The QUICK PROMPT: the hotkey that opens a task box anywhere in the TUI
-//! and launches an AGENT on what you type, without walking the NEW SESSION
-//! PICKER first. The two are the two ways to start a session: `p` starts
+//! and launches an AGENT on what you type, without walking the NEW AGENT
+//! PICKER first. The two are the two ways to start an agent: `p` starts
 //! one on a typed task, `n` starts one bare — a harness pick, and the first
 //! prompt typed in the CLI — so the picker never ends in this box.
 //!
@@ -87,7 +87,7 @@ pub struct QuickLaunch {
     /// the issue is; `^P` is refused, the issues being this project's.
     pub linear: Option<crate::linear::LinearBatch>,
     /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
-    /// `Tab` picker toggles it, as it does in the NEW SESSION PICKER, and
+    /// `Tab` picker toggles it, as it does in the NEW AGENT PICKER, and
     /// Enter sends the typed text as the cloud task (`claude --cloud
     /// <task>`) rather than as a STARTING PROMPT. Only ever on a plain
     /// Claude launch ([`QuickLaunch::with_cloud`]): the DAEMON refuses a
@@ -276,7 +276,7 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
     }
 }
 
-/// Open the box a picker reached with NO box up owes — `n`'s NEW SESSION
+/// Open the box a picker reached with NO box up owes — `n`'s NEW AGENT
 /// PICKER (`QuickReturn::from_box` false): the pick is the spec, and the
 /// DRAFT the last abandoned box left hands back its text alone. The
 /// harness was chosen a moment ago, on purpose, so no parked spec
@@ -427,7 +427,7 @@ impl QuickLaunch {
     /// Does Enter on an empty box launch? Every box but a CLAUDE CLOUD
     /// one does: the session starts on the harness, MODEL and EFFORT the
     /// title names with no first prompt — the CLI's own input is it, as
-    /// after the NEW SESSION PICKER (`n`) — and a box an AGENT PRESET is
+    /// after the NEW AGENT PICKER (`n`) — and a box an AGENT PRESET is
     /// on sends the prefix and postfix alone (nothing at all for a bare
     /// preset). A cloud box cannot: `claude --cloud` takes its task on the
     /// command line, so its empty box is a change of mind. (An ISSUE
@@ -750,7 +750,7 @@ pub(crate) fn target_branch(app: &App, launch: &QuickLaunch) -> Option<String> {
 }
 
 /// `Tab` in the box: which harness this one launch uses. The same AGENT
-/// KIND rows the NEW SESSION PICKER offers — so `→` drills into the same
+/// KIND rows the NEW AGENT PICKER offers — so `→` drills into the same
 /// MODEL / EFFORT submenus with the same TYPE-AHEAD — but the pick comes
 /// back here instead of creating a session, and it clears any AGENT PRESET
 /// (a launch spec has one source).
@@ -862,7 +862,7 @@ mod tests {
     }
 
     /// A harness switched off on the AGENTS TAB after it was chosen would
-    /// otherwise launch a kind the NEW SESSION PICKER no longer offers.
+    /// otherwise launch a kind the NEW AGENT PICKER no longer offers.
     #[test]
     fn a_disabled_harness_steps_on_to_an_enabled_one() {
         let cfg = Config {

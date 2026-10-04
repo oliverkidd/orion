@@ -1236,7 +1236,7 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
     let agents = if on.is_empty() {
         Chosen {
             what: "Agents",
-            value: "none on — turn one on in Settings → Agents to start a session".into(),
+            value: "none on — turn one on in Settings → Agents to start an agent".into(),
             warn: true,
         }
     } else {
@@ -1321,6 +1321,10 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
 fn next_keys(keymap: &Keymap) -> Vec<(String, &'static str)> {
     [
         (Action::QuickPrompt, "start an agent: type the task, Enter"),
+        (
+            Action::NewTerminal,
+            "open a terminal: a plain shell, no agent",
+        ),
         (Action::Palette, "jump to any project, worktree or session"),
         (Action::Linear, "your Linear issues"),
         (Action::CommandPalette, "every action by name"),
@@ -1379,7 +1383,7 @@ fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
         body.row(
             false,
             vec![
-                (key, Style::default().fg(th.accent)),
+                (key, crate::hints::key_style(th)),
                 (does.to_string(), Style::default().fg(th.text)),
             ],
             &widths,

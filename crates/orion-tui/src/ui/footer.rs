@@ -47,8 +47,7 @@ fn draw_key_combo(f: &mut Frame, app: &App, area: Rect) {
         ..area
     };
     let th = app.theme;
-    let cap = Style::default()
-        .fg(th.accent)
+    let cap = crate::hints::key_style(th)
         .bg(th.sel_bg)
         .add_modifier(Modifier::BOLD);
     let mut spans = vec![Span::raw(" ")];

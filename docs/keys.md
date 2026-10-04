@@ -22,8 +22,10 @@ its key, and `Enter` runs it.
   its way out (`Esc`) last; a key is never cut in half.
 - **A modal's explanation** of the row or setting under its cursor is a dim line inside the frame,
   right above the keys — in the SETTINGS OVERLAY, the COMMAND PALETTE, the onboarding wizard.
-- **One spelling for every key.** A letter under a modifier is its capital — `⌘K`, `^K`, `⌥P`,
-  `⇧A` — and a bare letter is the letter you type (`t`). A key that belongs to an action is always
+- **One spelling and one colour for every key.** A letter under a modifier is its capital — `⌘K`,
+  `^K`, `⌥P`, `⇧A` — and a bare letter is the letter you type (`t`). Every key label is drawn in the
+  theme's accent — in the footer, on a modal's border, in the new-agent box's header, the COMMAND
+  PALETTE's key column, Help, the Hotkeys tab — and what it does in dim grey. A key that belongs to an action is always
   spelled from the live keymap, so a rebind shows up everywhere at once, and a terminal that never
   sends ⌘ sees the `^` twin instead; a modal's own keys come from the same table its key handler
   reads.
@@ -33,6 +35,9 @@ its key, and `Enter` runs it.
 
 ## How the keys are laid out
 
+- **A session is an agent or a terminal.** `⌘N` starts an AGENT — an AI coding CLI on a task — and
+  `t` a TERMINAL — a plain shell. Both are SESSIONS, the word for what applies to either card: the
+  attention walk, archive, delete ([Sessions](sessions.md)).
 - **⌘ for the entry points, as in Cursor.** The things you open from anywhere — a new agent, the
   jump list, go to file, changes, the pane — are `⌘` chords, and each has a `Ctrl` twin (`⌘P` and
   `^P`) for a terminal that never sends ⌘. Ghostty and kitty send ⌘ (the KITTY PROTOCOL);
@@ -53,8 +58,9 @@ its key, and `Enter` runs it.
   card under the cursor (below). Everything else lives behind `⌘O` (open outside orion), the
   right-click menu, or the COMMAND PALETTE.
 
-orion writes three `unbind` lines into Ghostty's config, inside an orion-managed block it keeps in
-place, so `⌘⇧P`, `⌘N` and `⌘,` reach it rather than Ghostty — see
+orion writes a line into Ghostty's config for every ⌘ chord it answers to, inside an orion-managed
+block it keeps in place, so `⌘⇧P`, `⌘N`, `⌘,` and the rest reach it rather than Ghostty — and `⌘.`,
+which macOS turns into Escape, arrives as `⌘.` — see
 [Configuration](configuration.md#outside-terminal-and-ghostty-keybinds). Ghostty reads them at launch or on its own
 reload (`⌘⇧,`).
 
@@ -62,7 +68,7 @@ reload (`⌘⇧,`).
 
 | Action | Key | Twin | What it opens |
 |---|---|---|---|
-| New agent | `⌘N`, `⌘I` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
+| New agent | `⌘N` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
 | Select model | `⌘/` | `^/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | `^Y` | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Agents tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
 | Select worktree | `⌘.` | `^T` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree** |
@@ -113,7 +119,7 @@ or `Esc` folds it back.
 | `x` | close the project tab the grid is on (the project and its sessions are untouched; `⌘K` opens it again) |
 | right-click | a card's, a band's or a project tab's context menu |
 
-The actions with no key of their own — **New session** (harness picker first), **Agent presets**,
+The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts**,
 **Memory usage**, **Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts** — are
 in the COMMAND PALETTE and, where they apply to a card, its right-click menu. Bind any of them in

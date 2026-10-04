@@ -3191,6 +3191,10 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // ⌘. may arrive as macOS's Cancel — an Escape still holding ⌘ — and
+    // must never reach an Esc arm as one: the new-agent box would close
+    // under its own **Select worktree** key.
+    let key = crate::keymap::untangle_cmd_period(key);
     // The editor modal sits above every overlay: all keys forward to it —
     // vim needs Esc — except Ctrl+Q, the same hatch the terminal lock uses.
     if app.vim.is_some() {
@@ -6116,7 +6120,7 @@ fn selected_project_main_worktree(app: &App) -> Option<WorktreeId> {
     app.root_worktree(&project.id)
 }
 
-/// `n` on a PROJECT OPEN PRS GROUP row: the NEW SESSION PICKER's harness
+/// `n` on a PROJECT OPEN PRS GROUP row: the NEW AGENT PICKER's harness
 /// rows, every one carrying the PR's URL and — through the same MODEL /
 /// EFFORT submenus, and as directly on Enter — launching a PR SESSION.
 pub(super) fn open_pr_agent_picker(app: &mut App) {
@@ -6589,7 +6593,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     *menu = *parent;
                 }
             }
-            // The NEW SESSION PICKER's Claude row — and the QUICK PROMPT
+            // The NEW AGENT PICKER's Claude row — and the QUICK PROMPT
             // `Tab` picker's, for a box that can go to the cloud — owns
             // Tab as a launch-mode toggle, and so do the rows of the
             // Claude MODEL / EFFORT lists behind it (`→`, or the box's
@@ -7476,7 +7480,7 @@ fn edit_keymap(app: &mut App, edit: impl FnOnce(&mut crate::keymap::Keymap)) -> 
 
 /// REMEMBER HARNESS (Settings → Experimental): make a launch's harness —
 /// and a model or effort picked for it — the defaults the next NEW
-/// SESSION PICKER and QUICK PROMPT start from
+/// AGENT PICKER and QUICK PROMPT start from
 /// (`Config::remember_launch`). Nothing is written while the switch is
 /// off or the pick already is the default; a failed write flashes.
 fn remember_launch(
@@ -8546,7 +8550,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 if back.from_box {
                     crate::quick_prompt::reopen(app, launch, &back.text);
                 } else {
-                    // No box was up (`n`'s NEW SESSION PICKER): the pick
+                    // No box was up (`n`'s NEW AGENT PICKER): the pick
                     // OPENS one, on the spec just chosen.
                     crate::quick_prompt::open_picked_box(app, launch);
                 }
@@ -17162,7 +17166,7 @@ diff --git a/src/c.rs b/src/c.rs
         })
     }
 
-    /// Esc on the NEW SESSION PICKER sends nothing: opening it warmed
+    /// Esc on the NEW AGENT PICKER sends nothing: opening it warmed
     /// nothing, and only Enter on a row creates.
     #[test]
     fn esc_on_the_new_session_picker_sends_nothing() {
@@ -18132,7 +18136,7 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected agent-type picker, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             assert_eq!(
                 menu.items.len(),
                 AgentKind::ALL.len() - 1,
@@ -19170,7 +19174,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             open_picker(&mut app);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
             };
             let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
             assert_eq!(
@@ -19363,7 +19367,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert!(matches!(
             &app.overlay,
-            Some(Overlay::Menu(m)) if m.title.as_deref() == Some("New session")
+            Some(Overlay::Menu(m)) if m.title.as_deref() == Some("New agent — choose harness")
         ));
     }
 
@@ -22908,7 +22912,7 @@ diff --git a/src/c.rs b/src/c.rs
 
     // ---- git-diff modal ----
 
-    /// The NEW SESSION PICKER for the selected checkout — what the card
+    /// The NEW AGENT PICKER for the selected checkout — what the card
     /// menu's **New agent** opens, and what the Sessions panel's `n` used
     /// to. The GRID's `n` is the QUICK PROMPT box, so the picker is opened
     /// here rather than typed into being.
@@ -31170,7 +31174,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `Tab` in the box retargets this one launch: the same harness rows
-    /// the NEW SESSION PICKER offers, with the MODEL / EFFORT submenus
+    /// the NEW AGENT PICKER offers, with the MODEL / EFFORT submenus
     /// behind them — and the typed text survives the trip.
     #[test]
     fn tab_in_the_quick_prompt_picks_the_harness_and_keeps_the_text() {
@@ -31231,7 +31235,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `Tab` on the Claude row of the box's own `Tab` picker is the NEW
-    /// SESSION PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
+    /// AGENT PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
     /// box with the text kept, the next `Tab` opens on the toggle as the
     /// box left it, and Enter sends the text as the cloud task — never as
     /// a STARTING PROMPT, and with no warm slot consumed or refilled.
@@ -33118,7 +33122,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A click on a row of a picking list is Enter with the cursor on that
-    /// row: the `/` palette, the NEW SESSION PICKER's menu, the AGENT
+    /// row: the `/` palette, the NEW AGENT PICKER's menu, the AGENT
     /// PRESETS list in both of its modes.
     #[test]
     fn a_click_on_a_list_row_is_enter_on_it() {

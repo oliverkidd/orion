@@ -370,8 +370,8 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::New,
         id: "new",
-        label: "New session",
-        hint: "Pick the harness first (→ drills into its model and effort), then the quick prompt opens set to it, in the checkout under the cursor; on the first-run splash, add a project",
+        label: crate::agent_picker::NEW_AGENT_PICKER_TITLE,
+        hint: "Pick the agent's harness first (→ drills into its model and effort), then the new-agent box opens set to it, in the checkout under the cursor; on the first-run splash, add a project",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -480,7 +480,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NewTerminal,
         id: "new_terminal",
         label: "New shell terminal",
-        hint: "Spawn a plain shell inside orion, in the selected worktree's directory; {open_outside} opens one outside it",
+        hint: "A terminal: a plain shell inside orion — a session like an agent, but no AI CLI — in the selected worktree's directory; {open_outside} opens one outside it",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["t"],
@@ -562,10 +562,10 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::QuickPrompt,
         id: "quick_prompt",
         label: "New agent",
-        hint: "Type a task; Enter starts an agent on it (Tab picks the harness; {select_model} the model; {cycle_effort} the effort; {select_launch_worktree} the worktree; Settings → Agents sets the default)",
+        hint: "An agent is an AI coding CLI on a task ({new_terminal} starts a terminal, a plain shell; both are sessions). Type the task; Enter starts it (Tab picks the harness; {select_model} the model; {cycle_effort} the effort; {select_launch_worktree} the worktree)",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["cmd+i", "cmd+n", "ctrl+n"],
+        defaults: &["cmd+n", "ctrl+n"],
     },
     ActionSpec {
         action: Action::SelectModel,
@@ -818,6 +818,28 @@ pub fn spec_of(action: Action) -> Option<&'static ActionSpec> {
 
 // ---- chords ----
 
+/// `key` with an Escape carrying ⌘ turned back into the ⌘. it was
+/// pressed as. macOS binds ⌘. to Cancel — `cancelOperation:`, the very
+/// command Escape sends — in every app, so a terminal can hand orion the
+/// press as an Escape, ⌘ still held, and every Esc arm that ignores the
+/// modifiers read it as a bare Esc: **Select worktree** (`⌘.`) closed the
+/// new-agent box it was pressed in. No one presses ⌘Esc meaning Esc, so
+/// the loop folds it here before any handler sees it, and
+/// [`KeyChord::from_event`] does the same for a chord built elsewhere.
+/// Ghostty is asked to send ⌘. as the KITTY PROTOCOL spells it in the
+/// first place ([`crate::ghostty_config::SENT_AS_KITTY`]); this is the net
+/// under a terminal or a config that does not.
+pub fn untangle_cmd_period(key: KeyEvent) -> KeyEvent {
+    if key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::SUPER) {
+        KeyEvent {
+            code: KeyCode::Char('.'),
+            ..key
+        }
+    } else {
+        key
+    }
+}
+
 /// A single key press: one key plus the modifiers held with it, in the one
 /// canonical spelling [`KeyChord::from_event`] produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -846,8 +868,11 @@ impl KeyChord {
     /// * `BackTab` becomes `shift+tab`;
     /// * `ctrl+5` — the legacy encoding's name for byte 0x1D — becomes
     ///   `ctrl+]`, which is what the user actually pressed, and `ctrl+7`
-    ///   (byte 0x1F) becomes `ctrl+/`.
+    ///   (byte 0x1F) becomes `ctrl+/`;
+    /// * an Escape carrying ⌘ is `cmd+.` — macOS's Cancel, the key it
+    ///   turns ⌘. into ([`untangle_cmd_period`]).
     pub fn from_event(key: &KeyEvent) -> Self {
+        let key = untangle_cmd_period(*key);
         let mut mods = key.modifiers & KEPT_MODS;
         let mut code = key.code;
         match code {
@@ -1770,6 +1795,30 @@ mod tests {
         let before = ids.len();
         ids.dedup();
         assert_eq!(before, ids.len(), "duplicate action id");
+    }
+
+    /// An Escape carrying ⌘ — macOS's Cancel, which is what ⌘. becomes
+    /// on a Mac — is ⌘. everywhere: the chord the keymap binds to
+    /// **Select worktree**, and an event no Esc arm can take for a bare
+    /// Esc. A plain or shifted Escape stays Escape.
+    #[test]
+    fn an_escape_holding_cmd_is_cmd_period() {
+        let cancel = KeyEvent::new(KeyCode::Esc, KeyModifiers::SUPER);
+        assert_eq!(
+            KeyChord::from_event(&cancel),
+            KeyChord::parse("cmd+.").unwrap()
+        );
+        assert_eq!(
+            Keymap::default().lookup(Scope::Global, &KeyChord::from_event(&cancel)),
+            Some(Action::SelectLaunchWorktree)
+        );
+        assert_eq!(untangle_cmd_period(cancel).code, KeyCode::Char('.'));
+        assert_eq!(untangle_cmd_period(cancel).modifiers, KeyModifiers::SUPER);
+        for kept in [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let esc = KeyEvent::new(KeyCode::Esc, kept);
+            assert_eq!(untangle_cmd_period(esc), esc);
+            assert_eq!(KeyChord::from_event(&esc).code, KeyCode::Esc);
+        }
     }
 
     #[test]

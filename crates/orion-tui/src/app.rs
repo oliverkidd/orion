@@ -155,7 +155,7 @@ pub enum HitTarget {
     /// The ISSUE COUNT beside it (`1 issue`): a click opens that
     /// project's open issues — the modal `i` opens.
     LauncherIssues,
-    /// The key cap in the empty GRID's welcome (`press p to prompt`): a
+    /// The key cap in the empty GRID's welcome (`press ⌘N to start an agent`): a
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
     LauncherWelcomePrompt,
@@ -347,7 +347,7 @@ pub enum MenuAction {
     /// Flip the `hide_draft_prs` SETTING from the Worktrees panel menu:
     /// drafts out of the group and `/`, or back in.
     ToggleDraftPrs,
-    /// A row of the WORKTREE PICKER `^T` (or a click on the NEW SESSION
+    /// A row of the WORKTREE PICKER `^T` (or a click on the NEW AGENT
     /// box's branch) opens: aim this one launch at `target` — one of the project's
     /// checkouts, or a fresh worktree — and hand the box back with its
     /// text. It picks where the session runs, never what branch a checkout
@@ -526,7 +526,7 @@ impl ContextMenu {
             .any(|i| matches!(i.action, MenuAction::OpenProject(_)))
     }
 
-    /// Is this the WORKTREE PICKER `^T` (or a click on the NEW SESSION
+    /// Is this the WORKTREE PICKER `^T` (or a click on the NEW AGENT
     /// box's branch) opens? It is drawn hanging from that branch.
     pub fn is_launch_worktree_picker(&self) -> bool {
         self.items
@@ -539,8 +539,8 @@ impl ContextMenu {
     /// everywhere else: the picker's Claude row, and every row of the
     /// Claude MODEL / EFFORT lists under it — reached with `→`, or opened
     /// straight onto by the box's Select model and its effort field.
-    /// Two pickers offer it: the NEW SESSION PICKER (its `"New session"`
-    /// title is the gate — the PR SESSION picker and a PR row's menu share
+    /// Two pickers offer it: the NEW AGENT PICKER (its
+    /// [`crate::agent_picker::NEW_AGENT_PICKER_TITLE`] is the gate — the PR SESSION picker and a PR row's menu share
     /// these rows but never launch cloud, the daemon refusing a PR launch
     /// with a cloud task) and the QUICK PROMPT's `Tab` picker, whose pick
     /// makes the box a cloud one — unless the box is for an issue or a PR
@@ -561,7 +561,9 @@ impl ContextMenu {
             } => {
                 let offered = match quick {
                     Some(back) => back.launch.takes_cloud(),
-                    None => root.title.as_deref() == Some("New session"),
+                    None => {
+                        root.title.as_deref() == Some(crate::agent_picker::NEW_AGENT_PICKER_TITLE)
+                    }
                 };
                 offered.then_some(*cloud)
             }
@@ -570,7 +572,7 @@ impl ContextMenu {
     }
 
     /// The harnessed launch under the cursor, if the hovered row starts
-    /// one: the New session picker, its PR sibling, the quick prompt
+    /// one: the NEW AGENT PICKER, its PR sibling, the quick prompt
     /// picker, and their model/effort submenus all carry it. Gates the
     /// `?` jump to agent settings.
     pub fn hovered_agent_kind(&self) -> Option<(AgentKind, Option<String>)> {
@@ -801,7 +803,7 @@ pub enum PromptKind {
     /// the typed text as its STARTING PROMPT. It carries the whole launch
     /// spec, resolved when the dialog opens so the title can show what
     /// Enter is about to start — and rewritten in place by the box's `Tab`
-    /// / `Shift+Tab` pickers. The NEW SESSION PICKER never ends here: its
+    /// / `Shift+Tab` pickers. The NEW AGENT PICKER never ends here: its
     /// pick creates the session outright.
     QuickPrompt(crate::quick_prompt::QuickLaunch),
     /// A message to queue on a row's Claude Cloud session
@@ -2205,7 +2207,7 @@ pub struct PlaceholderRows {
 }
 
 /// A `CreateAgent` (or `CreatePrAgent`) as a launch surface drafts it —
-/// the NEW SESSION PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
+/// the NEW AGENT PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
 /// the ISSUES MODAL. `event_loop::create_agent` turns it into the request
 /// and the PENDING INTENT that attaches the row; a draft aimed at a
 /// stand-in checkout waits on that checkout's own intent instead
@@ -2213,7 +2215,7 @@ pub struct PlaceholderRows {
 ///
 /// An empty `name` takes the generated default (agent-1, …) and opts the
 /// session into agent-driven auto-titling (`orion rename` on the first
-/// prompt) — what every launch from the NEW SESSION PICKER and the QUICK
+/// prompt) — what every launch from the NEW AGENT PICKER and the QUICK
 /// PROMPT does. A name a surface does set is the user's choice and stays.
 #[derive(Debug, Clone)]
 pub struct AgentLaunchDraft {

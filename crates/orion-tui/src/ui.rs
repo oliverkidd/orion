@@ -1060,10 +1060,14 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     Span::styled(label, style),
                     Span::styled(" ".repeat(pad), style),
                 ];
+                // The hint column is a key — the COMMAND PALETTE's and the
+                // OPEN MENU's — in the one key style.
                 if hint_len > 0 {
                     spans.push(Span::styled(
                         hint.to_string(),
-                        style.fg(th.dim).remove_modifier(Modifier::BOLD),
+                        style
+                            .patch(crate::hints::key_style(th))
+                            .remove_modifier(Modifier::BOLD),
                     ));
                     spans.push(Span::styled(" ", style));
                 }
@@ -1325,15 +1329,17 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     ],
                 ),
             ];
+            // A SESSION is an AGENT or a TERMINAL: the header says so
+            // once, where the two keys that start them are listed.
             const RIGHT: &[HelpSection] = &[
                 (
-                    "SESSIONS",
+                    "SESSIONS = AGENTS + TERMINALS",
                     &[
-                        (Act(&[QuickPrompt]), "new agent: Enter launches"),
+                        (Act(&[QuickPrompt]), "new agent (an AI coding CLI)"),
                         (Act(&[SelectModel]), "Select model"),
                         (Act(&[CycleEffort]), "Cycle effort"),
                         (Act(&[SelectLaunchWorktree]), "Select worktree"),
-                        (Act(&[NewTerminal]), "terminal in the checkout"),
+                        (Act(&[NewTerminal]), "new terminal (a plain shell)"),
                         (Act(&[FollowUp]), "follow-up prompt to the agent"),
                         (Act(&[ContinueOn]), "continue on another account"),
                         (Act(&[Rename]), "rename the session"),
@@ -1473,11 +1479,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         lines.push(Line::from(vec![
                             Span::styled(
                                 format!(" {keys:<width$}", width = HELP_KEY_W),
-                                Style::default().fg(th.accent),
+                                crate::hints::key_style(th),
                             ),
                             Span::styled(
                                 truncate(v, (width as usize).saturating_sub(16)),
-                                Style::default().fg(th.dim),
+                                crate::hints::does_style(th),
                             ),
                         ]));
                     }
@@ -1678,12 +1684,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         let reach = app.keymap.reach_at(*i);
                         let ambiguous = app.keymap.is_ambiguous(*i);
                         let mut label_style = Style::default();
-                        let mut value_style =
-                            Style::default().fg(if reach.is_fine() && !ambiguous {
-                                th.accent
-                            } else {
-                                th.warn
-                            });
+                        let mut value_style = if reach.is_fine() && !ambiguous {
+                            crate::hints::key_style(th)
+                        } else {
+                            Style::default().fg(th.warn)
+                        };
                         if selected {
                             label_style = label_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
                             value_style = value_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
@@ -3862,15 +3867,12 @@ fn draw_cloud_session(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     lines.push(Line::from(vec![
         Span::styled(
             format!(" {}", key_hint(app, Action::Activate)),
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+            crate::hints::key_style(th),
         ),
-        Span::styled(" or click: open in browser", Style::default().fg(th.dim)),
+        Span::styled(" or click: open in browser", crate::hints::does_style(th)),
         Span::styled("   ·   ", Style::default().fg(th.dim)),
-        Span::styled(
-            "right-click",
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(": send a message", Style::default().fg(th.dim)),
+        Span::styled("right-click", crate::hints::key_style(th)),
+        Span::styled(": send a message", crate::hints::does_style(th)),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -4113,24 +4115,30 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
         None => {
             // Empty-pane hero: vertically centered wordmark + a compact
             // key cheat-sheet, so the big blank pane earns its keep.
+            // Every key spelled from the live keymap, in the one key style.
             let key = |k: &str, label: &str| {
                 vec![
-                    Span::styled(
-                        k.to_string(),
-                        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!(" {label}"), Style::default().fg(th.dim)),
+                    Span::styled(k.to_string(), crate::hints::key_style(th)),
+                    Span::styled(format!(" {label}"), crate::hints::does_style(th)),
                 ]
             };
             let sep = || Span::styled("   ·   ", Style::default().fg(th.dim));
+            let spelled =
+                |action, fallback: &str| crate::hints::key_or(&app.keymap, action, fallback);
             let mut hint = Vec::new();
-            hint.extend(key("Enter", "attach"));
+            hint.extend(key(
+                &spelled(crate::keymap::Action::Activate, "Enter"),
+                "attach",
+            ));
             hint.push(sep());
-            hint.extend(key("n", "new agent"));
+            hint.extend(key(
+                &spelled(crate::keymap::Action::QuickPrompt, "⌘N"),
+                "new agent",
+            ));
             hint.push(sep());
-            hint.extend(key("/", "jump"));
+            hint.extend(key(&spelled(crate::keymap::Action::Palette, "⌘K"), "jump"));
             hint.push(sep());
-            hint.extend(key("?", "help"));
+            hint.extend(key(&spelled(crate::keymap::Action::Help, "?"), "help"));
             let mut lines = vec![Line::from("")];
             let blank = inner.height.saturating_sub(6) / 2;
             for _ in 0..blank {

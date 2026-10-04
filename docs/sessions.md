@@ -4,9 +4,15 @@
 
 Everything that can start an AGENT, and what each launch path does differently.
 
-## The NEW SESSION PICKER
+**Session, agent, terminal.** A SESSION is anything with a card on the grid, and it is one of two
+things: an AGENT — an AI coding CLI (Claude, Codex, Cursor, …) working on a task, started with `⌘N` —
+or a TERMINAL — a plain shell, started with `t`. orion says "agent" for what starts or concerns the
+CLI, "terminal" for the shell, and "session" only for what is true of both: the cards, the attention
+walk (`.` / `,`), archiving and deleting.
 
-Run **New session** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
+## The NEW AGENT PICKER
+
+Run **New agent — choose harness** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
 run — **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
 switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
@@ -57,7 +63,7 @@ The picker opens on the Agents tab's **Quick prompt › Agent** harness — the 
 is on (Settings → Experimental, `remember_harness` in CONFIG.JSON). Then every launch you walk
 through this picker, the PR SESSION picker or the QUICK PROMPT's `Tab` picker writes its harness into
 that row, and a model or effort you drilled into through the
-submenus into that harness's own **Model** / **Effort** rows: the next **New session** opens on that harness with
+submenus into that harness's own **Model** / **Effort** rows: the next **New agent — choose harness** opens on that harness with
 its ✓ on that model, the box `Enter` opens is set to it, and `⌘N` launches it too. The rows are the ordinary settings,
 so the Agents tab always shows what the next launch will be, and you can still change them there. An
 AGENT PRESET launch leaves them alone — its harness is the preset's, not a change of mind.

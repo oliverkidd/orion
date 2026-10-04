@@ -126,7 +126,7 @@ pub(super) fn open_box(app: &mut App) {
     }
 }
 
-/// `n`: the NEW SESSION PICKER first — which harness, `→` its model and
+/// `n`: the NEW AGENT PICKER first — which harness, `→` its model and
 /// effort — and the box after it, set to the pick, in the checkout `p`
 /// would take. The picker's rows carry the box they owe
 /// (`QuickReturn::from_box` false: no box is up yet), so Enter on a row
@@ -3553,6 +3553,49 @@ mod tests {
         });
     }
 
+    /// ⌘. as macOS hands it over — Cancel, an Escape still holding ⌘ —
+    /// is **Select worktree**, never the Esc that closes what it was
+    /// pressed in: over the new-agent box it opens the worktree picker
+    /// with the box's text owed back, and over the NEW AGENT PICKER
+    /// (**New agent — choose harness**) the same picker, aimed where the
+    /// box would be.
+    #[test]
+    fn cmd_period_sent_as_cancel_opens_the_worktree_picker_and_closes_nothing() {
+        let worktree_picker = |app: &App| {
+            matches!(&app.overlay, Some(Overlay::Menu(m))
+                if m.title.as_deref() == Some("Worktree"))
+        };
+        with_default_config(|| {
+            // Over the box.
+            let mut app = two_sessions();
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            type_text(&mut app, "ship it");
+            key(&mut app, KeyCode::Esc, KeyModifiers::SUPER);
+            assert!(worktree_picker(&app), "over the box: {:?}", app.overlay);
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "ship it", "the box survived, text and all");
+
+            // Over the harness-first picker.
+            let mut app = two_sessions();
+            draw(&mut app);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
+            };
+            let aimed = super::super::menu_quick_return(menu)
+                .expect("the rows owe a box")
+                .launch
+                .target;
+            key(&mut app, KeyCode::Esc, KeyModifiers::SUPER);
+            let Some(Overlay::Menu(picker)) = &app.overlay else {
+                panic!("over the picker: {:?}", app.overlay);
+            };
+            assert!(worktree_picker(&app), "over the picker: {:?}", picker.title);
+            let back = super::super::menu_quick_return(picker).expect("it owes a box");
+            assert_eq!(back.launch.target, aimed);
+        });
+    }
+
     /// The effort field is a button too: a click opens the model's EFFORT
     /// list, the box's own effort ticked, and a pick hands the box back
     /// with it in the header — the text, and an AGENT PRESET on the box,
@@ -4949,7 +4992,7 @@ mod tests {
 
             // Over the box, which stays on screen behind it.
             let text = buffer_text(&draw_at(&mut app, 140, 40));
-            assert!(text.contains("New session"), "the box's title: {text}");
+            assert!(text.contains("New agent"), "the box's title: {text}");
             assert!(text.contains("fix the nav"), "the task: {text}");
             assert!(text.contains("+ new worktree"), "the picker: {text}");
 
@@ -5929,7 +5972,7 @@ mod tests {
             let text = buffer_text(&draw(&mut app));
             assert_eq!(tabs_drawn(&app), ["docs", "demo"], "{text}");
             assert!(
-                text.contains("press  ^N  to prompt"),
+                text.contains("press  ^N  to start an agent"),
                 "the grid says what starts one: {text}"
             );
         });
@@ -6327,7 +6370,7 @@ mod tests {
             let terminal = draw(&mut by_click);
             let text = buffer_text(&terminal);
             assert!(text.contains("Welcome to orion"), "{text}");
-            assert!(text.contains("press  ^N  to prompt"), "{text}");
+            assert!(text.contains("press  ^N  to start an agent"), "{text}");
             assert!(!text.contains("type a task"), "only the welcome: {text}");
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherWelcomePrompt);
             let cap = &terminal.backend().buffer()[(x + 7, y)];
@@ -6382,7 +6425,7 @@ mod tests {
             let sky = glyphs(&terminal, grid.y..key_y - 3);
             assert!(sky > 40, "{sky} specks of dust: {}", buffer_text(&terminal));
             assert!(row(&terminal, key_y - 2).contains("   Welcome to orion   "));
-            assert!(row(&terminal, key_y).contains("   press  ^N  to prompt   "));
+            assert!(row(&terminal, key_y).contains("   press  ^N  to start an agent   "));
             assert!(!app.welcome_active(), "animations off: a still frame");
 
             let mut small = on_an_empty_project();
@@ -8106,7 +8149,7 @@ mod tests {
                 );
                 let text = buffer_text(&draw(&mut app));
                 assert!(
-                    text.contains("press  ^N  to prompt"),
+                    text.contains("press  ^N  to start an agent"),
                     "{keys:?}: the empty grid says what starts one: {text}"
                 );
             }
@@ -8392,7 +8435,7 @@ mod tests {
             type_text(&mut app, "fix the nav");
             let box_behind = |app: &mut App, what: &str| {
                 let text = buffer_text(&draw(app));
-                assert!(text.contains("New session"), "{what}: the title: {text}");
+                assert!(text.contains("New agent"), "{what}: the title: {text}");
                 assert!(
                     text.contains("project demo ^P"),
                     "{what}: the details row: {text}"
@@ -8441,7 +8484,7 @@ mod tests {
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("type a project name"), "the picker: {text}");
-            assert!(text.contains("New session"), "the box's title: {text}");
+            assert!(text.contains("New agent"), "the box's title: {text}");
             assert!(text.contains("project demo ^P"), "its details row: {text}");
             assert!(text.contains("fix the nav"), "and the task in it: {text}");
 
@@ -10858,7 +10901,7 @@ mod tests {
         key(app, KeyCode::Enter, KeyModifiers::NONE);
     }
 
-    /// `n` is not `p`: it asks which harness first — the NEW SESSION
+    /// `n` is not `p`: it asks which harness first — the NEW AGENT
     /// PICKER, with no box drawn behind it — and Enter on a row opens the
     /// box set to that harness, in the checkout `p` would take (the
     /// worktree under the cursor). Esc on the picker opens nothing: no
@@ -10875,9 +10918,9 @@ mod tests {
 
             crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             let back = super::super::menu_quick_return(menu).expect("the rows owe a box");
             assert!(!back.from_box, "no box is up under the picker");
             assert_eq!(back.launch.target, feat, "the checkout p would take");

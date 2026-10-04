@@ -407,25 +407,25 @@ pub const AGENTS_HEAD: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::QuickPromptKind,
         label: "Agent",
-        hint: "Harness the quick prompt hotkey launches, with that kind's model/effort",
+        hint: "Harness a new agent starts on, with that kind's model/effort",
         group: "Quick prompt",
     },
     SettingSpec {
         kind: SettingKind::QuickPromptFocus,
         label: "Focus",
-        hint: "Enter the new session's terminal on launch (off = just select its row)",
+        hint: "Enter the new agent's terminal on launch (off = just select its row)",
         group: "Quick prompt",
     },
     SettingSpec {
         kind: SettingKind::FollowNewSession,
         label: "Follow new",
-        hint: "Move the cursor onto the new session's card, the grid scrolled to it, without entering it (off = stay on the card you're on)",
+        hint: "Move the cursor onto the new agent's card, the grid scrolled to it, without entering it (off = stay on the card you're on)",
         group: "Quick prompt",
     },
     SettingSpec {
         kind: SettingKind::HideUninstalledHarnesses,
         label: "Hide missing CLIs",
-        hint: "List only harnesses found on PATH in the New session picker (daemon still checks at launch)",
+        hint: "List only harnesses found on PATH when you start an agent (daemon still checks at launch)",
         group: "Quick prompt",
     },
 ];
@@ -1364,7 +1364,7 @@ pub struct Config {
     pub card_line_changes: bool,
     /// The key of the **Skip starting prompt** SETTING (Settings →
     /// Sessions, through 0.30): on, `n` created the session straight from
-    /// the NEW SESSION PICKER instead of putting a task box up first.
+    /// the NEW AGENT PICKER instead of putting a task box up first.
     /// Every `n` does that now — a launch that starts from a typed task is
     /// the QUICK PROMPT's — so this build never reads it and no tab edits
     /// it any more. Still loaded and written back as stored, so an older
@@ -1447,7 +1447,7 @@ pub struct Config {
     /// not one project.
     pub projects: BTreeMap<PathBuf, ProjectSettings>,
     /// Experimental: REMEMBER HARNESS — a launch walked through the NEW
-    /// SESSION PICKER, the PR SESSION picker or the QUICK PROMPT's `Tab`
+    /// AGENT PICKER, the PR SESSION picker or the QUICK PROMPT's `Tab`
     /// picker writes its harness into `quick_prompt_kind`, and a model or
     /// effort a submenu chose into that harness's own rows, so the next
     /// picker starts on it and the next `p` launches it
@@ -1494,7 +1494,7 @@ pub struct Config {
     /// variant picked inside its own TUI — so its Agents section has no
     /// Effort row and nothing to store for one.
     pub opencode_model: String,
-    /// Which AGENT KINDS the NEW SESSION PICKER offers. Off leaves that
+    /// Which AGENT KINDS the NEW AGENT PICKER offers. Off leaves that
     /// harness out of the picker and the PR SESSION picker (and, for
     /// Claude, out of the standing PREWARM POOL slot); sessions that already
     /// exist keep attaching, resuming and restarting as before. Off until
@@ -1512,7 +1512,7 @@ pub struct Config {
     /// daemon re-checks through the login shell at launch anyway.
     pub hide_uninstalled_harnesses: bool,
     /// User-defined harnesses (`custom_harnesses` in config.json): offered
-    /// in the New session picker after the built-ins when enabled, launched
+    /// in the NEW AGENT PICKER after the built-ins when enabled, launched
     /// with the entry's program and model flag, with process-based status
     /// unless the entry names a hook dialect. Empty by default. Legacy:
     /// new harnesses belong in `harnesses` as full descriptors, where
@@ -1549,7 +1549,7 @@ pub struct Config {
     /// fired from, so firing one off does not interrupt what you were
     /// doing — and where the cursor goes is [`Config::follow_new_session`]'s
     /// to say. Only the QUICK PROMPT reads this — every other launch
-    /// (the NEW SESSION PICKER, an AGENT PRESET, a PR SESSION, a Cloud task)
+    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION, a Cloud task)
     /// still enters the pane.
     pub quick_prompt_focus: bool,
     /// FOLLOW NEW SESSION: a QUICK PROMPT launch lands the cursor on the
@@ -2174,7 +2174,7 @@ impl Config {
         fit_effort_in(&descriptor, model.as_deref(), effort)
     }
 
-    /// Whether the NEW SESSION PICKER offers `kind` at all.
+    /// Whether the NEW AGENT PICKER offers `kind` at all.
     pub fn kind_enabled(&self, kind: AgentKind) -> bool {
         if kind == AgentKind::Custom {
             // A bare Custom kind is never enabled: entries gate themselves.
@@ -2506,7 +2506,7 @@ impl Config {
         let label = descriptor.display_label();
         let mut hint = match field {
             HarnessField::Enabled => format!(
-                "Offer {label} in the New session picker (off hides it; existing sessions keep running)"
+                "Offer {label} when you start an agent (off hides it; its running agents keep running)"
             ),
             HarnessField::Model => match descriptor.model.catalog {
                 Some(orion_core::harness::HarnessCatalog::Claude) => format!(
@@ -2782,7 +2782,7 @@ impl Config {
         out
     }
 
-    /// The harness the NEW SESSION PICKER (and the PR SESSION picker)
+    /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
     /// starts on: the last launch's while REMEMBER HARNESS is on — read
     /// through [`Config::quick_prompt_harness`], so one switched off since
     /// steps aside — and None, the first row, while it is off.

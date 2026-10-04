@@ -2579,7 +2579,7 @@ fn draw_empty(f: &mut Frame, app: &mut App, area: Rect) {
                 .bg(th.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" to prompt", words),
+        Span::styled(" to start an agent", words),
     ]);
     let prompt_w = (prompt.width() as u16).min(area.width);
     let lines = vec![Line::from(welcome), Line::from(""), prompt];
@@ -3211,7 +3211,7 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
         .map(|f| f.label.chars().count())
         .max()
         .unwrap_or(0);
-    let key_style = Style::default().fg(th.accent);
+    let key_style = crate::hints::key_style(th);
     let mut out = BoxHeader::default();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut x = 0usize;
@@ -3298,12 +3298,13 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
         .unwrap_or_else(|| "(project gone)".into())
 }
 
-/// The view's box title: what Enter starts. The harness, the model, the
+/// The view's box title: what Enter starts — always a new AGENT (a
+/// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
 /// keys that change them; what is left here is what the box is *for* — an
 /// issue, a pull request, a Claude Cloud task.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
-    let mut head = vec!["New session".to_string()];
+    let mut head = vec!["New agent".to_string()];
     if let Some(issue) = &launch.issue {
         head.push(format!("issue #{}", issue.number));
     }
@@ -3506,11 +3507,11 @@ mod tests {
         let mut launch = a_launch();
         launch.model = None;
         launch.effort = None;
-        assert_eq!(box_title(&launch), "New session");
+        assert_eq!(box_title(&launch), "New agent");
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
         launch.preset = Some(a_preset("reviewer"));
-        assert_eq!(box_title(&launch), "New session");
+        assert_eq!(box_title(&launch), "New agent");
     }
 
     fn a_preset(name: &str) -> crate::agent_presets::AgentPreset {

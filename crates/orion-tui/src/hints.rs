@@ -18,6 +18,11 @@
 //! unbound action drops out, a terminal without ⌘ sees the `^` twin), a
 //! modal's own keys from the small [`Key`] table its key handler matches
 //! against, so a hint can never name a key the modal does not answer to.
+//! And every key label is drawn in one style, [`key_style`] — the theme's
+//! accent — whatever it sits in: the footer, a modal's border, the
+//! new-agent box's header, the COMMAND PALETTE's key column, Help, the
+//! HOTKEYS TAB, onboarding, the KEY COMBO DISPLAY. What the key does stays
+//! dim.
 
 use crate::keymap::{Action, KeyChord, Keymap};
 use crate::theme::Theme;
@@ -287,11 +292,24 @@ pub fn fit(hints: &[Hint], width: usize) -> Vec<&Hint> {
     shown
 }
 
-/// The spans of `hints` fitted to `width`: each key a step brighter than
-/// what it does, the separators dimmest.
+/// THE key label style: the theme's accent, on every key orion names on
+/// screen — so `⌘N` reads as a key in the same colour in the footer, on a
+/// modal's border, in the box's header and in every list of keys.
+/// Separators and what a key does stay dim ([`does_style`]).
+pub fn key_style(th: Theme) -> Style {
+    Style::default().fg(th.accent)
+}
+
+/// What a key does, beside its [`key_style`] label: dim.
+pub fn does_style(th: Theme) -> Style {
+    Style::default().fg(th.dim)
+}
+
+/// The spans of `hints` fitted to `width`: each key in [`key_style`],
+/// what it does and the separators dim.
 pub fn spans(hints: &[Hint], width: usize, th: Theme) -> Vec<Span<'static>> {
-    let key = Style::default().fg(th.muted);
-    let does = Style::default().fg(th.dim);
+    let key = key_style(th);
+    let does = does_style(th);
     let mut out = Vec::new();
     for (i, hint) in fit(hints, width).into_iter().enumerate() {
         if i > 0 {
@@ -452,6 +470,31 @@ mod tests {
 
     fn hints(pairs: &[(&str, &str)]) -> Vec<Hint> {
         pairs.iter().map(|(k, d)| Hint::new(*k, *d)).collect()
+    }
+
+    /// Every key label is in the one key style — the theme's accent — and
+    /// everything else on the line is dim, on the footer's line and a
+    /// modal's border alike, in every theme.
+    #[test]
+    fn keys_are_the_accent_and_the_rest_is_dim() {
+        let line = hints(&[("⌘N", "new agent"), ("t", "terminal"), ("Esc", "close")]);
+        for name in crate::theme::THEMES {
+            let th = Theme::by_name(name);
+            assert_eq!(key_style(th).fg, Some(th.accent));
+            let keys = ["⌘N", "t", "Esc"];
+            let border = border_line(&line, 80, th);
+            for span in spans(&line, 80, th).iter().chain(border.spans.iter()) {
+                if span.content.trim().is_empty() {
+                    continue;
+                }
+                let want = if keys.contains(&span.content.as_ref()) {
+                    th.accent
+                } else {
+                    th.dim
+                };
+                assert_eq!(span.style.fg, Some(want), "{name}: {:?}", span.content);
+            }
+        }
     }
 
     #[test]

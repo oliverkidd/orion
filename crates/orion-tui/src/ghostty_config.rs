@@ -7,7 +7,10 @@
 //! ([`unbinds`]), plus the editing chords the built-in editor takes
 //! ([`EDITOR_CHORDS`]), and nothing orion does not use. A few Ghostty chords are
 //! never taken whatever the keymap says ([`NEVER_RELEASED`]): copy, paste,
-//! quit, and the window and tab keys.
+//! quit, and the window and tab keys. A chord macOS itself steals before
+//! a terminal can send it is not merely released but bound to the bytes
+//! orion expects for it ([`SENT_AS_KITTY`]) — ⌘. is Cancel, Escape's
+//! twin, everywhere on a Mac.
 //!
 //! The lines live in one marked block orion owns and rewrites in place.
 //! Everything outside it is the user's and is never touched, and a block
@@ -131,6 +134,36 @@ pub const EDITOR_CHORDS: &[&str] = &[
     "super+shift+p",
 ];
 
+/// The ⌘ chords macOS turns into something else before the terminal can
+/// encode them, each with the bytes the block makes Ghostty send in its
+/// place. Unbinding one is not enough: the press still goes through
+/// Cocoa's key handling, which reads it as a command, not a key.
+///
+/// * `⌘.` is Cancel — `cancelOperation:`, the command Escape sends — in
+///   every Mac app, so with only `unbind` it reaches orion as an Escape
+///   (at best one still carrying ⌘), and **Select worktree** closed the
+///   new-agent box it was pressed in instead of opening its picker.
+///   Ghostty's `csi:` action writes `ESC [` and the text after it, and
+///   `46;9u` is the KITTY PROTOCOL's own spelling of ⌘. — codepoint 46,
+///   modifiers 1 + 8 (super) — which crossterm reads as `Char('.')` with
+///   SUPER, the chord the keymap binds. orion folds an Escape carrying ⌘
+///   into the same chord ([`crate::keymap::untangle_cmd_period`]) for a
+///   terminal or a config without this line.
+///
+/// A trigger here is bound this way only when the block would release it
+/// anyway — some action answers to it — and the rest of the keymap's ⌘
+/// chords are plain `unbind`s.
+pub const SENT_AS_KITTY: &[(&str, &str)] = &[("super+.", "csi:46;9u")];
+
+/// What the block binds `trigger` to: its [`SENT_AS_KITTY`] bytes, or
+/// `unbind` — handed to the program inside as Ghostty encodes it.
+pub fn action(trigger: &str) -> &'static str {
+    SENT_AS_KITTY
+        .iter()
+        .find(|(t, _)| *t == trigger)
+        .map_or("unbind", |(_, sent)| sent)
+}
+
 /// Whether the block releases `chord`: a ⌘ chord not on
 /// [`NEVER_RELEASED`].
 pub fn releases(chord: &KeyChord) -> bool {
@@ -179,12 +212,13 @@ fn keymap_unbinds(keymap: &Keymap) -> Vec<String> {
 }
 
 /// The block as written for `keymap`: the markers around one
-/// `keybind = <trigger>=unbind` per [`unbinds`] entry.
+/// `keybind = <trigger>=<action>` per [`unbinds`] entry — `unbind`, or
+/// the bytes [`SENT_AS_KITTY`] sends for a chord macOS steals.
 pub fn block(keymap: &Keymap) -> String {
     let mut out = String::from(BEGIN);
     out.push('\n');
     for trigger in unbinds(keymap) {
-        out.push_str(&format!("keybind = {trigger}=unbind\n"));
+        out.push_str(&format!("keybind = {trigger}={}\n", action(&trigger)));
     }
     out.push_str(END);
     out.push('\n');
@@ -386,7 +420,6 @@ mod tests {
                 "super+e",
                 "super+r",
                 "super+l",
-                "super+i",
                 "super+n",
                 "super+/",
                 "super+y",
@@ -411,6 +444,48 @@ mod tests {
             !block.contains("ctrl+"),
             "a ^ twin is never Ghostty's to give"
         );
+        assert!(block.contains("\nkeybind = super+.=csi:46;9u\n"), "{block}");
+        assert!(!block.contains("super+.=unbind"));
+        assert!(
+            !block.contains("super+i="),
+            "⌘I is no key of orion's: Ghostty keeps it"
+        );
+    }
+
+    /// Every chord macOS steals is sent as the KITTY PROTOCOL spells the
+    /// chord itself — `CSI <codepoint> ; <1 + modifier bits> u` — so it
+    /// arrives as the very chord the keymap binds, and is written only
+    /// while some action answers to it.
+    #[test]
+    fn a_chord_macos_steals_is_sent_as_its_kitty_sequence() {
+        for (trigger, sent) in SENT_AS_KITTY {
+            let spec = trigger.replace("super", "cmd");
+            let chord = KeyChord::parse(&spec).unwrap();
+            assert_eq!(super::trigger(&chord).as_deref(), Some(*trigger));
+            let KeyCode::Char(c) = chord.code else {
+                panic!("{trigger}: not a character key");
+            };
+            let mut bits = 0;
+            for (held, bit) in [
+                (KeyModifiers::SHIFT, 1),
+                (KeyModifiers::ALT, 2),
+                (KeyModifiers::CONTROL, 4),
+                (KeyModifiers::SUPER, 8),
+            ] {
+                if chord.mods.contains(held) {
+                    bits += bit;
+                }
+            }
+            assert_eq!(*sent, format!("csi:{};{}u", c as u32, 1 + bits));
+            assert_eq!(action(trigger), *sent);
+        }
+        assert_eq!(action("super+k"), "unbind");
+        // Rebound off ⌘., the line goes with it: Ghostty has it back.
+        let mut keymap = Keymap::default();
+        let worktree =
+            crate::keymap::index_of(crate::keymap::Action::SelectLaunchWorktree).unwrap();
+        keymap.bind(worktree, KeyChord::parse("cmd+u").unwrap(), false);
+        assert!(!block(&keymap).contains("super+."));
     }
 
     /// Every ⌘ chord an action answers to is released — the derivation

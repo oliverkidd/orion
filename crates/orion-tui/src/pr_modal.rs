@@ -4,7 +4,7 @@
 //! cursor read on the right, and the ISSUES MODAL's ways to put an agent
 //! on it: a QUICK PROMPT (`Enter`), one of the saved AGENT PRESETS
 //! (`Shift+Tab`), or a bare harness pick (`Tab`, the group row's NEW
-//! SESSION PICKER) — the QUICK PROMPT box's own three keys. Every one of
+//! AGENT PICKER) — the QUICK PROMPT box's own three keys. Every one of
 //! them is a PR SESSION, launched exactly as the group's row launches it
 //! (`quick_prompt::pr_launch_for`): the create is a `CreatePrAgent`, the
 //! DAEMON runs the session in the project's checkout of the pull
@@ -498,7 +498,7 @@ fn open_preset_for_selected(app: &mut App) {
     }
 }
 
-/// `Tab`: the NEW SESSION PICKER's harness rows for a PR SESSION on the pull
+/// `Tab`: the NEW AGENT PICKER's harness rows for a PR SESSION on the pull
 /// request — `n` on the group's row — launching bare on Enter, or through
 /// the MODEL / EFFORT submenus on `→`.
 fn open_harness_picker_for_selected(app: &mut App) {
@@ -1350,7 +1350,7 @@ mod tests {
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("Tab: expected the harness picker, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New PR session · #41"));
+            assert_eq!(menu.title.as_deref(), Some("New PR agent · #41"));
             assert!(!menu.items.is_empty());
         });
     }
@@ -1468,7 +1468,7 @@ mod tests {
                 screen.contains("Pull requests — demo"),
                 "the modal under the box"
             );
-            assert!(screen.contains("New session · PR #41"), "the box over it");
+            assert!(screen.contains("New agent · PR #41"), "the box over it");
             assert!(
                 screen.contains("Esc back to pull requests"),
                 "and says where Esc goes"
