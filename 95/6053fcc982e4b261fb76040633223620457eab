@@ -1,0 +1,45 @@
+scripts/shot/scenes/pr-window-merge.keys
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-8
+crates/orion-tui/src/pr_actions.rs
+  s_9588d48c4c863d::t_3d0d83cda9df51 297-298,302-308,1389,1477-1478,1480-1484,1974
+  s_9588d48c4c863d::t_c06d4b324d1d96 299-301,1387-1388,1454-1455,1467,1479,1930-1973
+  s_9588d48c4c863d::t_8d831ddafa57b2 1485-1486,1975
+scripts/shot/fixtures/pr-42.stats.json
+  s_9588d48c4c863d::t_a73f70553863ed 1-44
+scripts/shot/scenes/pr-window-create.setup.sh
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-7
+scripts/shot/scenes/pr-window-page.keys
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-10
+scripts/shot/scenes/pr-window-create-pick.setup.sh
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-7
+scripts/shot/fixtures/pr-39.stats.json
+  s_9588d48c4c863d::t_a73f70553863ed 1-28
+scripts/shot/scenes/pr-window-create.keys
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-16
+scripts/shot/scenes/pr-window-create-pick.keys
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-12
+scripts/shot/scenes/pr-window-nested-diff.keys
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-13
+scripts/shot/scenes/settings-review.keys
+  s_9588d48c4c863d::t_86421ad0dd2b36 1-4
+scripts/shot/fixtures/repo.json
+  s_9588d48c4c863d::t_a73f70553863ed 1
+scripts/shot/bin/gh
+  s_9588d48c4c863d::t_a73f70553863ed 6-8,83-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "956053fcc982e4b261fb76040633223620457eab",
+  "prompts": {},
+  "sessions": {
+    "s_9588d48c4c863d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124f9c55-c32b-4c39-b4a5-e69a6258e9cb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
