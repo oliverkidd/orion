@@ -170,8 +170,8 @@ PTY — the same path your keystrokes take in the pane — so the CLI sees it as
 prompt with line breaks in it crosses as one bracketed paste rather than as typing, so nothing
 auto-indents it to mush.
 
-While the box is open it owns the keyboard: the grid's own verbs are bare letters, so `a`, `t` and `r`
-are letters in your prompt and not archive, delete and rename aimed at the session you are prompting.
+While the box is open it owns the keyboard: the grid's own verbs include bare letters, so `t`, `r` and `s`
+are letters in your prompt and not a terminal, a rename or Settings aimed at the session you are prompting.
 A click outside the box closes it, as it closes any modal.
 
 Nothing about the PANE moves when you use it. It is not unfolded, not swapped onto the card, not
@@ -370,8 +370,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   walked: `↑`,`↑` on the top row of cards hands the keys up to the tabs, with a cursor of
   their own on the lit tab; `←`/`→` move it and the grid switches with it, each project
   shown on its last-focused card as the cursor passes, and `Enter` — or `↓`,`↓` back
-  down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `x` for the one the
-  grid is on (the one under the header's cursor while it has the keys), closes it and the grid
+  down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `Backspace` on the
+  one under the header's cursor while it has the keys (behind a confirm), closes it and the grid
   moves to the tab that slides into its place. Closing a tab
   changes nothing about the project — its sessions run on. Closing the last tab puts orion back on
   the splash it opens on before there is any project, where `+` lists every project, `Enter` opens
@@ -544,10 +544,10 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
   out to: `Esc` lets the card go, a second does nothing, and `↑` on the first band stays put.
 
-Every other key acts on the session under the cursor — `a` archives, `Backspace` deletes, `⌘E` opens its
-diff, `⌘K` jumps, `s` opens Settings. `a` asks first, always: a CONFIRM DIALOG names
+Every other key acts on the session under the cursor — `⌘⇧A` (`^A`) archives, `Backspace` deletes, `⌘E` opens its
+diff, `⌘K` jumps, `s` opens Settings. `⌘⇧A` asks first, always: a CONFIRM DIALOG names
 the session, `Enter` or `y` archives it and `Esc` or `n` keeps it, so a letter aimed at an agent
-that lands on the grid archives nothing — and saying yes is cheap, since `u` brings it back. The
+that lands on the grid archives nothing — and saying yes is cheap, since `⌘⇧U` (`^U`) brings it back. The
 cursor lands on the card after the one archived in its band — the one that slides up into its
 place — or, when the band's last card went, on the one before it; a band's only card leaving takes
 the band with it, and the cursor lands on the one that slid up into its slot. `Backspace` lands
@@ -557,19 +557,30 @@ before anything is deleted: `Delete agent 'x'? Its session and history go away.`
 `Nothing else is left in worktree 'feature': delete it from disk too?`, with three answers. `Enter`
 or `y` deletes the card and then the worktree, the way `Backspace` on its band would; `n` deletes the card
 and keeps the checkout standing empty; `Esc` cancels, and the card stays alive. The ROOT WORKTREE
-is never offered, and an archive (`a`) never asks: an archived card is still filed under its
+is never offered, and an archive (`⌘⇧A`) never asks: an archived card is still filed under its
 checkout, so the dialog on a worktree that still holds archived sessions counts them, since the
 delete takes their history with it. **Delete emptied worktree** (Settings → Sessions, off by
 default) skips the question: the card's ordinary confirm says the worktree goes with it and `Enter`
 deletes both — except when archived sessions are still filed under it, which always get the
 three-way question. **Show all worktrees** takes the question away, not the setting: with both on,
-the worktree still goes with its last card. A held `a` opens one dialog and
-archives nothing by itself; a held `u` in the ARCHIVED VIEW unarchives one card, and the next needs
+the worktree still goes with its last card. A held `⌘⇧A` opens one dialog and
+archives nothing by itself; a held `⌘⇧U` in the ARCHIVED VIEW unarchives one card, and the next needs
 the key let go and pressed again (on a terminal with the kitty keyboard protocol, which is what
 tells a held key's repeats from a fresh press; without it a long hold still walks the row).
 
+**Every band carries an ARCHIVED DRAWER** under it once its checkout has an archived session: a
+faint `▸ 3 archived` line, folded by default. `z` on the band — or a click on the line — unfolds it
+into one line per archived session, most recently archived first, each drawn in an archived card's
+quiet colors with how long ago it was filed on the right; the cursor lands on the newest, so `z`
+then `⌘⇧U` brings back the session just archived. `↓` off the band's cards walks into the drawer and
+on to the next band, `↑` the other way; `⌘⇧U` on a line (or a double-click) unarchives it, the cursor
+staying on it as a live card, and `Backspace` deletes it. `z` again folds the drawer, the cursor
+back on the band's cards. A checkout with only archived sessions has no band of its own — unless its
+drawer is unfolded, so archiving a band's last card with the drawer open leaves the band standing.
+Which drawers are open is remembered across restarts.
+
 **`⇧A` is the ARCHIVED VIEW**: the same grid, of the project's archived sessions instead of its live
-ones, with the header counting them under their own word (`3 archived sessions`). `u` unarchives the
+ones, with the header counting them under their own word (`3 archived sessions`). `⌘⇧U` unarchives the
 card under the cursor where it stands and `Backspace` deletes it; `⇧A` again comes back to the live
 sessions. The two lists never mix — there is no group to fold, only the other grid — and `Enter`
 on an archived card says to unarchive it first, its session having been reaped when it was

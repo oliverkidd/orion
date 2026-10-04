@@ -1,9 +1,9 @@
 //! The FOOTER: the bar along the bottom of every screen.
 //!
 //! Left to right it is always the STATUS — which orion this is (a button:
-//! a click goes HOME), where you are (`project ▸ branch ▸ session`, and
-//! `· archived`, `· full screen` or `· home` when you are somewhere other
-//! than the grid), and at the right edge the live counts. Between the two
+//! a click goes HOME), `· archived`, `· full screen` or `· home` when you
+//! are somewhere other than the grid, and at the right edge the live
+//! counts. Between the two
 //! go KEY HINTS, and only while no modal is up ([`hints`]): a modal's keys
 //! are on its own bottom border (`crate::hints::modal_block`), so the
 //! footer never repeats or contradicts them. With nothing up, the hints
@@ -64,62 +64,22 @@ fn draw_key_combo(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
-/// `project ▸ branch ▸ session` breadcrumb of the current selection; the
-/// segment matching the focused panel is highlighted. Sessions/Terminal
-/// focus both highlight the session segment.
-fn breadcrumb(app: &App) -> Vec<Span<'static>> {
+/// Where the view is, when it is not the grid of live sessions —
+/// `archived`, `full screen`, `home`: the word that says what Esc climbs
+/// out of. The bar used to lead with the selection's `project ▸ branch ▸
+/// session` too, but the grid's tabs, band rule and the pane's header
+/// already say all three, and the crumb ate the room the KEY HINTS need.
+fn place_tag(app: &App) -> Vec<Span<'static>> {
     let th = app.theme;
-    let seg = |name: &str, active: bool| {
-        Span::styled(
-            truncate(name, 20),
-            if active {
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(th.muted)
-            },
-        )
-    };
-    let sep = || Span::styled(" ▸ ", Style::default().fg(th.dim));
-
-    let mut spans = Vec::new();
-    if app.splash_showing() && !app.home {
-        return spans;
-    }
-    let Some(project) = app.selected_project() else {
-        return spans;
-    };
-    spans.push(seg(&project.name, app.focus == Focus::Projects));
-    if let Some(worktree) = app.selected_worktree() {
-        spans.push(sep());
-        spans.push(seg(&worktree.branch, app.focus == Focus::Worktrees));
-        if let Some(session) = app.selected_session_row() {
-            spans.push(sep());
-            // A link's crumb is its display label, not the raw URL — the
-            // crumb has 20 cells and "https://" would eat eight of them —
-            // and a pull request's just its number: its title is on the
-            // band's rule, and the bar's room is the hints'.
-            let name = match session.as_link() {
-                Some(link) => match link.pull_request() {
-                    Some(pr) => format!("#{}", pr.number),
-                    None => link.label(),
-                },
-                None => session.name().to_string(),
-            };
-            spans.push(seg(
-                &name,
-                matches!(app.focus, Focus::Sessions | Focus::Terminal),
-            ));
-        }
-    }
-    // Where the view is, when it is not the grid of live sessions: the
-    // word that says what Esc climbs out of.
-    if let Some(place) = place(app) {
-        spans.push(Span::styled(
-            format!("  · {place}"),
-            Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
-        ));
-    }
-    spans
+    place(app)
+        .map(|place| {
+            Span::styled(
+                place,
+                Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The view the screen is on, when it is not the grid of live sessions.
@@ -212,6 +172,17 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
         return list;
     };
     let mut list = Vec::new();
+    if crate::launcher::drawer_cursor(app, &bands[band_at]).is_some() {
+        // A line of the band's ARCHIVED DRAWER: a session put away, with
+        // nothing to open or prompt until it is brought back.
+        list.extend([
+            act(km, Action::Unarchive, "unarchive"),
+            act(km, Action::ToggleArchivedDrawer, "hide archived"),
+            act(km, Action::Delete, "delete"),
+        ]);
+        list.extend(tail);
+        return list;
+    }
     match card {
         Some(crate::launcher::Card::Session(row)) => {
             list.push(act(km, Action::Activate, "open"));
@@ -414,7 +385,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         status.push(Span::styled("✗ disconnected", Style::default().fg(th.err)));
         status.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
-    let crumbs = breadcrumb(app);
+    let crumbs = place_tag(app);
     // Right edge: live session/process counts and orion's total memory
     // footprint, fed by the footer metrics poll. The hints clip before the
     // readout does.

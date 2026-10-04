@@ -460,6 +460,8 @@ mod tests {
                 "super+e",
                 "super+r",
                 "super+l",
+                "super+shift+a",
+                "super+shift+u",
                 "super+n",
                 "super+/",
                 "super+y",

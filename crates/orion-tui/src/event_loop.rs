@@ -103,7 +103,12 @@ const PR_GONE: &str = "pull request is no longer open";
 const NO_SESSIONS_TO_JUMP: &str = "no sessions to jump to";
 
 /// Flash for an action an archived agent refuses until it's unarchived.
-pub(crate) const AGENT_ARCHIVED: &str = "agent is archived — unarchive first (u)";
+pub(crate) fn agent_archived(app: &App) -> String {
+    format!(
+        "agent is archived — unarchive first ({})",
+        crate::hints::key_or(&app.keymap, crate::keymap::Action::Unarchive, "its menu")
+    )
+}
 
 /// How often the worktree panel's changed-file badge re-reads `git status`
 /// for the selected checkout, so agent edits surface without a keypress.
@@ -2403,6 +2408,12 @@ fn ui_state_json(app: &App) -> String {
         launcher_open_bands: saved_open_bands(app),
         launcher_tabs: app.launcher_tabs.iter().map(|id| id.to_string()).collect(),
         projects_closed: app.projects_closed,
+        archived_open: app
+            .archived_open
+            .iter()
+            .filter(|id| app.tree.worktrees.iter().any(|w| &w.id == *id))
+            .map(|id| id.to_string())
+            .collect(),
     };
     serde_json::to_string(&state).unwrap_or_else(|_| "{}".into())
 }
@@ -2440,6 +2451,7 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
         return false;
     };
     app.show_archived = state.show_archived;
+    app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
     app.issues_collapsed = state.issues_collapsed;
     if let Some(w) = state.diff_files_width {
@@ -3778,6 +3790,9 @@ fn dispatch_action(
                 }
             }
         }
+        // The grid's own key (`launcher::handle_action`): with a session
+        // full-screen over the view there is no band to fold one under.
+        Action::ToggleArchivedDrawer => {}
         // The grid takes this itself (`launcher::handle_action`); it
         // reaches here from the menu and with a session full-screen over
         // the view, where there are no cards to swap.
@@ -5659,7 +5674,8 @@ fn handle_page_key(app: &mut App, key: KeyEvent) {
 /// on the dialog's Enter ([`archive_agent_now`]).
 fn archive_agent(app: &mut App, id: AgentId) {
     if let Some(a) = app.tree.agents.iter().find(|a| a.id == id) {
-        app.overlay = Some(Overlay::Confirm(confirm_archive_agent(&a.name, id)));
+        let undo = crate::hints::key_or(&app.keymap, crate::keymap::Action::Unarchive, "Unarchive in its menu");
+        app.overlay = Some(Overlay::Confirm(confirm_archive_agent(&a.name, id, &undo)));
     }
 }
 
@@ -5671,11 +5687,11 @@ fn archive_agent_now(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
 }
 
 /// The confirm before an agent is archived. The message says why saying
-/// yes is cheap: `u` undoes it.
-fn confirm_archive_agent(name: &str, id: AgentId) -> ConfirmDialog {
+/// yes is cheap: `undo`, the unarchive key, brings it back.
+fn confirm_archive_agent(name: &str, id: AgentId, undo: &str) -> ConfirmDialog {
     ConfirmDialog {
         title: "Archive agent".into(),
-        message: format!("Archive agent '{name}'? It leaves the list; u brings it back."),
+        message: format!("Archive agent '{name}'? It leaves the list; {undo} brings it back."),
         action: PendingAction::ArchiveAgent(id),
         area: ratatui::layout::Rect::default(),
     }
@@ -6505,8 +6521,11 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
 fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientRequest>) -> bool {
     match *target {
         HitTarget::LauncherCard(at) => launcher::select_card_row(app, at, out),
-        HitTarget::LauncherBand(i) | HitTarget::LauncherBandMore(i) => {
-            launcher::select_band_row(app, i, out)
+        HitTarget::LauncherBand(i)
+        | HitTarget::LauncherBandMore(i)
+        | HitTarget::LauncherDrawer(i) => launcher::select_band_row(app, i, out),
+        HitTarget::LauncherDrawerEntry(band, entry) => {
+            launcher::select_drawer_entry(app, band, entry, out)
         }
         HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
         HitTarget::LauncherCardIssue(ref id) => launcher::select_issue_card(app, id, out),
@@ -10734,6 +10753,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherStripLeft(_)
                 | HitTarget::LauncherStripRight(_)
                 | HitTarget::LauncherBandMore(_)
+                | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
                 | HitTarget::LauncherPaneSide
@@ -11412,6 +11432,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // `▾ 6 more · Tab: see all 8` under a band's row: the band
                 // opens, the very toggle Tab runs.
                 Some(HitTarget::LauncherBandMore(i)) => launcher::click_band_more(app, i, out),
+                // `▸ 3 archived` under a band: its ARCHIVED DRAWER folds
+                // or unfolds, as `z` does.
+                Some(HitTarget::LauncherDrawer(i)) => launcher::click_drawer(app, i, out),
+                // An archived session's line in an unfolded drawer: the
+                // cursor onto it; a second click brings it back.
+                Some(HitTarget::LauncherDrawerEntry(band, entry)) => {
+                    launcher::click_drawer_entry(app, band, entry, out)
+                }
                 // The PULL REQUEST on a band's rule: it opens in the
                 // browser, through the very `open_pull_request` `⇧V` runs.
                 Some(HitTarget::LauncherBandPr(wid)) => {
@@ -11630,6 +11658,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherStripLeft(_)
                             | HitTarget::LauncherStripRight(_)
                             | HitTarget::LauncherBandMore(_)
+                            | HitTarget::LauncherDrawer(_)
+                            | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
                     )
                 )
@@ -14073,7 +14103,7 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Enter open your first project"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
-        assert!(text.contains("q quit"), "{text}");
+        assert!(text.contains("^C quit"), "{text}");
         for dead in ["⌫ delete", "t terminal", "a archive"] {
             assert!(
                 !text.contains(dead),
@@ -17510,7 +17540,7 @@ diff --git a/src/c.rs b/src/c.rs
         let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
@@ -17541,7 +17571,7 @@ diff --git a/src/c.rs b/src/c.rs
         let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(!buffer_text(&terminal).contains('⇡'), "nothing to flag yet");
 
@@ -18233,16 +18263,16 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         let mut out = Vec::new();
 
-        // Panel focus: 'q' asks first, then quits on `y`.
+        // Panel focus: ^C asks first, then quits on `y`.
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut out,
         );
-        assert!(!app.should_quit, "q asks before it quits");
+        assert!(!app.should_quit, "^C asks before it quits");
         assert!(
             matches!(&app.overlay, Some(Overlay::Confirm(c)) if c.action == PendingAction::Quit),
-            "q opens the quit confirm"
+            "^C opens the quit confirm"
         );
         handle_key(
             &mut app,
@@ -18273,15 +18303,13 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.term_locked, "Ctrl+q clears the input lock");
     }
 
-    /// `q` sits among the panel hotkeys, so a letter meant for an agent used
-    /// to end the client outright. Both quit chords ask first, and backing
-    /// out leaves the app exactly where it was.
+    /// A letter meant for an agent used to end the client outright, so
+    /// quit is no bare key at all, and its chord asks first; backing out
+    /// leaves the app exactly where it was.
     #[test]
     fn quit_asks_before_it_closes_the_tui() {
-        for chord in [
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        ] {
+        {
+            let chord = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             let mut app = App::new();
             seed_tree(&mut app);
             let mut out = Vec::new();
@@ -26646,8 +26674,8 @@ diff --git a/src/c.rs b/src/c.rs
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            // 'q' would close the overlay; here it is just a key.
-            press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, &mut out);
+            // ^C would close the overlay; here it is just a key.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, &mut out);
             assert!(
                 matches!(app.overlay, Some(Overlay::Settings(_))),
                 "the overlay stayed open"
@@ -28565,8 +28593,8 @@ diff --git a/src/c.rs b/src/c.rs
         app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
 
         let mut out = Vec::new();
-        // `a` asks first; Enter on the confirm is the archive.
-        press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+        // `^A` asks first; Enter on the confirm is the archive.
+        press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, &mut out);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(
             app.overlay.is_none(),
@@ -28626,7 +28654,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, &mut out);
             assert!(
                 matches!(
                     &app.overlay,
@@ -28657,7 +28685,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(app.term.is_some(), "backing out keeps the pane");
 
             // Enter goes through, exactly as the bare key would have.
-            press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "Enter closes the confirm");
             assert!(

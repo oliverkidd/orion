@@ -121,6 +121,10 @@ pub enum Action {
     Archive,
     Unarchive,
     ToggleArchived,
+    /// `z` on the grid: fold or unfold the ARCHIVED DRAWER under the
+    /// band the cursor is on — that checkout's archived sessions, one
+    /// faint line apiece, for `u` to bring back.
+    ToggleArchivedDrawer,
     Delete,
     DeleteAll,
     /// The AGENT PRESETS list: saved launch definitions for the checkout
@@ -344,7 +348,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — {palette} opens it again",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["x"],
+        // No key: a tab's `×`, its right-click menu and the COMMAND
+        // PALETTE close it. A bare `x` closed one by accident.
+        defaults: &[],
     },
     ActionSpec {
         action: Action::ProjectDropdown,
@@ -511,16 +517,18 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Archive the selected agent (its PTY is released), or bring an archived one back",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["a"],
+        // Never a bare letter: a stray `a` aimed at a prompt that lands on
+        // the grid must not file a session away.
+        defaults: &["cmd+shift+a", "ctrl+a"],
     },
     ActionSpec {
         action: Action::Unarchive,
         id: "unarchive",
         label: "Unarchive session",
-        hint: "Bring an archived agent back into the list",
+        hint: "Bring the archived agent under the cursor back into the list",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &[],
+        defaults: &["cmd+shift+u", "ctrl+u"],
     },
     ActionSpec {
         action: Action::ToggleArchived,
@@ -532,10 +540,19 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["shift+a"],
     },
     ActionSpec {
+        action: Action::ToggleArchivedDrawer,
+        id: "toggle_archived_drawer",
+        label: "Show / hide worktree's archived",
+        hint: "Fold or unfold the archived sessions listed under the worktree the cursor is on",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["z"],
+    },
+    ActionSpec {
         action: Action::Delete,
         id: "delete",
         label: "Delete selected",
-        hint: "Remove the selected row, behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation — x closes it outright",
+        hint: "Remove the selected row, behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["backspace"],
@@ -798,7 +815,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Leave the TUI (sessions keep running in the daemon)",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["q", "ctrl+c"],
+        // Not a bare `q`: a stray letter must not ask to quit.
+        defaults: &["ctrl+c"],
     },
 ];
 
@@ -1922,9 +1940,23 @@ mod tests {
         // ^q in the panels is free — the scopes never read the same press.
         assert_eq!(map.lookup(Scope::Global, &ctrl_q), None);
         assert_eq!(
-            map.lookup(Scope::Global, &KeyChord::parse("q").unwrap()),
+            map.lookup(Scope::Global, &KeyChord::parse("ctrl+c").unwrap()),
             Some(Action::Quit)
         );
+    }
+
+    /// A stray letter must not quit, close a tab, or archive or unarchive a
+    /// session: those ship on modified chords, or none.
+    #[test]
+    fn stray_letters_quit_close_and_archive_nothing() {
+        let map = Keymap::default();
+        for bare in ["q", "x", "a", "u"] {
+            assert_eq!(
+                map.lookup(Scope::Global, &KeyChord::parse(bare).unwrap()),
+                None,
+                "{bare} is bound"
+            );
+        }
     }
 
     /// `t` is a shell terminal inside orion; one outside it is a row of

@@ -10,8 +10,9 @@ its key, and `Enter` runs it.
 ## How the screen is laid out
 
 - **The FOOTER is the status bar.** Always, left to right: which orion this is (`orion v0.42.0` —
-  a click on it goes HOME), where you are (`project ▸ branch ▸ session`, then `· archived`,
-  `· full screen` or `· home` when you are somewhere other than the grid of live sessions), and at
+  a click on it goes HOME), then `archived`, `full screen` or `home` when you are somewhere other
+  than the grid of live sessions — the selection itself is on the grid and the pane, not repeated
+  here, so the bar's room goes to the KEY HINTS — and at
   the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
   then only about what the grid or the pane has under its cursor: on an empty band
   `⌘N new agent · t terminal · ⌫ delete worktree`, beside a pull request the pane can read
@@ -85,7 +86,7 @@ reload (`⌘⇧,`).
 | Full-screen session | `^F` | | give the session in the pane the whole screen, or bring it back down |
 | Settings | `⌘,` | `s` | the SETTINGS OVERLAY |
 | Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `orion vX.Y.Z` does the same |
-| Quit | `q`, `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
+| Quit | `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
 
 ## The grid
 
@@ -106,8 +107,10 @@ or `Esc` folds it back.
 | `t` | a new shell terminal inside orion, in the cursor's checkout — a chip on the grid with the pane on it and the keys in it. `⌘O` → **Terminal in the checkout** opens one outside orion |
 | `` ` `` | the next TERMINAL chip of the cursor's checkout, round to the first |
 | `r` | rename the session under the cursor |
-| `a` | archive the session, behind a CONFIRM DIALOG (`Enter` or `y` archives, `Esc` or `n` keeps it); on an archived card, unarchive it. A held `a` opens one dialog and archives nothing by itself |
-| `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `a` unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again, or `Esc`, comes back |
+| `⌘⇧A` / `^A` | archive the session, behind a CONFIRM DIALOG (`Enter` or `y` archives, `Esc` or `n` keeps it); on an archived card, unarchive it. Never a bare letter, so a stray keypress can't file a session away. Held, it opens one dialog and archives nothing by itself |
+| `⌘⇧U` / `^U` | unarchive the archived session under the cursor — a line of an ARCHIVED DRAWER, or a card in the ARCHIVED VIEW. The cursor stays on it, a live card again. Held, it unarchives one |
+| `z` | **the ARCHIVED DRAWER**: fold or unfold the `▸ 3 archived` line under the band the cursor is on — that checkout's archived sessions, a faint line apiece, most recently archived first. Unfolding puts the cursor on the newest, so `z` then `⌘⇧U` brings back the session just archived; `↑` / `↓` walk through the drawer between the band's cards and the next band. A click on the line is `z`, a double-click on a session's line unarchives it. Remembered across restarts |
+| `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `⌘⇧U` (or `⌘⇧A`) unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again, or `Esc`, comes back |
 | `Backspace` | delete the card under the cursor, behind a confirm. On the last live card of a linked worktree the confirm asks about the checkout too — `y` deletes both, `n` the card only, `Esc` keeps the card. A checkout with uncommitted or untracked work asks once more before it goes, counting the files it would lose (commits on its branch are kept), so nothing is lost by accident. On an EMPTY BAND it asks to delete the worktree itself; on a terminal's chip it closes the terminal and kills its shell |
 | `c` | the BRANCH SWITCHER for the project's root checkout (below) |
 | `⇧C` | **continue on another account**: the Claude session under the cursor, conversation and all, carried onto another Claude account and resumed there — a list of the accounts it can go to, `Enter` goes. For a session stopped at a usage limit (see [Sessions](sessions.md#usage-limits-and-a-second-account)) |
@@ -116,7 +119,6 @@ or `Esc` folds it back.
 | `.` / `,` | next / previous session in attention order — waiting on you first, then running, then the unread finishes, then the rest by last interaction — wrapping at both ends, in any project. Landing on an UNSEEN finish reads it |
 | `[` / `]` | the project tab to the left / right, stopping at the ends |
 | `1`–`9` | that PROJECT TAB, counting from the left; rebindable per slot as `project_tab_1` … `project_tab_9` |
-| `x` | close the project tab the grid is on (the project and its sessions are untouched; `⌘K` opens it again) |
 | right-click | a card's, a band's or a project tab's context menu |
 
 The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
@@ -206,7 +208,7 @@ the footer (or the modal's border) always names the way:
 | `↑`,`↑` on the top row of cards | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
 | `←` / `→`, `[` / `]` | walk the header's cursor along the tabs — **the grid switches with it**, each project on the card you last left it on |
 | `Enter`, `↓`,`↓` | hand the keys back to the cards of the project on screen |
-| `x` / `Backspace` | close the tab under the cursor — `x` at once, `Backspace` behind a confirm |
+| `Backspace` | close the tab under the cursor, behind a confirm (or click its `×`; **Close project tab** has no key by default — bind one in Settings → Hotkeys) |
 | `Esc`, a click, any other key | back down to the cards; any other key then means what it means on the grid |
 
 A click on a tab opens it, a tab's `×` closes it, and the `+` in front of the tabs drops the

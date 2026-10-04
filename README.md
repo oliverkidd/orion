@@ -124,7 +124,7 @@ The first launch opens a short setup, a step at a time: which agents to turn on 
 
 **2. Start an agent.** `⌘N` (`Ctrl+N` if the terminal never sends ⌘) opens the quick prompt. Type the task, `Enter`. `Tab` picks the harness, `⌘/` the model, `⌘Y` steps the effort, `⌘.` the checkout (or a fresh worktree), `⌘P` the project — the box's header shows each with its key.
 
-**3. Read the grid.** `↑` / `↓` walk the bands. `Enter` steps into the pane. `Esc` leaves it. `Space` on a card sends the next turn without opening the session. `q` quits the TUI; sessions keep running in the daemon.
+**3. Read the grid.** `↑` / `↓` walk the bands. `Enter` steps into the pane. `Esc` leaves it. `Space` on a card sends the next turn without opening the session. `^C` quits the TUI; sessions keep running in the daemon.
 
 **4. Linear (optional).** Put `LINEAR_API_KEY=lin_api_…` in the project's `.env` or `.env.local`. `⌘L` lists issues assigned to the key's owner. Settings → Linear → **Test connection** says whose it is, and **Linear account** takes your email if the key is shared. Space marks, Enter launches one agent for the set.
 

@@ -107,6 +107,15 @@ pub enum HitTarget {
     /// it as the ACCORDION, the very toggle Tab runs
     /// (`event_loop::launcher::click_band_more`).
     LauncherBandMore(usize),
+    /// The `▸ 3 archived` line under a BAND, by the band's place in
+    /// `launcher::bands`: a click puts the cursor on the band and folds
+    /// or unfolds its ARCHIVED DRAWER, as `z` does
+    /// (`event_loop::launcher::click_drawer`).
+    LauncherDrawer(usize),
+    /// An archived session's line in an unfolded ARCHIVED DRAWER: the
+    /// band's place, then the line's. A click lands the cursor on it; a
+    /// second brings it back (`event_loop::launcher::click_drawer_entry`).
+    LauncherDrawerEntry(usize, usize),
     /// The `‹ sessions` crumb in a full-screen session's header
     /// (LAUNCHER VIEW): a click leaves the session for the grid, as `^q`
     /// does.
@@ -3185,6 +3194,10 @@ pub struct UiState {
     /// start opens on the splash too. Absent in older blobs.
     #[serde(default)]
     pub projects_closed: bool,
+    /// The checkouts whose ARCHIVED DRAWER was left unfolded
+    /// ([`App::archived_open`]), by worktree id. Absent in older blobs.
+    #[serde(default)]
+    pub archived_open: Vec<String>,
 }
 
 /// A mouse selection over the terminal pane (drag or double-click word),
@@ -3415,6 +3428,9 @@ struct RowsKey {
     cursor: (usize, usize, usize),
     shape: [usize; 5],
     show_archived: bool,
+    /// How many ARCHIVED DRAWERS are open: an open one lists its
+    /// checkout's archived rows ([`App::sessions_in`]).
+    drawers: usize,
 }
 
 impl RowsMemo {
@@ -3549,6 +3565,11 @@ pub struct App {
     /// not the screen.
     pub follow_up: Option<FollowUp>,
     pub show_archived: bool,
+    /// The checkouts whose ARCHIVED DRAWER is unfolded on the grid (`z`,
+    /// or a click on its `▸ N archived` line): their archived sessions
+    /// listed one faint line apiece under the band, where the cursor
+    /// walks onto them and `u` brings one back. Rides the UI-state blob.
+    pub archived_open: std::collections::HashSet<WorktreeId>,
     /// The Worktrees panel's OPEN PRS group folded down to its header (a
     /// click on it). Like `show_archived`, it rides the UI-state blob so a
     /// restart brings it back folded.
@@ -4207,6 +4228,7 @@ impl App {
             release_watch: None,
             overlay: None,
             show_archived: false,
+            archived_open: Default::default(),
             open_prs_collapsed: false,
             issues_collapsed: false,
             collapsed: false,
@@ -4972,6 +4994,7 @@ impl App {
                 self.tree.links.len(),
             ],
             show_archived: self.show_archived,
+            drawers: self.archived_open.len(),
         }
     }
 
@@ -5665,7 +5688,10 @@ impl App {
         if let Some(id) = &self.just_launched {
             rows.sort_by_key(|a| &a.id != id);
         }
-        if self.show_archived {
+        // The ARCHIVED VIEW lists every checkout's archived rows; on the
+        // live grid, a checkout whose ARCHIVED DRAWER is open lists its
+        // own, so the cursor can rest on one there.
+        if self.show_archived || self.archived_open.contains(wt) {
             let mut archived: Vec<Agent> = self
                 .tree
                 .agents
