@@ -861,6 +861,7 @@ fn draw_multiline_prompt(
     if backdrop {
         return branch_area;
     }
+    crate::mention::draw(f, prompt, editor_inner, view, th);
     if let Some(Overlay::Prompt(p)) = &mut app.overlay {
         p.area = area;
         p.editor_area = editor_inner;

@@ -2905,6 +2905,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
             };
             prompt.input.insert_str(&text);
             prompt.refresh_dirs();
+            crate::mention::sync(app);
         }
         Overlay::Palette(palette) => {
             palette.query.insert_str(text);
@@ -3266,6 +3267,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             crate::key_combo::note(app, &[chord], None);
         }
         handle_overlay_key(app, key, out);
+        crate::mention::sync(app);
         return;
     }
 
@@ -5144,6 +5146,9 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
 /// not list, closes the modal with the reason — what `f` and `b` used to
 /// say instead of opening.
 fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, String>) {
+    if crate::mention::land(app, ticket, &result) {
+        return;
+    }
     let branch = match &app.overlay {
         Some(Overlay::Files(finder)) if finder.listing == Some(ticket) => finder.branch.clone(),
         Some(Overlay::Tree(view)) if view.listing == Some(ticket) => view.branch.clone(),
@@ -6503,6 +6508,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
     }
     if matches!(&app.overlay, Some(Overlay::FileTabs(_))) {
         crate::file_tabs::handle_key(app, key);
+        return;
+    }
+    // A box's FILE MENTION list, while it is up, has first refusal on the
+    // keys that walk it and write a path in.
+    if crate::mention::handle_key(app, &key) {
         return;
     }
     // The chord that dropped the PROJECT DROPDOWN (`⌘P`) puts it away

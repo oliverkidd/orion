@@ -11363,4 +11363,53 @@ mod tests {
             );
         });
     }
+
+    /// `@` in the box lists the files of the checkout the launch runs in,
+    /// narrowed as you type; Tab writes the pick in as `@path`, and Enter
+    /// after it sends the box as usual.
+    #[test]
+    fn an_at_lists_the_checkouts_files_and_tab_writes_one_in() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let git = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .output()
+                    .unwrap()
+            };
+            git(&["init", "-q"]);
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/auth.rs"), "").unwrap();
+            std::fs::write(repo.join("README.md"), "").unwrap();
+            let mut app = App::new();
+            app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
+            seed_tree(&mut app);
+            seed_feat(&mut app, repo.to_path_buf());
+            seed_web(&mut app);
+            // The box on `feat`, the checkout under the cursor.
+            crate::quick_prompt::open_box(
+                &mut app,
+                QuickLaunch::from_config(
+                    QuickTarget::Worktree(WorktreeId("w2".into())),
+                    &crate::config::Config::load(),
+                ),
+            );
+            type_text(&mut app, "fix @aut");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("src/auth.rs"), "{text}");
+            assert!(!text.contains("README.md"), "narrowed: {text}");
+
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "fix @src/auth.rs ");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(!text.contains(" files "), "the list went: {text}");
+
+            // Esc puts a list away and leaves the box up.
+            type_text(&mut app, "@");
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "fix @src/auth.rs @");
+        });
+    }
 }

@@ -192,6 +192,24 @@ impl TextInput {
         self.text[..self.cursor].chars().count()
     }
 
+    /// Cursor as a byte offset into [`as_str`](Self::as_str).
+    pub fn caret_byte(&self) -> usize {
+        self.cursor
+    }
+
+    /// Replace the text from byte `start` up to the caret with `with`, the
+    /// caret landing after it — a completion written over the word it
+    /// completes. A `start` past the caret, or off a char boundary,
+    /// changes nothing.
+    pub fn replace_to_caret(&mut self, start: usize, with: &str) {
+        if start > self.cursor || !self.text.is_char_boundary(start) {
+            return;
+        }
+        self.text.replace_range(start..self.cursor, with);
+        self.cursor = start + with.len();
+        self.goal = None;
+    }
+
     /// Park the caret `at` chars in, clamped to the end of the text.
     fn set_cursor_chars(&mut self, at: usize) {
         self.cursor = self

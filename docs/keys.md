@@ -409,6 +409,7 @@ sends is the dim line along the bottom of the frame.
 | `⌘.` (`^T`) | the WORKTREE PICKER: **+ new worktree** first, then every checkout of the project |
 | `⌘/` (`^/`) | the harness's model list |
 | `⌘Y` (`^Y`) | step the effort, the header showing the step at once — `⇧⌘/` too, where macOS lets it through |
+| `@` | list the checkout's files under the caret, narrowed by what follows the `@`: `↑`/`↓` move, `Tab` or `Enter` writes `@path/to/file` in, `Esc` puts the list away for that `@` |
 | a click on a header field | the picker its key opens; on `effort`, the model's effort list; on `mode`, the next mode |
 
 `⌘.`, `⌘/` and `⌘Y` work the same with one of the box's pickers open over it — the model list,

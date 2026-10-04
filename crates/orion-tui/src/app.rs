@@ -952,6 +952,9 @@ pub struct PromptDialog {
     /// branch is not drawn or names nothing to pick — a PR SESSION's
     /// checkout is the DAEMON's.
     pub branch_area: Rect,
+    /// The FILE MENTION list an `@` puts up in a box whose text goes to a
+    /// local agent (`mention`).
+    pub mention: crate::mention::Mention,
 }
 
 impl PromptDialog {
@@ -973,6 +976,7 @@ impl PromptDialog {
             editor_area: Rect::default(),
             detail_areas: Vec::new(),
             branch_area: Rect::default(),
+            mention: crate::mention::Mention::default(),
         };
         // The task and comment boxes hold line breaks; the rest are one
         // line. The field itself then knows which keys break a line and
