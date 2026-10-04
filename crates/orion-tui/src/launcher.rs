@@ -1533,23 +1533,7 @@ pub fn project_cards(app: &App) -> Vec<ProjectCard> {
 /// the ones most recently interacted with — the grid's own
 /// `recency_key`, so the first is the session the grid opens on.
 fn project_sessions(app: &App, project: &ProjectId) -> Vec<Agent> {
-    // The project's checkouts once, not once per session: the tabs count
-    // every open project's sessions on every frame, and a scan per agent
-    // turned that into the tree squared.
-    let checkouts: std::collections::HashSet<&WorktreeId> = app
-        .tree
-        .worktrees
-        .iter()
-        .filter(|w| &w.project_id == project)
-        .map(|w| &w.id)
-        .collect();
-    let mut out: Vec<Agent> = app
-        .tree
-        .agents
-        .iter()
-        .filter(|a| !a.archived && checkouts.contains(&a.worktree_id))
-        .cloned()
-        .collect();
+    let mut out: Vec<Agent> = project_agents(app, project).cloned().collect();
     let now = crate::app::now_ms();
     out.sort_by(|a, b| {
         crate::app::recency_key(a, now)
@@ -1562,34 +1546,84 @@ fn project_sessions(app: &App, project: &ProjectId) -> Vec<Agent> {
 
 // ---- the header's PROJECT TABS ----
 
-/// What a PROJECT TAB counts in dots beside its name: that project's
-/// sessions, each under its own status — waiting on a human, finished
-/// unread, mid-turn. A session at rest counts nowhere, so a quiet project
-/// is a bare name.
+/// What a PROJECT TAB counts in marks beside its name: that project's
+/// sessions, each under its own status — waiting on a human, crashed,
+/// finished unread, mid-turn. A session at rest counts nowhere, so a quiet
+/// project is a bare name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
-    /// Waiting on a human: the red dot.
+    /// Waiting on a human: the crimson `●`.
     pub needs_you: usize,
-    /// Finished, and the finish still unread: the blue dot.
+    /// Crashed mid-turn: the crimson `✕`.
+    pub failed: usize,
+    /// Finished, and the finish still unread: the `●` in the done color.
     pub done: usize,
-    /// Mid-turn: the yellow dot.
+    /// Mid-turn: the gold spinner.
     pub running: usize,
+    /// One of them only just started needing you, or crashed — inside the
+    /// red ONE-SHOT SWEEP's window ([`crate::app::fresh_alarm`]).
+    pub alarm: bool,
+}
+
+impl Tally {
+    /// Two tallies as one, for the MORE CHIP that carries the tabs it holds.
+    /// Whether anything counted wants a human: waiting, crashed, or
+    /// finished unread — what lights an unlit tab's name.
+    pub fn wants_you(self) -> bool {
+        self.needs_you + self.failed + self.done > 0
+    }
+
+    pub fn plus(self, other: Tally) -> Tally {
+        Tally {
+            needs_you: self.needs_you + other.needs_you,
+            failed: self.failed + other.failed,
+            done: self.done + other.done,
+            running: self.running + other.running,
+            alarm: self.alarm || other.alarm,
+        }
+    }
 }
 
 /// `project`'s tally, over the sessions its grid lists — the unarchived
 /// ones, less any in a ROOT WORKTREE it hides — so a tab never counts a
-/// session its own grid would not show.
+/// session its own grid would not show. A session whose PTY is gone
+/// (reaped, or lost to a daemon restart) is not waiting or working
+/// whatever status it last had — its row draws it gray — so it counts only
+/// for what is still true of it: a crash, or a finish nobody has read.
 pub fn project_tally(app: &App, project: &ProjectId) -> Tally {
     let mut tally = Tally::default();
-    for a in project_sessions(app, project) {
+    let now = crate::app::now_ms();
+    for a in project_agents(app, project) {
+        let live = !crate::app::drawn_cold(a);
         match a.status {
-            AgentStatus::NeedsFeedback => tally.needs_you += 1,
-            AgentStatus::Running => tally.running += 1,
+            AgentStatus::NeedsFeedback if live => tally.needs_you += 1,
+            AgentStatus::Running if live => tally.running += 1,
+            AgentStatus::Terminated => tally.failed += 1,
             AgentStatus::Finished if a.unseen => tally.done += 1,
             _ => {}
         }
+        tally.alarm |= crate::app::fresh_alarm(a, now);
     }
     tally
+}
+
+/// `project`'s unarchived sessions, borrowed and in tree order — what a
+/// count needs, without the clone and the sort a list does.
+fn project_agents<'a>(app: &'a App, project: &ProjectId) -> impl Iterator<Item = &'a Agent> {
+    // The project's checkouts once, not once per session: the tabs count
+    // every open project's sessions on every frame, and a scan per agent
+    // turned that into the tree squared.
+    let checkouts: std::collections::HashSet<&WorktreeId> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == project)
+        .map(|w| &w.id)
+        .collect();
+    app.tree
+        .agents
+        .iter()
+        .filter(move |a| !a.archived && checkouts.contains(&a.worktree_id))
 }
 
 /// One tab in the header's PROJECT TABS.
@@ -1772,22 +1806,18 @@ pub fn fresh_worktree(
 /// worktree of the project it is aimed at, or — flipping off — an existing
 /// checkout of it, the one under the grid's cursor else the ROOT BRANCH
 /// ([`launch_checkout`]). The AGENT PRESETS list's `Tab` flips through
-/// here. A PR SESSION's checkout is the DAEMON's
-/// to pick, so it has nothing to flip; the error says why for the footer.
-pub fn flipped_target(
-    app: &App,
-    launch: &crate::quick_prompt::QuickLaunch,
-) -> Result<QuickTarget, &'static str> {
+/// here. A PR SESSION's checkout is the DAEMON's to pick, so it has
+/// nothing to flip: None, as for a project gone or no checkout to flip
+/// back onto.
+pub fn flipped_target(app: &App, launch: &crate::quick_prompt::QuickLaunch) -> Option<QuickTarget> {
     if launch.pr.is_some() {
-        return Err("a PR session runs in the pull request's own checkout");
+        return None;
     }
-    let project = project_of(app, &launch.target).ok_or("project no longer exists")?;
+    let project = project_of(app, &launch.target)?;
     if !launch.is_new_worktree() {
-        return Ok(fresh_worktree(app, project, launch));
+        return Some(fresh_worktree(app, project, launch));
     }
-    launch_checkout(app, &project)
-        .map(QuickTarget::Worktree)
-        .ok_or("no checkout to launch on — keeping the new worktree")
+    launch_checkout(app, &project).map(QuickTarget::Worktree)
 }
 
 /// Is a launch into `project` a BACKGROUND LAUNCH — one that lands
@@ -2476,7 +2506,7 @@ mod tests {
             Tally {
                 needs_you: 1,
                 done: 1,
-                running: 0,
+                ..Tally::default()
             }
         );
 

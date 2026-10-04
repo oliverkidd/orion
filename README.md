@@ -39,7 +39,7 @@ orion replaces the reading with a grid and a color. Every session is a card — 
 |---|---|
 | **One grid, every session** | Project tabs across the top, a band per worktree, a card per session, and the live terminal of the card under the cursor. `j`/`k` walk the bands, `Enter` steps into the pane, `Esc` hands the keys back (`⇧Esc` is the agent's Esc). |
 | **A daemon that owns the PTYs** | Quit the TUI, shut the laptop, come back tomorrow. The agents never stopped. |
-| **Status dots you read instead of screens** | ● yellow mid-turn, ● blue finished and unread, ● green finished and read, ● red waiting on you. |
+| **Status marks you read instead of screens** | ● red waiting on you, ✕ red crashed, ● your theme's accent finished and unread (it shimmers until you look), ◐ a gold spinner mid-turn, ● gray at rest. Filled means look at me. |
 | **Claude accounts** | Add a second Claude login in Settings → Agents (or at first run): its own config dir, your `CLAUDE.md`, settings and skills shared, signed in from inside orion. Each is named after its email, `Claude (you@example.com)`, and two signed in as one are flagged. A session that hits its usage limit goes red with Claude's reset time; `⇧C` carries it, conversation and all, onto the other account. |
 | **A task box, not a picker** | `⌘N` opens the quick prompt: type the task, `Enter`, and an agent is working on it. |
 | **Real git worktrees** | `⌘N` in the box flips the launch onto a fresh `git worktree`. Ignored `.env*` files from the main checkout are symlinked in by default. Delete asks before losing uncommitted work. |

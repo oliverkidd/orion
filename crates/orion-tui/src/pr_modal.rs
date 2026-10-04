@@ -166,7 +166,6 @@ impl PullRequestsView {
 /// was already reading.
 pub(crate) fn open(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
-        app.flash = Some("pull requests: select a project first".into());
         return;
     };
     let mut view = PullRequestsView::new(
@@ -435,7 +434,8 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 }
 
 /// `Ctrl+r`: ask for the list again now, and the selected pull request's body
-/// over the cached copy. The rows stay until the answer lands.
+/// over the cached copy. The rows stay until the answer lands, the title
+/// saying `refreshing…` meanwhile.
 fn refresh(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
@@ -455,7 +455,6 @@ fn refresh(app: &mut App) {
             ));
         }
     }
-    app.flash = Some("refreshing pull requests…".into());
     app.dirty = true;
 }
 
@@ -464,16 +463,12 @@ fn refresh(app: &mut App) {
 /// The launch the row under the cursor describes — the group row's, for
 /// this pull request: the `quick_prompt_kind` SETTING's harness, the pull
 /// request carried as `QuickLaunch::pr`, addressed to the project's root.
-fn launch_for_selected(app: &mut App) -> Option<QuickLaunch> {
+fn launch_for_selected(app: &App) -> Option<QuickLaunch> {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return None;
     };
-    let project = view.project.clone();
-    let Some(pr) = selected_pr(app) else {
-        app.flash = Some("no pull request selected".into());
-        return None;
-    };
-    crate::quick_prompt::pr_launch_for(app, &project, &pr)
+    let pr = selected_pr(app)?;
+    crate::quick_prompt::pr_launch_for(app, &view.project, &pr)
 }
 
 /// `Enter`: the QUICK PROMPT for a PR SESSION on the pull request.
@@ -507,12 +502,10 @@ fn open_harness_picker_for_selected(app: &mut App) {
     };
     let project = view.project.clone();
     let Some(pr) = selected_pr(app) else {
-        app.flash = Some("no pull request selected".into());
         return;
     };
     // The PROJECT's ROOT WORKTREE: what a PR SESSION create is addressed to.
     let Some(root) = app.root_worktree(&project) else {
-        app.flash = Some("the project has no ROOT WORKTREE for this PR session".into());
         return;
     };
     crate::agent_picker::open_kind_picker(
@@ -530,7 +523,6 @@ fn open_comment_for_selected(app: &mut App) {
     };
     let view = view.clone();
     let Some(pr) = selected_pr(app) else {
-        app.flash = Some("no pull request selected".into());
         return;
     };
     let draft = app.pr_comment_drafts.remove(&pr.url).unwrap_or_default();
@@ -549,8 +541,8 @@ fn open_comment_for_selected(app: &mut App) {
 /// `Ctrl+o`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the pull request under the cursor in the
 /// browser, through the very `event_loop::open_link` a card's `⇧V` and
-/// `⇧I` run — the footer says where it went, or that it could not — and the pull request is marked
-/// read on the way out, its conversation about to be on screen.
+/// `⇧I` run — the footer says when it could not — and the pull request is
+/// marked read on the way out, its conversation about to be on screen.
 /// Nothing under the cursor opens nothing. INPUT PARITY: the key and the
 /// click end in the same state.
 pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
@@ -1329,20 +1321,14 @@ mod tests {
                 assert!(!back.from_box, "no box to go back to");
             }
             // A PR SESSION runs in the pull request's own checkout: the
-            // list's NEW WORKTREE `Tab` has nothing to flip, and says so.
+            // list's NEW WORKTREE `Tab` has nothing to flip.
             app.flash = None;
             crate::event_loop::handle_overlay_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
             let Some(Overlay::AgentPresets(presets)) = &app.overlay else {
                 panic!("Tab keeps the picker up, got {:?}", app.overlay);
             };
             assert!(presets.aim.is_none(), "{:?}", presets.aim);
-            assert!(
-                app.flash
-                    .as_deref()
-                    .is_some_and(|f| f.contains("own checkout")),
-                "{:?}",
-                app.flash
-            );
+            assert_eq!(app.flash, None);
 
             open(&mut app);
             handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
@@ -1356,9 +1342,9 @@ mod tests {
     }
 
     /// A project with no ROOT WORKTREE has nothing to address a PR SESSION
-    /// to: the keys say so and the modal stays up.
+    /// to: the keys open nothing and the modal stays up.
     #[test]
-    fn without_a_root_the_launch_keys_say_so() {
+    fn without_a_root_the_launch_keys_open_nothing() {
         pinned(|| {
             let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], false);
             for launch_key in [KeyCode::Enter, KeyCode::BackTab, KeyCode::Tab] {
@@ -1369,11 +1355,7 @@ mod tests {
                     matches!(&app.overlay, Some(Overlay::PullRequests(_))),
                     "{launch_key:?}: the modal stays"
                 );
-                assert_eq!(
-                    app.flash.as_deref(),
-                    Some("the project has no ROOT WORKTREE for this PR session"),
-                    "{launch_key:?}"
-                );
+                assert_eq!(app.flash, None, "{launch_key:?}");
             }
         });
     }
@@ -1630,10 +1612,11 @@ mod tests {
         assert_eq!(view(&app).tabs.tab, PrTab::Checks);
         screen(&mut app, 140, 34);
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+        crate::event_loop::take_opened();
         handle_key(&mut app, ctrl('o'), &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened github.com/o/r/actions/runs/9")
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/actions/runs/9"]
         );
 
         // The mouse: a tab's label, then a row.
@@ -1754,8 +1737,10 @@ mod tests {
 
         let mut out = Vec::new();
         handle_key(&mut app, ctrl('o'), &mut out);
-        assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r/pull/42"));
-        app.flash = None;
+        assert_eq!(
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/pull/42"]
+        );
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: at.x,
@@ -1763,7 +1748,10 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         handle_mouse(&mut app, click, at, &mut out);
-        assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r/pull/42"));
+        assert_eq!(
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/pull/42"]
+        );
         assert!(
             matches!(app.overlay, Some(Overlay::PullRequests(_))),
             "the modal stays up"
@@ -1954,26 +1942,29 @@ mod tests {
             handle_mouse(app, click, at, &mut out);
         };
 
+        let opened = crate::event_loop::take_opened;
         click_at(&mut app, 1);
         assert_eq!(selected_pr(&app).unwrap().number, 41);
-        assert_eq!(app.flash, None, "one click only selects");
+        assert!(opened().is_empty(), "one click only selects");
         click_at(&mut app, 0);
         assert_eq!(selected_pr(&app).unwrap().number, 42);
-        assert_eq!(app.flash, None, "a click on another row is a single click");
+        assert!(
+            opened().is_empty(),
+            "a click on another row is a single click"
+        );
         click_at(&mut app, 0);
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened github.com/o/r/pull/42"),
+            opened(),
+            ["https://github.com/o/r/pull/42"],
             "the second click on the row opens it"
         );
         assert!(
             matches!(app.overlay, Some(Overlay::PullRequests(_))),
             "the modal stays up"
         );
-        app.flash = None;
         click_at(&mut app, 0);
-        assert_eq!(
-            app.flash, None,
+        assert!(
+            opened().is_empty(),
             "a double-click is spent: the third click starts over"
         );
     }
@@ -2028,14 +2019,14 @@ mod tests {
     }
 
     /// The verbs the letters used to be are chords now: Ctrl+r asks
-    /// GitHub again and Ctrl+g asks for the diff, each saying so in the
-    /// footer, while the plain letters go to the filter.
+    /// GitHub again and Ctrl+g asks for the diff, while the plain letters
+    /// go to the filter.
     #[test]
     fn the_verb_chords_run_and_the_plain_letters_type() {
         let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
         open(&mut app);
         handle_key(&mut app, ctrl('r'), &mut Vec::new());
-        assert_eq!(app.flash.as_deref(), Some("refreshing pull requests…"));
+        assert_eq!(app.flash, None, "the title says it is refreshing");
         assert!(app.pr_refresh_requested);
         assert!(app.open_prs_lookup_due(&project));
         app.flash = None;

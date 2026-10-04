@@ -63,7 +63,7 @@ pub fn note(app: &mut App, keys: &[KeyChord], does: Option<&str>) {
 }
 
 /// The second press of a double tap, shown as one combo: `h h` and what
-/// the pair did, worded from the footer's `h again: …` hint.
+/// the pair did.
 pub fn note_double_tap(app: &mut App, chord: &KeyChord, does: &str) {
     let mut label = String::with_capacity(does.len());
     let mut chars = does.chars();

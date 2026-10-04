@@ -296,7 +296,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NextAttention,
         id: "next_attention",
         label: "Next session needing you",
-        hint: "Jump to the next session in the palette's attention order (needs feedback, running, unseen, then recency) in any project, wrapping",
+        hint: "Jump to the next session in the palette's attention order (needs you or crashed, finished unread, running, then recency) in any project, wrapping",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["."],

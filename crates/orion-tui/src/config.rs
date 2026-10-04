@@ -90,8 +90,9 @@ pub const PRESET_TEXTS: &[&str] = &[
 ];
 
 /// Values the settings overlay cycles through for `done_sound` (what rings
-/// when a turn reaches FINISHED) and `feedback_sound` (what rings when one
-/// stops at NEEDS FEEDBACK). `off` is silence, `bell` the terminal BEL
+/// when a turn nobody watched reaches FINISHED) and `feedback_sound` (what
+/// rings when one stops at NEEDS FEEDBACK, or dies mid-turn). `off` is
+/// silence, `bell` the terminal BEL
 /// (the one sound that reaches the local terminal over `orion ssh` — but
 /// silent in Ghostty out of the box, whose `bell-features` default to
 /// `no-audio`), the rest are macOS system sounds in `/System/Library/Sounds`,
@@ -732,13 +733,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::DoneSound,
                 label: "Done sound",
-                hint: "Ding when a turn finishes: off, the terminal bell, or a macOS system sound",
+                hint: "Ding, and notify an unfocused window, when a turn you haven't seen finishes (off silences both)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::FeedbackSound,
                 label: "Feedback sound",
-                hint: "Ring, and notify an unfocused window, when a turn stops to ask you (off silences both)",
+                hint: "Ring, and notify an unfocused window, when a turn stops to ask you or crashes (off silences both)",
                 group: "",
             },
             SettingSpec {
@@ -1244,18 +1245,23 @@ pub struct Config {
     /// rests on it, so attaching lands on a booted screen. Daemon-owned and
     /// TUI-written, same as above.
     pub prewarm_sessions: bool,
-    /// What rings when a turn reaches FINISHED: "off", "bell" (terminal
-    /// BEL) or the name of a macOS system sound (`Glass` by default,
-    /// `Ping`, …; see [`SOUNDS`]). Resolved by [`Config::done_sound`],
-    /// which falls back to the bell wherever `afplay` can't reach the
-    /// user's speakers.
+    /// What rings when a turn reaches FINISHED with nobody watching it:
+    /// "off", "bell" (terminal BEL) or the name of a macOS system sound
+    /// (`Glass` by default, `Ping`, …; see [`SOUNDS`]). Resolved by
+    /// [`Config::done_sound`], which falls back to the bell wherever
+    /// `afplay` can't reach the user's speakers. When it rings — once the
+    /// finish settles, once per unseen spell, never inside the fold of the
+    /// last sound — is up to `app::DoneSounds`. The one knob for both the DONE
+    /// SOUND and the `<session> finished` desktop notification an
+    /// unfocused terminal window gets: "off" silences the pair.
     pub done_sound: String,
     /// What rings when a turn stops at NEEDS FEEDBACK — a permission
-    /// prompt or a question the agent is parked on. Same values and
-    /// resolution as `done_sound`; `Sosumi` by default so red and green
-    /// sound different from the next room. The one knob for both the
-    /// FEEDBACK SOUND and the desktop notification an unfocused terminal
-    /// window gets: "off" silences the pair.
+    /// prompt or a question the agent is parked on — or its CLI dies with
+    /// an error mid-turn. Same values and resolution as `done_sound`;
+    /// `Sosumi` by default so red and green sound different from the next
+    /// room. The one knob for both the FEEDBACK SOUND and the desktop
+    /// notification an unfocused terminal window gets: "off" silences the
+    /// pair.
     pub feedback_sound: String,
     /// PRESET TEXT: which side of the task a new AGENT PRESET's text goes
     /// — `prefix` (one box, sent before the task), `postfix` (one box,
@@ -3171,8 +3177,10 @@ pub enum Sound {
 }
 
 impl Config {
-    /// The sound to play for a finish, or `None` for silence. A named
-    /// system sound only resolves to its file on macOS, on a local
+    /// The sound to play for an unseen finish, or `None` for silence —
+    /// which also stands down the `<session> finished` desktop
+    /// notification. A named system sound only resolves to its file on
+    /// macOS, on a local
     /// terminal, and when the file exists — over ssh `afplay` would ring
     /// the *remote* box, so the bell stands in there, as it does off
     /// macOS and for a name the sound folder doesn't hold.
@@ -3184,8 +3192,9 @@ impl Config {
         )
     }
 
-    /// The sound to play when a turn stops to ask the user, or `None` for
-    /// silence — which also stands down the desktop notification, since
+    /// The sound to play when a turn stops to ask the user or dies
+    /// mid-turn, or `None` for silence — which also stands down their
+    /// desktop notifications, since
     /// `feedback_sound` is the one switch for both. Same fallbacks as
     /// [`Config::done_sound`].
     pub fn feedback_sound(&self) -> Option<Sound> {
@@ -3565,6 +3574,10 @@ mod tests {
         (
             "0.42.0",
             include_str!("../../orion-core/fixtures/config-0.42.0.json"),
+        ),
+        (
+            "1.0.0",
+            include_str!("../../orion-core/fixtures/config-1.0.0.json"),
         ),
     ];
 

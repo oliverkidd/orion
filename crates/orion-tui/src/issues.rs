@@ -657,7 +657,6 @@ fn day(stamp: &str) -> &str {
 /// project has nothing to list.
 pub(crate) fn open_issues(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
-        app.flash = Some("issues: select a project first".into());
         return;
     };
     let mut view = IssuesView::new(
@@ -1014,7 +1013,6 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                 // again, with the new comment in.
                 app.issue_detail.remove(&issue.url);
                 app.issue_detail_failed.remove(&issue.url);
-                app.flash = Some(format!("comment posted on #{}", issue.number));
                 schedule_detail(app);
             } else {
                 app.flash = Some(format!(
@@ -1055,7 +1053,6 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                         view.editor = None;
                     }
                 }
-                app.flash = Some(format!("issue #{number} updated"));
                 if let Some(dir) = app
                     .tree
                     .projects
@@ -1098,7 +1095,6 @@ fn open_comment_for_selected(app: &mut App) {
     };
     let view = view.clone();
     let Some((issue, _)) = selected_issue(app) else {
-        app.flash = Some("no issue selected".into());
         return;
     };
     crate::event_loop::open_prompt(
@@ -1139,7 +1135,6 @@ pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, tex
         return;
     };
     app.issue_comment_inflight.insert(issue.url.clone());
-    app.flash = Some(format!("posting a comment on #{}…", issue.number));
     let number = issue.number;
     tokio::spawn(async move {
         let posted = comment(&dir, number, &text).await;
@@ -1153,7 +1148,8 @@ pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, tex
 }
 
 /// `Ctrl+r` in the modal: ask for the list again now, and the selected issue's
-/// comments over the cached copy. The rows stay until the answer lands.
+/// comments over the cached copy. The rows stay until the answer lands, the
+/// title saying `refreshing…` meanwhile.
 fn refresh(app: &mut App) {
     let Some(Overlay::Issues(view)) = &app.overlay else {
         return;
@@ -1174,7 +1170,6 @@ fn refresh(app: &mut App) {
             ));
         }
     }
-    app.flash = Some("refreshing issues…".into());
     app.dirty = true;
 }
 
@@ -1281,10 +1276,9 @@ fn clear_query(app: &mut App) {
 
 /// `Ctrl+e`: turn the reading pane into the editor for the issue under the
 /// cursor, prefilled from the row. A list with no rows has nothing to
-/// edit, and says so where the launch keys do.
+/// edit.
 fn open_editor(app: &mut App) {
     let Some((issue, _)) = selected_issue(app) else {
-        app.flash = Some("no issue selected".into());
         return;
     };
     if let Some(Overlay::Issues(view)) = &mut app.overlay {
@@ -1315,7 +1309,6 @@ fn save_editor(app: &mut App) {
     }
     if text == editor.original {
         view.editor = None;
-        app.flash = Some("issue unchanged".into());
         return;
     }
     if !dir.is_dir() {
@@ -1484,21 +1477,16 @@ fn launch_target(app: &App, project: &ProjectId) -> Option<QuickTarget> {
 
 /// The launch a row describes: the `quick_prompt_kind` SETTING's harness
 /// and defaults, aimed at [`launch_target`], carrying the issue.
-fn launch_for_selected(app: &mut App) -> Option<QuickLaunch> {
+fn launch_for_selected(app: &App) -> Option<QuickLaunch> {
     let Some(Overlay::Issues(view)) = &app.overlay else {
         return None;
     };
-    let project = view.project.clone();
-    let Some((issue, _)) = selected_issue(app) else {
-        app.flash = Some("no issue selected".into());
-        return None;
-    };
-    let issue = issue.launch_ref();
-    let Some(target) = launch_target(app, &project) else {
-        app.flash = Some("issues: the project has no worktree to launch into".into());
-        return None;
-    };
-    Some(QuickLaunch::from_config(target, &crate::config::Config::load()).with_issue(Some(issue)))
+    let (issue, _) = selected_issue(app)?;
+    let target = launch_target(app, &view.project)?;
+    Some(
+        QuickLaunch::from_config(target, &crate::config::Config::load())
+            .with_issue(Some(issue.launch_ref())),
+    )
 }
 
 /// `Enter`: the QUICK PROMPT for the issue. The box goes up over the
@@ -1526,13 +1514,10 @@ fn open_preset_for_selected(app: &mut App) {
 /// The launch the PROJECT ISSUES GROUP row under the Worktrees cursor
 /// describes — the modal's for that row: the `quick_prompt_kind`
 /// SETTING's harness aimed at [`launch_target`], carrying the issue.
-fn launch_for_row(app: &mut App) -> Option<QuickLaunch> {
+fn launch_for_row(app: &App) -> Option<QuickLaunch> {
     let issue = app.selected_worktree_issue()?.launch_ref();
     let project = app.selected_project()?.id.clone();
-    let Some(target) = launch_target(app, &project) else {
-        app.flash = Some("issues: the project has no worktree to launch into".into());
-        return None;
-    };
+    let target = launch_target(app, &project)?;
     Some(QuickLaunch::from_config(target, &crate::config::Config::load()).with_issue(Some(issue)))
 }
 
@@ -1554,7 +1539,7 @@ pub(crate) fn open_preset_for_row(app: &mut App) {
 /// `Ctrl+o`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the issue under the cursor in the
 /// browser, through the very `event_loop::open_link` a card's `⇧V` and
-/// `⇧I` run — the footer says where it went, or that it could not.
+/// `⇧I` run — the footer says when it could not.
 /// Nothing under the cursor opens nothing. INPUT PARITY: the key and the
 /// click end in the same state.
 pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
@@ -1707,7 +1692,7 @@ pub fn lines(
             Span::styled(format!("{INDENT}#{} ", issue.number), dim),
             Span::styled(
                 issue.title.clone(),
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
             ),
         ],
         width,
@@ -1716,7 +1701,7 @@ pub fn lines(
         Span::styled(INDENT.to_string(), dim),
         Span::styled(
             "open".to_string(),
-            Style::default().fg(th.ok).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
         ),
     ];
     if !issue.author.is_empty() {
@@ -1731,7 +1716,7 @@ pub fn lines(
         out.push(fit(
             vec![
                 Span::styled(INDENT.to_string(), dim),
-                Span::styled(issue.labels.join(" · "), Style::default().fg(th.warn)),
+                Span::styled(issue.labels.join(" · "), Style::default().fg(th.muted)),
             ],
             width,
         ));
@@ -1774,7 +1759,7 @@ pub fn lines(
                 out.push(Line::from(""));
                 let mut head = vec![Span::styled(
                     format!("{INDENT}{}", c.author),
-                    Style::default().fg(th.accent),
+                    Style::default().fg(th.muted),
                 )];
                 let at = day(&c.at);
                 if !at.is_empty() {
@@ -2337,7 +2322,7 @@ mod tests {
             matches!(&app.overlay, Some(Overlay::Issues(_))),
             "no rows: the modal stays"
         );
-        assert_eq!(app.flash.as_deref(), Some("no issue selected"));
+        assert_eq!(app.flash, None);
         land_answer(
             &mut app,
             IssuesAnswer::List {
@@ -2453,7 +2438,7 @@ mod tests {
             app.pending_issue_detail.is_some(),
             "…and asked for again as the cursor rests"
         );
-        assert_eq!(app.flash.as_deref(), Some("comment posted on #15"));
+        assert_eq!(app.flash, None, "the conversation says it");
         assert!(matches!(&app.overlay, Some(Overlay::Issues(_))));
 
         app.issue_comment_inflight.insert(fifteen.url.clone());
@@ -2852,7 +2837,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(editor(&empty).is_none());
-        assert_eq!(empty.flash.as_deref(), Some("no issue selected"));
+        assert_eq!(empty.flash, None);
     }
 
     /// Tab moves the caret between the two fields and ↑/↓ do too once
@@ -2997,7 +2982,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(editor(&app).is_none(), "an unchanged form just closes");
-        assert_eq!(app.flash.as_deref(), Some("issue unchanged"));
+        assert_eq!(app.flash, None);
         // A changed one with no sender installed stays put, unsent.
         handle_key(
             &mut app,
@@ -3080,7 +3065,7 @@ mod tests {
         let row = &app.issues[&project].list[0];
         assert_eq!(row.title, "Fix the login redirect");
         assert_eq!(row.body, "Bounces to /.");
-        assert_eq!(app.flash.as_deref(), Some("issue #15 updated"));
+        assert_eq!(app.flash, None, "the row says it");
 
         // A form reopened meanwhile is left alone by a late answer.
         handle_key(
@@ -3450,17 +3435,19 @@ mod tests {
     }
 
     /// The verbs the letters used to be are chords now: Ctrl+r asks
-    /// GitHub again, saying so in the footer, while the plain letters go
-    /// to the filter.
+    /// GitHub again — the selected issue's conversation with the list —
+    /// while the plain letters go to the filter.
     #[test]
     fn the_verb_chords_run_and_the_plain_letters_type() {
         let (mut app, _) = modal_with(vec![issue(15, "Fix login redirect")]);
+        app.pending_issue_detail = None;
         handle_key(
             &mut app,
             key(KeyCode::Char('r'), KeyModifiers::CONTROL),
             &mut Vec::new(),
         );
-        assert_eq!(app.flash.as_deref(), Some("refreshing issues…"));
+        assert!(app.pending_issue_detail.is_some(), "asked for again");
+        assert_eq!(app.flash, None);
         for letter in "roce".chars() {
             handle_key(
                 &mut app,
@@ -3589,10 +3576,9 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened github.com/o/r/issues/15")
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/issues/15"]
         );
-        app.flash = None;
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: at.x,
@@ -3601,8 +3587,8 @@ mod tests {
         };
         handle_mouse(&mut app, click, at, &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened github.com/o/r/issues/15")
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/issues/15"]
         );
         assert!(
             matches!(app.overlay, Some(Overlay::Issues(_))),

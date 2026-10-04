@@ -38,8 +38,7 @@ pub(super) fn enter_terminal_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
 pub(super) const DOUBLE_TAP: Duration = Duration::from_millis(400);
 
 /// `h`/`l` (or ←/→) has landed on the end of the panel row. The first
-/// press arms and stays put, telling the user in the footer what a second
-/// one does; a second press of the same action inside `DOUBLE_TAP` — with
+/// press arms and stays put; a second press of the same action inside `DOUBLE_TAP` — with
 /// nothing else in between, see the `take()` in `handle_key` — reports
 /// `true` so the caller can jump the boundary. A slow second press re-arms
 /// rather than jumping: the gap says it was two single presses.
@@ -58,7 +57,6 @@ pub(super) fn double_tapped(
         return true;
     }
     app.edge_tap = Some((action, now));
-    app.flash = Some(format!("{} again: {does}", chord.display()));
     false
 }
 

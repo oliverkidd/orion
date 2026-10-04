@@ -570,7 +570,7 @@ impl QuickLaunch {
 /// AGENT PRESETS list this does not ask for FOCUS on the SESSIONS PANEL —
 /// the point of a quick prompt is that it works from wherever you are —
 /// but it still needs a checkout to run in, so a PROJECT with no worktree
-/// selected flashes instead.
+/// selected opens nothing.
 ///
 /// The one exception is the WORKTREES PANEL: `p` there means "a fresh
 /// worktree, then this task in it", whatever checkout the cursor is
@@ -601,7 +601,6 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
     }
     if app.focus == Focus::Worktrees {
         let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
-            app.flash = Some("quick prompt: select a project first".into());
             return;
         };
         let branch = crate::branch_name::random_name(&app.project_branches(&project));
@@ -609,13 +608,11 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
         return;
     }
     let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) else {
-        app.flash = Some("quick prompt: select a worktree first".into());
         return;
     };
     // The stand-in a previous `p` put up: git is still cutting it, and
     // the box would only be refused at Enter.
     if app.is_placeholder_worktree(&worktree) {
-        app.flash = Some("quick prompt: worktree is still being created".into());
         return;
     }
     open_for(app, QuickTarget::Worktree(worktree));
@@ -635,8 +632,7 @@ pub(crate) fn open_for(app: &mut App, target: QuickTarget) {
 /// PROJECT has no checkout on the head branch yet, puts the stand-in rows
 /// up at once, nested under the pull request where the DAEMON's real row
 /// will list (`create_agent`, through `placeholder::stage`). Nothing to
-/// open when the project has no ROOT WORKTREE to address it to; the
-/// footer says so.
+/// open when the project has no ROOT WORKTREE to address it to.
 fn open_for_pr(app: &mut App) {
     if let Some(launch) = pr_launch(app) {
         open_pr_box(app, launch);
@@ -669,9 +665,9 @@ pub(crate) fn open_pr_box(app: &mut App, launch: QuickLaunch) {
 /// Worktrees cursor carried as `QuickLaunch::pr`, and the PROJECT's ROOT
 /// WORKTREE as the target, which only names the project the create is
 /// addressed to (as the `n` picker's does) — the DAEMON picks the
-/// checkout, the PR head branch's own. None off a pull request row, and,
-/// with a flash, when the project has no root to address it to.
-fn pr_launch(app: &mut App) -> Option<QuickLaunch> {
+/// checkout, the PR head branch's own. None off a pull request row, and
+/// when the project has no root to address it to.
+fn pr_launch(app: &App) -> Option<QuickLaunch> {
     let pr = app.selected_worktree_pr().cloned()?;
     let project = app.selected_project()?.id.clone();
     pr_launch_for(app, &project, &pr)
@@ -679,17 +675,10 @@ fn pr_launch(app: &mut App) -> Option<QuickLaunch> {
 
 /// The PR SESSION launch for `pr` on `project` — what [`pr_launch`] builds
 /// for the Worktrees cursor's row, for any open pull request: the PULL
-/// REQUESTS MODAL's rows launch through it too. None, with a flash, when
-/// the project has no ROOT WORKTREE to address the create to.
-pub(crate) fn pr_launch_for(
-    app: &mut App,
-    project: &ProjectId,
-    pr: &OpenPr,
-) -> Option<QuickLaunch> {
-    let Some(root) = app.root_worktree(project) else {
-        app.flash = Some("the project has no ROOT WORKTREE for this PR session".into());
-        return None;
-    };
+/// REQUESTS MODAL's rows launch through it too. None when the project
+/// has no ROOT WORKTREE to address the create to.
+pub(crate) fn pr_launch_for(app: &App, project: &ProjectId, pr: &OpenPr) -> Option<QuickLaunch> {
+    let root = app.root_worktree(project)?;
     Some(
         QuickLaunch::from_config(QuickTarget::Worktree(root), &Config::load())
             .with_pr(Some(PrLaunch::of(pr))),
@@ -756,7 +745,6 @@ pub(crate) fn target_branch(app: &App, launch: &QuickLaunch) -> Option<String> {
 /// (a launch spec has one source).
 pub(crate) fn open_launch_picker(app: &mut App, back: QuickReturn) {
     let Some(context) = picker_context(app, &back.launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     crate::agent_picker::open_kind_picker(
@@ -780,7 +768,6 @@ pub(crate) fn open_preset_picker(app: &mut App, back: QuickReturn) {
         .and_then(|p| presets.iter().position(|row| row.name == p.name))
         .unwrap_or(0);
     let Some(context) = picker_context(app, &back.launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let mut view = crate::preset_overlays::AgentPresetsView::new(context, presets);

@@ -22,7 +22,6 @@
 
 use super::{
     attach_now, jump_to_target, open_link, open_session, run_menu_action, Landing, SettingsCmd,
-    WORKTREE_STILL_CREATING,
 };
 use crate::app::{
     App, ConfirmDialog, DiffFocus, DiffView, Focus, FollowUp, Overlay, PendingAction, SessionRow,
@@ -310,8 +309,7 @@ pub(super) fn follow_up(app: &mut App) {
             return;
         }
     }
-    if let Some(why) = no_follow_up(app, &row) {
-        app.flash = Some(why);
+    if !app.takes_follow_up(&row) {
         return;
     }
     let SessionRow::Agent(a) = row else {
@@ -323,27 +321,6 @@ pub(super) fn follow_up(app: &mut App) {
     });
     app.focus = Focus::Sessions;
     app.dirty = true;
-}
-
-/// Why `row` takes no follow-up, or None when it does. Both composers
-/// ask — the SESSIONS PANEL's box in the card ([`follow_up`]) and the
-/// LAUNCHER VIEW's modal (`event_loop::launcher::follow_up`) — so what a
-/// row refuses, and the word it refuses with, is written once.
-pub(super) fn no_follow_up(app: &App, row: &SessionRow) -> Option<String> {
-    if app.takes_follow_up(row) {
-        return None;
-    }
-    Some(match row {
-        SessionRow::Agent(a) if a.archived => {
-            "archived sessions take no follow-up — u brings it back".into()
-        }
-        SessionRow::Agent(a) if a.cloud_session_id.is_some() => {
-            "cloud sessions take a queued message — right-click, then Send to cloud session".into()
-        }
-        SessionRow::Agent(_) => "the session is still starting".into(),
-        SessionRow::Terminal(_) => "terminals take typing in the pane — Enter attaches".into(),
-        SessionRow::Link(_) => "a pull request takes a comment — y".into(),
-    })
 }
 
 /// Bring an archived agent back — `u` on its row, **Unarchive** in its
@@ -362,12 +339,7 @@ pub(super) fn delete_worktree(app: &mut App, id: &WorktreeId) {
     let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == id) else {
         return;
     };
-    if w.is_main {
-        app.flash = Some("cannot delete the main checkout".into());
-        return;
-    }
-    if app.is_placeholder_worktree(id) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
+    if w.is_main || app.is_placeholder_worktree(id) {
         return;
     }
     let live_here = app

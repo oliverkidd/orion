@@ -8,9 +8,9 @@
 
 use super::{
     ago_badge, below_first_row, centered_rect, empty_list_row, fit_ago, fuzzy_highlight_spans,
-    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_dot,
-    status_name_spans, sweep_ramp, truncate, visible_positions, NO_MATCHES, OVER_BOX_INSET,
-    PENDING_SESSION_BADGE,
+    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_color,
+    status_dot, status_name_spans, sweep_ramp, truncate, visible_positions, wants_you, NO_MATCHES,
+    OVER_BOX_INSET, PENDING_SESSION_BADGE,
 };
 use crate::app::{App, Focus, HitTarget, Overlay};
 use crate::keymap::Action;
@@ -206,12 +206,13 @@ fn draw_head(f: &mut Frame, app: &mut App, body: Rect, count: HeadCount, hidden:
 /// tab (`event_loop::launcher::open_project_menu`). A right-click on a
 /// tab opens that project with its menu over it.
 ///
-/// Each tab carries its project's STATUS DOTS after the name — waiting on
-/// you (red), finished unread (blue), working (yellow), each with its
-/// count and no word ([`tab_dots`]) — so a project that wants you says so
-/// from the header, whichever project the grid is on. Its name sweeps on
-/// the loudest of the three ([`tab_ramp`]), so the tab says it in motion
-/// too.
+/// Each tab carries its project's STATUS MARKS after the name — waiting
+/// on you, crashed, finished unread, working — each with its count and
+/// no word ([`tab_dots`]), so a project that wants you says so from the
+/// header, whichever project the grid is on. An unlit tab's name
+/// shimmers while a finish there is unread, and sweeps red once when
+/// something there starts needing you ([`tab_ramp`]), so the tab says it
+/// in motion too; the lit tab holds still.
 ///
 /// The hit rects are laid down as the spans are measured, so a click
 /// lands on the tab itself and never on the air between two, and the
@@ -445,22 +446,19 @@ fn fit_tabs(
 
 /// The STATUS DOTS the tabs at `ids` would carry between them.
 fn tally_of(tabs: &[ProjectTab], ids: &[usize]) -> Tally {
-    ids.iter().fold(Tally::default(), |sum, &i| Tally {
-        needs_you: sum.needs_you + tabs[i].tally.needs_you,
-        done: sum.done + tabs[i].tally.done,
-        running: sum.running + tabs[i].tally.running,
-    })
+    ids.iter()
+        .fold(Tally::default(), |sum, &i| sum.plus(tabs[i].tally))
 }
 
 /// What the MORE CHIP says it drops, after the count.
 const MORE_CARET: &str = " ▾ ";
 
 /// The MORE CHIP: ` 2 more ●1 ▾ ` — how many PROJECT TABS the row had no
-/// room for, the STATUS DOTS they carry between them, and the caret that
-/// says a click lists them. Its words sweep on the loudest of those dots
-/// ([`tab_ramp`]) as a tab's name does, so a project off the row that is
-/// waiting on you is still seen moving in the header. Underlined under
-/// the pointer, as the tabs are.
+/// room for, the STATUS MARKS they carry between them, and the caret that
+/// says a click lists them. Its words sweep as a tab's name does
+/// ([`tab_ramp`]), so a project off the row with a finish nobody has read
+/// is still seen moving in the header. Underlined under the pointer, as
+/// the tabs are.
 fn more_chip(
     count: usize,
     tally: Tally,
@@ -480,7 +478,7 @@ fn more_chip(
         ramp,
         sweep.unwrap_or(0),
     ));
-    spans.extend(tab_dots(tally, th));
+    spans.extend(tab_dots(tally, sweep, th));
     spans.push(Span::styled(MORE_CARET, Style::default().fg(th.dim)));
     PaneTab {
         spans,
@@ -489,17 +487,20 @@ fn more_chip(
 }
 
 /// One PROJECT TAB, as two hits side by side: the tab — its name and its
-/// STATUS DOTS — and the `×` that closes it, a target of its own so a
+/// STATUS MARKS — and the `×` that closes it, a target of its own so a
 /// click on the cross never reads as a click on the tab. The lit tab is a
 /// raised chip, pads and all, with its name in the accent; the rest sit
-/// flat and muted. The name is cut to `name_max`. Every tab closes, the
-/// last one included: that one closes to the splash.
+/// flat — the name bright while something in the project wants you, dim
+/// while nothing does. The name is cut to `name_max`. Every tab closes,
+/// the last one included: that one closes to the splash.
 ///
 /// `sweep` is the frame's sweep phase, `None` with the animations off:
-/// with it, the name sweeps on the loudest thing its sessions are doing
-/// ([`tab_ramp`]) — lit or not, since the tab is what says so from
-/// another project. The header's cursor holds still, so the block that
-/// says where Enter goes stays legible.
+/// with it, an unlit tab's name sweeps while its project has a finish
+/// nobody has read, or something there just started needing you
+/// ([`tab_ramp`]) — the tab is what says so from another project. The lit
+/// tab never sweeps: its accent is what says where you are, and the rows
+/// under it already say the rest. Nor does the header's cursor, so the
+/// block that says where Enter goes stays legible.
 fn project_chip(
     tab: &ProjectTab,
     name_max: usize,
@@ -514,10 +515,13 @@ fn project_chip(
             style
         }
     };
+    let wants = tab.tally.wants_you();
     let mut name = if tab.active {
         Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
+    } else if wants {
+        Style::default().fg(th.text)
     } else {
-        Style::default().fg(th.muted)
+        Style::default().fg(th.dim)
     };
     if hover == Some(&HitTarget::LauncherTab(tab.id.clone())) {
         name = name.add_modifier(Modifier::UNDERLINED);
@@ -531,7 +535,7 @@ fn project_chip(
         (fill(Style::default()), fill(name))
     };
     let (ramp, phase) = match sweep {
-        Some(phase) if !tab.focused => (tab_ramp(tab.tally, th), phase),
+        Some(phase) if !tab.focused && !tab.active => (tab_ramp(tab.tally, th), phase),
         _ => (None, 0),
     };
     let mut label = vec![Span::styled(" ", pad)];
@@ -542,7 +546,7 @@ fn project_chip(
         phase,
     ));
     label.extend(
-        tab_dots(tab.tally, th)
+        tab_dots(tab.tally, sweep, th)
             .into_iter()
             .map(|dot| Span::styled(dot.content, fill(dot.style))),
     );
@@ -551,7 +555,7 @@ fn project_chip(
     } else if tab.active {
         th.muted
     } else {
-        th.dim
+        th.faint
     };
     [
         PaneTab {
@@ -565,36 +569,42 @@ fn project_chip(
     ]
 }
 
-/// A PROJECT TAB's STATUS DOTS: one per state its sessions are in, each
-/// carrying that state's count and no word at all, so the header is read
-/// at a glance rather than parsed. Waiting on you leads (red), then
-/// finished unread (blue), then working (yellow) — the three a row's own
-/// STATUS DOT wears. A state with nothing in it is left out, so a quiet
-/// project is its bare name — and because the order is fixed, the dots
-/// that are there never move as the work under them does.
-fn tab_dots(tally: Tally, th: Theme) -> Vec<Span<'static>> {
+/// A PROJECT TAB's STATUS MARKS: one per state its sessions are in, each
+/// the mark a row in that state wears, carrying the state's count and no
+/// word at all, so the header is read at a glance rather than parsed. In
+/// the attention order — waiting on you (`●`, crimson), crashed (`✕`),
+/// finished unread (`●`, the done color), then working (the gold
+/// spinner, turning with `sweep`). A state with nothing in it is left
+/// out, so a quiet project is its bare name — and because the order is
+/// fixed, the marks that are there never move as the work under them does.
+fn tab_dots(tally: Tally, sweep: Option<usize>, th: Theme) -> Vec<Span<'static>> {
+    use orion_core::AgentStatus;
+    let spin = sweep.map(crate::app::spin_step);
     [
-        (tally.needs_you, th.err),
-        (tally.done, th.done),
-        (tally.running, th.warn),
+        (tally.needs_you, Some(AgentStatus::NeedsFeedback), false),
+        (tally.failed, Some(AgentStatus::Terminated), false),
+        (tally.done, Some(AgentStatus::Finished), true),
+        (tally.running, Some(AgentStatus::Running), false),
     ]
     .into_iter()
-    .filter(|(n, _)| *n > 0)
-    .map(|(n, color)| Span::styled(format!(" ●{n}"), Style::default().fg(color)))
+    .filter(|(n, _, _)| *n > 0)
+    .map(|(n, status, unseen)| {
+        let mark = status_dot(status, unseen, spin, th);
+        Span::styled(format!(" {}{n}", mark.content.trim_end()), mark.style)
+    })
     .collect()
 }
 
-/// The ramp a PROJECT TAB's name sweeps on: red while any of its sessions
-/// waits on you, whatever else is going on; yellow while any is mid-turn;
-/// and blue once none is, for as long as a finish is left unread — the
-/// project's work is done and you have not looked. A quiet project holds
-/// still. Unlike a card's ONE-SHOT SWEEP the blue lasts, since the tab is
-/// how a finish in a project you are not on gets noticed at all.
+/// The ramp an unlit PROJECT TAB's name sweeps on: the red ONE-SHOT SWEEP
+/// for the few seconds after something there starts needing you or
+/// crashes, and otherwise the UNREAD SHIMMER for as long as a finish
+/// there is left unread — the tab is how a finish in a project you are
+/// not on gets noticed at all, so it keeps moving until you look. A
+/// project with neither holds still, running or not: work in progress is
+/// the spinner's to say.
 fn tab_ramp(tally: Tally, th: Theme) -> Option<[Color; 3]> {
-    if tally.needs_you > 0 {
+    if tally.alarm {
         Some(th.err_sweep)
-    } else if tally.running > 0 {
-        Some(th.warn_sweep)
     } else if tally.done > 0 {
         Some(th.done_sweep)
     } else {
@@ -1408,20 +1418,13 @@ fn draw_list_row(
                 runs_style: Style::default().fg(quiet_or(th.dim)),
                 text_mark,
                 text,
-                text_style: Style::default().fg(quiet_or(th.muted)),
+                text_style: Style::default().fg(look.prompt),
                 badge: look.ago,
                 badge_style: look.ago_style,
             }
         }
         crate::launcher::Card::Terminal(t) => Entry {
-            lead: Span::styled(
-                if t.run_command.is_some() {
-                    "▶ "
-                } else {
-                    "❯ "
-                },
-                Style::default().fg(if t.alive { th.ok } else { th.dim }),
-            ),
+            lead: terminal_mark(t, th),
             name: t.name.clone(),
             name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
             ramp: None,
@@ -1440,7 +1443,7 @@ fn draw_list_row(
             } else {
                 EXITED_BADGE.into()
             },
-            badge_style: Style::default().fg(th.err),
+            badge_style: Style::default().fg(th.exited),
         },
     };
     let mut spans = vec![mark, e.lead];
@@ -1619,17 +1622,31 @@ fn draw_band_rule(
     };
     let right_w: usize = right.iter().map(|s| s.width()).sum();
 
-    // The checkout, as the cards used to paint it: the glyph in its
-    // scope color never yields, the branch truncates around it.
-    let (glyph, scope) = if band.is_main {
-        ("⌂ ", th.root)
+    // The checkout: `⌂` for the root, `↳` for a worktree — the glyph
+    // says which, so neither needs a color of its own — never yielding,
+    // the branch truncating around it. The root's branch is bright, being
+    // the branch itself; a worktree's muted, unless the cursor is on it.
+    //
+    // A checkout whose pull request has landed is the MERGED BAND: a
+    // purple dot ahead of it and the checkout in purple, so the one to
+    // delete stands out from across the room. Its branch sweeps once, for
+    // the few seconds after orion sees the merge land, then holds still —
+    // nothing about a landed checkout is live.
+    let merged = app.worktree_wears_merge(&band.worktree);
+    let glyph = if band.is_main { "⌂ " } else { "↳ " };
+    let (glyph_color, branch_color) = if merged {
+        (th.merged, th.merged)
+    } else if band.is_main || on {
+        (th.muted, th.text)
     } else {
-        ("↳ ", th.worktree)
+        (th.muted, th.muted)
     };
-    let mut branch_style = Style::default().fg(scope);
+    let mut branch_style = Style::default().fg(branch_color);
     if on {
         branch_style = branch_style.add_modifier(Modifier::BOLD);
     }
+    let merged_dot = if merged { "● " } else { "" };
+    let ramp = (app.animations && app.merge_sweeping(&band.worktree)).then_some(th.merged_sweep);
     // `── ` before, ` ` after the words, ` ` before the right end and
     // ` ──` after it: what the words have to fit between.
     let room = width.saturating_sub(3 + right_w + 5);
@@ -1641,7 +1658,7 @@ fn draw_band_rule(
                 n,
                 app.worktree_lines(&band.worktree),
                 band.branch.chars().count(),
-                room.saturating_sub(glyph.chars().count()),
+                room.saturating_sub(glyph.chars().count() + merged_dot.chars().count()),
             )
         });
     let taken = changes.as_ref().map_or(0, |(files, lines)| {
@@ -1652,7 +1669,7 @@ fn draw_band_rule(
     });
     let branch = truncate(
         &band.branch,
-        room.saturating_sub(glyph.chars().count() + taken),
+        room.saturating_sub(glyph.chars().count() + merged_dot.chars().count() + taken),
     );
     // The rule's left end: `──` like every other band's, or the CURSOR
     // MARK `❯` on the one the keys are on — the mark a prompt puts before
@@ -1667,17 +1684,24 @@ fn draw_band_rule(
     } else {
         dash(2)
     };
-    let mut left = vec![
-        lead,
-        Span::raw(" "),
-        Span::styled(glyph, Style::default().fg(scope)),
-        Span::styled(branch, branch_style),
-    ];
+    let mut left = vec![lead, Span::raw(" ")];
+    if merged {
+        left.push(Span::styled(merged_dot, Style::default().fg(th.merged)));
+    }
+    left.push(Span::styled(glyph, Style::default().fg(glyph_color)));
+    left.extend(status_name_spans(
+        branch,
+        branch_style,
+        ramp,
+        app.sweep_phase(),
+    ));
+    // The checkout's uncommitted changes: a fact, not a status, so the
+    // file count is muted and the lines take the diff's own pastels.
     if let Some((files, lines)) = changes {
-        left.push(Span::styled(files, Style::default().fg(th.warn)));
+        left.push(Span::styled(files, Style::default().fg(th.muted)));
         if let Some((added, removed)) = lines {
-            left.push(Span::styled(added, Style::default().fg(th.ok)));
-            left.push(Span::styled(removed, Style::default().fg(th.err)));
+            left.push(Span::styled(added, Style::default().fg(th.added)));
+            left.push(Span::styled(removed, Style::default().fg(th.removed)));
         }
     }
     let mut hits = Vec::new();
@@ -1733,9 +1757,20 @@ fn draw_band_rule(
     hits
 }
 
+/// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
+/// RUN TERMINAL, `❯` for a plain shell, muted while its PTY lives and
+/// faint once it has exited.
+fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'static> {
+    let glyph = if t.run_command.is_some() { "▶ " } else { "❯ " };
+    Span::styled(
+        glyph,
+        Style::default().fg(if t.alive { th.muted } else { th.faint }),
+    )
+}
+
 /// A TERMINAL's card: what a session's card is to a session, and the
 /// same size — its name behind the glyph the SESSIONS PANEL gave the row
-/// (`▶` for a RUN TERMINAL, `❯` for a plain shell, in `th.ok` while its
+/// (`▶` for a RUN TERMINAL, `❯` for a plain shell, in `th.muted` while its
 /// PTY is alive, with `exited` at the row's right once the shell is
 /// gone), what runs in it, then the last lines it printed where a
 /// session's card has its prompt ([`terminal_tail_lines`]) — so a glance
@@ -1775,23 +1810,18 @@ fn draw_chip(
     }
     // HIDE CARD MARKS drops the glyph, and the name starts where it was.
     let glyph = if app.hide_card_marks {
-        ""
-    } else if t.run_command.is_some() {
-        "▶ "
+        Span::raw("")
     } else {
-        "❯ "
+        terminal_mark(t, th)
     };
-    let glyph_w = glyph.chars().count();
+    let glyph_w = glyph.width();
     // `exited` sits where a session card keeps its ago badge, and the
     // name gives it the room, as a session's does.
     let badge = if t.alive { "" } else { EXITED_BADGE };
     let (badge, name_max) = fit_ago(badge.to_string(), width);
     let name = truncate(&t.name, name_max.saturating_sub(glyph_w));
     let mut first = vec![
-        Span::styled(
-            glyph,
-            Style::default().fg(if t.alive { th.ok } else { dim }),
-        ),
+        glyph,
         Span::styled(
             name.clone(),
             Style::default().fg(th.text).add_modifier(Modifier::BOLD),
@@ -1801,7 +1831,7 @@ fn draw_chip(
         let badge = badge.trim_start().to_string();
         let pad = width.saturating_sub(name.chars().count() + glyph_w + badge.chars().count());
         first.push(Span::raw(" ".repeat(pad)));
-        first.push(Span::styled(badge, Style::default().fg(th.err)));
+        first.push(Span::styled(badge, Style::default().fg(th.exited)));
     }
     let runs = t.run_command.as_deref().unwrap_or("shell");
     let second = vec![Span::styled(
@@ -1887,29 +1917,21 @@ fn terminal_tail_lines(
         .unwrap_or_default()
 }
 
-/// A card's frame color when its status wants one: red for a turn waiting
-/// on you, blue for one finished and unread, yellow for one still running
-/// — the three the PROJECT TABS count, each in the color its STATUS DOT
-/// wears, and no other. A read finish, a fresh or terminated session and a
-/// `quiet` card (cold, pending or archived: nothing on it is live) keep
-/// the plain edge. The cursor's card outranks all three
-/// ([`selected_card_block`]).
+/// A card's frame color when its status wants you: crimson for a turn
+/// waiting on you or a crash, the done color for a finish nobody has read
+/// — each in the color its STATUS MARK wears, and no other. A working
+/// card keeps the plain edge (its spinner says it is busy, and a busy
+/// card asks nothing of you), as do a read finish, a fresh session and a
+/// `quiet` card (pending or archived, or cold with nothing left that wants
+/// you). The cursor's card outranks them all ([`selected_card_block`]).
 fn card_edge(a: &orion_core::Agent, quiet: bool, th: Theme) -> Option<Color> {
-    use orion_core::AgentStatus;
-    if quiet {
-        return None;
-    }
-    match a.status {
-        AgentStatus::NeedsFeedback => Some(th.err),
-        AgentStatus::Finished if a.unseen => Some(th.done),
-        AgentStatus::Running => Some(th.warn),
-        _ => None,
-    }
+    let status = Some(a.status);
+    (!quiet && wants_you(status, a.unseen)).then(|| status_color(status, a.unseen, th))
 }
 
 /// The frame of the card under the cursor, session or terminal: a heavy
 /// accent border — a weight no status frame ([`card_edge`]) ever takes,
-/// so a blue unread finish or a red question beside it can't be read as
+/// so an unread finish or a crimson question beside it can't be read as
 /// the selection, color or no color — over the raised fill every selected
 /// row in orion wears, frame and all: `sel_bg` while the grid has the
 /// keys, `sel_bg_dim` while the pane or the PROJECT TABS do, so the card
@@ -2069,12 +2091,13 @@ fn draw_card(
 ) {
     let a = &row.agent;
     let pending = app.is_placeholder_agent(&a.id);
-    let cold = !a.alive && a.cloud_session_id.is_none();
+    let cold = crate::app::drawn_cold(a);
     let archived = a.archived;
     let SessionLook {
         dot,
         quiet,
         name_style,
+        prompt: prompt_color,
         ramp,
         ago,
         ago_style,
@@ -2177,7 +2200,7 @@ fn draw_card(
             crate::launcher::last_prompt(a).unwrap_or_default(),
             width,
             mark,
-            quiet_or(prompt),
+            prompt_color,
             crate::launcher::PROMPT_LINES,
         )),
     }
@@ -2254,15 +2277,21 @@ fn card_issue_hit(
     })
 }
 
-/// How a session shows its state wherever the grid draws it — a card's
-/// head, a LIST entry — so the two never disagree.
+/// How a session shows its state wherever orion draws it — a card's head,
+/// a LIST entry, the pane's header, the full-screen breadcrumb — so they
+/// never disagree.
 struct SessionLook {
-    /// The STATUS DOT, or an archived card's square.
+    /// The STATUS MARK, or an archived card's square.
     dot: Span<'static>,
     /// What an archived session's every part is drawn in, and a live
     /// one's age: dim, a step up on the cursor's entry.
     quiet: Color,
+    /// Bold and bright for a session that wants you, plain text for one
+    /// working, muted for one at rest — the way an inbox reads.
     name_style: Style,
+    /// The last prompt's color: muted where the name is bright, dim where
+    /// the session is at rest.
+    prompt: Color,
     /// The status sweep across the name, while it animates.
     ramp: Option<[Color; 3]>,
     /// How long since it moved (`done`, `starting`, …), with its lead space.
@@ -2271,6 +2300,12 @@ struct SessionLook {
 }
 
 /// `a`'s [`SessionLook`], on the cursor's entry when `selected`.
+///
+/// A session whose PTY is gone (cold: reaped, or lost to a daemon restart)
+/// is drawn by what is still true of it. A crash, or a finish nobody has
+/// read, still wants you and keeps its mark; anything else it last did —
+/// working, asking — stopped being true with the process, so its mark goes
+/// faint and still, and its name sits back with the sessions at rest.
 ///
 /// An ARCHIVED session is the same session put away, and it is drawn as
 /// such: nothing on it is live, so nothing on it is colored. Every part of
@@ -2283,38 +2318,62 @@ struct SessionLook {
 /// a word repeated on every card - the header's `n archived sessions` says
 /// that once.
 fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> SessionLook {
+    use orion_core::AgentStatus;
     let pending = app.is_placeholder_agent(&a.id);
-    let cold = !a.alive && a.cloud_session_id.is_none();
     let archived = a.archived;
+    let cold = crate::app::drawn_cold(a);
     let quiet = if selected { th.muted } else { th.dim };
-    // The dot and the sweep read the session's status, cold and pending
-    // alike.
     let dot = if archived {
-        Span::styled(ARCHIVED_MARK, Style::default().fg(quiet))
+        Span::styled(ARCHIVED_MARK, Style::default().fg(th.faint))
     } else if pending {
-        status_dot(None, false, th)
+        status_dot(None, false, app.spin_phase(), th)
     } else if cold {
         Span {
-            style: Style::default().fg(th.dim),
-            ..status_dot(Some(a.status), false, th)
+            style: Style::default().fg(th.faint),
+            ..status_dot(Some(a.status), false, None, th)
         }
     } else {
-        status_dot(Some(a.status), a.unseen, th)
+        status_dot(Some(a.status), a.unseen, app.spin_phase(), th)
     };
     let ramp = if pending || cold || archived {
         None
     } else {
-        sweep_ramp(Some(a.status), app.agent_fresh_done(a), th, app.animations)
+        sweep_ramp(
+            Some(a.status),
+            a.unseen,
+            app.agent_fresh_alarm(a),
+            th,
+            app.animations,
+        )
     };
+    let wants = !pending && !cold && wants_you(Some(a.status), a.unseen);
+    let working = pending || (!cold && a.status == AgentStatus::Running);
     // An archived name is not the loud thing on the screen any more: it
     // gives up the bold with the rest of the card's weight and sits one
     // step above the quiet the rest of the card is in — muted over dim,
     // and text over muted on the card the cursor is on, the same one-step
-    // lift `quiet` takes there.
+    // lift `quiet` takes there. A live name is bold and bright only while
+    // the session wants you; a working one is plain text, one at rest
+    // muted — lifted to text under the cursor.
     let name_style = if archived {
         Style::default().fg(if selected { th.text } else { th.muted })
-    } else {
+    } else if wants {
         Style::default().fg(th.text).add_modifier(Modifier::BOLD)
+    } else if working || selected {
+        Style::default().fg(th.text)
+    } else {
+        Style::default().fg(th.muted)
+    };
+    let prompt = if archived {
+        quiet
+    } else if wants || working {
+        if selected {
+            th.text
+        } else {
+            th.muted
+        }
+    } else {
+        quiet
     };
     // A session stopped on a usage limit says so where its age goes, in
     // the red its frame is: the reason it is waiting on you.
@@ -2345,6 +2404,7 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
         dot,
         quiet,
         name_style,
+        prompt,
         ramp,
         ago,
         ago_style,
@@ -2812,39 +2872,32 @@ pub(super) fn pane_frame(
 }
 
 /// The pane's title, laid out left to right in `room` columns: the card
-/// the cursor is on — its STATUS DOT and name for a session, the
-/// SESSIONS PANEL's `❯`/`▶` and name for a terminal — in the accent,
-/// since it is what the keys reach; the checkout it runs in after it,
-/// in the SCOPE COLOR the band's rule paints it. With the pane on
-/// something the grid no longer lists — a card just archived out from
-/// under it — the attached session's own name, muted.
+/// the cursor is on — its STATUS MARK and name for a session, drawn by
+/// the same [`session_look`] its row is, so a reaped or archived session
+/// reads the same here as there; the `❯`/`▶` and name for a terminal —
+/// bold, the name being the thing the pane reads; the checkout it runs in
+/// after it, as the band's rule names it. With the pane on something the
+/// grid no longer lists — a card just archived out from under it — the
+/// attached session's own name, muted.
 fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
     let th = app.theme;
     let bands = crate::launcher::bands(app);
     let at = crate::launcher::cursor(app, &bands);
     let card = at.and_then(|at| crate::launcher::card_at(&bands, at));
     let name_room = (room / 2).max(8);
-    let lit = Style::default().fg(th.accent).add_modifier(Modifier::BOLD);
+    let lit = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
     let mut tabs = Vec::new();
     match card {
         Some(crate::launcher::Card::Session(row)) => {
             let a = &row.agent;
             tabs.push(PaneTab::plain(vec![
-                status_dot(Some(a.status), a.unseen, th),
+                session_look(app, a, false, th).dot,
                 Span::styled(truncate(&a.name, name_room), lit),
             ]));
         }
         Some(crate::launcher::Card::Terminal(t)) => {
-            let glyph = if t.run_command.is_some() {
-                "▶ "
-            } else {
-                "❯ "
-            };
             tabs.push(PaneTab::plain(vec![
-                Span::styled(
-                    glyph,
-                    Style::default().fg(if t.alive { th.ok } else { th.dim }),
-                ),
+                terminal_mark(t, th),
                 Span::styled(truncate(&t.name, name_room), lit),
             ]));
         }
@@ -2857,10 +2910,9 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
             }
         }
     }
-    // The checkout everything in the pane belongs to, in the SCOPE COLOR
-    // the band's rule paints it — `⌂` on the project's root branch, `↳`
-    // on a checkout of its own — so the pane and the grid say the same
-    // thing the same way.
+    // The checkout everything in the pane belongs to, as the band's rule
+    // names it — `⌂` on the project's root branch, `↳` on a checkout of
+    // its own — so the pane and the grid say the same thing the same way.
     let checkout = at
         .and_then(|at| bands.get(at.band))
         .map(|b| (b.is_main, b.branch.clone()))
@@ -2869,19 +2921,15 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
                 .map(|w| (w.is_main, w.branch.clone()))
         });
     if let Some((is_main, branch)) = checkout {
-        let (glyph, scope) = if is_main {
-            ("⌂ ", th.root)
-        } else {
-            ("↳ ", th.worktree)
-        };
+        let glyph = if is_main { "⌂ " } else { "↳ " };
         if !tabs.is_empty() {
             tabs.push(PaneTab::plain(vec![Span::raw("  ")]));
         }
         tabs.push(PaneTab::plain(vec![
-            Span::styled(glyph, Style::default().fg(scope)),
+            Span::styled(glyph, Style::default().fg(th.muted)),
             Span::styled(
                 truncate(&branch, (room / 4).max(8)),
-                Style::default().fg(scope),
+                Style::default().fg(th.muted),
             ),
         ]));
     }
@@ -2968,7 +3016,7 @@ pub(super) fn crumb_frame(f: &mut Frame, app: &mut App, area: Rect) -> Rect {
         if let Some(row) = &row {
             let a = &row.agent;
             spans.push(Span::styled(" / ", Style::default().fg(th.dim)));
-            spans.push(status_dot(Some(a.status), a.unseen, th));
+            spans.push(session_look(app, a, false, th).dot);
             spans.push(Span::styled(
                 truncate(&a.name, usize::from(r.width / 2).max(8)),
                 Style::default().fg(th.text).add_modifier(Modifier::BOLD),
@@ -4657,8 +4705,9 @@ mod tests {
         let lit = spans.iter().find(|s| s.content == "api").expect("api");
         assert_eq!(lit.style.fg, Some(th.accent));
         assert_eq!(lit.style.bg, Some(th.sel_bg), "the lit tab is a chip");
+        // A tab with nothing in it that wants you sits back, dim.
         let flat = spans.iter().find(|s| s.content == "web").expect("web");
-        assert_eq!(flat.style.fg, Some(th.muted));
+        assert_eq!(flat.style.fg, Some(th.dim));
         assert_eq!(flat.style.bg, None);
 
         // With nothing open, the `+` says what it does.
@@ -4669,10 +4718,11 @@ mod tests {
         assert_eq!(head_hits(&app), vec![HitTarget::LauncherTabAdd]);
     }
 
-    /// A tab's STATUS DOTS: a dot and a count per state its project's
+    /// A tab's STATUS MARKS: the mark and a count per state its project's
     /// sessions are in, right of the name, in the one order — needs-you
-    /// red, done blue, running yellow — with no word of its own. A quiet
-    /// project is its bare name.
+    /// crimson `●`, done `●`, working gold spinner (still, with the
+    /// animations off) — with no word of its own. A quiet project is its
+    /// bare name.
     #[test]
     fn a_tab_carries_its_projects_status_dots() {
         use orion_core::{AgentId, AgentStatus};
@@ -4686,13 +4736,14 @@ mod tests {
         app.tree.agents.push(asking);
         app.tree.agents[0].status = AgentStatus::Running;
         app.tree.agents[1].unseen = true;
+        app.animations = false;
         select(&mut app, "api");
         app.hits.clear();
         let spans = head_tabs(&mut app, r);
-        assert_eq!(row_text(&spans), " +   web ●1 ×   api ●1 ●1 × ");
+        assert_eq!(row_text(&spans), " +   web ●1 ×   api ●1 ◐1 × ");
         let dots: Vec<(String, Option<Color>)> = spans
             .iter()
-            .filter(|s| s.content.contains('●'))
+            .filter(|s| s.content.contains(['●', '◐', '✕']))
             .map(|s| (s.content.to_string(), s.style.fg))
             .collect();
         assert_eq!(
@@ -4700,7 +4751,7 @@ mod tests {
             vec![
                 (" ●1".to_string(), Some(th.done)),
                 (" ●1".to_string(), Some(th.err)),
-                (" ●1".to_string(), Some(th.warn)),
+                (" ◐1".to_string(), Some(th.warn)),
             ]
         );
     }
@@ -4725,10 +4776,11 @@ mod tests {
     }
 
     /// The tabs sweep in place: whatever the work under them is doing, the
-    /// names spell the same names in the same columns — a running project's
-    /// name is recolored a cell at a time ([`tab_ramp`]), never moved.
+    /// names spell the same names in the same columns — a project with an
+    /// unread finish has its name recolored a cell at a time
+    /// ([`tab_ramp`]), never moved.
     #[test]
-    fn the_tabs_sweep_in_place_whatever_is_running() {
+    fn the_tabs_sweep_in_place_whatever_is_unread() {
         use orion_core::AgentStatus;
         let r = Rect::new(0, 0, 80, 1);
         let mut app = a_tabbed_tree();
@@ -4736,7 +4788,8 @@ mod tests {
         head_tabs(&mut app, r);
         let quiet = std::mem::take(&mut app.hits);
         for a in &mut app.tree.agents {
-            a.status = AgentStatus::Running;
+            a.status = AgentStatus::Finished;
+            a.unseen = true;
         }
         select(&mut app, "api");
         let busy = head_tabs(&mut app, r);
@@ -4758,20 +4811,33 @@ mod tests {
         );
     }
 
-    /// Red outranks everything, yellow outranks an unread finish, and blue
-    /// is only a project with nothing live left; a quiet one holds still.
+    /// A tab sweeps red only for the seconds after something there starts
+    /// needing you (the one-shot), and otherwise shimmers in the done color
+    /// for as long as a finish there is unread; work in progress, and a
+    /// question already announced, hold still — the marks say those.
     #[test]
-    fn a_tabs_ramp_is_the_loudest_state_under_it() {
+    fn a_tab_sweeps_for_a_fresh_alarm_or_an_unread_finish_only() {
         let th = Theme::default();
-        let tally = |needs_you, running, done| Tally {
+        let tally = |needs_you, running, done, alarm| Tally {
             needs_you,
             done,
             running,
+            alarm,
+            ..Tally::default()
         };
-        assert_eq!(tab_ramp(tally(1, 3, 2), th), Some(th.err_sweep));
-        assert_eq!(tab_ramp(tally(0, 1, 2), th), Some(th.warn_sweep));
-        assert_eq!(tab_ramp(tally(0, 0, 2), th), Some(th.done_sweep));
-        assert_eq!(tab_ramp(tally(0, 0, 0), th), None);
+        assert_eq!(tab_ramp(tally(1, 3, 2, true), th), Some(th.err_sweep));
+        assert_eq!(tab_ramp(tally(1, 3, 2, false), th), Some(th.done_sweep));
+        assert_eq!(
+            tab_ramp(tally(1, 3, 0, false), th),
+            None,
+            "announced already"
+        );
+        assert_eq!(
+            tab_ramp(tally(0, 1, 0, false), th),
+            None,
+            "working is the spinner"
+        );
+        assert_eq!(tab_ramp(tally(0, 0, 0, false), th), None);
     }
 
     /// The pointer marks the button it rests on: a tab's name underlines,
@@ -5153,29 +5219,28 @@ mod tests {
             .collect()
     }
 
-    /// A band's rule names its checkout in the SCOPE COLOR — `⌂` root,
-    /// `↳` worktree — glyph and branch both, and nothing else on the rule,
-    /// so the two scopes sort a screenful of bands before a word is read.
+    /// A band's rule names its checkout by its glyph — `⌂` root, `↳`
+    /// worktree — in muted, with no color of its own: the glyph sorts the
+    /// two scopes, so neither spends a hue the statuses need. The root's
+    /// branch is bright, being the branch itself; a worktree's muted.
     #[test]
-    fn a_band_paints_its_checkout_in_the_scope_color() {
+    fn a_band_names_its_checkout_by_glyph() {
         let app = App::new();
         let th = app.theme;
         let root = rule_row(&app, &a_band(true, "main"), 44);
         let worktree = rule_row(&app, &a_band(false, "feat-x"), 44);
-        assert_eq!(painted(&root, 0, th.root), "⌂ main");
-        assert_eq!(painted(&worktree, 0, th.worktree), "↳ feat-x");
-        // And neither wears the other's color anywhere on that row.
-        assert_eq!(painted(&root, 0, th.worktree), "");
-        assert_eq!(painted(&worktree, 0, th.root), "");
+        assert_eq!(painted(&root, 0, th.muted).trim(), "⌂");
+        assert_eq!(painted(&root, 0, th.text), "main");
+        assert_eq!(painted(&worktree, 0, th.muted).trim(), "↳ feat-x");
         // The cards under it say what runs in the checkout, not where.
         let text = row_string(&worktree, 0);
         assert!(text.contains("1 session"), "{text:?}");
     }
 
     /// The checkout's changed-file count rides right behind the branch on
-    /// its band's rule, in the heads-up color, and on a rule too narrow
-    /// for the word it keeps the number and drops `files` before the
-    /// branch gives up more.
+    /// its band's rule, muted — a fact, not the working gold — and on a
+    /// rule too narrow for the word it keeps the number and drops `files`
+    /// before the branch gives up more.
     #[test]
     fn a_band_counts_its_checkouts_changes_behind_the_branch() {
         use orion_core::WorktreeId;
@@ -5190,11 +5255,13 @@ mod tests {
         let buf = rule_row(&app, &band, 44);
         let text = row_string(&buf, 0);
         assert!(text.contains("↳ feat-x +3 files"), "{text:?}");
-        assert_eq!(painted(&buf, 0, th.warn).trim(), "+3 files");
+        assert!(painted(&buf, 0, th.muted).ends_with("+3 files"));
+        assert_eq!(painted(&buf, 0, th.warn), "", "never the working gold");
 
         let buf = rule_row(&app, &band, 24);
         let text = row_string(&buf, 0);
-        assert_eq!(painted(&buf, 0, th.warn).trim(), "+3", "narrow: {text:?}");
+        assert!(text.contains(" +3"), "narrow: {text:?}");
+        assert!(!text.contains("files"), "narrow: {text:?}");
     }
 
     /// The band the keys are on says so: its rule opens on the CURSOR
@@ -5224,10 +5291,10 @@ mod tests {
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
         assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
         assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
-        // The mark in the accent, the checkout still in its own color.
+        // The mark in the accent, the checkout as on any band.
         let accent = painted(&buf, 0, th.accent);
         assert!(accent.starts_with('❯'), "{accent:?}");
-        assert_eq!(painted(&buf, 0, th.root), "⌂ main");
+        assert_eq!(painted(&buf, 0, th.text), "main");
 
         // The cursor's band with the keys elsewhere: bold branch, and
         // that is all — no mark, the count as on any band.
@@ -5336,7 +5403,13 @@ mod tests {
         );
         assert_eq!(
             frame(with(AgentStatus::Running, false), false, true),
-            th.warn
+            th.edge,
+            "working asks nothing of you: the spinner says it, not the frame"
+        );
+        assert_eq!(
+            frame(with(AgentStatus::Terminated, false), false, true),
+            th.err,
+            "a crash wants you"
         );
         assert_eq!(
             frame(with(AgentStatus::Finished, false), false, true),
@@ -5348,6 +5421,13 @@ mod tests {
             ..with(AgentStatus::Running, false)
         };
         assert_eq!(frame(cold, false, true), th.edge);
+        // A crash's PTY is gone too, but the crash is still true: it keeps
+        // the frame that says it wants you.
+        let crashed = Agent {
+            alive: false,
+            ..with(AgentStatus::Terminated, false)
+        };
+        assert_eq!(frame(crashed, false, true), th.err, "a cold crash still wants you");
         let archived = Agent {
             archived: true,
             ..with(AgentStatus::NeedsFeedback, false)
@@ -5445,7 +5525,7 @@ mod tests {
                 id: AgentId("a1".into()),
                 worktree_id: WorktreeId("w1".into()),
                 name: "fix login".into(),
-                status: AgentStatus::Running,
+                status: AgentStatus::NeedsFeedback,
                 archived: false,
                 archived_at: 0,
                 unseen: false,
@@ -5485,7 +5565,7 @@ mod tests {
         let buf = draw(&app, false);
         assert_eq!(buf.cell((20, 1)).unwrap().bg, th.sel_bg_dim);
 
-        // On: a faint wash of the running yellow, frame and all, while
+        // On: a faint wash of the needs-you crimson, frame and all, while
         // the pane has the keys.
         app.highlight_current_card = true;
         let buf = draw(&app, false);
@@ -5495,7 +5575,7 @@ mod tests {
             panic!("{fill:?}")
         };
         assert!(r.max(g).max(b) <= 45, "faint: {fill:?}");
-        assert!(r > b && g > b, "yellowish: {fill:?}");
+        assert!(r > g && r > b, "reddish: {fill:?}");
 
         // It breathes between the floor and the peak.
         let levels: Vec<f32> = (0..TINT_BREATH).map(tint_level).collect();
@@ -5522,21 +5602,20 @@ mod tests {
         app.animations = false;
         assert_eq!(
             draw(&app, false).cell((20, 2)).unwrap().bg,
-            dim_toward_black(th.warn, TINT_PEAK)
+            dim_toward_black(th.err, TINT_PEAK)
         );
 
         // The PROJECT TABS holding the keys fade it further.
         app.launcher_tab_cursor = Some(orion_core::ProjectId("p1".into()));
         assert_eq!(
             draw(&app, false).cell((20, 2)).unwrap().bg,
-            dim_toward_black(th.warn, TINT_PEAK * 0.6)
+            dim_toward_black(th.err, TINT_PEAK * 0.6)
         );
     }
 
     /// CARD LINE COUNTS: the lines behind the file count always follow it
-    /// on the band's rule in the DIFF VIEWER's green and red — `+3 files
-    /// +120 -45` — and yield after the word and before the branch as the
-    /// rule narrows.
+    /// on the band's rule in the diff's own pastels — `+3 files +120 -45` —
+    /// and yield after the word and before the branch as the rule narrows.
     #[test]
     fn card_line_counts_follow_the_file_count_in_green_and_red() {
         use orion_core::WorktreeId;
@@ -5558,24 +5637,22 @@ mod tests {
             let buf = rule_row(app, &band, width);
             (
                 row_string(&buf, 0),
-                painted(&buf, 0, th.warn),
-                painted(&buf, 0, th.ok),
-                painted(&buf, 0, th.err),
+                painted(&buf, 0, th.added),
+                painted(&buf, 0, th.removed),
             )
         };
 
-        let (text, warn, added, removed) = rule(&app, 60);
+        let (text, added, removed) = rule(&app, 60);
         assert!(text.contains("↳ feat-x +3 files +120 -45"), "{text:?}");
-        assert_eq!(warn.trim(), "+3 files");
         assert_eq!(added.trim(), "+120");
         assert_eq!(removed.trim(), "-45");
 
-        let (text, warn, added, _) = rule(&app, 37);
+        let (text, added, _) = rule(&app, 37);
         assert!(text.contains("↳ feat-x +3 +120 -45"), "{text:?}");
-        assert_eq!((warn.trim(), added.trim()), ("+3", "+120"));
+        assert_eq!(added.trim(), "+120");
 
-        let (text, warn, added, _) = rule(&app, 24);
-        assert_eq!(warn.trim(), "+3", "narrowest: {text:?}");
+        let (text, added, _) = rule(&app, 24);
+        assert!(text.contains(" +3"), "narrowest: {text:?}");
         assert_eq!(added.trim(), "", "the lines go before the branch does");
     }
 
@@ -5694,6 +5771,5 @@ mod tests {
         // its band's rule, not the card's.
         assert_eq!(colored(&live, 2, th.dim), "claude");
         assert_eq!(colored(&gone, 2, th.dim), "claude");
-        assert_eq!(colored(&live, 2, th.root), "");
     }
 }

@@ -36,7 +36,6 @@
 use super::{
     create_agent, pane_size, reconcile_selection, reconcile_selection_inner, release_attachment,
     remove_worktree_rows, restore_context, select_worktree_by_id, selection_snapshot,
-    WORKTREE_STILL_CREATING,
 };
 use crate::app::{
     now_ms, AgentLaunchDraft, App, AttachedTerm, ConfirmDialog, Overlay, PendingAction,
@@ -471,8 +470,8 @@ pub(super) fn discard_agent(app: &mut App, placeholder: &AgentId, out: &mut Vec<
 /// not lost either: its session row goes up under the stand-in as a
 /// QUICK PROMPT's would, the draft rides the checkout's own PENDING
 /// INTENT, and the Ack that names the real checkout sends it there
-/// (`replay_launch`). Every other launch waits as before, saying so: one
-/// into a QUICK PROMPT's or a PR SESSION's stand-in, whose intent
+/// (`replay_launch`). Every other launch is refused: one into a QUICK
+/// PROMPT's or a PR SESSION's stand-in, whose intent
 /// already carries the launch that made it; a second into the modal's
 /// while one is waiting; a PR SESSION, which is addressed to the PROJECT
 /// and cuts a checkout of its own.
@@ -493,7 +492,6 @@ pub(super) fn defer_launch(
             _ => None,
         });
     let Some(req_id) = slot.filter(|_| draft.pr.is_none()) else {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     };
     let agent = stage_agent(
@@ -563,7 +561,7 @@ fn blank_pane_if_showing(app: &mut App, placeholder: &AgentId) {
     if showing {
         app.term = None;
         // The stand-in was typed at while the real session booted: taking
-        // its pane away takes the keyboard with it, and says so.
+        // its pane away takes the keyboard with it.
         app.release_terminal();
     }
 }
@@ -1037,17 +1035,11 @@ mod tests {
 
             press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("worktree is still being created")
-            );
+            assert!(app.flash.is_none());
 
             app.focus = Focus::Sessions;
             press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("worktree is still being created")
-            );
+            assert!(app.flash.is_none());
             assert!(out.is_empty(), "{out:?}");
 
             // Enter on the stand-in session row enters the pane as it
@@ -1141,10 +1133,7 @@ mod tests {
             // A new terminal here would land in a checkout the DAEMON
             // does not have: it stops before anything is sent.
             press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("worktree is still being created")
-            );
+            assert!(app.flash.is_none());
             assert!(out.is_empty(), "{out:?}");
         });
     }
@@ -1474,10 +1463,7 @@ mod tests {
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert!(out.is_empty(), "nothing under a made-up id: {out:?}");
-            assert_ne!(
-                app.flash.as_deref(),
-                Some("worktree is still being created")
-            );
+            assert_eq!(app.flash, None);
             let agent = match app.pending.get(&req_id) {
                 Some(PendingIntent::SelectCreatedWorktree {
                     launch: Some(draft),
@@ -1507,10 +1493,7 @@ mod tests {
             out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("worktree is still being created")
-            );
+            assert!(app.flash.is_none());
             assert_eq!(app.visible_session_rows().len(), 1, "no second stand-in");
             assert!(out.is_empty(), "{out:?}");
 
@@ -1963,10 +1946,7 @@ mod tests {
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             super::super::open_pr_agent_picker(&mut app);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("worktree is still being created")
-            );
+            assert!(app.flash.is_none());
             assert!(
                 !out.iter()
                     .any(|r| matches!(r, ClientRequest::CreatePrAgent { .. })),

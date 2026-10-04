@@ -500,11 +500,11 @@ fn meta_line(
             }
             spans.push(Span::styled(
                 format!("+{}", lines.added),
-                Style::default().fg(th.ok),
+                Style::default().fg(th.added),
             ));
             spans.push(Span::styled(
                 format!(" −{}", lines.removed),
-                Style::default().fg(th.err),
+                Style::default().fg(th.removed),
             ));
             spans
         }
@@ -586,12 +586,7 @@ fn draw_files(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, u
         let status = match file {
             Some(file) => Span::styled(
                 format!("{} ", file.status_str()),
-                Style::default().fg(match (file.xy[0], file.xy[1]) {
-                    ('?', '?') | ('A', _) => th.ok,
-                    ('D', _) | (_, 'D') => th.err,
-                    ('R', _) | ('C', _) => th.accent,
-                    _ => th.warn,
-                }),
+                Style::default().fg(super::change_color(file.xy, th)),
             ),
             None => Span::raw("   "),
         };

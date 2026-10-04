@@ -203,7 +203,6 @@ pub enum LinearAnswer {
         list: Result<Vec<LinearIssue>, String>,
     },
     Attach {
-        identifier: String,
         result: Result<(), String>,
     },
     /// **Test connection**: who the key in `dir` belongs to.
@@ -308,7 +307,6 @@ impl LinkStore {
 /// `⌘L` on the grid: browse assigned issues for the selected project.
 pub(crate) fn open(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
-        app.flash = Some("linear: select a project first".into());
         return;
     };
     open_on(app, project.id, project.name, project.repo_path, LinearMode::Browse);
@@ -321,7 +319,6 @@ pub(crate) fn open_attach(app: &mut App) {
     };
     let (project, name, dir) = (view.project.clone(), view.project_name.clone(), view.dir.clone());
     let Some(pr) = selected_open_pr(app) else {
-        app.flash = Some("linear: no pull request selected".into());
         return;
     };
     let back = match &app.overlay {
@@ -448,10 +445,11 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
             }
             app.dirty = true;
         }
-        LinearAnswer::Attach { identifier, result } => match result {
-            Ok(()) => app.flash = Some(format!("attached the pull request to {identifier}")),
-            Err(err) => app.flash = Some(err),
-        },
+        LinearAnswer::Attach { result } => {
+            if let Err(err) = result {
+                app.flash = Some(err);
+            }
+        }
     }
 }
 
@@ -503,19 +501,19 @@ pub(crate) fn attach_new_prs(
         let Some(link) = app.linear_links.take(&pr.head) else {
             continue;
         };
-        for (id, identifier) in link.issue_ids.into_iter().zip(link.identifiers) {
-            spawn_attach(app, dir.clone(), id, identifier, pr.url.clone());
+        for id in link.issue_ids {
+            spawn_attach(app, dir.clone(), id, pr.url.clone());
         }
     }
 }
 
-fn spawn_attach(app: &mut App, dir: PathBuf, issue_id: String, identifier: String, pr_url: String) {
+fn spawn_attach(app: &mut App, dir: PathBuf, issue_id: String, pr_url: String) {
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
     tokio::spawn(async move {
         let result = attach_pr(&dir, &issue_id, &pr_url).await;
-        let _ = tx.send(LinearAnswer::Attach { identifier, result });
+        let _ = tx.send(LinearAnswer::Attach { result });
     });
 }
 
@@ -751,7 +749,6 @@ fn picked(app: &App) -> Vec<LinearIssue> {
 fn confirm(app: &mut App) {
     let issues = picked(app);
     if issues.is_empty() {
-        app.flash = Some("linear: pick at least one issue".into());
         return;
     }
     let Some(Overlay::Linear(view)) = &app.overlay else {
@@ -763,7 +760,7 @@ fn confirm(app: &mut App) {
             let url = pr_url.clone();
             let dir = view.dir.clone();
             for issue in issues {
-                spawn_attach(app, dir.clone(), issue.id, issue.identifier, url.clone());
+                spawn_attach(app, dir.clone(), issue.id, url.clone());
             }
         }
     }
@@ -786,7 +783,6 @@ fn open_preset(app: &mut App) {
     }
     let issues = picked(app);
     if issues.is_empty() {
-        app.flash = Some("linear: pick at least one issue".into());
         return;
     }
     let Some(launch) = launch_for(app, issues) else {
@@ -930,13 +926,24 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
             break;
         };
         let issue = &issues[*index];
-        let tick = if view.marked.contains(&issue.id) {
-            "● "
-        } else {
-            "  "
-        };
+        // A marked row is ticked in the accent — it is a choice the keys
+        // made, not a status, so not the `●` a session's STATUS MARK is.
+        let marked = view.marked.contains(&issue.id);
+        let tick = if marked { "✓ " } else { "  " };
         let full = format!("{tick}{}", issue.label());
-        let status = issue.status.clone();
+        // The status, behind the mark of where it stands — `◑` started,
+        // `○` not yet, `◌` in the backlog — quieter the further off it is.
+        let (state_mark, state_color) = match issue.status_type.as_str() {
+            "started" => ("◑ ", th.muted),
+            "unstarted" => ("○ ", th.dim),
+            "backlog" => ("◌ ", th.faint),
+            _ => ("", th.dim),
+        };
+        let status = if issue.status.is_empty() {
+            String::new()
+        } else {
+            format!("{state_mark}{}", issue.status)
+        };
         let budget = (rows_area.width as usize).saturating_sub(2);
         let status_w = status.chars().count();
         let text_budget = budget.saturating_sub(if status_w > 0 { status_w + 2 } else { 0 });
@@ -944,9 +951,25 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         let pos = visible_positions(positions, &label, &full);
         let used = label.chars().count();
         let mut spans = fuzzy_highlight_styled(&label, pos, Style::default(), th);
+        if marked {
+            // The tick alone takes the accent; the label after it keeps
+            // its own style and highlights.
+            if let Some(first) = spans.first().cloned() {
+                if let Some(rest) = first.content.strip_prefix("✓ ") {
+                    let rest = rest.to_string();
+                    spans[0] = Span::styled(
+                        "✓ ",
+                        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                    );
+                    if !rest.is_empty() {
+                        spans.insert(1, Span::styled(rest, first.style));
+                    }
+                }
+            }
+        }
         if status_w > 0 && used + status_w < budget {
             spans.push(Span::raw(" ".repeat(budget - used - status_w)));
-            spans.push(Span::styled(status, Style::default().fg(th.dim)));
+            spans.push(Span::styled(status, Style::default().fg(state_color)));
         }
         render_row(f, row_area, spans, Some(*index) == cursor, list_focused, th);
     }

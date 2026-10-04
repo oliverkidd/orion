@@ -1,17 +1,39 @@
 //! The two ways orion reaches a user who is not looking at it: the DONE
 //! SOUND and FEEDBACK SOUND (`Config::done_sound` / `Config::feedback_sound`,
-//! played here), and the desktop notification a session that stops to ask
-//! posts while the terminal window is in the background. `event_loop.rs`
-//! decides *when* — the status edges, the per-frame drain of
-//! `App::pending_ding` and `App::pending_feedback`, the focus and ssh
-//! gates — this module only does the reaching, and fails soft: an `afplay`
-//! that won't start falls back to the bell, a notifier that is missing or
-//! exits non-zero is a debug line in tui.log.
+//! played here), and the desktop notification a session posts while the
+//! terminal window is in the background — when it stops to ask, when its
+//! CLI dies mid-turn, and when a turn nobody watched has finished.
+//! `event_loop.rs` decides *when* — the status edges ([`edge_alert`]), the
+//! DONE SOUND's settling and folding (`App::done_sounds`), the per-frame
+//! drain of `App::pending_feedback`, the focus and ssh gates — this module
+//! only does the reaching, and fails soft: an `afplay` that won't start
+//! falls back to the bell, a notifier that is missing or exits non-zero is
+//! a debug line in tui.log.
 
-use crate::app::{FeedbackAlert, Tree};
+use crate::app::{AlertKind, FeedbackAlert, Tree};
 use crate::config::Sound;
-use orion_core::AgentId;
+use orion_core::{AgentId, AgentStatus};
 use std::process::{Command, Stdio};
+
+/// What a status flip from `from` to `to` has to say to a user who is not
+/// looking, before any gate: the edge into NEEDS FEEDBACK asks
+/// ([`AlertKind::NeedsFeedback`]); a live turn — RUNNING or NEEDS FEEDBACK
+/// — landing on FINISHED is done ([`AlertKind::Finished`]), and on
+/// TERMINATED crashed ([`AlertKind::Crashed`]). A re-stamp of the status a
+/// row already wears says nothing, and neither does any other move: a
+/// gray row booting, a dead one coming back, a daemon restart's
+/// DISCONNECTED.
+pub(super) fn edge_alert(from: AgentStatus, to: AgentStatus) -> Option<AlertKind> {
+    let live = matches!(from, AgentStatus::Running | AgentStatus::NeedsFeedback);
+    match to {
+        AgentStatus::NeedsFeedback if from != AgentStatus::NeedsFeedback => {
+            Some(AlertKind::NeedsFeedback)
+        }
+        AgentStatus::Finished if live => Some(AlertKind::Finished),
+        AgentStatus::Terminated if live => Some(AlertKind::Crashed),
+        _ => None,
+    }
+}
 
 /// Ring `sound` once: a file goes to `afplay` (detached; a helper thread
 /// reaps it so no zombie lingers), the bell — and a file whose `afplay`
@@ -36,10 +58,10 @@ pub(super) fn play_sound<W: std::io::Write>(backend: &mut W, sound: Sound) {
     let _ = backend.flush();
 }
 
-/// The alert for `agent`, as its row reads on screen: the session's name
-/// and `<project> · <branch>`. `None` for a row the tree doesn't hold (a
-/// status that raced a delete).
-pub(super) fn alert_for(tree: &Tree, agent: &AgentId) -> Option<FeedbackAlert> {
+/// The `kind` alert for `agent`, as its row reads on screen: the session's
+/// name and `<project> · <branch>`. `None` for a row the tree doesn't hold
+/// (a status that raced a delete).
+pub(super) fn alert_for(tree: &Tree, agent: &AgentId, kind: AlertKind) -> Option<FeedbackAlert> {
     let a = tree.agents.iter().find(|a| a.id == *agent)?;
     let worktree = tree.worktrees.iter().find(|w| w.id == a.worktree_id);
     let project = worktree.and_then(|w| tree.projects.iter().find(|p| p.id == w.project_id));
@@ -49,6 +71,7 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId) -> Option<FeedbackAlert> {
         _ => String::new(),
     };
     Some(FeedbackAlert {
+        kind,
         session: a.name.clone(),
         place,
         limit: a.limit_reached().map(orion_core::UsageLimit::label),
@@ -58,8 +81,8 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId) -> Option<FeedbackAlert> {
 /// Post one desktop notification per alert — `osascript` on macOS,
 /// `notify-send` elsewhere — detached, reaped on a helper thread. A
 /// notifier that is missing or exits non-zero is logged at debug and
-/// otherwise ignored: the sound already rang, and a box with no desktop is
-/// not an error.
+/// otherwise ignored: the sound already rang (or was folded into one that
+/// just did), and a box with no desktop is not an error.
 pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
     for alert in alerts {
         let (program, args) = notifier_command(alert, cfg!(target_os = "macos"));
@@ -87,12 +110,16 @@ pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
 /// The notifier to run for `alert`, as a program and its argv — never a
 /// shell line, so the only quoting is AppleScript's own. macOS shows
 /// *orion* / *`<session>` needs feedback* / *`<project> · <branch>`* —
-/// *`<session>`: limit reached* for one stopped on a usage limit;
-/// `notify-send` gets the same as app name, summary and body.
+/// *`<session>`: limit reached* for one stopped on a usage limit,
+/// *`<session>` stopped with an error* for a crash, *`<session>`
+/// finished* for an unseen finish; `notify-send` gets the same as app
+/// name, summary and body.
 fn notifier_command(alert: &FeedbackAlert, macos: bool) -> (&'static str, Vec<String>) {
-    let summary = match alert.limit {
-        Some(limit) => format!("{}: {limit}", alert.session),
-        None => format!("{} needs feedback", alert.session),
+    let summary = match (alert.kind, alert.limit) {
+        (AlertKind::NeedsFeedback, Some(limit)) => format!("{}: {limit}", alert.session),
+        (AlertKind::NeedsFeedback, None) => format!("{} needs feedback", alert.session),
+        (AlertKind::Crashed, _) => format!("{} stopped with an error", alert.session),
+        (AlertKind::Finished, _) => format!("{} finished", alert.session),
     };
     if macos {
         let mut script = format!(
@@ -139,6 +166,7 @@ mod tests {
 
     fn alert(session: &str, place: &str) -> FeedbackAlert {
         FeedbackAlert {
+            kind: AlertKind::NeedsFeedback,
             session: session.into(),
             place: place.into(),
             limit: None,
@@ -199,6 +227,61 @@ mod tests {
         };
         let (_, args) = notifier_command(&limited, false);
         assert_eq!(args[1], "Fix Login: limit reached");
+
+        // A crash and an unseen finish say what happened, in the same
+        // place; a limit still recorded on a row that left red says nothing.
+        let crashed = FeedbackAlert {
+            kind: AlertKind::Crashed,
+            ..alert("Fix Login", "demo · main")
+        };
+        let (_, args) = notifier_command(&crashed, true);
+        assert_eq!(
+            args[1],
+            r#"display notification "demo · main" with title "orion" subtitle "Fix Login stopped with an error""#
+        );
+        let finished = FeedbackAlert {
+            kind: AlertKind::Finished,
+            limit: Some("limit reached"),
+            ..alert("Fix Login", "demo · main")
+        };
+        let (_, args) = notifier_command(&finished, false);
+        assert_eq!(
+            args,
+            ["--app-name=orion", "Fix Login finished", "demo · main"]
+        );
+    }
+
+    /// The edges that reach a user who is not looking — into red, and a
+    /// live turn landing on green or dying — and none of the moves around
+    /// them.
+    #[test]
+    fn edge_alert_names_three_edges_and_nothing_else() {
+        use AgentStatus::*;
+        let edge = edge_alert;
+        assert_eq!(edge(Running, NeedsFeedback), Some(AlertKind::NeedsFeedback));
+        assert_eq!(
+            edge(Finished, NeedsFeedback),
+            Some(AlertKind::NeedsFeedback)
+        );
+        assert_eq!(
+            edge(NeedsFeedback, NeedsFeedback),
+            None,
+            "a re-stamp of red"
+        );
+
+        assert_eq!(edge(Running, Finished), Some(AlertKind::Finished));
+        assert_eq!(edge(NeedsFeedback, Finished), Some(AlertKind::Finished));
+        assert_eq!(edge(Finished, Finished), None, "a re-stamp of green");
+        assert_eq!(edge(Fresh, Finished), None, "no turn was live");
+
+        assert_eq!(edge(Running, Terminated), Some(AlertKind::Crashed));
+        assert_eq!(edge(NeedsFeedback, Terminated), Some(AlertKind::Crashed));
+        assert_eq!(edge(Finished, Terminated), None, "no turn was live");
+        assert_eq!(edge(Terminated, Terminated), None);
+
+        assert_eq!(edge(Running, Disconnected), None, "a daemon restart");
+        assert_eq!(edge(Finished, Running), None);
+        assert_eq!(edge(Fresh, Running), None);
     }
 
     /// The bell path writes exactly one BEL through the backend; `off` is

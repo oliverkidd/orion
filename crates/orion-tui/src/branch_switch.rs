@@ -1111,12 +1111,12 @@ impl BranchSwitchView {
 // ---- opening and answers ----
 
 /// The hotkey. From a WORKTREES PANEL or SESSIONS PANEL row (and the pane)
-/// it acts on the selected checkout, which must be the root; from the
-/// PROJECTS PANEL, or with no checkout under the cursor (an OPEN PRS
-/// row), on the project's root.
+/// it acts on the selected checkout, which must be the root — a worktree
+/// stays on the branch it was cut for, so on one the key opens nothing;
+/// from the PROJECTS PANEL, or with no checkout under the cursor (an OPEN
+/// PRS row), on the project's root.
 pub(crate) fn open_branch_switch(app: &mut App) {
     let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
-        app.flash = Some("switch branch: select a project first".into());
         return;
     };
     let on_checkout = matches!(
@@ -1124,19 +1124,12 @@ pub(crate) fn open_branch_switch(app: &mut App) {
         Focus::Worktrees | Focus::Sessions | Focus::Terminal
     );
     let target = match app.selected_worktree().filter(|_| on_checkout) {
-        Some(w) if !w.is_main => {
-            app.flash = Some(
-                "switch branch is for the ⌂ root checkout — a worktree stays on the branch it was cut for"
-                    .into(),
-            );
-            return;
-        }
+        Some(w) if !w.is_main => return,
         Some(w) => Some(w.id.clone()),
         None => app.root_worktree(&project),
     };
-    match target {
-        Some(id) => open_for(app, &id),
-        None => app.flash = Some("switch branch: the project has no root checkout yet".into()),
+    if let Some(id) = target {
+        open_for(app, &id);
     }
 }
 
@@ -1384,10 +1377,12 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             if view_for(app, &worktree).is_some() {
                 app.overlay = None;
             }
-            app.flash = Some(match note {
-                Some(note) => format!("⌂ root is on {branch} · {note}"),
-                None => format!("⌂ root is on {branch}"),
-            });
+            // The row's new branch says it switched; only where the
+            // changes went (a stash, a commit) or what git complained of
+            // is news.
+            if let Some(note) = note {
+                app.flash = Some(format!("⌂ root is on {branch} · {note}"));
+            }
         }
         Outcome::Dirty { files, keys } if showing => {
             if let Some(view) = view_for(app, &worktree) {
@@ -1698,18 +1693,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             }
         },
         // git is already running: Esc only hides the modal (`c` brings it
-        // back), and the result lands in the footer.
+        // back); a refusal or a note on the result lands in the footer.
         Stage::Working(_) => {
             if key.code == KeyCode::Esc {
                 app.overlay = None;
-                let again = crate::hints::key_or(
-                    &app.keymap,
-                    crate::keymap::Action::SwitchBranch,
-                    "the branch switcher",
-                );
-                app.flash = Some(format!(
-                    "still switching — {again} shows it, the result lands here"
-                ));
             }
         }
     }
@@ -1856,13 +1843,15 @@ fn branch_row(
     th: Theme,
 ) -> Vec<Span<'static>> {
     let elsewhere = branch.checked_out_at.is_some();
+    // The checked-out branch is ticked, the rest unmarked: a `●` or `○`
+    // here would read as a session's STATUS MARK.
     let (glyph, glyph_color) = if branch.current {
-        ("● ", th.ok)
+        ("✓ ", th.text)
     } else {
-        ("○ ", th.dim)
+        ("  ", th.dim)
     };
     let (tag, tag_color) = if branch.current {
-        ("current", th.ok)
+        ("current", th.muted)
     } else if elsewhere {
         ("in a worktree", th.dim)
     } else if branch.remote {
@@ -1885,7 +1874,7 @@ fn branch_row(
     let base = if elsewhere {
         Style::default().fg(th.dim)
     } else if branch.current {
-        Style::default().fg(th.ok).add_modifier(Modifier::BOLD)
+        Style::default().fg(th.text).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -2063,11 +2052,13 @@ fn draw_list(f: &mut Frame, view: &BranchSwitchView, body: Rect, th: Theme) -> (
     (list, selected)
 }
 
-/// One `M  path` line of the changed files.
+/// One `M  path` line of the changed files, its code in the color every
+/// diff surface gives it.
 fn file_line(file: &DiffFile, width: usize, th: Theme) -> Line<'static> {
     let code: String = file.xy.iter().collect();
+    let color = crate::ui::change_color(file.xy, th);
     Line::from(vec![
-        Span::styled(format!("   {code} "), Style::default().fg(th.warn)),
+        Span::styled(format!("   {code} "), Style::default().fg(color)),
         Span::raw(fit(&file.path, width.saturating_sub(7))),
     ])
 }
@@ -2958,7 +2949,7 @@ mod tests {
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
         assert_eq!(head(&repo), "feature");
         assert_eq!(app.tree.worktrees[0].branch, "feature");
-        assert_eq!(app.flash.as_deref(), Some("⌂ root is on feature"));
+        assert_eq!(app.flash, None, "the renamed row says it");
         assert!(app.branch_switch.switching.is_empty());
     }
 
@@ -2973,7 +2964,7 @@ mod tests {
         assert!(screen(&mut app, 110, 30).contains("Enter creates \"brand-new\" off main"));
         key(&mut app, KeyCode::Enter);
         assert_eq!(head(&repo), "brand-new");
-        assert_eq!(app.flash.as_deref(), Some("⌂ root is on brand-new"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]

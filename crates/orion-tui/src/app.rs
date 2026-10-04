@@ -16,13 +16,25 @@ use std::path::PathBuf;
 /// size of [`App::sweep_phase`] (one text cell per frame).
 pub const SWEEP_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// How long a ONE-SHOT SWEEP runs: the sweep a row takes for a change that
-/// happened while nobody was looking — a turn finishing unread (blue), a
-/// checkout's pull request merging (purple) — before it settles into its
-/// still color. Two or three passes of the band: long enough to catch the
-/// eye from another panel, short enough that motion keeps meaning *live*.
-/// Only running and needs-feedback rows sweep for as long as they last.
+/// How long a ONE-SHOT SWEEP runs: the sweep a row takes when it changes
+/// into a state that wants you — a session starting to need you or
+/// crashing (red), a checkout's pull request merging (purple) — before it
+/// settles into its still color. Two or three passes of the band: long
+/// enough to catch the eye from another panel, short enough that motion
+/// keeps meaning *news*. The one sweep that does not run out is the UNREAD
+/// SHIMMER: a finish nobody has looked at sweeps until somebody does.
 pub const ONE_SHOT_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Frames of the WORKING SPINNER, the dot a running session wears: a
+/// quarter turn every [`SPIN_FRAMES_PER_STEP`] sweep frames.
+pub const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// Sweep frames ([`SWEEP_FRAME`]) per quarter turn of the spinner.
+pub const SPIN_FRAMES_PER_STEP: usize = 2;
+
+/// The WORKING SPINNER's frame at sweep phase `phase`.
+pub fn spin_step(phase: usize) -> usize {
+    phase / SPIN_FRAMES_PER_STEP
+}
 
 /// How many recently shown sessions keep their screen ([`App::term_cache`]):
 /// enough for a rotation through the sessions of a couple of worktrees.
@@ -162,7 +174,7 @@ pub enum HitTarget {
     /// The footer's right-edge readout (`2 agents · 1 term · 412 MB`): a
     /// click opens the memory modal — the one `⇧M` opens.
     FooterUsage,
-    /// The footer's nameplate at the far left (`orion v0.42.0`): a click
+    /// The footer's nameplate at the far left (`orion v1.0.0`): a click
     /// goes HOME, or back from it — what `⌘G` does.
     FooterHome,
     /// The `↗ open in browser` BUTTON on the ISSUES and PULL REQUESTS
@@ -194,14 +206,6 @@ pub const MIN_DIFF_FILES_W: u16 = 16;
 pub const SETTINGS_MEMORY_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// The diff pane always keeps at least this much width.
 pub const MIN_DIFF_PANE_W: u16 = 24;
-
-/// What a PANE losing the keyboard says ([`App::release_terminal`]). The
-/// input lock is what decides where a keystroke lands, so a drop the user
-/// did not ask for silently changes what every key they type next MEANS —
-/// `x` closes the project's tab, `⇧M` opens the memory modal — and the
-/// one thing it must not be is quiet.
-pub const TERMINAL_RELEASED: &str =
-    "the keys are the grid's again — Enter steps back into the session";
 
 // ---- list-view arithmetic shared by every overlay with a cursor ----
 
@@ -314,12 +318,10 @@ pub enum MenuAction {
     DuplicateAgent(AgentId),
     /// **Continue on** another account: carry this Claude session onto the
     /// harness `harness` (a registry id) — another account — and resume
-    /// it there (`ClientRequest::ContinueAgentOn`). `label` is what the
-    /// footer names once it has gone.
+    /// it there (`ClientRequest::ContinueAgentOn`).
     ContinueOn {
         id: AgentId,
         harness: String,
-        label: String,
     },
     EditLink(LinkId),
     DeleteLink(LinkId),
@@ -2321,12 +2323,6 @@ pub enum PendingIntent {
         text: String,
         note: String,
     },
-    /// A menu's **Run** / **Stop run** (`StartRun` / `StopRun`): once the
-    /// DAEMON has done it, flash what happened in `branch`.
-    RunToggled {
-        branch: String,
-        started: bool,
-    },
     /// Select the added project and step into its Worktrees panel.
     SelectCreatedProject,
     /// The NEW WORKTREE modal's create. The stand-in row `placeholder`
@@ -2389,9 +2385,6 @@ pub enum PendingIntent {
     /// A row renamed, archived, unarchived or deleted on the keypress
     /// (`event_loop::optimistic`): put it back on Error.
     Undo(Undo),
-    /// Flash this once the DAEMON has done it (an Error flashes its own
-    /// reason instead).
-    Note(String),
     None,
 }
 
@@ -2617,8 +2610,9 @@ pub enum RowKey {
     Worktree(WorktreeId),
 }
 
-/// Aggregate status for a worktree row: red > yellow > green > gray,
-/// archived agents excluded. Free-standing so the `/` palette can roll a
+/// Aggregate status for a worktree row, loudest first — needs you, then
+/// working, then finished, then the rest — archived agents excluded.
+/// Free-standing so the `/` palette can roll a
 /// row up straight from the tree, with no `App` in hand.
 pub fn worktree_rollup(tree: &Tree, worktree_id: &WorktreeId) -> Option<AgentStatus> {
     rollup(
@@ -2664,17 +2658,39 @@ pub fn project_unseen(tree: &Tree, project_id: &ProjectId) -> usize {
         .sum()
 }
 
-/// Whether the agent's unread finish is recent enough (`ONE_SHOT_SWEEP`) to
-/// still be sweeping at `now` epoch ms. `unseen` is only ever true on a
-/// finished row, so `status_changed_at` is the finish itself. The stamp is
-/// the DAEMON's clock and `now` this client's, so the window is taken either
-/// side of it: a skewed pair sweeps a little off-time, never for an hour.
-pub fn fresh_done(agent: &Agent, now: i64) -> bool {
+/// Whether the agent changed into a state that wants you — NEEDS YOU or
+/// FAILED (a crash) — recently enough (`ONE_SHOT_SWEEP`) to still be
+/// sweeping at `now` epoch ms. `status_changed_at` is that change itself.
+/// The stamp is the DAEMON's clock and `now` this client's, so the window
+/// is taken either side of it: a skewed pair sweeps a little off-time,
+/// never for an hour.
+pub fn fresh_alarm(agent: &Agent, now: i64) -> bool {
     let window = ONE_SHOT_SWEEP.as_millis() as i64;
-    agent.unseen
-        && !agent.archived
+    matches!(
+        agent.status,
+        AgentStatus::NeedsFeedback | AgentStatus::Terminated
+    ) && !agent.archived
         && agent.status_changed_at > 0
         && (now - agent.status_changed_at).abs() < window
+}
+
+/// A finished turn nobody has looked at yet: DONE, NOT SEEN, the state the
+/// UNREAD SHIMMER marks until the session is read. `unseen` is only ever
+/// true on a finished row.
+pub fn unread_finish(agent: &Agent) -> bool {
+    agent.unseen && !agent.archived && agent.status == AgentStatus::Finished
+}
+
+/// Whether `agent` is drawn COLD: its PTY is gone — reaped, or lost to a
+/// daemon restart — and nothing it last did is still true. A crash, or a
+/// finish nobody has read, still is, and keeps its color; working or
+/// asking stopped being true with the process, so the row draws gray and
+/// still, and counts on no PROJECT TAB.
+pub fn drawn_cold(agent: &Agent) -> bool {
+    !agent.alive
+        && agent.cloud_session_id.is_none()
+        && agent.status != AgentStatus::Terminated
+        && !unread_finish(agent)
 }
 
 /// A session that is mid-turn or blocked on the user. These count as
@@ -3320,10 +3336,28 @@ pub struct CloudPreview {
 /// coalesce those while still beating the steady beat by a wide margin.
 pub const OPEN_PRS_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// One session that stopped to ask the user, as the desktop notification
-/// names it: the row's name and where it runs.
+/// Which status edge a desktop notification is about — what its summary
+/// says, and which sound's setting switches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertKind {
+    /// The edge into NEEDS FEEDBACK: a question, a permission prompt, or a
+    /// usage limit (`FeedbackAlert::limit`). Rides the FEEDBACK SOUND.
+    NeedsFeedback,
+    /// A live turn whose CLI died with an error — the edge from RUNNING or
+    /// NEEDS FEEDBACK into TERMINATED. Nothing will carry it on until the
+    /// user does, so it rides the FEEDBACK SOUND too.
+    Crashed,
+    /// A turn that finished with nobody looking, once it has settled
+    /// ([`DoneSounds`]). Rides the DONE SOUND.
+    Finished,
+}
+
+/// One session a desktop notification names: the edge it took, the row's
+/// name and where it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedbackAlert {
+    /// What happened to it.
+    pub kind: AlertKind,
     /// The session row's name.
     pub session: String,
     /// `<project> · <branch>`, the worktree it runs in; empty when the tree
@@ -3333,6 +3367,115 @@ pub struct FeedbackAlert {
     /// of the usage limit it stopped on (`limit reached`), from
     /// `Agent::limit_reached`.
     pub limit: Option<&'static str>,
+}
+
+/// DONE SETTLE: how long a finish has to stand before its DONE SOUND
+/// rings. Long enough to outlast the flickers — a subagent's `SubagentStart`
+/// healing a finish its `Stop` raced, a queued message starting the next
+/// turn — short enough to still read as the moment it finished.
+pub const DONE_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// DONE FOLD: a DONE SOUND due within this long of the last sound of either
+/// kind is not rung — the one that just rang already said "go and look".
+pub const DONE_FOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The DONE SOUND between a status edge and the speaker. A finish rings
+/// only when it is news:
+///
+/// - UNSEEN only. A turn that finishes in the pane on screen was watched
+///   — the edge takes its `Agent::unseen` straight down — so it rings
+///   nothing; neither does an archived row's, which never raises the flag.
+/// - SETTLE. The sound is due [`DONE_SETTLE`] after the edge, and stands
+///   down if by then the row has left FINISHED, been seen, or gone
+///   (deleted, archived). A finish that flickers rings once, where it
+///   lands.
+/// - ONCE PER UNSEEN SPELL. An agent whose finish has been announced rings
+///   nothing more until the user has seen it: the wake-up turns a task
+///   notification or a queued message starts, each finishing on its own,
+///   and the subagent drain that reopens a finished row and closes it
+///   again 180 s later, are one thing to go and read, not a sound each.
+/// - FOLD. A sound due within [`DONE_FOLD`] of the last sound of either
+///   kind is dropped. The finish still counts as announced — the sound
+///   that just rang covers it — and still gets its desktop notification.
+///
+/// The event loop feeds it (`finished` on the edge, `seen` from
+/// `mark_agent_seen`), wakes for [`DoneSounds::next_due`], and rings what
+/// [`DoneSounds::settle`] hands back.
+#[derive(Debug, Default)]
+pub struct DoneSounds {
+    /// Finishes waiting out the SETTLE, each with when it is due. Another
+    /// finish of the same agent meanwhile starts its wait over.
+    pub due: HashMap<AgentId, std::time::Instant>,
+    /// Agents announced in their current UNSEEN SPELL.
+    pub announced: std::collections::HashSet<AgentId>,
+    /// When a sound of either kind last rang, for the FOLD.
+    pub last_rang: Option<std::time::Instant>,
+}
+
+impl DoneSounds {
+    /// A live turn of `agent` reached FINISHED at `now` and is unseen after
+    /// the pane on screen had its say: start the SETTLE — unless this
+    /// UNSEEN SPELL has been announced already.
+    pub fn finished(&mut self, agent: &AgentId, now: std::time::Instant) {
+        if !self.announced.contains(agent) {
+            self.due.insert(agent.clone(), now + DONE_SETTLE);
+        }
+    }
+
+    /// The user has seen `agent` — its pane came on screen, here or in
+    /// another client: its UNSEEN SPELL is over, so its next finish is news
+    /// again, and a finish still settling is not.
+    pub fn seen(&mut self, agent: &AgentId) {
+        self.announced.remove(agent);
+        self.due.remove(agent);
+    }
+
+    /// When the next settling finish falls due — the event loop's wake-up
+    /// for it, since nothing else need be moving on screen by then.
+    pub fn next_due(&self) -> Option<std::time::Instant> {
+        self.due.values().min().copied()
+    }
+
+    /// The finishes whose SETTLE ran out by `now` and that still stand —
+    /// the row in `tree` still FINISHED, still unseen, not archived — in
+    /// tree order, each now announced for its UNSEEN SPELL. Those that no
+    /// longer stand are dropped without a sound.
+    pub fn settle(&mut self, tree: &Tree, now: std::time::Instant) -> Vec<AgentId> {
+        if self.next_due().is_none_or(|due| due > now) {
+            return Vec::new();
+        }
+        let mut ripe = std::collections::HashSet::new();
+        self.due.retain(|agent, due| {
+            let keep = *due > now;
+            if !keep {
+                ripe.insert(agent.clone());
+            }
+            keep
+        });
+        let settled: Vec<AgentId> = tree
+            .agents
+            .iter()
+            .filter(|a| ripe.contains(&a.id) && unread_finish(a))
+            .map(|a| a.id.clone())
+            .collect();
+        // A deleted agent is never seen again to end its spell.
+        self.announced
+            .retain(|agent| tree.agents.iter().any(|a| a.id == *agent));
+        self.announced.extend(settled.iter().cloned());
+        settled
+    }
+
+    /// Whether a DONE SOUND due `now` rings, rather than FOLD into a sound
+    /// that rang within [`DONE_FOLD`].
+    pub fn may_ring(&self, now: std::time::Instant) -> bool {
+        self.last_rang
+            .is_none_or(|rang| now.saturating_duration_since(rang) >= DONE_FOLD)
+    }
+
+    /// A sound of either kind just rang.
+    pub fn rang(&mut self, now: std::time::Instant) {
+        self.last_rang = Some(now);
+    }
 }
 
 /// The FOLLOW-UP COMPOSER: the box a session card grows when it is
@@ -3721,10 +3864,6 @@ pub struct App {
     pub select_project_when_seen: Option<ProjectId>,
     /// Worktree created by us, awaiting its upsert to fix the selection.
     pub select_worktree_when_seen: Option<WorktreeId>,
-    /// A RUN TERMINAL `r` started whose upsert had not landed when its Ack
-    /// did, and the branch it runs in: the flash names the command once
-    /// the row arrives.
-    pub run_flash_when_seen: Option<(TerminalId, String)>,
     /// Last selected worktree per project — switching back to a project
     /// returns to the worktree the user left it on.
     pub last_worktree_for_project: HashMap<ProjectId, WorktreeId>,
@@ -3822,16 +3961,19 @@ pub struct App {
     /// when the copy has to be delegated to the attached terminal (see
     /// `copy_and_flash`). The main loop writes and clears it.
     pub pending_clipboard: Option<String>,
-    /// A turn reached FINISHED since the last frame: the main loop rings
-    /// the DONE SOUND (`Config::done_sound`) once and clears it — once per
-    /// frame however many rows finished together.
-    pub pending_ding: bool,
-    /// Sessions that reached NEEDS FEEDBACK since the last frame, one entry
-    /// each: the main loop rings the FEEDBACK SOUND (`Config::feedback_sound`)
-    /// once for the lot, posts a desktop notification per entry while the
-    /// terminal window is in the background, and clears it. A session whose
-    /// pane the user is locked into typing at, window focused, is never
-    /// queued — that prompt is already in front of them.
+    /// The DONE SOUND's finishes on their way to the speaker — settling,
+    /// announced, and when anything last rang (see [`DoneSounds`]). The
+    /// main loop rings what settles, once per frame however many rows
+    /// settled together, and names each in a desktop notification while
+    /// the terminal window is in the background.
+    pub done_sounds: DoneSounds,
+    /// Sessions that reached NEEDS FEEDBACK, or crashed mid-turn, since the
+    /// last frame, one entry each: the main loop rings the FEEDBACK SOUND
+    /// (`Config::feedback_sound`) once for the lot, posts a desktop
+    /// notification per entry while the terminal window is in the
+    /// background, and clears it. A session whose pane the user is locked
+    /// into typing at, window focused, is never queued — that prompt, or
+    /// that error, is already in front of them.
     pub pending_feedback: Vec<FeedbackAlert>,
     /// Whether the terminal window has focus, from the focus reports
     /// (mode 1004) `setup_terminal` asks for. True until the terminal says
@@ -3912,6 +4054,13 @@ pub struct App {
     /// or whose first answer ever says merged, landed some other day and
     /// paints solid purple from the first frame.
     pub merge_landed: HashMap<WorktreeId, std::time::Instant>,
+    /// The ATTENTION WALK in progress (`.` / `,`): the session it last
+    /// landed on and the ring as it stood when the walk began. Landing on
+    /// an unread finish reads it, which re-sorts it behind the running
+    /// sessions; walking on from the ring as it was keeps the next step
+    /// from skipping them. A walk resumes from this only while the cursor
+    /// is still where it landed and the same sessions are in the ring.
+    pub attention_walk: Option<(AgentId, Vec<AgentId>)>,
     /// How far the user has read into each pull request's conversation,
     /// keyed by PR URL — the daemon's `pr_seen` rows, plus whatever this
     /// session has marked since. What's newer than the mark is what the
@@ -4207,7 +4356,6 @@ impl App {
             just_launched: None,
             select_project_when_seen: None,
             select_worktree_when_seen: None,
-            run_flash_when_seen: None,
             last_worktree_for_project: HashMap::new(),
             last_session_for_worktree: HashMap::new(),
             pending_prewarm: None,
@@ -4233,7 +4381,7 @@ impl App {
             keymap: crate::keymap::Keymap::default(),
             pointer_shape: PointerShape::default(),
             pending_clipboard: None,
-            pending_ding: false,
+            done_sounds: DoneSounds::default(),
             pending_feedback: Vec::new(),
             window_focused: true,
             body_area: Rect::default(),
@@ -4254,6 +4402,7 @@ impl App {
             worktree_lines: HashMap::new(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
+            attention_walk: None,
             pr_seen: HashMap::new(),
             pr_inflight: std::collections::HashSet::new(),
             pr_recheck: HashMap::new(),
@@ -4480,30 +4629,22 @@ impl App {
         self.launcher_active() && !self.collapsed
     }
 
-    /// Take the keyboard back from the session in the PANE, and say so
-    /// when it was really being typed into.
+    /// Take the keyboard back from the session in the PANE.
     ///
     /// Every UNASKED drop goes through here: a redraw that finds the pane
     /// gone ([`App::settle_launcher_focus`]), a row archived, deleted or
     /// reaped out from under the pane showing it, a stand-in replaced by
-    /// the session it stood for. None of those is a key the user pressed,
-    /// and each one leaves the next thing they type meaning something
-    /// else — so each one flashes [`TERMINAL_RELEASED`].
+    /// the session it stood for.
     ///
     /// The guard lives here rather than at the call sites: they run from
     /// draws and from daemon events and cannot know whether the lock was
-    /// held, and a flash on every frame would be noise. Only a lock that
-    /// was actually HELD says anything.
-    ///
-    /// The deliberate ways out of a pane — `^q`, `^z`, Esc up a level —
-    /// name what they did themselves and do not come through here.
+    /// held, and a redraw on every frame would be waste. Only a lock that
+    /// was actually HELD marks the frame dirty.
     pub fn release_terminal(&mut self) {
-        if !self.term_locked {
-            return;
+        if self.term_locked {
+            self.term_locked = false;
+            self.dirty = true;
         }
-        self.term_locked = false;
-        self.flash = Some(TERMINAL_RELEASED.into());
-        self.dirty = true;
     }
 
     /// FOCUS as the LAUNCHER VIEW's GRID has it: the cards, or the PANE
@@ -4531,7 +4672,7 @@ impl App {
         // (`event_loop`'s `PanelBg` arm) before letting the card go, and
         // the input lock left behind would have gone on eating keys with
         // no pane on screen to type into. `release_terminal` is a no-op
-        // on a lock that was never held, so only a real one says so.
+        // on a lock that was never held.
         self.release_terminal();
     }
 
@@ -4558,20 +4699,18 @@ impl App {
         self.animations && self.welcome_on_screen && self.vim.is_none()
     }
 
-    /// Some sidebar row is showing a running (yellow) or needs-feedback
-    /// (red) status, or is inside a ONE-SHOT SWEEP — a turn that just
-    /// finished unread (blue), a checkout whose pull request was just seen
-    /// to merge (purple) — so its text sweep should be ticking. Any agent
-    /// in one of those states surfaces somewhere — its own row, or a
-    /// worktree / project rollup — unless the panels are hidden (collapsed,
-    /// editor modal, splash) or animations are switched off. A merged
-    /// checkout only shows while its project is selected, so only those
-    /// keep the clock running. The one-shots run out on the clock, so an
-    /// idle app with a week-old merged checkout on screen repaints nothing.
-    /// The exception is a PROJECT TAB: its name sweeps blue for as long as
-    /// its project has a finish left unread and nothing live, so the clock
-    /// runs while one does (the cheap scan for any unread finish first,
-    /// since this is asked on every turn of the event loop).
+    /// Something on screen moves, so the clock should be ticking: a
+    /// running session's WORKING SPINNER, a finish nobody has read (the
+    /// UNREAD SHIMMER, on its row and its project's tab, until it is read),
+    /// or a ONE-SHOT SWEEP still inside its window — a session that just
+    /// started needing you or crashed, a checkout whose pull request was
+    /// just seen to merge. Any agent in one of those states surfaces
+    /// somewhere — its own row, a tab, the jump list — unless the panels
+    /// are hidden (collapsed, editor modal, splash) or animations are
+    /// switched off. A merged checkout only shows while its project is
+    /// selected, so only those keep the clock running. The one-shots run
+    /// out on the clock, so an idle app with everything read repaints
+    /// nothing.
     pub fn status_anim_active(&self) -> bool {
         let now = now_ms();
         self.animations
@@ -4579,29 +4718,45 @@ impl App {
             && self.vim.is_none()
             && !self.splash_active()
             && (self.tree.agents.iter().any(|a| {
-                !a.archived
-                    && (matches!(a.status, AgentStatus::Running | AgentStatus::NeedsFeedback)
-                        || fresh_done(a, now))
+                !a.archived && (self.spins(a) || self.shows_unread(a) || fresh_alarm(a, now))
             }) || self
                 .visible_worktrees()
                 .iter()
-                .any(|w| self.worktree_wears_merge(&w.id) && self.merge_is_fresh(&w.id))
-                || self.tab_sweeps_done())
+                .any(|w| self.merge_sweeping(&w.id)))
     }
 
-    /// Some PROJECT TAB sweeps blue: its project has an unread finish on
-    /// the grid ([`crate::launcher::project_tally`]'s `done`).
-    fn tab_sweeps_done(&self) -> bool {
-        self.launcher_active()
-            && self
-                .tree
-                .agents
-                .iter()
-                .any(|a| !a.archived && a.unseen && a.status == AgentStatus::Finished)
-            && self
-                .launcher_tabs
-                .iter()
-                .any(|id| crate::launcher::project_tally(self, id).done > 0)
+    /// Whether `agent`'s dot is the turning WORKING SPINNER: a session
+    /// still starting, or one running with its PTY alive. A row left
+    /// running by a process that is gone is drawn COLD and still.
+    pub fn spins(&self, agent: &Agent) -> bool {
+        self.is_placeholder_agent(&agent.id)
+            || (agent.status == AgentStatus::Running && !drawn_cold(agent))
+    }
+
+    /// Whether an unread finish shimmers anywhere: on the grid's own rows
+    /// and on an open PROJECT TAB (the lit one is always open), in the
+    /// jump list while it is up, and on every row of the old panels. One
+    /// in a project whose tab is closed shows nowhere, and keeps no clock
+    /// running.
+    fn shows_unread(&self, agent: &Agent) -> bool {
+        unread_finish(agent)
+            && (!self.launcher_active()
+                || matches!(self.overlay, Some(Overlay::Palette(_)))
+                || self.tree.worktrees.iter().any(|w| {
+                    w.id == agent.worktree_id && self.launcher_tabs.contains(&w.project_id)
+                }))
+    }
+
+    /// Whether a desktop notification reaches anyone: the terminal window
+    /// is in the background, and this is the machine the user sits at (not
+    /// over `orion ssh`, where the desktop is the wrong one).
+    pub fn may_notify_desktop(&self) -> bool {
+        !self.window_focused && !self.is_remote
+    }
+
+    /// Whether `worktree`'s MERGED BAND is still inside its ONE-SHOT SWEEP.
+    pub fn merge_sweeping(&self, worktree: &WorktreeId) -> bool {
+        self.worktree_wears_merge(worktree) && self.merge_is_fresh(worktree)
     }
 
     /// This client just saw `worktree`'s pull request turn merged: start
@@ -4622,9 +4777,16 @@ impl App {
             .is_some_and(|at| at.elapsed() < ONE_SHOT_SWEEP)
     }
 
-    /// Whether the session's unread finish still sweeps ([`fresh_done`]).
-    pub fn agent_fresh_done(&self, agent: &Agent) -> bool {
-        fresh_done(agent, now_ms())
+    /// Whether the session's change into needing you, or its crash, still
+    /// sweeps ([`fresh_alarm`]).
+    pub fn agent_fresh_alarm(&self, agent: &Agent) -> bool {
+        fresh_alarm(agent, now_ms())
+    }
+
+    /// The WORKING SPINNER's frame right now, or `None` with the
+    /// animations off (a still `◐`).
+    pub fn spin_phase(&self) -> Option<usize> {
+        self.animations.then(|| spin_step(self.sweep_phase()))
     }
 
     /// Frame counter for the status-sweep text animation — a pure function
@@ -5770,8 +5932,8 @@ impl App {
         (prs, issues)
     }
 
-    /// Aggregate status for a worktree row: red > yellow > green > gray,
-    /// archived agents excluded.
+    /// Aggregate status for a worktree row ([`worktree_rollup`]), archived
+    /// agents excluded.
     pub fn worktree_rollup(&self, worktree_id: &WorktreeId) -> Option<AgentStatus> {
         worktree_rollup(&self.tree, worktree_id)
     }
@@ -5782,7 +5944,7 @@ impl App {
     /// branch has landed is the one to archive or delete — so its row says
     /// so in purple, from across the room. A live session still wins: a
     /// running or asking agent is exactly the thing not to delete a
-    /// checkout out from under, and its yellow or red is the warning.
+    /// checkout out from under, and its spinner or crimson is the warning.
     pub fn worktree_wears_merge(&self, worktree_id: &WorktreeId) -> bool {
         let merged = self
             .pull_requests

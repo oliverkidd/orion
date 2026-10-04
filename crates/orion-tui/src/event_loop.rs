@@ -8,7 +8,7 @@ use crate::app::{
     PointerShape, PromptDialog, PromptKind, SessionRow, SettingsView, SubmenuKind, TermSelection,
     WorktreeRollback,
 };
-use crate::app::{PrCommentAnswer, PrDiffAnswer};
+use crate::app::{AlertKind, PrCommentAnswer, PrDiffAnswer};
 use crate::pull_request::Lookup;
 use crate::text_input::TextInput;
 use crate::tree_browser::TreeBrowser;
@@ -91,19 +91,6 @@ pub(super) const KEYBOARD_MENU_ANCHOR: (u16, u16) = (30, 4);
 /// vim…) takes it as one paste rather than typing to auto-indent.
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// Flash for an action that needs a checkout to act on and has none.
-const SELECT_CONTEXT_FIRST: &str = "select a project or worktree first";
-
-/// Flash for a session pick that lost a race with its removal.
-const SESSION_GONE: &str = "session no longer exists";
-/// Flash for a `/` pull-request pick whose row a refresh retired meanwhile.
-const PR_GONE: &str = "pull request is no longer open";
-/// `.` / `,` with no session anywhere to land on.
-const NO_SESSIONS_TO_JUMP: &str = "no sessions to jump to";
-
-/// Flash for an action an archived agent refuses until it's unarchived.
-pub(crate) const AGENT_ARCHIVED: &str = "agent is archived — unarchive first (u)";
 
 /// How often the worktree panel's changed-file badge re-reads `git status`
 /// for the selected checkout, so agent edits surface without a keypress.
@@ -421,6 +408,12 @@ async fn main_loop(
         let drag_autoscroll_deadline = app
             .next_drag_autoscroll
             .map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std);
+        // When the next settling finish is due its DONE SOUND (its arm
+        // below).
+        let done_sound_deadline = app
+            .done_sounds
+            .next_due()
+            .map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std);
         tokio::select! {
             // Pending redraw: wake at the frame boundary even if no new
             // events arrive.
@@ -546,6 +539,12 @@ async fn main_loop(
             _ = tokio::time::sleep_until(drag_autoscroll_deadline), if app.next_drag_autoscroll.is_some() => {
                 drag_autoscroll_tick(&mut app, &mut out);
             }
+            // A finish has waited out the DONE SOUND's SETTLE. An idle app
+            // may have nothing else to wake it — the animations off, or
+            // the finish off every tab, and no output — so the deadline
+            // takes a wake of its own; the frame's drain below does the
+            // ringing.
+            _ = tokio::time::sleep_until(done_sound_deadline), if app.done_sounds.next_due().is_some() => {}
             // The selection rested past the debounce: tell the daemon what
             // the pane has been showing since the cursor landed here.
             _ = tokio::time::sleep(app.attach_delay().unwrap_or_default()),
@@ -774,26 +773,43 @@ async fn main_loop(
             let _ = backend.flush();
         }
 
-        // A turn reached FINISHED: ring the DONE SOUND. The bell goes out
-        // through the same terminal as the OSC writes above, so over ssh it
-        // rings the terminal the user is sitting at. CONFIG.JSON is read
-        // fresh, like every other setting.
-        if std::mem::take(&mut app.pending_ding) {
-            if let Some(sound) = crate::config::Config::load().done_sound() {
-                alerts::play_sound(terminal.backend_mut(), sound);
-            }
-        }
-
-        // One or more turns stopped to ask the user: ring the FEEDBACK
-        // SOUND once for the lot and, while the terminal window is in the
-        // background, name each of them in a desktop notification — never
-        // over ssh, where the desktop is the wrong machine's. `off` is
-        // silence for both.
+        // One or more turns stopped to ask the user, or died mid-turn: ring
+        // the FEEDBACK SOUND once for the lot and, while the terminal
+        // window is in the background, name each of them in a desktop
+        // notification — never over ssh, where the desktop is the wrong
+        // machine's. `off` is silence for both. The bell goes out through
+        // the same terminal as the OSC writes above, so over ssh it rings
+        // the terminal the user is sitting at. CONFIG.JSON is read fresh,
+        // like every other setting.
         let alerts = std::mem::take(&mut app.pending_feedback);
         if !alerts.is_empty() {
             if let Some(sound) = crate::config::Config::load().feedback_sound() {
                 alerts::play_sound(terminal.backend_mut(), sound);
-                if !app.window_focused && !app.is_remote {
+                app.done_sounds.rang(std::time::Instant::now());
+                if app.may_notify_desktop() {
+                    alerts::notify_desktop(&alerts);
+                }
+            }
+        }
+
+        // Unseen finishes that have settled ring the DONE SOUND — once for
+        // the lot, and not at all inside the FOLD of the last sound, the
+        // FEEDBACK SOUND just above included — and each is named in a
+        // desktop notification on the same terms as the feedback ones,
+        // folded or not. `done_sound` is their one switch.
+        let now = std::time::Instant::now();
+        let settled = app.done_sounds.settle(&app.tree, now);
+        if !settled.is_empty() {
+            if let Some(sound) = crate::config::Config::load().done_sound() {
+                if app.done_sounds.may_ring(now) {
+                    alerts::play_sound(terminal.backend_mut(), sound);
+                    app.done_sounds.rang(now);
+                }
+                if app.may_notify_desktop() {
+                    let alerts: Vec<_> = settled
+                        .iter()
+                        .filter_map(|id| alerts::alert_for(&app.tree, id, AlertKind::Finished))
+                        .collect();
                     alerts::notify_desktop(&alerts);
                 }
             }
@@ -1409,10 +1425,8 @@ fn reconcile_open_pr_cursor(
                 restore_session(app, out);
             }
             // The pane is showing something else now: rewind it and fetch
-            // whatever the cursor landed on. Say why, too — a row that
-            // evaporates mid-read is otherwise just the cursor jumping.
+            // whatever the cursor landed on.
             schedule_pr_detail(app);
-            app.flash = Some(format!("#{} is no longer open", was.number));
             app.dirty = true;
         }
     }
@@ -1628,33 +1642,26 @@ fn land_pr_detail(
 /// Sessions panel's PR ROW — or **Comment…** from either row's menu: the
 /// COMMENT BOX, a multi-row task box titled with the row, whose Enter
 /// posts the text on that pull request through `gh pr comment`
-/// (`post_pr_comment`). Off a pull request row the key only says what it
-/// wants. A draft a refused post handed back while another modal was up
+/// (`post_pr_comment`). Off a pull request row the key does nothing. A
+/// draft a refused post handed back while another modal was up
 /// (`pr_comment_drafts`) fills the box, so the refusal cost nothing typed.
 fn open_pr_comment(app: &mut App) {
     // The pane reading a pull request (a `/` jump lands on one) is the one
     // to comment on; otherwise, on the grid, the card's — the pull request
     // `⇧V` opens.
     let found = match app.previewed_pr() {
-        Some(pr) => Ok(pr),
+        Some(pr) => Some(pr),
         None if app.launcher_grid() => {
-            launcher::card_pull_request(app, launcher::NO_CARD_FOR_COMMENT).map(|pr| {
-                crate::app::PreviewedPr {
-                    label: crate::pull_request::numbered_label(pr.number, &pr.title),
-                    number: pr.number,
-                    url: pr.url,
-                }
+            launcher::card_pull_request(app).map(|pr| crate::app::PreviewedPr {
+                label: crate::pull_request::numbered_label(pr.number, &pr.title),
+                number: pr.number,
+                url: pr.url,
             })
         }
-        None => Err("move onto a pull request row to comment on it".into()),
+        None => None,
     };
-    let pr = match found {
-        Ok(pr) => pr,
-        Err(why) => {
-            app.flash = Some(why);
-            app.dirty = true;
-            return;
-        }
+    let Some(pr) = found else {
+        return;
     };
     let draft = app.pr_comment_drafts.remove(&pr.url).unwrap_or_default();
     reopen_prompt_with(
@@ -1672,10 +1679,10 @@ fn open_pr_comment(app: &mut App) {
 /// Enter in the COMMENT BOX: post `body` on pull request `number` off the
 /// loop, as the `gh` user, from the selected project's checkout — `gh pr
 /// comment` resolves the number from any checkout of the repo, as the
-/// detail fetch does — and say it is on its way. The outcome lands in
-/// `land_pr_comment`. A post that cannot even start — one already running
-/// on this pull request, no checkout on disk — says why and hands the box
-/// straight back with its text. A box that stood in for the PULL REQUESTS
+/// detail fetch does. The outcome lands in `land_pr_comment`. A post that
+/// cannot even start — one already running on this pull request, no
+/// checkout on disk (which the footer names) — hands the box straight
+/// back with its text. A box that stood in for the PULL REQUESTS
 /// MODAL (`back`) puts the modal back on its row as the post goes out.
 fn post_pr_comment(
     app: &mut App,
@@ -1686,22 +1693,15 @@ fn post_pr_comment(
     back: Option<Box<crate::pr_modal::PullRequestsView>>,
 ) {
     let dir = app.selected_project().map(|p| p.repo_path.clone());
-    let refused = if app.pr_comment_inflight.contains(&url) {
-        Some(format!("still posting the last comment on #{number}…"))
-    } else {
-        match &dir {
-            Some(dir) if !dir.is_dir() => {
-                Some(format!("repo path missing on disk: {}", dir.display()))
-            }
-            None => Some("no project selected to post from".into()),
-            // Never in the running TUI: the loop installs the channel at
-            // startup. Handing the box back beats losing the text.
-            Some(_) if app.pr_comment_tx.is_none() => Some("not ready to post yet".into()),
-            Some(_) => None,
+    let busy = app.pr_comment_inflight.contains(&url);
+    let missing = dir.as_ref().filter(|dir| !dir.is_dir());
+    // The loop installs the channel at startup, so a post without one is
+    // never in the running TUI: handing the box back beats losing the text.
+    let refused = busy || dir.is_none() || missing.is_some() || app.pr_comment_tx.is_none();
+    if refused {
+        if let Some(dir) = missing.filter(|_| !busy) {
+            app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
         }
-    };
-    if let Some(why) = refused {
-        app.flash = Some(why);
         reopen_prompt_with(
             app,
             PromptKind::PrComment {
@@ -1722,7 +1722,6 @@ fn post_pr_comment(
         return;
     };
     app.pr_comment_inflight.insert(url.clone());
-    app.flash = Some(format!("posting a comment on #{number}…"));
     app.dirty = true;
     tokio::spawn(async move {
         let result = crate::pull_request::comment(&dir, number, &body).await;
@@ -1736,8 +1735,8 @@ fn post_pr_comment(
     });
 }
 
-/// A `gh pr comment` landed. Posted: say so, and read the pull request
-/// again so the pane's conversation carries the new comment — in place
+/// A `gh pr comment` landed. Posted: read the pull request again so the
+/// pane's conversation carries the new comment — in place
 /// when the pane is still on it (`refetch_pr_detail`, which keeps the
 /// reader's scroll), and on the next visit otherwise (`pr_detail_stale`).
 /// Refused: say why, in `gh`'s words, and put the box back with the text
@@ -1756,7 +1755,6 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
     app.pr_comment_inflight.remove(&url);
     match result {
         Ok(_) => {
-            app.flash = Some(format!("comment posted on #{number}"));
             app.pr_detail_stale.insert(url.clone());
             if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
                 // The modal reads its row again, the new comment in.
@@ -1879,7 +1877,6 @@ fn open_pr_commit(app: &mut App, title: &str, sha: &str) -> bool {
 /// at `file`, when one is asked for.
 fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: Option<String>) {
     if app.pr_diff_inflight == Some(number) {
-        app.flash = Some(format!("still fetching the diff for #{number}…"));
         return;
     }
     let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
@@ -1895,6 +1892,8 @@ fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: O
     if open_cached_pr_diff(app, number, &url, &title, file.as_deref()) {
         app.pr_diff_refreshing.insert(url.clone());
     } else {
+        // Nothing else on screen marks the `gh pr diff` under way, and it
+        // takes seconds: the footer is the only sign Enter was heard.
         app.flash = Some(format!("fetching the diff for #{number}…"));
     }
     app.pr_diff_inflight = Some(number);
@@ -1925,7 +1924,6 @@ pub(crate) fn request_pr_commit_diff(
     subject: &str,
 ) {
     if app.pr_diff_inflight == Some(number) {
-        app.flash = Some(format!("still fetching a diff for #{number}…"));
         return;
     }
     let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
@@ -2012,7 +2010,6 @@ fn land_pr_diff(app: &mut App, answer: PrDiffAnswer) {
         return;
     }
     if refresh_pr_diff_view(view, &diff) {
-        app.flash = Some(format!("#{number}'s diff changed since it was last read"));
         app.dirty = true;
     }
 }
@@ -2181,9 +2178,6 @@ fn schedule_pull_request_refresh(app: &mut App) {
     schedule_pr_lookup(app);
 }
 
-/// What `Shift+R` says in the footer the moment it is heard.
-pub(crate) const RELOAD_FLASH: &str = "reloading pull requests and issues from GitHub…";
-
 /// `Shift+R`, from any panel: reload from GitHub *now* — the selected
 /// project's open list and its open issues (`issues::reload_selected`),
 /// every one of its checkouts' own PR, and the body
@@ -2194,8 +2188,7 @@ pub(crate) const RELOAD_FLASH: &str = "reloading pull requests and issues from G
 /// list lookups fire on the loop's next turn rather than the next git
 /// tick. The other checkouts follow at the sweep's one-per-tick pace, so
 /// the key spends one process per row over the next seconds, never a
-/// burst. The flash is the only immediate feedback: the rows repaint once
-/// the answers land, and a machine with no `gh` never repaints at all.
+/// burst. The rows repaint once the answers land.
 fn refresh_pull_requests(app: &mut App) {
     let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
         return;
@@ -2208,7 +2201,6 @@ fn refresh_pull_requests(app: &mut App) {
     refetch_pr_detail(app);
     app.pr_refresh_requested = true;
     crate::issues::reload_selected(app);
-    app.flash = Some(RELOAD_FLASH.into());
     app.dirty = true;
 }
 
@@ -3095,10 +3087,6 @@ fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientReques
     let sref = SessionRef::Agent(id.clone());
     if !agent.alive {
         attach_now(app, sref, out);
-        app.flash = Some(format!(
-            "starting {} — press Enter again once it is up",
-            agent.name
-        ));
         return TurnSent::Booting;
     }
     let data = if text.contains('\n') {
@@ -3115,7 +3103,6 @@ fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientReques
         session: sref,
         data: b"\r".to_vec(),
     });
-    app.flash = Some(format!("sent to {}", agent.name));
     TurnSent::Sent
 }
 
@@ -3558,9 +3545,7 @@ fn dispatch_action(
         // still what `^q` comes back to — and before the first project,
         // where there are no cards to have a pane under.
         Action::ToggleLauncherPane if app.launcher_active() => launcher::toggle_pane(app),
-        Action::ToggleLauncherPane => {
-            app.flash = Some("no cards to fold a pane under — add a project first".into())
-        }
+        Action::ToggleLauncherPane => {}
         // Full-screen, and back down. The grid takes this key itself
         // (`launcher::handle_action`), as does a LOCKED PANE; it reaches
         // here from a full-screen session that is not typing — one that
@@ -3568,15 +3553,12 @@ fn dispatch_action(
         Action::ToggleFullScreen if app.launcher_active() => {
             launcher::toggle_full_screen(app, out);
         }
-        Action::ToggleFullScreen => {
-            app.flash = Some("no session to full-screen — add a project first".into())
-        }
+        Action::ToggleFullScreen => {}
         // The strip across the LAUNCHER PANE's header. The grid takes this
         // key itself (`launcher::handle_action`); it reaches here over a
         // full-screen session, which has no strip, and before the first
         // project, where there is no pane at all.
-        Action::PaneTabs if app.launcher_active() => app.flash = Some(launcher::no_pane_here(app)),
-        Action::PaneTabs => app.flash = Some("no pane here — add a project first".into()),
+        Action::PaneTabs => {}
         // The header's PROJECT TABS. The grid takes these keys itself
         // (`launcher::handle_action`); they reach here with a session
         // full-screen over it, where the header is not on screen.
@@ -3587,7 +3569,7 @@ fn dispatch_action(
         | Action::PrevProjectTab
         | Action::CloseProjectTab
         | Action::SelectProjectTab(_)
-        | Action::ProjectDropdown => app.flash = Some(launcher::no_tabs_here(app)),
+        | Action::ProjectDropdown => {}
         Action::MoveDown => move_selection(app, 1, out),
         Action::MoveUp => move_selection(app, -1, out),
         // The first-run SPLASH, started inside a git repo: Enter opens it —
@@ -3678,12 +3660,8 @@ fn dispatch_action(
                         activate::unarchive(app, a.id, out);
                         release_watch::arm(&mut app.release_watch, *chord, std::time::Instant::now());
                     }
-                    Some(SessionRow::Terminal(_)) => {
-                        app.flash = Some("terminals can't be archived — d closes them".into());
-                    }
-                    Some(SessionRow::Link(_)) => {
-                        app.flash = Some("links can't be archived — d deletes them".into());
-                    }
+                    // Terminals and links can't be archived: `d` closes or
+                    // deletes them.
                     _ => {}
                 }
             }
@@ -3905,10 +3883,6 @@ fn cycle_box_effort(app: &mut App, back: crate::quick_prompt::QuickReturn) {
     );
     let choices = crate::config::effort_choices(kind, model, custom);
     if choices.is_empty() {
-        app.flash = Some(format!(
-            "{} has no effort to cycle",
-            crate::agent_picker::harness_label(kind, custom)
-        ));
         return;
     }
     let current = launch
@@ -3955,10 +3929,6 @@ fn cycle_default_effort(app: &mut App) {
         .default_model()
         .map(str::to_string);
     if crate::config::effort_choices(kind, model.as_deref(), custom.as_deref()).is_empty() {
-        app.flash = Some(format!(
-            "{} has no effort to cycle",
-            crate::agent_picker::harness_label(kind, custom.as_deref())
-        ));
         return;
     }
     let id = custom
@@ -3968,6 +3938,8 @@ fn cycle_default_effort(app: &mut App) {
     cfg.cycle_agent_row(&id, crate::config::HarnessField::Effort, 1);
     let next = cfg.agent_value(&id, crate::config::HarnessField::Effort);
     let _ = cfg.try_save();
+    // No box is up to show the default it stepped: the footer is the only
+    // place the new effort is seen.
     app.flash = Some(format!("effort: {next}"));
     app.dirty = true;
 }
@@ -4366,10 +4338,9 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
     let known = canon
         .ancestors()
         .find_map(|dir| app.tree.project_at_path(dir))
-        .map(|p| (p.id.clone(), p.name.clone()));
-    if let Some((id, name)) = known {
+        .map(|p| p.id.clone());
+    if let Some(id) = known {
         launcher::open_project(app, &id, out);
-        app.flash = Some(format!("{name} is already a project — opened it"));
         return;
     }
     if canon.is_dir() && !in_git_repo(&canon) {
@@ -4413,23 +4384,24 @@ fn open_repo_in_browser(app: &mut App) {
         .filter(|path| path.is_dir())
         .or_else(|| app.selected_project().map(|p| p.repo_path.clone()));
     let Some(root) = root else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
-    // Not open_link: this is a repo page, never a PR row to mark read.
-    let open = move || match crate::remote::repo_url(&root) {
-        Ok(url) if open_url(&url) => format!("opened {}", crate::app::pretty_url(&url)),
-        Ok(url) => format!("couldn't open {url}"),
-        Err(msg) => msg,
+    // Not open_link: this is a repo page, never a PR row to mark read. The
+    // page opening is the answer; only a page that won't says why.
+    let failed = move || match crate::remote::repo_url(&root) {
+        Ok(url) if open_url(&url) => None,
+        Ok(url) => Some(format!("couldn't open {url}")),
+        Err(msg) => Some(msg),
     };
     // Which page it is takes a `git remote get-url` to know: asked off the
-    // loop, with the outcome flashed when it lands.
+    // loop, with a failure flashed when it lands.
     match app.view_jobs.clone() {
-        Some(jobs) => {
-            app.flash = Some("opening the repository's page…".into());
-            jobs.run(move || Some(crate::view_jobs::Answer::Flash(open())));
+        Some(jobs) => jobs.run(move || failed().map(crate::view_jobs::Answer::Flash)),
+        None => {
+            if let Some(why) = failed() {
+                app.flash = Some(why);
+            }
         }
-        None => app.flash = Some(open()),
     }
 }
 
@@ -4437,7 +4409,7 @@ fn open_repo_in_browser(app: &mut App) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OutsideApp {
     bundle: std::path::PathBuf,
-    /// What one hand-off opens, for the flash: "Ghostty tab".
+    /// What one hand-off opens, for a failure's flash: "Ghostty tab".
     opens: &'static str,
 }
 
@@ -4474,9 +4446,9 @@ fn outside_app(choice: crate::config::OutsideTerminal) -> Option<OutsideApp> {
 /// setting. `open -a` hands the app a folder, which Ghostty takes like one
 /// dropped on its Dock icon — a tab in the front window under the default
 /// `macos-dock-drop-behavior = new-tab` — and Terminal.app as a new window
-/// there. Silent — no flash at all — when there is no app to hand it to:
+/// there. Silent when it opens, and when there is no app to hand it to:
 /// off macOS, or over ssh, where `open` would reach the remote machine's
-/// screen instead of the one being looked at.
+/// screen instead of the one being looked at. A failure says why.
 fn open_outside_terminal(app: &mut App) {
     let choice = crate::config::Config::load().outside_terminal();
     open_outside_terminal_with(app, outside_app(choice));
@@ -4486,28 +4458,34 @@ fn open_outside_terminal_with(app: &mut App, outside: Option<OutsideApp>) {
     let Some(outside) = outside.filter(|_| !app.is_remote) else {
         return;
     };
-    app.flash = Some(match context_dir(app) {
-        Ok(dir) if open_in_app(&outside.bundle, &dir) => {
-            format!("opened a {} in {}", outside.opens, dir.display())
+    match context_dir(app) {
+        Some(Ok(dir)) => {
+            if !open_in_app(&outside.bundle, &dir) {
+                app.flash = Some(format!(
+                    "couldn't open a {} in {}",
+                    outside.opens,
+                    dir.display()
+                ));
+            }
         }
-        Ok(dir) => format!("couldn't open a {} in {}", outside.opens, dir.display()),
-        Err(why) => why,
-    });
+        Some(Err(why)) => app.flash = Some(why),
+        None => {}
+    }
 }
 
 /// The checkout the cursor is on — the selected worktree, else its
 /// project's repo — while it is still on disk, or what to say instead.
-fn context_dir(app: &App) -> Result<std::path::PathBuf, String> {
+/// None with nothing selected.
+fn context_dir(app: &App) -> Option<Result<std::path::PathBuf, String>> {
     let dir = app
         .selected_worktree()
         .map(|w| w.path.clone())
-        .or_else(|| app.selected_project().map(|p| p.repo_path.clone()))
-        .ok_or_else(|| SELECT_CONTEXT_FIRST.to_string())?;
-    if dir.is_dir() {
+        .or_else(|| app.selected_project().map(|p| p.repo_path.clone()))?;
+    Some(if dir.is_dir() {
         Ok(dir)
     } else {
         Err(format!("path missing on disk: {}", dir.display()))
-    }
+    })
 }
 
 /// The OPEN MENU's **Checkout in <app>**: the checkout under the cursor as
@@ -4522,49 +4500,33 @@ fn open_checkout_outside(app: &mut App) {
         return;
     }
     let dir = match context_dir(app) {
-        Ok(dir) => dir,
-        Err(why) => {
+        Some(Ok(dir)) => dir,
+        Some(Err(why)) => {
             app.flash = Some(why);
             return;
         }
+        None => return,
     };
-    let pending = format!(
-        "opening {} in {}…",
-        dir.display(),
-        crate::outside_editor::hint_name()
-    );
-    hand_off(app, pending, move || {
+    hand_off(app, move || {
         let target = crate::outside_editor::configured()?;
         let (program, args) = target.dir_command(&dir);
-        match crate::outside_editor::launch(&program, &args) {
-            Ok(()) => Ok(format!("opened {} in {}", dir.display(), target.name)),
-            Err(why) => Err(format!(
-                "couldn't open {} in {}: {why}",
-                dir.display(),
-                target.name
-            )),
-        }
+        crate::outside_editor::launch(&program, &args)
+            .map_err(|why| format!("couldn't open {} in {}: {why}", dir.display(), target.name))
     });
 }
 
 /// Run `open` — a hand-off to an app outside orion, whose tool takes a
 /// second or so to pass the file to the running app — off the loop: the
-/// footer says it is under way, then what came of it, a failure with its
+/// app coming up is the answer, and a failure lands in the footer with its
 /// reason. Inline where there is no loop to land it on (unit tests).
-fn hand_off(
-    app: &mut App,
-    pending: String,
-    open: impl FnOnce() -> Result<String, String> + Send + 'static,
-) {
-    let said = |outcome: Result<String, String>| match outcome {
-        Ok(done) | Err(done) => done,
-    };
+fn hand_off(app: &mut App, open: impl FnOnce() -> Result<(), String> + Send + 'static) {
     match app.view_jobs.clone() {
-        Some(jobs) => {
-            app.flash = Some(pending);
-            jobs.run(move || Some(crate::view_jobs::Answer::Flash(said(open()))));
+        Some(jobs) => jobs.run(move || open().err().map(crate::view_jobs::Answer::Flash)),
+        None => {
+            if let Err(why) = open() {
+                app.flash = Some(why);
+            }
         }
-        None => app.flash = Some(said(open())),
     }
 }
 
@@ -4627,17 +4589,14 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
 
 /// The file in the OPEN IN APP editor — on its checkout's window at the
 /// line, where the app takes one — off the loop ([`hand_off`]), the footer
-/// saying where it went or why it didn't.
+/// saying why when it didn't go.
 fn open_in_outside_app(app: &mut App, root: &std::path::Path, file: &str, line: u64) {
-    let pending = format!("opening {file} in {}…", crate::outside_editor::hint_name());
     let (root, file) = (root.to_path_buf(), file.to_string());
-    hand_off(app, pending, move || {
+    hand_off(app, move || {
         let target = crate::outside_editor::configured()?;
         let (program, args) = target.file_command(&root, &file, line);
-        match crate::outside_editor::launch(&program, &args) {
-            Ok(()) => Ok(format!("opened {file} in {}", target.name)),
-            Err(why) => Err(format!("couldn't open {file} in {}: {why}", target.name)),
-        }
+        crate::outside_editor::launch(&program, &args)
+            .map_err(|why| format!("couldn't open {file} in {}: {why}", target.name))
     });
 }
 
@@ -4672,12 +4631,11 @@ fn open_in_app(bundle: &std::path::Path, path: &std::path::Path) -> bool {
 /// `r` on the Worktrees panel: start the selected checkout's RUN COMMAND,
 /// or stop it when it is already up.
 fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
+    // A pull request row has no checkout to run.
     if app.selected_worktree_pr().is_some() {
-        app.flash = Some("a pull request has no checkout to run — pick a worktree".into());
         return;
     }
     let Some(w) = app.selected_worktree().cloned() else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
     toggle_run_in(app, &w, out);
@@ -4686,16 +4644,11 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// Ask the DAEMON to start `worktree`'s run, or to stop it while it runs.
 fn toggle_run_in(app: &mut App, worktree: &orion_core::Worktree, out: &mut Vec<ClientRequest>) {
     if app.is_placeholder_worktree(&worktree.id) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     }
     let start = !app.worktree_running(&worktree.id);
-    let intent = PendingIntent::RunToggled {
-        branch: worktree.branch.clone(),
-        started: start,
-    };
     let id = worktree.id.clone();
-    send_with(app, out, intent, |req_id| {
+    send(app, out, |req_id| {
         if start {
             ClientRequest::StartRun {
                 req_id,
@@ -4712,12 +4665,11 @@ fn toggle_run_in(app: &mut App, worktree: &orion_core::Worktree, out: &mut Vec<C
 
 /// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
 fn open_selected_worktree(app: &mut App) {
+    // A pull request row has no checkout to open.
     if app.selected_worktree_pr().is_some() {
-        app.flash = Some("a pull request has no checkout to open — pick a worktree".into());
         return;
     }
     let Some(w) = app.selected_worktree().cloned() else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
     open_worktree(app, &w);
@@ -4729,8 +4681,8 @@ const NO_OPEN_COMMAND: &str =
     "no open command for this worktree — set one in Settings (s) → Project, \
                                or add .orion.json with {\"open\": \"open http://localhost:3000\"}";
 
-/// Run `worktree`'s OPEN COMMAND once and say so: the project's **Open
-/// command** setting (Settings → Project) when it is set, else the
+/// Run `worktree`'s OPEN COMMAND once — saying why when there is none or
+/// it won't start: the project's **Open command** setting (Settings → Project) when it is set, else the
 /// checkout's `.orion.json` `open`. The TUI runs it, not the DAEMON: it
 /// opens a browser or an editor on the machine the user is sitting at.
 fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
@@ -4747,10 +4699,9 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
             return;
         }
     };
-    app.flash = Some(match spawn_open_command(&command, &worktree.path) {
-        Ok(()) => format!("↗ {command}"),
-        Err(e) => format!("couldn't run {command}: {e}"),
-    });
+    if let Err(e) = spawn_open_command(&command, &worktree.path) {
+        app.flash = Some(format!("couldn't run {command}: {e}"));
+    }
 }
 
 /// The OPEN COMMAND for a checkout, resolved the way the DAEMON resolves
@@ -4806,17 +4757,13 @@ fn spawn_open_command(command: &str, cwd: &std::path::Path) -> std::io::Result<(
 }
 
 /// The selected worktree's checkout — path and branch — for the modals that
-/// read it. Flashes and returns None when no worktree is selected or its
+/// read it. None when no worktree is selected, and, flashing why, when its
 /// path is gone from disk.
 fn selected_checkout(app: &mut App) -> Option<(std::path::PathBuf, String)> {
     // Clone before touching app.overlay — selected_worktree borrows app.
-    let Some((path, branch)) = app
+    let (path, branch) = app
         .selected_worktree()
-        .map(|w| (w.path.clone(), w.branch.clone()))
-    else {
-        app.flash = Some("no worktree selected".into());
-        return None;
-    };
+        .map(|w| (w.path.clone(), w.branch.clone()))?;
     if !path.is_dir() {
         app.flash = Some(format!("worktree path missing on disk: {}", path.display()));
         return None;
@@ -4825,13 +4772,9 @@ fn selected_checkout(app: &mut App) -> Option<(std::path::PathBuf, String)> {
 }
 
 /// Every tracked + untracked file of a checkout, plus the configured editor
-/// command, for the finder and tree modals. Flashes and returns None when
-/// git fails or the checkout has no files.
-fn load_worktree_files(
-    app: &mut App,
-    path: &std::path::Path,
-    branch: &str,
-) -> Option<(Vec<String>, String)> {
+/// command, for the finder and tree modals. None when the checkout has no
+/// files, and, flashing why, when git fails.
+fn load_worktree_files(app: &mut App, path: &std::path::Path) -> Option<(Vec<String>, String)> {
     let files = match crate::git_diff::list_files(path) {
         Ok(files) => files,
         Err(msg) => {
@@ -4840,7 +4783,6 @@ fn load_worktree_files(
         }
     };
     if files.is_empty() {
-        app.flash = Some(format!("no files in {branch}"));
         return None;
     }
     let editor = crate::config::Config::load().editor_command();
@@ -4862,11 +4804,10 @@ fn load_worktree_files(
 /// LIST (`git_diff::read_opening`), so a checkout with nothing uncommitted
 /// but commits of its own opens on those instead of saying "no changes".
 ///
-/// A checkout the changed-files badge already knows to be clean is told so
-/// on the spot instead of being shown a modal that closes again; the badge
-/// can be two seconds behind an agent, so git is still asked, and the
-/// modal opens after all if it disagrees — or if the branch has commits to
-/// show (`App::diff_probe`).
+/// A checkout the changed-files badge already knows to be clean opens no
+/// modal that would only close again; the badge can be two seconds behind
+/// an agent, so git is still asked, and the modal opens after all if it
+/// disagrees — or if the branch has commits to show (`App::diff_probe`).
 fn open_diff_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -4885,7 +4826,6 @@ fn open_diff_view(app: &mut App) {
     let known_clean =
         matches!(&app.git_changes, Some((id, Some(0))) if Some(id) == selected.as_ref());
     if known_clean {
-        app.flash = Some(format!("no changes in {branch}"));
         app.diff_probe = Some((ticket, path.clone(), branch));
     } else {
         let mut view = DiffView::opening(path.clone(), branch, jobs.clone(), ticket);
@@ -4915,8 +4855,8 @@ fn open_diff_view(app: &mut App) {
     });
 }
 
-/// Open the DIFF VIEWER on a listing already in hand — or say there is
-/// nothing to show.
+/// Open the DIFF VIEWER on a listing already in hand — nothing, when it
+/// has nothing to show.
 fn show_diff_listing(
     app: &mut App,
     path: std::path::PathBuf,
@@ -4924,7 +4864,6 @@ fn show_diff_listing(
     listing: crate::view_jobs::DiffListing,
 ) {
     if listing.is_empty() {
-        app.flash = Some(format!("no changes in {branch}"));
         return;
     }
     let mut view = DiffView::new(path, branch, Vec::new(), true);
@@ -4939,8 +4878,8 @@ fn show_diff_listing(
 }
 
 /// Fuzzy file finder over every tracked + untracked file of the selected
-/// worktree (`f`). Same shell as `open_diff_view`: flash instead of opening
-/// when there's no worktree, the path is gone, or git fails.
+/// worktree (`f`). Same shell as `open_diff_view`: nothing opens with no
+/// worktree, and the footer says why when the path is gone or git fails.
 /// `Shift+H`: destinations remembered by `orion ssh`, newest first. Opens even
 /// when empty — the modal's hint is how the feature introduces itself.
 fn open_hosts_picker(app: &mut App) {
@@ -4963,7 +4902,7 @@ fn open_file_finder(app: &mut App) {
         )));
         return;
     }
-    let Some((files, editor)) = load_worktree_files(app, &path, &branch) else {
+    let Some((files, editor)) = load_worktree_files(app, &path) else {
         return;
     };
     app.overlay = Some(Overlay::Files(FileFinder::new(path, branch, editor, files)));
@@ -4985,8 +4924,8 @@ fn request_worktree_files(jobs: &crate::view_jobs::Jobs, path: &std::path::Path)
 
 /// Tree browser (`b`): full file tree of the selected worktree with a
 /// content preview, filterable by file name. Same shell as `open_diff_view`:
-/// flash instead of opening when there's no worktree, the path is gone, or
-/// git fails.
+/// nothing opens with no worktree, and the footer says why when the path is
+/// gone or git fails.
 fn open_tree_browser(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -5000,7 +4939,7 @@ fn open_tree_browser(app: &mut App) {
         )));
         return;
     }
-    let Some((files, editor)) = load_worktree_files(app, &path, &branch) else {
+    let Some((files, editor)) = load_worktree_files(app, &path) else {
         return;
     };
     app.overlay = Some(Overlay::Tree(TreeBrowser::new(path, branch, editor, files)));
@@ -5080,20 +5019,21 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
 }
 
 /// `git ls-files` came back for the FILE FINDER or the TREE BROWSER that
-/// opened ahead of it. A checkout with nothing to list, or one git could
-/// not list, closes the modal with the reason — what `f` and `b` used to
-/// say instead of opening.
+/// opened ahead of it. A checkout with nothing to list closes the modal;
+/// one git could not list closes it with the reason.
 fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, String>) {
-    let branch = match &app.overlay {
-        Some(Overlay::Files(finder)) if finder.listing == Some(ticket) => finder.branch.clone(),
-        Some(Overlay::Tree(view)) if view.listing == Some(ticket) => view.branch.clone(),
-        _ => return,
+    let waiting = match &app.overlay {
+        Some(Overlay::Files(finder)) => finder.listing == Some(ticket),
+        Some(Overlay::Tree(view)) => view.listing == Some(ticket),
+        _ => false,
     };
+    if !waiting {
+        return;
+    }
     let files = match result {
         Ok(files) if !files.is_empty() => files,
         Ok(_) => {
             app.overlay = None;
-            app.flash = Some(format!("no files in {branch}"));
             return;
         }
         Err(msg) => {
@@ -5110,10 +5050,10 @@ fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, S
 }
 
 /// `git status` came back for a `g`: fill the DIFF VIEWER that opened ahead
-/// of it — or close it, saying why, when there is nothing to show — or, for
-/// the checkout that was told "no changes" off the badge, open it after all
-/// when git found some, or the branch has commits to show, and nothing
-/// else has taken the screen since.
+/// of it — or close it when there is nothing to show (saying why when git
+/// failed) — or, for the checkout the badge said was clean, open it after
+/// all when git found changes, or the branch has commits to show, and
+/// nothing else has taken the screen since.
 fn land_diff_listing(
     app: &mut App,
     ticket: u64,
@@ -5130,26 +5070,21 @@ fn land_diff_listing(
                 && app.vim.is_none()
                 && app.page.is_none()
             {
-                app.flash = None;
                 show_diff_listing(app, path, branch, listing);
             }
         }
         return;
     }
-    let branch = match &app.overlay {
-        Some(Overlay::Diff(view)) if view.listing == Some(ticket) => view.branch.clone(),
-        _ => return,
-    };
+    if !matches!(&app.overlay, Some(Overlay::Diff(view)) if view.listing == Some(ticket)) {
+        return;
+    }
     match result {
         Ok(listing) if !listing.is_empty() => {
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
                 crate::git_diff::fill_view(view, listing);
             }
         }
-        Ok(_) => {
-            app.overlay = None;
-            app.flash = Some(format!("no changes in {branch}"));
-        }
+        Ok(_) => app.overlay = None,
         Err(msg) => {
             app.overlay = None;
             app.flash = Some(msg);
@@ -5343,7 +5278,6 @@ pub(crate) fn vim_size_guess(app: &App) -> (u16, u16) {
 /// referenced line — a markdown file as its MARKDOWN PAGE.
 fn open_file_link(app: &mut App, path: &str, line: Option<u64>) {
     let Some(root) = attached_worktree_root(app) else {
-        app.flash = Some("no worktree for this session".into());
         return;
     };
     let Some(file) = resolve_file_link(&root, path) else {
@@ -5669,7 +5603,6 @@ fn follow_checkout(app: &mut App, id: Option<&WorktreeId>) {
 /// attaches it, so one keypress lands in a ready shell.
 fn create_terminal_for_context(app: &mut App, out: &mut Vec<ClientRequest>) {
     let Some(worktree) = worktree_in_context(app) else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
     create_terminal(app, worktree, out);
@@ -5678,7 +5611,6 @@ fn create_terminal_for_context(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// Ask the daemon for a shell terminal in `worktree`; the Ack attaches it.
 fn create_terminal(app: &mut App, worktree: WorktreeId, out: &mut Vec<ClientRequest>) {
     if app.is_placeholder_worktree(&worktree) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     }
     worked_in(app, &worktree);
@@ -5790,9 +5722,8 @@ pub(super) fn confirm_remove_project(name: &str, id: ProjectId) -> ConfirmDialog
 /// Edit the URL behind a link row. The detected pull request has no stored
 /// row to rewrite — it comes back from git on every lookup.
 fn edit_link(app: &mut App, row: &LinkRow) {
-    match row.id() {
-        Some(id) => open_prompt(app, PromptKind::EditLink { id: id.clone() }),
-        None => app.flash = Some("the pull request comes from git and can't be edited".into()),
+    if let Some(id) = row.id() {
+        open_prompt(app, PromptKind::EditLink { id: id.clone() });
     }
 }
 
@@ -5801,7 +5732,6 @@ fn edit_link(app: &mut App, row: &LinkRow) {
 /// lookup.
 fn delete_link(app: &mut App, row: &LinkRow) {
     let Some(id) = row.id() else {
-        app.flash = Some("the pull request link can't be deleted — it comes from git".into());
         return;
     };
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
@@ -5847,7 +5777,6 @@ fn open_delete_all_confirm(app: &mut App) {
                 .filter(|w| !w.is_main)
                 .collect();
             if doomed.is_empty() {
-                app.flash = Some("no deletable worktrees (the main checkout stays)".into());
                 return;
             }
             let killed = app
@@ -5878,18 +5807,13 @@ fn open_delete_all_confirm(app: &mut App) {
         Focus::Sessions => {
             // What the panel shows is what dies — terminals too, archived
             // rows only when the archived toggle has them visible.
-            let doomed = app.visible_session_rows();
-            if doomed.is_empty() {
-                app.flash = Some("no sessions to delete".into());
-                return;
-            }
             // Links are bookmarks, not sessions: `D` never touches them.
-            let doomed: Vec<SessionRow> = doomed
+            let doomed: Vec<SessionRow> = app
+                .visible_session_rows()
                 .into_iter()
                 .filter(|r| r.as_link().is_none())
                 .collect();
             if doomed.is_empty() {
-                app.flash = Some("no sessions to delete".into());
                 return;
             }
             let names: Vec<String> = doomed.iter().map(|r| r.name().to_string()).collect();
@@ -6098,9 +6022,8 @@ pub(super) fn open_menu(app: &mut App, items: Vec<MenuItem>, at: (u16, u16)) {
 /// CONTEXT MENU's "New terminal" already cover it.
 fn open_new_agent_picker(app: &mut App, worktree: WorktreeId) {
     // A stand-in checkout is not a place the DAEMON knows yet; better to
-    // say so here than after a kind and a model were picked.
+    // refuse here than after a kind and a model were picked.
     if app.is_placeholder_worktree(&worktree) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     }
     // Only the AGENT KINDS still enabled in the SETTINGS OVERLAY's Agents
@@ -6124,7 +6047,6 @@ pub(super) fn open_pr_agent_picker(app: &mut App) {
         return;
     };
     let Some(worktree) = selected_project_main_worktree(app) else {
-        app.flash = Some("the project has no ROOT WORKTREE for this PR session".into());
         return;
     };
     agent_picker::open_kind_picker(app, KindPicker::pr_session(worktree, &pr));
@@ -6564,10 +6486,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     && c != ' '
                     && !key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                let query = format!("{}{c}", menu.filter_query());
-                if !menu.type_filter(c) {
-                    app.flash = Some(format!("no row matches '{query}'"));
-                }
+                menu.type_filter(c);
             }
             _ if ui::menu_keys::WIDEN.matches(&key) && menu.filter.is_some() => menu.pop_filter(),
             // Esc never lands here: `closes_on_esc` closes the menu from any
@@ -7897,11 +7816,6 @@ fn toggle_hide_draft_prs(app: &mut App, out: &mut Vec<ClientRequest>) {
         restore_session(app, out);
         fire_pending_attach(app, out);
     }
-    app.flash = Some(if cfg.hide_draft_prs {
-        "draft pull requests hidden (Settings → Appearance)".into()
-    } else {
-        "draft pull requests shown".into()
-    });
 }
 
 /// Open `kind`'s prompt and send it straight on, empty — Enter on the box
@@ -8017,7 +7931,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             PromptKind::NewSkill { view } => crate::skills::reopen(app, (**view).clone()),
             _ => {}
         }
-        app.flash = Some("cancelled: empty input".into());
         return;
     }
     match prompt.kind {
@@ -8258,10 +8171,9 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
         } => {
             let mut presets = crate::agent_presets::load();
             if index < presets.len() {
-                let removed = presets.remove(index);
-                match crate::agent_presets::save(&presets) {
-                    Ok(()) => app.flash = Some(format!("deleted preset '{}'", removed.name)),
-                    Err(err) => app.flash = Some(format!("could not save agent presets: {err}")),
+                presets.remove(index);
+                if let Err(err) = crate::agent_presets::save(&presets) {
+                    app.flash = Some(format!("could not save agent presets: {err}"));
                 }
             }
             crate::preset_overlays::reopen_presets_list(
@@ -8481,8 +8393,8 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::SendCloudMessage(id) => open_prompt(app, PromptKind::CloudMessage { id }),
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
-        MenuAction::ContinueOn { id, harness, label } => {
-            launcher::continue_on_harness(app, id, harness, label, out)
+        MenuAction::ContinueOn { id, harness } => {
+            launcher::continue_on_harness(app, id, harness, out)
         }
         MenuAction::RenameAgent(id) => open_prompt(app, PromptKind::RenameAgent { id }),
         MenuAction::ArchiveAgent(id) => archive_agent(app, id),
@@ -8694,8 +8606,7 @@ fn detach_if_attached(app: &mut App, sref: &SessionRef, out: &mut Vec<ClientRequ
     if showing {
         app.pending_attach = None;
         app.term = None;
-        // The row went away under the pane — not a key anyone pressed, so
-        // it says that the keys are the grid's now.
+        // The row went away under the pane: the keys are the grid's now.
         app.release_terminal();
         if app.focus == Focus::Terminal {
             app.focus = Focus::Sessions;
@@ -8983,7 +8894,6 @@ fn jump_to_target_inner(
                 .is_some_and(|pid| select_project_row_by_id(app, &pid));
             let index = found.then(|| app.worktree_row_of(&id)).flatten();
             let Some(index) = index else {
-                app.flash = Some("worktree no longer exists".into());
                 return;
             };
             app.sel_worktree = index;
@@ -9012,7 +8922,6 @@ fn jump_to_target_inner(
                 .then(|| worktree.as_ref().and_then(|wid| app.worktree_row_of(wid)))
                 .flatten();
             let Some(wt_index) = wt_index else {
-                app.flash = Some(SESSION_GONE.into());
                 return;
             };
             app.sel_worktree = wt_index;
@@ -9025,7 +8934,6 @@ fn jump_to_target_inner(
                 // its worktree instead of attaching.
                 restore_session(app, out);
                 app.focus = Focus::Sessions;
-                app.flash = Some(SESSION_GONE.into());
                 return;
             };
             app.sel_session = index;
@@ -9054,7 +8962,6 @@ fn jump_to_target_inner(
                 .map(|p| p.id != project)
                 .unwrap_or(true);
             if !select_project_row_by_id(app, &project) {
-                app.flash = Some("project no longer exists".into());
                 return;
             }
             if changed {
@@ -9065,7 +8972,6 @@ fn jump_to_target_inner(
                 app.dirty = true;
             }
             let Some(row) = app.open_pr_row_of(&url) else {
-                app.flash = Some(PR_GONE.into());
                 return;
             };
             // Re-picking the row the cursor is already on keeps the
@@ -9112,7 +9018,6 @@ fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
         .then(|| worktree.as_ref().and_then(|wid| app.worktree_row_of(wid)))
         .flatten();
     let Some(wt_index) = wt_index else {
-        app.flash = Some(SESSION_GONE.into());
         return;
     };
     app.sel_worktree = wt_index;
@@ -9123,7 +9028,6 @@ fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
     else {
         restore_session(app, out);
         app.focus = Focus::Sessions;
-        app.flash = Some(SESSION_GONE.into());
         return;
     };
     app.sel_session = index;
@@ -9192,9 +9096,20 @@ fn session_needs_feedback(app: &App, id: &AgentId) -> bool {
 /// starts at the top and `,` at the bottom, so the two stay each other's
 /// reverse.
 fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<ClientRequest>) {
-    let ring = crate::palette::attention_sessions(&app.tree);
+    let current = crate::palette::attention_sessions(&app.tree);
+    // A walk in progress keeps the ring it started on (`App::attention_walk`)
+    // while the cursor is where it last landed and nothing joined or left.
+    let ring = match app.attention_walk.take() {
+        Some((landed, ring))
+            if app.selected_session().is_some_and(|a| a.id == landed)
+                && ring.len() == current.len()
+                && current.iter().all(|id| ring.contains(id)) =>
+        {
+            ring
+        }
+        _ => current,
+    };
     if ring.is_empty() {
-        app.flash = Some(NO_SESSIONS_TO_JUMP.into());
         return;
     }
     let len = ring.len() as i64;
@@ -9206,9 +9121,11 @@ fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<Client
         None if step > 0 => 0,
         None => len - 1,
     };
-    let target = PaletteTarget::Session(ring[next as usize].clone());
+    let landed = ring[next as usize].clone();
+    let target = PaletteTarget::Session(landed.clone());
     let landing = Landing::for_enter_on(app, &target, attaches);
     jump_to_target(app, target, landing, out);
+    app.attention_walk = Some((landed, ring));
 }
 
 fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
@@ -9394,14 +9311,13 @@ fn leave_terminal_lock(app: &mut App) {
     app.focus = Focus::Sessions;
 }
 
-/// Open a saved link in the browser, reporting either way — the browser
-/// comes up in front of the terminal, so a silent failure would read as
-/// "orion did nothing". A pull request is marked read on the way out: the
-/// conversation is about to be on screen, so the row's unread count starts
-/// again from here.
+/// Open a saved link in the browser, saying so when it couldn't — the
+/// browser comes up in front of the terminal on success, so a silent
+/// failure would read as "orion did nothing". A pull request is marked
+/// read on the way out: the conversation is about to be on screen, so the
+/// row's unread count starts again from here.
 pub(crate) fn open_link(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
     if open_url(url) {
-        app.flash = Some(format!("opened {}", crate::app::pretty_url(url)));
         mark_pr_seen(app, url, out);
     } else {
         app.flash = Some(format!("couldn't open {url}"));
@@ -9438,7 +9354,13 @@ fn mark_pr_seen(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
 /// rows. Applied locally as well as sent, so the counts drop on this frame
 /// instead of waiting for the daemon's upsert — and skipped entirely when
 /// there is nothing to clear.
+///
+/// Seen is seen whatever the row says now: a session looked at mid-way
+/// through a wake-up turn, its flag already down, has still been seen, so
+/// its UNSEEN SPELL ends here too and its next finish may ring the DONE
+/// SOUND again (`DoneSounds::seen`).
 fn mark_agent_seen(app: &mut App, id: &AgentId, out: &mut Vec<ClientRequest>) {
+    app.done_sounds.seen(id);
     let Some(a) = app.tree.agents.iter_mut().find(|a| &a.id == id && a.unseen) else {
         return;
     };
@@ -9678,10 +9600,6 @@ fn fire_pending_prewarm(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.next_keepwarm = Some(std::time::Instant::now() + KEEPWARM_REFRESH);
 }
 
-/// Flashed at a launch, a delete or a terminal aimed at a QUICK PROMPT
-/// stand-in checkout the DAEMON has not cut yet.
-const WORKTREE_STILL_CREATING: &str = "worktree is still being created";
-
 /// The PROJECT a checkout belongs to — what `CreatePrAgent` is addressed
 /// to. None only if the row went away between the picker and Enter.
 fn project_of_worktree(app: &App, worktree: &WorktreeId) -> Option<ProjectId> {
@@ -9731,7 +9649,6 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
     let pr = match pr {
         Some(pr) => {
             let Some(project) = project_of_worktree(app, &worktree) else {
-                app.flash = Some("worktree no longer exists".into());
                 return;
             };
             // The checkout it runs in: the project's worktree already on
@@ -9756,7 +9673,6 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
                     if let Some((kind, text)) = reopen_on_error {
                         reopen_prompt_with(app, kind, text);
                     }
-                    app.flash = Some(WORKTREE_STILL_CREATING.into());
                     return;
                 }
                 Some(_) => None,
@@ -10366,6 +10282,8 @@ pub(crate) fn open_url(url: &str) -> bool {
         return false;
     }
     if cfg!(test) {
+        #[cfg(test)]
+        OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
         return true;
     }
     #[cfg(target_os = "macos")]
@@ -10378,6 +10296,17 @@ pub(crate) fn open_url(url: &str) -> bool {
     {
         false
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The URLs [`open_url`] handed the browser on this test's thread, taken.
+#[cfg(test)]
+pub(crate) fn take_opened() -> Vec<String> {
+    OPENED.with(|opened| std::mem::take(&mut *opened.borrow_mut()))
 }
 
 /// Start `command` and let it finish on its own: true once it is running.
@@ -11119,11 +11048,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     .find(|link| link.contains(cell))
                     .map(|link| link.url.clone())
                 {
-                    app.flash = Some(if open_url(&url) {
-                        format!("opened {url}")
-                    } else {
-                        format!("open failed: {url}")
-                    });
+                    if !open_url(&url) {
+                        app.flash = Some(format!("open failed: {url}"));
+                    }
                     app.dirty = true;
                     return;
                 }
@@ -11644,24 +11571,12 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // re-sorts those columns too.
             // Every cursor stays on the row it was on.
             let before = selection_snapshot(app);
-            let mut went_red = false;
+            // Which sound, if any, this edge is news for (`edge_alert`): a
+            // re-stamp of the status a row already wears, and the startup
+            // Snapshot, never get one.
+            let mut edge = None;
             if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id == agent) {
-                // The RUNNING / NEEDS FEEDBACK → FINISHED edge — the one
-                // that raises UNSEEN — rings the DONE SOUND, whether or not
-                // the session is on screen. A re-stamp of a finished row
-                // and the startup Snapshot never get here.
-                if status == orion_core::AgentStatus::Finished
-                    && matches!(
-                        a.status,
-                        orion_core::AgentStatus::Running | orion_core::AgentStatus::NeedsFeedback
-                    )
-                {
-                    app.pending_ding = true;
-                }
-                // The edge *into* NEEDS FEEDBACK is the FEEDBACK SOUND's;
-                // a re-stamp of a row already red is not.
-                went_red = status == orion_core::AgentStatus::NeedsFeedback
-                    && a.status != orion_core::AgentStatus::NeedsFeedback;
+                edge = alerts::edge_alert(a.status, status);
                 a.status = status;
                 a.status_changed_at = changed_at;
                 a.unseen = unseen;
@@ -11683,16 +11598,30 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             if unseen && on_screen {
                 mark_agent_seen(app, &agent, out);
             }
-            // A prompt in the pane the user is locked into typing at, with
-            // the window focused, is already under their hands: a sound
-            // there is noise. Previewing the pane from a panel is not
-            // typing at it, and a window in the background can't be seen —
-            // both ring, and the second is the whole point.
+            // A prompt — or a crash — in the pane the user is locked into
+            // typing at, with the window focused, is already under their
+            // hands: a sound there is noise. Previewing the pane from a
+            // panel is not typing at it, and a window in the background
+            // can't be seen — both ring, and the second is the whole point.
             let under_hands = on_screen && app.term_locked && app.window_focused;
-            if went_red && !under_hands {
-                if let Some(alert) = alerts::alert_for(&app.tree, &agent) {
-                    app.pending_feedback.push(alert);
+            match edge {
+                // The DONE SOUND is for a finish nobody saw land: one still
+                // UNSEEN once the pane on screen has had its say above. It
+                // rings only after it settles (`DoneSounds`), from the
+                // frame's drain.
+                Some(AlertKind::Finished) => {
+                    if app.tree.agents.iter().any(|a| a.id == agent && a.unseen) {
+                        app.done_sounds.finished(&agent, std::time::Instant::now());
+                    }
                 }
+                // Into NEEDS FEEDBACK, or a live turn's CLI dying: the
+                // FEEDBACK SOUND, on this frame.
+                Some(kind) if !under_hands => {
+                    if let Some(alert) = alerts::alert_for(&app.tree, &agent, kind) {
+                        app.pending_feedback.push(alert);
+                    }
+                }
+                _ => {}
             }
             // Nothing left any list, so this only re-seats the cursors.
             reconcile_selection_inner(app, before, out);
@@ -11738,41 +11667,8 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                         _ => placeholder::discard_pr(app, &placeholder, out),
                     }
                 }
-                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _)
-                | (Some(PendingIntent::Note(note)), _) => {
+                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _) => {
                     app.flash = Some(note);
-                }
-                (
-                    Some(PendingIntent::RunToggled {
-                        branch,
-                        started: true,
-                    }),
-                    created,
-                ) => {
-                    // The reply usually beats the broadcast upsert, so the
-                    // row naming the command may not be in the tree yet:
-                    // then the flash names it when the row lands.
-                    match created {
-                        Some(EntityId::Terminal(id)) => match run_command_of(app, &id) {
-                            Some(command) => {
-                                app.flash = Some(format!("▶ running {command} in {branch}"));
-                            }
-                            None => {
-                                app.flash = Some(format!("▶ running in {branch}"));
-                                app.run_flash_when_seen = Some((id, branch));
-                            }
-                        },
-                        _ => app.flash = Some(format!("▶ running in {branch}")),
-                    }
-                }
-                (
-                    Some(PendingIntent::RunToggled {
-                        branch,
-                        started: false,
-                    }),
-                    _,
-                ) => {
-                    app.flash = Some(format!("■ stopped the run in {branch}"));
                 }
                 (Some(PendingIntent::SelectCreatedProject), Some(EntityId::Project(id))) => {
                     // Its upsert usually lands just before this Ack; if not,
@@ -12168,39 +12064,27 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
                 .agents
                 .iter()
                 .any(|x| x.id == a.id && x.worktree_id != a.worktree_id);
+            // A finish read somewhere else — another client put it on
+            // screen — ends its UNSEEN SPELL here as well.
+            let read_elsewhere = !a.unseen
+                && a.status == orion_core::AgentStatus::Finished
+                && app
+                    .tree
+                    .agents
+                    .iter()
+                    .any(|x| x.id == a.id && crate::app::unread_finish(x));
+            if read_elsewhere {
+                app.done_sounds.seen(&a.id);
+            }
             let id = a.id.clone();
             upsert_by(&mut app.tree.agents, a, |x, y| x.id == y.id);
             if moved && selected.as_ref() == Some(&id) {
                 app.select_when_seen = Some(SessionRef::Agent(id));
             }
         }
-        Entity::Terminal(t) => {
-            let id = t.id.clone();
-            upsert_by(&mut app.tree.terminals, t, |x, y| x.id == y.id);
-            if app
-                .run_flash_when_seen
-                .as_ref()
-                .is_some_and(|(want, _)| *want == id)
-            {
-                if let (Some(command), Some((_, branch))) =
-                    (run_command_of(app, &id), app.run_flash_when_seen.take())
-                {
-                    app.flash = Some(format!("▶ running {command} in {branch}"));
-                }
-            }
-        }
+        Entity::Terminal(t) => upsert_by(&mut app.tree.terminals, t, |x, y| x.id == y.id),
         Entity::Link(l) => upsert_by(&mut app.tree.links, l, |x, y| x.id == y.id),
     }
-}
-
-/// The command a RUN TERMINAL in the tree runs; None for a plain shell or
-/// a row not seen yet.
-fn run_command_of(app: &App, id: &TerminalId) -> Option<String> {
-    app.tree
-        .terminals
-        .iter()
-        .find(|t| &t.id == id)
-        .and_then(|t| t.run_command.clone())
 }
 
 /// Replace the first entry of `list` that `same` pairs with `item`, or
@@ -12629,49 +12513,309 @@ mod tests {
         );
     }
 
-    /// The DONE SOUND rings on the RUNNING / NEEDS FEEDBACK → FINISHED
-    /// edge only — not on the way into NEEDS FEEDBACK, not on a re-stamp
-    /// of a row already finished — and the flag is one bool, so a frame
-    /// with several finishes rings once.
+    /// `agent` flipping to `status` as the daemon says it: a live turn
+    /// landing on FINISHED raises UNSEEN, every other flip drops it.
+    fn flip_to(agent: &str, status: orion_core::AgentStatus) -> ServerEvent {
+        ServerEvent::StatusChanged {
+            agent: AgentId(agent.into()),
+            status,
+            changed_at: crate::app::now_ms(),
+            unseen: status == orion_core::AgentStatus::Finished,
+        }
+    }
+
+    /// The DONE SOUND for an unseen finish is not rung on the edge but
+    /// scheduled a SETTLE later, and rings — once, announced for its UNSEEN
+    /// SPELL — when the drain finds it due and still standing. The edge
+    /// into NEEDS FEEDBACK schedules nothing, nor does a re-stamp of a row
+    /// already finished.
     #[test]
-    fn a_finish_rings_the_done_sound_once() {
+    fn an_unseen_finish_rings_the_done_sound_once_it_settles() {
+        use crate::app::DONE_SETTLE;
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_agent(&mut app, AgentStatus::Running);
-        assert!(!app.pending_ding, "the snapshot is silent");
         let a2 = AgentId("a2".into());
-        let flip = |status: AgentStatus| ServerEvent::StatusChanged {
-            agent: a2.clone(),
-            status,
-            changed_at: crate::app::now_ms(),
-            unseen: status == AgentStatus::Finished,
+        assert_eq!(app.done_sounds.next_due(), None, "the snapshot is silent");
+
+        hse(&mut app, flip_to("a2", AgentStatus::NeedsFeedback));
+        assert_eq!(
+            app.done_sounds.next_due(),
+            None,
+            "waiting on the user is not done"
+        );
+        let edge = std::time::Instant::now();
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        let due = app
+            .done_sounds
+            .next_due()
+            .expect("NEEDS FEEDBACK -> FINISHED");
+        assert!(
+            due >= edge + DONE_SETTLE && due <= std::time::Instant::now() + DONE_SETTLE,
+            "due a SETTLE after the edge"
+        );
+
+        let early = due - Duration::from_millis(1);
+        assert!(
+            app.done_sounds.settle(&app.tree, early).is_empty(),
+            "not yet"
+        );
+        assert_eq!(app.done_sounds.settle(&app.tree, due), vec![a2.clone()]);
+        assert!(app.done_sounds.announced.contains(&a2));
+        assert_eq!(app.done_sounds.next_due(), None, "rung once, then gone");
+
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(
+            app.done_sounds.next_due(),
+            None,
+            "a re-stamp of a finished row is silent"
+        );
+    }
+
+    /// A finish in the pane on screen was watched, so it is not news: the
+    /// edge reads the row as already seen and schedules nothing — whether
+    /// the user is typing there or only previewing it.
+    #[test]
+    fn a_finish_in_the_pane_on_screen_rings_no_done_sound() {
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+        app.term = Some(AttachedTerm::new(
+            SessionRef::Agent(AgentId("a2".into())),
+            40,
+            10,
+        ));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.next_due(), None);
+
+        // Another session's pane on screen: this one finished unwatched.
+        app.term = Some(AttachedTerm::new(
+            SessionRef::Agent(AgentId("a1".into())),
+            40,
+            10,
+        ));
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert!(app.done_sounds.next_due().is_some());
+    }
+
+    /// ONCE PER UNSEEN SPELL: after a finish has rung, the wake-up turns
+    /// that follow — started by a task notification or a queued message,
+    /// each ending on its own — ring nothing until the user has seen the
+    /// session. Seeing it, here or in another client, starts the next
+    /// spell, and its first finish rings again.
+    #[test]
+    fn later_finishes_ring_nothing_until_the_session_is_seen() {
+        use orion_core::{AgentStatus, Entity};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+        let a2 = AgentId("a2".into());
+        let ring = |app: &mut App| {
+            let due = app.done_sounds.next_due()?;
+            app.done_sounds.settle(&app.tree, due).into_iter().next()
         };
 
-        hse(&mut app, flip(AgentStatus::NeedsFeedback));
-        assert!(!app.pending_ding, "waiting on the user is not done");
-        hse(&mut app, flip(AgentStatus::Finished));
-        assert!(app.pending_ding, "NEEDS FEEDBACK -> FINISHED rings");
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(ring(&mut app), Some(a2.clone()));
 
-        app.pending_ding = false;
-        hse(&mut app, flip(AgentStatus::Finished));
-        assert!(!app.pending_ding, "a re-stamp of a finished row is silent");
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.next_due(), None, "a wake-up turn's finish");
 
-        hse(&mut app, flip(AgentStatus::Running));
-        assert!(!app.pending_ding);
-        // On screen or not makes no difference to the sound.
-        app.term = Some(AttachedTerm::new(SessionRef::Agent(a2.clone()), 40, 10));
-        hse(&mut app, flip(AgentStatus::Finished));
-        assert!(
-            app.pending_ding,
-            "RUNNING -> FINISHED rings, even on screen"
+        // Seen mid-way through another wake-up turn: its flag is already
+        // down, and it was seen all the same.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        let mut out = Vec::new();
+        mark_agent_seen(&mut app, &a2, &mut out);
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(ring(&mut app), Some(a2.clone()), "a new spell rings");
+
+        // Read in another client: the daemon's upsert drops the flag on a
+        // row still finished, which ends the spell here too.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.next_due(), None);
+        let mut read = app.tree.agents.iter().find(|a| a.id == a2).unwrap().clone();
+        read.unseen = false;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(read),
+            },
         );
-        hse(&mut app, flip(AgentStatus::Running));
-        hse(&mut app, flip(AgentStatus::Finished));
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(ring(&mut app), Some(a2));
+    }
+
+    /// SETTLE: a finish that does not stand for the whole wait rings
+    /// nothing — the row went back to work (a subagent's start healing it,
+    /// the next queued turn), was seen, archived or deleted. A finish that
+    /// flickers back and forth inside the wait rings once, a SETTLE after
+    /// where it landed.
+    #[test]
+    fn a_finish_that_does_not_stand_through_the_settle_rings_nothing() {
+        use orion_core::{AgentStatus, Entity, EntityId};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+        let a2 = AgentId("a2".into());
+        let settle_all = |app: &mut App| {
+            let due = app.done_sounds.next_due().expect("a finish is settling");
+            app.done_sounds.settle(&app.tree, due)
+        };
+
+        // Back to work inside the wait.
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        assert!(settle_all(&mut app).is_empty(), "it left FINISHED");
         assert!(
-            app.pending_ding,
-            "two finishes in a frame are still one ding"
+            !app.done_sounds.announced.contains(&a2),
+            "nothing was announced, so the real finish still rings"
         );
+
+        // Flickering: the second finish restarts the one wait.
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        let first = app.done_sounds.next_due().unwrap();
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.due.len(), 1);
+        assert!(app.done_sounds.next_due().unwrap() >= first);
+        assert_eq!(settle_all(&mut app), vec![a2.clone()]);
+
+        // Seen inside the wait.
+        let mut out = Vec::new();
+        mark_agent_seen(&mut app, &a2, &mut out);
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        mark_agent_seen(&mut app, &a2, &mut out);
+        assert_eq!(app.done_sounds.next_due(), None, "seen: nothing to settle");
+
+        // Archived inside the wait — read off the row itself, ahead of the
+        // daemon dropping the flag with it.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        let mut archived = app.tree.agents.iter().find(|a| a.id == a2).unwrap().clone();
+        archived.archived = true;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(archived.clone()),
+            },
+        );
+        assert!(settle_all(&mut app).is_empty(), "archived");
+        archived.archived = false;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(archived),
+            },
+        );
+
+        // Deleted inside the wait.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        hse(
+            &mut app,
+            ServerEvent::EntityRemoved {
+                id: EntityId::Agent(a2.clone()),
+            },
+        );
+        assert!(settle_all(&mut app).is_empty(), "deleted");
+    }
+
+    /// FOLD: of two DONE SOUNDs due within ten seconds of each other only
+    /// the first rings — and a FEEDBACK SOUND that just rang folds one the
+    /// same way. Each folded finish is still announced (the notification
+    /// names it); past the FOLD the next one rings again.
+    #[test]
+    fn done_sounds_due_inside_the_fold_ring_once() {
+        use crate::app::{DoneSounds, DONE_FOLD, DONE_SETTLE};
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Finished);
+        for a in &mut app.tree.agents {
+            a.status = AgentStatus::Finished;
+            a.unseen = true;
+        }
+        let (a1, a2) = (AgentId("a1".into()), AgentId("a2".into()));
+        let t0 = std::time::Instant::now();
+        let mut sounds = DoneSounds::default();
+        let mut rung = Vec::new();
+        let mut ring_due = |sounds: &mut DoneSounds, now: std::time::Instant| {
+            let settled = sounds.settle(&app.tree, now);
+            if !settled.is_empty() && sounds.may_ring(now) {
+                sounds.rang(now);
+                rung.push(now);
+            }
+            settled
+        };
+
+        sounds.finished(&a1, t0);
+        sounds.finished(&a2, t0 + Duration::from_secs(5));
+        assert_eq!(ring_due(&mut sounds, t0 + DONE_SETTLE), vec![a1.clone()]);
+        let later = t0 + Duration::from_secs(5) + DONE_SETTLE;
+        assert_eq!(ring_due(&mut sounds, later), vec![a2.clone()], "announced");
+        assert_eq!(rung, [t0 + DONE_SETTLE], "the second folded into the first");
+        assert!(sounds.announced.contains(&a2));
+
+        // A feedback sound a moment before a finish settles folds it too.
+        let mut sounds = DoneSounds::default();
+        sounds.rang(t0);
+        assert!(!sounds.may_ring(t0 + DONE_FOLD - Duration::from_millis(1)));
+        assert!(sounds.may_ring(t0 + DONE_FOLD), "the FOLD has passed");
+        assert!(DoneSounds::default().may_ring(t0), "nothing has rung yet");
+    }
+
+    /// A live turn whose CLI dies with an error queues the FEEDBACK SOUND
+    /// as a crash — under the same gate as a question: never for the pane
+    /// the user is typing at with the window focused. A row that was not
+    /// mid-turn dying is not news.
+    #[test]
+    fn a_crash_mid_turn_queues_the_feedback_alert() {
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert_eq!(
+            app.pending_feedback,
+            vec![FeedbackAlert {
+                kind: AlertKind::Crashed,
+                session: "agent-2".into(),
+                place: "demo · main".into(),
+                limit: None,
+            }]
+        );
+        assert_eq!(app.done_sounds.next_due(), None, "a crash is not done");
+
+        app.pending_feedback.clear();
+        hse(&mut app, flip_to("a2", AgentStatus::NeedsFeedback));
+        app.pending_feedback.clear();
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert_eq!(app.pending_feedback.len(), 1, "dying while red counts");
+
+        app.pending_feedback.clear();
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert!(app.pending_feedback.is_empty(), "no turn was live");
+
+        // Under the user's hands: locked into the pane, window focused.
+        app.term = Some(AttachedTerm::new(
+            SessionRef::Agent(AgentId("a2".into())),
+            40,
+            10,
+        ));
+        app.focus = Focus::Terminal;
+        app.term_locked = true;
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert!(app.pending_feedback.is_empty(), "the error is on screen");
     }
 
     /// A turn that finishes in the pane the user is already looking at was
@@ -12729,12 +12873,17 @@ mod tests {
         assert_eq!(
             app.pending_feedback,
             vec![FeedbackAlert {
+                kind: AlertKind::NeedsFeedback,
                 session: "agent-2".into(),
                 place: "demo · main".into(),
                 limit: None,
             }]
         );
-        assert!(!app.pending_ding, "waiting on the user is not done");
+        assert_eq!(
+            app.done_sounds.next_due(),
+            None,
+            "waiting on the user is not done"
+        );
 
         hse(&mut app, flip("a2", AgentStatus::NeedsFeedback));
         assert_eq!(
@@ -12749,7 +12898,7 @@ mod tests {
             app.pending_feedback.is_empty(),
             "leaving red is the done sound's edge"
         );
-        assert!(app.pending_ding);
+        assert!(app.done_sounds.next_due().is_some());
 
         // Two sessions stopping in one frame: two names for the
         // notification; the drain plays the sound once for both.
@@ -12918,11 +13067,12 @@ mod tests {
     }
 
     /// A session with no live PTY behind it — reaped, or not booted since
-    /// the daemon started — wears a gray dot whatever its last status was,
-    /// and takes its color back once it is warm again. An unread finish
-    /// keeps its loud `done` badge while cold: the dot says the process is
-    /// gone, the badge that there is still a result to read. A Cloud row has
-    /// no local PTY to be warm, so it keeps its status color.
+    /// the daemon started — wears the faintest gray for whatever it last
+    /// did that stopped being true with the process, and its own color
+    /// again once it is warm. A finish nobody has read is still true cold:
+    /// it keeps its done color and its `done` badge, there still being a
+    /// result to read. A Cloud row has no local PTY to be warm, so it keeps
+    /// its status color.
     #[test]
     fn cold_session_dot_is_gray_until_warm() {
         use orion_core::{AgentStatus, Entity};
@@ -12962,11 +13112,11 @@ mod tests {
         };
 
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.ok, "warm: the finished green: {row}");
+        assert_eq!(fg, app.theme.dim, "warm, read: at rest: {row}");
 
         upsert(&mut app, &|a| a.alive = false);
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.dim, "cold: gray: {row}");
+        assert_eq!(fg, app.theme.faint, "cold: the faintest gray: {row}");
 
         hse(
             &mut app,
@@ -12978,13 +13128,13 @@ mod tests {
             },
         );
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.dim, "cold wins over unread: {row}");
+        assert_eq!(fg, app.theme.done, "unread is still true cold: {row}");
         let tail = &row[row.find("agent-2").unwrap()..];
-        assert!(tail.contains(" done"), "the badge still says so: {row}");
+        assert!(tail.contains(" done"), "the badge says so too: {row}");
 
         upsert(&mut app, &|a| a.alive = true);
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.done, "warm again: unread blue: {row}");
+        assert_eq!(fg, app.theme.done, "warm again: unread: {row}");
 
         upsert(&mut app, &|a| {
             a.alive = false;
@@ -13360,11 +13510,13 @@ mod tests {
         app.is_remote = false;
         seed_worktree_at(&mut app, dir.path());
         app.flash = None;
-        open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(
-            app.flash,
-            Some(format!("opened a Ghostty tab in {}", dir.path().display()))
+            context_dir(&app),
+            Some(Ok(dir.path().to_path_buf())),
+            "the selected worktree is the folder handed over"
         );
+        open_outside_terminal_with(&mut app, ghostty());
+        assert_eq!(app.flash, None, "the tab coming up is the answer");
         open_outside_terminal_with(
             &mut app,
             Some(OutsideApp {
@@ -13372,10 +13524,7 @@ mod tests {
                 opens: "Terminal window",
             }),
         );
-        assert_eq!(
-            app.flash,
-            Some(format!("opened a Terminal window in {}", dir.path().display()))
-        );
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -13616,8 +13765,8 @@ mod tests {
         out.clear();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some(&*format!("opened claude.ai/code/{CLOUD_ID}"))
+            take_opened(),
+            [format!("https://claude.ai/code/{CLOUD_ID}")]
         );
         assert_eq!(app.focus, Focus::Sessions);
         assert!(!app.term_locked);
@@ -13637,8 +13786,8 @@ mod tests {
             .expect("the link is a hit target");
         click(&mut app, link.x + 1, link.y, &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some(&*format!("opened claude.ai/code/{CLOUD_ID}"))
+            take_opened(),
+            [format!("https://claude.ai/code/{CLOUD_ID}")]
         );
     }
 
@@ -14011,10 +14160,7 @@ mod tests {
                 .any(|r| matches!(r, ClientRequest::AddProject { .. })),
             "{out:?}"
         );
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("demo is already a project — opened it")
-        );
+        assert_eq!(app.flash, None);
         assert_eq!(
             app.selected_project().map(|p| p.name.as_str()),
             Some("demo")
@@ -14659,7 +14805,7 @@ mod tests {
             &mut out,
         );
         assert!(app.overlay.is_none(), "the palette closes");
-        assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r/pull/7"));
+        assert_eq!(take_opened(), ["https://github.com/o/r/pull/7"]);
         assert_eq!(app.selected_worktree_pr().map(|pr| pr.number), Some(7));
         assert_eq!(app.focus, Focus::Worktrees);
     }
@@ -14713,20 +14859,24 @@ mod tests {
             text.contains("↗ demo/#9 Number the lines draft"),
             "a draft says so after its title:\n{text}"
         );
-        // The colors are the sidebar's: accent arrow and plain title for
-        // the ready one, dim arrow and dim title for the draft — the same
-        // `pr_row::look` both panels paint from.
+        // The colors are the band rule's: a muted arrow and plain title for
+        // the ready one, a faint arrow and dim title for the draft — the
+        // same `pr_row::look` both paint from.
         let buffer = terminal.backend().buffer();
         let (x, y) = find_cell(&terminal, "↗ demo/#7");
-        assert_eq!(buffer[(x, y)].fg, th.accent, "ready: the accent arrow");
+        assert_eq!(buffer[(x, y)].fg, th.muted, "ready: the muted arrow");
         // Past the dim crumb and the `#` the query lit: the title proper.
         let title_x = x + "↗ demo/#7 ".chars().count() as u16;
         assert_eq!(buffer[(title_x, y)].fg, th.text, "ready: the title reads");
         let (x, y) = find_cell(&terminal, "↗ demo/#9");
-        assert_eq!(buffer[(x, y)].fg, th.dim, "draft: the dim arrow");
+        assert_eq!(buffer[(x, y)].fg, th.faint, "draft: the faint arrow");
         assert_eq!(buffer[(title_x, y)].fg, th.dim, "draft: dimmed end to end");
         let badge_x = x + "↗ demo/#9 Number the lines ".chars().count() as u16;
-        assert_eq!(buffer[(badge_x, y)].fg, th.dim, "draft: the badge is dim");
+        assert_eq!(
+            buffer[(badge_x, y)].fg,
+            th.faint,
+            "draft: the badge is faint"
+        );
 
         // Park the cursor on the draft, then let a refresh say it was
         // marked ready for review: the word flips, the cursor stays.
@@ -14799,7 +14949,7 @@ mod tests {
             Landing::FocusOnly,
             &mut out,
         );
-        assert_eq!(app.flash.as_deref(), Some(PR_GONE));
+        assert!(app.flash.is_none());
         assert!(app.selected_worktree_pr().is_none());
         assert_eq!(app.sel_worktree, 0, "the cursor stays on the checkout");
     }
@@ -14965,11 +15115,7 @@ mod tests {
 
         assert_eq!(open_pr_numbers(&app), vec![9]);
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(9));
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("#7 is no longer open"),
-            "a row that evaporates mid-read says why"
-        );
+        assert_eq!(app.flash, None);
 
         // A draft is open, so nothing about it is retired.
         let mut draft = a_detail(9, "still cooking", vec![]);
@@ -15298,7 +15444,7 @@ mod tests {
         out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
+        assert_eq!(app.flash, None);
 
         // Shift+Enter breaks a line; Enter posts — here from a checkout
         // that is not on disk, so the box comes back with the text.
@@ -15320,16 +15466,14 @@ mod tests {
 
         // One already on its way to this pull request: wait, text kept.
         app.pr_comment_inflight.insert(pr_url(7));
+        app.flash = None;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Looks good\nto me"),
             "{:?}",
             app.overlay
         );
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("still posting the last comment on #7…")
-        );
+        assert_eq!(app.flash, None, "the box back with the text says it");
         app.pr_comment_inflight.clear();
         app.overlay = None;
 
@@ -15369,11 +15513,12 @@ mod tests {
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pending_pr_detail = None;
         app.pr_preview_scroll = 3;
+        app.flash = None;
         land_pr_comment(
             &mut app,
             answer("Looks good", Ok(format!("{}#issuecomment-1", pr_url(7)))),
         );
-        assert_eq!(app.flash.as_deref(), Some("comment posted on #7"));
+        assert_eq!(app.flash, None, "the conversation says it");
         assert!(
             app.pending_pr_detail
                 .as_ref()
@@ -15927,11 +16072,10 @@ diff --git a/docs/keys.md b/docs/keys.md
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.pr_diff_tx = Some(tx);
         app.pr_diff_inflight = Some(7);
+        app.flash = None;
         request_pr_diff(&mut app);
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("still fetching the diff for #7…")
-        );
+        assert_eq!(app.flash, None, "the first fetch already said so");
+        assert_eq!(app.pr_diff_inflight, Some(7));
     }
 
     /// The PULL REQUEST PAGE's Changes tab opens the DIFF VIEWER through
@@ -16063,54 +16207,80 @@ diff --git a/src/b.rs b/src/b.rs
         assert!(app.worktree_wears_merge(&w1), "the row keeps its merge");
     }
 
-    /// A turn that finishes unread sweeps blue for `ONE_SHOT_SWEEP` on its
-    /// card, so the sweep clock runs for those seconds and no longer. Reading it ends the sweep on the spot;
-    /// an old unread finish, an unstamped one and an archived one never ask
-    /// for a frame.
+    /// A finish nobody has read shimmers until it is read, however old, so
+    /// the sweep clock runs for it until then. A session that starts needing
+    /// you, or crashes, sweeps red for `ONE_SHOT_SWEEP` and no longer; an
+    /// unstamped one and an archived one never ask for a frame.
     #[test]
-    fn a_fresh_unread_finish_keeps_the_sweep_ticking_for_a_few_seconds() {
+    fn an_alarm_sweeps_for_a_few_seconds_and_an_unread_finish_until_read() {
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app);
-        let now = crate::app::now_ms();
-        let finish = |app: &mut App, at: i64| {
-            let a = &mut app.tree.agents[0];
+        for a in &mut app.tree.agents {
             a.status = AgentStatus::Finished;
-            a.unseen = true;
+            a.unseen = false;
+        }
+        let now = crate::app::now_ms();
+        let set = |app: &mut App, status: AgentStatus, unseen: bool, at: i64| {
+            let a = &mut app.tree.agents[0];
+            a.status = status;
+            a.unseen = unseen;
             a.archived = false;
             a.status_changed_at = at;
         };
-        let fresh = |app: &App| app.agent_fresh_done(&app.tree.agents[0]);
+        let fresh = |app: &App| app.agent_fresh_alarm(&app.tree.agents[0]);
+        assert!(!app.status_anim_active(), "everything read and at rest");
 
-        finish(&mut app, now);
-        assert!(fresh(&app), "the card sweeps");
-        assert!(app.status_anim_active());
+        // An unread finish shimmers until it is read, however old — where it
+        // shows: its project's tab open, or the jump list up.
+        set(
+            &mut app,
+            AgentStatus::Finished,
+            true,
+            now - settled().as_millis() as i64,
+        );
+        assert!(
+            !app.status_anim_active(),
+            "its project's tab closed: nothing shows it, nothing ticks"
+        );
+        app.launcher_tabs.push(orion_core::ProjectId("p1".into()));
+        assert!(app.status_anim_active(), "unread: the shimmer ticks");
         app.animations = false;
         assert!(!app.status_anim_active(), "unless animations are off");
         app.animations = true;
-
         app.tree.agents[0].unseen = false;
-        assert!(!fresh(&app), "read: over");
-        assert!(!app.status_anim_active());
+        assert!(!app.status_anim_active(), "read: still");
 
-        finish(&mut app, now - settled().as_millis() as i64);
+        // Needing you sweeps once, for a few seconds after it starts.
+        set(&mut app, AgentStatus::NeedsFeedback, false, now);
+        assert!(fresh(&app), "the card sweeps");
+        assert!(app.status_anim_active());
+        set(
+            &mut app,
+            AgentStatus::NeedsFeedback,
+            false,
+            now - settled().as_millis() as i64,
+        );
         assert!(!fresh(&app), "settled");
-        assert!(!app.status_anim_active(), "an old unread finish is still");
-
-        finish(&mut app, 0);
+        assert!(
+            !app.status_anim_active(),
+            "a question already announced holds still"
+        );
+        set(&mut app, AgentStatus::Terminated, false, now);
+        assert!(fresh(&app), "a crash sweeps once too");
+        set(&mut app, AgentStatus::NeedsFeedback, false, 0);
         assert!(!fresh(&app), "never stamped");
-
-        finish(&mut app, now);
+        set(&mut app, AgentStatus::NeedsFeedback, false, now);
         app.tree.agents[0].archived = true;
         assert!(!fresh(&app), "archived: out of sight");
         assert!(!app.status_anim_active());
 
         // A DAEMON clock a little ahead of this one still sweeps — and one
         // an hour ahead does not sweep for an hour.
-        finish(&mut app, now + 2_000);
-        assert!(app.agent_fresh_done(&app.tree.agents[0]), "small skew");
-        finish(&mut app, now + 3_600_000);
-        assert!(!app.agent_fresh_done(&app.tree.agents[0]), "large skew");
+        set(&mut app, AgentStatus::NeedsFeedback, false, now + 2_000);
+        assert!(fresh(&app), "small skew");
+        set(&mut app, AgentStatus::NeedsFeedback, false, now + 3_600_000);
+        assert!(!fresh(&app), "large skew");
     }
 
     /// A branch lookup that never reached GitHub leaves the row alone — the
@@ -16449,7 +16619,7 @@ diff --git a/src/c.rs b/src/c.rs
             "the reader's file, refreshed: {}",
             view.diff
         );
-        assert!(app.flash.as_deref().is_some_and(|f| f.contains("changed")));
+        assert_eq!(app.flash, None, "the refreshed rows say it");
         assert_eq!(
             crate::pr_cache::recall_diff(&app, &url).as_deref(),
             Some(fresh),
@@ -16550,7 +16720,7 @@ diff --git a/src/c.rs b/src/c.rs
             "fired on the loop's next turn, not the next git tick"
         );
         assert!(app.overlay.is_none(), "nothing to rename here");
-        assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
+        assert!(app.flash.is_none());
         assert!(out.is_empty(), "no daemon traffic — gh runs client-side");
 
         // The same from an open-PR row of the group, which the pane is
@@ -16611,7 +16781,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none(), "no prompt");
-        assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
+        assert!(app.flash.is_none());
         assert!(app.pr_lookup_due(&wid), "the row's own lookup is due");
         assert!(app.pr_refresh_requested);
         let (pending, at) = app
@@ -16643,7 +16813,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.flash = None;
         press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
         assert!(app.pr_refresh_requested && app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
+        assert!(app.flash.is_none());
 
         // …while `r` there still renames.
         press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
@@ -19385,7 +19555,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `r` on the Worktrees panel runs the checkout — nothing is renamed
-    /// there — the Ack names what is running, and `r` again stops it.
+    /// there — the run's terminal is what shows it, and `r` again stops it.
     #[test]
     fn r_on_a_worktree_starts_its_run_and_again_stops_it() {
         use orion_core::{Entity, TerminalId, TerminalTab, WorktreeId};
@@ -19424,9 +19594,8 @@ diff --git a/src/c.rs b/src/c.rs
                 created: Some(EntityId::Terminal(TerminalId("run1".into()))),
             },
         );
-        assert_eq!(app.flash.as_deref(), Some("▶ running npm run dev in main"));
+        assert_eq!(app.flash, None, "the running terminal says it");
         assert!(app.worktree_running(&WorktreeId("w1".into())));
-        assert_eq!(app.run_flash_when_seen, None);
 
         out.clear();
         press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
@@ -19439,10 +19608,10 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// The DAEMON's reply to `StartRun` usually reaches the TUI before the
-    /// broadcast upsert of the terminal it started: the flash names the
-    /// branch at once and the command when the row lands.
+    /// broadcast upsert of the terminal it started: the Ack lands quietly,
+    /// and the checkout reads as running once the row does.
     #[test]
-    fn a_run_ack_ahead_of_its_terminal_names_the_command_when_it_lands() {
+    fn a_run_ack_ahead_of_its_terminal_lands_quietly() {
         use orion_core::{Entity, TerminalTab, WorktreeId};
         let mut app = App::new();
         seed_tree(&mut app);
@@ -19463,7 +19632,8 @@ diff --git a/src/c.rs b/src/c.rs
                 created: Some(EntityId::Terminal(TerminalId("run1".into()))),
             },
         );
-        assert_eq!(app.flash.as_deref(), Some("▶ running in main"));
+        assert_eq!(app.flash, None);
+        assert!(!app.worktree_running(&WorktreeId("w1".into())));
 
         hse(
             &mut app,
@@ -19478,8 +19648,8 @@ diff --git a/src/c.rs b/src/c.rs
                 }),
             },
         );
-        assert_eq!(app.flash.as_deref(), Some("▶ running bun dev in main"));
-        assert_eq!(app.run_flash_when_seen, None, "spent");
+        assert_eq!(app.flash, None);
+        assert!(app.worktree_running(&WorktreeId("w1".into())));
     }
 
     /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
@@ -19513,22 +19683,25 @@ diff --git a/src/c.rs b/src/c.rs
                 r#"{"open": "open http://localhost:3000"}"#,
             )
             .unwrap();
+            let fires = || open_command_for(dir.path(), dir.path());
+            assert_eq!(fires().as_deref(), Ok("open http://localhost:3000"));
+            app.flash = None;
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:3000"));
+            assert_eq!(app.flash, None, "what it opens is the answer");
 
             // The setting wins over the file, and is read fresh per press.
             let mut cfg = crate::config::Config::load();
             assert!(cfg.set_project_text(dir.path(), OpenCommand, "open http://localhost:5173"));
             cfg.save_to(&config_path).unwrap();
+            assert_eq!(fires().as_deref(), Ok("open http://localhost:5173"));
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
+            assert_eq!(app.flash, None);
 
             // Sessions panel: the same worktree is under the
             // cursor, so the same command fires, and focus stays put.
             app.focus = Focus::Sessions;
-            app.flash = None;
             out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
+            assert_eq!(app.flash, None);
             assert_eq!(app.focus, Focus::Sessions);
             assert!(
                 out.is_empty(),
@@ -21299,10 +21472,11 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened https://example.com"),
+            take_opened(),
+            ["https://example.com"],
             "the URL under the cursor is opened"
         );
+        assert!(app.flash.is_none());
         assert_eq!(app.focus, Focus::Projects, "focus is untouched");
         assert!(!app.term_locked, "input stays unlocked");
         assert!(app.term_selection.is_none(), "no selection armed");
@@ -22707,7 +22881,6 @@ diff --git a/src/c.rs b/src/c.rs
         app.focus = Focus::Worktrees;
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "main checkout never gets a confirm");
-        assert!(app.flash.is_some(), "main checkout delete flashes instead");
 
         app.focus = Focus::Sessions;
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
@@ -22811,13 +22984,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.sel_worktree = 1;
         press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        assert!(
-            app.flash
-                .as_deref()
-                .is_some_and(|f| f.contains("root checkout")),
-            "{:?}",
-            app.flash
-        );
+        assert_eq!(app.flash, None);
 
         app.focus = Focus::Projects;
         press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
@@ -23064,7 +23231,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn g_with_clean_repo_flashes_no_changes() {
+    fn g_with_clean_repo_opens_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let repo = test_repo(&dir);
         let mut app = App::new();
@@ -23072,14 +23239,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none(), "clean tree opens no modal");
-        assert!(
-            app.flash
-                .as_deref()
-                .unwrap_or("")
-                .contains("no changes in main"),
-            "{:?}",
-            app.flash
-        );
+        assert_eq!(app.flash, None);
     }
 
     /// `G` turns the checkout's remote into a page and hands it to the
@@ -23097,7 +23257,8 @@ diff --git a/src/c.rs b/src/c.rs
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
         out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenRepo));
-        assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r"));
+        assert_eq!(take_opened(), ["https://github.com/o/r"]);
+        assert_eq!(app.flash, None);
         assert!(app.overlay.is_none(), "the browser is the whole feature");
         assert!(out.is_empty(), "nothing to tell the daemon about");
     }
@@ -24577,8 +24738,10 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `.` walks the ring `/` shows before a query: NEEDS FEEDBACK, then
-    /// RUNNING, then UNSEEN, then the rest — crossing projects as it goes,
+    /// UNSEEN, then RUNNING, then the rest — crossing projects as it goes,
     /// skipping the archived row, and wrapping from the bottom to the top.
+    /// Landing on the unread finish reads it, and the walk still goes on to
+    /// the running session after it rather than skipping it.
     #[test]
     fn next_attention_walks_the_palette_order_and_wraps() {
         let mut app = App::new();
@@ -24591,7 +24754,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert_eq!(
             walk_attention(&mut app, 1, 6),
-            ["codex-1", "ask", "run", "unread", "agent-1", "codex-1"]
+            ["codex-1", "ask", "unread", "run", "agent-1", "codex-1"]
         );
         assert_eq!(app.selected_project().unwrap().name, "orion");
         assert_eq!(app.selected_worktree().unwrap().branch, "feat-x");
@@ -24610,7 +24773,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert_eq!(
             walk_attention(&mut app, -1, 6),
-            ["unread", "run", "ask", "codex-1", "agent-1", "unread"]
+            ["run", "unread", "ask", "codex-1", "agent-1", "run"]
         );
     }
 
@@ -24852,7 +25015,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_default_config(|| {
             press(&mut app, KeyCode::Char('.'), KeyModifiers::NONE, &mut out);
         });
-        assert_eq!(app.flash.as_deref(), Some(NO_SESSIONS_TO_JUMP));
+        assert!(app.flash.is_none());
         assert_eq!(app.focus, Focus::Sessions);
         assert!(out.is_empty(), "nothing to attach: {out:?}");
     }
@@ -24949,11 +25112,12 @@ diff --git a/src/c.rs b/src/c.rs
             text.contains("type to search"),
             "query placeholder rendered:\n{text}"
         );
-        // Palette rows carry per-kind glyphs, FLAT: ● the session on a line
-        // of its own, the project it lives in in front of it — but not the
-        // branch, which is searched and not drawn.
+        // Palette rows carry per-kind glyphs, FLAT: the session on a line
+        // of its own behind its STATUS MARK (`○`, never run), the project
+        // it lives in in front of it — but not the branch, which is
+        // searched and not drawn.
         assert!(
-            text.contains("● demo/agent-1"),
+            text.contains("○ demo/agent-1"),
             "session row with its project in front:\n{text}"
         );
         assert!(
@@ -25011,23 +25175,23 @@ diff --git a/src/c.rs b/src/c.rs
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
 
-        // The one running agent lights its own row's glyph…
-        let (x, y) = find_cell(&terminal, "● demo/agent-1");
-        assert_eq!(
-            terminal.backend().buffer()[(x, y)].fg,
-            th.warn,
-            "the session glyph reads running"
+        // The one running agent wears the WORKING SPINNER on its own
+        // row, in the working gold…
+        let (x, y) = find_cell(&terminal, "demo/agent-1");
+        let glyph = &terminal.backend().buffer()[(x - 2, y)];
+        assert!(
+            crate::app::SPINNER.contains(&glyph.symbol()),
+            "the session glyph is the spinner, got {:?}",
+            glyph.symbol()
         );
+        assert_eq!(glyph.fg, th.warn, "the session glyph reads working");
         // ...and its title — its own name, past the dim project crumb —
-        // rides the running sweep, not plain text.
+        // holds still: work in progress is the spinner's to say.
         let buffer = terminal.backend().buffer();
-        let title_x = x + "● demo/".chars().count() as u16;
+        let title_x = x + "demo/".chars().count() as u16;
         for i in 0.."agent-1".chars().count() as u16 {
             let fg = buffer[(title_x + i, y)].fg;
-            assert!(
-                th.warn_sweep.contains(&fg),
-                "title cell {i} is on the sweep ramp, got {fg:?}"
-            );
+            assert_eq!(fg, th.text, "title cell {i} is plain text");
         }
         // …and so do its worktree's and its project's rollups, once a query
         // reaches those rows.
@@ -27297,12 +27461,12 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn f_without_worktree_flashes() {
+    fn f_without_worktree_opens_nothing() {
         let mut app = App::new();
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -27536,12 +27700,12 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn b_without_worktree_flashes() {
+    fn b_without_worktree_opens_nothing() {
         let mut app = App::new();
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
         assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -27698,12 +27862,12 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn shift_f_without_worktree_flashes() {
+    fn shift_f_without_worktree_opens_nothing() {
         let mut app = App::new();
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
         assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -28020,14 +28184,14 @@ diff --git a/src/c.rs b/src/c.rs
     /// With only the main checkout, Shift+D has nothing to offer — flash,
     /// no dialog.
     #[test]
-    fn shift_d_with_only_the_main_checkout_flashes() {
+    fn shift_d_with_only_the_main_checkout_does_nothing() {
         let mut app = App::new();
         seed_tree(&mut app); // p1/w1(main) + agent-1
         let mut out = Vec::new();
         app.focus = Focus::Worktrees;
         out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
         assert!(app.overlay.is_none(), "nothing to confirm");
-        assert!(app.flash.is_some(), "the refusal explains itself");
+        assert_eq!(app.flash, None);
         assert!(out.is_empty(), "nothing is requested");
     }
 
@@ -29226,10 +29390,7 @@ diff --git a/src/c.rs b/src/c.rs
                 KeyModifiers::CONTROL,
                 &mut out,
             );
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("quick prompt: a PR session runs in the pull request's own checkout")
-            );
+            assert_eq!(app.flash, None);
             assert!(
                 matches!(
                     &app.overlay,
@@ -29425,7 +29586,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(on_row(&app), "an empty box is a cancel: {:?}", app.overlay);
-        assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
+        assert_eq!(app.flash, None);
 
         // Enter with text: posted — or, off a checkout that isn't on disk,
         // the box comes back with the text, newline and all.
@@ -30192,7 +30353,7 @@ diff --git a/src/c.rs b/src/c.rs
             // `q` matches nothing: refused, the list still up.
             type_text(&mut app, "q", &mut out);
             assert_eq!(list(&app).filter, "e", "a dead letter is refused");
-            assert_eq!(app.flash.as_deref(), Some("no preset matches 'eq'"));
+            assert_eq!(app.flash, None);
 
             // Backspace widens; "scr" finds the second row and the cursor
             // follows it.
@@ -30357,7 +30518,7 @@ diff --git a/src/c.rs b/src/c.rs
                 }
                 other => panic!("delete should reopen the list, got {other:?}"),
             }
-            assert_eq!(app.flash.as_deref(), Some("deleted preset 'reviewer'"));
+            assert_eq!(app.flash, None, "the list without it says it");
             let left = crate::agent_presets::load();
             assert_eq!(left.len(), 1, "removal reached the store");
             assert_eq!(left[0].name, "scratch");
@@ -31952,13 +32113,13 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(prompt.title, "Quick prompt (claude · cloud)");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
+            assert_eq!(app.flash, None);
             assert!(out.is_empty(), "a cloud box needs its task: {out:?}");
         });
     }
 
     /// The agent has to run somewhere: with no checkout under the cursor
-    /// (an empty tree) `p` says so instead of opening a box that cannot
+    /// (an empty tree) `p` opens nothing rather than a box that cannot
     /// launch. On the WORKTREES PANEL the checkout is cut on the way, so
     /// only a PROJECT is needed — and an empty tree has none of those
     /// either. (A cursor parked on an OPEN PRS row is not this case: the
@@ -31970,19 +32131,13 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("quick prompt: select a worktree first")
-            );
+            assert_eq!(app.flash, None);
             assert!(out.is_empty(), "{out:?}");
 
             app.focus = Focus::Worktrees;
             press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("quick prompt: select a project first")
-            );
+            assert_eq!(app.flash, None);
             assert!(out.is_empty(), "{out:?}");
         });
     }
@@ -32125,14 +32280,14 @@ diff --git a/src/c.rs b/src/c.rs
                 "query in the title:\n{text}"
             );
 
-            // A letter no row matches is refused and flashed.
+            // A letter no row matches is refused.
             type_text(&mut app, "z", &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 unreachable!()
             };
             assert_eq!(menu.filter_query(), "opus");
             assert_eq!(menu.items.len(), 2);
-            assert!(app.flash.as_deref().is_some_and(|f| f.contains("opusz")));
+            assert_eq!(app.flash, None);
 
             // ↓ moves within the matches; → drills the hovered family into
             // its efforts, which start with an empty filter of their own.
@@ -32230,13 +32385,13 @@ diff --git a/src/c.rs b/src/c.rs
                 "filter beside the value:\n{text}"
             );
 
-            // A refused letter leaves everything as it was and flashes.
+            // A refused letter leaves everything as it was.
             type_text(&mut app, "q", &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 unreachable!()
             };
             assert_eq!(editor.filter, "sol");
-            assert!(app.flash.as_deref().is_some_and(|f| f.contains("solq")));
+            assert_eq!(app.flash, None);
             // Backspace to "so": sol still matches, so the value stays;
             // Esc clears the filter but keeps the value; a second Esc
             // backs out to the list as before.
@@ -32503,13 +32658,11 @@ diff --git a/src/c.rs b/src/c.rs
                 terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                 let text = buffer_text(&terminal);
                 assert!(text.contains("no presets yet — ^A creates one"), "{text}");
-                // Enter and Ctrl+e on nothing only nudge toward Ctrl+a.
+                // Enter and Ctrl+e on nothing do nothing: the hint names
+                // Ctrl+a.
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
-                assert_eq!(
-                    app.flash.as_deref(),
-                    Some("no preset selected — ^A creates one")
-                );
+                assert_eq!(app.flash, None);
                 press(
                     &mut app,
                     KeyCode::Char('e'),
@@ -32741,7 +32894,7 @@ diff --git a/src/c.rs b/src/c.rs
                 .any(|r| matches!(r, ClientRequest::Attach { .. })),
             "it was booted: {out:?}"
         );
-        assert!(app.flash.as_deref().is_some_and(|f| f.contains("starting")));
+        assert_eq!(app.flash, None, "the box still holding the text says it");
     }
 
     /// The FOLLOW-UP box is a modal over the grid, so Esc is the way out
@@ -33020,10 +33173,7 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
-            assert_eq!(
-                by_menu.flash.as_deref(),
-                Some("cannot delete the main checkout")
-            );
+            assert_eq!(by_menu.flash, None);
 
             // Attach: Enter on the row.
             let on_session = || {

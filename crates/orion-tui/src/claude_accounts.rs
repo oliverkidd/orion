@@ -530,27 +530,15 @@ pub fn auth_closed(app: &mut App) {
 }
 
 /// Sign account `id` in: `claude auth login` in the modal, `email`
-/// filling Claude's login page when one is given. False, the footer
-/// saying why, when nothing was started.
+/// filling Claude's login page when one is given. False when nothing was
+/// started — no such account, or a spawn that failed (which flashes why).
 pub fn sign_in(app: &mut App, id: &str, email: Option<&str>) -> bool {
-    match account(id) {
-        Some(entry) => run(app, login_command(&entry, email)),
-        None => {
-            app.flash = Some(format!("`{id}` is no Claude account to sign in"));
-            false
-        }
-    }
+    account(id).is_some_and(|entry| run(app, login_command(&entry, email)))
 }
 
 /// Sign account `id` out: `claude auth logout` in the modal.
 pub fn sign_out(app: &mut App, id: &str) -> bool {
-    match account(id) {
-        Some(entry) => run(app, logout_command(&entry)),
-        None => {
-            app.flash = Some(format!("`{id}` is no Claude account to sign out"));
-            false
-        }
-    }
+    account(id).is_some_and(|entry| run(app, logout_command(&entry)))
 }
 
 /// The registry row of Claude account `id`, named as it is listed.

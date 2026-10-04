@@ -1219,8 +1219,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     let Some(r) = row_rect(list_area, row) else {
                         break;
                     };
+                    // A repo is a project waiting to be opened: the `▪` a
+                    // project row wears in the jump list, not a STATUS MARK.
                     let marker = if entry.is_repo {
-                        Span::styled("● ", Style::default().fg(th.ok))
+                        Span::styled("▪ ", Style::default().fg(th.muted))
                     } else {
                         Span::styled("· ", Style::default().fg(th.dim))
                     };
@@ -2094,18 +2096,18 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     break;
                 };
                 let item = &palette.items[m.item];
-                // Kind lives in the glyph's shape; its color — and the
-                // hollow variant standing in for the panels' `○` — come
-                // from the same status the row carries in its panel, so a
-                // running session reads as running here too. The row draws
-                // the project it lives in dim, then its own name — a
-                // project row in bold, a dim "23m ago" pinned right — so
-                // the cyan-bold match highlight is the loudest thing in the
-                // list, and a title sweeps exactly like its panel row.
+                // A session wears its own STATUS MARK; any other row's kind
+                // lives in the glyph's shape, its color — and a hollow
+                // variant for nothing live under it — from its rollup. The
+                // row draws the project it lives in dim, then its own name
+                // — a project row in bold, "23m ago" pinned right — so the
+                // accent-bold match highlight is the loudest thing in the
+                // list, and an unread title shimmers exactly as its row.
                 let (solid, hollow) = match &item.target {
                     PaletteTarget::Project(_) => ("▪ ", "▫ "),
                     PaletteTarget::Worktree(_) => ("▸ ", "▹ "),
-                    PaletteTarget::Session(_) => ("● ", "○ "),
+                    // Drawn by `status_dot` below.
+                    PaletteTarget::Session(_) => ("", ""),
                     // The arrow its Worktrees-panel row wears (`pr_row`),
                     // since that row is where picking it lands.
                     PaletteTarget::PullRequest { .. } => ("↗ ", "↗ "),
@@ -2113,9 +2115,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 };
                 let status = item.status;
                 // A pull request carries no status; its colors are its
-                // standing's, the look its Worktrees-panel row wears — the
-                // accent for one ready for review, the dim end to end for
-                // a draft, red for one GitHub says cannot merge — and a
+                // standing's, the look its band rule wears (`pr_row::look`)
+                // — muted for one ready for review, faint for a draft, the
+                // needs-you crimson for one GitHub says cannot merge — and a
                 // trailing badge spells that state out in full (`draft`,
                 // `ready for review`, or the trouble: `merge conflicts`,
                 // `checks failing`), the sidebar's words at this modal's
@@ -2124,18 +2126,20 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 let pr = item
                     .standing
                     .map(|standing| (standing, crate::pr_row::look(standing, item.trouble, th)));
+                let is_session = matches!(item.target, PaletteTarget::Session(_));
                 let (glyph, glyph_color) = if let Some((_, look)) = pr {
-                    (solid, look.glyph)
+                    (solid.to_string(), look.glyph)
+                } else if is_session {
+                    // A session wears its STATUS MARK, the dot its own row
+                    // wears — spinner, cross and all.
+                    let dot = status_dot(status, item.unseen, app.spin_phase(), th);
+                    (dot.content.into_owned(), dot.style.fg.unwrap_or(th.dim))
                 } else {
-                    match status {
-                        Some(AgentStatus::Running) => (solid, th.warn),
-                        Some(AgentStatus::Finished) if item.unseen => (solid, th.done),
-                        Some(AgentStatus::Finished) => (solid, th.ok),
-                        Some(AgentStatus::NeedsFeedback) => (solid, th.err),
-                        Some(AgentStatus::Terminated) => (solid, th.special),
-                        Some(AgentStatus::Fresh) => (solid, th.dim),
-                        Some(AgentStatus::Disconnected) | None => (hollow, th.dim),
-                    }
+                    let glyph = match status {
+                        Some(AgentStatus::Disconnected) | None => hollow,
+                        Some(_) => solid,
+                    };
+                    (glyph.to_string(), status_color(status, item.unseen, th))
                 };
                 let badge = pr.map(|(standing, look)| {
                     let word = item.trouble.map_or(standing.label(), |t| t.label());
@@ -2166,9 +2170,13 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     ),
                     None => (String::new(), Vec::new()),
                 };
-                // Pinned right, dim: when the row last ran — its panel
-                // row's "23m ago".
-                let tail = if item.stamped > 0 {
+                // Pinned right: when the row last ran, dim — its panel
+                // row's "23m ago" — or, on a session whose finish nobody has
+                // read, the `done` tag its row wears, in the done color.
+                let unread = is_session && item.unseen;
+                let tail = if unread {
+                    "done".to_string()
+                } else if item.stamped > 0 {
                     crate::hosts::ago_label(crate::app::now_ms() - item.stamped)
                 } else {
                     String::new()
@@ -2196,9 +2204,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     &shown,
                     positions,
                     quiet,
-                    // No ONE-SHOT SWEEP in a list the user just summoned:
-                    // it is for the change nobody was looking at.
-                    sweep_ramp(status, false, th, app.animations),
+                    // The UNREAD SHIMMER, as on the row's own line; no
+                    // ONE-SHOT SWEEP in a list the user just summoned — it
+                    // is for the change nobody was looking at.
+                    sweep_ramp(status, item.unseen, false, th, app.animations),
                     app.sweep_phase(),
                     // A pull request in trouble paints its title in its
                     // row's red — the end-to-end red its sidebar row wears.
@@ -2206,7 +2215,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         .map_or(th.text, |(_, look)| look.label),
                     th,
                 );
-                if matches!(item.target, PaletteTarget::Project(_)) {
+                // A project row is bold as a heading; a session is bold when
+                // it wants you, as its own row is.
+                if matches!(item.target, PaletteTarget::Project(_))
+                    || (is_session && wants_you(status, item.unseen))
+                {
                     for s in &mut text {
                         s.style = s.style.add_modifier(Modifier::BOLD);
                     }
@@ -2232,7 +2245,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 let used = lead + shown.chars().count() + badge_len;
                 if tail_w > 0 && used + tail_w < width {
                     spans.push(Span::raw(" ".repeat(width - used - tail_w)));
-                    spans.push(Span::styled(tail, Style::default().fg(th.dim)));
+                    let tail_color = if unread { th.done } else { th.dim };
+                    spans.push(Span::styled(tail, Style::default().fg(tail_color)));
                 }
                 render_row(f, row_area, spans, i == palette.selected, true, th);
             }
@@ -3399,9 +3413,9 @@ pub(crate) type BadgePart = (String, Style, Option<HitTarget>);
 
 /// The PR & ISSUE COUNTS badge (always on; through 0.37 an Experimental
 /// switch, `pr_issue_counts`):
-/// ` 3 prs · 2 issues` — the pull requests in the accent the OPEN PRS rows
-/// wear (`pr_row::look`), the issues in the green the ISSUES MODAL paints
-/// `open` in, a dim `·` between — as spans, with the columns they take
+/// ` 3 prs · 2 issues` — both in muted, a count being a fact rather than a
+/// status or the focus (the accent is the cursor's, the greens and reds
+/// are the sessions'), a dim `·` between — as spans, with the columns they take
 /// together so the name can be truncated around them. A count that is
 /// zero, or not known yet, leaves its word out, and the badge goes with
 /// both; one `pr` or `issue` is singular; a list cut off at the fetch cap
@@ -3425,10 +3439,10 @@ pub(crate) fn open_counts_badge(
     let (prs, issues) = counts;
     let parts = [
         prs.and_then(|n| word(n, "pr", "prs", crate::pull_request::LIST_LIMIT))
-            .map(|text| (text, th.accent, HitTarget::LauncherPullRequests)),
+            .map(|text| (text, th.muted, HitTarget::LauncherPullRequests)),
         issues
             .and_then(|n| word(n, "issue", "issues", crate::issues::LIST_LIMIT))
-            .map(|text| (text, th.ok, HitTarget::LauncherIssues)),
+            .map(|text| (text, th.muted, HitTarget::LauncherIssues)),
     ];
     let mut spans: Vec<BadgePart> = Vec::new();
     for (text, color, hit) in parts.into_iter().flatten() {
@@ -3443,15 +3457,18 @@ pub(crate) fn open_counts_badge(
     Some((spans, len))
 }
 
-/// Sweep shades for a status that animates. The live two sweep for as long
-/// as they last: running rows shimmer yellow, needs-feedback rows red. A
-/// finished row takes the ONE-SHOT SWEEP — the done ramp, while `fresh`
-/// says an unread finish under it is only seconds old
-/// (`app::fresh_done`) — and then holds still like every other status:
-/// motion means live, or just changed; a row at rest is at rest. `enabled`
-/// is the animations setting — off, nothing animates.
+/// Sweep shades for a session's name, or `None` for a name that holds
+/// still. The shimmer means *unread*: a finish nobody has looked at sweeps
+/// on the done ramp for as long as it stays unread — the UNREAD SHIMMER —
+/// and stops the moment the session is read. A session that changes into
+/// needing you, or crashes, takes the red ONE-SHOT SWEEP while `fresh`
+/// says that change is only seconds old (`app::fresh_alarm`), then holds
+/// still in its red. A running session never sweeps: its dot is the
+/// WORKING SPINNER. `enabled` is the animations setting — off, nothing
+/// animates.
 fn sweep_ramp(
     status: Option<AgentStatus>,
+    unseen: bool,
     fresh: bool,
     th: Theme,
     enabled: bool,
@@ -3460,9 +3477,8 @@ fn sweep_ramp(
         return None;
     }
     match status {
-        Some(AgentStatus::Running) => Some(th.warn_sweep),
-        Some(AgentStatus::NeedsFeedback) => Some(th.err_sweep),
-        Some(AgentStatus::Finished) if fresh => Some(th.done_sweep),
+        Some(AgentStatus::Finished) if unseen => Some(th.done_sweep),
+        Some(AgentStatus::NeedsFeedback | AgentStatus::Terminated) if fresh => Some(th.err_sweep),
         _ => None,
     }
 }
@@ -3540,31 +3556,72 @@ fn fit_ago(ago: String, free: usize) -> (String, usize) {
     }
 }
 
-/// The dot. `unseen` splits the finished state in two: blue while a
-/// finished turn is still unread — the one state that wants a human — and
-/// green once the cursor has been on it, which is a result filed away, not
-/// a job. Every other status ignores the flag.
-fn status_dot(status: Option<AgentStatus>, unseen: bool, th: Theme) -> Span<'static> {
+/// The STATUS MARK, a session's dot, with a space after it. One rule
+/// runs through it: *filled means look at me*. A session that needs you
+/// is a filled crimson `●`, a finish nobody has read a filled `●` in the
+/// done color, a crash a crimson `✕`; a running session's dot is the
+/// WORKING SPINNER, a gold `◐` turning a quarter every few frames
+/// (`spin`, `None` with the animations off — a still `◐`). A finish that
+/// has been read is AT REST: the same filled `●`, gray. A session that
+/// has never run is a hollow `○`, one whose PTY went with a daemon
+/// restart a dotted `◌`, and `None` — a session still starting — the
+/// spinner in gray. Every status has its own shape, so the marks still
+/// read with the color gone.
+pub(crate) fn status_dot(
+    status: Option<AgentStatus>,
+    unseen: bool,
+    spin: Option<usize>,
+    th: Theme,
+) -> Span<'static> {
+    let spinner = || crate::app::SPINNER[spin.unwrap_or(0) % crate::app::SPINNER.len()];
     let glyph = match status {
-        Some(AgentStatus::Disconnected) | None => "○ ",
-        Some(_) => "● ",
+        Some(AgentStatus::Running) | None => spinner(),
+        Some(AgentStatus::Terminated) => "✕",
+        Some(AgentStatus::Fresh) => "○",
+        Some(AgentStatus::Disconnected) => "◌",
+        Some(AgentStatus::NeedsFeedback | AgentStatus::Finished) => "●",
     };
-    Span::styled(glyph, Style::default().fg(status_color(status, unseen, th)))
+    Span::styled(
+        format!("{glyph} "),
+        Style::default().fg(status_color(status, unseen, th)),
+    )
 }
 
-/// The STATUS DOT's color on its own, for the marks that answer to it:
-/// the selection rail of a PILL ROW, the `▌` of a PROJECT button and the
-/// TAB UNDERLINE all take the row's dot color, so the cursor carries the
-/// row's status rather than the theme accent.
+/// The STATUS MARK's color on its own: crimson for a session that needs
+/// you or crashed, the done color for a finish nobody has read, gold for
+/// one working, and gray for everything at rest — a read finish, a fresh
+/// session, one starting up; the quietest gray for one gone offline.
 fn status_color(status: Option<AgentStatus>, unseen: bool, th: Theme) -> Color {
     match status {
-        Some(AgentStatus::Fresh) => th.dim,
-        Some(AgentStatus::Running) => th.warn,
+        Some(AgentStatus::NeedsFeedback | AgentStatus::Terminated) => th.err,
         Some(AgentStatus::Finished) if unseen => th.done,
-        Some(AgentStatus::Finished) => th.ok,
-        Some(AgentStatus::NeedsFeedback) => th.err,
-        Some(AgentStatus::Terminated) => th.special,
-        Some(AgentStatus::Disconnected) | None => th.dim,
+        Some(AgentStatus::Running) => th.warn,
+        Some(AgentStatus::Finished | AgentStatus::Fresh) | None => th.dim,
+        Some(AgentStatus::Disconnected) => th.faint,
+    }
+}
+
+/// A changed file's two-letter git status (`xy`) in the color every diff
+/// surface gives it — the DIFF VIEWER, the PULL REQUEST PAGE's Changes,
+/// the branch switcher's uncommitted files: added (or untracked) sage,
+/// deleted rose, a rename or copy muted, anything else the modified sand.
+pub(crate) fn change_color(xy: [char; 2], th: Theme) -> Color {
+    match (xy[0], xy[1]) {
+        ('?', '?') | ('A', _) => th.added,
+        ('D', _) | (_, 'D') => th.removed,
+        ('R', _) | ('C', _) => th.muted,
+        _ => th.modified,
+    }
+}
+
+/// Whether a session in `status` wants a human: needs you, crashed, or
+/// finished with nobody having looked. Its name goes bold and bright —
+/// the rest of the list sits back in plain weight, the way an inbox reads.
+pub(crate) fn wants_you(status: Option<AgentStatus>, unseen: bool) -> bool {
+    match status {
+        Some(AgentStatus::NeedsFeedback | AgentStatus::Terminated) => true,
+        Some(AgentStatus::Finished) => unseen,
+        _ => false,
     }
 }
 
@@ -3997,11 +4054,11 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
     let right = match &app.term {
         Some(t) if t.exited => Some(Span::styled(
             "exited".to_string(),
-            Style::default().fg(th.err).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.exited).add_modifier(Modifier::BOLD),
         )),
         Some(t) if t.scroll_offset() > 0 => Some(Span::styled(
             format!("scroll {}", t.scroll_offset()),
-            Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
         )),
         // Nothing has come off the PTY yet and nothing will for a while:
         // the session was reaped while the user was elsewhere and its CLI
@@ -4885,56 +4942,110 @@ mod tests {
         );
     }
 
-    /// Yellow (running) and red (needs feedback) animate for as long as
-    /// they last, whatever `fresh` says; a finished row animates only while
-    /// its unread finish is fresh — the ONE-SHOT SWEEP, on the done ramp —
-    /// and every other status renders still text. The animations setting
-    /// kills all three.
+    /// The shimmer means unread: a finished turn nobody has read sweeps on
+    /// the done ramp for as long as it stays unread, fresh or not, and
+    /// holds still once read. Needing you, or crashing, takes the red
+    /// ONE-SHOT SWEEP only while `fresh` says the change is new. A running
+    /// session never sweeps — its dot is the spinner — and neither does
+    /// anything else. The animations setting kills them all.
     #[test]
-    fn sweep_ramp_gates_on_live_statuses_a_fresh_finish_and_the_setting() {
+    fn sweep_ramp_marks_unread_finishes_and_fresh_alarms_only() {
         let th = Theme::default();
         for fresh in [false, true] {
             assert_eq!(
-                sweep_ramp(Some(AgentStatus::Running), fresh, th, true),
-                Some(th.warn_sweep)
+                sweep_ramp(Some(AgentStatus::Finished), true, fresh, th, true),
+                Some(th.done_sweep),
+                "unread: the shimmer, however old the finish"
             );
             assert_eq!(
-                sweep_ramp(Some(AgentStatus::NeedsFeedback), fresh, th, true),
-                Some(th.err_sweep)
+                sweep_ramp(Some(AgentStatus::Finished), false, fresh, th, true),
+                None,
+                "read: still"
             );
             for status in [
+                AgentStatus::Running,
                 AgentStatus::Fresh,
-                AgentStatus::Terminated,
                 AgentStatus::Disconnected,
             ] {
-                assert_eq!(
-                    sweep_ramp(Some(status), fresh, th, true),
-                    None,
-                    "{status:?}"
-                );
+                for unseen in [false, true] {
+                    assert_eq!(
+                        sweep_ramp(Some(status), unseen, fresh, th, true),
+                        None,
+                        "{status:?}"
+                    );
+                }
             }
-            assert_eq!(sweep_ramp(None, fresh, th, true), None);
+            assert_eq!(sweep_ramp(None, false, fresh, th, true), None);
             for status in [
-                AgentStatus::Running,
                 AgentStatus::NeedsFeedback,
+                AgentStatus::Terminated,
                 AgentStatus::Finished,
             ] {
                 assert_eq!(
-                    sweep_ramp(Some(status), fresh, th, false),
+                    sweep_ramp(Some(status), true, fresh, th, false),
                     None,
                     "{status:?}, animations off"
                 );
             }
         }
+        for status in [AgentStatus::NeedsFeedback, AgentStatus::Terminated] {
+            assert_eq!(
+                sweep_ramp(Some(status), false, true, th, true),
+                Some(th.err_sweep),
+                "{status:?}, just now: the one-shot"
+            );
+            assert_eq!(
+                sweep_ramp(Some(status), false, false, th, true),
+                None,
+                "{status:?}, and then it holds still"
+            );
+        }
+    }
+
+    /// Every status has its own mark, so the dots still read with the color
+    /// gone: filled for what wants you or sits at rest, the spinner for
+    /// work (turning with the phase, still without one), a cross for a
+    /// crash, hollow for never run, dotted for offline.
+    #[test]
+    fn every_status_has_its_own_mark() {
+        let th = Theme::default();
+        let mark = |status, unseen, spin| status_dot(status, unseen, spin, th);
         assert_eq!(
-            sweep_ramp(Some(AgentStatus::Finished), true, th, true),
-            Some(th.done_sweep),
-            "just finished, unread: the one-shot"
+            mark(Some(AgentStatus::NeedsFeedback), false, None).content,
+            "● "
         );
         assert_eq!(
-            sweep_ramp(Some(AgentStatus::Finished), false, th, true),
-            None,
-            "and then it holds still"
+            mark(Some(AgentStatus::Terminated), false, None).content,
+            "✕ "
         );
+        assert_eq!(mark(Some(AgentStatus::Fresh), false, None).content, "○ ");
+        assert_eq!(
+            mark(Some(AgentStatus::Disconnected), false, None).content,
+            "◌ "
+        );
+        assert_eq!(mark(Some(AgentStatus::Running), false, None).content, "◐ ");
+        assert_eq!(
+            mark(Some(AgentStatus::Running), false, Some(1)).content,
+            "◓ "
+        );
+        assert_eq!(
+            mark(None, false, Some(2)).content,
+            "◑ ",
+            "starting spins too"
+        );
+        let fg = |status, unseen| mark(status, unseen, None).style.fg;
+        assert_eq!(fg(Some(AgentStatus::NeedsFeedback), false), Some(th.err));
+        assert_eq!(fg(Some(AgentStatus::Terminated), false), Some(th.err));
+        assert_eq!(fg(Some(AgentStatus::Finished), true), Some(th.done));
+        assert_eq!(
+            fg(Some(AgentStatus::Finished), false),
+            Some(th.dim),
+            "read is at rest"
+        );
+        assert_eq!(fg(Some(AgentStatus::Running), false), Some(th.warn));
+        assert_eq!(fg(None, false), Some(th.dim), "starting is gray");
+        assert!(wants_you(Some(AgentStatus::Finished), true));
+        assert!(!wants_you(Some(AgentStatus::Finished), false));
+        assert!(!wants_you(Some(AgentStatus::Running), true));
     }
 }

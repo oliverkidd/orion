@@ -733,10 +733,7 @@ pub(crate) fn open_agent_presets(app: &mut App) {
     }
     let worktree = match (app.focus, app.selected_worktree()) {
         (Focus::Sessions | Focus::Worktrees, Some(w)) => w.id.clone(),
-        _ => {
-            app.flash = Some("agent presets: put the cursor on a checkout first".into());
-            return;
-        }
+        _ => return,
     };
     reopen_agent_presets(app, worktree, 0);
 }
@@ -780,7 +777,6 @@ pub(crate) fn open_agent_preset_editor(
         Some(index) => match crate::agent_presets::load().get(index) {
             Some(preset) => AgentPresetEditor::from_preset(worktree, index, preset, text),
             None => {
-                app.flash = Some("that preset is gone".into());
                 reopen_presets_list(app, worktree, quick, 0);
                 return;
             }
@@ -854,10 +850,6 @@ pub(crate) fn open_agent_preset_task(
     out: &mut Vec<ClientRequest>,
 ) {
     let Some(preset) = view.presets.get(view.selected).cloned() else {
-        app.flash = Some(format!(
-            "no preset selected — {} creates one",
-            keys::NEW.label()
-        ));
         return;
     };
     if !crate::config::Config::load().preset_harness_usable(&preset) {
@@ -913,7 +905,6 @@ fn apply_preset_to_quick_prompt(
     out: &mut Vec<ClientRequest>,
 ) {
     let Some(preset) = presets.get(selected).cloned() else {
-        app.flash = Some("no preset selected".into());
         return;
     };
     let cfg = crate::config::Config::load();
@@ -984,12 +975,7 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
             open_agent_preset_editor(app, worktree, quick, None);
         }
         _ if keys::EDIT.matches(&key) => {
-            if view.presets.is_empty() {
-                app.flash = Some(format!(
-                    "no preset selected — {} creates one",
-                    keys::NEW.label()
-                ));
-            } else {
+            if !view.presets.is_empty() {
                 let (worktree, quick) = (view.worktree.clone(), view.aimed_quick());
                 let index = view.selected;
                 open_agent_preset_editor(app, worktree, quick, Some(index));
@@ -1008,14 +994,7 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         // A leading space would narrow nothing; it waits for a word.
         KeyCode::Char(' ') if view.filter.is_empty() => {}
         KeyCode::Char(c) if !ctrl => {
-            let query = format!("{}{c}", view.filter);
-            if !view.type_filter(c) {
-                app.flash = Some(if view.presets.is_empty() {
-                    format!("no presets yet — {} creates one", keys::NEW.label())
-                } else {
-                    format!("no preset matches '{query}'")
-                });
-            }
+            view.type_filter(c);
         }
         _ => {}
     }
@@ -1046,9 +1025,9 @@ fn activate_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// checkout — the manager's between the worktree `e` was pressed on and a
 /// fresh one of its project, a picker's through `launcher::flipped_target`,
 /// so the box it hands over is already aimed. A picker opened from the box
-/// has no row to flip ([`AgentPresetsView::has_worktree_row`]). A PR SESSION has nothing to flip: its checkout
-/// is the pull request's own, and the footer says so. INPUT PARITY: the
-/// key and the click both call this.
+/// has no row to flip ([`AgentPresetsView::has_worktree_row`]). A PR
+/// SESSION has nothing to flip: its checkout is the pull request's own.
+/// INPUT PARITY: the key and the click both call this.
 pub(crate) fn toggle_new_worktree(app: &mut App) {
     let Some(Overlay::AgentPresets(view)) = &app.overlay else {
         return;
@@ -1056,7 +1035,7 @@ pub(crate) fn toggle_new_worktree(app: &mut App) {
     let home = QuickTarget::Worktree(view.worktree.clone());
     let flipped = match view.aimed_quick() {
         Some(back) => crate::launcher::flipped_target(app, &back.launch),
-        None if view.is_new_worktree() => Ok(home.clone()),
+        None if view.is_new_worktree() => Some(home.clone()),
         None => app
             .tree
             .worktrees
@@ -1068,20 +1047,16 @@ pub(crate) fn toggle_new_worktree(app: &mut App) {
                     project: w.project_id.clone(),
                     branch: crate::branch_name::random_name(&taken),
                 }
-            })
-            .ok_or("worktree no longer exists"),
+            }),
     };
-    match flipped {
-        Ok(target) => {
-            if let Some(Overlay::AgentPresets(view)) = &mut app.overlay {
-                let own = view
-                    .quick
-                    .as_ref()
-                    .map_or(home, |q| q.launch.target.clone());
-                view.aim = (target != own).then_some(target);
-            }
+    if let Some(target) = flipped {
+        if let Some(Overlay::AgentPresets(view)) = &mut app.overlay {
+            let own = view
+                .quick
+                .as_ref()
+                .map_or(home, |q| q.launch.target.clone());
+            view.aim = (target != own).then_some(target);
         }
-        Err(why) => app.flash = Some(format!("agent presets: {why}")),
     }
     app.dirty = true;
 }
@@ -1145,10 +1120,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
         // refused, so the row never shows a choice the filter denies.
         KeyCode::Backspace if !editor.field.is_typed() => editor.pop_filter(),
         KeyCode::Char(c) if !editor.field.is_typed() && !ctrl => {
-            let query = format!("{}{c}", editor.filter);
-            if !editor.type_filter(c) {
-                app.flash = Some(format!("no choice matches '{query}'"));
-            }
+            editor.type_filter(c);
         }
         _ => editor.edit_text(&key),
     }

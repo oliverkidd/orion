@@ -117,7 +117,7 @@ fn breadcrumb(app: &App) -> Vec<Span<'static>> {
     if let Some(place) = place(app) {
         spans.push(Span::styled(
             format!("  · {place}"),
-            Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
         ));
     }
     spans
@@ -407,7 +407,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     if app.is_remote {
         status.push(Span::styled(
             truncate(&app.hostname, 24),
-            Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
         ));
         status.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
@@ -468,7 +468,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         if let Some(update) = update {
             spans.push(Span::styled(
                 update,
-                Style::default().fg(th.warn).add_modifier(Modifier::BOLD),
+                Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
             ));
         }
         spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
@@ -482,7 +482,9 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let room = usize::from(left.width).saturating_sub(used + 1);
     match &app.flash {
-        Some(flash) => spans.push(Span::styled(flash.clone(), Style::default().fg(th.warn))),
+        // A flash is news, not a status: plain text, so it never reads as
+        // the working gold beside a spinner.
+        Some(flash) => spans.push(Span::styled(flash.clone(), Style::default().fg(th.text))),
         None => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }
     f.render_widget(Paragraph::new(Line::from(spans)), left);

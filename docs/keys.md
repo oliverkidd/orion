@@ -9,7 +9,7 @@ its key, and `Enter` runs it.
 
 ## How the screen is laid out
 
-- **The FOOTER is the status bar.** Always, left to right: which orion this is (`orion v0.42.0` —
+- **The FOOTER is the status bar.** Always, left to right: which orion this is (`orion v1.0.0` —
   a click on it goes HOME), where you are (`project ▸ branch ▸ session`, then `· archived`,
   `· full screen` or `· home` when you are somewhere other than the grid of live sessions), and at
   the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
@@ -91,7 +91,7 @@ or `Esc` folds it back.
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | walk the BANDS — one checkout at a time, the pane swapping onto that checkout's remembered card as you pass; on the band opened with `Tab`, walk the rows of its cards and off its last row on to the next band. On the first band `↑` has nowhere to go: one press stays put and says so, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
+| `↑` / `↓` | walk the BANDS — one checkout at a time, the pane swapping onto that checkout's remembered card as you pass; on the band opened with `Tab`, walk the rows of its cards and off its last row on to the next band. On the first band `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
 | `←` / `→` | walk the cards of the band under the cursor, stopping at either end, the pane following onto each. A `❮` before the row or a `❯` after its last card says the rest went that way, and a click on either is the same step. With the pane beside the cards, `→` off the row's last card — or on a band with no cards — goes on into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
 | `Tab` | **open the worktree in place**: every card of the band wrapped into rows under its rule, its terminals under a `terminals` rule. One band is open at a time; `Tab` on the open band folds it back. Remembered per project and across restarts. With Settings → Appearance → **Expand all worktrees** on, every band stays open and `Tab` does nothing |
 | `Enter`, a double-click | into the pane on the card under the cursor, its input locked. On a band with nothing on it but its pull request, into the pane to read it. On a terminal too short to draw the pane the session takes the whole screen instead |
@@ -457,8 +457,8 @@ The TERMINAL PANE's header shows one chip at a time — the first of these that 
 
 | Chip | What it is telling you |
 |---|---|
-| `exited` (red) | the session's process is gone. `Esc`, `Enter` and `q` leave the lock and everything else falls through to the grid; the next attach respawns it |
-| `scroll N` (yellow) | you are N lines back in the scrollback. Typing anything, or scrolling back down, clears it |
+| `exited` (copper) | the session's process is gone. `Esc`, `Enter` and `q` leave the lock and everything else falls through to the grid; the next attach respawns it |
+| `scroll N` (muted) | you are N lines back in the scrollback. Typing anything, or scrolling back down, clears it |
 | `starting…` (dim) | nothing has come off the PTY yet: the session's CLI is booting |
 | `INPUT` (accent) | the pane is locked and every key is going to the PTY; `Esc` leaves |
 
