@@ -1,36 +1,49 @@
 //! The PULL REQUESTS MODAL: the selected project's open pull requests,
 //! listed down the left in the PROJECT OPEN PRS GROUP's order — newest
-//! first, the drafts sunk below the finished ones — the one under the
-//! cursor read on the right, and the ISSUES MODAL's ways to put an agent
-//! on it: a QUICK PROMPT (`Enter`), one of the saved AGENT PRESETS
-//! (`Shift+Tab`), or a bare harness pick (`Tab`, the group row's NEW
-//! AGENT PICKER) — the QUICK PROMPT box's own three keys. Every one of
-//! them is a PR SESSION, launched exactly as the group's row launches it
-//! (`quick_prompt::pr_launch_for`): the create is a `CreatePrAgent`, the
-//! DAEMON runs the session in the project's checkout of the pull
-//! request's head branch — reused when one is there, cut otherwise, its
-//! stand-in rows up under the pull request from the moment Enter is
-//! pressed — and the PR's URL rides the harness's context.
+//! first, the drafts sunk below the finished ones — and the one under the
+//! cursor read on the right, as the PULL REQUEST PAGE. Two panels, and
+//! `Tab` / `⇧Tab` hand the keys from one to the other as they do in the
+//! DIFF VIEWER ([`PrFocus`]): the list's keys walk the pull requests and
+//! type into its filter, the page's walk its tabs (`←`/`→`) and their rows
+//! (`↑`/`↓`), and Enter acts on the row — the DIFF VIEWER at a file or a
+//! commit, a check's page.
+//!
+//! `Enter` on the list puts an agent on the pull request: the QUICK
+//! PROMPT for a PR SESSION, launched exactly as the group's row launches
+//! it (`quick_prompt::pr_launch_for`) — the box's own `Tab` and `⇧Tab`
+//! pick another harness or an AGENT PRESET. The create is a
+//! `CreatePrAgent`: the DAEMON runs the session in the project's checkout
+//! of the pull request's head branch — reused when one is there, cut
+//! otherwise, its stand-in rows up under the pull request from the moment
+//! Enter is pressed — and the PR's URL rides the harness's context.
 //!
 //! The list's filter is live from the moment the modal opens, as the
 //! DIFF VIEWER's and the FILE FINDER's are: every letter typed narrows
 //! the rows to the fuzzy matches of `#42 title` (`fuzzy::rank`), best
-//! first, the cursor on the best, and Esc clears it before a second Esc
-//! closes. So the verbs are chords: `Ctrl+c` or `Ctrl+y` leaves a comment (the
-//! COMMENT BOX the group row's `y` opens, which comes back to the modal
-//! on its row), `Ctrl+g` reads the whole diff, `Ctrl+o` opens the pull
-//! request in the browser, `Ctrl+r` asks GitHub again.
+//! first, the cursor on the best — a letter typed on the page hands the
+//! keys back to the list first — and Esc clears it before a second Esc
+//! closes (Esc on the page goes back to the list). So the verbs are
+//! chords: `Ctrl+c` or `Ctrl+y` leaves a comment (the COMMENT BOX the
+//! group row's `y` opens, which comes back to the modal on its row),
+//! `Ctrl+g` reads the diff, `Ctrl+o` opens the pull request in the
+//! browser, `Ctrl+r` asks GitHub again, `Ctrl+t` opens a new pull request
+//! and `Ctrl+x` merges this one (`pr_actions`, both forms in the reading
+//! pane's place).
+//!
+//! The DIFF VIEWER opened from here is a level inside the modal: it takes
+//! the modal's frame, its title says which pull request it is reading,
+//! and Esc comes back to the modal on the same row and tab
+//! (`DiffView::back`).
 //!
 //! Nothing is fetched here the panels do not already keep. The rows are
 //! the project's open list (`App::open_prs`) — kept warm on the OPEN PRS
 //! beat and remembered across launches (`pr_cache`) — so the modal paints
 //! at once, and opening it on a list older than [`FRESH`] asks again
 //! underneath. The reading side is the PULL REQUEST PAGE the pane shows
-//! (`pr_preview`) — its tabs walked with `⇧←`/`⇧→`, a listing's rows with
-//! `⇧↑`/`⇧↓`, `^G` opening the diff of the file or commit under the
-//! cursor and `^O` the check — fetched on the pane's debounce into the
-//! same `App::pr_detail`, so a pull request read in one is read in the
-//! other.
+//! (`pr_preview`) — fetched on the pane's debounce into the same
+//! `App::pr_detail`, so a pull request read in one is read in the other.
+//! From the list its tabs are walked with `⇧←`/`⇧→` and a listing's rows
+//! with `⇧↑`/`⇧↓`, without moving the keys.
 
 use std::path::PathBuf;
 
@@ -47,7 +60,7 @@ use crate::app::{
 };
 use crate::pr_preview::{Nav, PrTab};
 use crate::pull_request::OpenPr;
-use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn};
+use crate::quick_prompt::{ModalUnder, QuickLaunch};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
@@ -70,6 +83,28 @@ pub(crate) const LIST_PCT: u16 = 38;
 pub(crate) const MIN_LIST_W: u16 = 24;
 /// Lines one wheel notch scrolls the reading pane.
 pub(crate) const WHEEL_LINES: i32 = 3;
+
+/// Which panel of the modal has the keys — the one wearing the accent.
+/// `Tab` and `⇧Tab` hand them across, as the DIFF VIEWER's panels do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PrFocus {
+    /// `↑`/`↓` walk the pull requests; typing filters them.
+    #[default]
+    List,
+    /// The PULL REQUEST PAGE: `←`/`→` its tabs, `↑`/`↓` a listing's rows
+    /// or the prose, Enter the row under the cursor.
+    Page,
+}
+
+impl PrFocus {
+    /// Two panels: `Tab` and `⇧Tab` both land on the other one.
+    pub fn other(self) -> Self {
+        match self {
+            PrFocus::List => PrFocus::Page,
+            PrFocus::Page => PrFocus::List,
+        }
+    }
+}
 
 /// The modal's own state. The rows live on the [`App`] (`open_prs`, keyed
 /// by project), where the panels read them too; this holds only the
@@ -118,6 +153,12 @@ pub struct PullRequestsView {
     /// second click on the same row inside the DOUBLE-CLICK window opens it
     /// in the browser (`event_loop::is_double_click`).
     pub last_row_click: Option<(std::time::Instant, u64)>,
+    /// The panel with the keys.
+    pub focus: PrFocus,
+    /// A form in the reading pane's place — a new pull request, or the
+    /// merge of the one under the cursor (`pr_actions`). While it is up
+    /// every key is its own.
+    pub form: Option<Box<crate::pr_actions::PrForm>>,
 }
 
 impl PullRequestsView {
@@ -139,6 +180,8 @@ impl PullRequestsView {
             query: TextInput::new(),
             cursor_row: 0,
             last_row_click: None,
+            focus: PrFocus::List,
+            form: None,
         }
     }
 
@@ -267,7 +310,7 @@ fn is_fresh(app: &App, project: &ProjectId) -> bool {
 /// beat — `Shift+R`'s path (`App::pr_refresh_requested`), which asks for
 /// the selected project, the modal's. A lookup already in flight is left
 /// to land.
-fn request_list(app: &mut App, project: &ProjectId) {
+pub(crate) fn request_list(app: &mut App, project: &ProjectId) {
     if let Some(open) = app.open_prs.get_mut(project) {
         open.due = std::time::Instant::now();
     }
@@ -276,7 +319,7 @@ fn request_list(app: &mut App, project: &ProjectId) {
 
 /// The pull request under the cursor, while the modal is up and the list
 /// has a row the filter shows.
-fn selected_pr(app: &App) -> Option<OpenPr> {
+pub(crate) fn selected_pr(app: &App) -> Option<OpenPr> {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return None;
     };
@@ -425,9 +468,13 @@ fn clear_query(app: &mut App) {
 /// rows as typing it would. True whenever the modal is up: the filter is
 /// always live.
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
+    if crate::pr_actions::form_up(app) {
+        return crate::pr_actions::paste(app, text);
+    }
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return false;
     };
+    view.focus = PrFocus::List;
     view.query.insert_str(text);
     query_changed(app);
     true
@@ -471,47 +518,16 @@ fn launch_for_selected(app: &App) -> Option<QuickLaunch> {
     crate::quick_prompt::pr_launch_for(app, &view.project, &pr)
 }
 
-/// `Enter`: the QUICK PROMPT for a PR SESSION on the pull request.
-/// The box goes up over the modal, which stays on screen under it: Esc
-/// puts the modal back on the row (`QuickLaunch::under`), and the launch
-/// closes it onto the new session's card.
+/// `Enter` on the list: the QUICK PROMPT for a PR SESSION on the pull
+/// request. The box goes up over the modal, which stays on screen under
+/// it: Esc puts the modal back on the row (`QuickLaunch::under`), and the
+/// launch closes it onto the new session's card. The box's own `Tab` and
+/// `⇧Tab` pick another harness or an AGENT PRESET for it.
 fn open_prompt_for_selected(app: &mut App) {
     let under = ModalUnder::of(app.overlay.as_ref());
     if let Some(launch) = launch_for_selected(app) {
         crate::quick_prompt::open_pr_box(app, launch.with_under(under));
     }
-}
-
-/// `Shift+Tab`: one of the saved AGENT PRESETS as a PR SESSION on the pull
-/// request. The picker goes up over the modal, as `Enter`'s box does, and
-/// hands its pick to that same box with the preset applied; Esc puts the
-/// modal back on the row.
-fn open_preset_for_selected(app: &mut App) {
-    let under = ModalUnder::of(app.overlay.as_ref());
-    if let Some(launch) = launch_for_selected(app) {
-        crate::quick_prompt::open_preset_picker(app, QuickReturn::fresh(launch.with_under(under)));
-    }
-}
-
-/// `Tab`: the NEW AGENT PICKER's harness rows for a PR SESSION on the pull
-/// request — `n` on the group's row — launching bare on Enter, or through
-/// the MODEL / EFFORT submenus on `→`.
-fn open_harness_picker_for_selected(app: &mut App) {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return;
-    };
-    let project = view.project.clone();
-    let Some(pr) = selected_pr(app) else {
-        return;
-    };
-    // The PROJECT's ROOT WORKTREE: what a PR SESSION create is addressed to.
-    let Some(root) = app.root_worktree(&project) else {
-        return;
-    };
-    crate::agent_picker::open_kind_picker(
-        app,
-        crate::agent_picker::KindPicker::pr_session(root, &pr),
-    );
 }
 
 /// `Ctrl+c`: the COMMENT BOX for the pull request under the cursor, carrying the
@@ -609,33 +625,66 @@ fn switch_tab(view: &mut PullRequestsView, tab: PrTab) {
     }
 }
 
-/// Keys in the PULL REQUESTS MODAL. The filter is always live, so
-/// letters type — the modal's own hotkey and `q` among them — and the
-/// verbs are chords; only Esc closes, once the filter is clear.
+/// Enter on the page: the row under its cursor acted on — the DIFF
+/// VIEWER at a file or a commit, a check's page — and on a tab of prose,
+/// the pull request in the browser, as Enter on the pane's page does.
+fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let lists = match &app.overlay {
+        Some(Overlay::PullRequests(view)) => view.tabs.tab.lists(),
+        _ => return,
+    };
+    if lists {
+        act_on_row(app, out);
+    } else {
+        open_in_browser(app, out);
+    }
+}
+
+/// Keys in the PULL REQUESTS MODAL. A form in the reading pane's place
+/// takes every key (`pr_actions::handle_key`). Otherwise `Tab` / `⇧Tab`
+/// move the keys between the list and the page ([`PrFocus`]); the list's
+/// filter is always live, so letters type — the modal's own hotkey and
+/// `q` among them, a letter on the page handing the keys back to the list
+/// — and the verbs are chords. Esc steps back: off the page, then the
+/// filter, then the modal.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     use crate::pr_preview::keys as page;
+    if crate::pr_actions::form_up(app) {
+        crate::pr_actions::handle_key(app, key);
+        return;
+    }
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let plain = key.modifiers.is_empty();
+    let on_page = view.focus == PrFocus::Page;
     let half = (view.view_height / 2).max(1) as i32;
     let max = view.max_scroll();
     match key.code {
+        KeyCode::Esc if on_page => view.focus = PrFocus::List,
         // Two-stage escape, like every fuzzy overlay: a typed filter is
         // cleared before the second Esc closes the modal.
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
         KeyCode::Esc => close(app),
-        // The reading side's tabs, ⇧←/⇧→ round either end.
-        KeyCode::Left | KeyCode::Right if page::MODAL_TABS.matches(&key) => {
+        // Tab / ⇧Tab (a shifted Tab under the kitty protocol too): the
+        // keys to the other panel.
+        _ if keys::PANEL.matches(&key) => view.focus = view.focus.other(),
+        // The page's tabs: ←/→ with the keys on it, ⇧←/⇧→ from anywhere,
+        // round either end.
+        KeyCode::Left | KeyCode::Right if page::MODAL_TABS.matches(&key) || (on_page && plain) => {
             let delta = if key.code == KeyCode::Right { 1 } else { -1 };
             let tab = view.tabs.tab.step(delta);
             switch_tab(view, tab);
         }
-        // Shift+↑/↓ walk a listing's rows, or scroll prose a line; ↑/↓
-        // walk the rows the filter leaves, Ctrl+n/p mirroring them.
-        KeyCode::Down if shift => view.tabs.navigate(Nav::Line(1), &mut view.scroll, max),
-        KeyCode::Up if shift => view.tabs.navigate(Nav::Line(-1), &mut view.scroll, max),
+        // ↑/↓ walk a listing's rows or scroll prose with the keys on the
+        // page, and ⇧↑/⇧↓ do from the list; on the list ↑/↓ walk the rows
+        // the filter leaves, Ctrl+n/p mirroring them.
+        KeyCode::Down if shift || on_page => {
+            view.tabs.navigate(Nav::Line(1), &mut view.scroll, max)
+        }
+        KeyCode::Up if shift || on_page => view.tabs.navigate(Nav::Line(-1), &mut view.scroll, max),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
         KeyCode::Char('n') if ctrl => step(app, 1),
@@ -650,21 +699,23 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::PageUp => view.tabs.navigate(Nav::Page(-1), &mut view.scroll, max),
         KeyCode::Home => view.tabs.navigate(Nav::Top, &mut view.scroll, max),
         KeyCode::End => view.tabs.navigate(Nav::Bottom, &mut view.scroll, max),
-        // The launches are the QUICK PROMPT box's own keys: Enter prompts,
-        // Tab picks a harness, Shift+Tab a preset (a shifted Tab under the
-        // kitty protocol is the same key).
+        // Enter: the page's row with the keys there, else an agent on the
+        // pull request.
+        _ if on_page && keys::ACT.matches(&key) => act(app, out),
         _ if keys::PROMPT.matches(&key) => open_prompt_for_selected(app),
-        _ if keys::PRESET.matches(&key) => open_preset_for_selected(app),
-        _ if keys::HARNESS.matches(&key) => open_harness_picker_for_selected(app),
         _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
         _ if keys::DIFF.matches(&key) => diff(app, out),
         _ if keys::BROWSER.matches(&key) => browser(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
+        _ if keys::NEW.matches(&key) => crate::pr_actions::open_create(app),
+        _ if keys::MERGE.matches(&key) => crate::pr_actions::open_merge(app),
         _ if keys::LINEAR.matches(&key) => crate::linear::open_attach(app),
         // Everything else feeds the always-live fuzzy filter, which edits
-        // like a terminal line (see text_input).
+        // like a terminal line (see text_input) — and typing hands the
+        // list the keys.
         _ => {
             if view.query.handle_key(&key).changed() {
+                view.focus = PrFocus::List;
                 query_changed(app);
             }
         }
@@ -674,18 +725,24 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
 
 /// Mouse in the PULL REQUESTS MODAL: the wheel moves the cursor over the
 /// rows the filter leaves and scrolls the reading side over it, a click on
-/// a row selects it (a launch is `Enter`, not a click — the row is
-/// something to read first), a double-click on a row opens that pull
-/// request in the browser — the very open `Ctrl+o` and the `↗ open in
-/// browser` button run — a click on a tab shows it, a click on a file, a
-/// commit or a check is `^G` or `^O` on it, and a click outside closes
-/// (`overlay_close`); everything else is swallowed.
+/// a row selects it and hands the list the keys (a launch is `Enter`, not
+/// a click — the row is something to read first), a double-click on a row
+/// opens that pull request in the browser — the very open `Ctrl+o` and
+/// the `↗ open in browser` button run — a click on the page hands it the
+/// keys, on a tab shows it, on a file, a commit or a check is Enter on
+/// it, and a click outside closes (`overlay_close`); everything else is
+/// swallowed. A form up in the reading pane's place has the mouse
+/// (`pr_actions::handle_mouse`).
 pub(crate) fn handle_mouse(
     app: &mut App,
     mouse: MouseEvent,
     mouse_pos: Position,
     out: &mut Vec<ClientRequest>,
 ) {
+    if crate::pr_actions::form_up(app) {
+        crate::pr_actions::handle_mouse(app, mouse, mouse_pos);
+        return;
+    }
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
@@ -712,16 +769,20 @@ pub(crate) fn handle_mouse(
         // `Ctrl+o` runs.
         MouseEventKind::Down(MouseButton::Left) if on_button => open_in_browser(app, out),
         MouseEventKind::Down(MouseButton::Left) if on_tab.is_some() => {
+            view.focus = PrFocus::Page;
             if let Some(tab) = on_tab {
                 switch_tab(view, tab);
             }
         }
         MouseEventKind::Down(MouseButton::Left) if on_row.is_some() => {
+            view.focus = PrFocus::Page;
             if let Some(row) = on_row {
                 view.tabs.select(row);
             }
             act_on_row(app, out);
         }
+        // A click on the page hands it the keys.
+        MouseEventKind::Down(MouseButton::Left) if over_body => view.focus = PrFocus::Page,
         MouseEventKind::Down(MouseButton::Left) => {
             let list = view.list_area;
             let first = view.window_start(list.height as usize);
@@ -732,6 +793,7 @@ pub(crate) fn handle_mouse(
                 .map_or(&[], |open| open.list.as_slice());
             let visible = visible_rows(&view.query, prs);
             if let Some(row) = crate::list_hit::row_at(list, first, visible.len(), mouse_pos) {
+                view.focus = PrFocus::List;
                 let index = visible[row].0;
                 let double =
                     crate::event_loop::is_double_click(&mut view.last_row_click, prs[index].number);
@@ -754,53 +816,91 @@ pub(crate) fn handle_mouse(
 pub(crate) mod keys {
     use crate::hints::Key;
 
-    /// The launches are the QUICK PROMPT box's own keys: Enter prompts,
-    /// Tab picks a harness, ⇧Tab a preset.
+    /// Enter on the list: the QUICK PROMPT for an agent on the pull
+    /// request.
     pub const PROMPT: Key = crate::issues::keys::PROMPT;
-    pub const HARNESS: Key = Key::new(&["tab"], "harness");
-    pub const PRESET: Key = crate::issues::keys::PRESET;
+    /// The keys to the other panel: the page from the list, the list from
+    /// the page.
+    pub const PANEL: Key = Key::new(&["tab", "shift+tab"], "page");
+    /// [`PANEL`] as the page names it: back to the list.
+    pub const BACK: Key = Key::new(&["shift+tab", "tab"], "list");
+    /// The page's own, with the keys on it.
+    pub const PAGE_TABS: Key = Key::new(&["left", "right"], "tabs").show(2);
+    pub const PAGE_ROWS: Key = Key::new(&["up", "down"], "pick").show(2);
+    pub const ACT: Key = Key::new(&["enter"], "open");
     pub const COMMENT: Key = crate::issues::keys::COMMENT;
     pub const DIFF: Key = Key::new(&["ctrl+g"], "diff");
     pub const BROWSER: Key = crate::issues::keys::BROWSER;
     pub const REFRESH: Key = crate::issues::keys::REFRESH;
     pub const READ: Key = crate::issues::keys::READ;
+    /// A new pull request, from a branch of the project's.
+    pub const NEW: Key = Key::new(&["ctrl+t"], "new PR");
+    /// Merge the pull request under the cursor.
+    pub const MERGE: Key = Key::new(&["ctrl+x"], "merge");
     /// Linear issues to attach the pull request to.
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
     pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
     pub const ROWS: Key = crate::pr_preview::keys::MODAL_ROWS;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        PROMPT, HARNESS, PRESET, COMMENT, DIFF, BROWSER, REFRESH, READ, LINEAR, TABS, ROWS,
+        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
+        MERGE, LINEAR, TABS, ROWS,
     ];
 }
 
-/// The keys along the modal's bottom edge — `^G` and `^O` named for what
-/// they reach on the tab showing. Esc clears a typed filter before it
-/// closes.
+/// The keys along the modal's bottom edge, for the panel that has them —
+/// `^G` and `^O` named for what they reach on the tab showing, and Enter
+/// on the page for what it does there. A form up in the reading pane's
+/// place says its own (`pr_actions::hints`). Esc steps back off the page,
+/// then clears a typed filter, then closes.
 pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
+    use crate::hints::Hint;
+    if let Some(form) = &view.form {
+        return crate::pr_actions::hints(form);
+    }
     let tab = view.tabs.tab;
-    let mut hints = vec![keys::PROMPT.hint().kept(), keys::TABS.hint()];
+    let diff = match tab {
+        PrTab::Changes => keys::DIFF.hint_as("diff the file"),
+        PrTab::Commits => keys::DIFF.hint_as("diff the commit"),
+        _ => keys::DIFF.hint(),
+    };
+    let browser = if tab == PrTab::Checks {
+        keys::BROWSER.hint_as("open the check")
+    } else {
+        keys::BROWSER.hint()
+    };
+    if view.focus == PrFocus::Page {
+        return vec![
+            keys::ACT.hint_as(tab.act_does()).kept(),
+            keys::PAGE_TABS.hint(),
+            keys::PAGE_ROWS.hint_as(if tab.lists() { "pick" } else { "scroll" }),
+            keys::BACK.hint(),
+            keys::COMMENT.hint(),
+            keys::MERGE.hint(),
+            diff,
+            browser,
+            keys::READ.hint(),
+            Hint::new("Esc", "list"),
+        ];
+    }
+    let mut hints = vec![
+        keys::PROMPT.hint().kept(),
+        keys::PANEL.hint().kept(),
+        keys::TABS.hint(),
+    ];
     if tab.lists() {
         hints.push(keys::ROWS.hint());
     }
     hints.extend([
-        keys::HARNESS.hint(),
-        keys::PRESET.hint(),
+        keys::NEW.hint(),
+        keys::MERGE.hint(),
         keys::COMMENT.hint(),
-        match tab {
-            PrTab::Changes => keys::DIFF.hint_as("diff the file"),
-            PrTab::Commits => keys::DIFF.hint_as("diff the commit"),
-            _ => keys::DIFF.hint(),
-        },
-        if tab == PrTab::Checks {
-            keys::BROWSER.hint_as("open the check")
-        } else {
-            keys::BROWSER.hint()
-        },
+        diff,
+        browser,
         keys::READ.hint(),
         keys::LINEAR.hint(),
         keys::REFRESH.hint(),
-        crate::hints::Hint::new(
+        Hint::new(
             "Esc",
             if view.query.is_empty() {
                 "close"
@@ -914,7 +1014,11 @@ pub(crate) fn draw(
         count,
         if inflight { ", refreshing…" } else { "" }
     );
-    let block = panel_block(&title, !backdrop, th);
+    // The panel with the keys wears the accent — neither, while a box
+    // over the modal or a form in the page's place has them.
+    let list_focused = !backdrop && view.form.is_none() && view.focus == PrFocus::List;
+    let page_focused = !backdrop && view.form.is_none() && view.focus == PrFocus::Page;
+    let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
     // The always-live filter on the list's first line, the rows under it.
@@ -959,9 +1063,28 @@ pub(crate) fn draw(
             row_area,
             row_spans(&rows[*index], positions, budget, th),
             Some(*index) == cursor,
-            !backdrop,
+            list_focused,
             th,
         );
+    }
+
+    // ---- right: a form in the page's place, while one is up ----
+    if let Some(form) = &view.form {
+        let drawn = crate::pr_actions::draw(f, body_a, form, !backdrop, th);
+        if !backdrop {
+            crate::hints::draw_on_border(f, area, &hints(view), drawn.foot_w, th);
+        }
+        if let Some(Overlay::PullRequests(v)) = &mut app.overlay {
+            v.area = area;
+            v.list_area = rows_area;
+            v.cursor_row = cursor_row;
+            v.body_area = Rect::default();
+            v.browser_area = Rect::default();
+            if let Some(form) = &mut v.form {
+                crate::pr_actions::write_back(form, drawn);
+            }
+        }
+        return;
     }
 
     // ---- right: the reading side, the PULL REQUEST PAGE ----
@@ -971,7 +1094,7 @@ pub(crate) fn draw(
         Some(pr) => format!("Pull request #{}", pr.number),
         None => "Pull request".to_string(),
     };
-    let block = panel_block(&body_title, false, th);
+    let block = panel_block(&body_title, page_focused, th);
     let body_inner = block.inner(body_a);
     f.render_widget(block, body_a);
     let mut tabs = view.tabs.clone();
@@ -986,7 +1109,8 @@ pub(crate) fn draw(
             diff_key: keys::DIFF.label(),
             now: orion_core::clock::now_secs() as i64,
         };
-        let page = crate::pr_preview::page(&input, &tabs, !backdrop, body_inner.width as usize, th);
+        let page =
+            crate::pr_preview::page(&input, &tabs, page_focused, body_inner.width as usize, th);
         crate::pr_preview::draw(f, body_inner, &page, &mut tabs, view.scroll)
     });
     // Where the body is read to, on the bottom border, once it scrolls.
@@ -1274,11 +1398,11 @@ mod tests {
         assert_eq!(pending_url(&app), Some("https://github.com/o/r/pull/42"));
     }
 
-    /// Enter opens the QUICK PROMPT for a PR SESSION on the row under the
-    /// cursor, Shift+Tab the AGENT PRESETS picker for it and Tab the
-    /// harness picker for it — the box's own three keys.
+    /// Enter on the list opens the QUICK PROMPT for a PR SESSION on the
+    /// row under the cursor — the box's own Tab and Shift+Tab pick a
+    /// harness or a preset for it, so the modal keeps neither.
     #[test]
-    fn the_launch_keys_start_a_pr_session_on_the_row() {
+    fn enter_starts_a_pr_session_on_the_row() {
         pinned(|| {
             let (mut app, _) = app_with(
                 vec![pr(42, "Fix login", false), pr(41, "Spike", true)],
@@ -1304,59 +1428,176 @@ mod tests {
                 QuickTarget::Worktree(WorktreeId("w-root".into()))
             );
             assert!(prompt.title.contains("PR #41"), "{}", prompt.title);
-
-            // Shift+Tab in either spelling a terminal has for it.
-            for preset_key in [key(KeyCode::BackTab), shifted(KeyCode::Tab)] {
-                open(&mut app);
-                handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
-                handle_key(&mut app, preset_key, &mut Vec::new());
-                let Some(Overlay::AgentPresets(presets)) = &app.overlay else {
-                    panic!(
-                        "Shift+Tab: expected the preset picker, got {:?}",
-                        app.overlay
-                    );
-                };
-                let back = presets.quick.as_ref().expect("a picker for a launch");
-                assert_eq!(back.launch.pr.as_ref(), Some(&expected));
-                assert!(!back.from_box, "no box to go back to");
-            }
-            // A PR SESSION runs in the pull request's own checkout: the
-            // list's NEW WORKTREE `Tab` has nothing to flip.
-            app.flash = None;
-            crate::event_loop::handle_overlay_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
-            let Some(Overlay::AgentPresets(presets)) = &app.overlay else {
-                panic!("Tab keeps the picker up, got {:?}", app.overlay);
-            };
-            assert!(presets.aim.is_none(), "{:?}", presets.aim);
-            assert_eq!(app.flash, None);
-
-            open(&mut app);
-            handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
-            handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("Tab: expected the harness picker, got {:?}", app.overlay);
-            };
-            assert_eq!(menu.title.as_deref(), Some("New PR agent · #41"));
-            assert!(!menu.items.is_empty());
         });
     }
 
-    /// A project with no ROOT WORKTREE has nothing to address a PR SESSION
-    /// to: the keys open nothing and the modal stays up.
+    /// Tab and Shift+Tab (either spelling a terminal has for it) hand the
+    /// keys between the list and the page, as the DIFF VIEWER's panels
+    /// do: on the page ←/→ walk its tabs, ↑/↓ a listing's rows, and Enter
+    /// acts on the row; a letter typed there hands the keys back to the
+    /// list's filter, and Esc steps back to the list before it closes.
     #[test]
-    fn without_a_root_the_launch_keys_open_nothing() {
+    fn tab_moves_the_keys_between_the_list_and_the_page() {
+        use crate::pr_preview::PrTab;
+        use crate::pull_request::PrFile;
+        let (mut app, _) = app_with(
+            vec![pr(42, "Fix login", false), pr(41, "Spike", false)],
+            true,
+        );
+        let url = "https://github.com/o/r/pull/42".to_string();
+        let mut d = detail(42, "Fix login");
+        d.files = ["src/login.rs", "src/auth.rs"]
+            .iter()
+            .map(|path| PrFile {
+                path: path.to_string(),
+                additions: 2,
+                deletions: 1,
+                change: "MODIFIED".into(),
+            })
+            .collect();
+        app.pr_detail.insert(url.clone(), d);
+        open(&mut app);
+        let mut out = Vec::new();
+        assert_eq!(view(&app).focus, PrFocus::List);
+        handle_key(&mut app, key(KeyCode::Tab), &mut out);
+        assert_eq!(view(&app).focus, PrFocus::Page);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::PullRequests(_))),
+            "Tab launches nothing"
+        );
+        let shot = screen(&mut app, 140, 34);
+        assert!(shot.contains("←→ tabs"), "{shot}");
+        assert!(shot.contains("⇧Tab list"), "{shot}");
+        crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+
+        // ←/→ walk the tabs, ↑/↓ the Changes rows — the list stays put.
+        handle_key(&mut app, key(KeyCode::Right), &mut out);
+        assert_eq!(view(&app).tabs.tab, PrTab::Changes);
+        screen(&mut app, 140, 34);
+        handle_key(&mut app, key(KeyCode::Down), &mut out);
+        assert_eq!(view(&app).tabs.row(), 1);
+        assert_eq!(view(&app).selected, 0, "the list's cursor never moved");
+        handle_key(&mut app, key(KeyCode::Enter), &mut out);
+        assert_eq!(app.pr_diff_at, Some((url, "src/auth.rs".to_string())));
+        app.overlay = None;
+        open(&mut app);
+
+        for back in [key(KeyCode::BackTab), shifted(KeyCode::Tab)] {
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            assert_eq!(view(&app).focus, PrFocus::Page);
+            handle_key(&mut app, back, &mut out);
+            assert_eq!(view(&app).focus, PrFocus::List, "{back:?}");
+        }
+
+        // A letter on the page types into the list's filter.
+        handle_key(&mut app, key(KeyCode::Tab), &mut out);
+        handle_key(&mut app, key(KeyCode::Char('s')), &mut out);
+        assert_eq!(view(&app).focus, PrFocus::List);
+        assert_eq!(view(&app).query.as_str(), "s");
+
+        // Esc: off the page, then the filter, then the modal.
+        handle_key(&mut app, key(KeyCode::Tab), &mut out);
+        handle_key(&mut app, key(KeyCode::Esc), &mut out);
+        assert_eq!(view(&app).focus, PrFocus::List);
+        assert_eq!(view(&app).query.as_str(), "s", "the filter kept");
+        handle_key(&mut app, key(KeyCode::Esc), &mut out);
+        assert!(view(&app).query.is_empty());
+        handle_key(&mut app, key(KeyCode::Esc), &mut out);
+        assert!(app.overlay.is_none());
+    }
+
+    /// `Ctrl+t` opens the new pull request form in the reading pane's
+    /// place, from the branch the Worktrees cursor's checkout is on, and
+    /// `Ctrl+x` the merge of the row under the cursor; Esc puts the page
+    /// back either way, and the form has every key meanwhile.
+    #[test]
+    fn the_forms_open_in_the_pages_place() {
+        use crate::pr_actions::{CreateField, PrForm};
         pinned(|| {
-            let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], false);
-            for launch_key in [KeyCode::Enter, KeyCode::BackTab, KeyCode::Tab] {
-                open(&mut app);
-                app.flash = None;
-                handle_key(&mut app, key(launch_key), &mut Vec::new());
-                assert!(
-                    matches!(&app.overlay, Some(Overlay::PullRequests(_))),
-                    "{launch_key:?}: the modal stays"
-                );
-                assert_eq!(app.flash, None, "{launch_key:?}");
+            let dir = tempfile::tempdir().unwrap();
+            let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+            app.tree.projects[0].repo_path = dir.path().to_path_buf();
+            app.tree.worktrees.push(orion_core::Worktree {
+                id: WorktreeId("w-feature".into()),
+                project_id: project.clone(),
+                path: dir.path().join("feature"),
+                branch: "feature/login".into(),
+                is_main: false,
+                sort_order: 1,
+            });
+            app.sel_worktree = app
+                .worktree_rows()
+                .iter()
+                .position(|row| row.checkout().is_some_and(|w| w.id.0 == "w-feature"))
+                .expect("the feature checkout has a row");
+            open(&mut app);
+            let mut out = Vec::new();
+            handle_key(&mut app, ctrl('t'), &mut out);
+            let Some(form) = &view(&app).form else {
+                panic!("no form");
+            };
+            let PrForm::Create(create) = form.as_ref() else {
+                panic!("{form:?}");
+            };
+            assert_eq!(create.from.as_str(), "feature/login");
+            assert_eq!(create.field, CreateField::Title);
+            handle_key(&mut app, key(KeyCode::Char('q')), &mut out);
+            assert!(view(&app).query.is_empty(), "the form took the letter");
+            let shot = screen(&mut app, 140, 34);
+            assert!(shot.contains("New pull request"), "{shot}");
+            assert!(shot.contains("From   feature/login"), "{shot}");
+            assert!(shot.contains("Enter create PR"), "{shot}");
+            // Enter with nothing to merge into says so and sends nothing.
+            handle_key(&mut app, key(KeyCode::Enter), &mut out);
+            let Some(PrForm::Create(create)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert_eq!(
+                create.notice.as_deref(),
+                Some("which branch does it merge into?")
+            );
+            handle_key(&mut app, key(KeyCode::Esc), &mut out);
+            assert!(view(&app).form.is_none());
+            assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
+
+            handle_key(&mut app, ctrl('x'), &mut out);
+            let Some(PrForm::Merge(merge)) = view(&app).form.as_deref() else {
+                panic!("no merge form");
+            };
+            assert_eq!(merge.number, 42);
+            let shot = screen(&mut app, 140, 34);
+            assert!(shot.contains("Merge #42"), "{shot}");
+            assert!(shot.contains("squash and merge"), "{shot}");
+            assert!(shot.contains("its details are still loading"), "{shot}");
+            assert!(shot.contains("known once its details are in"), "{shot}");
+            // The body lands: the form takes the branch and the base.
+            let url = "https://github.com/o/r/pull/42".to_string();
+            let mut d = detail(42, "Fix login");
+            d.head = "pr-42".into();
+            if let Some(Overlay::PullRequests(v)) = &mut app.overlay {
+                if let Some(PrForm::Merge(m)) = v.form.as_deref_mut() {
+                    m.head = "pr-42".into();
+                }
             }
+            app.open_prs.get_mut(&project).unwrap().list[0].head = "pr-42".into();
+            app.pr_detail.insert(url.clone(), d);
+            crate::pr_actions::detail_landed(&mut app, &url);
+            let Some(PrForm::Merge(merge)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert_eq!(merge.branch.as_deref(), Some("pr-42"));
+            assert_eq!(merge.base, "main");
+            assert!(merge.delete_branch, "the setting's default");
+            let shot = screen(&mut app, 140, 34);
+            assert!(shot.contains("pr-42 → main"), "{shot}");
+            assert!(shot.contains("pr-42 on GitHub, once merged"), "{shot}");
+            handle_key(&mut app, key(KeyCode::Right), &mut out);
+            let Some(PrForm::Merge(merge)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert_eq!(merge.method, crate::pr_actions::MergeMethod::Merge);
+            handle_key(&mut app, key(KeyCode::Esc), &mut out);
+            assert!(view(&app).form.is_none());
         });
     }
 
@@ -1567,6 +1808,7 @@ mod tests {
             subject: "Stop the bounce".into(),
             author: "kate".into(),
             at: String::new(),
+            ..Default::default()
         }];
         d.checks = vec![PrCheck {
             name: "test".into(),
@@ -1596,7 +1838,10 @@ mod tests {
         assert!(view(&app).query.is_empty(), "the filter never saw them");
         let shot = screen(&mut app, 140, 34);
         assert!(shot.contains("▌M src/login.rs  +2 −1"), "{shot}");
-        assert!(shot.contains("^G diff the file"), "{shot}");
+        assert!(
+            hints(view(&app)).iter().any(|h| h.does == "diff the file"),
+            "{shot}"
+        );
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
         handle_key(&mut app, shifted(KeyCode::Down), &mut out);
         assert_eq!(view(&app).tabs.row(), 1);
@@ -1643,9 +1888,15 @@ mod tests {
         let at = Position::new(row.x + 2, row.y);
         handle_mouse(&mut app, click(at), at, &mut out);
         assert_eq!(app.pr_diff_at, Some((url, "src/login.rs".to_string())));
+        assert_eq!(
+            view(&app).focus,
+            PrFocus::Page,
+            "a click hands the page the keys"
+        );
 
         // Another pull request: the rows rewind, the tab stays.
         handle_key(&mut app, shifted(KeyCode::Down), &mut out);
+        handle_key(&mut app, key(KeyCode::BackTab), &mut out);
         handle_key(&mut app, key(KeyCode::Down), &mut out);
         assert_eq!(
             (view(&app).tabs.tab, view(&app).tabs.row()),

@@ -82,6 +82,13 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             crate::quick_prompt::reopen(app, back.launch, &back.text);
         }
         Some(Overlay::Onboard(_)) => crate::onboard::dismiss(app),
+        // A DIFF VIEWER opened from the PULL REQUESTS MODAL is a level
+        // inside it: the modal comes back on the row and tab it was on.
+        Some(Overlay::Diff(view)) if view.back.is_some() => {
+            if let Some(back) = view.back.clone() {
+                crate::pr_modal::reopen(app, *back);
+            }
+        }
         // Nothing to unwind on the way out.
         Some(
             Overlay::Help(_)

@@ -1,0 +1,44 @@
+{
+ "data": {
+  "repository": {
+   "pullRequest": {
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "oid": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "additions": 48,
+        "deletions": 6,
+        "changedFilesIfAvailable": 3
+       }
+      },
+      {
+       "commit": {
+        "oid": "b2c3d4e5f60718293a4b5c6d7e8f901234567891",
+        "additions": 12,
+        "deletions": 2,
+        "changedFilesIfAvailable": 1
+       }
+      },
+      {
+       "commit": {
+        "oid": "c3d4e5f60718293a4b5c6d7e8f90123456789123",
+        "additions": 31,
+        "deletions": 9,
+        "changedFilesIfAvailable": 2
+       }
+      },
+      {
+       "commit": {
+        "oid": "d4e5f60718293a4b5c6d7e8f9012345678912345",
+        "additions": 15,
+        "deletions": 0,
+        "changedFilesIfAvailable": 1
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

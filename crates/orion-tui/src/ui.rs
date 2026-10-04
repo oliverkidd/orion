@@ -1595,6 +1595,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // ---- tab strip ----
             let (strip, hits) = tab_strip(
                 inner.x,
+                inner.width,
                 crate::config::SETTINGS_TABS.iter().map(|t| t.title),
                 tab,
                 view.on_tabs,
@@ -2588,6 +2589,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // ---- tab strip and its rule ----
             let (strip, hits) = tab_strip(
                 inner.x,
+                inner.width,
                 view.tabs.iter().map(|t| t.label.as_str()),
                 view.tab,
                 view.on_tabs,
@@ -2883,21 +2885,31 @@ fn key_hint(app: &App, action: crate::keymap::Action) -> String {
 /// The tab strip the SETTINGS OVERLAY and the FILE TABS share: labels laid
 /// out left to right from `x`, the active one lit — and reversed while the
 /// cursor is parked on the strip, so ←/→ visibly belong to it — returning
-/// the spans and each label's screen x-range for click hit-testing.
+/// the spans and each label's screen x-range for click hit-testing. A
+/// strip wider than `width` drops the padding inside each label, so every
+/// tab stays on screen a little closer together.
 fn tab_strip<'a>(
     x: u16,
+    width: u16,
     labels: impl Iterator<Item = &'a str>,
     active: usize,
     on_tabs: bool,
     th: Theme,
 ) -> (Vec<Span<'static>>, Vec<(u16, u16)>) {
+    let labels: Vec<&str> = labels.collect();
+    let padded: usize = labels.iter().map(|t| t.chars().count() + 3).sum();
+    let pad = if padded <= usize::from(width) {
+        " "
+    } else {
+        ""
+    };
     let mut strip: Vec<Span> = Vec::new();
     let mut hits: Vec<(u16, u16)> = Vec::new();
     let mut x = x;
-    for (i, t) in labels.enumerate() {
+    for (i, t) in labels.into_iter().enumerate() {
         strip.push(Span::raw(" "));
         x += 1;
-        let label = format!(" {t} ");
+        let label = format!("{pad}{t}{pad}");
         let mut style = Style::default().fg(th.dim);
         if i == active {
             style = Style::default()
@@ -4467,6 +4479,130 @@ pub(crate) fn draw_multiline_input_with_caret(
         .collect();
     f.render_widget(Paragraph::new(shown), area);
     (view, rows)
+}
+
+// ---- forms in a modal's reading pane ----
+
+/// How wide a form row's label is drawn, past its inset: `Title  `.
+const FORM_LABEL_W: usize = 7;
+
+/// The frame a form in a modal's reading pane wears — the ISSUE EDITOR,
+/// the PULL REQUESTS MODAL's create and merge (`pr_actions`): the title
+/// chip, and on the bottom border's right why the last Enter went nowhere
+/// (`notice`, red) or what is on its way (`saving`), cut to fit. Its
+/// inside, and how wide the foot is, for the keys to keep clear of.
+pub(crate) fn form_frame(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    notice: Option<&str>,
+    saving: Option<&str>,
+    focused: bool,
+    th: Theme,
+) -> (Rect, u16) {
+    let foot = match (notice, saving) {
+        (Some(notice), _) => Some((format!(" {notice} "), Style::default().fg(th.err))),
+        (None, Some(saving)) => Some((format!(" {saving} "), Style::default().fg(th.warn))),
+        (None, None) => None,
+    };
+    let mut block = panel_block(title, focused, th);
+    let mut foot_w = 0;
+    if let Some((foot, style)) = foot {
+        // The border's corners and a cell of air either side.
+        let foot = truncate(&foot, usize::from(area.width.saturating_sub(4)));
+        foot_w = foot.chars().count() as u16 + 2;
+        block = block.title_bottom(Line::from(Span::styled(foot, style)).right_aligned());
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    (inner, foot_w)
+}
+
+/// A form row's label, lit while the row has the caret (`on`).
+pub(crate) fn form_label(label: &str, on: bool, th: Theme) -> Span<'static> {
+    let style = if on {
+        Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(th.muted)
+    };
+    let indent = crate::pr_preview::INDENT;
+    Span::styled(format!("{indent}{label:<FORM_LABEL_W$}"), style)
+}
+
+/// A one-line form field on its row, `width` cells: its label, then the
+/// field — the live text with its caret while it has it (`on`), else its
+/// text, or `placeholder` dim while it is empty.
+pub(crate) fn form_field(
+    label: &str,
+    input: &TextInput,
+    placeholder: &str,
+    on: bool,
+    width: usize,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    let label = form_label(label, on, th);
+    let budget = width.saturating_sub(label.content.chars().count() + 1);
+    let mut spans = vec![label];
+    if on {
+        spans.extend(input_spans(input, budget, th.accent, th));
+    } else if input.trim().is_empty() {
+        spans.push(Span::styled(
+            placeholder.to_string(),
+            Style::default().fg(th.dim),
+        ));
+    } else {
+        spans.push(Span::styled(
+            truncate(input.as_str(), budget),
+            Style::default().fg(th.text),
+        ));
+    }
+    spans
+}
+
+/// A rounded box under a form's rows, `title` on its top border and both
+/// in the accent while it is `lit`: its inside.
+pub(crate) fn form_box(f: &mut Frame, area: Rect, title: &str, lit: bool, th: Theme) -> Rect {
+    let color = if lit { th.accent } else { th.dim };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(color),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    inner
+}
+
+/// A multi-row form field in a [`form_box`]: with the caret (`on`), the
+/// live field, scrolled to keep the caret in sight and marked where it runs
+/// past the box — the view it was drawn with returned, for the live field
+/// to take ([`TextInput::set_view`]); without, its text wrapped, or `empty`
+/// dim while there is none.
+pub(crate) fn form_text_box(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    input: &TextInput,
+    on: bool,
+    empty: &str,
+    th: Theme,
+) -> Option<TextView> {
+    let inner = form_box(f, area, title, on, th);
+    if on {
+        let (view, rows) = draw_multiline_input(f, input, inner, th);
+        draw_scroll_marks(f, area, view, rows, th.dim);
+        return Some(view);
+    }
+    let text = if input.trim().is_empty() {
+        Paragraph::new(Span::styled(empty.to_string(), Style::default().fg(th.dim)))
+    } else {
+        Paragraph::new(input.as_str().to_string()).wrap(ratatui::widgets::Wrap { trim: false })
+    };
+    f.render_widget(text, inner);
+    None
 }
 
 /// `↑ 3 more` / `↓ 5 more` at the right of a multi-row field's box while

@@ -3,6 +3,9 @@
 make from canned JSON under $ORION_GH_FIXTURES, so a screenshot never needs a network, a token or a
 real repository. Anything else is "couldn't ask" (exit 1) — exactly what orion treats as no PR.
 
+  gh api graphql … commits(last …  -F number=<n>
+                                          → fixtures/pr-<n>.stats.json, the Commits tab's per-commit counts, else exit 1
+  gh repo view --json …                   → fixtures/repo.json, the repo's merge methods, else exit 1
   gh api graphql … pullRequests …         → fixtures/pr-list.json, rows in `gh pr list --json` shape, handed back as
                                             the open list's GraphQL answer (a row's `statusCheckRollup` checks
                                             become the rollup `state` on its last commit). With
@@ -77,6 +80,11 @@ def open_list():
 def main(argv):
     if argv[:2] == ["api", "graphql"] and any("pullRequests" in a for a in argv):
         return open_list()
+    if argv[:2] == ["api", "graphql"] and any("commits(last" in a for a in argv):
+        number = next((a.split("=", 1)[1] for a in argv if a.startswith("number=")), None)
+        return emit("pr-%s.stats.json" % number) if number else 1
+    if argv[:2] == ["repo", "view"]:
+        return emit("repo.json")
     if argv[:2] == ["pr", "view"]:
         rest = [a for a in argv[2:] if not a.startswith("--")]
         number = next((a for a in rest if a.isdigit()), None)

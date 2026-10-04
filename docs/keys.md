@@ -176,13 +176,15 @@ at the top.
 |---|---|---|
 | **Description** | the body as markdown, then the conversation — comments and reviews, oldest first | the pull request in the browser |
 | **Changes** `11` | every file: its status (`M`, `A`, `D`, `R`) and its `+`/`−`. GitHub hands back the first hundred; past that the tab says so and `⌘E` reads the whole diff | the DIFF VIEWER on the pull request, at that file |
-| **Commits** `4` | newest first: short sha, subject, author and age | the DIFF VIEWER on that commit's own diff |
+| **Commits** `4` | newest first: short sha, subject, author and age, and how big it is — `+12 −3 · 4 files` | the DIFF VIEWER on that commit's own diff |
 | **Checks** | failed first, then running, passed and skipped: `✗` / `●` / `✓` / `–`, the name, its workflow and how long it ran. The tab reads `✗ Checks 44/45` with one failed (44 of 45 fine), `● Checks 3/5` while some still run, `✓ Checks` when every one passed | the check's page — its log — in the browser |
 | **Reviews** | GitHub's review decision (`✓ Approved`, `✗ Changes requested`, `● Review required`), each reviewer's latest word, who has been asked and not answered, then the reviews themselves. The tab wears the decision's mark | the pull request in the browser |
 
-In the pane the tabs are `Tab` / `⇧Tab` and a click on a label; in the modal, whose `Tab` and
-`⇧Tab` launch and whose letters type into its filter, they are `⇧←` / `⇧→`, a listing's rows are
-`⇧↑` / `⇧↓`, and `^G` and `^O` reach the row — the border names each by what it does there.
+In the pane the tabs are `Tab` / `⇧Tab` and a click on a label. In the modal `Tab` / `⇧Tab` hand
+the keys between the list and the page, as the DIFF VIEWER's panels do: with the page holding them
+`←` / `→` walk its tabs, `↑` / `↓` a listing's rows (or scroll prose), and `Enter` acts on the row;
+from the list, whose letters type into its filter, the tabs are `⇧←` / `⇧→` and a listing's rows
+`⇧↑` / `⇧↓`. `^G` and `^O` reach the row from either — the border names each by what it does there.
 
 ### Back to the grid
 
@@ -243,8 +245,8 @@ With the pane reading a pull request — its [page](#the-pull-request-page) — 
 | **File tree** (`⌘B`) | Tree on the left, syntax-highlighted preview on the right, long lines wrapped (a markdown file as a rendered page; `^R` flips it to the source and back), and an always-live filter. `→` expands a directory and `←` collapses it; `Enter` folds a directory, and on a file edits it in the BUILT-IN EDITOR in the preview's place — a markdown file opens as its MARKDOWN PAGE over the tree. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll the preview. `⌘C`/`^Y` copies the selected path, `⌘O` opens it in the **Open in app** editor, and dragging the tree/preview border resizes the tree |
 | **Skills** (`⌘S`) | Every agent skill on the machine in one list, nothing picked for a launch — agents find their skills themselves. Yours (`~/.claude/skills`, or `$CLAUDE_CONFIG_DIR/skills`), the selected checkout's (its `.claude/skills`, `.cursor/skills`, `.codex/skills`, `.agents/skills`), `~/.cursor/skills`, `~/.codex/skills` (`$CODEX_HOME`) and `~/.agents/skills`, and installed Claude Code plugins' — each row badged `user`, `project`, `cursor`, `codex`, `agents` or `plugin`. A folder reached twice (`~/.claude/skills` a symlink to `~/.cursor/skills`) is listed once. Type to filter by name and description; `↑`/`↓` (or `^N`/`^P`) walk the matches, and the right pane reads the one under the cursor: its frontmatter on a line or two, the SKILL.md as a rendered page, its other files. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll it. `Enter` (or a click on the row the cursor is on) edits the SKILL.md in the BUILT-IN EDITOR, `⌘O` opens the skill's folder in the **Open in app** editor, and `⌘C`/`^Y` copies the SKILL.md's path. `^A` names a new skill and opens `~/.claude/skills/<name>/SKILL.md`, written from a stub. `^D` moves the skill's folder — its symlinks resolved — to the Trash behind a confirm that names it: `~/.Trash` on macOS, the freedesktop.org Trash elsewhere, never a delete. A plugin's skills are read-only and refuse it. `^R` reads the folders again, as closing the editor does. `Esc` closes |
 | **GitHub issues** (`i`) | The project's open issues, newest first, the one under the cursor read on the right with its comments. Type to filter by `#15 title`; `↑`/`↓` (or `^N`/`^P`) walk the matches; `Esc` clears the filter before a second `Esc` closes. `PgUp`/`PgDn` and `⇧↑`/`⇧↓` read; `^O` — or the pane's `↗ open in browser` button — opens it in the browser; `^R` asks GitHub again. `^C` (or `^Y`) comments, `^E` edits the title and description in place. `Enter` opens the QUICK PROMPT for an ISSUE SESSION on it (sent empty, the task is `Fix GitHub issue #15: <title>`), `⇧Tab` picks an AGENT PRESET for it, and `⌘.` in the box offers a fresh `issue-15-<title-slug>` worktree as its first row |
-| **GitHub pull requests** (`v`) | The project's open pull requests, newest first with the drafts below, the one under the cursor read on the right as its [pull request page](#the-pull-request-page) — `⇧←`/`⇧→` (or a click on a label) walk its tabs, `⇧↑`/`⇧↓` the rows of Changes, Commits and Checks. Filters as the issues modal does, with the same two-stage `Esc`. `^R` refreshes, `^C`/`^Y` comments, `^G` opens its diff — at the file under the cursor on Changes, that commit's on Commits — and `^O` (or a double-click) opens it in the browser, or on Checks the check under the cursor. `⌘L` flips to Linear issues to attach this PR. `Enter` opens the QUICK PROMPT for a PR SESSION on it, `⇧Tab` launches an AGENT PRESET, `Tab` picks a harness and starts one bare — all in the project's checkout of the PR's head branch |
-| **Linear issues** (`⌘L`) | Open Linear issues assigned to you (Settings → Linear → **Linear account**; empty = the owner of the project's `LINEAR_API_KEY`). Type to filter; `Space` marks; `Enter` starts one agent on the marked set in one worktree, with a task that asks for one PR; `⇧Tab` picks a preset. From a pull request, `⌘L` attaches the PR to the marked issues |
+| **GitHub pull requests** (`v`) | The project's open pull requests, newest first with the drafts below, the one under the cursor read on the right as its [pull request page](#the-pull-request-page). `Tab` / `⇧Tab` move the keys between the list and the page: on the page `←`/`→` walk its tabs, `↑`/`↓` the rows of Changes, Commits and Checks, and `Enter` opens the row; from the list `⇧←`/`⇧→` and `⇧↑`/`⇧↓` do the same. Filters as the issues modal does — a letter typed on the page hands the keys back to the list — and `Esc` steps back off the page, then clears the filter, then closes. `^R` refreshes, `^C`/`^Y` comments, `^G` opens its diff — at the file under the cursor on Changes, that commit's on Commits — and `^O` (or a double-click) opens it in the browser, or on Checks the check under the cursor. The DIFF VIEWER opened from here is a level inside the modal: `#42 ›` leads its title and `Esc` comes back to the pull request on the same tab. `^T` opens a **new pull request** in the page's place — from the branch the cursor's checkout is on, into the project's base, each a list of branches to pick from as you type, the title and description filled from the commits between them, a Draft box (`Space`) — and `Enter` pushes the branch and runs `gh pr create`. `^X` **merges** the one under the cursor: squash, merge commit or rebase (`←`/`→`, only what the repo allows), the branch deleted from GitHub once it lands, or auto-merge once its checks and reviews are in — with what stands in the way (a draft, conflicts, checks, a review owed) spelled out first; Settings → Review holds the defaults. `⌘L` flips to Linear issues to attach this PR. `Enter` on the list opens the QUICK PROMPT for a PR SESSION on it — the box's own `Tab` / `⇧Tab` pick a harness or an AGENT PRESET — in the project's checkout of the PR's head branch |
+| **Linear issues** (`⌘L`) | Open Linear issues assigned to you (Settings → Linear → **Linear account**; empty = the owner of the project's `LINEAR_API_KEY`). Type to filter; `Space` marks; `Enter` starts one agent on the marked set in one worktree, with a task that asks for one PR; `⇧Tab` picks a preset. `^S` lists the issue's team states in the reading pane — `↑`/`↓`, `Enter` moves the issue there, the row saying so at once and put back if Linear refuses. From a pull request, `⌘L` attaches the PR to the marked issues |
 | **Branch switcher** (`c`) | Moves the project's ROOT WORKTREE onto another branch: the current branch first, then the local branches newest first, then the remote ones. Type to filter; `↑`/`↓` move; `Enter` switches (a remote branch becomes a local one tracking it); `^R` fetches again. With nothing matching, `Enter` creates the typed branch. A checkout with uncommitted changes asks how they travel: `s` stashes, `b` brings them along, `c` commits everything first, `d` discards tracked changes on a second `d`. `Esc` on the list closes it; past the list it backs out one step at a time, and while git works it hides the modal (`c` brings it back) |
 | **File tabs** *(an agent opens it)* | What `orion open <file>…` raises when a session runs it. One tab per file: `←`/`→`, `Tab`/`⇧Tab` and `1`-`9` switch tabs; the focused file is previewed underneath — a markdown file as a rendered page (`m` flips it to the source). `Enter` edits the file in that pane. `↓` from the strip drops into the preview, where `↑`/`↓`, `PgUp`/`PgDn` and `Home`/`End` scroll and `↑` off the top returns to the strip. `Esc` and `^Q` step back to the strip first, and close from the strip |
 
@@ -341,6 +343,9 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
   each. The rows on screen are the bold ones, and the panel's foot says `3 ticked · together`. A
   clean checkout opens with every commit ticked — the whole branch, what its pull request shows; a
   dirty one on its uncommitted changes, nothing ticked. Nothing carries over to the next `⌘E`.
+- **How it opens** is Settings → Review: the keys on the commits (**Start on**, so the ticks come
+  first and `Tab` moves on to the files, then the diff), the files as a directory tree (**Files as a
+  tree**), and ticked commits together or one at a time (**Ticked commits**).
 - **Ticked with a gap.** Ticked rows side by side on the branch read as one range. An unticked
   commit, or a merge, between two ticked ones starts another range, and a file both ranges touch
   shows each range's diff in turn under its `── 1ec007c..dde6cc9` label — never a diff across the
@@ -367,15 +372,18 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | `⇧↑` / `⇧↓`, `PgUp` / `PgDn`, `Home` / `End` | anywhere | scroll the diff |
 | typing | anywhere | the files' fuzzy filter, which takes the keys; `^U` kills it |
 | `^R` | the files, the diff | mark the file reviewed ✓, which sinks it to the bottom — orion-side bookkeeping only: on the uncommitted changes it is stored until HEAD moves or the file changes again, on anything else it lasts while the modal is open |
-| `^T` | the files | fold the file list into a directory tree and back (`←`/`→` fold), remembered |
+| `^T` | the files | fold the file list into a directory tree and back (`←`/`→` fold) — this viewer's alone; **Files as a tree** says how the next opens |
 | `⌘O` (`^O`) | the files, the diff | the file in the **Open in app** editor, at the line at the top of the diff |
 | the wheel | over any panel | scrolls that panel; no cursor moves |
 | a click | | a commit's row aims the cursor there and its box ticks it, a file is selected, the diff takes the keys; a second click on the cursor's row is `Enter` |
-| `Esc` | | close |
+| `Esc` | | close — or, opened from the PULL REQUESTS MODAL, back to the pull request |
 
-With the pane reading a pull request, `⌘E` — and the PULL REQUESTS MODAL's `^G` — open the same
-viewer on that pull request's diff, fetched whole with `gh pr diff`: its files in the column, its
-title heading each, no commit list.
+With the pane reading a pull request, `⌘E` — and the PULL REQUESTS MODAL's `^G` and its Changes and
+Commits rows — open the same viewer on that pull request. When the repo has its head commit (your
+branch, or one fetched since) it is read from git: its commits over the files, every one ticked —
+the whole pull request — to read one at a time or a few together like a checkout's, opened on the
+file or the commit you picked. Otherwise its diff is fetched whole with `gh pr diff`: its files in
+the column, its title heading each, no commit list.
 
 ## The quick prompt
 

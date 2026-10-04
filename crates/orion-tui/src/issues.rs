@@ -62,7 +62,7 @@ use orion_core::{ClientRequest, ProjectId};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
@@ -74,8 +74,8 @@ use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
 use crate::text_input::{TextInput, TextView};
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, draw_multiline_input, draw_scroll_marks, empty_list_row,
-    fuzzy_highlight_styled, input_spans, panel_block, render_row, row_rect, search_line, truncate,
+    centered_rect_pct, empty_list_row, form_field, form_frame, form_text_box,
+    fuzzy_highlight_styled, panel_block, render_row, row_rect, search_line, truncate,
     visible_positions, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 
@@ -2020,81 +2020,45 @@ fn draw_editor(
     th: Theme,
 ) -> (Rect, Rect, Option<TextView>, u16) {
     let title = format!("Edit issue #{}", editor.number);
-    let foot = match (&editor.notice, editor.saving) {
-        (Some(notice), _) => Some((format!(" {notice} "), Style::default().fg(th.err))),
-        (None, true) => Some((" saving… ".to_string(), Style::default().fg(th.warn))),
-        (None, false) => None,
-    };
-    let mut block = panel_block(&title, true, th);
-    let mut foot_w = 0;
-    if let Some((foot, style)) = foot {
-        foot_w = foot.chars().count() as u16 + 2;
-        block = block.title_bottom(Line::from(Span::styled(foot, style)).right_aligned());
-    }
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let saving = editor.saving.then_some("saving…");
+    let (inner, foot_w) = form_frame(f, area, &title, editor.notice.as_deref(), saving, true, th);
 
     // Row 0: the title, a one-line field.
     let mut title_area = Rect::default();
     if let Some(row) = row_rect(inner, 0) {
         title_area = row;
-        let focused = editor.field == EditField::Title;
-        let label = format!("{INDENT}Title  ");
-        let label_style = if focused {
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(th.muted)
-        };
-        let budget = (row.width as usize).saturating_sub(label.chars().count() + 1);
-        let mut spans = vec![Span::styled(label, label_style)];
-        if focused {
-            spans.extend(input_spans(&editor.title, budget, th.accent, th));
-        } else if editor.title.trim().is_empty() {
-            spans.push(Span::styled("(required)", Style::default().fg(th.dim)));
-        } else {
-            spans.push(Span::raw(truncate(editor.title.as_str(), budget)));
-        }
+        let on = editor.field == EditField::Title;
+        let spans = form_field(
+            "Title",
+            &editor.title,
+            "(required)",
+            on,
+            row.width.into(),
+            th,
+        );
         f.render_widget(Paragraph::new(Line::from(spans)), row);
     }
 
     // The description box, taking the rest of the pane.
     let box_area = Rect {
-        x: inner.x,
         y: inner.y.saturating_add(1),
-        width: inner.width,
         height: inner.height.saturating_sub(1),
+        ..inner
     };
     let mut body_area = Rect::default();
     let mut body_view = None;
     if box_area.height >= 3 && box_area.width >= 4 {
         body_area = box_area;
-        let focused = editor.field == EditField::Body;
-        let border = if focused { th.accent } else { th.dim };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border))
-            .title(Span::styled(" Description ", Style::default().fg(border)));
-        let box_inner = block.inner(box_area);
-        f.render_widget(block, box_area);
-        if focused {
-            let (view, rows) = draw_multiline_input(f, &editor.body, box_inner, th);
-            draw_scroll_marks(f, box_area, view, rows, th.dim);
-            body_view = Some(view);
-        } else if editor.body.trim().is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "(no description)",
-                    Style::default().fg(th.dim),
-                )),
-                box_inner,
-            );
-        } else {
-            f.render_widget(
-                Paragraph::new(editor.body.as_str().to_string()).wrap(Wrap { trim: false }),
-                box_inner,
-            );
-        }
+        let on = editor.field == EditField::Body;
+        body_view = form_text_box(
+            f,
+            box_area,
+            "Description",
+            &editor.body,
+            on,
+            "(no description)",
+            th,
+        );
     }
     (title_area, body_area, body_view, foot_w)
 }

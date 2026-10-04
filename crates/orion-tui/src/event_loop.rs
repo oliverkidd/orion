@@ -345,6 +345,11 @@ async fn main_loop(
     let (prcomment_tx, mut prcomment_rx) =
         tokio::sync::mpsc::unbounded_channel::<PrCommentAnswer>();
     app.pr_comment_tx = Some(prcomment_tx);
+    // The PULL REQUESTS MODAL's forms: a new pull request's branches,
+    // fill, push and create, and a merge.
+    let (pr_actions_tx, mut pr_actions_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::pr_actions::Answer>();
+    app.pr_actions_tx = Some(pr_actions_tx);
     // The ISSUES MODAL's `gh issue list` / `gh issue view` answers, on the
     // same footing: the modal's own handlers start the fetch, the loop
     // lands it.
@@ -481,7 +486,7 @@ async fn main_loop(
             // Metrics poll: always on for the footer's memory/session
             // readout, tightened while the metrics modal is open (its
             // initial reading is requested by the M keypress itself).
-            _ = tokio::time::sleep_until(next_metrics_poll) => {
+            _ = tokio::time::sleep_until(next_metrics_poll), if matches!(app.conn, ConnState::Connected) => {
                 request_metrics(&mut app, &mut out);
                 let period = if matches!(app.overlay, Some(Overlay::Metrics(_))) {
                     METRICS_POLL
@@ -494,7 +499,9 @@ async fn main_loop(
             // on a beat of its own for as long as any is on screen — with
             // the grid folded away or no terminal drawn there is nothing
             // to ask after, and the beat sleeps with it.
-            _ = tokio::time::sleep_until(next_tail_poll), if !app.tail_cards.is_empty() => {
+            _ = tokio::time::sleep_until(next_tail_poll),
+                if !app.tail_cards.is_empty() && matches!(app.conn, ConnState::Connected) =>
+            {
                 request_terminal_tails(&mut app, &mut out);
                 next_tail_poll = tokio::time::Instant::now() + TAIL_POLL;
             }
@@ -618,7 +625,10 @@ async fn main_loop(
                 }
                 Some(Err(_)) | None => app.should_quit = true,
             },
-            ev = channels.rx.recv() => match ev {
+            // Guarded: a closed channel answers `None` at once, every
+            // time, and unguarded that spun the loop flat out from the
+            // moment the DAEMON went.
+            ev = channels.rx.recv(), if matches!(app.conn, ConnState::Connected) => match ev {
                 Some(server_event) => {
                     log_server_event(&server_event);
                     if let Some(perf) = &mut perf {
@@ -626,11 +636,7 @@ async fn main_loop(
                     }
                     handle_server_event(&mut app, server_event, &mut out);
                 }
-                None => {
-                    app.conn = ConnState::Disconnected;
-                    app.flash = Some("daemon connection lost".into());
-                    app.dirty = true;
-                }
+                None => connection_lost(&mut app, &mut out),
             },
             ev = vim_rx.recv() => {
                 // Never None: app.vim_tx keeps a sender alive.
@@ -709,6 +715,11 @@ async fn main_loop(
             answer = prcomment_rx.recv() => {
                 if let Some(answer) = answer {
                     land_pr_comment(&mut app, answer);
+                }
+            }
+            answer = pr_actions_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::pr_actions::land_answer(&mut app, answer);
                 }
             }
             // The ISSUES MODAL's hover debounce: the cursor has rested on
@@ -838,11 +849,23 @@ async fn main_loop(
             }
         }
 
+        // Once the connection is gone nothing is sent — a request queued
+        // to a writer that has died would vanish without a word — and each
+        // round's requests fail through `connection_lost` instead, so a
+        // launch typed after the DAEMON went comes back with its text.
+        let mut lost = false;
         for req in out.drain(..) {
-            if channels.tx.send(req).await.is_err() {
-                app.conn = ConnState::Disconnected;
-                app.dirty = true;
+            if !matches!(app.conn, ConnState::Connected) || channels.tx.send(req).await.is_err() {
+                lost = true;
             }
+        }
+        if lost {
+            // What the reader already took off the socket still counts: an
+            // Ack in there is a create the DAEMON made, not one to roll back.
+            while let Ok(ev) = channels.rx.try_recv() {
+                handle_server_event(&mut app, ev, &mut out);
+            }
+            connection_lost(&mut app, &mut out);
         }
 
         if app.should_quit {
@@ -1654,6 +1677,7 @@ fn land_pr_detail(
             app.pr_detail.insert(url.clone(), detail);
             app.pr_detail_stale.remove(&url);
             app.pr_cache_dirty |= changed;
+            crate::pr_actions::detail_landed(app, &url);
             if retired {
                 drop_retired_pr(app, &url, out);
             }
@@ -1853,13 +1877,66 @@ pub enum PrReviewAt {
     Commit(String),
 }
 
+/// A pull request the DIFF VIEWER is reading from this repo's git, and
+/// where it was asked to open: kept on the view (`DiffView::pr_review`)
+/// so that, should the commits turn out not to be here, the same request
+/// is read from GitHub instead ([`land_diff_listing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrReview {
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    pub at: PrReviewAt,
+}
+
+/// What a pull request read from git says when this repo does not have
+/// its head commit — never shown: the view falls back to GitHub on it.
+const PR_NOT_LOCAL: &str = "the pull request's commits aren't in this repo";
+
 /// THE way into the DIFF VIEWER for a pull request of the selected
 /// project, titled `title` — the pane's `⌘E`, the PULL REQUESTS MODAL's
 /// `^G`, a PR tab's file or commit. The viewer is the same one `⌘E` opens
-/// on a checkout: wrapped, numbered, syntax-coloured, the same keys. A
-/// pull request's whole diff comes from one `gh pr diff` (cached, and
-/// refreshed under the open modal); one commit of it from the repo's git.
+/// on a checkout: wrapped, numbered, syntax-coloured, the same keys.
+///
+/// When the repo has the pull request's head commit — a branch of yours,
+/// or one fetched since — the viewer reads it from git, the COMMIT LIST
+/// over its files with every commit ticked: the whole pull request, its
+/// commits there to read one at a time or a few together, as a
+/// checkout's are ([`open_local_pr_review`]). Otherwise its whole diff
+/// comes from one `gh pr diff` (cached, and refreshed under the open
+/// modal), and one commit of it from the repo's git or from GitHub.
+///
+/// Opened from the PULL REQUESTS MODAL, the viewer is a level inside it:
+/// Esc puts the modal back as it was (`DiffView::back`).
 pub fn open_pr_review(app: &mut App, number: u64, url: String, title: String, at: PrReviewAt) {
+    // A file the PULL REQUEST PAGE's Changes tab asked for, for this pull
+    // request (`pr_preview::run_act`).
+    let at = match (at, app.pr_diff_at.as_ref()) {
+        (PrReviewAt::Top, Some((asked, path))) if *asked == url => PrReviewAt::File(path.clone()),
+        (at, _) => at,
+    };
+    let review = PrReview {
+        number,
+        url,
+        title,
+        at,
+    };
+    if open_local_pr_review(app, &review) {
+        app.pr_diff_at = None;
+        return;
+    }
+    open_github_pr_review(app, review);
+}
+
+/// [`open_pr_review`] from GitHub: the whole diff `gh pr diff` gives, or
+/// one commit's.
+fn open_github_pr_review(app: &mut App, review: PrReview) {
+    let PrReview {
+        number,
+        url,
+        title,
+        at,
+    } = review;
     match at {
         PrReviewAt::Top => fetch_pr_diff(app, number, url, title, None),
         PrReviewAt::File(path) => fetch_pr_diff(app, number, url, title, Some(path)),
@@ -1875,6 +1952,119 @@ pub fn open_pr_review(app: &mut App, number: u64, url: String, title: String, at
     }
 }
 
+/// The PULL REQUESTS MODAL as it is now, when it is what is up: the
+/// level a DIFF VIEWER opened from it goes back to (`DiffView::back`).
+fn pr_modal_under(app: &App) -> Option<Box<crate::pr_modal::PullRequestsView>> {
+    match &app.overlay {
+        Some(Overlay::PullRequests(view)) => Some(Box::new(view.clone())),
+        _ => None,
+    }
+}
+
+/// Dress a DIFF VIEWER about to go up the way every one opens: its column
+/// at the width it was last dragged to; the **Review** SETTINGS — the
+/// files as a tree, the panel with the keys (the commits only where there
+/// are any to tick: `commits`), how ticked commits read; and, opened from
+/// the PULL REQUESTS MODAL, the modal to go back to. Before its files are
+/// selected or filled in: a tree toggled after would land elsewhere.
+fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
+    use crate::app::DiffFocus;
+    view.files_width = app.diff_files_width;
+    if app.diff_tree && view.tree.is_none() {
+        view.toggle_tree();
+    }
+    view.focus = match app.diff_start {
+        DiffFocus::Commits if !commits => DiffFocus::Files,
+        focus => focus,
+    };
+    view.open_one_at_a_time = app.diff_one_at_a_time;
+    view.back = pr_modal_under(app);
+}
+
+/// [`open_pr_review`] from this repo's git, when the pull request's body
+/// is in (`App::pr_detail`, for its head commit and base): the viewer
+/// goes up at once, its commits and files read underneath as a BACKGROUND
+/// READ ([`read_pr_opening`]) — inline in a view built without a handle.
+/// Whether the repo has the commit is that read's to say; when it does
+/// not, the view falls back to GitHub (`land_diff_listing`). False when
+/// there is nothing to read from git with, and GitHub is asked straight
+/// away.
+fn open_local_pr_review(app: &mut App, review: &PrReview) -> bool {
+    let Some(detail) = app.pr_detail.get(&review.url) else {
+        return false;
+    };
+    let (tip, base) = (detail.head_sha.clone(), detail.base.clone());
+    if tip.is_empty() || base.is_empty() {
+        return false;
+    }
+    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
+        return false;
+    };
+    if !dir.is_dir() {
+        return false;
+    }
+    let ticket = crate::view_jobs::ticket();
+    let jobs = app.view_jobs.clone();
+    let mut view = DiffView::opening(dir.clone(), review.title.clone(), jobs.clone(), ticket);
+    view.pr_url = Some(review.url.clone());
+    if let PrReviewAt::File(path) = &review.at {
+        view.want_path = Some(path.clone());
+    }
+    view.pr_review = Some(review.clone());
+    dress_viewer(app, &mut view, true);
+    app.overlay = Some(Overlay::Diff(view));
+    app.dirty = true;
+    match jobs {
+        Some(jobs) => jobs.run(move || {
+            Some(crate::view_jobs::Answer::DiffListing {
+                ticket,
+                result: read_pr_opening(&dir, &base, &tip),
+            })
+        }),
+        None => land_diff_listing(app, ticket, read_pr_opening(&dir, &base, &tip)),
+    }
+    true
+}
+
+/// What a pull request read from git opens on: its COMMIT LIST to `tip`
+/// against `base` (`commit_list::read_tip`) and nothing uncommitted — or
+/// [`PR_NOT_LOCAL`].
+fn read_pr_opening(
+    dir: &std::path::Path,
+    base: &str,
+    tip: &str,
+) -> Result<crate::view_jobs::DiffListing, String> {
+    let listing = crate::commit_list::read_tip(dir, base, tip).ok_or(PR_NOT_LOCAL)?;
+    Ok(crate::view_jobs::DiffListing {
+        files: Vec::new(),
+        head: Some(tip.to_string()),
+        reviewed: std::collections::HashMap::new(),
+        commits: Some(listing),
+    })
+}
+
+/// A pull request read from git, its listing in: opened on one of its
+/// commits (the Commits tab's row), that commit alone is what is on
+/// screen — nothing ticked, the cursor on it — rather than the whole pull
+/// request.
+fn land_pr_review_at(view: &mut DiffView) {
+    let Some(PrReviewAt::Commit(sha)) = view.pr_review.as_ref().map(|r| r.at.clone()) else {
+        return;
+    };
+    let Some(list) = &mut view.commits else {
+        return;
+    };
+    let Some(i) = list
+        .commits
+        .iter()
+        .position(|c| c.sha.starts_with(&sha) || sha.starts_with(&c.sha))
+    else {
+        return;
+    };
+    list.show_only(crate::commit_list::Row::Commit(i));
+    crate::commit_list::show_selected(view);
+}
+
 /// [`PrReviewAt::Commit`]: the DIFF VIEWER on one commit of the selected
 /// project's repo, under its message. False when the repo has no such
 /// commit.
@@ -1887,13 +2077,10 @@ fn open_pr_commit(app: &mut App, title: &str, sha: &str) -> bool {
     };
     let mut view = DiffView::new(dir, title.to_string(), Vec::new(), true);
     view.jobs = app.view_jobs.clone();
-    view.files_width = app.diff_files_width;
     let mut head = vec![crate::diff_doc::Head::Meta(title.to_string())];
     head.extend(commit.head(crate::app::now_ms(), None));
     view.head = head;
-    if app.diff_tree {
-        view.toggle_tree();
-    }
+    dress_viewer(app, &mut view, false);
     crate::commit_list::show_scope(&mut view, commit.scope());
     app.overlay = Some(Overlay::Diff(view));
     app.dirty = true;
@@ -2132,14 +2319,11 @@ fn open_pr_diff_view(
     let mut view = DiffView::new(root, title.clone(), files, true);
     view.prefetched = Some(chunks.into_iter().collect());
     view.pr_url = Some(url.to_string());
-    view.files_width = app.diff_files_width;
     view.head = vec![
         crate::diff_doc::Head::Title(title),
         crate::diff_doc::Head::Meta("the pull request's whole diff, as GitHub has it".into()),
     ];
-    if app.diff_tree {
-        view.toggle_tree();
-    }
+    dress_viewer(app, &mut view, false);
     // On a file: the one asked for here (`open_pr_review`), else the one
     // the PULL REQUEST PAGE's Changes tab left for this pull request. The
     // page's request is spent either way.
@@ -2471,7 +2655,9 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
         // The draw re-caps it to the actual modal width.
         app.diff_files_width = w.clamp(crate::app::MIN_DIFF_FILES_W, MAX_RESTORED_WIDTH);
     }
-    app.diff_tree = state.diff_tree;
+    // `diff_tree` in the blob is what `Ctrl+t` was last left on, from
+    // builds before the **Files as a tree** SETTING: the setting decides
+    // now (`apply_config`).
     // The next draw re-fits it to the body actually on screen
     // (`launcher::pane_height`); the cap here only keeps a nonsense blob
     // from carrying a wild number around.
@@ -5027,11 +5213,8 @@ fn open_diff_view(app: &mut App) {
     if known_clean {
         app.diff_probe = Some((ticket, path.clone(), branch));
     } else {
-        let mut view = DiffView::opening(path.clone(), branch, jobs.clone(), ticket);
-        view.files_width = app.diff_files_width;
-        if app.diff_tree {
-            view.toggle_tree();
-        }
+        let mut view = DiffView::opening(path.clone(), branch, Some(jobs.clone()), ticket);
+        dress_viewer(app, &mut view, true);
         // The badge's last `git status` — two seconds old at most — is the
         // list to open on: the files are up on this keypress and the first
         // diff is being read while the `git status` below checks them, not
@@ -5067,12 +5250,10 @@ fn show_diff_listing(
     }
     let mut view = DiffView::new(path, branch, Vec::new(), true);
     view.jobs = app.view_jobs.clone();
-    view.files_width = app.diff_files_width;
+    dress_viewer(app, &mut view, listing.commits.is_some());
+    // The tree the listing lands in is folded from it, on the first
+    // unreviewed file as the flat list is (`fill_view`).
     crate::git_diff::fill_view(&mut view, listing);
-    // After the marks: the tree opens on the first unreviewed file too.
-    if app.diff_tree && view.toggle_tree() {
-        crate::git_diff::load_selected_diff(&mut view);
-    }
     app.overlay = Some(Overlay::Diff(view));
 }
 
@@ -5281,10 +5462,14 @@ fn land_diff_listing(
     if !matches!(&app.overlay, Some(Overlay::Diff(view)) if view.listing == Some(ticket)) {
         return;
     }
+    if result.is_err() && fall_back_to_github(app) {
+        return;
+    }
     match result {
         Ok(listing) if !listing.is_empty() => {
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
                 crate::git_diff::fill_view(view, listing);
+                land_pr_review_at(view);
             }
         }
         Ok(_) => app.overlay = None,
@@ -5293,6 +5478,25 @@ fn land_diff_listing(
             app.flash = Some(msg);
         }
     }
+}
+
+/// A pull request read from git whose commits are not here after all: the
+/// PULL REQUESTS MODAL it was opened from goes back up — on its row, as
+/// Esc would put it — and GitHub is asked instead. False for any other
+/// viewer, whose failed listing is its own to report.
+fn fall_back_to_github(app: &mut App) -> bool {
+    let Some(Overlay::Diff(view)) = &mut app.overlay else {
+        return false;
+    };
+    let Some(review) = view.pr_review.take() else {
+        return false;
+    };
+    match view.back.take() {
+        Some(back) => crate::pr_modal::reopen(app, *back),
+        None => app.overlay = None,
+    }
+    open_github_pr_review(app, review);
+    true
 }
 
 /// Enter on a grep hit: spawn the editor at `path:line` inside the modal
@@ -7088,11 +7292,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 // Ctrl+t flips the file list between flat paths and the
                 // directory tree (`diff_tree`), the cursor staying on its
-                // file; remembered for the next open, like the list's width.
-                _ if TREE.matches(&key) => {
-                    activate::diff_tree_toggled(view);
-                    app.diff_tree = view.tree.is_some();
-                }
+                // file — this viewer's alone: the **Files as a tree**
+                // SETTING is how the next one opens.
+                _ if TREE.matches(&key) => activate::diff_tree_toggled(view),
                 // The COMMIT LIST's own: tick, all or none, and how the
                 // ticked are read — ^G from anywhere, the rest where its
                 // cursor is.
@@ -7859,6 +8061,9 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.launcher_pane_at = cfg.pane_side();
     app.launcher_list = cfg.list_layout();
     app.launcher_all_open = cfg.expand_all_worktrees;
+    app.diff_tree = cfg.diff_tree_view;
+    app.diff_start = cfg.diff_start();
+    app.diff_one_at_a_time = cfg.diff_one_at_a_time();
     set_hide_draft_prs(app, cfg.hide_draft_prs);
 }
 
@@ -11871,6 +12076,35 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         }
         _ => {}
     }
+}
+
+/// What a launch refused for a lost DAEMON connection says, beside the
+/// footer's `✗ disconnected`: the TUI never reconnects, so the way out is
+/// a fresh start.
+const CONNECTION_LOST: &str =
+    "lost the orion daemon — nothing here reaches it now; quit and start orion again";
+
+/// The DAEMON connection is gone, and the TUI never makes another, so no
+/// Ack or Error will come for anything in flight. Each pending intent fails
+/// the way a refusal does — a QUICK PROMPT's box comes back with its text,
+/// an optimistic row goes back — instead of waiting forever with the
+/// user's words in a request nobody will read. Oldest first, so of two
+/// QUICK PROMPT launches the newer one's box is the one left on screen.
+fn connection_lost(app: &mut App, out: &mut Vec<ClientRequest>) {
+    app.conn = ConnState::Disconnected;
+    let mut in_flight: Vec<u64> = app.pending.keys().copied().collect();
+    in_flight.sort_unstable();
+    for req_id in in_flight {
+        let refusal = ServerEvent::Error {
+            req_id: Some(req_id),
+            message: CONNECTION_LOST.into(),
+        };
+        handle_server_event(app, refusal, out);
+    }
+    // Nothing is left to carry what the rollbacks queued.
+    out.clear();
+    app.flash = Some(CONNECTION_LOST.into());
+    app.dirty = true;
 }
 
 fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
@@ -16345,7 +16579,10 @@ diff --git a/docs/keys.md b/docs/keys.md
         );
         assert!(diff_view(&app).diff.contains("+new-b"));
         assert_eq!(diff_view(&app).scroll, 3, "same file: the place is kept");
-        assert!(app.diff_tree, "remembered for the next open");
+        assert!(
+            !app.diff_tree,
+            "this viewer's alone: the setting decides the next open"
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -16486,8 +16723,9 @@ diff --git a/docs/keys.md b/docs/keys.md
     }
 
     /// A fresh `gh pr diff` landing under the tree keeps what the reader
-    /// folded and the file they were on; `diff_tree` rides the UI state
-    /// blob, so the next launch opens the modal the way this one left it.
+    /// folded and the file they were on. How the next launch opens is the
+    /// **Files as a tree** SETTING's to say, not the UI state blob's: a
+    /// blob from before the setting no longer flips it either way.
     #[test]
     fn the_diff_tree_survives_a_refresh_and_a_relaunch() {
         let mut app = pr_diff_app(true);
@@ -16516,11 +16754,14 @@ diff --git a/docs/keys.md b/docs/keys.md
         let json = ui_state_json(&app);
         let mut next = App::new();
         seed_tree(&mut next);
+        let cfg = crate::config::Config::default();
+        apply_config(&mut next, &cfg);
+        assert!(next.diff_tree, "the setting's default is the tree");
+        let mut flat = cfg.clone();
+        flat.diff_tree_view = false;
+        apply_config(&mut next, &flat);
         restore_ui_state(&mut next, &json);
-        assert!(next.diff_tree);
-        // A blob from before the tree existed keeps the flat list.
-        restore_ui_state(&mut next, "{\"show_archived\":false,\"collapsed\":false}");
-        assert!(!next.diff_tree);
+        assert!(!next.diff_tree, "a blob saying tree doesn't overrule it");
     }
 
     /// A diff `gh` couldn't fetch flashes and leaves the modal shut, and a
@@ -24255,6 +24496,50 @@ diff --git a/src/c.rs b/src/c.rs
             .collect()
     }
 
+    /// Opened as a tree (the **Files as a tree** SETTING), a checkout's
+    /// viewer lands on the first file not yet reviewed, as the flat list
+    /// does — not on a directory, and not on the file a ✓ already covers —
+    /// with that file's diff on screen.
+    #[test]
+    fn a_tree_opens_on_the_first_unreviewed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::review::with_store_path(dir.path().join("reviewed.json"), || {
+            let repo = test_repo(&dir);
+            std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+            std::fs::create_dir(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/b.txt"), "bee\n").unwrap();
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            let mut out = Vec::new();
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(
+                &mut app,
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(diff_view(&app).reviewed.contains_key("a.txt"));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            app.diff_tree = true;
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            let view = diff_view(&app);
+            assert!(view.tree.is_some(), "opened as the tree");
+            assert_eq!(view.selected_path(), Some("src/b.txt"));
+            assert!(view.diff.contains("+bee"), "{}", view.diff);
+        });
+    }
+
     #[test]
     fn ctrl_r_toggles_reviewed_and_marks_survive_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -24493,6 +24778,123 @@ diff --git a/src/c.rs b/src/c.rs
                 assert!(screen.contains(needle), "{needle:?}\n{screen}");
             }
             assert!(app.flash.is_none(), "{:?}", app.flash);
+        });
+    }
+
+    /// A pull request whose head commit the repo has is read from git:
+    /// acted on from the PULL REQUESTS MODAL's Changes tab, the DIFF
+    /// VIEWER opens inside the modal — on that file, the COMMIT LIST over
+    /// the files with every commit ticked, the keys on the commits (the
+    /// **Start on** SETTING) — and Esc puts the modal back on its row and
+    /// tab. A commit acted on from the Commits tab is that commit alone.
+    /// A pull request the repo doesn't have falls back to GitHub, the
+    /// modal still up.
+    #[test]
+    fn a_local_pull_request_is_reviewed_from_git_inside_the_pr_modal() {
+        use crate::app::DiffFocus;
+        use crate::pr_modal::PrFocus;
+        use crate::pr_preview::PrTab;
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = repo_with_commits(&dir);
+            let tip = String::from_utf8(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string();
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            app.diff_start = DiffFocus::Commits;
+            seed_open_prs(&mut app, &[(7, "Attach links")]);
+            let mut detail = a_detail(7, "Adds b, edits a.", vec![]);
+            detail.head_sha = tip.clone();
+            detail.files = ["a.txt", "b.txt"]
+                .iter()
+                .map(|path| crate::pull_request::PrFile {
+                    path: path.to_string(),
+                    additions: 1,
+                    deletions: 0,
+                    change: "MODIFIED".into(),
+                })
+                .collect();
+            detail.commits = vec![crate::pull_request::PrCommit {
+                sha: tip.clone(),
+                subject: "edit a".into(),
+                ..Default::default()
+            }];
+            app.pr_detail.insert(pr_url(7), detail);
+            let mut out = Vec::new();
+
+            let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+            crate::pr_modal::open(&mut app);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            // The listing walks its rows once it has been drawn.
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let view = diff_view(&app);
+            assert!(view.back.is_some(), "a level inside the modal");
+            assert_eq!(view.focus, DiffFocus::Commits);
+            let list = view.commits.as_ref().expect("the PR's commits");
+            assert_eq!(list.commits.len(), 2);
+            assert!(list.all_ticked(), "the whole pull request");
+            assert_eq!(diff_paths(&app), ["a.txt", "b.txt"]);
+            assert_eq!(
+                view.selected_path(),
+                Some("b.txt"),
+                "on the file the tab was on"
+            );
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let screen = buffer_text(&terminal);
+            assert!(screen.contains("#7 › Commits · 2 since"), "{screen}");
+            assert!(screen.contains("Esc back to the pull request"), "{screen}");
+
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::PullRequests(modal)) = &app.overlay else {
+                panic!("expected the modal back, got {:?}", app.overlay);
+            };
+            assert_eq!(modal.tabs.tab, PrTab::Changes);
+            assert_eq!(modal.focus, PrFocus::Page);
+
+            // The Commits tab's row: that commit alone.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let list = diff_view(&app).commits.as_ref().expect("the PR's commits");
+            assert!(list.ticked.is_empty());
+            assert_eq!(
+                list.selected_row(),
+                Some(crate::commit_list::Row::Commit(0))
+            );
+            assert_eq!(diff_paths(&app), ["a.txt"]);
+
+            // A head this repo has never seen: the whole diff from GitHub
+            // (`^G` on the Description tab), the modal still up meanwhile.
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            if let Some(detail) = app.pr_detail.get_mut(&pr_url(7)) {
+                detail.head_sha = "0".repeat(40);
+            }
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(
+                matches!(&app.overlay, Some(Overlay::PullRequests(_))),
+                "{:?}",
+                app.overlay
+            );
         });
     }
 
@@ -26981,9 +27383,17 @@ diff --git a/src/c.rs b/src/c.rs
         press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Char('3'), KeyModifiers::NONE, &mut out);
         assert_eq!(settings_view(&app).tab, 2);
-        // A digit past the last tab is ignored rather than clamped.
-        press(&mut app, KeyCode::Char('9'), KeyModifiers::NONE, &mut out);
-        assert_eq!(settings_view(&app).tab, 2);
+        // A digit past the last tab is ignored rather than clamped — while
+        // the strip is short enough for one to be past it.
+        let tabs = crate::config::tab_count();
+        if let Some(past) = char::from_digit(tabs as u32 + 1, 10) {
+            press(&mut app, KeyCode::Char(past), KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).tab, 2);
+        }
+        if let Some(last) = char::from_digit(tabs as u32, 10) {
+            press(&mut app, KeyCode::Char(last), KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).tab, tabs - 1);
+        }
     }
 
     /// The arrows do double duty: cycling a value inside the list, walking

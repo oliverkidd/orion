@@ -579,9 +579,10 @@ mod tests {
         with_config_json, with_default_config, with_seeded_presets, worktree_branches,
     };
     use super::super::{
-        fire_pending_prewarm, handle_server_event, handle_terminal_event, paste_into_overlay,
+        connection_lost, fire_pending_prewarm, handle_server_event, handle_terminal_event,
+        paste_into_overlay,
     };
-    use crate::app::{App, Focus, Overlay, PendingIntent, PlaceholderRows, PromptKind};
+    use crate::app::{App, ConnState, Focus, Overlay, PendingIntent, PlaceholderRows, PromptKind};
     use crate::quick_prompt::QuickTarget;
     use crate::ui;
     use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
@@ -970,6 +971,39 @@ mod tests {
                 .last_worktree_for_project
                 .values()
                 .any(|w| *w == rows.worktree));
+        });
+    }
+
+    /// The DAEMON drops the connection while a launch waits on it — as a
+    /// DAEMON of another build did on the `CreateAgent` it couldn't decode.
+    /// No Ack or Error will ever come, so the launch fails as a refusal
+    /// would: its stand-in goes and the box comes back with the text,
+    /// where it used to wait forever with the prompt in a dead request.
+    #[test]
+    fn a_launch_in_flight_when_the_daemon_goes_comes_back_with_its_text() {
+        with_default_config(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let (branch, rows, req_id) = stage_launch(&mut app, &mut out);
+            worktree_created(&mut app, &branch, req_id, &mut out);
+            assert_eq!(app.pending.len(), 1, "the CreateAgent waits on its Ack");
+
+            connection_lost(&mut app, &mut out);
+
+            assert!(matches!(app.conn, ConnState::Disconnected));
+            assert!(app.pending.is_empty());
+            assert!(
+                out.is_empty(),
+                "nothing is sent down a dead connection: {out:?}"
+            );
+            assert!(!app.tree.agents.iter().any(|a| a.id == rows.agent));
+            assert_eq!(app.flash.as_deref(), Some(super::super::CONNECTION_LOST));
+            assert!(matches!(
+                &app.overlay,
+                Some(Overlay::Prompt(prompt))
+                    if matches!(prompt.kind, PromptKind::QuickPrompt(_))
+                        && prompt.input.as_str() == "Fix auth"
+            ));
         });
     }
 

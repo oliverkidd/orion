@@ -779,8 +779,14 @@ fn body(
                     INDENT,
                     hang.as_str(),
                 )];
+                // Who and when, then how big it is: `+12 −3 · 4 files`.
+                let mut meta = Vec::new();
                 if !who.is_empty() {
-                    parts.push((vec![(who, dim)], hang.as_str(), hang.as_str()));
+                    meta.push((who, dim));
+                }
+                meta.extend(commit_size(commit, !meta.is_empty(), th));
+                if !meta.is_empty() {
+                    parts.push((meta, hang.as_str(), hang.as_str()));
                 }
                 listed.row(parts);
             }
@@ -848,6 +854,29 @@ impl Listing {
         }
         self.spans.push((first, self.lines.len() - first));
     }
+}
+
+/// A commit's size on its Commits row: `+12` green, `−3` red and how many
+/// files, `gap` putting space before it when something leads; nothing
+/// for a commit GitHub gave no counts for.
+fn commit_size(
+    commit: &crate::pull_request::PrCommit,
+    gap: bool,
+    th: Theme,
+) -> Vec<(String, Style)> {
+    let (Some(added), Some(removed)) = (commit.additions, commit.deletions) else {
+        return Vec::new();
+    };
+    let lead = if gap { "  " } else { "" };
+    let mut runs = vec![
+        (format!("{lead}+{added}"), Style::default().fg(th.ok)),
+        (format!(" −{removed}"), Style::default().fg(th.err)),
+    ];
+    if let Some(files) = commit.files {
+        let noun = if files == 1 { "file" } else { "files" };
+        runs.push((format!(" · {files} {noun}"), Style::default().fg(th.dim)));
+    }
+    runs
 }
 
 /// One check's row: its mark, its name, the workflow it ran in, and how
@@ -1365,12 +1394,16 @@ mod tests {
                 subject: "Dedupe the PR row".into(),
                 author: "webdevcody".into(),
                 at: "2026-10-01T10:00:00Z".into(),
+                additions: Some(12),
+                deletions: Some(3),
+                files: Some(1),
             },
             PrCommit {
                 sha: "aaaaaaa1111".into(),
                 subject: "Attach links".into(),
                 author: "webdevcody".into(),
                 at: "2026-09-30T10:00:00Z".into(),
+                ..Default::default()
             },
         ];
         let check = |name: &str, state, word: &str| PrCheck {
@@ -1536,7 +1569,14 @@ mod tests {
         assert!(changes.contains(" A src/links.rs  +6"), "{changes}");
         let commits = body(PrTab::Commits);
         assert!(commits.contains("▌bbbbbbb Dedupe the PR row"), "{commits}");
-        assert!(commits.contains("webdevcody · 1d ago"), "{commits}");
+        assert!(
+            commits.contains("webdevcody · 1d ago  +12 −3 · 1 file"),
+            "{commits}"
+        );
+        assert!(
+            commits.trim_end().ends_with("webdevcody · 2d ago"),
+            "no counts: none drawn — {commits}"
+        );
         assert!(
             commits.find("bbbbbbb").unwrap() < commits.find("aaaaaaa").unwrap(),
             "newest first"

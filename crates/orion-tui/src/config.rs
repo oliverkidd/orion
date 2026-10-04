@@ -81,6 +81,25 @@ pub const PANE_SIDES: &[&str] = &[
 /// ([`crate::launcher::LIST_RECENT`]).
 pub const WORKTREE_LAYOUTS: &[&str] = &["cards", "list"];
 
+/// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
+/// that has the keys when it opens, the default first.
+pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
+const START_ON_FILES: &str = "files";
+const START_ON_DIFF: &str = "diff";
+
+/// The **Ticked commits** choices (Settings → Review): how the DIFF
+/// VIEWER reads two or more ticked commits when it opens.
+pub const DIFF_TICKED: &[&str] = &["together", ONE_AT_A_TIME];
+const ONE_AT_A_TIME: &str = "one at a time";
+
+/// The **Merge method** choices (Settings → Review), the default first
+/// (`pr_actions::MergeMethod`).
+pub const MERGE_METHODS: &[&str] = &[
+    crate::pr_actions::MergeMethod::Squash.as_str(),
+    crate::pr_actions::MergeMethod::Merge.as_str(),
+    crate::pr_actions::MergeMethod::Rebase.as_str(),
+];
+
 /// The **Preset text** choices (Settings → Sessions), in the order the row
 /// cycles them: the [`PresetText`] sides by label.
 pub const PRESET_TEXTS: &[&str] = &[
@@ -492,6 +511,12 @@ pub enum SettingKind {
     OpenCommand,
     RememberHarness,
     HideUninstalledHarnesses,
+    DiffTreeView,
+    DiffStart,
+    DiffTicked,
+    PrMergeMethod,
+    PrDeleteBranch,
+    PrDraft,
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
@@ -622,6 +647,12 @@ impl SettingKind {
             | SettingKind::LinearKey
             | SettingKind::LinearTest
             | SettingKind::OutsideEditor => (2026, 10, 3),
+            SettingKind::DiffTreeView
+            | SettingKind::DiffStart
+            | SettingKind::DiffTicked
+            | SettingKind::PrMergeMethod
+            | SettingKind::PrDeleteBranch
+            | SettingKind::PrDraft => (2026, 10, 4),
         }
     }
 
@@ -840,6 +871,50 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "Agents",
         body: TabBody::Agents,
+    },
+    // How the DIFF VIEWER opens, and the PULL REQUESTS MODAL's create and
+    // merge forms: the choices a review would otherwise make by hand
+    // every time.
+    SettingsTab {
+        title: "Review",
+        body: TabBody::Values(&[
+            SettingSpec {
+                kind: SettingKind::DiffTreeView,
+                label: "Files as a tree",
+                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^T flips one open viewer)",
+                group: "Changes",
+            },
+            SettingSpec {
+                kind: SettingKind::DiffStart,
+                label: "Start on",
+                hint: "Which panel has the keys when the changes viewer opens: the commits to tick, the files, or the diff (Tab moves on from there)",
+                group: "Changes",
+            },
+            SettingSpec {
+                kind: SettingKind::DiffTicked,
+                label: "Ticked commits",
+                hint: "How two or more ticked commits read when the viewer opens: together as one diff, or one at a time from the oldest (^G flips it)",
+                group: "Changes",
+            },
+            SettingSpec {
+                kind: SettingKind::PrMergeMethod,
+                label: "Merge method",
+                hint: "How a pull request's merge (^X in the pull requests modal) lands: squash, a merge commit or a rebase — the first the repo allows when it refuses this one",
+                group: "Pull requests",
+            },
+            SettingSpec {
+                kind: SettingKind::PrDeleteBranch,
+                label: "Delete merged branch",
+                hint: "The merge deletes the pull request's branch from GitHub once it lands (never a fork's; the local branch and its worktree stay)",
+                group: "Pull requests",
+            },
+            SettingSpec {
+                kind: SettingKind::PrDraft,
+                label: "New PRs as drafts",
+                hint: "A new pull request (^T in the pull requests modal) opens with its Draft box ticked",
+                group: "Pull requests",
+            },
+        ]),
     },
     // Every Linear option in one place: the onboarding wizard's Linear
     // page draws the same rows (`LINEAR_SETTINGS`).
@@ -1381,6 +1456,29 @@ pub struct Config {
     /// the SESSIONS PANEL — those describe work you have, not work you are
     /// browsing. Off by default: a config predating the key hides nothing.
     pub hide_draft_prs: bool,
+    /// How the DIFF VIEWER opens (Settings → Review): its file list as
+    /// the directory tree rather than flat paths (`Ctrl+t` still flips
+    /// one open viewer), on by default.
+    pub diff_tree_view: bool,
+    /// Which of the DIFF VIEWER's panels has the keys when it opens:
+    /// `commits` (the COMMIT LIST, where there is one — the default, so
+    /// the ticks come first), `files` or `diff`. Read through
+    /// [`Config::diff_start`]; a word off the list is the commits.
+    pub diff_start: String,
+    /// How the DIFF VIEWER reads ticked commits when it opens: `together`
+    /// as one diff, the default, or `one at a time` (`^G` flips it).
+    pub diff_ticked: String,
+    /// How the PULL REQUESTS MODAL's merge form opens (Settings →
+    /// Review): `squash`, `merge` or `rebase` — the first the repo allows
+    /// when it refuses this one.
+    pub pr_merge_method: String,
+    /// The merge form opens with the pull request's branch deleted from
+    /// GitHub once it merges. On by default; a fork's branch is never
+    /// ours to delete.
+    pub pr_delete_branch: bool,
+    /// The new pull request form opens with its Draft box ticked. Off by
+    /// default.
+    pub pr_draft: bool,
     /// RETIRED with the line counts always drawn. Through 0.37 the **Card
     /// line counts** SETTING (Settings → Appearance, off by default)
     /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
@@ -1730,6 +1828,12 @@ impl Default for Config {
             hide_card_prompt: false,
             card_issue_number: true,
             hide_draft_prs: false,
+            diff_tree_view: true,
+            diff_start: DIFF_STARTS[0].into(),
+            diff_ticked: DIFF_TICKED[0].into(),
+            pr_merge_method: MERGE_METHODS[0].into(),
+            pr_delete_branch: true,
+            pr_draft: false,
             card_line_changes: false,
             skip_session_naming: false,
             confirm_on_archive: false,
@@ -1964,6 +2068,33 @@ impl Config {
     /// `theme` resolved to the palette the UI draws with.
     pub fn theme(&self) -> crate::theme::Theme {
         crate::theme::Theme::by_name(&self.theme)
+    }
+
+    /// `diff_start` as one of [`DIFF_STARTS`]; a word off the list is the
+    /// commits.
+    fn diff_start_word(&self) -> &'static str {
+        DIFF_STARTS[cycled_index(&self.diff_start, DIFF_STARTS, 0)]
+    }
+
+    /// The DIFF VIEWER panel the **Start on** SETTING hands the keys to as
+    /// it opens.
+    pub fn diff_start(&self) -> crate::app::DiffFocus {
+        match self.diff_start_word() {
+            START_ON_FILES => crate::app::DiffFocus::Files,
+            START_ON_DIFF => crate::app::DiffFocus::Diff,
+            _ => crate::app::DiffFocus::Commits,
+        }
+    }
+
+    /// `diff_ticked` as one of [`DIFF_TICKED`]; a word off the list is
+    /// together.
+    fn diff_ticked_word(&self) -> &'static str {
+        DIFF_TICKED[cycled_index(&self.diff_ticked, DIFF_TICKED, 0)]
+    }
+
+    /// The **Ticked commits** SETTING says one at a time.
+    pub fn diff_one_at_a_time(&self) -> bool {
+        self.diff_ticked_word() == ONE_AT_A_TIME
     }
 
     /// `session_pane` resolved to the side the LAUNCHER VIEW lays its pane
@@ -2993,6 +3124,16 @@ impl Config {
             SettingKind::ExpandAllWorktrees => on_off(self.expand_all_worktrees).into(),
             SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
+            SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
+            SettingKind::DiffStart => self.diff_start_word().into(),
+            SettingKind::DiffTicked => self.diff_ticked_word().into(),
+            SettingKind::PrMergeMethod => {
+                crate::pr_actions::MergeMethod::parse(&self.pr_merge_method)
+                    .as_str()
+                    .into()
+            }
+            SettingKind::PrDeleteBranch => on_off(self.pr_delete_branch).into(),
+            SettingKind::PrDraft => on_off(self.pr_draft).into(),
             // A project row with no project to speak of: what one without
             // an entry would show.
             SettingKind::RunCommand | SettingKind::OpenCommand => {
@@ -3143,6 +3284,27 @@ impl Config {
             }
             SettingKind::HideDraftPrs => {
                 self.hide_draft_prs = !self.hide_draft_prs;
+            }
+            SettingKind::DiffTreeView => {
+                self.diff_tree_view = !self.diff_tree_view;
+            }
+            // A hand edit off the list steps on from the first, the word
+            // it reads as.
+            SettingKind::DiffStart => {
+                self.diff_start = cycle_choice(&self.diff_start, DIFF_STARTS, step).into();
+            }
+            SettingKind::DiffTicked => {
+                self.diff_ticked = cycle_choice(&self.diff_ticked, DIFF_TICKED, step).into();
+            }
+            SettingKind::PrMergeMethod => {
+                self.pr_merge_method =
+                    cycle_choice(&self.pr_merge_method, MERGE_METHODS, step).into();
+            }
+            SettingKind::PrDeleteBranch => {
+                self.pr_delete_branch = !self.pr_delete_branch;
+            }
+            SettingKind::PrDraft => {
+                self.pr_draft = !self.pr_draft;
             }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}
@@ -4580,6 +4742,53 @@ mod tests {
         // A config predating the key keeps animations on.
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(cfg.animations);
+    }
+
+    /// The REVIEW TAB: how the changes viewer opens — the tree, the keys
+    /// on the commits, ticked commits together — and how the pull request
+    /// forms open — a squash, the branch deleted, not a draft — each row
+    /// cycling its own words and a word off the list reading as the
+    /// default.
+    #[test]
+    fn the_review_tab_holds_the_viewer_and_pull_request_defaults() {
+        use crate::app::DiffFocus;
+        let mut cfg = Config::default();
+        assert!(cfg.diff_tree_view);
+        assert_eq!(cfg.diff_start(), DiffFocus::Commits);
+        assert!(!cfg.diff_one_at_a_time());
+        assert_eq!(cfg.value_label(SettingKind::PrMergeMethod), "squash");
+        assert!(cfg.pr_delete_branch && !cfg.pr_draft);
+        for kind in [
+            SettingKind::DiffTreeView,
+            SettingKind::DiffStart,
+            SettingKind::DiffTicked,
+            SettingKind::PrMergeMethod,
+            SettingKind::PrDeleteBranch,
+            SettingKind::PrDraft,
+        ] {
+            let (tab, _) = locate(kind).unwrap();
+            assert_eq!(SETTINGS_TABS[tab].title, "Review", "{kind:?}");
+        }
+        let (tab, row) = locate(SettingKind::DiffStart).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.diff_start(), DiffFocus::Files);
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.diff_start(), DiffFocus::Diff);
+        assert_eq!(cfg.value_label(SettingKind::DiffStart), "diff");
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.diff_start(), DiffFocus::Commits, "round again");
+        let (tab, row) = locate(SettingKind::DiffTicked).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert!(cfg.diff_one_at_a_time());
+        let (tab, row) = locate(SettingKind::PrMergeMethod).unwrap();
+        cfg.cycle(tab, row, -1);
+        assert_eq!(cfg.pr_merge_method, "rebase");
+
+        let odd: Config =
+            serde_json::from_str(r#"{"diff_start": "sideways", "pr_merge_method": "yolo"}"#)
+                .unwrap();
+        assert_eq!(odd.diff_start(), DiffFocus::Commits);
+        assert_eq!(odd.value_label(SettingKind::PrMergeMethod), "squash");
     }
 
     /// DRAFT PULL REQUESTS: an Appearance row that reads `shown` / `hidden`
