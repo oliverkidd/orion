@@ -1,0 +1,17 @@
+# Two agents launched on main, one archived with ^A (never a bare letter now), then `z` unfolds the band's
+# ARCHIVED DRAWER: the archived session a faint line under the band, the cursor on it.
+C-n
+Profile the daemon's startup
+Enter
+F12
+Escape
+C-n
+Sort the changelog entries by date
+Enter
+F12
+Escape
+C-a
+Enter
+F12
+z
+F12
