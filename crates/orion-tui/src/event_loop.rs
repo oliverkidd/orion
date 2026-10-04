@@ -470,7 +470,7 @@ async fn main_loop(
             // Metrics poll: always on for the footer's memory/session
             // readout, tightened while the metrics modal is open (its
             // initial reading is requested by the M keypress itself).
-            _ = tokio::time::sleep_until(next_metrics_poll) => {
+            _ = tokio::time::sleep_until(next_metrics_poll), if matches!(app.conn, ConnState::Connected) => {
                 request_metrics(&mut app, &mut out);
                 let period = if matches!(app.overlay, Some(Overlay::Metrics(_))) {
                     METRICS_POLL
@@ -483,7 +483,9 @@ async fn main_loop(
             // on a beat of its own for as long as any is on screen — with
             // the grid folded away or no terminal drawn there is nothing
             // to ask after, and the beat sleeps with it.
-            _ = tokio::time::sleep_until(next_tail_poll), if !app.tail_cards.is_empty() => {
+            _ = tokio::time::sleep_until(next_tail_poll),
+                if !app.tail_cards.is_empty() && matches!(app.conn, ConnState::Connected) =>
+            {
                 request_terminal_tails(&mut app, &mut out);
                 next_tail_poll = tokio::time::Instant::now() + TAIL_POLL;
             }
@@ -601,7 +603,10 @@ async fn main_loop(
                 }
                 Some(Err(_)) | None => app.should_quit = true,
             },
-            ev = channels.rx.recv() => match ev {
+            // Guarded: a closed channel answers `None` at once, every
+            // time, and unguarded that spun the loop flat out from the
+            // moment the DAEMON went.
+            ev = channels.rx.recv(), if matches!(app.conn, ConnState::Connected) => match ev {
                 Some(server_event) => {
                     log_server_event(&server_event);
                     if let Some(perf) = &mut perf {
@@ -609,11 +614,7 @@ async fn main_loop(
                     }
                     handle_server_event(&mut app, server_event, &mut out);
                 }
-                None => {
-                    app.conn = ConnState::Disconnected;
-                    app.flash = Some("daemon connection lost".into());
-                    app.dirty = true;
-                }
+                None => connection_lost(&mut app, &mut out),
             },
             ev = vim_rx.recv() => {
                 // Never None: app.vim_tx keeps a sender alive.
@@ -799,11 +800,23 @@ async fn main_loop(
             }
         }
 
+        // Once the connection is gone nothing is sent — a request queued
+        // to a writer that has died would vanish without a word — and each
+        // round's requests fail through `connection_lost` instead, so a
+        // launch typed after the DAEMON went comes back with its text.
+        let mut lost = false;
         for req in out.drain(..) {
-            if channels.tx.send(req).await.is_err() {
-                app.conn = ConnState::Disconnected;
-                app.dirty = true;
+            if !matches!(app.conn, ConnState::Connected) || channels.tx.send(req).await.is_err() {
+                lost = true;
             }
+        }
+        if lost {
+            // What the reader already took off the socket still counts: an
+            // Ack in there is a create the DAEMON made, not one to roll back.
+            while let Ok(ev) = channels.rx.try_recv() {
+                handle_server_event(&mut app, ev, &mut out);
+            }
+            connection_lost(&mut app, &mut out);
         }
 
         if app.should_quit {
@@ -11511,6 +11524,35 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         }
         _ => {}
     }
+}
+
+/// What a launch refused for a lost DAEMON connection says, beside the
+/// footer's `✗ disconnected`: the TUI never reconnects, so the way out is
+/// a fresh start.
+const CONNECTION_LOST: &str =
+    "lost the orion daemon — nothing here reaches it now; quit and start orion again";
+
+/// The DAEMON connection is gone, and the TUI never makes another, so no
+/// Ack or Error will come for anything in flight. Each pending intent fails
+/// the way a refusal does — a QUICK PROMPT's box comes back with its text,
+/// an optimistic row goes back — instead of waiting forever with the
+/// user's words in a request nobody will read. Oldest first, so of two
+/// QUICK PROMPT launches the newer one's box is the one left on screen.
+fn connection_lost(app: &mut App, out: &mut Vec<ClientRequest>) {
+    app.conn = ConnState::Disconnected;
+    let mut in_flight: Vec<u64> = app.pending.keys().copied().collect();
+    in_flight.sort_unstable();
+    for req_id in in_flight {
+        let refusal = ServerEvent::Error {
+            req_id: Some(req_id),
+            message: CONNECTION_LOST.into(),
+        };
+        handle_server_event(app, refusal, out);
+    }
+    // Nothing is left to carry what the rollbacks queued.
+    out.clear();
+    app.flash = Some(CONNECTION_LOST.into());
+    app.dirty = true;
 }
 
 fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {

@@ -2582,6 +2582,42 @@ async fn create_agent_succeeds_when_the_cli_is_on_the_login_shell_path() {
     wait_for_exit(&mut daemon);
 }
 
+/// A TUI built off other protocol types than the daemon it reaches — a
+/// fresh install talking to a daemon still running the old build, with
+/// PROTOCOL_VERSION left where it was — sends a request the daemon can't
+/// decode. The daemon refuses that one request by its req_id, so the
+/// launch waiting on it fails visibly, and goes on serving. It used to end
+/// the connection: the TUI sat connected to nothing, and every launch
+/// typed into it went nowhere, its prompt with it.
+#[tokio::test]
+async fn an_undecodable_request_is_refused_and_the_connection_kept() {
+    let env = TestEnv::new();
+    let mut daemon = env.spawn_daemon();
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+
+    // `{variant: [fields…]}` is how a request travels; this one names a
+    // real variant with fields no build of it has.
+    let skewed = std::collections::HashMap::from([("CreateAgent", (9u64, "plan"))]);
+    write_frame(&mut c, &skewed).await.unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter().any(|e| matches!(e, ServerEvent::Error { .. }))
+    })
+    .await;
+    match events.last() {
+        Some(ServerEvent::Error { req_id, message }) => {
+            assert_eq!(*req_id, Some(9), "the refusal names the request");
+            assert_eq!(message, orion_core::UNDECODABLE_FRAME_HINT);
+        }
+        other => panic!("expected an Error, got {other:?}"),
+    }
+
+    subscribe(&mut c).await;
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 fn pid_alive(pid: i32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])

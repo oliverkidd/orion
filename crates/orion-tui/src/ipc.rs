@@ -2,7 +2,7 @@
 //! perform the version handshake.
 
 use anyhow::{bail, Context, Result};
-use orion_core::codec::{read_frame, write_frame};
+use orion_core::codec::{read_frame, read_frame_or_undecodable, write_frame, Frame};
 use orion_core::{
     env, paths, AgentId, AgentKind, ClientRequest, EnterOutcome, ServerEvent, PROTOCOL_VERSION,
 };
@@ -203,7 +203,18 @@ pub fn split_connection(conn: Connection) -> IpcChannels {
 
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(read_half);
-        while let Ok(Some(ev)) = read_frame::<ServerEvent, _>(&mut reader).await {
+        while let Ok(Some(frame)) = read_frame_or_undecodable::<ServerEvent, _>(&mut reader).await {
+            let ev = match frame {
+                Frame::Msg(ev) => ev,
+                // An event from a daemon built off other protocol types:
+                // say so and read on, rather than end the connection over
+                // it. No req_id: an Ack that didn't decode may be a create
+                // the daemon did make, which must not be rolled back here.
+                Frame::Undecodable { .. } => ServerEvent::Error {
+                    req_id: None,
+                    message: orion_core::UNDECODABLE_FRAME_HINT.into(),
+                },
+            };
             if event_tx.send(ev).await.is_err() {
                 break;
             }
