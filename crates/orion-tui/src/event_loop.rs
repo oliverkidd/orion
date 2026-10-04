@@ -237,7 +237,20 @@ const SWEEP_FRAME: Duration = crate::app::SWEEP_FRAME;
 
 /// `Some(entry)` = quit via the hosts picker: the caller should exec
 /// `orion ssh` at it now that the terminal is restored.
-pub async fn run_app() -> Result<Option<crate::hosts::HostEntry>> {
+/// How the TUI ended, for the binary to act on once the terminal is
+/// restored.
+#[derive(Debug)]
+pub enum Exit {
+    Quit,
+    /// The hosts picker chose a destination: exec `orion ssh` at it, the
+    /// local daemon and its sessions left up.
+    Ssh(crate::hosts::HostEntry),
+    /// **Restart orion**: stop the daemon, then exec this binary afresh
+    /// (`crate::restart`).
+    Restart,
+}
+
+pub async fn run_app() -> Result<Exit> {
     let conn = ipc::connect_or_spawn().await?;
     let mut channels = ipc::split_connection(conn);
     channels.tx.send(ClientRequest::Subscribe).await?;
@@ -251,7 +264,7 @@ pub async fn run_app() -> Result<Option<crate::hosts::HostEntry>> {
 async fn main_loop(
     terminal: &mut Terminal<CrosstermBackend<BufWriter<Stdout>>>,
     channels: &mut ipc::IpcChannels,
-) -> Result<Option<crate::hosts::HostEntry>> {
+) -> Result<Exit> {
     let mut app = App::new();
     app.conn = ConnState::Connected;
     // The repo orion was started in, for the first run's "open this
@@ -837,7 +850,11 @@ async fn main_loop(
                     json: ui_state_json(&app),
                 })
                 .await;
-            return Ok(app.pending_ssh.take());
+            return Ok(if app.restart {
+                Exit::Restart
+            } else {
+                app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
+            });
         }
     }
 }
@@ -2733,8 +2750,12 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
         }
         Event::Paste(text) if app.vim.is_some() => {
             if let Some(vim) = &mut app.vim {
-                // Bracketed paste so vim doesn't auto-indent it to mush.
-                vim.input(&bracketed(&text));
+                // Bracketed when the child asked, so vim doesn't auto-indent
+                // it to mush; as typed when it never did — `claude auth
+                // login` reads its code with a plain readline, and took the
+                // markers for part of the code (`Invalid code`).
+                let data = pasted(vim.parser.screen(), &text);
+                vim.input(&data);
             }
         }
         // A MARKDOWN PAGE has nothing to paste into, and the overlay under
@@ -3181,6 +3202,13 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // `⌘W` closes the agent or terminal in the pane, never a modal: over
+    // the editor, a markdown page or any overlay it does nothing at all,
+    // rather than reach the editor as its `^W` or a list as a `w`.
+    let modal_up = app.vim.is_some() || app.page.is_some() || app.overlay.is_some();
+    if modal_up && closes_pane(app, &key) {
+        return;
+    }
     // The editor modal sits above every overlay: all keys forward to it —
     // vim needs Esc — except Ctrl+Q, the same hatch the terminal lock uses.
     if app.vim.is_some() {
@@ -3493,6 +3521,7 @@ fn dispatch_action(
     use crate::keymap::Action;
     match action {
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
+        Action::Restart => app.overlay = Some(Overlay::Confirm(confirm_restart())),
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
@@ -3721,6 +3750,7 @@ fn dispatch_action(
             jump_attention(app, -1, attaches, out);
         }
         Action::Delete => open_delete_confirm(app),
+        Action::ClosePane => close_pane(app),
         // Delete EVERY row of the focused panel (behind a confirm that
         // lists the casualties).
         Action::DeleteAll => open_delete_all_confirm(app),
@@ -4301,6 +4331,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::NextAttention
             | Action::PrevAttention
             | Action::Quit
+            | Action::Restart
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
@@ -5681,6 +5712,42 @@ fn open_delete_confirm(app: &mut App) {
     }
 }
 
+/// Whether `key` is a ⌘ chord bound to **Close agent or terminal** — the
+/// one the modal guard in [`handle_key`] swallows. Only a ⌘ chord: one
+/// rebound onto a bare key keeps that key a modal's own.
+fn closes_pane(app: &App, key: &KeyEvent) -> bool {
+    let chord = crate::keymap::KeyChord::from_event(key);
+    chord.mods.contains(KeyModifiers::SUPER)
+        && app.keymap.lookup(crate::keymap::Scope::Global, &chord)
+            == Some(crate::keymap::Action::ClosePane)
+}
+
+/// `⌘W`: close the agent or terminal the PANE shows — from its card, the
+/// pane holding the keys, or typing inside it (the lock, and full screen,
+/// are left on the way: `handle_key`'s ⌘ chord path). The confirm is the
+/// very one `Backspace` asks on the card, the worktree question folded in
+/// on a linked worktree's last card. Only a session: an EMPTY BAND, a
+/// link row or a pane reading a pull request says so and closes nothing.
+fn close_pane(app: &mut App) {
+    let on_cards = matches!(app.focus, Focus::Sessions | Focus::Terminal);
+    let aimed = !(app.launcher_grid() && app.launcher_unaimed);
+    let row = (on_cards && aimed && launcher::empty_band(app).is_none())
+        .then(|| app.selected_session_row())
+        .flatten();
+    match row {
+        Some(SessionRow::Agent(a)) => {
+            app.overlay = Some(Overlay::Confirm(confirm_delete_agent_in(app, &a)));
+        }
+        Some(SessionRow::Terminal(t)) => {
+            app.overlay = Some(Overlay::Confirm(confirm_close_terminal_in(app, &t)));
+        }
+        _ => app.flash = Some(NOTHING_TO_CLOSE.into()),
+    }
+}
+
+/// What `⌘W` says with no agent or terminal in front of it.
+const NOTHING_TO_CLOSE: &str = "no agent or terminal here to close";
+
 /// The confirm before an agent is deleted — from the `d` key and the row
 /// menu alike, so the two never drift apart in wording.
 fn confirm_delete_agent(name: &str, id: AgentId) -> ConfirmDialog {
@@ -5712,6 +5779,24 @@ fn confirm_quit() -> ConfirmDialog {
         // Sized to the longest line, never wrapped: keep both under 52.
         message: "Leave the TUI?\nSessions keep running in the daemon.".into(),
         action: PendingAction::Quit,
+        area: ratatui::layout::Rect::default(),
+    }
+}
+
+/// The confirm before **Restart orion** (`⌘⇧R`, HOME's key): the TUI
+/// quits, the DAEMON is stopped with every session in it, and the binary
+/// starts again from scratch (`crate::restart`). The message says what is
+/// lost — a running turn, a terminal's shell — and what is not.
+fn confirm_restart() -> ConfirmDialog {
+    ConfirmDialog {
+        title: "Restart orion".into(),
+        // Sized to the longest line, never wrapped: keep each under 52.
+        message: "Stop the daemon and every session in it,\n\
+                  then start orion again from scratch?\n\
+                  Agents pick their conversation back up;\n\
+                  terminals start a new shell."
+            .into(),
+        action: PendingAction::Restart,
         area: ratatui::layout::Rect::default(),
     }
 }
@@ -8208,6 +8293,10 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
         }
         PendingAction::RemoveClaudeAccount { id } => remove_claude_account(app, &id, false),
         PendingAction::Quit => app.should_quit = true,
+        PendingAction::Restart => {
+            app.restart = true;
+            app.should_quit = true;
+        }
     }
 }
 
@@ -26159,12 +26248,13 @@ diff --git a/src/c.rs b/src/c.rs
             let ran = crate::claude_accounts::take_ran();
             assert_eq!(ran.len(), 1);
             assert_eq!(ran[0].args, ["auth", "login", "--email", "c@d.co"]);
+            // Its dir first; on a Mac, the private-window BROWSER after it.
             assert_eq!(
-                ran[0].env,
-                [(
+                ran[0].env[0],
+                (
                     "CLAUDE_CONFIG_DIR".to_string(),
                     root.join(".claude-2").display().to_string()
-                )]
+                )
             );
             // Esc on the email backs out to the row, nothing run.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -27453,6 +27543,47 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert!(app.vim.is_none(), "the force close");
+    }
+
+    /// A paste into the modal reaches a child that never turned bracketed
+    /// paste on as typed — `claude auth login`'s `Paste code here if
+    /// prompted >` is a plain readline, and a code wrapped in the markers
+    /// was an `Invalid code` — and one that did (vim) in the markers.
+    #[test]
+    fn a_paste_into_the_modal_is_bracketed_only_when_the_child_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let script = "printf 'Paste code here if prompted > '; read -r line; \
+                      printf 'GOT:'; printf %s \"$line\" | od -An -tx1 | tr -d ' \\n'; \
+                      printf '\\033[?2004h'; stty raw -echo; printf ' ASKED'; \
+                      dd bs=1 count=13 2>/dev/null | od -An -tx1 | tr -d ' \\n'; \
+                      printf ' DONE'; sleep 30";
+        let mut vim = VimTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), script.into()],
+            dir.path(),
+            "t".into(),
+            80,
+            24,
+            1,
+            tx,
+        )
+        .unwrap();
+        vim.account_auth = true;
+        let mut app = App::new();
+        app.vim = Some(vim);
+        let mut out = Vec::new();
+        pump_editor(&mut app, &mut rx, |s| s.contains("prompted >"));
+        handle_terminal_event(&mut app, Event::Paste("ab#cd".into()), &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("ASKED"));
+        assert!(shown.contains("GOT:6162236364 "), "the code alone: {shown}");
+        handle_terminal_event(&mut app, Event::Paste("x".into()), &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("DONE"));
+        assert!(shown.contains("1b5b3230307e781b5b3230317e"), "{shown}");
+        if let Some(vim) = &mut app.vim {
+            vim.kill();
+        }
     }
 
     /// Output a child printed, pumped into the modal until `done`.
@@ -34371,7 +34502,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "PullRequests",
                 |app| {
                     seed_tree(app);
-                    press(app, KeyCode::Char('v'), KeyModifiers::NONE, &mut Vec::new());
+                    press(
+                        app,
+                        KeyCode::Char('u'),
+                        KeyModifiers::SUPER,
+                        &mut Vec::new(),
+                    );
                 },
                 None,
             ),

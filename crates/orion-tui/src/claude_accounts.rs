@@ -395,12 +395,23 @@ pub fn same_account_groups(entries: &[HarnessDescriptor]) -> Vec<(String, Vec<St
 /// the settings overlay, the wizard — and short enough a line for both:
 /// which dirs share an email, what that costs, and how to fix it.
 pub fn same_account_warning(email: &str, dirs: &[String]) -> Vec<String> {
-    vec![
+    let fix = if cfg!(target_os = "macos") {
+        [
+            "  it in again, in a private browser window: sign in there as",
+            "  the other account, or type its email (claude auth login --email).",
+        ]
+    } else {
+        [
+            "  it in again: from a private browser window (or after signing out",
+            "  of claude.ai), or type the other email (claude auth login --email).",
+        ]
+    };
+    let mut lines = vec![
         format!("⚠ {} are signed in as one account,", and_list(dirs)),
         format!("  {email}: one subscription, one limit. Enter on one signs"),
-        "  it in again: from a private browser window (or after signing out".into(),
-        "  of claude.ai), or type the other email (claude auth login --email).".into(),
-    ]
+    ];
+    lines.extend(fix.map(String::from));
+    lines
 }
 
 /// `a`, `a and b`, `a, b and c`.
@@ -429,14 +440,21 @@ pub struct AuthCommand {
 
 /// `claude auth login` for `entry`, in its config dir: Claude Code's own
 /// browser sign-in, with `--email` filling the login page when one is
-/// given. The CLI is the account's own program, so a `harnesses` override
-/// of Claude's reaches the sign-in too.
+/// given, and on a Mac that page opening in a private window
+/// ([`private_browser`]). The CLI is the account's own program, so a
+/// `harnesses` override of Claude's reaches the sign-in too.
 pub fn login_command(entry: &HarnessDescriptor, email: Option<&str>) -> AuthCommand {
     let mut args = vec!["auth".to_string(), "login".to_string()];
     if let Some(email) = email.map(str::trim).filter(|e| !e.is_empty()) {
         args.extend(["--email".to_string(), email.to_string()]);
     }
-    auth_command(entry, args, "Sign in")
+    let mut command = auth_command(entry, args, "Sign in");
+    if let Some(browser) = private_browser() {
+        command
+            .env
+            .push(("BROWSER".into(), browser.display().to_string()));
+    }
+    command
 }
 
 /// `claude auth logout` for `entry`, in its config dir.
@@ -464,6 +482,82 @@ fn auth_command(entry: &HarnessDescriptor, args: Vec<String>, verb: &str) -> Aut
         cwd,
         title: format!("{verb} · {shown}"),
     }
+}
+
+/// Browsers that open a private window from the command line, by bundle
+/// id, with the flag that does it. Safari has no such flag.
+const PRIVATE_BROWSERS: &[(&str, &str)] = &[
+    ("com.google.Chrome", "--incognito"),
+    ("org.mozilla.firefox", "--private-window"),
+    ("com.brave.Browser", "--incognito"),
+    ("com.microsoft.edgemac", "--inprivate"),
+    ("com.vivaldi.Vivaldi", "--incognito"),
+    ("org.chromium.Chromium", "--incognito"),
+    ("com.operasoftware.Opera", "--private"),
+];
+
+/// The program a sign-in names as Claude Code's `BROWSER`:
+/// [`private_browser_script`], written to orion's data dir. None off a
+/// Mac, or when it can't be written — Claude then opens its page the way
+/// it always does.
+fn private_browser() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let dir = if cfg!(test) {
+        std::env::temp_dir().join("orion-unit-tests-browser")
+    } else {
+        orion_core::paths::data_dir()
+    };
+    write_private_browser(&dir).ok()
+}
+
+/// Write [`private_browser_script`] into `dir` — only when it has changed
+/// — executable, and say where.
+fn write_private_browser(dir: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("claude-sign-in-browser");
+    let script = private_browser_script();
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(&path, &script)?;
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(path)
+}
+
+/// The browser `claude auth login` opens its page with: a script that
+/// opens it in a private window, where claude.ai asks who is signing in
+/// rather than approving whichever account the browser is already signed
+/// in to — the trap [`same_account_groups`] flags. The page's localhost
+/// redirect still finishes the sign-in, so there is no code to paste. The
+/// default browser goes first when it has a private mode, then
+/// [`PRIVATE_BROWSERS`] in order; with none of them installed the page
+/// opens as it always did.
+fn private_browser_script() -> String {
+    let mut script = String::from(
+        r#"#!/bin/sh
+# Written by orion: the browser `claude auth login` opens (BROWSER). It opens
+# Claude's sign-in page in a private window, so claude.ai asks which account
+# is signing in rather than approving the one this browser is signed in to.
+url=$1
+private() { open -nb "$1" --args "$2" "$url" 2>/dev/null; }
+default=$(osascript -l JavaScript -e 'ObjC.import("AppKit");
+var app = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("https://claude.ai"));
+app.isNil() ? "" : $.NSBundle.bundleWithURL(app).bundleIdentifier.js' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+case $default in
+"#,
+    );
+    for (id, flag) in PRIVATE_BROWSERS {
+        let lower = id.to_ascii_lowercase();
+        script.push_str(&format!("{lower}) private {id} {flag} && exit 0 ;;\n"));
+    }
+    script.push_str("esac\n");
+    for (id, flag) in PRIVATE_BROWSERS {
+        script.push_str(&format!("private {id} {flag} && exit 0\n"));
+    }
+    script.push_str("exec open \"$url\"\n");
+    script
 }
 
 /// Run `command` in the editor modal, over whatever overlay is up: the
@@ -944,28 +1038,100 @@ mod tests {
         entry
             .env
             .insert("CLAUDE_CONFIG_DIR".into(), two.display().to_string());
+        // On a Mac the sign-in's browser is orion's private-window opener.
+        let browser = |env: &[(String, String)]| {
+            env.iter()
+                .find(|(name, _)| name == "BROWSER")
+                .map(|(_, value)| PathBuf::from(value))
+        };
         m.run(|| {
             let login = login_command(&entry, Some(" b@b.co "));
             assert_eq!(login.program, "claude");
             assert_eq!(login.args, ["auth", "login", "--email", "b@b.co"]);
             assert_eq!(
-                login.env,
-                [("CLAUDE_CONFIG_DIR".to_string(), two.display().to_string())]
+                login.env[0],
+                ("CLAUDE_CONFIG_DIR".to_string(), two.display().to_string())
             );
+            let opener = browser(&login.env);
+            assert_eq!(opener.is_some(), cfg!(target_os = "macos"));
+            if let Some(opener) = opener {
+                assert!(opener.ends_with("claude-sign-in-browser"), "{opener:?}");
+                assert!(opener.is_file());
+            }
             assert_eq!(login.cwd, two);
             assert_eq!(login.title, "Sign in · ~/.claude-2");
             assert_eq!(login_command(&entry, Some("")).args, ["auth", "login"]);
             let logout = logout_command(&entry);
             assert_eq!(logout.args, ["auth", "logout"]);
-            assert_eq!(logout.env, login.env);
+            assert_eq!(logout.env, login.env[..1], "no browser to sign out");
             // The default account runs as orion was started: no dir of its
             // own to set.
             let claude = orion_core::harness::builtin("claude").unwrap();
             let login = login_command(&claude, None);
-            assert!(login.env.is_empty());
+            assert!(login.env.iter().all(|(name, _)| name == "BROWSER"));
             assert_eq!(login.cwd, m.home.path().join(".claude"));
             assert_eq!(login.title, "Sign in · ~/.claude");
         });
+    }
+
+    /// The sign-in's browser opens the page in a private window: the
+    /// default browser's when it has one, else the first installed of the
+    /// rest — and as Claude would itself when none of them is there.
+    #[test]
+    fn the_sign_in_page_opens_in_a_private_window() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.path().join("log");
+        // `open` logs each call and finds only the apps in $INSTALLED;
+        // `osascript` names $DEFAULT as the default browser.
+        let stub = |name: &str, body: String| {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub(
+            "open",
+            format!(
+                r#"echo "$*" >> '{}'
+[ "$1" = -nb ] || exit 0
+case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
+                log.display()
+            ),
+        );
+        stub("osascript", r#"printf '%s\n' "$DEFAULT""#.into());
+        let script = write_private_browser(dir.path()).unwrap();
+        let url = "http://localhost:4321/callback?code=x";
+        let run = |default: &str, installed: &str| -> Vec<String> {
+            let _ = std::fs::remove_file(&log);
+            let status = std::process::Command::new(&script)
+                .arg(url)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("DEFAULT", default)
+                .env("INSTALLED", installed)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let calls = std::fs::read_to_string(&log).unwrap();
+            calls.lines().map(String::from).collect()
+        };
+        assert_eq!(
+            run("com.brave.Browser", "com.google.Chrome com.brave.Browser"),
+            [format!("-nb com.brave.Browser --args --incognito {url}")],
+            "the default browser first"
+        );
+        assert_eq!(
+            run("com.apple.Safari", "org.mozilla.firefox"),
+            [
+                format!("-nb com.google.Chrome --args --incognito {url}"),
+                format!("-nb org.mozilla.firefox --args --private-window {url}"),
+            ],
+            "Safari has no private flag: the first of the rest installed"
+        );
+        let calls = run("com.apple.Safari", "");
+        assert_eq!(calls.len(), PRIVATE_BROWSERS.len() + 1);
+        assert_eq!(calls.last().unwrap(), url, "none: the page as before");
     }
 
     #[test]

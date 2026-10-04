@@ -3696,6 +3696,200 @@ mod tests {
     /// [`two_sessions`] with **Show all worktrees** on and a third
     /// checkout of `demo` — `idle`, with nothing running in it — its
     /// EMPTY BAND the grid's last, under `feat`'s.
+    /// `⌘W` is `Backspace` on the agent or terminal the pane shows: the
+    /// very confirm, asked before anything goes — from the card, and from
+    /// inside the locked pane, which it leaves on the way. `^W` stays the
+    /// agent's delete-word there.
+    #[test]
+    fn cmd_w_closes_the_session_in_front_behind_backspaces_confirm() {
+        with_default_config(|| {
+            let cmd_w = |app: &mut App| key(app, KeyCode::Char('w'), KeyModifiers::SUPER);
+            let mut by_backspace = two_sessions();
+            draw(&mut by_backspace);
+            to_feat(&mut by_backspace);
+            key(&mut by_backspace, KeyCode::Backspace, KeyModifiers::NONE);
+            // The worktree's last card: its question folded in.
+            assert!(
+                matches!(&by_backspace.overlay, Some(Overlay::Confirm(c))
+                    if c.title == "Delete agent"),
+                "{:?}",
+                by_backspace.overlay
+            );
+
+            let mut on_card = two_sessions();
+            draw(&mut on_card);
+            to_feat(&mut on_card);
+            let sent = cmd_w(&mut on_card);
+            assert!(sent.is_empty(), "asked first: {sent:?}");
+            assert_eq!(
+                format!("{:?}", on_card.overlay),
+                format!("{:?}", by_backspace.overlay),
+                "the card's own confirm"
+            );
+
+            let mut locked = two_sessions();
+            draw(&mut locked);
+            to_feat(&mut locked);
+            key(&mut locked, KeyCode::Enter, KeyModifiers::NONE);
+            if locked.term.is_none() {
+                locked.term = Some(crate::app::AttachedTerm::new(
+                    SessionRef::Agent(AgentId("a2".into())),
+                    40,
+                    10,
+                ));
+            }
+            assert!(locked.term_locked, "Enter put the keys in the pane");
+            let sent = key(&mut locked, KeyCode::Char('w'), KeyModifiers::CONTROL);
+            assert!(
+                locked.overlay.is_none() && locked.term_locked,
+                "^W is the agent's"
+            );
+            assert!(
+                matches!(sent.last(), Some(ClientRequest::Input { .. })),
+                "down the PTY: {sent:?}"
+            );
+            let sent = cmd_w(&mut locked);
+            assert!(!sent
+                .iter()
+                .any(|r| matches!(r, ClientRequest::Input { .. })));
+            assert!(!locked.term_locked, "the lock is left on the way");
+            assert_eq!(
+                format!("{:?}", locked.overlay),
+                format!("{:?}", by_backspace.overlay),
+                "the same confirm from inside the pane"
+            );
+            key(&mut locked, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(locked.overlay.is_none(), "Esc keeps the agent");
+        });
+    }
+
+    /// `⌘W` on a TERMINAL's chip closes that terminal, behind its own
+    /// confirm, as `Backspace` there does.
+    #[test]
+    fn cmd_w_on_a_terminal_closes_the_terminal() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            seed_terminal(&mut app, "t1", "w2", "shell-1");
+            draw(&mut app);
+            to_feat(&mut app);
+            key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if matches!(c.action, PendingAction::CloseTerminal(_))),
+                "the terminal's close: {:?}",
+                app.overlay
+            );
+        });
+    }
+
+    /// `⌘W` closes agents and terminals only: on an EMPTY BAND it says so
+    /// rather than ask to delete the worktree `Backspace` would, and over
+    /// a modal or HOME it does nothing at all.
+    #[test]
+    fn cmd_w_never_reaches_a_worktree_a_modal_or_home() {
+        with_default_config(|| {
+            let cmd_w = |app: &mut App| key(app, KeyCode::Char('w'), KeyModifiers::SUPER);
+            let mut app = with_empty_band();
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
+            let sent = cmd_w(&mut app);
+            assert!(
+                sent.is_empty() && app.overlay.is_none(),
+                "{:?}",
+                app.overlay
+            );
+            assert!(
+                app.flash
+                    .as_deref()
+                    .is_some_and(|f| f.contains("no agent or terminal")),
+                "{:?}",
+                app.flash
+            );
+
+            let mut app = two_sessions();
+            draw(&mut app);
+            to_feat(&mut app);
+            key(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
+            let before = format!("{:?}", app.overlay);
+            assert!(matches!(app.overlay, Some(Overlay::Menu(_))));
+            cmd_w(&mut app);
+            assert_eq!(
+                format!("{:?}", app.overlay),
+                before,
+                "the modal is untouched"
+            );
+
+            app.overlay = None;
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(app.home);
+            cmd_w(&mut app);
+            assert!(app.home && app.overlay.is_none(), "{:?}", app.overlay);
+        });
+    }
+
+    /// The pull requests open on `⌘U` (`^V`); the bare `v` is free again.
+    #[test]
+    fn cmd_u_opens_the_pull_requests_and_v_does_not() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            for (letter, mods) in [('u', KeyModifiers::SUPER), ('v', KeyModifiers::CONTROL)] {
+                key(&mut app, KeyCode::Char(letter), mods);
+                assert!(
+                    matches!(app.overlay, Some(Overlay::PullRequests(_))),
+                    "{mods:?}: {:?}",
+                    app.overlay
+                );
+                app.overlay = None;
+            }
+        });
+    }
+
+    /// HOME's `⌘⇧R` asks before it restarts orion, over HOME, in a dialog
+    /// sized to its lines; Esc keeps everything up, and `y` quits the TUI
+    /// marked for the restart the binary then runs.
+    #[test]
+    fn cmd_shift_r_on_home_asks_then_quits_for_a_restart() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(app.home);
+            assert!(
+                footer_text(&app).contains("restart orion"),
+                "{}",
+                footer_text(&app)
+            );
+            let restart = |app: &mut App| {
+                key(
+                    app,
+                    KeyCode::Char('R'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                )
+            };
+            restart(&mut app);
+            let Some(Overlay::Confirm(c)) = &app.overlay else {
+                panic!("the restart confirm, got {:?}", app.overlay)
+            };
+            assert_eq!(c.action, PendingAction::Restart);
+            assert!(
+                c.message.lines().all(|l| l.chars().count() < 52),
+                "{:?}",
+                c.message
+            );
+            assert!(app.home, "asked over HOME");
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(app.overlay.is_none() && !app.should_quit && !app.restart);
+
+            restart(&mut app);
+            key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+            assert!(app.should_quit && app.restart);
+        });
+    }
+
     fn with_empty_band() -> App {
         let mut app = two_sessions();
         app.show_all_worktrees = true;
@@ -8729,11 +8923,11 @@ mod tests {
             };
             assert_eq!(view.project, project);
             let clicked = app.overlay.take();
-            key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('u'), KeyModifiers::SUPER);
             assert_eq!(
                 format!("{:?}", app.overlay),
                 format!("{clicked:?}"),
-                "the click is `v`"
+                "the click is `⌘U`"
             );
 
             app.overlay = None;

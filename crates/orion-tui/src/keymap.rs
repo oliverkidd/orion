@@ -73,9 +73,9 @@ pub enum Action {
     New,
     GitDiff,
     OpenRepo,
-    /// `Shift+V`: the pull request of the session card under the cursor,
-    /// in the browser — the `#42 title` line on the card. `v` lists the
-    /// project's pull requests in orion; the shifted key goes to GitHub.
+    /// The pull request of the session card under the cursor, in the
+    /// browser — the `#42 title` line on the card. `⌘U` lists the
+    /// project's pull requests in orion; this one goes to GitHub.
     OpenPullRequest,
     /// `Shift+I`: the GitHub issue the session card under the cursor was
     /// started from, in the browser. `i` lists the project's issues in
@@ -98,7 +98,7 @@ pub enum Action {
     /// place, commented on, with a QUICK PROMPT or an AGENT PRESET launched
     /// on one.
     Issues,
-    /// `v`: the PULL REQUESTS MODAL — the project's open pull requests,
+    /// `⌘U`: the PULL REQUESTS MODAL — the project's open pull requests,
     /// read in place, commented on, with a PR SESSION launched on one.
     PullRequests,
     /// `⌘L`: the LINEAR VIEW — open Linear issues assigned to you.
@@ -122,6 +122,11 @@ pub enum Action {
     Unarchive,
     ToggleArchived,
     Delete,
+    /// `⌘W`: close the agent or terminal the PANE shows — from the card,
+    /// the pane, a locked pane or a full-screen session — behind the very
+    /// confirm `Backspace` asks on its card. Never a modal, never a
+    /// worktree or a project tab: over a modal the chord does nothing.
+    ClosePane,
     DeleteAll,
     /// The AGENT PRESETS list: saved launch definitions for the checkout
     /// under the cursor.
@@ -177,6 +182,9 @@ pub enum Action {
     ClaudeAccounts,
     Metrics,
     Help,
+    /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
+    /// start orion again from the binary on disk, behind a confirm.
+    Restart,
     /// `⌘/`: pick the model for a new agent — searchable, like Cursor.
     SelectModel,
     /// `⌘⇧/`: cycle the effort / reasoning variant of the current model.
@@ -398,7 +406,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenPullRequest,
         id: "open_pull_request",
         label: "Open pull request in browser",
-        hint: "Send the pull request of the session card under the cursor — its checkout's branch — to your browser, as a click on the card's #42 line does. v lists the pull requests in orion",
+        hint: "Send the pull request of the session card under the cursor — its checkout's branch — to your browser, as a click on the card's #42 line does. {pull_requests} lists the pull requests in orion",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -446,7 +454,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "List the project's open pull requests; Enter prompts a PR session on one, ⇧Tab launches a preset on it, Tab picks a harness",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["v"],
+        // ⌘U: every window orion opens is a ⌘ chord, and ⌘P is Go to
+        // file, as in Cursor. `^V`, the old `v`, is its twin.
+        defaults: &["cmd+u", "ctrl+v"],
     },
     ActionSpec {
         action: Action::Linear,
@@ -539,6 +549,19 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["backspace"],
+    },
+    ActionSpec {
+        action: Action::ClosePane,
+        id: "close_pane",
+        label: "Close agent or terminal",
+        hint: "Close the agent or terminal the pane shows — from its card, the pane, or typing inside it — behind the same confirmation Backspace asks. Does nothing over a modal",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        // ⌘W, as every Mac app closes what is in front, and ⌘ reaches
+        // orion from inside a locked pane. `^W` is its twin for a
+        // terminal that never sends ⌘ — from the cards and the pane
+        // unlocked only: in a locked pane it is the agent's delete-word.
+        defaults: &["cmd+w", "ctrl+w"],
     },
     ActionSpec {
         action: Action::DeleteAll,
@@ -761,6 +784,17 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],
+    },
+    ActionSpec {
+        action: Action::Restart,
+        id: "restart",
+        label: "Restart orion",
+        hint: "Stop the daemon and every agent and terminal in it, then start orion again from scratch, behind a confirmation. Agents pick their conversation back up; terminals start a new shell",
+        group: "GENERAL",
+        scope: Scope::Global,
+        // ⌘⇧R, HOME's key; `^X` the twin a terminal without ⌘ delivers.
+        // Both behind the confirm: nothing here is one stray letter.
+        defaults: &["cmd+shift+r", "ctrl+x"],
     },
     ActionSpec {
         action: Action::CommandPalette,
@@ -1991,14 +2025,22 @@ mod tests {
 
     #[test]
     fn cmd_chords_are_reported_by_who_keeps_them() {
-        for kept in ["cmd+c", "cmd+w", "cmd+t", "cmd+q"] {
+        for kept in ["cmd+c", "cmd+shift+w", "cmd+t", "cmd+q"] {
             let (reach, why) = host_warning(&KeyChord::parse(kept).unwrap());
             assert_eq!(reach, Reach::Blocked, "{kept} is Ghostty's for good");
             assert!(why.unwrap().contains('⌘'));
         }
         // Every other chord Ghostty binds is one the block can release —
         // a rebind onto ⌘] included.
-        for freed in ["cmd+shift+p", "cmd+n", "cmd+,", "cmd+k", "cmd+]", "cmd+1"] {
+        for freed in [
+            "cmd+shift+p",
+            "cmd+n",
+            "cmd+,",
+            "cmd+k",
+            "cmd+]",
+            "cmd+1",
+            "cmd+w",
+        ] {
             let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
             assert_eq!(reach, Reach::Risky, "{freed}");
             assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
