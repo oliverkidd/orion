@@ -76,7 +76,9 @@ Then it makes sure of what orion leans on: **git** (it stops without it), an **e
 
 `orion doctor` checks all of it at any time — git, gh and its sign-in, the editor and what really opens, the Open in app editor, Ghostty's keybinds, the CLI of every agent you turned on, the project's `LINEAR_API_KEY` — and prints the command that fixes whatever is missing. It never installs anything itself; first-run setup and Settings do, on `i` ([Configuration](docs/configuration.md#installing-editors-and-agent-clis)).
 
-Until a `v*` release exists, install from the repo:
+Every push to `main` publishes a release (`v1.0.N`, the patch bumped automatically; edit `[workspace.package] version` in `Cargo.toml` for a minor or major bump, or put `[skip release]` in the commit message to skip one). A running orion checks for a newer release hourly and shows it in the footer; `orion upgrade` installs it.
+
+To build from source instead:
 
 ```sh
 git clone https://github.com/oliverkidd/orion.git
