@@ -1,0 +1,51 @@
+crates/orion-tui/src/event_loop.rs
+  s_bf0bfc305b0126::t_e7279e0029f703 19377-19382,32113-32118,32213-32218,32244-32249,32265-32270,32297-32302
+crates/orion/src/tunnel.rs
+  s_bf0bfc305b0126::t_e9cc79e0a21320 386
+crates/orion-fuzzy/src/lib.rs
+  s_bf0bfc305b0126::t_ada6d136b7813a 353
+crates/orion-daemon/src/open_files.rs
+  s_bf0bfc305b0126::t_815e9a4553a56b 24
+crates/orion/src/upgrade.rs
+  s_bf0bfc305b0126::t_eda30434b8aecd 13
+crates/orion/tests/e2e_tui.rs
+  s_bf0bfc305b0126::t_51d35a68da05de 57
+crates/orion-tui/src/mention.rs
+  s_bf0bfc305b0126::t_776c2752227341 310-312,314-318
+crates/orion-tui/src/event_loop/launcher.rs
+  s_bf0bfc305b0126::t_d8e84e183fc697 11353-11357,11364-11367
+crates/orion/tests/e2e_pty.rs
+  s_bf0bfc305b0126::t_a3ed959c5047a3 4153
+crates/orion-daemon/src/hooks/installer.rs
+  s_bf0bfc305b0126::t_1698e89e3b837e 577-581
+crates/orion-tui/src/ui/launcher_view.rs
+  s_bf0bfc305b0126::t_3631d3eb5193cf 5079
+crates/orion-core/src/project_file.rs
+  s_bf0bfc305b0126::t_7082ecf5b34405 148-149
+crates/orion-daemon/src/registry.rs
+  s_bf0bfc305b0126::t_01a09acf976f05 793-794,837-838,1157-1158,2529-2532,6727,6736-6739,7104-7107
+crates/orion-daemon/src/store.rs
+  s_bf0bfc305b0126::t_3e91e193eaa215 1442,1486,1542,1576,1628,1714
+crates/orion/src/main.rs
+  s_bf0bfc305b0126::t_52143c17343d3e 103
+crates/orion-tui/src/splash.rs
+  s_bf0bfc305b0126::t_abd8c64b525f3b 474-477,504-505
+crates/orion-daemon/src/env_links.rs
+  s_bf0bfc305b0126::t_f98b78c0618144 113-117,127-135,151-154,157-160,175-178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67a92d78343e4fac325e18dda155d2f6ea1194fb",
+  "prompts": {},
+  "sessions": {
+    "s_bf0bfc305b0126": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fe852ff6-ce7e-42b8-ab25-42329073dedd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
