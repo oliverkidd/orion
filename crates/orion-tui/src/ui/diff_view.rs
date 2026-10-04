@@ -162,8 +162,22 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             }
         }
     }
-    hints.push(crate::hints::ESC_CLOSE.hint());
+    hints.push(match view.back {
+        Some(_) => crate::hints::ESC_CLOSE.hint_as("back to the pull request"),
+        None => crate::hints::ESC_CLOSE.hint(),
+    });
     hints
+}
+
+/// The pull request a viewer opened from the PULL REQUESTS MODAL is
+/// reading, as its top-left panel's title leads with it — `#42 ›` — so
+/// the viewer reads as a level inside the modal.
+fn crumb(view: &DiffView) -> Option<String> {
+    view.back.as_ref()?;
+    let url = view.pr_url.as_deref()?;
+    let (_, rest) = url.split_once("/pull/")?;
+    let number = rest.split('/').next()?;
+    Some(format!("#{number} › "))
 }
 
 /// The dim line at the diff's foot: what is on screen, and the key that
@@ -271,12 +285,15 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
             list,
             &heights,
             view.focus == DiffFocus::Commits,
+            crumb(view),
             commits_a,
             now,
             th,
         ));
     }
-    let (list_inner, files_top) = draw_files(f, view, files_a, th);
+    // With no COMMIT LIST over them, the files lead with the crumb.
+    let files_crumb = commit_draw.is_none().then(|| crumb(view)).flatten();
+    let (list_inner, files_top) = draw_files(f, view, files_crumb, files_a, th);
     let (diff_inner, scroll) = draw_diff(f, view, diff_a, th);
 
     // The viewer's keys along its bottom edge, under both columns and
@@ -335,11 +352,13 @@ fn text_width(inner_w: u16) -> usize {
 
 /// The COMMIT LIST panel. Returns the first row drawn and each drawn row's
 /// rect, for the pointer.
+#[allow(clippy::too_many_arguments)]
 fn draw_commits(
     f: &mut Frame,
     list: &CommitList,
     heights: &[usize],
     focused: bool,
+    crumb: Option<String>,
     area: Rect,
     now: i64,
     th: Theme,
@@ -358,6 +377,7 @@ fn draw_commits(
         }
         (Some(base), true) => format!("Commits · {} since {base}", list.total),
     };
+    let title = format!("{}{title}", crumb.unwrap_or_default());
     let mut block = panel_block(&title, focused, th);
     let ticked = list.ticked.len();
     if ticked > 0 {
@@ -551,9 +571,16 @@ fn meta_line(
 /// The changed-file list — flat paths, or the directory tree (`Ctrl+t`) —
 /// under its always-live filter. Returns the rows' rect and the first row
 /// drawn.
-fn draw_files(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, usize) {
+fn draw_files(
+    f: &mut Frame,
+    view: &DiffView,
+    crumb: Option<String>,
+    area: Rect,
+    th: Theme,
+) -> (Rect, usize) {
     let focused = view.focus == DiffFocus::Files;
-    let mut title = if view.listing.is_some() && view.files.is_empty() {
+    let mut title = crumb.unwrap_or_default();
+    title += &if view.listing.is_some() && view.files.is_empty() {
         "Files (…)".to_string()
     } else if view.filter.is_empty() {
         format!("Files ({})", view.files.len())

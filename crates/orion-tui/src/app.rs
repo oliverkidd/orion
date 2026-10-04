@@ -1257,6 +1257,22 @@ pub struct DiffView {
     /// branch's — kept for as long as the modal is up and brought back
     /// with their row. The uncommitted changes' are on disk instead.
     pub scope_marks: HashMap<crate::git_diff::DiffScope, HashMap<String, u64>>,
+    /// The PULL REQUESTS MODAL this viewer was opened from, as it was:
+    /// the viewer is a level inside it, and Esc or a click outside puts
+    /// it back on the same row and tab rather than closing onto the grid.
+    pub back: Option<Box<crate::pr_modal::PullRequestsView>>,
+    /// The **Ticked commits** SETTING as the viewer opened: the COMMIT
+    /// LIST reads two or more ticked commits ONE AT A TIME from the start
+    /// (`commit_list::install`). The list's own `one_at_a_time` is how it
+    /// reads them now.
+    pub open_one_at_a_time: bool,
+    /// A file to put the cursor on once the next scope's files land — a
+    /// pull request's file, asked for before its commits were read.
+    pub want_path: Option<String>,
+    /// A pull request read from this repo's git (`event_loop::
+    /// open_pr_review`): what to read from GitHub instead should its
+    /// commits turn out not to be here.
+    pub pr_review: Option<crate::event_loop::PrReview>,
 }
 
 /// The most diff text a DIFF VIEWER keeps beyond the one on screen. Two
@@ -1269,14 +1285,16 @@ pub const DIFF_CACHE_ENTRY_MAX: usize = 512 * 1024;
 impl DiffView {
     /// A view up before its file list is: `g` opens this at once and
     /// `event_loop::land_view_answer` fills it when `git status` answers.
+    /// Without BACKGROUND READS (a view a test builds) the listing is read
+    /// inline and handed to the same landing.
     pub fn opening(
         root: PathBuf,
         branch: String,
-        jobs: crate::view_jobs::Jobs,
+        jobs: Option<crate::view_jobs::Jobs>,
         listing: u64,
     ) -> Self {
         let mut view = Self::new(root, branch, Vec::new(), true);
-        view.jobs = Some(jobs);
+        view.jobs = jobs;
         view.listing = Some(listing);
         view.commits = Some(Box::new(crate::commit_list::CommitList::reading()));
         view
@@ -1392,6 +1410,10 @@ impl DiffView {
             head: Vec::new(),
             header_read: false,
             scope_marks: HashMap::new(),
+            back: None,
+            open_one_at_a_time: false,
+            want_path: None,
+            pr_review: None,
         };
         view.apply_filter();
         view
@@ -3794,9 +3816,15 @@ pub struct App {
     pub term_file_links: Vec<crate::links::FileLink>,
     /// File-list width of the diff modal, remembered across opens.
     pub diff_files_width: u16,
-    /// The diff modal lists its files as a directory tree (`Ctrl+t` inside
-    /// it), remembered across opens and launches like the width.
+    /// The diff modal opens with its files as a directory tree: the
+    /// **Files as a tree** SETTING (Settings → Review), mirrored by
+    /// `apply_config`. `Ctrl+t` flips the open viewer alone.
     pub diff_tree: bool,
+    /// The diff modal's panel with the keys as it opens — the **Start
+    /// on** SETTING — and whether it reads ticked commits one at a time
+    /// from the start — **Ticked commits**. Mirrored by `apply_config`.
+    pub diff_start: DiffFocus,
+    pub diff_one_at_a_time: bool,
     /// Selected tab of the settings modal, remembered across opens.
     pub settings_tab: usize,
     /// Cursor row of the settings modal, one per tab, remembered across
@@ -3997,6 +4025,10 @@ pub struct App {
     /// Where a finished `gh pr comment` lands (`PrCommentAnswer`);
     /// installed by the loop at startup like `pr_diff_tx`.
     pub pr_comment_tx: Option<tokio::sync::mpsc::UnboundedSender<PrCommentAnswer>>,
+    /// Where the PULL REQUESTS MODAL's forms' git and `gh` land — a new
+    /// pull request, a merge (`pr_actions::Answer`); None in unit tests,
+    /// which send nothing.
+    pub pr_actions_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::pr_actions::Answer>>,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
     /// this instance has one: the main loop installs the real one at
     /// startup and hydrates from it; the unit tests leave it `None`, so no
@@ -4226,6 +4258,8 @@ impl App {
             term_file_links: Vec::new(),
             diff_files_width: DEFAULT_DIFF_FILES_W,
             diff_tree: false,
+            diff_start: DiffFocus::Files,
+            diff_one_at_a_time: false,
             settings_tab: 0,
             settings_selected: vec![0; crate::config::tab_count()],
             settings_on_tabs: true,
@@ -4275,6 +4309,7 @@ impl App {
             pr_comment_inflight: std::collections::HashSet::new(),
             pr_comment_drafts: HashMap::new(),
             pr_comment_tx: None,
+            pr_actions_tx: None,
             pr_cache: None,
             pr_cache_dirty: false,
             attachments_dir: None,

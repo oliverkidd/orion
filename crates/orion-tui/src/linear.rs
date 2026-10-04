@@ -1,7 +1,11 @@
 //! The LINEAR VIEW (`⌘L`): open Linear issues assigned to you, picked
 //! together so one agent fixes them in one worktree and opens one pull
 //! request. From the PULL REQUESTS MODAL the same list attaches a pull
-//! request to the issues you mark (`attachmentLinkGitHubPR`).
+//! request to the issues you mark (`attachmentLinkGitHubPR`). `Ctrl+s` on
+//! an issue lists its team's workflow states in the reading pane's place
+//! ([`StatusPick`]) — read with the issues, so the list is up at once —
+//! and Enter moves the issue to one (`issueUpdate`), the row saying so
+//! before Linear has answered and put back if it refuses.
 //!
 //! The key is the project's `LINEAR_API_KEY` (`.env.local`, then `.env`,
 //! then the process env). Only that one name is read. It is never logged,
@@ -57,6 +61,30 @@ pub struct LinearIssue {
     pub status: String,
     #[serde(default)]
     pub status_type: String,
+    /// The team the issue belongs to: whose workflow states it can move
+    /// to (`LinearList::states`).
+    #[serde(default)]
+    pub team_id: String,
+}
+
+/// One of a team's workflow states — `Todo`, `In Progress`, `Done` —
+/// with Linear's word for its kind (`unstarted`, `started`, `completed`,
+/// …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearState {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+/// `Ctrl+s`: the issue under the cursor, and the states it can move to,
+/// in the reading pane's place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusPick {
+    pub issue_id: String,
+    pub identifier: String,
+    pub states: Vec<LinearState>,
+    pub selected: usize,
 }
 
 impl LinearIssue {
@@ -156,6 +184,8 @@ pub struct LinearView {
     pub cursor_row: usize,
     pub marked: BTreeSet<String>,
     pub mode: LinearMode,
+    /// The status picker, while it is up: every key but Esc is its own.
+    pub status_pick: Option<StatusPick>,
 }
 
 impl LinearView {
@@ -176,6 +206,7 @@ impl LinearView {
             cursor_row: 0,
             marked: BTreeSet::new(),
             mode,
+            status_pick: None,
         }
     }
 
@@ -189,18 +220,33 @@ impl LinearView {
     }
 }
 
-/// What Linear last said about a project's assigned issues.
-#[derive(Debug, Clone)]
+/// What Linear last said about a project's assigned issues, and the
+/// workflow states of the teams they belong to, by team id, in Linear's
+/// own order.
+#[derive(Debug, Clone, Default)]
 pub struct LinearList {
     pub list: Vec<LinearIssue>,
+    pub states: HashMap<String, Vec<LinearState>>,
 }
+
+/// What [`fetch_assigned`] reads: the issues, and their teams' states.
+type Assigned = (Vec<LinearIssue>, HashMap<String, Vec<LinearState>>);
 
 /// A finished Linear call, back on the loop.
 #[derive(Debug, Clone)]
 pub enum LinearAnswer {
     List {
         project: ProjectId,
-        list: Result<Vec<LinearIssue>, String>,
+        list: Result<Assigned, String>,
+    },
+    /// An issue moved to another state — or why not, with the state it
+    /// had, to put back.
+    Status {
+        project: ProjectId,
+        issue_id: String,
+        identifier: String,
+        state: LinearState,
+        result: Result<(), StatusRefused>,
     },
     Attach {
         identifier: String,
@@ -211,6 +257,15 @@ pub enum LinearAnswer {
         dir: PathBuf,
         result: Result<Viewer, String>,
     },
+}
+
+/// Why Linear refused to move an issue, and the state it was in before
+/// the row said otherwise — what [`land_answer`] puts back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusRefused {
+    pub why: String,
+    pub status: String,
+    pub status_type: String,
 }
 
 /// The account a key belongs to, as Linear's `viewer` query names it.
@@ -431,10 +486,11 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
         LinearAnswer::List { project, list } => {
             app.linear_inflight.remove(&project);
             match list {
-                Ok(list) => {
+                Ok((list, states)) => {
                     let n = list.len();
                     app.linear_failed.remove(&project);
-                    app.linear.insert(project.clone(), LinearList { list });
+                    app.linear
+                        .insert(project.clone(), LinearList { list, states });
                     if let Some(Overlay::Linear(view)) = &mut app.overlay {
                         if view.project == project {
                             view.selected = clamp_selection(view.selected as i64, n);
@@ -452,6 +508,30 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
             Ok(()) => app.flash = Some(format!("attached the pull request to {identifier}")),
             Err(err) => app.flash = Some(err),
         },
+        LinearAnswer::Status {
+            project,
+            issue_id,
+            identifier,
+            state,
+            result,
+        } => {
+            match result {
+                Ok(()) => app.flash = Some(format!("{identifier} → {}", state.name)),
+                // Put back what it said before the move.
+                Err(refused) => {
+                    if let Some(issue) = app
+                        .linear
+                        .get_mut(&project)
+                        .and_then(|l| l.list.iter_mut().find(|i| i.id == issue_id))
+                    {
+                        issue.status = refused.status;
+                        issue.status_type = refused.status_type;
+                    }
+                    app.flash = Some(format!("couldn't move {identifier}: {}", refused.why));
+                }
+            }
+            app.dirty = true;
+        }
     }
 }
 
@@ -529,8 +609,13 @@ pub(crate) mod keys {
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
     pub const BROWSER: Key = Key::new(&["ctrl+o", "cmd+o"], "browser");
     pub const REFRESH: Key = Key::new(&["ctrl+r", "cmd+r"], "refresh");
+    /// The issue's workflow state.
+    pub const STATUS: Key = Key::new(&["ctrl+s"], "status");
+    /// The status picker's own.
+    pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
+    pub const SET: Key = Key::new(&["enter"], "set status");
     #[cfg(test)]
-    pub const ALL: &[Key] = &[MARK, CONFIRM, PRESET, BROWSER, REFRESH];
+    pub const ALL: &[Key] = &[MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PICK, SET];
 }
 
 /// The keys along the modal's bottom edge, for browsing or for picking
@@ -544,10 +629,18 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     } else {
         "close"
     };
+    if view.status_pick.is_some() {
+        return vec![
+            keys::SET.hint().kept(),
+            keys::PICK.hint(),
+            Hint::new("Esc", "cancel"),
+        ];
+    }
     match view.mode {
         LinearMode::Browse => vec![
             keys::MARK.hint(),
             keys::CONFIRM.hint().kept(),
+            keys::STATUS.hint(),
             keys::PRESET.hint(),
             keys::BROWSER.hint(),
             keys::REFRESH.hint(),
@@ -556,10 +649,118 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         LinearMode::Attach { .. } => vec![
             keys::MARK.hint(),
             keys::CONFIRM.hint_as("attach marked to this PR").kept(),
+            keys::STATUS.hint(),
             keys::BROWSER.hint(),
             Hint::new("Esc", esc),
         ],
     }
+}
+
+/// `Ctrl+s`: the status picker for the issue under the cursor, on the
+/// state it is in. An issue whose team's states were not read says so.
+fn open_status_pick(app: &mut App) {
+    let Some(issue) = selected_issue(app).cloned() else {
+        app.flash = Some("no issue selected".into());
+        return;
+    };
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let states = app
+        .linear
+        .get(&view.project)
+        .and_then(|l| l.states.get(&issue.team_id))
+        .cloned()
+        .unwrap_or_default();
+    if states.is_empty() {
+        app.flash = Some(format!(
+            "Linear didn't say which states {} can move to — {} asks again",
+            issue.identifier,
+            keys::REFRESH.label()
+        ));
+        return;
+    }
+    let selected = states
+        .iter()
+        .position(|s| s.name == issue.status)
+        .unwrap_or(0);
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.status_pick = Some(StatusPick {
+            issue_id: issue.id,
+            identifier: issue.identifier,
+            states,
+            selected,
+        });
+    }
+}
+
+/// Keys while the status picker is up.
+fn handle_pick_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(pick) = &mut view.status_pick else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => view.status_pick = None,
+        KeyCode::Down => {
+            pick.selected = clamp_selection(pick.selected as i64 + 1, pick.states.len())
+        }
+        KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, pick.states.len()),
+        _ if keys::SET.matches(&key) => set_status(app),
+        _ => {}
+    }
+    app.dirty = true;
+}
+
+/// Enter in the status picker: the row says the new state at once, and
+/// `issueUpdate` runs off the loop — put back if Linear refuses. The
+/// state the issue is already in closes the picker with nothing sent.
+fn set_status(app: &mut App) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(pick) = view.status_pick.take() else {
+        return;
+    };
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    let Some(state) = pick.states.get(pick.selected).cloned() else {
+        return;
+    };
+    let Some(issue) = app
+        .linear
+        .get_mut(&project)
+        .and_then(|l| l.list.iter_mut().find(|i| i.id == pick.issue_id))
+    else {
+        return;
+    };
+    if issue.status == state.name {
+        return;
+    }
+    let (status, status_type) = (issue.status.clone(), issue.status_type.clone());
+    issue.status = state.name.clone();
+    issue.status_type = state.kind.clone();
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    let (issue_id, identifier) = (pick.issue_id, pick.identifier);
+    tokio::spawn(async move {
+        let result = update_state(&dir, &issue_id, &state.id)
+            .await
+            .map_err(|why| StatusRefused {
+                why,
+                status,
+                status_type,
+            });
+        let _ = tx.send(LinearAnswer::Status {
+            project,
+            issue_id,
+            identifier,
+            state,
+            result,
+        });
+    });
 }
 
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
@@ -572,6 +773,10 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.status_pick.is_some()) {
+        handle_pick_key(app, key);
+        return;
+    }
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
@@ -599,6 +804,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::PRESET.matches(&key) => open_preset(app),
         _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
+        _ if keys::STATUS.matches(&key) => open_status_pick(app),
         _ => {
             if view.query.handle_key(&key).changed() {
                 query_changed(app);
@@ -984,11 +1190,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         ),
         None => Rect::default(),
     };
-    let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
-    f.render_widget(
-        Paragraph::new(shown).wrap(Wrap { trim: false }),
-        body_inner,
-    );
+    if let Some(pick) = &view.status_pick {
+        draw_status_pick(f, body_inner, pick, th);
+    } else {
+        let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
+        f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), body_inner);
+    }
     // The modal's keys along its bottom edge — none while a box over it
     // has the keys.
     if !backdrop {
@@ -1008,6 +1215,38 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
             v.selected = index;
         }
         v.scroll = scroll;
+    }
+}
+
+/// The status picker in the reading pane's place: what it is for, then a
+/// row per state, the cursor's lit and the kind of each dim beside it.
+fn draw_status_pick(f: &mut Frame, area: Rect, pick: &StatusPick, th: Theme) {
+    if let Some(row) = row_rect(area, 0) {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("Move {} to…", pick.identifier),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            row,
+        );
+    }
+    // The states start under the heading and a blank row.
+    const HEAD_ROWS: u16 = 2;
+    let rows = Rect {
+        y: area.y.saturating_add(HEAD_ROWS),
+        height: area.height.saturating_sub(HEAD_ROWS),
+        ..area
+    };
+    let start = window_start(pick.selected, rows.height as usize);
+    for (i, state) in pick.states.iter().enumerate().skip(start) {
+        let Some(row) = row_rect(rows, i - start) else {
+            break;
+        };
+        let spans = vec![
+            Span::raw(state.name.clone()),
+            Span::styled(format!("  {}", state.kind), Style::default().fg(th.dim)),
+        ];
+        render_row(f, row, spans, i == pick.selected, true, th);
     }
 }
 
@@ -1042,34 +1281,123 @@ fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>
 
 // ---- Linear HTTP (key never on argv) ----
 
-async fn fetch_assigned(dir: &Path, email: &str) -> Result<Vec<LinearIssue>, String> {
+/// What each listed issue is read with: the row, the reading pane, and
+/// its team's workflow states for `Ctrl+s` — the same fields whoever's
+/// issues are asked for.
+const ISSUE_FIELDS: &str = "id identifier title url description state { name type } \
+    team { id states { nodes { id name type position } } }";
+
+async fn fetch_assigned(dir: &Path, email: &str) -> Result<Assigned, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let (query, variables) = if email.is_empty() {
         (
-            r#"query {
-              viewer {
-                assignedIssues(first: 100, filter: { state: { type: { nin: ["completed", "canceled"] } } }) {
-                  nodes { id identifier title url description state { name type } }
-                }
-              }
-            }"#,
+            format!(
+                r#"query {{
+              viewer {{
+                assignedIssues(first: 100, filter: {{ state: {{ type: {{ nin: ["completed", "canceled"] }} }} }}) {{
+                  nodes {{ {ISSUE_FIELDS} }}
+                }}
+              }}
+            }}"#
+            ),
             serde_json::json!({}),
         )
     } else {
         (
-            r#"query($email: String!) {
-              issues(first: 100, filter: {
-                assignee: { email: { eq: $email } }
-                state: { type: { nin: ["completed", "canceled"] } }
-              }) {
-                nodes { id identifier title url description state { name type } }
-              }
-            }"#,
+            format!(
+                r#"query($email: String!) {{
+              issues(first: 100, filter: {{
+                assignee: {{ email: {{ eq: $email }} }}
+                state: {{ type: {{ nin: ["completed", "canceled"] }} }}
+              }}) {{
+                nodes {{ {ISSUE_FIELDS} }}
+              }}
+            }}"#
+            ),
             serde_json::json!({ "email": email }),
         )
     };
-    let json = graphql(&key, query, variables).await?;
-    parse_issues(&json, email.is_empty())
+    let json = graphql(&key, &query, variables).await?;
+    let issues = parse_issues(&json, email.is_empty())?;
+    Ok((issues, parse_states(&json, email.is_empty())))
+}
+
+/// Move issue `issue_id` to the workflow state `state_id`.
+async fn update_state(dir: &Path, issue_id: &str, state_id: &str) -> Result<(), String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let json = graphql(
+        &key,
+        r#"mutation($id: String!, $stateId: String!) {
+          issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+        }"#,
+        serde_json::json!({ "id": issue_id, "stateId": state_id }),
+    )
+    .await?;
+    mutation_result(&json, "issueUpdate", "Linear did not move the issue")
+}
+
+/// A mutation's answer: `Ok` when `data.<field>.success` is true, else
+/// Linear's own error, else `refused`.
+fn mutation_result(json: &serde_json::Value, field: &str, refused: &str) -> Result<(), String> {
+    let success = json
+        .pointer(&format!("/data/{field}/success"))
+        .and_then(|v| v.as_bool());
+    if success == Some(true) {
+        return Ok(());
+    }
+    Err(graphql_error(json).unwrap_or_else(|| refused.to_string()))
+}
+
+/// The issues' nodes in a [`fetch_assigned`] answer: the viewer's own, or
+/// an assignee's by email.
+fn issue_nodes(json: &serde_json::Value, viewer: bool) -> Option<&Vec<serde_json::Value>> {
+    let at = if viewer {
+        "/data/viewer/assignedIssues/nodes"
+    } else {
+        "/data/issues/nodes"
+    };
+    json.pointer(at)?.as_array()
+}
+
+/// Each team's workflow states, from the issues' `team` fields, in
+/// Linear's `position` order.
+fn parse_states(json: &serde_json::Value, viewer: bool) -> HashMap<String, Vec<LinearState>> {
+    let mut out: HashMap<String, Vec<LinearState>> = HashMap::new();
+    for team in issue_nodes(json, viewer)
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.get("team"))
+    {
+        let Some(id) = team.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if out.contains_key(id) {
+            continue;
+        }
+        let mut states: Vec<(f64, LinearState)> = team
+            .pointer("/states/nodes")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                Some((
+                    s.get("position").and_then(|p| p.as_f64()).unwrap_or(0.0),
+                    LinearState {
+                        id: s.get("id")?.as_str()?.to_string(),
+                        name: s.get("name")?.as_str()?.to_string(),
+                        kind: s
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                ))
+            })
+            .collect();
+        states.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.insert(id.to_string(), states.into_iter().map(|(_, s)| s).collect());
+    }
+    out
 }
 
 async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> {
@@ -1082,17 +1410,11 @@ async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> 
         serde_json::json!({ "issueId": issue_id, "url": url }),
     )
     .await?;
-    if json
-        .pointer("/data/attachmentLinkGitHubPR/success")
-        .and_then(|v| v.as_bool())
-        == Some(true)
-    {
-        return Ok(());
-    }
-    if let Some(err) = graphql_error(&json) {
-        return Err(err);
-    }
-    Err("Linear did not attach the pull request".into())
+    mutation_result(
+        &json,
+        "attachmentLinkGitHubPR",
+        "Linear did not attach the pull request",
+    )
 }
 
 async fn graphql(
@@ -1191,12 +1513,7 @@ fn parse_issues(json: &serde_json::Value, viewer: bool) -> Result<Vec<LinearIssu
     if let Some(err) = graphql_error(json) {
         return Err(err);
     }
-    let nodes = if viewer {
-        json.pointer("/data/viewer/assignedIssues/nodes")
-    } else {
-        json.pointer("/data/issues/nodes")
-    };
-    let Some(nodes) = nodes.and_then(|v| v.as_array()) else {
+    let Some(nodes) = issue_nodes(json, viewer) else {
         return Err("Linear returned no issue list".into());
     };
     let mut issues: Vec<LinearIssue> = nodes.iter().filter_map(issue_from).collect();
@@ -1227,6 +1544,11 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .to_string(),
         status_type: value
             .pointer("/state/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        team_id: value
+            .pointer("/team/id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -1453,7 +1775,82 @@ mod tests {
             description: String::new(),
             status: "In Progress".into(),
             status_type: "started".into(),
+            team_id: "t1".into(),
         }
+    }
+
+    /// The teams' states ride the issue list, in Linear's order; `Ctrl+s`
+    /// lists them on the issue's own state, Enter moves the issue there —
+    /// the row says so before Linear answers, and a refusal puts it back.
+    #[test]
+    fn ctrl_s_moves_an_issue_to_another_state() {
+        let json = serde_json::json!({"data": {"viewer": {"assignedIssues": {"nodes": [
+            {"id": "1", "identifier": "ENG-12", "title": "Login", "url": "https://linear.app/x/issue/ENG-12",
+             "state": {"name": "In Progress", "type": "started"},
+             "team": {"id": "t1", "states": {"nodes": [
+                {"id": "s3", "name": "Done", "type": "completed", "position": 3.0},
+                {"id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0},
+                {"id": "s2", "name": "In Progress", "type": "started", "position": 2.0}
+             ]}}}
+        ]}}}});
+        let issues = parse_issues(&json, true).unwrap();
+        assert_eq!(issues[0].team_id, "t1");
+        let states = parse_states(&json, true);
+        let names: Vec<&str> = states["t1"].iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Todo", "In Progress", "Done"]);
+
+        let mut app = App::new();
+        let project = ProjectId("p1".into());
+        app.linear.insert(
+            project.clone(),
+            LinearList {
+                list: issues,
+                states,
+            },
+        );
+        app.overlay = Some(Overlay::Linear(LinearView::new(
+            project.clone(),
+            "demo".into(),
+            PathBuf::from("/nonexistent"),
+            LinearMode::Browse,
+        )));
+        let mut out = Vec::new();
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        handle_key(&mut app, ctrl_s, &mut out);
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("the modal stays");
+        };
+        let pick = view.status_pick.as_ref().expect("the picker");
+        assert_eq!(pick.selected, 1, "on the state it is in");
+        crate::hints::assert_hints_from(&hints(view), keys::ALL);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut out);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Enter), &mut out);
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("the modal stays");
+        };
+        assert!(view.status_pick.is_none());
+        assert_eq!(app.linear[&project].list[0].status, "Done");
+
+        let done = app.linear[&project].states["t1"][2].clone();
+        land_answer(
+            &mut app,
+            LinearAnswer::Status {
+                project: project.clone(),
+                issue_id: "1".into(),
+                identifier: "ENG-12".into(),
+                state: done,
+                result: Err(StatusRefused {
+                    why: "not allowed".into(),
+                    status: "In Progress".into(),
+                    status_type: "started".into(),
+                }),
+            },
+        );
+        assert_eq!(app.linear[&project].list[0].status, "In Progress");
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("couldn't move ENG-12: not allowed")
+        );
     }
 
     #[test]

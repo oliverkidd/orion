@@ -52,7 +52,7 @@ const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 /// ONBOARDING wizard already seen (it would cover the grid every test
 /// drives) and the agents it offers switched on, which a fresh install
 /// leaves off.
-fn seed_onboarded_config(data_dir: &std::path::Path) {
+fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
     std::fs::write(
         data_dir.join("config.local.json"),
@@ -61,8 +61,10 @@ fn seed_onboarded_config(data_dir: &std::path::Path) {
     .unwrap();
     std::fs::write(
         data_dir.join("config.json"),
-        r#"{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
-            "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true}"#,
+        format!(
+            r#"{{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
+            "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true{settings}}}"#
+        ),
     )
     .unwrap();
 }
@@ -86,6 +88,16 @@ impl TuiHarness {
     /// a stub `gh` on PATH so the pull-request row can be driven without a
     /// GitHub account.
     fn spawn_with_env(extra_env: &[(&str, String)]) -> Self {
+        Self::spawn_with(extra_env, "")
+    }
+
+    /// `spawn`, with `settings` — `, "key": value` pairs — added to the
+    /// seeded config.json.
+    fn spawn_with_settings(settings: &str) -> Self {
+        Self::spawn_with(&[], settings)
+    }
+
+    fn spawn_with(extra_env: &[(&str, String)], settings: &str) -> Self {
         // Socket paths must stay under SUN_LEN (~104 bytes) — keep the
         // runtime dir short. Tests share one process, so a per-harness
         // sequence keeps each test on its own daemon.
@@ -96,7 +108,7 @@ impl TuiHarness {
         let data_dir = PathBuf::from(format!("/tmp/oriontui-data-{pid}-{seq}"));
         let _ = std::fs::remove_dir_all(&runtime_dir);
         let _ = std::fs::remove_dir_all(&data_dir);
-        seed_onboarded_config(&data_dir);
+        seed_onboarded_config(&data_dir, settings);
         let repos = tempfile::tempdir().unwrap();
 
         let pty = native_pty_system()
@@ -724,9 +736,12 @@ fn tui_issues_modal_edits_the_issue_in_place() {
     tui.wait_for_gone("Issues — issues-proj");
 }
 
+/// The DIFF VIEWER's flat file list: opened with the keys on the files
+/// and the list flat (Settings → Review), the way this walk reads it.
 #[test]
 fn tui_git_diff_modal() {
-    let mut tui = TuiHarness::spawn();
+    let mut tui =
+        TuiHarness::spawn_with_settings(r#", "diff_start": "files", "diff_tree_view": false"#);
     let repo = tui.make_repo("diff-proj");
 
     tui.wait_for_text("open your first project");
@@ -795,7 +810,8 @@ fn tui_git_diff_modal() {
     tui.wait_for_text("no changes in main");
 }
 
-/// The DIFF VIEWER's COMMIT LIST end to end: a clean checkout with commits
+/// The DIFF VIEWER's COMMIT LIST end to end, on the Review tab's defaults
+/// — the keys on the commits as it opens: a clean checkout with commits
 /// of its own opens on the whole branch, every commit ticked, instead of
 /// saying "no changes"; `^A` unticks them and the cursor's commit shows
 /// exactly its files under its message; `⇧←`/`⇧→` step older and newer
@@ -836,8 +852,8 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     tui.wait_for_text("Files (2)");
     tui.wait_for_text("+ alpha line");
 
-    // ---- ⇧Tab, ^A: nothing ticked, the newest commit, exactly its files ----
-    tui.send(SHIFT_TAB);
+    // ---- ^A, the keys already on the commits: nothing ticked, the
+    // newest commit, exactly its files ----
     tui.send(CTRL_A);
     tui.wait_for_text("Files (1)");
     tui.wait_for_text("+ beta line");

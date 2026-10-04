@@ -40,6 +40,7 @@ pub mod outside_editor;
 pub mod overlay_close;
 pub mod palette;
 pub mod perf;
+pub mod pr_actions;
 pub mod pr_cache;
 pub mod pr_modal;
 pub mod pr_preview;
