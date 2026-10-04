@@ -18864,7 +18864,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "`?` leaves other menus alone"
             );
 
-            // The New session picker itself advertises the jump.
+            // The NEW AGENT PICKER itself advertises the jump.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             open_picker(&mut app);
             let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();

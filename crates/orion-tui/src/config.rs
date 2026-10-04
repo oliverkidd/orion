@@ -1523,7 +1523,7 @@ pub struct Config {
     pub pi_enabled: bool,
     pub muse_enabled: bool,
     pub opencode_enabled: bool,
-    /// When on, the New session picker lists only enabled harnesses whose
+    /// When on, the NEW AGENT PICKER lists only enabled harnesses whose
     /// CLI is found on this machine's PATH. Off by default: a login shell
     /// (mise, brew shims) can see CLIs a plain PATH lookup misses, and the
     /// daemon re-checks through the login shell at launch anyway.

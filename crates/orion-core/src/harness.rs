@@ -906,7 +906,7 @@ pub struct CustomHarness {
     /// The CLI orion launches, resolved on PATH through the login shell
     /// like every other harness.
     pub program: String,
-    /// Whether the NEW SESSION PICKER offers this entry.
+    /// Whether the NEW AGENT PICKER offers this entry.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Default model id. `"default"` (the default) means don't pass the
