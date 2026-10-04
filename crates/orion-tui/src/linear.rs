@@ -311,7 +311,13 @@ pub(crate) fn open(app: &mut App) {
         app.flash = Some("linear: select a project first".into());
         return;
     };
-    open_on(app, project.id, project.name, project.repo_path, LinearMode::Browse);
+    open_on(
+        app,
+        project.id,
+        project.name,
+        project.repo_path,
+        LinearMode::Browse,
+    );
 }
 
 /// `⌘L` in the PULL REQUESTS MODAL: the same list, for attaching the PR.
@@ -319,7 +325,11 @@ pub(crate) fn open_attach(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let (project, name, dir) = (view.project.clone(), view.project_name.clone(), view.dir.clone());
+    let (project, name, dir) = (
+        view.project.clone(),
+        view.project_name.clone(),
+        view.dir.clone(),
+    );
     let Some(pr) = selected_open_pr(app) else {
         app.flash = Some("linear: no pull request selected".into());
         return;
@@ -367,13 +377,7 @@ fn selected_open_pr(app: &App) -> Option<crate::pull_request::OpenPr> {
     list.get(i).cloned()
 }
 
-fn open_on(
-    app: &mut App,
-    project: ProjectId,
-    name: String,
-    dir: PathBuf,
-    mode: LinearMode,
-) {
+fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: LinearMode) {
     let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
     view.selected = clamp_selection(0, list_len(app, &project));
     app.overlay = Some(Overlay::Linear(view));
@@ -401,10 +405,16 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
     app.linear_inflight.insert(project.clone());
     app.linear_failed.remove(&project);
     app.dirty = true;
-    let email = crate::config::Config::load().linear_assignee_email.trim().to_string();
+    let email = crate::config::Config::load()
+        .linear_assignee_email
+        .trim()
+        .to_string();
     tokio::spawn(async move {
         let result = fetch_assigned(&dir, &email).await;
-        let _ = tx.send(LinearAnswer::List { project, list: result });
+        let _ = tx.send(LinearAnswer::List {
+            project,
+            list: result,
+        });
     });
 }
 
@@ -792,7 +802,10 @@ fn open_preset(app: &mut App) {
     let Some(launch) = launch_for(app, issues) else {
         return;
     };
-    crate::quick_prompt::open_preset_picker(app, QuickReturn::fresh(launch.with_under(ModalUnder::of(app.overlay.as_ref()))));
+    crate::quick_prompt::open_preset_picker(
+        app,
+        QuickReturn::fresh(launch.with_under(ModalUnder::of(app.overlay.as_ref()))),
+    );
 }
 
 fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
@@ -985,10 +998,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         None => Rect::default(),
     };
     let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
-    f.render_widget(
-        Paragraph::new(shown).wrap(Wrap { trim: false }),
-        body_inner,
-    );
+    f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), body_inner);
     // The modal's keys along its bottom edge — none while a box over it
     // has the keys.
     if !backdrop {
@@ -1156,7 +1166,8 @@ async fn curl_graphql(
     ));
     std::fs::write(&body_path, body.as_bytes()).map_err(|e| e.to_string())?;
     let _cleanup = DeleteOnDrop(body_path.clone());
-    let config = format!("header = \"Authorization: {key}\"\nheader = \"Content-Type: application/json\"\n");
+    let config =
+        format!("header = \"Authorization: {key}\"\nheader = \"Content-Type: application/json\"\n");
     let mut cmd = tokio::process::Command::new("curl");
     cmd.args([
         "-sS",
@@ -1182,9 +1193,13 @@ async fn curl_graphql(
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Linear request failed: {}", err.lines().next().unwrap_or("curl error")));
+        return Err(format!(
+            "Linear request failed: {}",
+            err.lines().next().unwrap_or("curl error")
+        ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|_| "Linear returned something that wasn't JSON".into())
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Linear returned something that wasn't JSON".into())
 }
 
 fn parse_issues(json: &serde_json::Value, viewer: bool) -> Result<Vec<LinearIssue>, String> {
@@ -1213,7 +1228,11 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
     Some(LinearIssue {
         id: value.get("id")?.as_str()?.to_string(),
         identifier: value.get("identifier")?.as_str()?.to_string(),
-        title: value.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        title: value
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         url: value.get("url")?.as_str()?.to_string(),
         description: value
             .get("description")
@@ -1458,7 +1477,10 @@ mod tests {
 
     #[test]
     fn template_expands_ids_and_first() {
-        let issues = [issue("1", "ENG-12", "Login"), issue("2", "ENG-15", "Logout")];
+        let issues = [
+            issue("1", "ENG-12", "Login"),
+            issue("2", "ENG-15", "Logout"),
+        ];
         let out = expand_template("Fix {ids} starting with {first_id}\n{issues}", &issues);
         assert!(out.contains("ENG-12, ENG-15"));
         assert!(out.contains("starting with ENG-12"));
@@ -1470,14 +1492,20 @@ mod tests {
     fn env_key_reads_only_linear() {
         let text = "OTHER=no\nLINEAR_API_KEY=lin_api_secret\nAWS_SECRET=x\n";
         assert_eq!(parse_env_key(text).as_deref(), Some("lin_api_secret"));
-        assert_eq!(parse_env_key("export LINEAR_API_KEY='quoted'\n").as_deref(), Some("quoted"));
+        assert_eq!(
+            parse_env_key("export LINEAR_API_KEY='quoted'\n").as_deref(),
+            Some("quoted")
+        );
         assert_eq!(parse_env_key("FOO=bar\n"), None);
     }
 
     #[test]
     fn batch_names_and_branch() {
         let batch = LinearBatch {
-            issues: vec![issue("1", "ENG-12", "Fix login redirect"), issue("2", "ENG-15", "x")],
+            issues: vec![
+                issue("1", "ENG-12", "Fix login redirect"),
+                issue("2", "ENG-15", "x"),
+            ],
             task: "go".into(),
         };
         assert_eq!(batch.ids(), "ENG-12, ENG-15");

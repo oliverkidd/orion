@@ -788,7 +788,8 @@ impl Daemon {
             },
         };
         let worktree = self.register_worktree(project_id, path, branch)?;
-        self.link_env_files(&project.repo_path, &worktree.path).await;
+        self.link_env_files(&project.repo_path, &worktree.path)
+            .await;
         // The row is out; the WORKTREE HOOK runs still under the lock, so
         // it is ordered with the operation it belongs to — a delete of
         // this path waits for it, two hooks never overlap — and the Ack
@@ -831,7 +832,8 @@ impl Daemon {
         }
         let path = git::add_pr_worktree(&project.repo_path, number, head).await?;
         let worktree = self.register_worktree(project_id, path, head)?;
-        self.link_env_files(&project.repo_path, &worktree.path).await;
+        self.link_env_files(&project.repo_path, &worktree.path)
+            .await;
         self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
             .await;
         drop(ops);
@@ -2505,7 +2507,10 @@ impl Daemon {
         }
         // The two dialects that write into the checkout keep those files out
         // of the project's `git status`.
-        if matches!(harness.hook_dialect(), Some(AgentKind::Claude | AgentKind::Cursor)) {
+        if matches!(
+            harness.hook_dialect(),
+            Some(AgentKind::Claude | AgentKind::Cursor)
+        ) {
             if let Err(e) = hooks::installer::exclude_managed_files(&worktree.path) {
                 tracing::warn!(error = %e, cwd = %worktree.path.display(), "info/exclude not updated");
             }
@@ -6657,10 +6662,7 @@ mod tests {
             "an ignored file alone is no reason to ask"
         );
 
-        git_in(
-            &repo,
-            &["worktree", "add", &wt.to_string_lossy(), "feat"],
-        );
+        git_in(&repo, &["worktree", "add", &wt.to_string_lossy(), "feat"]);
         seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
         std::fs::write(wt.join("notes.txt"), "draft").unwrap();
         std::fs::write(wt.join(".gitignore"), ".env\nedited\n").unwrap();
@@ -6669,7 +6671,10 @@ mod tests {
             WorktreeDelete::HasChanges(2)
         );
         assert!(wt.join("notes.txt").exists(), "nothing removed");
-        assert!(daemon.store.get_worktree(&id).unwrap().is_some(), "row kept");
+        assert!(
+            daemon.store.get_worktree(&id).unwrap().is_some(),
+            "row kept"
+        );
 
         assert_eq!(
             daemon.delete_worktree(&id, true).await.unwrap(),

@@ -166,7 +166,10 @@ pub fn model_choices(kind: AgentKind, custom: Option<&str>) -> Vec<String> {
 
 /// How a model id is shown in Agents and the pickers: Claude family
 /// aliases are the CLI's "latest of that family" names, so the row says so.
-pub fn model_row_label(model: &str, catalog: Option<orion_core::harness::HarnessCatalog>) -> String {
+pub fn model_row_label(
+    model: &str,
+    catalog: Option<orion_core::harness::HarnessCatalog>,
+) -> String {
     if catalog == Some(orion_core::harness::HarnessCatalog::Claude)
         && matches!(model, "opus" | "sonnet" | "haiku" | "fable")
     {
@@ -4617,8 +4620,7 @@ mod tests {
         assert!(cfg.card_issue_number, "stored default unchanged");
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert!(legacy.card_issue_number);
-        let loaded: Config =
-            serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
+        let loaded: Config = serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
         assert!(!loaded.card_issue_number);
     }
 

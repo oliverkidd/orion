@@ -579,13 +579,10 @@ mod tests {
         let tree = tree();
         let palette = Palette::new(&tree, false, &HashMap::new(), false);
         assert!(
-            palette
-                .matches
-                .iter()
-                .all(|m| matches!(
-                    palette.items[m.item].target,
-                    PaletteTarget::Session(_) | PaletteTarget::AddProject
-                )),
+            palette.matches.iter().all(|m| matches!(
+                palette.items[m.item].target,
+                PaletteTarget::Session(_) | PaletteTarget::AddProject
+            )),
             "only sessions, and the add-a-project row, before a query"
         );
         assert_eq!(rows(&tree, "quiet"), ["▶quiet", "quiet/main"]);
