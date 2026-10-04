@@ -250,6 +250,71 @@ impl Theme {
     }
 }
 
+/// `c` (RGB components) at `level` of its brightness, the rest black —
+/// truecolor, as `focus_tint` is, since the 256 palette has no dim shade
+/// of most hues.
+pub fn shade(c: [f32; 3], level: f32) -> Color {
+    let v = |x: f32| (x * level).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(v(c[0]), v(c[1]), v(c[2]))
+}
+
+/// The RGB a terminal most likely shows for `c`: xterm's defaults for the
+/// sixteen named colors, the 6×6×6 cube and the gray ramp for the rest of
+/// the 256.
+pub fn rgb(c: Color) -> Option<(u8, u8, u8)> {
+    const ANSI: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    let index = match c {
+        Color::Rgb(r, g, b) => return Some((r, g, b)),
+        Color::Indexed(i) => i,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Reset => return None,
+    };
+    Some(match index {
+        0..=15 => ANSI[usize::from(index)],
+        16..=231 => {
+            let i = index - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            (level(i / 36), level(i / 6 % 6), level(i % 6))
+        }
+        _ => {
+            let v = 8 + (index - 232) * 10;
+            (v, v, v)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
