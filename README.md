@@ -1,5 +1,5 @@
 > [!NOTE]
-> A customized fork of [nebula](https://github.com/AgentSystemLabs/nebula), built for my own workflow and my colleagues'. It changes as we use it: keys, screens and features move. Fork it if you want something stable. There are no GitHub bots or PR checks here; the only workflow builds release binaries when a `v*` tag is pushed.
+> A tool built for my own workflow and my colleagues'. It changes as we use it: keys, screens and features move. Fork it if you want something stable. There are no GitHub bots or PR checks here; the only workflow builds release binaries when a `v*` tag is pushed.
 
 <div align="center">
 
