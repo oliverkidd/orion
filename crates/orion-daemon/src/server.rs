@@ -5,8 +5,10 @@ use crate::attach::{self, PaneSize};
 use crate::pr_scope::CreatePrAgentSpec;
 use crate::registry::{CreateAgentSpec, Daemon};
 use anyhow::Result;
-use orion_core::codec::{read_frame, write_frame};
-use orion_core::{ClientRequest, ServerEvent, SessionRef, PROTOCOL_VERSION};
+use orion_core::codec::{read_frame_or_undecodable, write_frame, Frame};
+use orion_core::{
+    ClientRequest, ServerEvent, SessionRef, PROTOCOL_VERSION, UNDECODABLE_FRAME_HINT,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -61,7 +63,36 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let mut handshaken = false;
 
     let result: Result<()> = async {
-        while let Some(req) = read_frame::<ClientRequest, _>(&mut reader).await? {
+        while let Some(frame) = read_frame_or_undecodable::<ClientRequest, _>(&mut reader).await? {
+            let req = match frame {
+                Frame::Msg(req) => req,
+                // A request from a client built off other protocol types —
+                // the handshake compares only PROTOCOL_VERSION. Refuse that
+                // one request, so the intent waiting on it fails where the
+                // user can see it (a QUICK PROMPT comes back with its text),
+                // and keep serving: ending the connection here left the TUI
+                // talking to nothing, every launch's prompt lost with it.
+                // Before the handshake there is nothing to keep, and the
+                // leading integer of a `Hello` is no req_id.
+                Frame::Undecodable { error, req_id } => {
+                    tracing::warn!(
+                        req_id,
+                        error = %error,
+                        handshaken,
+                        "a request did not decode; the client is likely another build"
+                    );
+                    let _ = out_tx
+                        .send(ServerEvent::Error {
+                            req_id: req_id.filter(|_| handshaken),
+                            message: UNDECODABLE_FRAME_HINT.into(),
+                        })
+                        .await;
+                    if !handshaken {
+                        break;
+                    }
+                    continue;
+                }
+            };
             match req {
                 ClientRequest::Hello { protocol_version } => {
                     handshaken = protocol_version == PROTOCOL_VERSION;
@@ -327,6 +358,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     cloud_prompt,
                     starting_prompt,
                     issue_url,
+                    mode,
                 } => {
                     // Logged by mode only — never the task, prompt text or
                     // issue URL.
@@ -349,6 +381,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             starting_prompt,
                             pr_url: None,
                             issue_url,
+                            mode,
                         })
                         .await;
                     if let Some(launch_mode) = launch_mode {
@@ -386,6 +419,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     pr_url,
                     head,
                     starting_prompt,
+                    mode,
                 } => {
                     // A PR SESSION whose checkout does not exist yet is a
                     // fetch, a `git worktree add` and the WORKTREE HOOK
@@ -413,6 +447,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                                 pr_url: pr_url.clone(),
                                 head,
                                 starting_prompt,
+                                mode,
                             })
                             .await;
                         match &result {

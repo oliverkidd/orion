@@ -9,10 +9,11 @@ its key, and `Enter` runs it.
 
 ## How the screen is laid out
 
-- **The FOOTER is the status bar.** Always, left to right: which orion this is (`orion v0.42.0` —
-  a click on it goes HOME), where you are (`project ▸ branch ▸ session`, then `· archived`,
-  `· full screen` or `· home` when you are somewhere other than the grid of live sessions), and at
-  the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
+- **The FOOTER is the status bar.** Always, left to right: which orion this is (`v1.0.0` — a
+  click on it goes HOME), where you are in the grid's own marks (`demo ⎇ feat ◐ fix-login`: the
+  project, the checkout behind its SCOPE MARK, the session behind its STATUS MARK — each a link
+  back to it on the grid), then `· archived`, `· full screen` or `· home` when you are somewhere
+  other than the grid of live sessions, and at the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
   then only about what the grid or the pane has under its cursor: on an empty band
   `⌘N new agent · t terminal · ⌫ delete worktree`, beside a pull request the pane can read
   `→ focus PR`. Wherever you are not on the grid, the first hint is the way back to it.
@@ -22,8 +23,10 @@ its key, and `Enter` runs it.
   its way out (`Esc`) last; a key is never cut in half.
 - **A modal's explanation** of the row or setting under its cursor is a dim line inside the frame,
   right above the keys — in the SETTINGS OVERLAY, the COMMAND PALETTE, the onboarding wizard.
-- **One spelling for every key.** A letter under a modifier is its capital — `⌘K`, `^K`, `⌥P`,
-  `⇧A` — and a bare letter is the letter you type (`t`). A key that belongs to an action is always
+- **One spelling and one colour for every key.** A letter under a modifier is its capital — `⌘K`,
+  `^K`, `⌥P`, `⇧A` — and a bare letter is the letter you type (`t`). Every key label is drawn in the
+  theme's accent — in the footer, on a modal's border, in the new-agent box's header, the COMMAND
+  PALETTE's key column, Help, the Hotkeys tab — and what it does in dim grey. A key that belongs to an action is always
   spelled from the live keymap, so a rebind shows up everywhere at once, and a terminal that never
   sends ⌘ sees the `^` twin instead; a modal's own keys come from the same table its key handler
   reads.
@@ -33,6 +36,9 @@ its key, and `Enter` runs it.
 
 ## How the keys are laid out
 
+- **A session is an agent or a terminal.** `⌘N` starts an AGENT — an AI coding CLI on a task — and
+  `t` a TERMINAL — a plain shell. Both are SESSIONS, the word for what applies to either card: the
+  attention walk, archive, delete ([Sessions](sessions.md)).
 - **⌘ for the entry points, as in Cursor.** The things you open from anywhere — a new agent, the
   jump list, go to file, changes, the pane — are `⌘` chords, and each has a `Ctrl` twin (`⌘P` and
   `^P`) for a terminal that never sends ⌘. Ghostty and kitty send ⌘ (the KITTY PROTOCOL);
@@ -53,8 +59,9 @@ its key, and `Enter` runs it.
   card under the cursor (below). Everything else lives behind `⌘O` (open outside orion), the
   right-click menu, or the COMMAND PALETTE.
 
-orion writes three `unbind` lines into Ghostty's config, inside an orion-managed block it keeps in
-place, so `⌘⇧P`, `⌘N` and `⌘,` reach it rather than Ghostty — see
+orion writes a line into Ghostty's config for every ⌘ chord it answers to, inside an orion-managed
+block it keeps in place, so `⌘⇧P`, `⌘N`, `⌘,` and the rest reach it rather than Ghostty — and `⌘.`,
+which macOS turns into Escape, arrives as `⌘.` — see
 [Configuration](configuration.md#outside-terminal-and-ghostty-keybinds). Ghostty reads them at launch or on its own
 reload (`⌘⇧,`).
 
@@ -62,7 +69,7 @@ reload (`⌘⇧,`).
 
 | Action | Key | Twin | What it opens |
 |---|---|---|---|
-| New agent | `⌘N`, `⌘I` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
+| New agent | `⌘N` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
 | Select model | `⌘/` | `^/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | `^Y` | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Agents tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
 | Select worktree | `⌘.` | `^T` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree** |
@@ -78,8 +85,8 @@ reload (`⌘⇧,`).
 | Toggle pane | `⌘J` | `^J` | fold the pane beside the cards away or bring it back; `⌘J` works from inside the pane, `^J` from the cards only (in the pane it is the agent's newline) |
 | Full-screen session | `^F` | | give the session in the pane the whole screen, or bring it back down |
 | Settings | `⌘,` | `s` | the SETTINGS OVERLAY |
-| Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `orion vX.Y.Z` does the same |
-| Quit | `q`, `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
+| Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `vX.Y.Z` does the same |
+| Quit | `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
 
 ## The grid
 
@@ -91,7 +98,7 @@ or `Esc` folds it back.
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | walk the BANDS — one checkout at a time, the pane swapping onto that checkout's remembered card as you pass; on the band opened with `Tab`, walk the rows of its cards and off its last row on to the next band. On the first band `↑` has nowhere to go: one press stays put and says so, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
+| `↑` / `↓` | walk the BANDS — one checkout at a time, the pane swapping onto that checkout's remembered card as you pass; on the band opened with `Tab`, walk the rows of its cards and off its last row on to the next band. On the first band `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
 | `←` / `→` | walk the cards of the band under the cursor, stopping at either end, the pane following onto each. A `❮` before the row or a `❯` after its last card says the rest went that way, and a click on either is the same step. With the pane beside the cards, `→` off the row's last card — or on a band with no cards — goes on into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
 | `Tab` | **open the worktree in place**: every card of the band wrapped into rows under its rule, its terminals under a `terminals` rule. One band is open at a time; `Tab` on the open band folds it back. Remembered per project and across restarts. With Settings → Appearance → **Expand all worktrees** on, every band stays open and `Tab` does nothing |
 | `Enter`, a double-click | into the pane on the card under the cursor, its input locked. On a band with nothing on it but its pull request, into the pane to read it. On a terminal too short to draw the pane the session takes the whole screen instead |
@@ -100,8 +107,10 @@ or `Esc` folds it back.
 | `t` | a new shell terminal inside orion, in the cursor's checkout — a chip on the grid with the pane on it and the keys in it. `⌘O` → **Terminal in the checkout** opens one outside orion |
 | `` ` `` | the next TERMINAL chip of the cursor's checkout, round to the first |
 | `r` | rename the session under the cursor |
-| `a` | archive the session, behind a CONFIRM DIALOG (`Enter` or `y` archives, `Esc` or `n` keeps it); on an archived card, unarchive it. A held `a` opens one dialog and archives nothing by itself |
-| `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `a` unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again, or `Esc`, comes back |
+| `⌘⇧A` / `^A` | archive the session, behind a CONFIRM DIALOG (`Enter` or `y` archives, `Esc` or `n` keeps it); on an archived card, unarchive it. Never a bare letter, so a stray keypress can't file a session away. Held, it opens one dialog and archives nothing by itself |
+| `⌘⇧U` / `^U` | unarchive the archived session under the cursor — a line of an ARCHIVED DRAWER, or a card in the ARCHIVED VIEW. The cursor stays on it, a live card again. Held, it unarchives one |
+| `z` | **the ARCHIVED DRAWER**: fold or unfold the `▸ 3 archived` line under the band the cursor is on — that checkout's archived sessions, a faint line apiece, most recently archived first. Unfolding puts the cursor on the newest, so `z` then `⌘⇧U` brings back the session just archived; `↑` / `↓` walk through the drawer between the band's cards and the next band. A click on the line is `z`, a double-click on a session's line unarchives it. Remembered across restarts |
+| `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `⌘⇧U` (or `⌘⇧A`) unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again, or `Esc`, comes back |
 | `Backspace` | delete the card under the cursor, behind a confirm. On the last live card of a linked worktree the confirm asks about the checkout too — `y` deletes both, `n` the card only, `Esc` keeps the card. A checkout with uncommitted or untracked work asks once more before it goes, counting the files it would lose (commits on its branch are kept), so nothing is lost by accident. On an EMPTY BAND it asks to delete the worktree itself; on a terminal's chip it closes the terminal and kills its shell |
 | `c` | the BRANCH SWITCHER for the project's root checkout (below) |
 | `⇧C` | **continue on another account**: the Claude session under the cursor, conversation and all, carried onto another Claude account and resumed there — a list of the accounts it can go to, `Enter` goes. For a session stopped at a usage limit (see [Sessions](sessions.md#usage-limits-and-a-second-account)) |
@@ -110,10 +119,9 @@ or `Esc` folds it back.
 | `.` / `,` | next / previous session in attention order — waiting on you first, then running, then the unread finishes, then the rest by last interaction — wrapping at both ends, in any project. Landing on an UNSEEN finish reads it |
 | `[` / `]` | the project tab to the left / right, stopping at the ends |
 | `1`–`9` | that PROJECT TAB, counting from the left; rebindable per slot as `project_tab_1` … `project_tab_9` |
-| `x` | close the project tab the grid is on (the project and its sessions are untouched; `⌘K` opens it again) |
 | right-click | a card's, a band's or a project tab's context menu |
 
-The actions with no key of their own — **New session** (harness picker first), **Agent presets**,
+The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts**,
 **Memory usage**, **Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts** — are
 in the COMMAND PALETTE and, where they apply to a card, its right-click menu. Bind any of them in
@@ -169,13 +177,15 @@ at the top.
 |---|---|---|
 | **Description** | the body as markdown, then the conversation — comments and reviews, oldest first | the pull request in the browser |
 | **Changes** `11` | every file: its status (`M`, `A`, `D`, `R`) and its `+`/`−`. GitHub hands back the first hundred; past that the tab says so and `⌘E` reads the whole diff | the DIFF VIEWER on the pull request, at that file |
-| **Commits** `4` | newest first: short sha, subject, author and age | the DIFF VIEWER on that commit's own diff |
+| **Commits** `4` | newest first: short sha, subject, author and age, and how big it is — `+12 −3 · 4 files` | the DIFF VIEWER on that commit's own diff |
 | **Checks** | failed first, then running, passed and skipped: `✗` / `●` / `✓` / `–`, the name, its workflow and how long it ran. The tab reads `✗ Checks 44/45` with one failed (44 of 45 fine), `● Checks 3/5` while some still run, `✓ Checks` when every one passed | the check's page — its log — in the browser |
 | **Reviews** | GitHub's review decision (`✓ Approved`, `✗ Changes requested`, `● Review required`), each reviewer's latest word, who has been asked and not answered, then the reviews themselves. The tab wears the decision's mark | the pull request in the browser |
 
-In the pane the tabs are `Tab` / `⇧Tab` and a click on a label; in the modal, whose `Tab` and
-`⇧Tab` launch and whose letters type into its filter, they are `⇧←` / `⇧→`, a listing's rows are
-`⇧↑` / `⇧↓`, and `^G` and `^O` reach the row — the border names each by what it does there.
+In the pane the tabs are `Tab` / `⇧Tab` and a click on a label. In the modal `Tab` / `⇧Tab` hand
+the keys between the list and the page, as the DIFF VIEWER's panels do: with the page holding them
+`←` / `→` walk its tabs, `↑` / `↓` a listing's rows (or scroll prose), and `Enter` acts on the row;
+from the list, whose letters type into its filter, the tabs are `⇧←` / `⇧→` and a listing's rows
+`⇧↑` / `⇧↓`. `^G` and `^O` reach the row from either — the border names each by what it does there.
 
 ### Back to the grid
 
@@ -200,7 +210,7 @@ the footer (or the modal's border) always names the way:
 | `↑`,`↑` on the top row of cards | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
 | `←` / `→`, `[` / `]` | walk the header's cursor along the tabs — **the grid switches with it**, each project on the card you last left it on |
 | `Enter`, `↓`,`↓` | hand the keys back to the cards of the project on screen |
-| `x` / `Backspace` | close the tab under the cursor — `x` at once, `Backspace` behind a confirm |
+| `Backspace` | close the tab under the cursor, behind a confirm (or click its `×`; **Close project tab** has no key by default — bind one in Settings → Hotkeys) |
 | `Esc`, a click, any other key | back down to the cards; any other key then means what it means on the grid |
 
 A click on a tab opens it, a tab's `×` closes it, and the `+` in front of the tabs drops the
@@ -236,8 +246,8 @@ With the pane reading a pull request — its [page](#the-pull-request-page) — 
 | **File tree** (`⌘B`) | Tree on the left, syntax-highlighted preview on the right, long lines wrapped (a markdown file as a rendered page; `^R` flips it to the source and back), and an always-live filter. `→` expands a directory and `←` collapses it; `Enter` folds a directory, and on a file edits it in the BUILT-IN EDITOR in the preview's place — a markdown file opens as its MARKDOWN PAGE over the tree. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll the preview. `⌘C`/`^Y` copies the selected path, `⌘O` opens it in the **Open in app** editor, and dragging the tree/preview border resizes the tree |
 | **Skills** (`⌘S`) | Every agent skill on the machine in one list, nothing picked for a launch — agents find their skills themselves. Yours (`~/.claude/skills`, or `$CLAUDE_CONFIG_DIR/skills`), the selected checkout's (its `.claude/skills`, `.cursor/skills`, `.codex/skills`, `.agents/skills`), `~/.cursor/skills`, `~/.codex/skills` (`$CODEX_HOME`) and `~/.agents/skills`, and installed Claude Code plugins' — each row badged `user`, `project`, `cursor`, `codex`, `agents` or `plugin`. A folder reached twice (`~/.claude/skills` a symlink to `~/.cursor/skills`) is listed once. Type to filter by name and description; `↑`/`↓` (or `^N`/`^P`) walk the matches, and the right pane reads the one under the cursor: its frontmatter on a line or two, the SKILL.md as a rendered page, its other files. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll it. `Enter` (or a click on the row the cursor is on) edits the SKILL.md in the BUILT-IN EDITOR, `⌘O` opens the skill's folder in the **Open in app** editor, and `⌘C`/`^Y` copies the SKILL.md's path. `^A` names a new skill and opens `~/.claude/skills/<name>/SKILL.md`, written from a stub. `^D` moves the skill's folder — its symlinks resolved — to the Trash behind a confirm that names it: `~/.Trash` on macOS, the freedesktop.org Trash elsewhere, never a delete. A plugin's skills are read-only and refuse it. `^R` reads the folders again, as closing the editor does. `Esc` closes |
 | **GitHub issues** (`i`) | The project's open issues, newest first, the one under the cursor read on the right with its comments. Type to filter by `#15 title`; `↑`/`↓` (or `^N`/`^P`) walk the matches; `Esc` clears the filter before a second `Esc` closes. `PgUp`/`PgDn` and `⇧↑`/`⇧↓` read; `^O` — or the pane's `↗ open in browser` button — opens it in the browser; `^R` asks GitHub again. `^C` (or `^Y`) comments, `^E` edits the title and description in place. `Enter` opens the QUICK PROMPT for an ISSUE SESSION on it (sent empty, the task is `Fix GitHub issue #15: <title>`), `⇧Tab` picks an AGENT PRESET for it, and `⌘.` in the box offers a fresh `issue-15-<title-slug>` worktree as its first row |
-| **GitHub pull requests** (`v`) | The project's open pull requests, newest first with the drafts below, the one under the cursor read on the right as its [pull request page](#the-pull-request-page) — `⇧←`/`⇧→` (or a click on a label) walk its tabs, `⇧↑`/`⇧↓` the rows of Changes, Commits and Checks. Filters as the issues modal does, with the same two-stage `Esc`. `^R` refreshes, `^C`/`^Y` comments, `^G` opens its diff — at the file under the cursor on Changes, that commit's on Commits — and `^O` (or a double-click) opens it in the browser, or on Checks the check under the cursor. `⌘L` flips to Linear issues to attach this PR. `Enter` opens the QUICK PROMPT for a PR SESSION on it, `⇧Tab` launches an AGENT PRESET, `Tab` picks a harness and starts one bare — all in the project's checkout of the PR's head branch |
-| **Linear issues** (`⌘L`) | Open Linear issues assigned to you (Settings → Linear → **Linear account**; empty = the owner of the project's `LINEAR_API_KEY`). Type to filter; `Space` marks; `Enter` starts one agent on the marked set in one worktree, with a task that asks for one PR; `⇧Tab` picks a preset. From a pull request, `⌘L` attaches the PR to the marked issues |
+| **GitHub pull requests** (`v`) | The project's open pull requests, newest first with the drafts below, the one under the cursor read on the right as its [pull request page](#the-pull-request-page). `Tab` / `⇧Tab` move the keys between the list and the page: on the page `←`/`→` walk its tabs, `↑`/`↓` the rows of Changes, Commits and Checks, and `Enter` opens the row; from the list `⇧←`/`⇧→` and `⇧↑`/`⇧↓` do the same. Filters as the issues modal does — a letter typed on the page hands the keys back to the list — and `Esc` steps back off the page, then clears the filter, then closes. `^R` refreshes, `^C`/`^Y` comments, `^G` opens its diff — at the file under the cursor on Changes, that commit's on Commits — and `^O` (or a double-click) opens it in the browser, or on Checks the check under the cursor. The DIFF VIEWER opened from here is a level inside the modal: `#42 ›` leads its title and `Esc` comes back to the pull request on the same tab. `^T` opens a **new pull request** in the page's place — from the branch the cursor's checkout is on, into the project's base, each a list of branches to pick from as you type, the title and description filled from the commits between them, a Draft box (`Space`) — and `Enter` pushes the branch and runs `gh pr create`. `^X` **merges** the one under the cursor: squash, merge commit or rebase (`←`/`→`, only what the repo allows), the branch deleted from GitHub once it lands, or auto-merge once its checks and reviews are in — with what stands in the way (a draft, conflicts, checks, a review owed) spelled out first; Settings → Review holds the defaults. `⌘L` flips to Linear issues to attach this PR. `Enter` on the list opens the QUICK PROMPT for a PR SESSION on it — the box's own `Tab` / `⇧Tab` pick a harness or an AGENT PRESET — in the project's checkout of the PR's head branch |
+| **Linear issues** (`⌘L`) | Open Linear issues assigned to you (Settings → Linear → **Linear account**; empty = the owner of the project's `LINEAR_API_KEY`). Type to filter; `Space` marks; `Enter` starts one agent on the marked set in one worktree, with a task that asks for one PR; `⇧Tab` picks a preset. `^S` lists the issue's team states in the reading pane — `↑`/`↓`, `Enter` moves the issue there, the row saying so at once and put back if Linear refuses. From a pull request, `⌘L` attaches the PR to the marked issues |
 | **Branch switcher** (`c`) | Moves the project's ROOT WORKTREE onto another branch: the current branch first, then the local branches newest first, then the remote ones. Type to filter; `↑`/`↓` move; `Enter` switches (a remote branch becomes a local one tracking it); `^R` fetches again. With nothing matching, `Enter` creates the typed branch. A checkout with uncommitted changes asks how they travel: `s` stashes, `b` brings them along, `c` commits everything first, `d` discards tracked changes on a second `d`. `Esc` on the list closes it; past the list it backs out one step at a time, and while git works it hides the modal (`c` brings it back) |
 | **File tabs** *(an agent opens it)* | What `orion open <file>…` raises when a session runs it. One tab per file: `←`/`→`, `Tab`/`⇧Tab` and `1`-`9` switch tabs; the focused file is previewed underneath — a markdown file as a rendered page (`m` flips it to the source). `Enter` edits the file in that pane. `↓` from the strip drops into the preview, where `↑`/`↓`, `PgUp`/`PgDn` and `Home`/`End` scroll and `↑` off the top returns to the strip. `Esc` and `^Q` step back to the strip first, and close from the strip |
 
@@ -334,6 +344,9 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
   each. The rows on screen are the bold ones, and the panel's foot says `3 ticked · together`. A
   clean checkout opens with every commit ticked — the whole branch, what its pull request shows; a
   dirty one on its uncommitted changes, nothing ticked. Nothing carries over to the next `⌘E`.
+- **How it opens** is Settings → Review: the keys on the commits (**Start on**, so the ticks come
+  first and `Tab` moves on to the files, then the diff), the files as a directory tree (**Files as a
+  tree**), and ticked commits together or one at a time (**Ticked commits**).
 - **Ticked with a gap.** Ticked rows side by side on the branch read as one range. An unticked
   commit, or a merge, between two ticked ones starts another range, and a file both ranges touch
   shows each range's diff in turn under its `── 1ec007c..dde6cc9` label — never a diff across the
@@ -360,15 +373,18 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | `⇧↑` / `⇧↓`, `PgUp` / `PgDn`, `Home` / `End` | anywhere | scroll the diff |
 | typing | anywhere | the files' fuzzy filter, which takes the keys; `^U` kills it |
 | `^R` | the files, the diff | mark the file reviewed ✓, which sinks it to the bottom — orion-side bookkeeping only: on the uncommitted changes it is stored until HEAD moves or the file changes again, on anything else it lasts while the modal is open |
-| `^T` | the files | fold the file list into a directory tree and back (`←`/`→` fold), remembered |
+| `^T` | the files | fold the file list into a directory tree and back (`←`/`→` fold) — this viewer's alone; **Files as a tree** says how the next opens |
 | `⌘O` (`^O`) | the files, the diff | the file in the **Open in app** editor, at the line at the top of the diff |
 | the wheel | over any panel | scrolls that panel; no cursor moves |
 | a click | | a commit's row aims the cursor there and its box ticks it, a file is selected, the diff takes the keys; a second click on the cursor's row is `Enter` |
-| `Esc` | | close |
+| `Esc` | | close — or, opened from the PULL REQUESTS MODAL, back to the pull request |
 
-With the pane reading a pull request, `⌘E` — and the PULL REQUESTS MODAL's `^G` — open the same
-viewer on that pull request's diff, fetched whole with `gh pr diff`: its files in the column, its
-title heading each, no commit list.
+With the pane reading a pull request, `⌘E` — and the PULL REQUESTS MODAL's `^G` and its Changes and
+Commits rows — open the same viewer on that pull request. When the repo has its head commit (your
+branch, or one fetched since) it is read from git: its commits over the files, every one ticked —
+the whole pull request — to read one at a time or a few together like a checkout's, opened on the
+file or the commit you picked. Otherwise its diff is fetched whole with `gh pr diff`: its files in
+the column, its title heading each, no commit list.
 
 ## The quick prompt
 
@@ -377,17 +393,30 @@ with what you typed as its first prompt. Which CLI it launches is the `Agent` ro
 prompt** in Settings → Agents. `Enter` launches; `Enter` on the box empty starts the session bare.
 `Esc`, a click outside it and `^Q` park what you typed, and the next `⌘N` opens on it.
 
+What you type is also saved as you type it, to `quick_prompt_draft.txt` in the DATA DIR, so closing
+the terminal window with the box up loses nothing: the next `⌘N` after a restart opens on the
+draft, caret at its end, its dim explanation line starting `draft restored ·` until you edit it.
+Launching it, or emptying the box, deletes the file. A box that brings its own text — a launch
+the daemon refused, handed back — never takes the draft or overwrites it.
+
 Its header names everything the launch is made of, each field beside the key that changes it — where
 it runs over what runs it:
 
 ```
 project demo ⌘P   worktree main ⌘.
-agent   Claude (you@example.com) Tab   model opus · latest ⌘/   effort high ⌘Y
+agent   Claude (y… Tab   mode plan ⇧Tab   model opus · latest ⌘/   effort high ⌘Y
 ```
+
+The agent's name is cut to ten columns, so a Claude account's long label leaves the row room. The
+`mode` field is there for a harness that can start somewhere other than edit: Claude offers edit and
+plan (`--permission-mode plan`), Cursor edit, plan and ask (`--mode plan` / `--mode ask`). Every box
+opens on edit; plan and ask read in colour, so a launch that will not touch the code is
+never mistaken for one that will. The mode is where the session starts — the CLI's own toggle moves it
+from there, and a resume never forces it back.
 
 The effort is always there — `default` until one is picked — for every harness that has one
 (OpenCode has none, so its box has no effort field); an AGENT PRESET on the launch adds a
-`preset reviewer ⇧Tab` field, and a fresh worktree reads `new worktree <branch>`, in the green the
+`preset reviewer ⌘U` field, and a fresh worktree reads `new worktree <branch>`, in the green the
 frame turns. The worktree, model and effort keys are spelled from the live keymap, so a rebind shows
 there at once; on a narrow screen the fields wrap onto more rows rather than lose a key. What `Enter`
 sends is the dim line along the bottom of the frame.
@@ -395,13 +424,16 @@ sends is the dim line along the bottom of the frame.
 | Key | Action |
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
+| `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
 | `Tab` | pick a different harness for this one launch (`→` drills into its model and effort); in Claude's list `Tab` toggles Claude Cloud |
-| `⇧Tab` | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
+| `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
+| `⌘U` (`^X`) | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
 | `⌘.` (`^T`) | the WORKTREE PICKER: **+ new worktree** first, then every checkout of the project |
 | `⌘/` (`^/`) | the harness's model list |
 | `⌘Y` (`^Y`) | step the effort, the header showing the step at once — `⇧⌘/` too, where macOS lets it through |
-| a click on a header field | the picker its key opens; on `effort`, the model's effort list |
+| `@` | list the checkout's files under the caret, narrowed by what follows the `@`: `↑`/`↓` move, `Tab` or `Enter` writes `@path/to/file` in, `Esc` puts the list away for that `@` |
+| a click on a header field | the picker its key opens; on `effort`, the model's effort list; on `mode`, the next mode |
 
 `⌘.`, `⌘/` and `⌘Y` work the same with one of the box's pickers open over it — the model list,
 the worktree list, the harness or preset picker — and none of them closes the box: the model and
@@ -428,8 +460,9 @@ default back, `x` unbinds it, and `Esc` cancels a capture. A chord another actio
 not taken silently: the row names who has it and a second `Enter` moves it. A ⚠ on a row means the
 chord can't reach orion from this terminal; `R` resets every binding (with a confirmation). On the
 Agents tab's **Claude accounts** rows, `Enter` signs the account in (asking for the email first),
-`o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter` on **Add
-account** names a new one ([Configuration](configuration.md#claude-accounts)). On a row whose
+`r` renames it, `o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
+on **Add account** names a new one; on a **Saved on this machine** row `Enter` adds the dir back
+under a name and `⌫` moves it to the Trash ([Configuration](configuration.md#claude-accounts)). On a row whose
 program isn't on PATH — General's **File editor**, a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor
 modal and anything else leaves it unrun ([Installing editors and agent
@@ -449,7 +482,8 @@ skips the rest — or, while the step asks something, backs out of the question.
 | Where | Key | Action |
 |---|---|---|
 | Any typed field | `←→`/`⌥←→`, `^A`/`^E`, `⌥⌫`, `^U`/`^K` | every prompt, filter and query is the same line editor: move by character / word, jump to ends, delete word, kill line |
-| Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight |
+| Any typed field | `⇧←`/`⇧→`, `⌥⇧←`/`⌥⇧→`, `⌘⇧←`/`⌘⇧→` (`⇧Home`/`⇧End`), `⌘A` | select, as a macOS text field does: by character, by word, to the line's start or end, everything. The same key without `⇧` lets the selection go — `←`/`→` land on its edge — and typing, a paste, a line break, `⌫` or any delete replace or remove just the selection. It draws on the theme's selection background. `⌘A` reaches orion once the [Ghostty keybinds](configuration.md#outside-terminal-and-ghostty-keybinds) block releases it from Ghostty's own select-all; `^A` stays the line's start (Ghostty types it for `⌘←`) |
+| Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight. With `⇧` they select: `⇧↑`/`⇧↓` by row (on the first or last row, on to the start or end), `⌘⇧↑`/`⌘⇧↓` to the ends of the text, `⇧PgUp`/`⇧PgDn` a boxful |
 
 ## Chips and readouts
 
@@ -457,8 +491,8 @@ The TERMINAL PANE's header shows one chip at a time — the first of these that 
 
 | Chip | What it is telling you |
 |---|---|
-| `exited` (red) | the session's process is gone. `Esc`, `Enter` and `q` leave the lock and everything else falls through to the grid; the next attach respawns it |
-| `scroll N` (yellow) | you are N lines back in the scrollback. Typing anything, or scrolling back down, clears it |
+| `exited` (copper) | the session's process is gone. `Esc`, `Enter` and `q` leave the lock and everything else falls through to the grid; the next attach respawns it |
+| `scroll N` (muted) | you are N lines back in the scrollback. Typing anything, or scrolling back down, clears it |
 | `starting…` (dim) | nothing has come off the PTY yet: the session's CLI is booting |
 | `INPUT` (accent) | the pane is locked and every key is going to the PTY; `Esc` leaves |
 
@@ -466,12 +500,13 @@ The FOOTER carries the rest, left to right:
 
 | Readout | What it is telling you |
 |---|---|
-| `orion vX.Y.Z` at the far left | which orion this is — the string `orion --version` prints. A button: a click goes HOME, and from HOME back to the grid |
+| `vX.Y.Z` at the far left | which orion this is — the version `orion --version` prints. A button: a click goes HOME, and from HOME back to the grid |
 | `⇡ v0.22.0` after it, in the warning color | a newer orion is published on GitHub — run `orion upgrade`. `ORION_UPDATE_CHECK_SECS=0` turns the check off |
 | `✗ disconnected` | this client has lost the DAEMON. A healthy connection says nothing |
 | key hints | what the keys do where you are, built from your live keymap — a rebind shows up here, and an unbound action drops out. None while a modal is up: its keys are on its own border |
-| `demo ▸ feat ▸ fix-login  · archived` after it | where you are: the project, the checkout and the card under the cursor, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions |
-| `2 agents · 1 term · 3 warm · 412 MB` at the right edge | live counts and orion's whole memory footprint, re-read every 5 seconds; a click opens the memory modal |
+| `demo ⎇ feat ◐ fix-login  · archived` after it | where you are, in the marks the grid draws it with: the project, the checkout behind its SCOPE MARK (`⌂` the root, `⎇` a worktree), and the card under the cursor behind its STATUS MARK, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions. Each part is a link: a click goes back down onto the grid there — the project's whole grid, the checkout's band, the session's card |
+| a message in place of the hints | a FLASH, until the next key, led by what kind it is: `✕` a failure in crimson, `⚠` a setting to change in gold, `✓` a result nothing else shows in green, the gold spinner over muted words for a wait, `·` a heads-up in muted |
+| `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint, re-read every 5 seconds; a click opens the memory modal, which breaks it down by session, terminal and spare |
 | `↓ - Move down` on the row above the bar | the KEY COMBO DISPLAY: the key you just pressed and what it did, for anyone watching a screen share. Keys typed into a LOCKED PANE never show |
 
 ## Mouse

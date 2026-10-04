@@ -10,8 +10,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const INSTALL_URL: &str =
-    "https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh";
+const INSTALL_URL: &str = "https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh";
 
 /// The published install script, with `ORION_INSTALL_URL` as the override
 /// hook (tests point it at a file:// URL). Shared with `orion ssh`.

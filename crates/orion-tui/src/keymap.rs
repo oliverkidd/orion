@@ -73,9 +73,9 @@ pub enum Action {
     New,
     GitDiff,
     OpenRepo,
-    /// `Shift+V`: the pull request of the session card under the cursor,
-    /// in the browser — the `#42 title` line on the card. `v` lists the
-    /// project's pull requests in orion; the shifted key goes to GitHub.
+    /// The pull request of the session card under the cursor, in the
+    /// browser — the `#42 title` line on the card. `⌘U` lists the
+    /// project's pull requests in orion; this one goes to GitHub.
     OpenPullRequest,
     /// `Shift+I`: the GitHub issue the session card under the cursor was
     /// started from, in the browser. `i` lists the project's issues in
@@ -98,7 +98,7 @@ pub enum Action {
     /// place, commented on, with a QUICK PROMPT or an AGENT PRESET launched
     /// on one.
     Issues,
-    /// `v`: the PULL REQUESTS MODAL — the project's open pull requests,
+    /// `⌘U`: the PULL REQUESTS MODAL — the project's open pull requests,
     /// read in place, commented on, with a PR SESSION launched on one.
     PullRequests,
     /// `⌘L`: the LINEAR VIEW — open Linear issues assigned to you.
@@ -121,7 +121,16 @@ pub enum Action {
     Archive,
     Unarchive,
     ToggleArchived,
+    /// `z` on the grid: fold or unfold the ARCHIVED DRAWER under the
+    /// band the cursor is on — that checkout's archived sessions, one
+    /// faint line apiece, for `u` to bring back.
+    ToggleArchivedDrawer,
     Delete,
+    /// `⌘W`: close the agent or terminal the PANE shows — from the card,
+    /// the pane, a locked pane or a full-screen session — behind the very
+    /// confirm `Backspace` asks on its card. Never a modal, never a
+    /// worktree or a project tab: over a modal the chord does nothing.
+    ClosePane,
     DeleteAll,
     /// The AGENT PRESETS list: saved launch definitions for the checkout
     /// under the cursor.
@@ -177,6 +186,9 @@ pub enum Action {
     ClaudeAccounts,
     Metrics,
     Help,
+    /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
+    /// start orion again from the binary on disk, behind a confirm.
+    Restart,
     /// `⌘/`: pick the model for a new agent — searchable, like Cursor.
     SelectModel,
     /// `⌘⇧/`: cycle the effort / reasoning variant of the current model.
@@ -209,10 +221,10 @@ pub struct ActionSpec {
     pub defaults: &'static [&'static str],
 }
 
-/// One positional PROJECT TAB shortcut: the bare digit. `⌘N` is what a
-/// browser user reaches for, but Ghostty keeps ⌘1–⌘9 for its own tabs and
-/// Terminal.app never sends ⌘ at all; digits are otherwise unbound on the
-/// grid.
+/// One positional PROJECT TAB shortcut: `⌘N`, as in a browser. A ⌘ chord
+/// reaches orion from inside a locked agent pane too, so a tab is one
+/// press away wherever the keys are; orion's Ghostty block unbinds
+/// Ghostty's own ⌘1–⌘9.
 macro_rules! project_tab_slot {
     ($n:literal, $id:literal, $label:literal, $digit:literal) => {
         ActionSpec {
@@ -296,7 +308,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NextAttention,
         id: "next_attention",
         label: "Next session needing you",
-        hint: "Jump to the next session in the palette's attention order (needs feedback, running, unseen, then recency) in any project, wrapping",
+        hint: "Jump to the next session in the palette's attention order (needs you or crashed, finished unread, running, then recency) in any project, wrapping",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["."],
@@ -328,15 +340,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         defaults: &["["],
     },
-    project_tab_slot!(1, "project_tab_1", "Project tab 1", "1"),
-    project_tab_slot!(2, "project_tab_2", "Project tab 2", "2"),
-    project_tab_slot!(3, "project_tab_3", "Project tab 3", "3"),
-    project_tab_slot!(4, "project_tab_4", "Project tab 4", "4"),
-    project_tab_slot!(5, "project_tab_5", "Project tab 5", "5"),
-    project_tab_slot!(6, "project_tab_6", "Project tab 6", "6"),
-    project_tab_slot!(7, "project_tab_7", "Project tab 7", "7"),
-    project_tab_slot!(8, "project_tab_8", "Project tab 8", "8"),
-    project_tab_slot!(9, "project_tab_9", "Project tab 9", "9"),
+    project_tab_slot!(1, "project_tab_1", "Project tab 1", "cmd+1"),
+    project_tab_slot!(2, "project_tab_2", "Project tab 2", "cmd+2"),
+    project_tab_slot!(3, "project_tab_3", "Project tab 3", "cmd+3"),
+    project_tab_slot!(4, "project_tab_4", "Project tab 4", "cmd+4"),
+    project_tab_slot!(5, "project_tab_5", "Project tab 5", "cmd+5"),
+    project_tab_slot!(6, "project_tab_6", "Project tab 6", "cmd+6"),
+    project_tab_slot!(7, "project_tab_7", "Project tab 7", "cmd+7"),
+    project_tab_slot!(8, "project_tab_8", "Project tab 8", "cmd+8"),
+    project_tab_slot!(9, "project_tab_9", "Project tab 9", "cmd+9"),
     ActionSpec {
         action: Action::CloseProjectTab,
         id: "close_project_tab",
@@ -344,7 +356,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — {palette} opens it again",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["x"],
+        // No key: a tab's `×`, its right-click menu and the COMMAND
+        // PALETTE close it. A bare `x` closed one by accident.
+        defaults: &[],
     },
     ActionSpec {
         action: Action::ProjectDropdown,
@@ -370,8 +384,8 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::New,
         id: "new",
-        label: "New session",
-        hint: "Pick the harness first (→ drills into its model and effort), then the quick prompt opens set to it, in the checkout under the cursor; on the first-run splash, add a project",
+        label: crate::agent_picker::NEW_AGENT_PICKER_TITLE,
+        hint: "Pick the agent's harness first (→ drills into its model and effort), then the new-agent box opens set to it, in the checkout under the cursor; on the first-run splash, add a project",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -398,7 +412,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenPullRequest,
         id: "open_pull_request",
         label: "Open pull request in browser",
-        hint: "Send the pull request of the session card under the cursor — its checkout's branch — to your browser, as a click on the card's #42 line does. v lists the pull requests in orion",
+        hint: "Send the pull request of the session card under the cursor — its checkout's branch — to your browser, as a click on the card's #42 line does. {pull_requests} lists the pull requests in orion",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -446,7 +460,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "List the project's open pull requests; Enter prompts a PR session on one, ⇧Tab launches a preset on it, Tab picks a harness",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["v"],
+        // ⌘U: every window orion opens is a ⌘ chord, and ⌘P is Go to
+        // file, as in Cursor. `^V`, the old `v`, is its twin.
+        defaults: &["cmd+u", "ctrl+v"],
     },
     ActionSpec {
         action: Action::Linear,
@@ -480,7 +496,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NewTerminal,
         id: "new_terminal",
         label: "New shell terminal",
-        hint: "Spawn a plain shell inside orion, in the selected worktree's directory; {open_outside} opens one outside it",
+        hint: "A terminal: a plain shell inside orion — a session like an agent, but no AI CLI — in the selected worktree's directory; {open_outside} opens one outside it",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["t"],
@@ -511,16 +527,18 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Archive the selected agent (its PTY is released), or bring an archived one back",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["a"],
+        // Never a bare letter: a stray `a` aimed at a prompt that lands on
+        // the grid must not file a session away.
+        defaults: &["cmd+shift+a", "ctrl+a"],
     },
     ActionSpec {
         action: Action::Unarchive,
         id: "unarchive",
         label: "Unarchive session",
-        hint: "Bring an archived agent back into the list",
+        hint: "Bring the archived agent under the cursor back into the list",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &[],
+        defaults: &["cmd+shift+u", "ctrl+u"],
     },
     ActionSpec {
         action: Action::ToggleArchived,
@@ -532,13 +550,35 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["shift+a"],
     },
     ActionSpec {
+        action: Action::ToggleArchivedDrawer,
+        id: "toggle_archived_drawer",
+        label: "Show / hide worktree's archived",
+        hint: "Fold or unfold the archived sessions listed under the worktree the cursor is on",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["z"],
+    },
+    ActionSpec {
         action: Action::Delete,
         id: "delete",
         label: "Delete selected",
-        hint: "Remove the selected row, behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation — x closes it outright",
+        hint: "Remove the selected row, behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["backspace"],
+    },
+    ActionSpec {
+        action: Action::ClosePane,
+        id: "close_pane",
+        label: "Close agent or terminal",
+        hint: "Close the agent or terminal the pane shows — from its card, the pane, or typing inside it — behind the same confirmation Backspace asks. Does nothing over a modal",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        // ⌘W, as every Mac app closes what is in front, and ⌘ reaches
+        // orion from inside a locked pane. `^W` is its twin for a
+        // terminal that never sends ⌘ — from the cards and the pane
+        // unlocked only: in a locked pane it is the agent's delete-word.
+        defaults: &["cmd+w", "ctrl+w"],
     },
     ActionSpec {
         action: Action::DeleteAll,
@@ -562,10 +602,10 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::QuickPrompt,
         id: "quick_prompt",
         label: "New agent",
-        hint: "Type a task; Enter starts an agent on it (Tab picks the harness; {select_model} the model; {cycle_effort} the effort; {select_launch_worktree} the worktree; Settings → Agents sets the default)",
+        hint: "An agent is an AI coding CLI on a task ({new_terminal} starts a terminal, a plain shell; both are sessions). Type the task; Enter starts it (Tab picks the harness; {select_model} the model; {cycle_effort} the effort; {select_launch_worktree} the worktree)",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["cmd+i", "cmd+n", "ctrl+n"],
+        defaults: &["cmd+n", "ctrl+n"],
     },
     ActionSpec {
         action: Action::SelectModel,
@@ -763,6 +803,17 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &[],
     },
     ActionSpec {
+        action: Action::Restart,
+        id: "restart",
+        label: "Restart orion",
+        hint: "Stop the daemon and every agent and terminal in it, then start orion again from scratch, behind a confirmation. Agents pick their conversation back up; terminals start a new shell",
+        group: "GENERAL",
+        scope: Scope::Global,
+        // ⌘⇧R, HOME's key; `^X` the twin a terminal without ⌘ delivers.
+        // Both behind the confirm: nothing here is one stray letter.
+        defaults: &["cmd+shift+r", "ctrl+x"],
+    },
+    ActionSpec {
         action: Action::CommandPalette,
         id: "command_palette",
         label: "Command palette",
@@ -798,7 +849,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Leave the TUI (sessions keep running in the daemon)",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["q", "ctrl+c"],
+        // Not a bare `q`: a stray letter must not ask to quit.
+        defaults: &["ctrl+c"],
     },
 ];
 
@@ -817,6 +869,28 @@ pub fn spec_of(action: Action) -> Option<&'static ActionSpec> {
 }
 
 // ---- chords ----
+
+/// `key` with an Escape carrying ⌘ turned back into the ⌘. it was
+/// pressed as. macOS binds ⌘. to Cancel — `cancelOperation:`, the very
+/// command Escape sends — in every app, so a terminal can hand orion the
+/// press as an Escape, ⌘ still held, and every Esc arm that ignores the
+/// modifiers read it as a bare Esc: **Select worktree** (`⌘.`) closed the
+/// new-agent box it was pressed in. No one presses ⌘Esc meaning Esc, so
+/// the loop folds it here before any handler sees it, and
+/// [`KeyChord::from_event`] does the same for a chord built elsewhere.
+/// Ghostty is asked to send ⌘. as the KITTY PROTOCOL spells it in the
+/// first place ([`crate::ghostty_config::SENT_AS_KITTY`]); this is the net
+/// under a terminal or a config that does not.
+pub fn untangle_cmd_period(key: KeyEvent) -> KeyEvent {
+    if key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::SUPER) {
+        KeyEvent {
+            code: KeyCode::Char('.'),
+            ..key
+        }
+    } else {
+        key
+    }
+}
 
 /// A single key press: one key plus the modifiers held with it, in the one
 /// canonical spelling [`KeyChord::from_event`] produces.
@@ -846,8 +920,11 @@ impl KeyChord {
     /// * `BackTab` becomes `shift+tab`;
     /// * `ctrl+5` — the legacy encoding's name for byte 0x1D — becomes
     ///   `ctrl+]`, which is what the user actually pressed, and `ctrl+7`
-    ///   (byte 0x1F) becomes `ctrl+/`.
+    ///   (byte 0x1F) becomes `ctrl+/`;
+    /// * an Escape carrying ⌘ is `cmd+.` — macOS's Cancel, the key it
+    ///   turns ⌘. into ([`untangle_cmd_period`]).
     pub fn from_event(key: &KeyEvent) -> Self {
+        let key = untangle_cmd_period(*key);
         let mut mods = key.modifiers & KEPT_MODS;
         let mut code = key.code;
         match code {
@@ -1585,9 +1662,7 @@ impl Keymap {
     /// the one such a host uses.
     pub fn reach_at(&self, index: usize) -> Reach {
         let chords = self.chords_at(index);
-        let has_twin = chords
-            .iter()
-            .any(|c| !c.mods.contains(KeyModifiers::SUPER));
+        let has_twin = chords.iter().any(|c| !c.mods.contains(KeyModifiers::SUPER));
         chords
             .iter()
             .map(|c| match host_warning(c).0 {
@@ -1641,7 +1716,10 @@ mod tests {
         assert_eq!(at("cmd+."), Some(Action::SelectLaunchWorktree));
         assert_eq!(at("ctrl+t"), Some(Action::SelectLaunchWorktree));
         // Terminals deliver ⌘⇧/ as SUPER+SHIFT+/ (keep SHIFT) or as ⌘?.
-        let from_slash = ev(KeyCode::Char('/'), KeyModifiers::SUPER | KeyModifiers::SHIFT);
+        let from_slash = ev(
+            KeyCode::Char('/'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
         assert_eq!(from_slash, shift);
         assert_eq!(
             map.lookup(Scope::Global, &from_slash),
@@ -1772,6 +1850,30 @@ mod tests {
         assert_eq!(before, ids.len(), "duplicate action id");
     }
 
+    /// An Escape carrying ⌘ — macOS's Cancel, which is what ⌘. becomes
+    /// on a Mac — is ⌘. everywhere: the chord the keymap binds to
+    /// **Select worktree**, and an event no Esc arm can take for a bare
+    /// Esc. A plain or shifted Escape stays Escape.
+    #[test]
+    fn an_escape_holding_cmd_is_cmd_period() {
+        let cancel = KeyEvent::new(KeyCode::Esc, KeyModifiers::SUPER);
+        assert_eq!(
+            KeyChord::from_event(&cancel),
+            KeyChord::parse("cmd+.").unwrap()
+        );
+        assert_eq!(
+            Keymap::default().lookup(Scope::Global, &KeyChord::from_event(&cancel)),
+            Some(Action::SelectLaunchWorktree)
+        );
+        assert_eq!(untangle_cmd_period(cancel).code, KeyCode::Char('.'));
+        assert_eq!(untangle_cmd_period(cancel).modifiers, KeyModifiers::SUPER);
+        for kept in [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let esc = KeyEvent::new(KeyCode::Esc, kept);
+            assert_eq!(untangle_cmd_period(esc), esc);
+            assert_eq!(KeyChord::from_event(&esc).code, KeyCode::Esc);
+        }
+    }
+
     #[test]
     fn defaults_do_not_collide_within_a_scope() {
         let map = Keymap::default();
@@ -1873,9 +1975,23 @@ mod tests {
         // ^q in the panels is free — the scopes never read the same press.
         assert_eq!(map.lookup(Scope::Global, &ctrl_q), None);
         assert_eq!(
-            map.lookup(Scope::Global, &KeyChord::parse("q").unwrap()),
+            map.lookup(Scope::Global, &KeyChord::parse("ctrl+c").unwrap()),
             Some(Action::Quit)
         );
+    }
+
+    /// A stray letter must not quit, close a tab, or archive or unarchive a
+    /// session: those ship on modified chords, or none.
+    #[test]
+    fn stray_letters_quit_close_and_archive_nothing() {
+        let map = Keymap::default();
+        for bare in ["q", "x", "a", "u"] {
+            assert_eq!(
+                map.lookup(Scope::Global, &KeyChord::parse(bare).unwrap()),
+                None,
+                "{bare} is bound"
+            );
+        }
     }
 
     /// `t` is a shell terminal inside orion; one outside it is a row of
@@ -1900,7 +2016,11 @@ mod tests {
         let map = Keymap::default();
         let finder = map.chords(Action::FindFile);
         let spell = |chords: Vec<KeyChord>| {
-            chords.iter().map(KeyChord::display).collect::<Vec<_>>().join(" ")
+            chords
+                .iter()
+                .map(KeyChord::display)
+                .collect::<Vec<_>>()
+                .join(" ")
         };
         assert_eq!(spell(shown_side(finder, false)), "^P");
         assert_eq!(spell(shown_side(finder, true)), "⌘P");
@@ -1908,7 +2028,7 @@ mod tests {
         assert_eq!(spell(shown_side(&help, false)), "⌘K", "⌘ alone still shows");
         for n in 1..=9u8 {
             let action = Action::SelectProjectTab(n);
-            assert_eq!(spell(shown_side(map.chords(action), true)), n.to_string());
+            assert_eq!(spell(shown_side(map.chords(action), true)), format!("⌘{n}"));
         }
     }
 
@@ -1986,14 +2106,22 @@ mod tests {
 
     #[test]
     fn cmd_chords_are_reported_by_who_keeps_them() {
-        for kept in ["cmd+c", "cmd+w", "cmd+1", "cmd+q"] {
+        for kept in ["cmd+c", "cmd+shift+w", "cmd+t", "cmd+q"] {
             let (reach, why) = host_warning(&KeyChord::parse(kept).unwrap());
             assert_eq!(reach, Reach::Blocked, "{kept} is Ghostty's for good");
             assert!(why.unwrap().contains('⌘'));
         }
         // Every other chord Ghostty binds is one the block can release —
         // a rebind onto ⌘] included.
-        for freed in ["cmd+shift+p", "cmd+n", "cmd+,", "cmd+k", "cmd+]"] {
+        for freed in [
+            "cmd+shift+p",
+            "cmd+n",
+            "cmd+,",
+            "cmd+k",
+            "cmd+]",
+            "cmd+1",
+            "cmd+w",
+        ] {
             let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
             assert_eq!(reach, Reach::Risky, "{freed}");
             assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
@@ -2020,7 +2148,13 @@ mod tests {
         let map = Keymap::default();
         for (i, spec) in ACTIONS.iter().enumerate() {
             for chord in map.chords_at(i) {
-                assert_ne!(host_warning(chord).0, Reach::Blocked, "{}: {}", spec.id, chord.spec());
+                assert_ne!(
+                    host_warning(chord).0,
+                    Reach::Blocked,
+                    "{}: {}",
+                    spec.id,
+                    chord.spec()
+                );
             }
         }
     }
@@ -2052,6 +2186,11 @@ mod tests {
         let map = Keymap::default();
         for (i, spec) in ACTIONS.iter().enumerate() {
             let chords = map.chords_at(i);
+            // The tab slots are ⌘N alone by choice: digits stay free for
+            // typing, and `[` / `]` walk the tabs in any terminal.
+            if matches!(spec.action, Action::SelectProjectTab(_)) {
+                continue;
+            }
             assert!(
                 chords.is_empty() || chords.iter().any(|c| host_warning(c).0.is_fine()),
                 "{} has no chord a stock terminal delivers",

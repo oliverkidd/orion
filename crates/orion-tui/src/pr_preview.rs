@@ -511,9 +511,9 @@ fn headline(input: &PageInput, width: usize, th: Theme) -> Vec<Line<'static>> {
     // red, while the pull request is still open.
     let state = match (detail.state.as_str(), detail.is_draft) {
         (STATE_OPEN, true) => (Standing::Draft.label(), th.dim),
-        (STATE_OPEN, false) => (Standing::Open.label(), th.ok),
+        (STATE_OPEN, false) => (Standing::Open.label(), th.muted),
         ("MERGED", _) => (Standing::Merged.label(), th.merged),
-        ("CLOSED", _) => (Standing::Closed.label(), th.err),
+        ("CLOSED", _) => (Standing::Closed.label(), th.faint),
         _ => (detail.state.as_str(), th.dim),
     };
     let mut meta = vec![(
@@ -536,18 +536,21 @@ fn headline(input: &PageInput, width: usize, th: Theme) -> Vec<Line<'static>> {
         meta.push((format!(" · {} ← {}", detail.base, detail.head), dim));
     }
     meta.push((" · ".to_string(), dim));
-    meta.push((format!("+{}", detail.additions), Style::default().fg(th.ok)));
+    meta.push((
+        format!("+{}", detail.additions),
+        Style::default().fg(th.added),
+    ));
     meta.push((
         format!(" −{}", detail.deletions),
-        Style::default().fg(th.err),
+        Style::default().fg(th.removed),
     ));
     out.extend(flow_lines(&meta, width, INDENT, INDENT));
     out
 }
 
-/// One tab's label as styled runs: its mark (`✗` red, `✓` green, `●`
-/// while something is still running), its name, and its count — `…`
-/// while the body is on its way.
+/// One tab's label as styled runs: its mark (`✗` crimson, `✓` green, the
+/// gold `◐` while a check still runs, a muted `○` while a review is still
+/// owed), its name, and its count — `…` while the body is on its way.
 fn tab_label(tab: PrTab, input: &PageInput, th: Theme) -> (Option<(&'static str, Color)>, String) {
     let Some(d) = input.detail else {
         let count = if input.failed || !tab.lists() {
@@ -568,7 +571,7 @@ fn tab_label(tab: PrTab, input: &PageInput, th: Theme) -> (Option<(&'static str,
             } else if n.failed > 0 {
                 (Some(("✗", th.err)), format!("Checks {}/{}", n.ok, n.total))
             } else if n.running > 0 {
-                (Some(("●", th.warn)), format!("Checks {}/{}", n.ok, n.total))
+                (Some(("◐", th.warn)), format!("Checks {}/{}", n.ok, n.total))
             } else {
                 (Some(("✓", th.ok)), "Checks".into())
             }
@@ -576,7 +579,7 @@ fn tab_label(tab: PrTab, input: &PageInput, th: Theme) -> (Option<(&'static str,
         PrTab::Reviews => match d.review_decision.as_str() {
             "APPROVED" => (Some(("✓", th.ok)), "Reviews".into()),
             "CHANGES_REQUESTED" => (Some(("✗", th.err)), "Reviews".into()),
-            "REVIEW_REQUIRED" => (Some(("●", th.warn)), "Reviews".into()),
+            "REVIEW_REQUIRED" => (Some(("○", th.muted)), "Reviews".into()),
             _ => {
                 let n = d
                     .comments
@@ -717,24 +720,22 @@ fn body(
         PrTab::Changes => {
             listed.lines.push(Line::from(""));
             for file in &detail.files {
-                let color = match file.status() {
-                    'A' => th.ok,
-                    'D' => th.err,
-                    'R' | 'C' => th.accent,
-                    _ => th.warn,
-                };
+                let color = crate::ui::change_color([file.status(), ' '], th);
                 let mut runs = vec![
                     (file.status().to_string(), Style::default().fg(color)),
                     (format!(" {}", file.path), Style::default().fg(th.text)),
                 ];
                 if file.additions > 0 {
-                    runs.push((format!("  +{}", file.additions), Style::default().fg(th.ok)));
+                    runs.push((
+                        format!("  +{}", file.additions),
+                        Style::default().fg(th.added),
+                    ));
                 }
                 if file.deletions > 0 {
                     let gap = if file.additions > 0 { " " } else { "  " };
                     runs.push((
                         format!("{gap}−{}", file.deletions),
-                        Style::default().fg(th.err),
+                        Style::default().fg(th.removed),
                     ));
                 }
                 listed.row(vec![(runs, INDENT, "   ")]);
@@ -772,14 +773,20 @@ fn body(
                 let hang = format!("{INDENT}{}", " ".repeat(commit.short().width() + 1));
                 let mut parts = vec![(
                     vec![
-                        (commit.short().to_string(), Style::default().fg(th.accent)),
+                        (commit.short().to_string(), Style::default().fg(th.muted)),
                         (format!(" {}", commit.subject), Style::default().fg(th.text)),
                     ],
                     INDENT,
                     hang.as_str(),
                 )];
+                // Who and when, then how big it is: `+12 −3 · 4 files`.
+                let mut meta = Vec::new();
                 if !who.is_empty() {
-                    parts.push((vec![(who, dim)], hang.as_str(), hang.as_str()));
+                    meta.push((who, dim));
+                }
+                meta.extend(commit_size(commit, !meta.is_empty(), th));
+                if !meta.is_empty() {
+                    parts.push((meta, hang.as_str(), hang.as_str()));
                 }
                 listed.row(parts);
             }
@@ -849,13 +856,36 @@ impl Listing {
     }
 }
 
+/// A commit's size on its Commits row: `+12` green, `−3` red and how many
+/// files, `gap` putting space before it when something leads; nothing
+/// for a commit GitHub gave no counts for.
+fn commit_size(
+    commit: &crate::pull_request::PrCommit,
+    gap: bool,
+    th: Theme,
+) -> Vec<(String, Style)> {
+    let (Some(added), Some(removed)) = (commit.additions, commit.deletions) else {
+        return Vec::new();
+    };
+    let lead = if gap { "  " } else { "" };
+    let mut runs = vec![
+        (format!("{lead}+{added}"), Style::default().fg(th.ok)),
+        (format!(" −{removed}"), Style::default().fg(th.err)),
+    ];
+    if let Some(files) = commit.files {
+        let noun = if files == 1 { "file" } else { "files" };
+        runs.push((format!(" · {files} {noun}"), Style::default().fg(th.dim)));
+    }
+    runs
+}
+
 /// One check's row: its mark, its name, the workflow it ran in, and how
 /// long it ran — or that it is still running, or was skipped.
 fn check_runs(check: &PrCheck, now: i64, th: Theme) -> Vec<(String, Style)> {
     let dim = Style::default().fg(th.dim);
     let (mark, color) = match check.state {
         CheckState::Failed => ("✗", th.err),
-        CheckState::Running => ("●", th.warn),
+        CheckState::Running => ("◐", th.warn),
         CheckState::Passed => ("✓", th.ok),
         CheckState::Skipped => ("–", th.dim),
     };
@@ -939,7 +969,7 @@ fn reviews(detail: &PrDetail, width: usize, body_w: usize, th: Theme) -> Vec<Lin
     let decision = match detail.review_decision.as_str() {
         "APPROVED" => Some(("✓ Approved", bold(th.ok))),
         "CHANGES_REQUESTED" => Some(("✗ Changes requested", bold(th.err))),
-        "REVIEW_REQUIRED" => Some(("● Review required", bold(th.warn))),
+        "REVIEW_REQUIRED" => Some(("○ Review required", bold(th.muted))),
         _ => None,
     };
     let reviewers = detail.reviewers();
@@ -966,13 +996,13 @@ fn reviews(detail: &PrDetail, width: usize, body_w: usize, th: Theme) -> Vec<Lin
                 "APPROVED" => ("✓", "approved", th.ok),
                 "CHANGES_REQUESTED" => ("✗", "changes requested", th.err),
                 "DISMISSED" => ("–", "dismissed", th.dim),
-                REVIEW_REQUESTED => ("●", "review requested", th.warn),
+                REVIEW_REQUESTED => ("○", "review requested", th.muted),
                 _ => ("·", "commented", th.dim),
             };
             out.extend(flow_lines(
                 &[
                     (mark.to_string(), Style::default().fg(color)),
-                    (format!(" {who}"), Style::default().fg(th.accent)),
+                    (format!(" {who}"), Style::default().fg(th.muted)),
                     (format!(" · {word}"), dim),
                 ],
                 width,
@@ -1008,14 +1038,15 @@ fn reviews(detail: &PrDetail, width: usize, body_w: usize, th: Theme) -> Vec<Lin
 /// One comment: an attribution row, then its body rendered as markdown.
 fn comment_lines(c: &PrComment, width: usize, body_w: usize, th: Theme) -> Vec<Line<'static>> {
     let dim = Style::default().fg(th.dim);
-    let mut head = vec![(c.author.clone(), Style::default().fg(th.accent))];
-    // A verdict is the whole point of a review row — it goes loud, and in
-    // the color the panels already use for "this wants you".
+    let mut head = vec![(c.author.clone(), Style::default().fg(th.muted))];
+    // A verdict is the whole point of a review row — it goes loud, in the
+    // color its mark wears on the Reviews tab: green for an approval, the
+    // needs-you crimson for requested changes, a dismissal muted.
     if let Some(verdict) = c.verdict() {
-        let color = if verdict == "approved" {
-            th.ok
-        } else {
-            th.warn
+        let color = match verdict {
+            "approved" => th.ok,
+            "changes requested" => th.err,
+            _ => th.muted,
         };
         head.push((
             format!(" {verdict}"),
@@ -1187,9 +1218,8 @@ pub(crate) fn run_act(
             label.to_string(),
             crate::event_loop::PrReviewAt::Commit(sha),
         ),
-        RowAct::Check { name, url } if url.is_empty() => {
-            app.flash = Some(format!("{name} has no page to open"));
-        }
+        // A check with no page of its own opens nothing.
+        RowAct::Check { url, .. } if url.is_empty() => {}
         RowAct::Check { url, .. } => crate::event_loop::open_link(app, &url, out),
     }
 }
@@ -1364,12 +1394,16 @@ mod tests {
                 subject: "Dedupe the PR row".into(),
                 author: "webdevcody".into(),
                 at: "2026-10-01T10:00:00Z".into(),
+                additions: Some(12),
+                deletions: Some(3),
+                files: Some(1),
             },
             PrCommit {
                 sha: "aaaaaaa1111".into(),
                 subject: "Attach links".into(),
                 author: "webdevcody".into(),
                 at: "2026-09-30T10:00:00Z".into(),
+                ..Default::default()
             },
         ];
         let check = |name: &str, state, word: &str| PrCheck {
@@ -1494,7 +1528,7 @@ mod tests {
         d.review_decision = "REVIEW_REQUIRED".into();
         assert_eq!(
             tab_texts(&input(Some(&d)), th)[3..],
-            ["● Checks 1/2", "● Reviews"]
+            ["◐ Checks 1/2", "○ Reviews"]
         );
         d.checks.remove(0);
         d.review_decision = "APPROVED".into();
@@ -1535,14 +1569,21 @@ mod tests {
         assert!(changes.contains(" A src/links.rs  +6"), "{changes}");
         let commits = body(PrTab::Commits);
         assert!(commits.contains("▌bbbbbbb Dedupe the PR row"), "{commits}");
-        assert!(commits.contains("webdevcody · 1d ago"), "{commits}");
+        assert!(
+            commits.contains("webdevcody · 1d ago  +12 −3 · 1 file"),
+            "{commits}"
+        );
+        assert!(
+            commits.trim_end().ends_with("webdevcody · 2d ago"),
+            "no counts: none drawn — {commits}"
+        );
         assert!(
             commits.find("bbbbbbb").unwrap() < commits.find("aaaaaaa").unwrap(),
             "newest first"
         );
         let checks = body(PrTab::Checks);
         assert!(checks.contains("▌✗ test · CI · 3m 12s"), "{checks}");
-        assert!(checks.contains(" ● lint · CI · running"), "{checks}");
+        assert!(checks.contains(" ◐ lint · CI · running"), "{checks}");
         assert!(checks.contains(" ✓ build · CI · 3m 12s"), "{checks}");
         let reviews = body(PrTab::Reviews);
         assert!(reviews.contains("✗ Changes requested"), "{reviews}");

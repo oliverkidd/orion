@@ -100,17 +100,21 @@ fn main() -> Result<()> {
             Some(dir) => orion_tui::run_add_project(dir),
             None => {
                 init_tui_logging()?;
-                let handoff =
-                    log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
-                match handoff {
+                let exit = log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
+                match exit {
                     // Hosts-picker handoff: the TUI quit and restored the
                     // terminal so a fresh `orion ssh` can exec over us (the
                     // local daemon and its sessions stay up).
-                    Some(entry) => {
+                    orion_tui::Exit::Ssh(entry) => {
                         eprintln!("orion: connecting to {}…", entry.host);
                         ssh::run_ssh(&entry.host, entry.path.as_deref(), true)
                     }
-                    None => Ok(()),
+                    // **Restart orion**: the daemon goes, and a fresh
+                    // `orion` execs over us.
+                    orion_tui::Exit::Restart => {
+                        log_fatal(orion_tui::restart(), &orion_core::paths::tui_log_path())
+                    }
+                    orion_tui::Exit::Quit => Ok(()),
                 }
             }
         },

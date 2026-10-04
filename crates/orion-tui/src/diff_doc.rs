@@ -357,7 +357,7 @@ impl DiffDoc {
                         let lead = if indent == 0 {
                             Span::raw("")
                         } else if n == 0 {
-                            Span::styled(format!("{sha} "), Style::default().fg(th.accent))
+                            Span::styled(format!("{sha} "), Style::default().fg(th.muted))
                         } else {
                             Span::raw(" ".repeat(indent))
                         };
@@ -460,10 +460,13 @@ impl DiffDoc {
         let code = cols.code();
         let num_w = self.num_w.max(1);
         let (mark, mark_style) = match sign {
-            Sign::Add => ("+", Style::default().fg(th.ok).add_modifier(Modifier::BOLD)),
+            Sign::Add => (
+                "+",
+                Style::default().fg(th.added).add_modifier(Modifier::BOLD),
+            ),
             Sign::Del => (
                 "−",
-                Style::default().fg(th.err).add_modifier(Modifier::BOLD),
+                Style::default().fg(th.removed).add_modifier(Modifier::BOLD),
             ),
             Sign::Context => (" ", Style::default()),
         };

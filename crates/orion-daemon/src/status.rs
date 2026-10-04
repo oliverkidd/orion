@@ -281,8 +281,9 @@ pub struct AgentStatusMachine {
     /// said anything — a launch handed a first prompt (see
     /// [`AgentStatusMachine::launching`]). The one `9;4;0` such a CLI
     /// prints as it draws its input box is the boot, not that turn ending,
-    /// so it is swallowed once. Any other event is real news and spends
-    /// the reprieve.
+    /// so it is swallowed once. Any other event but the CLI's own
+    /// `SessionStart` (the boot again, racing that clear) is real news and
+    /// spends the reprieve.
     launch_idle_pending: bool,
     /// Set by the daemon while a `orion worktree` relocation waits on
     /// this turn's end — refreshed from its own record before every event
@@ -401,8 +402,18 @@ impl AgentStatusMachine {
         // Every event but the swallowed startup progress-clear below is
         // news from the CLI, so an optimistic launch's reprieve lasts
         // exactly until the first of them (foreign traffic returned above
-        // without spending it).
-        let launch_idle_pending = std::mem::take(&mut self.launch_idle_pending);
+        // without spending it). `SessionStart` is the one exception: it is
+        // the boot announcing itself, not the turn — it moves no status —
+        // and its POST and the boot's `9;4;0` off the PTY travel separate
+        // tasks, so it can land first. Spending the reprieve on it let the
+        // boot clear through as the launched turn's end: the row flashed
+        // green, and the DONE SOUND rang, a second after every launch with
+        // a first prompt.
+        let launch_idle_pending = if matches!(event, HookEvent::SessionStart { .. }) {
+            self.launch_idle_pending
+        } else {
+            std::mem::take(&mut self.launch_idle_pending)
+        };
 
         let was_waiting = self.status == AgentStatus::NeedsFeedback;
         match event {
@@ -1650,6 +1661,48 @@ mod tests {
             "the CREATE already said running, so the status does not move: {fx:?}"
         );
         let fx = progress(&mut m, false, now + Duration::from_secs(4));
+        assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
+    }
+
+    /// The CLI's `SessionStart` is the boot, not news of the turn: its POST
+    /// can beat the boot's `9;4;0` off the PTY, and must leave the reprieve
+    /// for it — spent there, the clear read as the launched turn ending and
+    /// the row went green (and rang) a second after the launch. The turn
+    /// itself then runs and ends as any other.
+    #[test]
+    fn session_start_leaves_the_launch_reprieve_for_the_boot_clear() {
+        let mut m = AgentStatusMachine::launching();
+        let now = t0();
+        let fx = m.handle(
+            HookEvent::SessionStart {
+                source: Some("startup".into()),
+            },
+            Some("s1"),
+            now,
+        );
+        assert_eq!(status_of(&fx), None, "{fx:?}");
+
+        let fx = progress(&mut m, false, now + Duration::from_millis(300));
+        assert!(fx.is_empty(), "the boot clear is still swallowed: {fx:?}");
+        assert_eq!(m.status(), AgentStatus::Running);
+
+        // The launched turn: its prompt, then its real end.
+        let fx = m.handle(
+            HookEvent::UserPromptSubmit,
+            Some("s1"),
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(status_of(&fx), None, "already running: {fx:?}");
+        let fx = m.handle(HookEvent::Stop, Some("s1"), now + Duration::from_secs(9));
+        assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
+
+        // And with the turn's own progress edges in place of its hooks: the
+        // reprieve went with the boot clear, so the turn's clear ends it.
+        let mut m = AgentStatusMachine::launching();
+        m.handle(HookEvent::SessionStart { source: None }, Some("s1"), now);
+        assert!(progress(&mut m, false, now + Duration::from_millis(300)).is_empty());
+        assert!(progress(&mut m, true, now + Duration::from_secs(1)).is_empty());
+        let fx = progress(&mut m, false, now + Duration::from_secs(9));
         assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
     }
 

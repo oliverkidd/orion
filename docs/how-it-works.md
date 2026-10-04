@@ -147,11 +147,11 @@
   right-click menu has the DAEMON start `run` in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
-  card's green `▶`; **Stop run** kills the process tree and drops the row. The idle reaper and the prewarm
+  card's `▶`; **Stop run** kills the process tree and drops the row. The idle reaper and the prewarm
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
   the ending instead of respawning — a command starts only when you pick **Run**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#the-project-file-orionjson).
-- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New session** first asks which CLI to
+- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree. Claude's picker can also dispatch a one-shot Cloud task as
   `claude --cloud=<task>`; because Claude accepts that description as a process argument, don't put
   secrets in the Cloud task. That CLI prints the new session's id and exits, and the DAEMON reads the
@@ -193,6 +193,10 @@
   suppresses the idle notification that normally un-sticks one, so orion also reads the CLI's terminal
   progress-bar escapes (OSC 9;4) straight off the PTY. That signal survives a cancel, and it stays busy
   while a permission prompt is open — so it can't mark an agent done while it is actually waiting on you.
+  A session launched with its first prompt is shown running from the moment it spawns, and the one
+  progress clear its CLI prints while it boots is ignored — even when the CLI's `SessionStart` hook,
+  which travels a different path, lands ahead of it — so a launch never flashes green, or rings the
+  done sound, a second after it starts.
 - **…and the IDLE PROMPT, which is a hold rather than a finish.** Claude posts a
   `Notification{idle_prompt}` after roughly 60 s parked at the input box with nobody touching the
   keyboard, and that is the notification which un-sticks a turn that ended without a `Stop` — a
@@ -217,14 +221,14 @@
   back to running, on the reading that the `Stop` raced that subagent's own POST. When the set never
   drains, a subagent that has shown no sign of life for 30 min — no `SubagentStart`/`SubagentStop`, no
   subagent tool traffic — is presumed killed and the turn finishes anyway. That last grace is why a
-  session whose worker died can sit yellow far longer than you expect, and it is generous on purpose:
-  one silent `cargo test` can run for many minutes, and a wrong green is the bug it exists to prevent.
+  session whose worker died can sit working far longer than you expect, and it is generous on purpose:
+  one silent `cargo test` can run for many minutes, and a wrong finish is the bug it exists to prevent.
   An individually tracked subagent older than 2 h is dropped from the set outright.
 - **Answering is a hook too — just not its own.** Approving a permission prompt fires nothing: the
   gated tool simply runs, and its `PostToolUse` is the first word that you said yes. So the
   `PostToolUse` group is unmatched — every tool's end reaches orion — and a tool event from the same
   origin as the open dialog (the foreground turn, or the one subagent whose prompt it was) moves the
-  row from red back to yellow; another subagent's traffic says nothing about a dialog it did not
+  row from red back to working; another subagent's traffic says nothing about a dialog it did not
   raise. An `AskUserQuestion` is answered only by that tool's own `PostToolUse`: Claude runs a question
   alongside the other calls of the response that asked it, so a read-only `Bash` or `Read` batched
   beside it finishes with the question still on screen, and its tool events leave the row red. The
@@ -250,7 +254,7 @@
   (`~/.pi/agent/extensions/orion.ts`, or `$PI_CODING_AGENT_DIR/extensions/` — global because pi loads
   those without the trust prompt a per-project `.pi/extensions/` raises) that maps pi's events onto the
   same names: `session_start` → `SessionStart`, `before_agent_start` → `UserPromptSubmit`,
-  `agent_end` → `Stop` (it fires on an abort too, so a cancelled pi turn goes green on its own), the
+  `agent_end` → `Stop` (it fires on an abort too, so a cancelled pi turn finishes on its own), the
   `ask_question` tool's start and end → `PreToolUse` / `PostToolUse`, and a blocking extension prompt
   mid-run → `PermissionRequest`. The file is env-guarded, so a `pi` you run outside orion loads it and
   does nothing. OpenCode runs TypeScript plugins the same way, so orion writes one managed plugin into
@@ -258,7 +262,7 @@
   — globbed at startup with no trust prompt, and always on the list whatever `OPENCODE_CONFIG_DIR` adds)
   that maps its server events onto the same names: `chat.message` → `UserPromptSubmit` (the typed text
   along for RECENT PROMPTS), `session.status` idle / `session.idle` → `Stop` (an abort ends the same way,
-  so a cancelled turn goes green on its own), `permission.asked` → `PermissionRequest` and
+  so a cancelled turn finishes on its own), `permission.asked` → `PermissionRequest` and
   `permission.replied` → the gated tool's `PostToolUse` (the one hook an approval fires), and the
   `question` tool's `question.asked` / `question.replied` → `PreToolUse` / `PostToolUse`. A subagent
   session's prompts post under the root session's id with the child as the origin, so its answer is its
@@ -299,8 +303,7 @@
   model's context and no extra turn runs. See [Sessions](sessions.md#recent-prompts).
 - **The header counts what is waiting on the repo.** The GRID's header says
   `4 sessions  3 prs · 2 issues` for the
-  selected project, the pull requests in the accent the PULL REQUESTS MODAL's rows wear and the
-  issues in green — the open
+  selected project, both counts muted, a count being a fact rather than a status — the open
   pull requests the OPEN PRS sweep already keeps warm for every project (drafts left out while
   `hide_draft_prs` is on), and the open issues, which a sweep of their own asks for one project per
   tick on a five-minute beat. Zero says nothing, and a narrow column
@@ -371,9 +374,9 @@ state and marking a failed check on its Checks tab),
 for as long as the checkout does — a worktree whose PR has shipped is the one
 you are about to archive or delete, and the PR is what you check first. A merged one also takes over the
 checkout's band: purple dot and purple branch name, so the checkout to
-delete stands out from across the room (a session still running or asking there keeps its yellow or red —
-that is not a checkout to pull out from under it). The name sweeps the way a running row's does for about
-five seconds after orion sees the merge land, then holds still in solid purple — nothing about a landed
+delete stands out from across the room (a session still running or asking there keeps the band as it was —
+that is not a checkout to pull out from under it). The name sweeps once, for about five seconds after
+orion sees the merge land, then holds still in solid purple — nothing about a landed
 checkout is live, so it says so once; one found already merged (last run's cache, a first lookup) never
 sweeps, and a merged checkout left lying around costs an idle orion no repaints. Jump to it with
 `⌘K` and the pane reads the pull request as its [page](keys.md#the-pull-request-page) — description and

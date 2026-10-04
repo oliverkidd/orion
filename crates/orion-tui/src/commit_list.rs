@@ -193,12 +193,16 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
         return listing;
     }
     listing.base = resolve_base(root, base_setting);
-    let Some(merge_base) = listing.base.as_deref().and_then(|b| merge_base(root, b)) else {
+    let Some(merge_base) = listing
+        .base
+        .as_deref()
+        .and_then(|b| merge_base(root, "HEAD", b))
+    else {
         return listing;
     };
-    let total = count_since(root, &merge_base);
+    let total = count_since(root, &merge_base, "HEAD");
     if total > 0 {
-        listing.commits = read_page(root, &merge_base, 0).unwrap_or_else(|err| {
+        listing.commits = read_page(root, &merge_base, "HEAD", 0).unwrap_or_else(|err| {
             tracing::warn!(root = %root.display(), "{err}");
             Vec::new()
         });
@@ -209,25 +213,105 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
     listing
 }
 
+/// The COMMIT LIST of a pull request whose head commit `tip` this repo
+/// has — `event_loop::open_pr_review` — measured against `base`, the
+/// branch it merges into (origin's copy first, then a local one): its own
+/// commits, newest first, and no uncommitted row, since nothing checked
+/// out is being read. None when the repo has no such commit, no such
+/// base — never another branch standing in for it — or nothing in common
+/// with it: the pull request is read from GitHub instead.
+pub fn read_tip(root: &Path, base: &str, tip: &str) -> Option<CommitListing> {
+    if !has_commit(root, tip) {
+        return None;
+    }
+    let base = branch_ref(root, base)?;
+    let merge_base = merge_base(root, tip, &base)?;
+    let total = count_since(root, &merge_base, tip);
+    let commits = match total {
+        0 => Vec::new(),
+        _ => read_page(root, &merge_base, tip, 0).ok()?,
+    };
+    Some(CommitListing {
+        total: if commits.is_empty() { 0 } else { total },
+        base: Some(base),
+        merge_base: Some(merge_base),
+        head: Some(tip.to_string()),
+        commits,
+        uncommitted: None,
+    })
+}
+
 /// The ref the branch is measured against — see the module doc for the
 /// order. The setting is read the way the DAEMON reads it: trimmed, a
 /// leading `origin/` meaning the same as the bare name.
 pub fn resolve_base(root: &Path, base_setting: &str) -> Option<String> {
-    let name = base_setting.trim();
-    let name = name.strip_prefix("origin/").unwrap_or(name).trim();
-    if !name.is_empty() && name != "HEAD" {
-        if has_commit(root, &format!("refs/remotes/origin/{name}")) {
-            return Some(format!("origin/{name}"));
-        }
-        if has_commit(root, &format!("refs/heads/{name}")) {
-            return Some(name.to_string());
-        }
+    if let Some(base) = branch_ref(root, base_setting) {
+        return Some(base);
     }
     git_line(
         root,
         &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
     )
     .or_else(|| root_branch(root))
+}
+
+/// How many commits HEAD has that the base it is measured against
+/// ([`resolve_base`]) does not, and how many the base has that HEAD does
+/// not: a band's `⇡4 ⇣1`. The root's base is origin's copy of its own
+/// branch, so there the two are what is unpushed and what is unpulled as
+/// of the last fetch. One `git rev-list` over both sides; None when git
+/// cannot say — no base to measure against, or no commit yet.
+pub fn ahead_behind(root: &Path, base_setting: &str) -> Option<(usize, usize)> {
+    let base = resolve_base_cached(root, base_setting)?;
+    let range = format!("HEAD...{base}");
+    let line = git_line(root, &["rev-list", "--left-right", "--count", &range])?;
+    let mut counts = line.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind))) => Some((ahead, behind)),
+        _ => None,
+    }
+}
+
+/// How long [`ahead_behind`] trusts a base it resolved: the setting and
+/// `origin/HEAD` it comes from rarely change, and resolving takes up to four
+/// git processes on a poll that runs every couple of seconds.
+const BASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`resolve_base`] for `root` and `base_setting`, kept for [`BASE_TTL`].
+fn resolve_base_cached(root: &Path, base_setting: &str) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    type Resolved = HashMap<(std::path::PathBuf, String), (Instant, Option<String>)>;
+    static BASES: OnceLock<Mutex<Resolved>> = OnceLock::new();
+    let bases = BASES.get_or_init(Default::default);
+    let key = (root.to_path_buf(), base_setting.to_string());
+    if let Ok(known) = bases.lock() {
+        if let Some((_, base)) = known.get(&key).filter(|(at, _)| at.elapsed() < BASE_TTL) {
+            return base.clone();
+        }
+    }
+    let base = resolve_base(root, base_setting);
+    if let Ok(mut known) = bases.lock() {
+        known.insert(key, (Instant::now(), base.clone()));
+    }
+    base
+}
+
+/// The ref a branch named `name` is read from: origin's copy when origin
+/// has one — `origin/<name>` — else the local branch. A leading `origin/`
+/// means the same as the bare name. None for no name, for `HEAD` (always
+/// this checkout's, never a branch anyone meant) and for a branch the
+/// repo has neither of.
+pub(crate) fn branch_ref(root: &Path, name: &str) -> Option<String> {
+    let name = name.trim();
+    let name = name.strip_prefix("origin/").unwrap_or(name).trim();
+    if name.is_empty() || name == "HEAD" {
+        return None;
+    }
+    if has_commit(root, &format!("refs/remotes/origin/{name}")) {
+        return Some(format!("origin/{name}"));
+    }
+    has_commit(root, &format!("refs/heads/{name}")).then(|| name.to_string())
 }
 
 /// The branch the ROOT WORKTREE has checked out — `git worktree list`
@@ -244,19 +328,21 @@ fn root_branch(root: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-fn has_commit(root: &Path, full_ref: &str) -> bool {
-    let spec = format!("{full_ref}^{{commit}}");
+/// Whether `rev` — a full ref, a sha — names a commit this repo has.
+fn has_commit(root: &Path, rev: &str) -> bool {
+    let spec = format!("{rev}^{{commit}}");
     git_line(root, &["rev-parse", "--verify", "--quiet", &spec]).is_some()
 }
 
-fn merge_base(root: &Path, base: &str) -> Option<String> {
-    git_line(root, &["merge-base", "HEAD", base])
+fn merge_base(root: &Path, tip: &str, base: &str) -> Option<String> {
+    git_line(root, &["merge-base", tip, base])
 }
 
-/// How many of its own commits HEAD has past `merge_base` — no diffs, so
-/// it costs the same for three commits as for three hundred.
-fn count_since(root: &Path, merge_base: &str) -> usize {
-    let range = format!("{merge_base}..HEAD");
+/// How many of its own commits `tip` — HEAD, or a pull request's head —
+/// has past `merge_base`: no diffs, so it costs the same for three commits
+/// as for three hundred.
+fn count_since(root: &Path, merge_base: &str, tip: &str) -> usize {
+    let range = format!("{merge_base}..{tip}");
     let mut args = vec!["rev-list", "--count"];
     args.extend(OWN_LINE);
     args.push(&range);
@@ -273,11 +359,16 @@ fn git_line(root: &Path, args: &[&str]) -> Option<String> {
     (output.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// One page of the branch's own commits, newest first: the `skip` newest
-/// left out, [`COMMIT_PAGE`] at most, each with its counts. `Err` is a
-/// user-facing message.
-pub fn read_page(root: &Path, merge_base: &str, skip: usize) -> Result<Vec<Commit>, String> {
-    let range = format!("{merge_base}..HEAD");
+/// One page of the branch's own commits up to `tip`, newest first: the
+/// `skip` newest left out, [`COMMIT_PAGE`] at most, each with its counts.
+/// `Err` is a user-facing message.
+pub fn read_page(
+    root: &Path,
+    merge_base: &str,
+    tip: &str,
+    skip: usize,
+) -> Result<Vec<Commit>, String> {
+    let range = format!("{merge_base}..{tip}");
     let max = format!("--max-count={COMMIT_PAGE}");
     let skip = format!("--skip={skip}");
     let mut args = vec![
@@ -557,6 +648,30 @@ impl CommitList {
         } else {
             self.ticked.extend((0..self.commits.len()).map(Row::Commit));
         }
+    }
+
+    /// `row` alone on screen: nothing ticked, the cursor on it — a pull
+    /// request opened on one of its commits.
+    pub fn show_only(&mut self, row: Row) {
+        let Some(index) = self.index_of(row) else {
+            return;
+        };
+        self.ticked.clear();
+        self.step = None;
+        self.one_at_a_time = false;
+        self.select(index as i64);
+    }
+
+    /// Read the ticked ONE AT A TIME from the oldest — the **Ticked
+    /// commits** SETTING's `one at a time`, as a viewer opens. Nothing
+    /// changes with fewer than two ticked.
+    pub fn start_one_at_a_time(&mut self) {
+        if self.ticked.len() < 2 {
+            return;
+        }
+        self.one_at_a_time = true;
+        self.step = self.steps().first().copied();
+        self.follow_step();
     }
 
     /// `^G`: TOGETHER and ONE AT A TIME, the other way round. Stepping
@@ -877,7 +992,11 @@ impl CommitList {
 /// Put the COMMIT LIST read with the viewer's opening into `view` and put
 /// up what it opens on: a clean checkout's whole branch, ticked.
 pub fn install(view: &mut DiffView, listing: CommitListing) {
-    view.commits = Some(Box::new(CommitList::from_listing(listing)));
+    let mut list = CommitList::from_listing(listing);
+    if view.open_one_at_a_time {
+        list.start_one_at_a_time();
+    }
+    view.commits = Some(Box::new(list));
     show_selected(view);
 }
 
@@ -1013,6 +1132,11 @@ pub fn land_scope(
     view.cache.clear();
     view.waiting = None;
     view.replace_files(files);
+    // A file asked for before this scope's files were read — a pull
+    // request's, from its Changes tab.
+    if let Some(path) = view.want_path.take() {
+        view.select_path(&path);
+    }
     view.show_diff(None, String::new(), false);
     match error {
         Some(msg) => view.show_diff(None, msg, false),
@@ -1049,6 +1173,9 @@ fn request_page(view: &mut DiffView) {
     if list.paging.is_some() || !list.has_older() {
         return;
     }
+    // The commit the first page was read down from: HEAD as it was, or a
+    // pull request's head.
+    let tip = list.head.clone().unwrap_or_else(|| "HEAD".into());
     let skip = list.commits.len();
     let ticket = crate::view_jobs::ticket();
     list.paging = Some(ticket);
@@ -1056,11 +1183,11 @@ fn request_page(view: &mut DiffView) {
         Some(jobs) => jobs.run(move || {
             Some(Answer::CommitPage {
                 ticket,
-                result: read_page(&root, &merge_base, skip),
+                result: read_page(&root, &merge_base, &tip, skip),
             })
         }),
         None => {
-            let result = read_page(&root, &merge_base, skip);
+            let result = read_page(&root, &merge_base, &tip, skip);
             land_page(view, ticket, result);
         }
     }
@@ -1119,6 +1246,24 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// A branch's commits ahead of and behind its base: `feat` two commits
+    /// on, and `main` — origin's copy, as a fetch leaves it — one on since
+    /// `feat` was cut. Level with it, both are 0.
+    #[test]
+    fn ahead_behind_counts_both_sides_of_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = branch_repo(&dir);
+        assert_eq!(ahead_behind(&repo, ""), Some((0, 0)));
+        commit(&repo, "a.txt", "a\n", "feat: a");
+        commit(&repo, "b.txt", "b\n", "feat: b");
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, "m.txt", "m\n", "main: m");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "feat"]);
+        assert_eq!(ahead_behind(&repo, ""), Some((2, 1)));
+        assert_eq!(ahead_behind(&repo, "origin/main"), Some((2, 1)));
+    }
+
     /// A repo on `main` with one commit, `origin/HEAD` pointing at it — the
     /// shape a worktree cut by the DAEMON sees — and `feat` checked out on
     /// top of it.
@@ -1158,6 +1303,32 @@ mod tests {
         git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         git(repo, &["checkout", "-q", "feat"]);
         git(repo, &["merge", "-q", "--no-edit", "main"]);
+    }
+
+    /// A pull request's commits are listed down from its head commit, not
+    /// from wherever the checkout is: another branch checked out lists the
+    /// same, there is no uncommitted row, and paging reads on from the
+    /// same tip. A head or a base the repo does not have lists nothing.
+    #[test]
+    fn a_pull_requests_commits_are_read_from_its_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = branch_repo(&dir);
+        commit(&repo, "a.txt", "a\n", "first");
+        commit(&repo, "b.txt", "b\n", "second");
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("dirty.txt"), "x\n").unwrap();
+        let listing = read_tip(&repo, "main", &tip).expect("the tip is here");
+        assert_eq!(listing.base.as_deref(), Some("origin/main"));
+        assert_eq!(listing.head.as_deref(), Some(tip.as_str()));
+        assert_eq!(listing.total, 2);
+        let subjects: Vec<&str> = listing.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["second", "first"]);
+        assert!(listing.uncommitted.is_none(), "nothing checked out is read");
+        let list = CommitList::from_listing(listing);
+        assert!(list.all_ticked(), "the whole pull request");
+        assert!(read_tip(&repo, "release", &tip).is_none(), "no such base");
+        assert!(read_tip(&repo, "main", &"0".repeat(40)).is_none());
     }
 
     #[test]

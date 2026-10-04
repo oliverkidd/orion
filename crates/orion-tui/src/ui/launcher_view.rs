@@ -8,9 +8,9 @@
 
 use super::{
     ago_badge, below_first_row, centered_rect, empty_list_row, fit_ago, fuzzy_highlight_spans,
-    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_dot,
-    status_name_spans, sweep_ramp, truncate, visible_positions, NO_MATCHES, OVER_BOX_INSET,
-    PENDING_SESSION_BADGE,
+    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_color, status_dot,
+    status_name_spans, sweep_ramp, truncate, visible_positions, wants_you, NO_MATCHES,
+    OVER_BOX_INSET, PENDING_SESSION_BADGE,
 };
 use crate::app::{App, Focus, HitTarget, Overlay};
 use crate::keymap::Action;
@@ -120,9 +120,23 @@ fn settle_panel_scroll(
     if let Some(index) = cursor {
         let band = &bands[index];
         let at = crate::launcher::card_cursor(app, band);
-        let on = at.and_then(|i| band.cards.get(i)).map(|c| c.sref());
+        // Off the cards, the cursor may be on a line of the band's
+        // ARCHIVED DRAWER: that line is what to keep on screen.
+        let drawer_at = at
+            .is_none()
+            .then(|| crate::launcher::drawer_cursor(app, band))
+            .flatten();
+        let on = match drawer_at {
+            Some(e) => Some(orion_core::SessionRef::Agent(
+                band.drawer()[e].agent.id.clone(),
+            )),
+            None => at.and_then(|i| band.cards.get(i)).map(|c| c.sref()),
+        };
         if app.launcher_reveal || !app.launcher_scroll_held || app.launcher_scroll_on != on {
-            scroll = panel.reveal(scroll, index, at);
+            scroll = match drawer_at {
+                Some(e) => panel.reveal_drawer(scroll, index, e),
+                None => panel.reveal(scroll, index, at),
+            };
             app.launcher_scroll_held = false;
             app.launcher_scroll_on = on;
         }
@@ -206,12 +220,13 @@ fn draw_head(f: &mut Frame, app: &mut App, body: Rect, count: HeadCount, hidden:
 /// tab (`event_loop::launcher::open_project_menu`). A right-click on a
 /// tab opens that project with its menu over it.
 ///
-/// Each tab carries its project's STATUS DOTS after the name — waiting on
-/// you (red), finished unread (blue), working (yellow), each with its
-/// count and no word ([`tab_dots`]) — so a project that wants you says so
-/// from the header, whichever project the grid is on. Its name sweeps on
-/// the loudest of the three ([`tab_ramp`]), so the tab says it in motion
-/// too.
+/// Each tab carries its project's STATUS MARKS after the name — waiting
+/// on you, crashed, finished unread, working — each with its count and
+/// no word ([`tab_dots`]), so a project that wants you says so from the
+/// header, whichever project the grid is on. An unlit tab's name
+/// shimmers while a finish there is unread, and sweeps red once when
+/// something there starts needing you ([`tab_ramp`]), so the tab says it
+/// in motion too; the lit tab holds still.
 ///
 /// The hit rects are laid down as the spans are measured, so a click
 /// lands on the tab itself and never on the air between two, and the
@@ -445,22 +460,19 @@ fn fit_tabs(
 
 /// The STATUS DOTS the tabs at `ids` would carry between them.
 fn tally_of(tabs: &[ProjectTab], ids: &[usize]) -> Tally {
-    ids.iter().fold(Tally::default(), |sum, &i| Tally {
-        needs_you: sum.needs_you + tabs[i].tally.needs_you,
-        done: sum.done + tabs[i].tally.done,
-        running: sum.running + tabs[i].tally.running,
-    })
+    ids.iter()
+        .fold(Tally::default(), |sum, &i| sum.plus(tabs[i].tally))
 }
 
 /// What the MORE CHIP says it drops, after the count.
 const MORE_CARET: &str = " ▾ ";
 
 /// The MORE CHIP: ` 2 more ●1 ▾ ` — how many PROJECT TABS the row had no
-/// room for, the STATUS DOTS they carry between them, and the caret that
-/// says a click lists them. Its words sweep on the loudest of those dots
-/// ([`tab_ramp`]) as a tab's name does, so a project off the row that is
-/// waiting on you is still seen moving in the header. Underlined under
-/// the pointer, as the tabs are.
+/// room for, the STATUS MARKS they carry between them, and the caret that
+/// says a click lists them. Its words sweep as a tab's name does
+/// ([`tab_ramp`]), so a project off the row with a finish nobody has read
+/// is still seen moving in the header. Underlined under the pointer, as
+/// the tabs are.
 fn more_chip(
     count: usize,
     tally: Tally,
@@ -480,7 +492,7 @@ fn more_chip(
         ramp,
         sweep.unwrap_or(0),
     ));
-    spans.extend(tab_dots(tally, th));
+    spans.extend(tab_dots(tally, sweep, th));
     spans.push(Span::styled(MORE_CARET, Style::default().fg(th.dim)));
     PaneTab {
         spans,
@@ -489,17 +501,20 @@ fn more_chip(
 }
 
 /// One PROJECT TAB, as two hits side by side: the tab — its name and its
-/// STATUS DOTS — and the `×` that closes it, a target of its own so a
+/// STATUS MARKS — and the `×` that closes it, a target of its own so a
 /// click on the cross never reads as a click on the tab. The lit tab is a
 /// raised chip, pads and all, with its name in the accent; the rest sit
-/// flat and muted. The name is cut to `name_max`. Every tab closes, the
-/// last one included: that one closes to the splash.
+/// flat — the name bright while something in the project wants you, dim
+/// while nothing does. The name is cut to `name_max`. Every tab closes,
+/// the last one included: that one closes to the splash.
 ///
 /// `sweep` is the frame's sweep phase, `None` with the animations off:
-/// with it, the name sweeps on the loudest thing its sessions are doing
-/// ([`tab_ramp`]) — lit or not, since the tab is what says so from
-/// another project. The header's cursor holds still, so the block that
-/// says where Enter goes stays legible.
+/// with it, an unlit tab's name sweeps while its project has a finish
+/// nobody has read, or something there just started needing you
+/// ([`tab_ramp`]) — the tab is what says so from another project. The lit
+/// tab never sweeps: its accent is what says where you are, and the rows
+/// under it already say the rest. Nor does the header's cursor, so the
+/// block that says where Enter goes stays legible.
 fn project_chip(
     tab: &ProjectTab,
     name_max: usize,
@@ -514,10 +529,13 @@ fn project_chip(
             style
         }
     };
+    let wants = tab.tally.wants_you();
     let mut name = if tab.active {
         Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
+    } else if wants {
+        Style::default().fg(th.text)
     } else {
-        Style::default().fg(th.muted)
+        Style::default().fg(th.dim)
     };
     if hover == Some(&HitTarget::LauncherTab(tab.id.clone())) {
         name = name.add_modifier(Modifier::UNDERLINED);
@@ -531,7 +549,7 @@ fn project_chip(
         (fill(Style::default()), fill(name))
     };
     let (ramp, phase) = match sweep {
-        Some(phase) if !tab.focused => (tab_ramp(tab.tally, th), phase),
+        Some(phase) if !tab.focused && !tab.active => (tab_ramp(tab.tally, th), phase),
         _ => (None, 0),
     };
     let mut label = vec![Span::styled(" ", pad)];
@@ -542,7 +560,7 @@ fn project_chip(
         phase,
     ));
     label.extend(
-        tab_dots(tab.tally, th)
+        tab_dots(tab.tally, sweep, th)
             .into_iter()
             .map(|dot| Span::styled(dot.content, fill(dot.style))),
     );
@@ -551,7 +569,7 @@ fn project_chip(
     } else if tab.active {
         th.muted
     } else {
-        th.dim
+        th.faint
     };
     [
         PaneTab {
@@ -565,36 +583,42 @@ fn project_chip(
     ]
 }
 
-/// A PROJECT TAB's STATUS DOTS: one per state its sessions are in, each
-/// carrying that state's count and no word at all, so the header is read
-/// at a glance rather than parsed. Waiting on you leads (red), then
-/// finished unread (blue), then working (yellow) — the three a row's own
-/// STATUS DOT wears. A state with nothing in it is left out, so a quiet
-/// project is its bare name — and because the order is fixed, the dots
-/// that are there never move as the work under them does.
-fn tab_dots(tally: Tally, th: Theme) -> Vec<Span<'static>> {
+/// A PROJECT TAB's STATUS MARKS: one per state its sessions are in, each
+/// the mark a row in that state wears, carrying the state's count and no
+/// word at all, so the header is read at a glance rather than parsed. In
+/// the attention order — waiting on you (`●`, crimson), crashed (`✕`),
+/// finished unread (`●`, the done color), then working (the gold
+/// spinner, turning with `sweep`). A state with nothing in it is left
+/// out, so a quiet project is its bare name — and because the order is
+/// fixed, the marks that are there never move as the work under them does.
+fn tab_dots(tally: Tally, sweep: Option<usize>, th: Theme) -> Vec<Span<'static>> {
+    use orion_core::AgentStatus;
+    let spin = sweep.map(crate::app::spin_step);
     [
-        (tally.needs_you, th.err),
-        (tally.done, th.done),
-        (tally.running, th.warn),
+        (tally.needs_you, Some(AgentStatus::NeedsFeedback), false),
+        (tally.failed, Some(AgentStatus::Terminated), false),
+        (tally.done, Some(AgentStatus::Finished), true),
+        (tally.running, Some(AgentStatus::Running), false),
     ]
     .into_iter()
-    .filter(|(n, _)| *n > 0)
-    .map(|(n, color)| Span::styled(format!(" ●{n}"), Style::default().fg(color)))
+    .filter(|(n, _, _)| *n > 0)
+    .map(|(n, status, unseen)| {
+        let mark = status_dot(status, unseen, spin, th);
+        Span::styled(format!(" {}{n}", mark.content.trim_end()), mark.style)
+    })
     .collect()
 }
 
-/// The ramp a PROJECT TAB's name sweeps on: red while any of its sessions
-/// waits on you, whatever else is going on; yellow while any is mid-turn;
-/// and blue once none is, for as long as a finish is left unread — the
-/// project's work is done and you have not looked. A quiet project holds
-/// still. Unlike a card's ONE-SHOT SWEEP the blue lasts, since the tab is
-/// how a finish in a project you are not on gets noticed at all.
+/// The ramp an unlit PROJECT TAB's name sweeps on: the red ONE-SHOT SWEEP
+/// for the few seconds after something there starts needing you or
+/// crashes, and otherwise the UNREAD SHIMMER for as long as a finish
+/// there is left unread — the tab is how a finish in a project you are
+/// not on gets noticed at all, so it keeps moving until you look. A
+/// project with neither holds still, running or not: work in progress is
+/// the spinner's to say.
 fn tab_ramp(tally: Tally, th: Theme) -> Option<[Color; 3]> {
-    if tally.needs_you > 0 {
+    if tally.alarm {
         Some(th.err_sweep)
-    } else if tally.running > 0 {
-        Some(th.warn_sweep)
     } else if tally.done > 0 {
         Some(th.done_sweep)
     } else {
@@ -728,7 +752,7 @@ fn hidden_mark(hidden: Hidden, th: Theme) -> Vec<Span<'static>> {
     )]
 }
 
-fn plural(n: usize) -> &'static str {
+pub(super) fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
     } else {
@@ -793,6 +817,8 @@ fn draw_bands(
     // does. Pushed after every card, rule and arrow so they keep their
     // own targets under `hit_at`'s first-match scan.
     let mut band_areas = Vec::with_capacity(bands.len());
+    let facts: Vec<RuleFacts> = bands.iter().map(|b| rule_facts(app, b, th)).collect();
+    let cols = RuleColumns::of(&facts);
     for (index, band) in bands.iter().enumerate() {
         let pb = &panel.bands[index];
         let whole = Rect {
@@ -834,6 +860,7 @@ fn draw_bands(
                 app,
                 placed.rect,
                 band,
+                &facts[index],
                 BandRule {
                     index,
                     on,
@@ -842,10 +869,31 @@ fn draw_bands(
                         Some(strip) => strip.hidden(),
                         None => pb.content.as_ref().map_or(0, |c| c.more),
                     },
+                    cols,
                 },
             );
             app.hits.extend(hits);
         }
+        // The ARCHIVED DRAWER under everything else the band draws: its
+        // `▸ N archived` line, and its sessions a faint line apiece once
+        // unfolded.
+        draw_drawer(
+            f,
+            app,
+            g,
+            pb,
+            DrawerBand {
+                index,
+                band,
+                window,
+                scroll,
+                at: on
+                    .then(|| crate::launcher::drawer_cursor(app, band))
+                    .flatten(),
+                lit: on && keys,
+            },
+            &mut cfg,
+        );
         if band.cards.is_empty() {
             draw_empty_band(f, app, g, pb, (window, scroll), on && keys);
             continue;
@@ -1228,6 +1276,117 @@ struct StripMore {
     centered: bool,
 }
 
+/// One band's ARCHIVED DRAWER as [`draw_drawer`] draws it.
+struct DrawerBand<'a> {
+    index: usize,
+    band: &'a crate::launcher::Band,
+    window: Rect,
+    scroll: u16,
+    /// The drawer line the cursor is on, when it is on one.
+    at: Option<usize>,
+    /// The cursor is on the band, with the keys on the grid.
+    lit: bool,
+}
+
+/// Columns an ARCHIVED DRAWER is set in from the band's edge, so its
+/// lines read as filed under the band rather than as a band of their own.
+const DRAWER_INDENT: u16 = 2;
+
+/// A band's ARCHIVED DRAWER: its `▸ 3 archived` line — `▾` once
+/// unfolded, naming the key that folds it while the band holds the
+/// cursor — and, unfolded, each archived session on a line of its own,
+/// drawn as the compact LIST draws an entry ([`draw_list_row`]) in an
+/// archived session's quiet colors, so the drawer reads as put away
+/// before a word of it is. A click on the first line folds or unfolds
+/// it (`HitTarget::LauncherDrawer`); on a session's, lands the cursor
+/// there (`HitTarget::LauncherDrawerEntry`).
+fn draw_drawer(
+    f: &mut Frame,
+    app: &mut App,
+    g: &crate::launcher::BandsLayout,
+    pb: &crate::launcher::PanelBand,
+    d: DrawerBand<'_>,
+    cfg: &mut Option<crate::config::Config>,
+) {
+    let DrawerBand {
+        index,
+        band,
+        window,
+        scroll,
+        at,
+        lit,
+    } = d;
+    if band.archived.is_empty() {
+        return;
+    }
+    let th = app.theme;
+    let inset = Rect {
+        x: g.area.x + DRAWER_INDENT.min(g.area.width),
+        width: g.area.width.saturating_sub(DRAWER_INDENT),
+        ..g.area
+    };
+    if let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_head(inset)) {
+        let hit = HitTarget::LauncherDrawer(index);
+        let hovered = app.hover_crumb.as_ref() == Some(&hit);
+        let fold = if band.drawer_open { "▾" } else { "▸" };
+        let mut spans = vec![Span::styled(
+            format!("{fold} {} archived", band.archived.len()),
+            Style::default().fg(if hovered { th.accent } else { th.dim }),
+        )];
+        if lit {
+            let key = crate::hints::key_or(&app.keymap, Action::ToggleArchivedDrawer, "");
+            if !key.is_empty() {
+                let does = if band.drawer_open { "hide" } else { "show" };
+                spans.push(Span::styled(" · ", Style::default().fg(th.dim)));
+                spans.push(Span::styled(
+                    key,
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {does}"),
+                    Style::default().fg(th.dim),
+                ));
+            }
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), placed.rect);
+        app.hits.push((placed.rect, hit));
+    }
+    let drawer = band.drawer();
+    if drawer.is_empty() {
+        return;
+    }
+    let cards: Vec<crate::launcher::Card> = drawer
+        .iter()
+        .cloned()
+        .map(crate::launcher::Card::Session)
+        .collect();
+    let mut cols = (0, 0);
+    for row in drawer {
+        cols = (
+            cols.0.max(row.agent.name.chars().count()),
+            cols.1.max(runs_on_line(&row.agent, cfg).chars().count()),
+        );
+    }
+    let cols = (cols.0.min(LIST_NAME_MAX), cols.1.min(LIST_RUNS_MAX));
+    for (i, card) in cards.iter().enumerate() {
+        let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_row(inset, i)) else {
+            continue;
+        };
+        let selected = at == Some(i);
+        draw_list_row(
+            f.buffer_mut(),
+            app,
+            placed.rect,
+            card,
+            (selected, selected && lit),
+            cols,
+            cfg,
+        );
+        app.hits
+            .push((placed.rect, HitTarget::LauncherDrawerEntry(index, i)));
+    }
+}
+
 /// What the cursor's LIST entry wears in front of it.
 const LIST_MARK: &str = "▌ ";
 /// Columns a LIST entry spends before its name: the cursor mark and the
@@ -1408,20 +1567,13 @@ fn draw_list_row(
                 runs_style: Style::default().fg(quiet_or(th.dim)),
                 text_mark,
                 text,
-                text_style: Style::default().fg(quiet_or(th.muted)),
+                text_style: Style::default().fg(look.prompt),
                 badge: look.ago,
                 badge_style: look.ago_style,
             }
         }
         crate::launcher::Card::Terminal(t) => Entry {
-            lead: Span::styled(
-                if t.run_command.is_some() {
-                    "▶ "
-                } else {
-                    "❯ "
-                },
-                Style::default().fg(if t.alive { th.ok } else { th.dim }),
-            ),
+            lead: terminal_mark(t, th),
             name: t.name.clone(),
             name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
             ramp: None,
@@ -1440,7 +1592,7 @@ fn draw_list_row(
             } else {
                 EXITED_BADGE.into()
             },
-            badge_style: Style::default().fg(th.err),
+            badge_style: Style::default().fg(th.exited),
         },
     };
     let mut spans = vec![mark, e.lead];
@@ -1567,19 +1719,173 @@ struct BandRule {
     lit: bool,
     /// Cards its row had no room for — always 0 once the band is open.
     more: usize,
+    /// The widths the right-hand columns take on every rule of the grid.
+    cols: RuleColumns,
 }
 
-/// A BAND's rule: the checkout — `⌂ main` or `↳ feat` in the SCOPE
-/// COLOR, its uncommitted changes behind it in the heads-up color, its
-/// pull request in the PR rows' own colors — a rule to the right end,
-/// and there how many cards are under it (`2 sessions · 1 terminal`), or
-/// off its edges (`▸ 2 more`). On the band the cursor is on the
-/// branch is bold — this is what says which checkout the pane reads,
-/// since no card under it wears the cursor — and for as long as the keys
-/// are on it the rule wears the accent and opens on the CURSOR MARK `❯`
-/// instead of `──`; gray and unmarked like the rest once the keys are up
-/// on the PROJECT TABS or down in the pane. What Tab does to it is the
-/// FOOTER's to say.
+/// How many git counts a rule's right end has a column for: uncommitted
+/// files, lines added, lines removed, commits ahead, commits behind.
+const GIT_COLUMNS: usize = 5;
+
+/// The letters of a branch a rule keeps before anything at its right end
+/// gives way.
+const MIN_BRANCH_CELLS: usize = 8;
+
+/// The gap between the parts of a rule's right end: `▸ N more`, the pull
+/// request, the counts.
+const COLUMN_GAP: usize = 2;
+
+/// What a band's rule says at its right end ([`rule_facts`]): its pull
+/// request, `↗ #57 ready`, and its checkout's git counts, `*3 +60 −28 ⇡4
+/// ⇣1`, each in its own column.
+struct RuleFacts {
+    pr: Vec<Span<'static>>,
+    git: [Option<Span<'static>>; GIT_COLUMNS],
+}
+
+/// The width of each right-hand column on the grid's rules: as wide as
+/// the widest band's, so the pull requests and the counts line up down the
+/// grid, and a count turning up on one band moves nothing on any other.
+/// A column no band has anything in takes no room at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RuleColumns {
+    pr: usize,
+    git: [usize; GIT_COLUMNS],
+}
+
+impl RuleColumns {
+    fn of<'a>(facts: impl IntoIterator<Item = &'a RuleFacts>) -> Self {
+        let mut cols = Self::default();
+        for f in facts {
+            cols.pr = cols.pr.max(spans_width(&f.pr));
+            for (w, count) in cols.git.iter_mut().zip(&f.git) {
+                *w = (*w).max(count.as_ref().map_or(0, Span::width));
+            }
+        }
+        cols
+    }
+
+    fn git_width(&self) -> usize {
+        let shown = self.git.iter().filter(|w| **w > 0);
+        shown.clone().sum::<usize>() + shown.count().saturating_sub(1)
+    }
+
+    /// The cells the columns take, with the two-cell gap between the pull
+    /// request and the counts when both are there.
+    fn width(&self) -> usize {
+        let git = self.git_width();
+        let gap = if self.pr > 0 && git > 0 {
+            COLUMN_GAP
+        } else {
+            0
+        };
+        self.pr + gap + git
+    }
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+/// The cells a rule's right end takes around a block `block` wide: ` `
+/// before it and ` ──` after it — none with nothing there, where the rule
+/// runs on unbroken.
+fn rule_tail_width(block: usize) -> usize {
+    if block > 0 {
+        1 + block + 3
+    } else {
+        0
+    }
+}
+
+/// `band`'s [`RuleFacts`]. The pull request in the PR rows' own colors
+/// (`pr_row::look`) — its number and the state word, `ready`, `draft`,
+/// `merged`, or the trouble (`conflicts`, `failing`) in the needs-you
+/// crimson — and the counts as facts rather than statuses: the files in
+/// the diff's modified sand, the lines in its pastels, the commits muted.
+fn rule_facts(app: &App, band: &crate::launcher::Band, th: Theme) -> RuleFacts {
+    let pr = band.pr.as_ref().map_or_else(Vec::new, |pr| {
+        let look = crate::pr_row::look(pr.standing, pr.trouble, th);
+        let badge = (format!(" {}", pr.badge()), look.badge);
+        crate::pr_row::spans(look, &format!("#{}", pr.number), usize::MAX, Some(badge))
+    });
+    let files = app.worktree_changes(&band.worktree).filter(|n| *n > 0);
+    let lines = files.and(app.worktree_lines(&band.worktree));
+    let (ahead, behind) = app.worktree_ahead_behind(&band.worktree);
+    let count = |n: u64, sign: &str, color: Color| {
+        (n > 0).then(|| Span::styled(format!("{sign}{n}"), Style::default().fg(color)))
+    };
+    RuleFacts {
+        pr,
+        git: [
+            files.and_then(|n| count(n as u64, "*", th.modified)),
+            lines.and_then(|l| count(l.added, "+", th.added)),
+            lines.and_then(|l| count(l.removed, "−", th.removed)),
+            count(ahead as u64, "⇡", th.muted),
+            count(behind as u64, "⇣", th.muted),
+        ],
+    }
+}
+
+/// A checkout's SCOPE MARK, the one glyph ahead of its branch wherever
+/// the grid names it — a band's rule, the FOOTER's breadcrumb: `⌂` the
+/// root, `⎇` a worktree, and the merged purple `●` once its pull request
+/// has landed. Two cells each, so the branches start in one column.
+pub(super) fn scope_mark(
+    app: &App,
+    worktree: &orion_core::WorktreeId,
+    is_main: bool,
+) -> Span<'static> {
+    let th = app.theme;
+    if app.worktree_wears_merge(worktree) {
+        Span::styled("● ", Style::default().fg(th.merged))
+    } else if is_main {
+        Span::styled("⌂ ", Style::default().fg(th.muted))
+    } else {
+        Span::styled("⎇ ", Style::default().fg(th.dim))
+    }
+}
+
+/// The checkout's folder, when it is not just its branch spelt as a
+/// folder name (`/` as `-`): `feat/ui-redesign` checked out in `pawy`.
+/// Never for the root, whose folder is the project's.
+fn folder_if_differs(app: &App, band: &crate::launcher::Band) -> Option<String> {
+    if band.is_main {
+        return None;
+    }
+    let path = &app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| w.id == band.worktree)?
+        .path;
+    let dir = path.file_name()?.to_string_lossy().into_owned();
+    (dir != band.branch.replace('/', "-")).then_some(dir)
+}
+
+/// A BAND's rule: the checkout on the left — its SCOPE MARK, the branch
+/// and, after it, the folder when that says something the branch does not
+/// (`feat/ui-redesign in pawy`) — then the rule, and at the right end the
+/// pull request and the git counts in columns as wide on every band
+/// ([`RuleColumns`]), so the eye reads them down the grid and nothing
+/// shifts when one band's count changes. Cards hanging off the band's
+/// edges are counted just ahead of them (`▸ 2 more`).
+///
+/// On the band the cursor is on the branch is bold — this is what says
+/// which checkout the pane reads, since no card under it wears the
+/// cursor — and for as long as the keys are on it the rule wears the
+/// accent and opens on the CURSOR MARK `❯` instead of `──`; gray and
+/// unmarked like the rest once the keys are up on the PROJECT TABS or
+/// down in the pane. What Tab does to it is the FOOTER's to say.
+///
+/// A checkout whose pull request has landed is the MERGED BAND: the merged
+/// `●` for its mark and the branch in purple, so the one to delete stands
+/// out from across the room. Its branch sweeps once, for the few seconds
+/// after orion sees the merge land, then holds still.
+///
+/// A rule too narrow for all of it lets the folder go first, then the
+/// pull request's column, then the counts', then `▸ N more`, before the
+/// branch shortens past eight letters.
 /// Returns the rule's hits: the pull request ahead of the rule itself,
 /// so a click on `#42` opens it and one anywhere else lands on the band.
 fn draw_band_rule(
@@ -1587,78 +1893,40 @@ fn draw_band_rule(
     app: &App,
     r: Rect,
     band: &crate::launcher::Band,
+    facts: &RuleFacts,
     rule: BandRule,
 ) -> Vec<(Rect, HitTarget)> {
     let th = app.theme;
     let width = usize::from(r.width);
-    let BandRule { on, lit, more, .. } = rule;
+    let BandRule {
+        on,
+        lit,
+        more,
+        mut cols,
+        ..
+    } = rule;
     let edge = if lit { th.accent } else { th.edge };
     let dash = |n: usize| Span::styled("─".repeat(n), Style::default().fg(edge));
 
-    // The right end first, since the left gives way to it.
-    let right = {
-        let mut words = format!("{} session{}", band.sessions(), plural(band.sessions()));
-        if band.terminals() > 0 {
-            words.push_str(&format!(
-                " · {} terminal{}",
-                band.terminals(),
-                plural(band.terminals())
-            ));
-        }
-        let mut spans = vec![Span::styled(words, Style::default().fg(th.dim))];
-        if more > 0 {
-            spans.push(Span::styled(
-                format!("  ▸ {more} more"),
-                Style::default().fg(th.muted),
-            ));
-        }
-        // What Tab does on the band under the cursor — expand it, fold it
-        // back — is the FOOTER's to say (`ui::footer`): a rule is a
-        // divider, and a key spelled on one band of many read as clutter.
-        spans
-    };
-    let right_w: usize = right.iter().map(|s| s.width()).sum();
-
-    // The checkout, as the cards used to paint it: the glyph in its
-    // scope color never yields, the branch truncates around it.
-    let (glyph, scope) = if band.is_main {
-        ("⌂ ", th.root)
+    let merged = app.worktree_wears_merge(&band.worktree);
+    let branch_color = if merged {
+        th.merged
+    } else if band.is_main || on {
+        th.text
     } else {
-        ("↳ ", th.worktree)
+        th.muted
     };
-    let mut branch_style = Style::default().fg(scope);
+    let mut branch_style = Style::default().fg(branch_color);
     if on {
         branch_style = branch_style.add_modifier(Modifier::BOLD);
     }
-    // `── ` before, ` ` after the words, ` ` before the right end and
-    // ` ──` after it: what the words have to fit between.
-    let room = width.saturating_sub(3 + right_w + 5);
-    let changes = app
-        .worktree_changes(&band.worktree)
-        .filter(|n| *n > 0)
-        .map(|n| {
-            change_labels(
-                n,
-                app.worktree_lines(&band.worktree),
-                band.branch.chars().count(),
-                room.saturating_sub(glyph.chars().count()),
-            )
-        });
-    let taken = changes.as_ref().map_or(0, |(files, lines)| {
-        files.chars().count()
-            + lines.as_ref().map_or(0, |(added, removed)| {
-                added.chars().count() + removed.chars().count()
-            })
-    });
-    let branch = truncate(
-        &band.branch,
-        room.saturating_sub(glyph.chars().count() + taken),
-    );
+    let ramp = (app.animations && app.merge_sweeping(&band.worktree)).then_some(th.merged_sweep);
+
     // The rule's left end: `──` like every other band's, or the CURSOR
     // MARK `❯` on the one the keys are on — the mark a prompt puts before
     // the line that takes the keys, so a rule that looks like a divider
-    // reads as a row something can be done to. Two cells either way, so
-    // the checkouts stay in one column down the grid.
+    // reads as a row something can be done to. Two cells either way, then
+    // the two-cell SCOPE MARK, so the branches start in one column.
     let lead = if lit {
         Span::styled(
             "❯ ",
@@ -1667,75 +1935,145 @@ fn draw_band_rule(
     } else {
         dash(2)
     };
+    let lead_w = 2 + 1 + 2;
+    let mut more_label = (more > 0).then(|| format!("▸ {more} more"));
+    // What the right end takes: the `▸ N more` and the columns, with the
+    // tail around them; and the words need ` ` and two dashes after them.
+    let right_w = |cols: &RuleColumns, more: Option<&String>| {
+        let gap = if cols.width() > 0 { COLUMN_GAP } else { 0 };
+        let more_w = more.map_or(0, |m| m.chars().count() + gap);
+        1 + 2 + rule_tail_width(more_w + cols.width())
+    };
+    let keep = band.branch.chars().count().min(MIN_BRANCH_CELLS);
+    let crowded =
+        |cols: &RuleColumns, more: Option<&String>| lead_w + keep + right_w(cols, more) > width;
+    if crowded(&cols, more_label.as_ref()) {
+        cols.pr = 0;
+    }
+    if crowded(&cols, more_label.as_ref()) {
+        cols.git = [0; GIT_COLUMNS];
+    }
+    if crowded(&cols, more_label.as_ref()) {
+        more_label = None;
+    }
+    let room = width
+        .saturating_sub(lead_w + right_w(&cols, more_label.as_ref()))
+        .max(1);
+    let branch = truncate(&band.branch, room);
+    let folder = folder_if_differs(app, band)
+        .map(|dir| format!(" in {dir}"))
+        .filter(|f| branch.chars().count() + f.chars().count() <= room);
+
     let mut left = vec![
         lead,
         Span::raw(" "),
-        Span::styled(glyph, Style::default().fg(scope)),
-        Span::styled(branch, branch_style),
+        scope_mark(app, &band.worktree, band.is_main),
     ];
-    if let Some((files, lines)) = changes {
-        left.push(Span::styled(files, Style::default().fg(th.warn)));
-        if let Some((added, removed)) = lines {
-            left.push(Span::styled(added, Style::default().fg(th.ok)));
-            left.push(Span::styled(removed, Style::default().fg(th.err)));
+    left.extend(status_name_spans(
+        branch,
+        branch_style,
+        ramp,
+        app.sweep_phase(),
+    ));
+    if let Some(folder) = folder {
+        left.push(Span::styled(folder, Style::default().fg(th.dim)));
+    }
+
+    // The right end: what hangs off the band's edges, then the columns.
+    let mut right = Vec::new();
+    let gap = || Span::raw(" ".repeat(COLUMN_GAP));
+    if let Some(more) = more_label {
+        right.push(Span::styled(more, Style::default().fg(th.muted)));
+        if cols.width() > 0 {
+            right.push(gap());
         }
     }
     let mut hits = Vec::new();
-    let used: usize = left.iter().map(|s| s.width()).sum();
-    // Its pull request, after the checkout, in the PR rows' own colors —
-    // as much of the title as the rule has room for, and none of it on a
-    // rule too short to say the number.
-    if let Some(pr) = &band.pr {
-        let spare = room.saturating_sub(used + 2 - 3);
-        if spare >= 6 {
-            let look = crate::pr_row::look(pr.standing, pr.trouble, th);
-            let label = crate::pull_request::numbered_label(pr.number, &pr.title);
-            let mut spans = crate::pr_row::spans(
-                look,
-                &label,
-                spare,
-                Some((format!(" {}", pr.badge()), look.badge)),
-            );
+    let mut pr_at = None;
+    if cols.pr > 0 {
+        let mut pr = facts.pr.clone();
+        if !pr.is_empty() {
+            pr_at = Some((spans_width(&right), spans_width(&pr)));
             let hovered = app.hover_crumb == Some(HitTarget::LauncherBandPr(band.worktree.clone()));
-            if hovered {
-                if let Some(label) = spans.get_mut(1) {
-                    label.style = label.style.add_modifier(Modifier::UNDERLINED);
-                }
+            if let Some(label) = pr.get_mut(1).filter(|_| hovered) {
+                label.style = label.style.add_modifier(Modifier::UNDERLINED);
             }
-            let pr_w: usize = spans.iter().map(|s| s.width()).sum();
-            left.push(Span::raw("  "));
-            let x = r.x + u16::try_from(used + 2).unwrap_or(u16::MAX);
+        }
+        let pad = cols.pr.saturating_sub(spans_width(&pr));
+        right.extend(pr);
+        right.push(Span::raw(" ".repeat(pad)));
+        if cols.git_width() > 0 {
+            right.push(gap());
+        }
+    }
+    let mut first = true;
+    for (w, count) in cols.git.iter().zip(&facts.git) {
+        if *w == 0 {
+            continue;
+        }
+        if !first {
+            right.push(Span::raw(" "));
+        }
+        first = false;
+        let count_w = count.as_ref().map_or(0, Span::width);
+        right.push(Span::raw(" ".repeat(w.saturating_sub(count_w))));
+        if let Some(count) = count {
+            right.push(count.clone());
+        }
+    }
+
+    let left_w = spans_width(&left);
+    let block_w = spans_width(&right);
+    let fill = width
+        .saturating_sub(left_w + 1 + rule_tail_width(block_w))
+        .max(2);
+    let mut spans = left;
+    spans.push(Span::raw(" "));
+    spans.push(dash(fill));
+    let block_x = left_w + 1 + fill + 1;
+    if block_w > 0 {
+        spans.push(Span::raw(" "));
+        spans.extend(right);
+        spans.push(Span::raw(" "));
+        spans.push(dash(2));
+    }
+    Paragraph::new(Line::from(spans)).render(r, buf);
+    if let Some((at, pr_w)) = pr_at {
+        let x = r.x + u16::try_from(block_x + at).unwrap_or(u16::MAX);
+        if x < r.right() {
             hits.push((
                 Rect {
                     x,
-                    width: u16::try_from(pr_w)
-                        .unwrap_or(u16::MAX)
-                        .min(r.width.saturating_sub(x - r.x)),
+                    width: u16::try_from(pr_w).unwrap_or(u16::MAX).min(r.right() - x),
                     height: 1,
                     ..r
                 },
                 HitTarget::LauncherBandPr(band.worktree.clone()),
             ));
-            left.extend(spans);
         }
     }
-    let used: usize = left.iter().map(|s| s.width()).sum();
-    let fill = width.saturating_sub(used + 1 + 1 + right_w + 1 + 2);
-    let mut spans = left;
-    spans.push(Span::raw(" "));
-    spans.push(dash(fill));
-    spans.push(Span::raw(" "));
-    spans.extend(right);
-    spans.push(Span::raw(" "));
-    spans.push(dash(2));
-    Paragraph::new(Line::from(spans)).render(r, buf);
     hits.push((r, HitTarget::LauncherBand(rule.index)));
     hits
 }
 
+/// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
+/// RUN TERMINAL, `❯` for a plain shell, muted while its PTY lives and
+/// faint once it has exited.
+pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'static> {
+    let glyph = if t.run_command.is_some() {
+        "▶ "
+    } else {
+        "❯ "
+    };
+    Span::styled(
+        glyph,
+        Style::default().fg(if t.alive { th.muted } else { th.faint }),
+    )
+}
+
 /// A TERMINAL's card: what a session's card is to a session, and the
 /// same size — its name behind the glyph the SESSIONS PANEL gave the row
-/// (`▶` for a RUN TERMINAL, `❯` for a plain shell, in `th.ok` while its
+/// (`▶` for a RUN TERMINAL, `❯` for a plain shell, in `th.muted` while its
 /// PTY is alive, with `exited` at the row's right once the shell is
 /// gone), what runs in it, then the last lines it printed where a
 /// session's card has its prompt ([`terminal_tail_lines`]) — so a glance
@@ -1775,23 +2113,18 @@ fn draw_chip(
     }
     // HIDE CARD MARKS drops the glyph, and the name starts where it was.
     let glyph = if app.hide_card_marks {
-        ""
-    } else if t.run_command.is_some() {
-        "▶ "
+        Span::raw("")
     } else {
-        "❯ "
+        terminal_mark(t, th)
     };
-    let glyph_w = glyph.chars().count();
+    let glyph_w = glyph.width();
     // `exited` sits where a session card keeps its ago badge, and the
     // name gives it the room, as a session's does.
     let badge = if t.alive { "" } else { EXITED_BADGE };
     let (badge, name_max) = fit_ago(badge.to_string(), width);
     let name = truncate(&t.name, name_max.saturating_sub(glyph_w));
     let mut first = vec![
-        Span::styled(
-            glyph,
-            Style::default().fg(if t.alive { th.ok } else { dim }),
-        ),
+        glyph,
         Span::styled(
             name.clone(),
             Style::default().fg(th.text).add_modifier(Modifier::BOLD),
@@ -1801,7 +2134,7 @@ fn draw_chip(
         let badge = badge.trim_start().to_string();
         let pad = width.saturating_sub(name.chars().count() + glyph_w + badge.chars().count());
         first.push(Span::raw(" ".repeat(pad)));
-        first.push(Span::styled(badge, Style::default().fg(th.err)));
+        first.push(Span::styled(badge, Style::default().fg(th.exited)));
     }
     let runs = t.run_command.as_deref().unwrap_or("shell");
     let second = vec![Span::styled(
@@ -1887,29 +2220,21 @@ fn terminal_tail_lines(
         .unwrap_or_default()
 }
 
-/// A card's frame color when its status wants one: red for a turn waiting
-/// on you, blue for one finished and unread, yellow for one still running
-/// — the three the PROJECT TABS count, each in the color its STATUS DOT
-/// wears, and no other. A read finish, a fresh or terminated session and a
-/// `quiet` card (cold, pending or archived: nothing on it is live) keep
-/// the plain edge. The cursor's card outranks all three
-/// ([`selected_card_block`]).
+/// A card's frame color when its status wants you: crimson for a turn
+/// waiting on you or a crash, the done color for a finish nobody has read
+/// — each in the color its STATUS MARK wears, and no other. A working
+/// card keeps the plain edge (its spinner says it is busy, and a busy
+/// card asks nothing of you), as do a read finish, a fresh session and a
+/// `quiet` card (pending or archived, or cold with nothing left that wants
+/// you). The cursor's card outranks them all ([`selected_card_block`]).
 fn card_edge(a: &orion_core::Agent, quiet: bool, th: Theme) -> Option<Color> {
-    use orion_core::AgentStatus;
-    if quiet {
-        return None;
-    }
-    match a.status {
-        AgentStatus::NeedsFeedback => Some(th.err),
-        AgentStatus::Finished if a.unseen => Some(th.done),
-        AgentStatus::Running => Some(th.warn),
-        _ => None,
-    }
+    let status = Some(a.status);
+    (!quiet && wants_you(status, a.unseen)).then(|| status_color(status, a.unseen, th))
 }
 
 /// The frame of the card under the cursor, session or terminal: a heavy
 /// accent border — a weight no status frame ([`card_edge`]) ever takes,
-/// so a blue unread finish or a red question beside it can't be read as
+/// so an unread finish or a crimson question beside it can't be read as
 /// the selection, color or no color — over the raised fill every selected
 /// row in orion wears, frame and all: `sel_bg` while the grid has the
 /// keys, `sel_bg_dim` while the pane or the PROJECT TABS do, so the card
@@ -1981,67 +2306,8 @@ fn tint_level(phase: usize) -> f32 {
 /// `focus_tint` already is, since the 256 palette has no dim shade of
 /// most hues. A color with no fixed value (`Reset`) is returned as is.
 fn dim_toward_black(c: Color, level: f32) -> Color {
-    let Some((r, g, b)) = color_rgb(c) else {
-        return c;
-    };
-    let f = |v: u8| (f32::from(v) * level).round().clamp(0.0, 255.0) as u8;
-    Color::Rgb(f(r), f(g), f(b))
-}
-
-/// The RGB a terminal most likely shows for `c`: xterm's defaults for the
-/// sixteen named colors, the 6×6×6 cube and the gray ramp for the rest of
-/// the 256.
-fn color_rgb(c: Color) -> Option<(u8, u8, u8)> {
-    const ANSI: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (205, 0, 0),
-        (0, 205, 0),
-        (205, 205, 0),
-        (0, 0, 238),
-        (205, 0, 205),
-        (0, 205, 205),
-        (229, 229, 229),
-        (127, 127, 127),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (92, 92, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
-    let index = match c {
-        Color::Rgb(r, g, b) => return Some((r, g, b)),
-        Color::Indexed(i) => i,
-        Color::Black => 0,
-        Color::Red => 1,
-        Color::Green => 2,
-        Color::Yellow => 3,
-        Color::Blue => 4,
-        Color::Magenta => 5,
-        Color::Cyan => 6,
-        Color::Gray => 7,
-        Color::DarkGray => 8,
-        Color::LightRed => 9,
-        Color::LightGreen => 10,
-        Color::LightYellow => 11,
-        Color::LightBlue => 12,
-        Color::LightMagenta => 13,
-        Color::LightCyan => 14,
-        Color::White => 15,
-        Color::Reset => return None,
-    };
-    Some(match index {
-        0..=15 => ANSI[usize::from(index)],
-        16..=231 => {
-            let i = index - 16;
-            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            (level(i / 36), level(i / 6 % 6), level(i % 6))
-        }
-        _ => {
-            let v = 8 + (index - 232) * 10;
-            (v, v, v)
-        }
+    crate::theme::rgb(c).map_or(c, |(r, g, b)| {
+        crate::theme::shade([r, g, b].map(f32::from), level)
     })
 }
 
@@ -2069,12 +2335,13 @@ fn draw_card(
 ) {
     let a = &row.agent;
     let pending = app.is_placeholder_agent(&a.id);
-    let cold = !a.alive && a.cloud_session_id.is_none();
+    let cold = crate::app::drawn_cold(a);
     let archived = a.archived;
     let SessionLook {
         dot,
         quiet,
         name_style,
+        prompt: prompt_color,
         ramp,
         ago,
         ago_style,
@@ -2177,7 +2444,7 @@ fn draw_card(
             crate::launcher::last_prompt(a).unwrap_or_default(),
             width,
             mark,
-            quiet_or(prompt),
+            prompt_color,
             crate::launcher::PROMPT_LINES,
         )),
     }
@@ -2254,15 +2521,21 @@ fn card_issue_hit(
     })
 }
 
-/// How a session shows its state wherever the grid draws it — a card's
-/// head, a LIST entry — so the two never disagree.
+/// How a session shows its state wherever orion draws it — a card's head,
+/// a LIST entry, the pane's header, the full-screen breadcrumb — so they
+/// never disagree.
 struct SessionLook {
-    /// The STATUS DOT, or an archived card's square.
+    /// The STATUS MARK, or an archived card's square.
     dot: Span<'static>,
     /// What an archived session's every part is drawn in, and a live
     /// one's age: dim, a step up on the cursor's entry.
     quiet: Color,
+    /// Bold and bright for a session that wants you, plain text for one
+    /// working, muted for one at rest — the way an inbox reads.
     name_style: Style,
+    /// The last prompt's color: muted where the name is bright, dim where
+    /// the session is at rest.
+    prompt: Color,
     /// The status sweep across the name, while it animates.
     ramp: Option<[Color; 3]>,
     /// How long since it moved (`done`, `starting`, …), with its lead space.
@@ -2271,6 +2544,12 @@ struct SessionLook {
 }
 
 /// `a`'s [`SessionLook`], on the cursor's entry when `selected`.
+///
+/// A session whose PTY is gone (cold: reaped, or lost to a daemon restart)
+/// is drawn by what is still true of it. A crash, or a finish nobody has
+/// read, still wants you and keeps its mark; anything else it last did —
+/// working, asking — stopped being true with the process, so its mark goes
+/// faint and still, and its name sits back with the sessions at rest.
 ///
 /// An ARCHIVED session is the same session put away, and it is drawn as
 /// such: nothing on it is live, so nothing on it is colored. Every part of
@@ -2283,38 +2562,62 @@ struct SessionLook {
 /// a word repeated on every card - the header's `n archived sessions` says
 /// that once.
 fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> SessionLook {
+    use orion_core::AgentStatus;
     let pending = app.is_placeholder_agent(&a.id);
-    let cold = !a.alive && a.cloud_session_id.is_none();
     let archived = a.archived;
+    let cold = crate::app::drawn_cold(a);
     let quiet = if selected { th.muted } else { th.dim };
-    // The dot and the sweep read the session's status, cold and pending
-    // alike.
     let dot = if archived {
-        Span::styled(ARCHIVED_MARK, Style::default().fg(quiet))
+        Span::styled(ARCHIVED_MARK, Style::default().fg(th.faint))
     } else if pending {
-        status_dot(None, false, th)
+        status_dot(None, false, app.spin_phase(), th)
     } else if cold {
         Span {
-            style: Style::default().fg(th.dim),
-            ..status_dot(Some(a.status), false, th)
+            style: Style::default().fg(th.faint),
+            ..status_dot(Some(a.status), false, None, th)
         }
     } else {
-        status_dot(Some(a.status), a.unseen, th)
+        status_dot(Some(a.status), a.unseen, app.spin_phase(), th)
     };
     let ramp = if pending || cold || archived {
         None
     } else {
-        sweep_ramp(Some(a.status), app.agent_fresh_done(a), th, app.animations)
+        sweep_ramp(
+            Some(a.status),
+            a.unseen,
+            app.agent_fresh_alarm(a),
+            th,
+            app.animations,
+        )
     };
+    let wants = !pending && !cold && wants_you(Some(a.status), a.unseen);
+    let working = pending || (!cold && a.status == AgentStatus::Running);
     // An archived name is not the loud thing on the screen any more: it
     // gives up the bold with the rest of the card's weight and sits one
     // step above the quiet the rest of the card is in — muted over dim,
     // and text over muted on the card the cursor is on, the same one-step
-    // lift `quiet` takes there.
+    // lift `quiet` takes there. A live name is bold and bright only while
+    // the session wants you; a working one is plain text, one at rest
+    // muted — lifted to text under the cursor.
     let name_style = if archived {
         Style::default().fg(if selected { th.text } else { th.muted })
-    } else {
+    } else if wants {
         Style::default().fg(th.text).add_modifier(Modifier::BOLD)
+    } else if working || selected {
+        Style::default().fg(th.text)
+    } else {
+        Style::default().fg(th.muted)
+    };
+    let prompt = if archived {
+        quiet
+    } else if wants || working {
+        if selected {
+            th.text
+        } else {
+            th.muted
+        }
+    } else {
+        quiet
     };
     // A session stopped on a usage limit says so where its age goes, in
     // the red its frame is: the reason it is waiting on you.
@@ -2345,10 +2648,19 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
         dot,
         quiet,
         name_style,
+        prompt,
         ramp,
         ago,
         ago_style,
     }
+}
+
+/// A session's STATUS MARK as its card draws it, and its name's style on
+/// the card the cursor is on ([`session_look`]): what the FOOTER's
+/// breadcrumb names the selected session with, so the two agree.
+pub(super) fn session_crumb(app: &App, a: &orion_core::Agent) -> (Span<'static>, Style) {
+    let look = session_look(app, a, true, app.theme);
+    (look.dot, look.name_style)
 }
 
 /// Which card wears the cursor: the one the cursor is on, or none at all
@@ -2476,37 +2788,6 @@ fn limit_lines(
 /// needs it: only a CUSTOM harness's label comes out of the file — an
 /// account's email is the last read's — so a grid of built-ins never
 /// opens it at all.
-/// What a card's branch row says about its checkout's uncommitted changes,
-/// beside a branch `branch` characters long in `room`: the file count —
-/// ` +3 files`, or ` +3` — and, with `lines` counted, the lines behind it,
-/// ` +120` and ` -45`. The word yields first, then the lines, and only then
-/// does the branch give up a letter.
-fn change_labels(
-    files: usize,
-    lines: Option<crate::git_diff::LineChanges>,
-    branch: usize,
-    room: usize,
-) -> (String, Option<(String, String)>) {
-    let long = format!(" +{files} file{}", if files == 1 { "" } else { "s" });
-    let short = format!(" +{files}");
-    let width = |s: &str| s.chars().count();
-    if let Some(l) = lines {
-        let (added, removed) = (format!(" +{}", l.added), format!(" -{}", l.removed));
-        let tail = width(&added) + width(&removed);
-        for count in [&long, &short] {
-            if branch + width(count) + tail <= room {
-                return (count.clone(), Some((added, removed)));
-            }
-        }
-    }
-    let count = if branch + width(&long) <= room {
-        long
-    } else {
-        short
-    };
-    (count, None)
-}
-
 fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
     if a.cloud_session_id.is_some() {
         return "cloud".into();
@@ -2562,7 +2843,7 @@ fn draw_empty(f: &mut Frame, app: &mut App, area: Rect) {
     let th = app.theme;
     let t = crate::splash::scene_time(app, app.splash_epoch);
     let mut welcome = vec![Span::styled("Welcome to ", Style::default().fg(th.text))];
-    welcome.extend(crate::splash::wordmark_word("orion", t));
+    welcome.extend(crate::splash::wordmark_word("orion", t, th));
     // The key line is a button, and marked as one under the pointer the
     // way the header's are.
     let mut words = Style::default().fg(th.muted);
@@ -2579,7 +2860,7 @@ fn draw_empty(f: &mut Frame, app: &mut App, area: Rect) {
                 .bg(th.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" to prompt", words),
+        Span::styled(" to start an agent", words),
     ]);
     let prompt_w = (prompt.width() as u16).min(area.width);
     let lines = vec![Line::from(welcome), Line::from(""), prompt];
@@ -2812,39 +3093,32 @@ pub(super) fn pane_frame(
 }
 
 /// The pane's title, laid out left to right in `room` columns: the card
-/// the cursor is on — its STATUS DOT and name for a session, the
-/// SESSIONS PANEL's `❯`/`▶` and name for a terminal — in the accent,
-/// since it is what the keys reach; the checkout it runs in after it,
-/// in the SCOPE COLOR the band's rule paints it. With the pane on
-/// something the grid no longer lists — a card just archived out from
-/// under it — the attached session's own name, muted.
+/// the cursor is on — its STATUS MARK and name for a session, drawn by
+/// the same [`session_look`] its row is, so a reaped or archived session
+/// reads the same here as there; the `❯`/`▶` and name for a terminal —
+/// bold, the name being the thing the pane reads; the checkout it runs in
+/// after it, as the band's rule names it. With the pane on something the
+/// grid no longer lists — a card just archived out from under it — the
+/// attached session's own name, muted.
 fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
     let th = app.theme;
     let bands = crate::launcher::bands(app);
     let at = crate::launcher::cursor(app, &bands);
     let card = at.and_then(|at| crate::launcher::card_at(&bands, at));
     let name_room = (room / 2).max(8);
-    let lit = Style::default().fg(th.accent).add_modifier(Modifier::BOLD);
+    let lit = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
     let mut tabs = Vec::new();
     match card {
         Some(crate::launcher::Card::Session(row)) => {
             let a = &row.agent;
             tabs.push(PaneTab::plain(vec![
-                status_dot(Some(a.status), a.unseen, th),
+                session_look(app, a, false, th).dot,
                 Span::styled(truncate(&a.name, name_room), lit),
             ]));
         }
         Some(crate::launcher::Card::Terminal(t)) => {
-            let glyph = if t.run_command.is_some() {
-                "▶ "
-            } else {
-                "❯ "
-            };
             tabs.push(PaneTab::plain(vec![
-                Span::styled(
-                    glyph,
-                    Style::default().fg(if t.alive { th.ok } else { th.dim }),
-                ),
+                terminal_mark(t, th),
                 Span::styled(truncate(&t.name, name_room), lit),
             ]));
         }
@@ -2857,33 +3131,42 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
             }
         }
     }
-    // The checkout everything in the pane belongs to, in the SCOPE COLOR
-    // the band's rule paints it — `⌂` on the project's root branch, `↳`
-    // on a checkout of its own — so the pane and the grid say the same
-    // thing the same way.
+    // The checkout everything in the pane belongs to, as the band's rule
+    // names it — its SCOPE MARK and branch, and its pull request's number —
+    // so the pane and the grid say the same thing the same way.
     let checkout = at
         .and_then(|at| bands.get(at.band))
-        .map(|b| (b.is_main, b.branch.clone()))
+        .map(|b| {
+            (
+                b.worktree.clone(),
+                b.is_main,
+                b.branch.clone(),
+                b.pr.as_ref().map(|pr| pr.number),
+            )
+        })
         .or_else(|| {
             app.selected_worktree()
-                .map(|w| (w.is_main, w.branch.clone()))
+                .map(|w| (w.id.clone(), w.is_main, w.branch.clone(), None))
         });
-    if let Some((is_main, branch)) = checkout {
-        let (glyph, scope) = if is_main {
-            ("⌂ ", th.root)
-        } else {
-            ("↳ ", th.worktree)
-        };
+    if let Some((worktree, is_main, branch, pr)) = checkout {
         if !tabs.is_empty() {
             tabs.push(PaneTab::plain(vec![Span::raw("  ")]));
         }
-        tabs.push(PaneTab::plain(vec![
-            Span::styled(glyph, Style::default().fg(scope)),
+        let mut spans = vec![
+            scope_mark(app, &worktree, is_main),
             Span::styled(
                 truncate(&branch, (room / 4).max(8)),
-                Style::default().fg(scope),
+                Style::default().fg(th.muted),
             ),
-        ]));
+        ];
+        if let Some(number) = pr {
+            spans.push(Span::styled("  ↗ ", Style::default().fg(th.muted)));
+            spans.push(Span::styled(
+                format!("#{number}"),
+                Style::default().fg(th.muted),
+            ));
+        }
+        tabs.push(PaneTab::plain(spans));
     }
     tabs
 }
@@ -2968,7 +3251,7 @@ pub(super) fn crumb_frame(f: &mut Frame, app: &mut App, area: Rect) -> Rect {
         if let Some(row) = &row {
             let a = &row.agent;
             spans.push(Span::styled(" / ", Style::default().fg(th.dim)));
-            spans.push(status_dot(Some(a.status), a.unseen, th));
+            spans.push(session_look(app, a, false, th).dot);
             spans.push(Span::styled(
                 truncate(&a.name, usize::from(r.width / 2).max(8)),
                 Style::default().fg(th.text).add_modifier(Modifier::BOLD),
@@ -2987,14 +3270,22 @@ pub(super) fn crumb_frame(f: &mut Frame, app: &mut App, area: Rect) -> Rect {
                     Style::default().fg(th.dim),
                 ));
             }
+            // Where it runs, as the footer's breadcrumb names it: the
+            // project, then the checkout behind its SCOPE MARK.
+            let is_main = app
+                .tree
+                .worktrees
+                .iter()
+                .any(|w| w.id == a.worktree_id && w.is_main);
             right.push(Span::styled(" · ", Style::default().fg(th.dim)));
             right.push(Span::styled(
-                format!(
-                    "{} / {}",
-                    truncate(&row.project, 20),
-                    truncate(&row.branch, 24)
-                ),
-                Style::default().fg(th.dim),
+                format!("{} ", truncate(&row.project, 20)),
+                Style::default().fg(th.muted),
+            ));
+            right.push(scope_mark(app, &a.worktree_id, is_main));
+            right.push(Span::styled(
+                truncate(&row.branch, 24),
+                Style::default().fg(th.muted),
             ));
             f.render_widget(
                 Paragraph::new(Line::from(right)).alignment(ratatui::layout::Alignment::Right),
@@ -3073,6 +3364,10 @@ pub(super) struct BoxHeader {
 /// `worktree main` never read as one phrase.
 const FIELD_GAP: usize = 3;
 
+/// Widest the `agent` field's value is drawn: a CLAUDE ACCOUNT's label
+/// runs to an email address, which took the row the mode needs.
+const AGENT_W: usize = 10;
+
 /// Fewest columns a value is cut to — `ma…` — before its field gives up
 /// its word, and then the whole field, instead.
 const MIN_VALUE: usize = 3;
@@ -3099,7 +3394,7 @@ fn header_fields(
     cfg: &crate::config::Config,
     th: Theme,
 ) -> [Vec<HeaderField>; 2] {
-    use super::task_keys::{AGENT, PRESET, PROJECT};
+    use super::task_keys::{AGENT, MODE, PRESET, PROJECT};
     let dim = Style::default().fg(th.dim);
     let bold = |fg| Style::default().fg(fg).add_modifier(Modifier::BOLD);
     let action_key = |action| crate::hints::key(&app.keymap, action);
@@ -3159,7 +3454,9 @@ fn header_fields(
     }
 
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
-    let mut agent = harness.display_label().to_string();
+    // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
+    // row room for the mode, the model and the effort beside it.
+    let mut agent = super::truncate(harness.display_label(), AGENT_W);
     // A CLAUDE CLOUD box says so on the field that toggles it.
     if launch.cloud {
         agent.push_str(crate::app::CLOUD_LABEL);
@@ -3187,6 +3484,26 @@ fn header_fields(
             action_key(Action::SelectModel),
         ),
     ];
+    // Beside the agent, since what it can be is the agent's: plan and ask
+    // read in colour, so a launch that will not edit is never mistaken for
+    // one that will.
+    if launch.modes(cfg).len() > 1 {
+        let colour = match launch.mode {
+            orion_core::AgentMode::Edit => th.text,
+            orion_core::AgentMode::Plan => th.warn,
+            orion_core::AgentMode::Ask => th.special,
+        };
+        runs.insert(
+            1,
+            field(
+                BoxField::Mode,
+                "mode",
+                launch.mode.as_str().to_string(),
+                bold(colour),
+                Some(MODE.label()),
+            ),
+        );
+    }
     if !crate::config::effort_choices_in(&harness, launch.model.as_deref()).is_empty() {
         runs.push(field(
             BoxField::Effort,
@@ -3211,7 +3528,7 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
         .map(|f| f.label.chars().count())
         .max()
         .unwrap_or(0);
-    let key_style = Style::default().fg(th.accent);
+    let key_style = crate::hints::key_style(th);
     let mut out = BoxHeader::default();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut x = 0usize;
@@ -3298,12 +3615,13 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
         .unwrap_or_else(|| "(project gone)".into())
 }
 
-/// The view's box title: what Enter starts. The harness, the model, the
+/// The view's box title: what Enter starts — always a new AGENT (a
+/// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
 /// keys that change them; what is left here is what the box is *for* — an
 /// issue, a pull request, a Claude Cloud task.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
-    let mut head = vec!["New session".to_string()];
+    let mut head = vec!["New agent".to_string()];
     if let Some(issue) = &launch.issue {
         head.push(format!("issue #{}", issue.number));
     }
@@ -3482,8 +3800,7 @@ mod tests {
 
     fn a_launch() -> QuickLaunch {
         let cfg = crate::config::Config::default();
-        let target =
-            crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+        let target = crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
         QuickLaunch::of_kind(
             target,
             orion_core::AgentKind::Claude,
@@ -3506,11 +3823,11 @@ mod tests {
         let mut launch = a_launch();
         launch.model = None;
         launch.effort = None;
-        assert_eq!(box_title(&launch), "New session");
+        assert_eq!(box_title(&launch), "New agent");
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
         launch.preset = Some(a_preset("reviewer"));
-        assert_eq!(box_title(&launch), "New session");
+        assert_eq!(box_title(&launch), "New agent");
     }
 
     fn a_preset(name: &str) -> crate::agent_presets::AgentPreset {
@@ -3748,7 +4065,9 @@ mod tests {
                 );
                 let head = box_header(&App::new(), &launch, &cfg, 200, Theme::default());
                 let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
-                assert_eq!(agent, "agent   Claude (b@b.co) Tab", "{:?}", rows_of(&head));
+                // Cut to ten columns, the row's room going to the mode,
+                // the model and the effort beside it.
+                assert_eq!(agent, "agent   Claude (b… Tab", "{:?}", rows_of(&head));
             })
         });
     }
@@ -3779,7 +4098,8 @@ mod tests {
                     BoxField::Agent => "Tab",
                     BoxField::Model => "^/",
                     BoxField::Effort => "^Y",
-                    BoxField::Preset => "⇧Tab",
+                    BoxField::Mode => "⇧Tab",
+                    BoxField::Preset => "^X",
                 };
                 assert!(
                     cells.ends_with(&format!(" {key}")),
@@ -3791,7 +4111,8 @@ mod tests {
                 );
             }
             if width >= 60 {
-                assert_eq!(head.fields.len(), 6, "{width}: every field fits: {rows:?}");
+                // Claude has plan, so its box draws the mode field too.
+                assert_eq!(head.fields.len(), 7, "{width}: every field fits: {rows:?}");
                 assert!(
                     !rows.concat().contains('…'),
                     "{width}: nothing cut: {rows:?}"
@@ -4657,8 +4978,9 @@ mod tests {
         let lit = spans.iter().find(|s| s.content == "api").expect("api");
         assert_eq!(lit.style.fg, Some(th.accent));
         assert_eq!(lit.style.bg, Some(th.sel_bg), "the lit tab is a chip");
+        // A tab with nothing in it that wants you sits back, dim.
         let flat = spans.iter().find(|s| s.content == "web").expect("web");
-        assert_eq!(flat.style.fg, Some(th.muted));
+        assert_eq!(flat.style.fg, Some(th.dim));
         assert_eq!(flat.style.bg, None);
 
         // With nothing open, the `+` says what it does.
@@ -4669,10 +4991,11 @@ mod tests {
         assert_eq!(head_hits(&app), vec![HitTarget::LauncherTabAdd]);
     }
 
-    /// A tab's STATUS DOTS: a dot and a count per state its project's
+    /// A tab's STATUS MARKS: the mark and a count per state its project's
     /// sessions are in, right of the name, in the one order — needs-you
-    /// red, done blue, running yellow — with no word of its own. A quiet
-    /// project is its bare name.
+    /// crimson `●`, done `●`, working gold spinner (still, with the
+    /// animations off) — with no word of its own. A quiet project is its
+    /// bare name.
     #[test]
     fn a_tab_carries_its_projects_status_dots() {
         use orion_core::{AgentId, AgentStatus};
@@ -4686,13 +5009,14 @@ mod tests {
         app.tree.agents.push(asking);
         app.tree.agents[0].status = AgentStatus::Running;
         app.tree.agents[1].unseen = true;
+        app.animations = false;
         select(&mut app, "api");
         app.hits.clear();
         let spans = head_tabs(&mut app, r);
-        assert_eq!(row_text(&spans), " +   web ●1 ×   api ●1 ●1 × ");
+        assert_eq!(row_text(&spans), " +   web ●1 ×   api ●1 ◐1 × ");
         let dots: Vec<(String, Option<Color>)> = spans
             .iter()
-            .filter(|s| s.content.contains('●'))
+            .filter(|s| s.content.contains(['●', '◐', '✕']))
             .map(|s| (s.content.to_string(), s.style.fg))
             .collect();
         assert_eq!(
@@ -4700,7 +5024,7 @@ mod tests {
             vec![
                 (" ●1".to_string(), Some(th.done)),
                 (" ●1".to_string(), Some(th.err)),
-                (" ●1".to_string(), Some(th.warn)),
+                (" ◐1".to_string(), Some(th.warn)),
             ]
         );
     }
@@ -4725,10 +5049,11 @@ mod tests {
     }
 
     /// The tabs sweep in place: whatever the work under them is doing, the
-    /// names spell the same names in the same columns — a running project's
-    /// name is recolored a cell at a time ([`tab_ramp`]), never moved.
+    /// names spell the same names in the same columns — a project with an
+    /// unread finish has its name recolored a cell at a time
+    /// ([`tab_ramp`]), never moved.
     #[test]
-    fn the_tabs_sweep_in_place_whatever_is_running() {
+    fn the_tabs_sweep_in_place_whatever_is_unread() {
         use orion_core::AgentStatus;
         let r = Rect::new(0, 0, 80, 1);
         let mut app = a_tabbed_tree();
@@ -4736,7 +5061,8 @@ mod tests {
         head_tabs(&mut app, r);
         let quiet = std::mem::take(&mut app.hits);
         for a in &mut app.tree.agents {
-            a.status = AgentStatus::Running;
+            a.status = AgentStatus::Finished;
+            a.unseen = true;
         }
         select(&mut app, "api");
         let busy = head_tabs(&mut app, r);
@@ -4758,20 +5084,33 @@ mod tests {
         );
     }
 
-    /// Red outranks everything, yellow outranks an unread finish, and blue
-    /// is only a project with nothing live left; a quiet one holds still.
+    /// A tab sweeps red only for the seconds after something there starts
+    /// needing you (the one-shot), and otherwise shimmers in the done color
+    /// for as long as a finish there is unread; work in progress, and a
+    /// question already announced, hold still — the marks say those.
     #[test]
-    fn a_tabs_ramp_is_the_loudest_state_under_it() {
+    fn a_tab_sweeps_for_a_fresh_alarm_or_an_unread_finish_only() {
         let th = Theme::default();
-        let tally = |needs_you, running, done| Tally {
+        let tally = |needs_you, running, done, alarm| Tally {
             needs_you,
             done,
             running,
+            alarm,
+            ..Tally::default()
         };
-        assert_eq!(tab_ramp(tally(1, 3, 2), th), Some(th.err_sweep));
-        assert_eq!(tab_ramp(tally(0, 1, 2), th), Some(th.warn_sweep));
-        assert_eq!(tab_ramp(tally(0, 0, 2), th), Some(th.done_sweep));
-        assert_eq!(tab_ramp(tally(0, 0, 0), th), None);
+        assert_eq!(tab_ramp(tally(1, 3, 2, true), th), Some(th.err_sweep));
+        assert_eq!(tab_ramp(tally(1, 3, 2, false), th), Some(th.done_sweep));
+        assert_eq!(
+            tab_ramp(tally(1, 3, 0, false), th),
+            None,
+            "announced already"
+        );
+        assert_eq!(
+            tab_ramp(tally(0, 1, 0, false), th),
+            None,
+            "working is the spinner"
+        );
+        assert_eq!(tab_ramp(tally(0, 0, 0, false), th), None);
     }
 
     /// The pointer marks the button it rests on: a tab's name underlines,
@@ -5041,16 +5380,12 @@ mod tests {
                 200,
             )
         };
-        assert!(
-            border(&launch).contains("⇧Tab preset"),
-            "{}",
-            border(&launch)
-        );
+        assert!(border(&launch).contains("^X preset"), "{}", border(&launch));
         launch.preset = Some(a_preset("reviewer"));
         let head = header(&app, &launch, BOX_SIZE.0 - 4);
         assert_eq!(
             cells_of(&head, BoxField::Preset).as_deref(),
-            Some("preset reviewer ⇧Tab"),
+            Some("preset reviewer ^X"),
             "{:?}",
             rows_of(&head)
         );
@@ -5062,7 +5397,11 @@ mod tests {
             Some(0),
             "on the row of where it runs"
         );
-        assert!(!border(&launch).contains("⇧Tab"), "{}", border(&launch));
+        assert!(
+            !border(&launch).contains(&super::super::task_keys::PRESET.label()),
+            "{}",
+            border(&launch)
+        );
     }
 
     /// One checkout's BAND, with one session in it, for the rule tests.
@@ -5099,6 +5438,8 @@ mod tests {
                 branch: branch.into(),
                 pr: None,
             })],
+            archived: Vec::new(),
+            drawer_open: false,
         }
     }
 
@@ -5114,6 +5455,7 @@ mod tests {
                 on: false,
                 lit: false,
                 more: 0,
+                cols: RuleColumns::default(),
             },
         )
     }
@@ -5126,11 +5468,16 @@ mod tests {
         rule: BandRule,
     ) -> ratatui::buffer::Buffer {
         let area = Rect::new(0, 0, width, 1);
+        let facts = rule_facts(app, band, app.theme);
+        let rule = BandRule {
+            cols: RuleColumns::of([&facts]),
+            ..rule
+        };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
         terminal
             .draw(|f| {
-                draw_band_rule(f.buffer_mut(), app, area, band, rule);
+                draw_band_rule(f.buffer_mut(), app, area, band, &facts, rule);
             })
             .unwrap();
         terminal.backend().buffer().clone()
@@ -5152,49 +5499,166 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect()
     }
-
-    /// A band's rule names its checkout in the SCOPE COLOR — `⌂` root,
-    /// `↳` worktree — glyph and branch both, and nothing else on the rule,
-    /// so the two scopes sort a screenful of bands before a word is read.
+    /// A band's rule names its checkout by its SCOPE MARK — `⌂` the root
+    /// in muted, `⎇` a worktree in dim — with no color of its own: the mark
+    /// sorts the two scopes, so neither spends a hue the statuses need. The
+    /// root's branch is bright, being the branch itself; a worktree's
+    /// muted. The cards under it say how many run there, so the rule does
+    /// not count them.
     #[test]
-    fn a_band_paints_its_checkout_in_the_scope_color() {
+    fn a_band_names_its_checkout_by_its_scope_mark() {
         let app = App::new();
         let th = app.theme;
         let root = rule_row(&app, &a_band(true, "main"), 44);
         let worktree = rule_row(&app, &a_band(false, "feat-x"), 44);
-        assert_eq!(painted(&root, 0, th.root), "⌂ main");
-        assert_eq!(painted(&worktree, 0, th.worktree), "↳ feat-x");
-        // And neither wears the other's color anywhere on that row.
-        assert_eq!(painted(&root, 0, th.worktree), "");
-        assert_eq!(painted(&worktree, 0, th.root), "");
-        // The cards under it say what runs in the checkout, not where.
+        assert_eq!(painted(&root, 0, th.muted).trim(), "⌂");
+        assert_eq!(painted(&root, 0, th.text), "main");
+        assert_eq!(painted(&worktree, 0, th.dim).trim(), "⎇");
+        assert_eq!(painted(&worktree, 0, th.muted), "feat-x");
         let text = row_string(&worktree, 0);
-        assert!(text.contains("1 session"), "{text:?}");
+        assert!(text.starts_with("── ⎇ feat-x ─"), "{text:?}");
+        assert!(!text.contains("session"), "{text:?}");
     }
 
-    /// The checkout's changed-file count rides right behind the branch on
-    /// its band's rule, in the heads-up color, and on a rule too narrow
-    /// for the word it keeps the number and drops `files` before the
-    /// branch gives up more.
+    /// A worktree checked out in a folder its branch's name doesn't spell
+    /// says so after the branch, dim — `feat/ui in pawy` — so the branches
+    /// still start in one column; one whose folder is just its branch (`/`
+    /// as `-`) says nothing more.
     #[test]
-    fn a_band_counts_its_checkouts_changes_behind_the_branch() {
+    fn a_band_names_its_folder_when_the_branch_does_not() {
+        use orion_core::{ProjectId, Worktree, WorktreeId};
+        let mut app = App::new();
+        let th = app.theme;
+        app.tree.worktrees.push(Worktree {
+            id: WorktreeId("w1".into()),
+            project_id: ProjectId("p1".into()),
+            path: "/repo/pawy".into(),
+            branch: "feat/ui".into(),
+            is_main: false,
+            sort_order: 0,
+        });
+        let band = a_band(false, "feat/ui");
+        let buf = rule_row(&app, &band, 60);
+        let text = row_string(&buf, 0);
+        assert!(text.starts_with("── ⎇ feat/ui in pawy ─"), "{text:?}");
+        assert!(painted(&buf, 0, th.dim).contains(" in pawy"));
+
+        app.tree.worktrees[0].path = "/repo/feat-ui".into();
+        let text = row_string(&rule_row(&app, &band, 60), 0);
+        assert!(!text.contains(" in "), "{text:?}");
+    }
+
+    /// The checkout's git counts sit at the rule's right end, each in its
+    /// own color — the files in the diff's modified sand, the lines in its
+    /// pastels, the commits ahead and behind muted, never the working gold
+    /// — and a rule too narrow for them lets them go before a short branch
+    /// gives up a letter.
+    #[test]
+    fn a_band_counts_its_checkouts_changes_at_its_right_end() {
         use orion_core::WorktreeId;
         let mut app = App::new();
         let th = app.theme;
-        app.worktree_changes.insert(
-            WorktreeId("w1".into()),
-            (Some(3), std::time::Instant::now()),
+        let w1 = WorktreeId("w1".into());
+        app.worktree_changes
+            .insert(w1.clone(), (Some(3), std::time::Instant::now()));
+        app.worktree_lines.insert(
+            w1.clone(),
+            crate::git_diff::LineChanges {
+                added: 120,
+                removed: 45,
+            },
         );
+        app.worktree_ahead.insert(w1, (4, 1));
         let band = a_band(false, "feat-x");
 
-        let buf = rule_row(&app, &band, 44);
+        let buf = rule_row(&app, &band, 60);
         let text = row_string(&buf, 0);
-        assert!(text.contains("↳ feat-x +3 files"), "{text:?}");
-        assert_eq!(painted(&buf, 0, th.warn).trim(), "+3 files");
+        assert!(text.ends_with(" *3 +120 −45 ⇡4 ⇣1 ──"), "{text:?}");
+        assert_eq!(painted(&buf, 0, th.modified), "*3");
+        assert_eq!(painted(&buf, 0, th.added), "+120");
+        assert_eq!(painted(&buf, 0, th.removed), "−45");
+        assert_eq!(painted(&buf, 0, th.warn), "", "never the working gold");
 
         let buf = rule_row(&app, &band, 24);
         let text = row_string(&buf, 0);
-        assert_eq!(painted(&buf, 0, th.warn).trim(), "+3", "narrow: {text:?}");
+        assert!(text.starts_with("── ⎇ feat-x ─"), "narrow: {text:?}");
+        assert!(!text.contains('*'), "the counts go first: {text:?}");
+    }
+
+    /// Every rule on the grid gives its pull request and its counts the
+    /// same columns ([`RuleColumns`]): a band with no pull request, or a
+    /// count the others have and it lacks, leaves those cells blank — so
+    /// the numbers line up down the grid, right-aligned, and the rule's
+    /// dashes end at the same column on every band.
+    #[test]
+    fn the_rules_line_their_columns_up_down_the_grid() {
+        use orion_core::WorktreeId;
+        let mut app = App::new();
+        let th = app.theme;
+        let now = std::time::Instant::now();
+        let mut root = a_band(true, "main");
+        root.worktree = WorktreeId("w0".into());
+        let mut feat = a_band(false, "feat/auth-tokens");
+        feat.pr = Some(crate::launcher::RowPr {
+            number: 57,
+            title: "Move the token store".into(),
+            url: String::new(),
+            standing: crate::pull_request::Standing::Open,
+            trouble: None,
+        });
+        app.worktree_changes
+            .insert(WorktreeId("w0".into()), (Some(12), now));
+        app.worktree_ahead.insert(WorktreeId("w0".into()), (0, 5));
+        app.worktree_changes
+            .insert(WorktreeId("w1".into()), (Some(3), now));
+        app.worktree_lines.insert(
+            WorktreeId("w1".into()),
+            crate::git_diff::LineChanges {
+                added: 60,
+                removed: 28,
+            },
+        );
+        let facts = [rule_facts(&app, &root, th), rule_facts(&app, &feat, th)];
+        let cols = RuleColumns::of(&facts);
+        let draw = |band: &crate::launcher::Band, facts: &RuleFacts| -> Vec<char> {
+            let area = Rect::new(0, 0, 80, 1);
+            let mut buf = Buffer::empty(area);
+            let rule = BandRule {
+                index: 0,
+                on: false,
+                lit: false,
+                more: 0,
+                cols,
+            };
+            draw_band_rule(&mut buf, &app, area, band, facts, rule);
+            row_string(&buf, 0).chars().collect()
+        };
+        let root_row = draw(&root, &facts[0]);
+        let feat_row = draw(&feat, &facts[1]);
+        let at = |row: &[char], needle: &str| -> usize {
+            let n: Vec<char> = needle.chars().collect();
+            row.windows(n.len())
+                .position(|w| w == n.as_slice())
+                .unwrap()
+        };
+        let text = |row: &[char]| row.iter().collect::<String>();
+        assert!(
+            text(&feat_row).contains("↗ #57 ready"),
+            "{}",
+            text(&feat_row)
+        );
+        assert!(!text(&root_row).contains('↗'), "{}", text(&root_row));
+        // The file counts end in the same column, right-aligned.
+        assert_eq!(at(&root_row, "*12") + 3, at(&feat_row, "*3") + 2);
+        // The pull request's column is blank on the root, not closed up.
+        let pr_at = at(&feat_row, "↗");
+        assert_eq!(root_row[pr_at], ' ', "{}", text(&root_row));
+        // The dashes stop at the same column on both.
+        let dashes_end = |row: &[char]| {
+            let start = at(row, "──");
+            start + row[start..].iter().take_while(|c| **c == '─').count()
+        };
+        assert_eq!(dashes_end(&root_row), dashes_end(&feat_row));
     }
 
     /// The band the keys are on says so: its rule opens on the CURSOR
@@ -5217,17 +5681,18 @@ mod tests {
             on: true,
             lit: true,
             more,
+            cols: RuleColumns::default(),
         };
 
         let buf = rule_row_as(&app, &band, 96, lit(6));
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
-        assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
+        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
-        // The mark in the accent, the checkout still in its own color.
+        // The mark in the accent, the checkout as on any band.
         let accent = painted(&buf, 0, th.accent);
         assert!(accent.starts_with('❯'), "{accent:?}");
-        assert_eq!(painted(&buf, 0, th.root), "⌂ main");
+        assert_eq!(painted(&buf, 0, th.text), "main");
 
         // The cursor's band with the keys elsewhere: bold branch, and
         // that is all — no mark, the count as on any band.
@@ -5240,11 +5705,12 @@ mod tests {
                 on: true,
                 lit: false,
                 more: 6,
+                cols: RuleColumns::default(),
             },
         );
         let text = row_string(&buf, 0);
         assert!(text.starts_with("── ⌂ main"), "keys elsewhere: {text:?}");
-        assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
+        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert_eq!(painted(&buf, 0, th.accent), "", "{text:?}");
     }
 
@@ -5261,12 +5727,13 @@ mod tests {
             on: true,
             lit: true,
             more: 2,
+            cols: RuleColumns::default(),
         };
 
         let buf = rule_row_as(&app, &band, 40, rule);
         let text = row_string(&buf, 0);
-        assert!(text.starts_with("❯  ↳ feat-x"), "{text:?}");
-        assert!(text.contains("3 sessions  ▸ 2 more ──"), "{text:?}");
+        assert!(text.starts_with("❯  ⎇ feat-x"), "{text:?}");
+        assert!(text.ends_with(" ▸ 2 more ──"), "{text:?}");
     }
 
     /// A card's frame carries its status — red asking, blue done unread,
@@ -5336,7 +5803,13 @@ mod tests {
         );
         assert_eq!(
             frame(with(AgentStatus::Running, false), false, true),
-            th.warn
+            th.edge,
+            "working asks nothing of you: the spinner says it, not the frame"
+        );
+        assert_eq!(
+            frame(with(AgentStatus::Terminated, false), false, true),
+            th.err,
+            "a crash wants you"
         );
         assert_eq!(
             frame(with(AgentStatus::Finished, false), false, true),
@@ -5348,6 +5821,17 @@ mod tests {
             ..with(AgentStatus::Running, false)
         };
         assert_eq!(frame(cold, false, true), th.edge);
+        // A crash's PTY is gone too, but the crash is still true: it keeps
+        // the frame that says it wants you.
+        let crashed = Agent {
+            alive: false,
+            ..with(AgentStatus::Terminated, false)
+        };
+        assert_eq!(
+            frame(crashed, false, true),
+            th.err,
+            "a cold crash still wants you"
+        );
         let archived = Agent {
             archived: true,
             ..with(AgentStatus::NeedsFeedback, false)
@@ -5445,7 +5929,7 @@ mod tests {
                 id: AgentId("a1".into()),
                 worktree_id: WorktreeId("w1".into()),
                 name: "fix login".into(),
-                status: AgentStatus::Running,
+                status: AgentStatus::NeedsFeedback,
                 archived: false,
                 archived_at: 0,
                 unseen: false,
@@ -5485,7 +5969,7 @@ mod tests {
         let buf = draw(&app, false);
         assert_eq!(buf.cell((20, 1)).unwrap().bg, th.sel_bg_dim);
 
-        // On: a faint wash of the running yellow, frame and all, while
+        // On: a faint wash of the needs-you crimson, frame and all, while
         // the pane has the keys.
         app.highlight_current_card = true;
         let buf = draw(&app, false);
@@ -5495,7 +5979,7 @@ mod tests {
             panic!("{fill:?}")
         };
         assert!(r.max(g).max(b) <= 45, "faint: {fill:?}");
-        assert!(r > b && g > b, "yellowish: {fill:?}");
+        assert!(r > g && r > b, "reddish: {fill:?}");
 
         // It breathes between the floor and the peak.
         let levels: Vec<f32> = (0..TINT_BREATH).map(tint_level).collect();
@@ -5522,61 +6006,15 @@ mod tests {
         app.animations = false;
         assert_eq!(
             draw(&app, false).cell((20, 2)).unwrap().bg,
-            dim_toward_black(th.warn, TINT_PEAK)
+            dim_toward_black(th.err, TINT_PEAK)
         );
 
         // The PROJECT TABS holding the keys fade it further.
         app.launcher_tab_cursor = Some(orion_core::ProjectId("p1".into()));
         assert_eq!(
             draw(&app, false).cell((20, 2)).unwrap().bg,
-            dim_toward_black(th.warn, TINT_PEAK * 0.6)
+            dim_toward_black(th.err, TINT_PEAK * 0.6)
         );
-    }
-
-    /// CARD LINE COUNTS: the lines behind the file count always follow it
-    /// on the band's rule in the DIFF VIEWER's green and red — `+3 files
-    /// +120 -45` — and yield after the word and before the branch as the
-    /// rule narrows.
-    #[test]
-    fn card_line_counts_follow_the_file_count_in_green_and_red() {
-        use orion_core::WorktreeId;
-        let mut app = App::new();
-        let th = app.theme;
-        app.worktree_changes.insert(
-            WorktreeId("w1".into()),
-            (Some(3), std::time::Instant::now()),
-        );
-        app.worktree_lines.insert(
-            WorktreeId("w1".into()),
-            crate::git_diff::LineChanges {
-                added: 120,
-                removed: 45,
-            },
-        );
-        let band = a_band(false, "feat-x");
-        let rule = |app: &App, width: u16| {
-            let buf = rule_row(app, &band, width);
-            (
-                row_string(&buf, 0),
-                painted(&buf, 0, th.warn),
-                painted(&buf, 0, th.ok),
-                painted(&buf, 0, th.err),
-            )
-        };
-
-        let (text, warn, added, removed) = rule(&app, 60);
-        assert!(text.contains("↳ feat-x +3 files +120 -45"), "{text:?}");
-        assert_eq!(warn.trim(), "+3 files");
-        assert_eq!(added.trim(), "+120");
-        assert_eq!(removed.trim(), "-45");
-
-        let (text, warn, added, _) = rule(&app, 37);
-        assert!(text.contains("↳ feat-x +3 +120 -45"), "{text:?}");
-        assert_eq!((warn.trim(), added.trim()), ("+3", "+120"));
-
-        let (text, warn, added, _) = rule(&app, 24);
-        assert_eq!(warn.trim(), "+3", "narrowest: {text:?}");
-        assert_eq!(added.trim(), "", "the lines go before the branch does");
     }
 
     /// An ARCHIVED card is the live card put away rather than the live card
@@ -5694,6 +6132,5 @@ mod tests {
         // its band's rule, not the card's.
         assert_eq!(colored(&live, 2, th.dim), "claude");
         assert_eq!(colored(&gone, 2, th.dim), "claude");
-        assert_eq!(colored(&live, 2, th.root), "");
     }
 }

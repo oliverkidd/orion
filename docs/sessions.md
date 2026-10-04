@@ -4,9 +4,15 @@
 
 Everything that can start an AGENT, and what each launch path does differently.
 
-## The NEW SESSION PICKER
+**Session, agent, terminal.** A SESSION is anything with a card on the grid, and it is one of two
+things: an AGENT — an AI coding CLI (Claude, Codex, Cursor, …) working on a task, started with `⌘N` —
+or a TERMINAL — a plain shell, started with `t`. orion says "agent" for what starts or concerns the
+CLI, "terminal" for the shell, and "session" only for what is true of both: the cards, the attention
+walk (`.` / `,`), archiving and deleting.
 
-Run **New session** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
+## The NEW AGENT PICKER
+
+Run **New agent — choose harness** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
 run — **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
 switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
@@ -16,8 +22,8 @@ checks through the login shell at launch). Your own CLIs join the menu too: add 
 `custom_harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
 own labels, each toggled in its own section on the Agents tab, with the session card wearing the
 entry's label as its badge. A custom entry launches with its program and model flag, boots fresh every
-time (no resume mapping), and — unless it names a built-in hook dialect — stays process-based: yellow
-while the PTY is live, green when it ends, never red. `→` on any row drills
+time (no resume mapping), and — unless it names a built-in hook dialect — stays process-based: working
+while the PTY is live, done when it ends, never needing you. `→` on any row drills
 into model and reasoning-effort submenus (Cursor's model is a family such as `claude-opus-5-thinking`, and
 its effort list follows the family, `-fast` variants included — `cursor-agent --list-models` bakes both
 into the id, so orion launches `--model claude-opus-5-thinking-high-fast`; the list is a built-in seed
@@ -57,7 +63,7 @@ The picker opens on the Agents tab's **Quick prompt › Agent** harness — the 
 is on (Settings → Experimental, `remember_harness` in CONFIG.JSON). Then every launch you walk
 through this picker, the PR SESSION picker or the QUICK PROMPT's `Tab` picker writes its harness into
 that row, and a model or effort you drilled into through the
-submenus into that harness's own **Model** / **Effort** rows: the next **New session** opens on that harness with
+submenus into that harness's own **Model** / **Effort** rows: the next **New agent — choose harness** opens on that harness with
 its ✓ on that model, the box `Enter` opens is set to it, and `⌘N` launches it too. The rows are the ordinary settings,
 so the Agents tab always shows what the next launch will be, and you can still change them there. An
 AGENT PRESET launch leaves them alone — its harness is the preset's, not a change of mind.
@@ -91,15 +97,15 @@ watching one and waiting for it to ask you something, it is not going to. Pi has
 orion installs one managed extension (`~/.pi/agent/extensions/orion.ts`, inert outside orion) that
 posts pi's `session_start`, `before_agent_start`, `agent_end` and `ask_question` tool events as
 `SessionStart`, `UserPromptSubmit`, `Stop` and `PreToolUse` / `PostToolUse`, and any blocking prompt an
-extension raises mid-run as `PermissionRequest` — so a Pi row goes yellow, red while its `ask_question`
-tool waits on you, and green when the run ends, a cancelled run included. Muse has no hooks at all yet:
-its row is yellow while the PTY is live and green when the process ends, and it never goes red. OpenCode
+extension raises mid-run as `PermissionRequest` — so a Pi row is working, red while its `ask_question`
+tool waits on you, and done when the run ends, a cancelled run included. Muse has no hooks at all yet:
+its row is working while the PTY is live and done when the process ends, and it never goes red. OpenCode
 runs TypeScript plugins, so orion installs one managed plugin (`~/.config/opencode/plugins/orion.ts`,
 inert outside orion) that posts OpenCode's `chat.message` as `UserPromptSubmit`, its `session.status`
 / `session.idle` as `Stop`, `permission.asked` / `permission.replied` as `PermissionRequest` and the
 gated tool's `PostToolUse`, and its `question` tool's `question.asked` / `question.replied` as
-`PreToolUse` / `PostToolUse` — so an OpenCode row goes yellow, red while a permission or a question
-waits on you (one raised from a subagent session included), and green when the turn ends, an aborted
+`PreToolUse` / `PostToolUse` — so an OpenCode row is working, red while a permission or a question
+waits on you (one raised from a subagent session included), and done when the turn ends, an aborted
 one included.
 
 ## AGENT PRESETS
@@ -157,15 +163,14 @@ The next turn for a session already running. Put the cursor on an agent's card a
 pick **Follow-up prompt** from its right-click menu — and a small MODAL opens over the grid, titled
 `Follow-up · <session>`, four rows of typing.
 
-`Enter` sends what you typed to the agent as its next turn and closes the box, with
-`sent to <session>` in the footer; `Shift+Enter`, `Option+Enter` and `Ctrl+J` break a line, as in Claude
-Code's own prompt, and `Esc` closes the box without sending. The text goes straight down the session's
+`Enter` sends what you typed to the agent as its next turn and closes the box; `Shift+Enter`,
+`Option+Enter` and `Ctrl+J` break a line, as in Claude Code's own prompt, and `Esc` closes the box without sending. The text goes straight down the session's
 PTY — the same path your keystrokes take in the pane — so the CLI sees it as a prompt typed at it. A
 prompt with line breaks in it crosses as one bracketed paste rather than as typing, so nothing
 auto-indents it to mush.
 
-While the box is open it owns the keyboard: the grid's own verbs are bare letters, so `a`, `t` and `r`
-are letters in your prompt and not archive, delete and rename aimed at the session you are prompting.
+While the box is open it owns the keyboard: the grid's own verbs include bare letters, so `t`, `r` and `s`
+are letters in your prompt and not a terminal, a rename or Settings aimed at the session you are prompting.
 A click outside the box closes it, as it closes any modal.
 
 Nothing about the PANE moves when you use it. It is not unfolded, not swapped onto the card, not
@@ -176,9 +181,9 @@ brings the pane back — never once stepping into a session or waiting for one t
 
 Only a live local agent takes one. An archived session's turn is over, a Claude Cloud row's
 agent runs in a sandbox with a message queue of its own (**Send to cloud session** in its menu), a shell
-terminal takes typing in the pane, and a pull request row is not a conversation — each says so if you
-ask. A session whose CLI is not up — reaped by the IDLE REAPER, or cold since the daemon started — is
-booted first and the box left as it is with `starting <session>` in the footer: nothing is typed into a
+terminal takes typing in the pane, and a pull request row is not a conversation — `Space` on any of
+them opens no box. A session whose CLI is not up — reaped by the IDLE REAPER, or cold since the daemon
+started — is booted first and the box left as it is, your text still in it: nothing is typed into a
 process that is still starting, so press `Enter` again once it is up.
 
 ## Dropping a screenshot on a prompt box
@@ -196,6 +201,28 @@ characters outside ASCII. Other dropped paths — a source file, an image with a
 as pasted, so the agent works on the file itself. Copies older than a week are deleted the next time
 something is dropped. A drop straight into a session's pane goes to the CLI untouched: Claude Code reads
 a dropped image there itself.
+
+An image on the clipboard — a screenshot taken with ⌃⇧⌘4, an image copied from a browser — goes in
+with `^V` in the same boxes (the hint is on each box's bottom border). The terminal's own `⌘V` only
+ever pastes text, so orion reads the clipboard itself: `pngpaste` when it is on PATH, otherwise
+`osascript` asking for the clipboard as PNG (or as TIFF, converted by `sips`). The image is written
+to the same `attachments/` folder as `clipboard-<hash>.png` — the same image pasted twice is one file
+— and its path goes in at the caret, replacing any selection. With no image on the clipboard the
+footer says so and nothing is pasted.
+
+## The quick prompt's draft
+
+The QUICK PROMPT's text is saved to `quick_prompt_draft.txt` in the DATA DIR as you type it — each
+change rewritten whole through a temporary file, nothing written when nothing changed. Closing the
+terminal window kills orion without a clean shutdown, so there is no exit hook to rely on; with the
+text already on disk, the next box opened after a restart starts from it, caret at its end, its
+explanation line reading `draft restored · …` until the first edit. Within one run the box you
+closed comes back the same way, with its harness and preset (`Esc` parks it).
+
+Sending the box deletes the draft, and so does emptying it by hand. A launch the daemon refuses
+comes back with its text, which is the draft again. Boxes that carry their own text — a refused
+launch, a preset's task, the FOLLOW-UP box — never open on the draft, and a box with text of its own
+writes nothing until you edit it, so opening one never overwrites what you were drafting.
 
 ## RECENT PROMPTS
 
@@ -238,11 +265,14 @@ A second Claude account is one more Claude Code config dir with a login of its o
 account** under **Claude accounts** on the settings overlay's Agents tab (or **Claude accounts** in
 the COMMAND PALETTE, or the step first-run onboarding has right after Agents) makes the dir, offers to
 share your setup with it — `CLAUDE.md`, settings, skills, agents, commands, plugins, as links — and
-`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account is named
-after the email it is signed in as, `Claude (you@example.com)`, and on a machine with more than one
-a card says which its session runs on by that email (`you@example.com opus high`) where it would
-say `claude`. See [Configuration](configuration.md#claude-accounts) for the `claude_accounts` entry
-behind it, signing in and out, and removing one.
+`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account goes by the
+name you gave it and the email it is signed in as, `Work (you@example.com)` — `Claude
+(you@example.com)` until it has a name — and `r` on its row renames it, the default account too,
+without moving its sessions or its dir. On a machine with more than one a card says which its
+session runs on by that name, else that email (`Work opus high`), where it would say `claude`. A
+removed account's dir stays, listed under **Saved on this machine** with who it is signed in as, to
+add back or move to the Trash. See [Configuration](configuration.md#claude-accounts) for the
+`claude_accounts` entry behind it, signing in and out, renaming and removing one.
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the
 browser sign-in approves whichever account the browser is signed in to, so it is easy to end up
@@ -264,8 +294,9 @@ and the model and effort that harness offers, kept), and resumes the conversatio
 comes back at its input box: type `continue`, or whatever the next turn is. The source is never
 deleted, and a file the destination already holds is never overwritten unless it is an older copy
 of the same transcript — a session carried back to an account it ran on before. A session with no
-conversation yet, a transcript orion can't find, a Claude Cloud session or an archived one is
-refused with the reason in the footer, before anything stops.
+conversation yet or a transcript orion can't find is refused with the reason in the footer, before
+anything stops; a Claude Cloud session, an archived one or one off Claude has nowhere to go, and
+`⇧C` on it lists nothing.
 
 ## The GRID
 
@@ -339,19 +370,22 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   walked: `↑`,`↑` on the top row of cards hands the keys up to the tabs, with a cursor of
   their own on the lit tab; `←`/`→` move it and the grid switches with it, each project
   shown on its last-focused card as the cursor passes, and `Enter` — or `↓`,`↓` back
-  down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `x` for the one the
-  grid is on (the one under the header's cursor while it has the keys), closes it and the grid
+  down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `Backspace` on the
+  one under the header's cursor while it has the keys (behind a confirm), closes it and the grid
   moves to the tab that slides into its place. Closing a tab
   changes nothing about the project — its sessions run on. Closing the last tab puts orion back on
   the splash it opens on before there is any project, where `+` lists every project, `Enter` opens
   the repo orion was started in and `⌘K`'s last row another folder; the splash stays across a restart. The
-  tabs are remembered across restarts. Each tab carries its project's STATUS DOTS right of the name — one
-  per state its sessions are in, carrying that state's count and no word at all: red waiting on
-  you, blue an unread finish, yellow mid-turn, in that fixed order and left out where a state is
-  empty, so a quiet project is its bare name. The tab's name sweeps too, on the loudest of them:
-  red while a session waits on you, else yellow while one is mid-turn, else blue while a finish is
-  left unread — and holds still once the project is quiet. The sweep recolors the name in place,
-  so no tab moves; the animations setting turns it off. The `+` in front of the tabs — or the
+  tabs are remembered across restarts. Each tab carries its project's STATUS MARKS right of the name — the
+  mark a session in each state wears, carrying that state's count and no word at all: crimson `●`
+  waiting on you, crimson `✕` crashed, `●` in the done color for an unread finish, the gold spinner
+  mid-turn — in that fixed order and left out where a state is empty, so a quiet project is its bare
+  name. An unlit tab's name is bright while something there wants you and dim while nothing does,
+  and it shimmers: once, in red, for the seconds after a session there starts waiting on you or
+  crashes, and in the done color for as long as a finish there is left unread — it stops the moment
+  you read it. Work in progress never sweeps a tab; the spinner says that. The tab you are on never
+  sweeps at all: its accent says where you are. The sweep recolors the name in place, so no tab
+  moves; the animations setting turns it off. The `+` in front of the tabs — or the
   key `+` from the cards (`⌘P` is its silent alias inside the pane, where the terminal sends ⌘) —
   drops the PROJECT DROPDOWN: every project on the machine — the
   ones with a session waiting on you first, then the ones running, then the rest most recently
@@ -379,14 +413,20 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   setting on, deleting a worktree's last card never asks about the worktree: the band stays,
   empty, until its own `Backspace` — unless **Delete emptied worktree** is on, which still deletes the
   worktree with its last card. Each band is a
-  titled rule over one row of cards: the rule names the checkout in its scope color (`↳ feat`,
-  `⌂ main` for the root — the project is the grid's own scope, named once in the header), with
-  that checkout's uncommitted changes right behind the branch in the warning color (`↳ feat +3
-  files`, just `+3` on a narrow rule, nothing when it is clean; the lines behind it follow in
-  green and red, `+3 files +120 -45`), then its pull request —
-  `↗ #42 Polish the nav  ready` in the colors the PR rows wear (red for conflicts or failing checks,
-  purple once merged), a link while the pointer rests on it — and, at its right end, how many
-  sessions and terminals are under it and how many cards the row had no room for (`▸ 2 more`).
+  titled rule over one row of cards: the rule names the checkout by its SCOPE MARK (`⎇ feat`,
+  `⌂ main` for the root, the purple `●` once its pull request has merged — the project is the
+  grid's own scope, named once in the header; the root's branch is bright, a worktree's muted), and
+  after the branch, dim, the folder it is checked out in when the branch's name doesn't spell it
+  (`⎇ feat/ui-redesign in pawy`). Its right end holds columns that are as wide on every band, so
+  they line up down the grid and nothing shifts when one band's count changes: the pull request —
+  `↗ #42 ready`, muted, in the colors the PR rows wear (crimson `conflicts` or `failing`, purple
+  once merged, faint for a draft or a closed one), a link while the pointer rests on it — then the
+  checkout's git counts, each right-aligned in its own column: uncommitted files `*3` in the diff's
+  sand, lines `+120 −45` in its sage and rose, and commits ahead of and behind the base it was cut
+  from, `⇡4 ⇣1`, muted (the root's base is origin's copy of its branch, so there they are what is
+  unpushed and unpulled). A band with nothing to say in a column leaves it blank; a narrow rule
+  drops the folder, then the pull request's column, then the counts', before the branch shortens.
+  How many cards the row had no room for sits just ahead of them (`▸ 2 more`).
   The band the keys are on opens on `❯` where the rest open on `──`, and the FOOTER says what
   Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every card
   of it wrapped into rows under the rule.
@@ -451,12 +491,12 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   wherever it sits), with `▾ 2 more · see all 5` on the line under them; `Tab`, or a click on
   that line, opens the band to every entry and `Tab` or `Esc` folds it back — one band open at a
   time, as with the cards. A band that already lists everything has nothing to open, and `Tab`
-  there says so. `↑` and `↓` walk the lines as one column, off a band's last line onto the next
+  there does nothing. `↑` and `↓` walk the lines as one column, off a band's last line onto the next
   band's first; `Enter` and a click work on a line as on a card.
 - **Every worktree open.** Settings → Appearance → **Expand all worktrees** (`expand_all_worktrees`,
   off by default) lays every band out open at once — each worktree's sessions and terminals wrapped
   into rows under its rule, or every line of the compact list — so there is no accordion: `Tab`, and
-  a second click on a rule, open and fold nothing (the footer says so), the footer offers no `Tab` verb,
+  a second click on a rule, open and fold nothing, the footer offers no `Tab` verb,
   and `Esc` has no band to close. `←`/`→` walk a row, `↑`/`↓` walk down every worktree's rows as one
   column — off a band's last row onto the next band's first, in the column the cursor was in. Which
   band `Tab` last opened is kept, and comes back open when the setting is switched off.
@@ -465,7 +505,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   it back) or Settings → Appearance → **Session pane** (`session_pane`, which the button writes; a
   window too narrow for it beside a column of cards lays it along the bottom until there is
   room) — and reads whichever card the cursor is on — on a collapsed band, its remembered
-  card: `● polish-nav  ↳ feat` on its header, the card's name and its checkout, and that session
+  card: `● polish-nav  ⎇ feat  ↗ #42` on its header, the card's name, its checkout and its pull
+  request, and that session
   live under it, swapping as you walk the
   grid, so stepping across the bands reads each checkout's progress in turn. A terminal's chip
   puts its shell there the same way. It is the selected session, so
@@ -513,10 +554,10 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
   out to: `Esc` lets the card go, a second does nothing, and `↑` on the first band stays put.
 
-Every other key acts on the session under the cursor — `a` archives, `Backspace` deletes, `⌘E` opens its
-diff, `⌘K` jumps, `s` opens Settings. `a` asks first, always: a CONFIRM DIALOG names
+Every other key acts on the session under the cursor — `⌘⇧A` (`^A`) archives, `Backspace` deletes, `⌘E` opens its
+diff, `⌘K` jumps, `s` opens Settings. `⌘⇧A` asks first, always: a CONFIRM DIALOG names
 the session, `Enter` or `y` archives it and `Esc` or `n` keeps it, so a letter aimed at an agent
-that lands on the grid archives nothing — and saying yes is cheap, since `u` brings it back. The
+that lands on the grid archives nothing — and saying yes is cheap, since `⌘⇧U` (`^U`) brings it back. The
 cursor lands on the card after the one archived in its band — the one that slides up into its
 place — or, when the band's last card went, on the one before it; a band's only card leaving takes
 the band with it, and the cursor lands on the one that slid up into its slot. `Backspace` lands
@@ -526,19 +567,30 @@ before anything is deleted: `Delete agent 'x'? Its session and history go away.`
 `Nothing else is left in worktree 'feature': delete it from disk too?`, with three answers. `Enter`
 or `y` deletes the card and then the worktree, the way `Backspace` on its band would; `n` deletes the card
 and keeps the checkout standing empty; `Esc` cancels, and the card stays alive. The ROOT WORKTREE
-is never offered, and an archive (`a`) never asks: an archived card is still filed under its
+is never offered, and an archive (`⌘⇧A`) never asks: an archived card is still filed under its
 checkout, so the dialog on a worktree that still holds archived sessions counts them, since the
 delete takes their history with it. **Delete emptied worktree** (Settings → Sessions, off by
 default) skips the question: the card's ordinary confirm says the worktree goes with it and `Enter`
 deletes both — except when archived sessions are still filed under it, which always get the
 three-way question. **Show all worktrees** takes the question away, not the setting: with both on,
-the worktree still goes with its last card. A held `a` opens one dialog and
-archives nothing by itself; a held `u` in the ARCHIVED VIEW unarchives one card, and the next needs
+the worktree still goes with its last card. A held `⌘⇧A` opens one dialog and
+archives nothing by itself; a held `⌘⇧U` in the ARCHIVED VIEW unarchives one card, and the next needs
 the key let go and pressed again (on a terminal with the kitty keyboard protocol, which is what
 tells a held key's repeats from a fresh press; without it a long hold still walks the row).
 
+**Every band carries an ARCHIVED DRAWER** under it once its checkout has an archived session: a
+faint `▸ 3 archived` line, folded by default. `z` on the band — or a click on the line — unfolds it
+into one line per archived session, most recently archived first, each drawn in an archived card's
+quiet colors with how long ago it was filed on the right; the cursor lands on the newest, so `z`
+then `⌘⇧U` brings back the session just archived. `↓` off the band's cards walks into the drawer and
+on to the next band, `↑` the other way; `⌘⇧U` on a line (or a double-click) unarchives it, the cursor
+staying on it as a live card, and `Backspace` deletes it. `z` again folds the drawer, the cursor
+back on the band's cards. A checkout with only archived sessions has no band of its own — unless its
+drawer is unfolded, so archiving a band's last card with the drawer open leaves the band standing.
+Which drawers are open is remembered across restarts.
+
 **`⇧A` is the ARCHIVED VIEW**: the same grid, of the project's archived sessions instead of its live
-ones, with the header counting them under their own word (`3 archived sessions`). `u` unarchives the
+ones, with the header counting them under their own word (`3 archived sessions`). `⌘⇧U` unarchives the
 card under the cursor where it stands and `Backspace` deletes it; `⇧A` again comes back to the live
 sessions. The two lists never mix — there is no group to fold, only the other grid — and `Enter`
 on an archived card says to unarchive it first, its session having been reaped when it was
@@ -597,8 +649,8 @@ description takes `Shift+Enter` (or `Option+Enter`, or `Ctrl+J`) for a line brea
 its lines, as every multi-row box does — the preset editor's prefix and postfix included.
 `Enter` sends both to GitHub as one `gh issue edit` (the title on the command line, the description
 on its stdin) and holds the form, its foot saying `saving…`, until GitHub answers: the row and the
-pane then carry the new text at once, the list is asked for again underneath, and the footer says
-`issue #15 updated`. `Esc` drops the draft and puts the reading pane back. An unchanged form closes
+pane then carry the new text at once, and the list is asked for again underneath. `Esc` drops the
+draft and puts the reading pane back. An unchanged form closes
 without a call, a blank title is refused on the spot, and a save GitHub refuses — not logged in, no
 push access to the repo — keeps the form up with `gh`'s own reason on its frame and your text
 intact, so nothing typed is lost. Labels, assignees and milestones stay GitHub's to edit.

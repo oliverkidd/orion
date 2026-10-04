@@ -9,6 +9,18 @@ use std::path::PathBuf;
 /// clients; the client then offers a kill-and-restart of the old daemon.
 pub const PROTOCOL_VERSION: u32 = 46;
 
+/// What the reader of a frame its build can't decode is told to do. The
+/// frames are positional msgpack, so a peer built from different protocol
+/// types — a TUI installed over a DAEMON that is still running, with
+/// `PROTOCOL_VERSION` left where it was — sends payloads the other side
+/// can't read even though the handshake passed. Neither side can tell which
+/// build is older, and `orion kill` alone only helps when the DAEMON is (a
+/// live older client respawns its DAEMON from its own binary), so the hint
+/// covers both.
+pub const UNDECODABLE_FRAME_HINT: &str = "orion and its daemon are different builds, so a message \
+     between them could not be read — make sure the newest orion is installed, then run \
+     `orion kill` and start orion again";
+
 /// Max IPC frame size (length prefix sanity bound).
 pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
 
@@ -130,6 +142,13 @@ pub enum ClientRequest {
         /// since a spare booted bare never got it.
         #[serde(default)]
         issue_url: Option<String>,
+        /// The mode the CLI starts in — plan, ask, or the edit it always
+        /// starts in ([`crate::harness::AgentMode`]). Request-only like
+        /// `starting_prompt`: a RESUME starts where the session left off,
+        /// and a mode the harness does not have is dropped. Skips PREWARM
+        /// POOL adoption unless it is edit, a spare having booted in edit.
+        #[serde(default)]
+        mode: crate::harness::AgentMode,
     },
     /// Create a local AGENT of any kind from an OPEN PRS row — a PR
     /// SESSION. It never runs in the ROOT WORKTREE: the daemon finds the
@@ -174,6 +193,9 @@ pub enum ClientRequest {
         /// is the first prompt. Request-only, never persisted.
         #[serde(default)]
         starting_prompt: Option<String>,
+        /// The mode the CLI starts in, under `CreateAgent`'s rules.
+        #[serde(default)]
+        mode: crate::harness::AgentMode,
     },
     /// Fire-and-forget: pre-spawn an agent CLI for this (worktree, kind) so
     /// the next CreateAgent adopts an already-booted session. Sent the

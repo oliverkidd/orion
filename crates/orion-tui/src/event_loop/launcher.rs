@@ -22,90 +22,15 @@ use crate::text_input::TextInput;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use orion_core::{AgentId, ClientRequest, ProjectId, SessionRef, WorktreeId};
 
-/// The key the live keymap gives `action`, for a sentence that names it —
-/// or `fallback`, the way to it without one.
-fn key_of(app: &App, action: Action, fallback: &str) -> String {
-    crate::hints::key_or(&app.keymap, action, fallback)
-}
-
-/// What `⇧A` says each way: which of the two lists the grid is now of.
-fn archived_view(app: &App) -> String {
-    format!(
-        "archived sessions — {} unarchives one, Esc back to the live ones",
-        key_of(app, Action::Archive, "the card's menu")
-    )
-}
-
-fn live_view(app: &App) -> String {
-    format!(
-        "live sessions — {} reads the archived ones",
-        key_of(app, Action::ToggleArchived, "the command palette")
-    )
-}
-
-/// What the grid says when there is nothing to step through yet — of
-/// whichever of the two lists it is showing ([`toggle_archived`]).
-pub(super) fn no_sessions(app: &App) -> String {
-    format!(
-        "no sessions yet — {} starts one",
-        key_of(app, Action::QuickPrompt, "New agent in the command palette")
-    )
-}
-
-const NO_ARCHIVED_SESSIONS: &str = "nothing archived here — Esc back to the live sessions";
-
 /// Is the card under this id one of the ARCHIVED VIEW's? Its session was
 /// reaped when it was archived, so nothing on it can be stepped into.
 fn is_archived(app: &App, id: &AgentId) -> bool {
     app.tree.agents.iter().any(|a| &a.id == id && a.archived)
 }
 
-/// The one of those two this grid means.
-fn nothing_here(app: &App) -> String {
-    if app.show_archived {
-        NO_ARCHIVED_SESSIONS.into()
-    } else {
-        no_sessions(app)
-    }
-}
-
-/// What the PROJECT DROPDOWN says with no project to list — never on
-/// screen in practice: the view is only up once there is one.
-fn no_projects(app: &App) -> String {
-    format!(
-        "no projects yet — {}, then its last row opens a folder",
-        key_of(app, Action::Palette, "the jump list")
-    )
-}
-
-/// What folding the PANE away says, and what bringing it back says. The
-/// first names what went with it: the card under the cursor is let go of
-/// too, as an Esc lets it go.
-fn pane_hidden(app: &App) -> String {
-    format!(
-        "pane hidden, nothing selected — {} brings it back",
-        key_of(app, Action::ToggleLauncherPane, "Toggle pane")
-    )
-}
-const PANE_SHOWN: &str = "pane back under the cards";
-
-/// What the pane's SIDE BUTTON says once it has moved the pane.
-const PANE_MOVED_RIGHT: &str = "pane moved beside the cards";
-const PANE_MOVED_BOTTOM: &str = "pane moved under the cards";
-/// What a double-click on the pane's edge says.
-const PANE_CENTERED: &str = "pane edge centered";
-
 /// What the fold key did as the first of its two presses from inside the
 /// PANE ([`fold_key`]), for the KEY COMBO DISPLAY.
 const BACK_TO_CARD: &str = "Back to the card";
-
-/// What letting the card under the cursor go says: nothing in the GRID is
-/// selected any more, and the PANE has no session to read.
-pub(super) fn unaimed(app: &App) -> String {
-    let walk = crate::hints::acts(&app.keymap, &[Action::MoveUp, Action::MoveDown], "")
-        .map_or_else(|| "an arrow".to_string(), |hint| hint.key);
-    format!("nothing selected — {walk} or a click picks a card again")
-}
 
 /// The box: the QUICK PROMPT, aimed at the project under the list's cursor
 /// (the selected project). It lands in the checkout under the grid's
@@ -126,7 +51,7 @@ pub(super) fn open_box(app: &mut App) {
     }
 }
 
-/// `n`: the NEW SESSION PICKER first — which harness, `→` its model and
+/// `n`: the NEW AGENT PICKER first — which harness, `→` its model and
 /// effort — and the box after it, set to the pick, in the checkout `p`
 /// would take. The picker's rows carry the box they owe
 /// (`QuickReturn::from_box` false: no box is up yet), so Enter on a row
@@ -139,7 +64,6 @@ pub(super) fn open_new_session(app: &mut App) {
     // The checkout the rows are built against; the launch keeps its own
     // target either way (`quick_prompt::open_launch_picker` does the same).
     let Some(context) = crate::quick_prompt::picker_context(app, &launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let back = QuickReturn::fresh(launch);
@@ -150,8 +74,8 @@ pub(super) fn open_new_session(app: &mut App) {
 }
 
 /// The launch a box opened from the grid starts from: the Settings →
-/// Agents harness, aimed as [`open_box`] says. None, with the flash set,
-/// when there is no project to aim at.
+/// Agents harness, aimed as [`open_box`] says. None when there is no
+/// project to aim at.
 fn box_launch(app: &mut App) -> Option<QuickLaunch> {
     let project = app.selected_project().map(|p| p.id.clone()).or_else(|| {
         app.project_rows()
@@ -159,10 +83,7 @@ fn box_launch(app: &mut App) -> Option<QuickLaunch> {
             .and_then(|i| app.tree.projects.get(*i))
             .map(|p| p.id.clone())
     });
-    let Some(project) = project else {
-        app.flash = Some("add a project first".into());
-        return None;
-    };
+    let project = project?;
     let cfg = crate::config::Config::load();
     let target = view::target_for(app, &project, false);
     Some(QuickLaunch::from_config(target, &cfg))
@@ -192,13 +113,12 @@ pub(super) fn take_aim(app: &mut App) {
 /// `j` steps from where the eye last saw it.
 ///
 /// INPUT PARITY: the one function behind the first Esc ([`escape`]) and
-/// the fold of the PANE ([`toggle_pane`]), so both end in the same state
-/// and say the same word. A click on the air between the cards is NOT one
+/// the fold of the PANE ([`toggle_pane`]), so both end in the same state.
+/// A click on the air between the cards is NOT one
 /// of them: a miss with the pointer folds nothing away — see the
 /// `PanelBg` arm in `event_loop`.
 pub(super) fn clear_aim(app: &mut App) {
     app.launcher_unaimed = true;
-    app.flash = Some(unaimed(app));
     app.dirty = true;
 }
 
@@ -218,12 +138,103 @@ pub(crate) fn toggle_archived(app: &mut App, out: &mut Vec<ClientRequest>) {
         Some(first) => select(app, first, out),
         None => clear_aim(app),
     }
-    app.flash = Some(if app.show_archived {
-        archived_view(app)
-    } else {
-        live_view(app)
-    });
     app.dirty = true;
+}
+
+/// `z`: fold or unfold the ARCHIVED DRAWER under the band the cursor is
+/// on — its checkout's archived sessions, a faint line apiece under the
+/// band. Unfolding lands the cursor on the most recently archived one, so
+/// `z` then `u` brings back the session just filed; folding with the
+/// cursor in the drawer puts it back on the band's cards.
+///
+/// INPUT PARITY: the one function behind the key and a click on the
+/// drawer's `▸ N archived` line ([`click_drawer`]).
+pub(super) fn toggle_drawer(app: &mut App, out: &mut Vec<ClientRequest>) {
+    // The ARCHIVED VIEW is every drawer at once, so there is none to open.
+    if app.show_archived {
+        return;
+    }
+    let bands = view::bands(app);
+    let Some(index) = view::band_cursor(app, &bands) else {
+        return;
+    };
+    let band = &bands[index];
+    let Some(newest) = band.archived.first() else {
+        take_aim(app);
+        return;
+    };
+    if band.drawer_open {
+        let in_drawer = view::drawer_cursor(app, band).is_some();
+        app.archived_open.remove(&band.worktree);
+        if in_drawer {
+            match band.cards.first() {
+                Some(card) => select_card(app, card.sref(), out),
+                None => select_band(app, band.worktree.clone(), out),
+            }
+        }
+    } else {
+        app.archived_open.insert(band.worktree.clone());
+        select(app, newest.agent.id.clone(), out);
+    }
+    take_aim(app);
+    app.dirty = true;
+}
+
+/// A click on a band's `▸ N archived` line: the cursor onto that band,
+/// then its drawer folded or unfolded, as `z` does there.
+pub(super) fn click_drawer(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
+    if select_band_row(app, index, out) {
+        toggle_drawer(app, out);
+    }
+}
+
+/// A click on an archived session's line in an unfolded drawer: the
+/// cursor onto it, as `j`/`k` land it — and a second click on the same
+/// line brings it back, as `u` does there.
+pub(super) fn click_drawer_entry(
+    app: &mut App,
+    band: usize,
+    entry: usize,
+    out: &mut Vec<ClientRequest>,
+) {
+    let Some(id) = point_at_drawer(app, band, entry, out) else {
+        return;
+    };
+    if is_double_click(
+        &mut app.last_session_click,
+        crate::app::RowKey::Session(SessionRef::Agent(id.clone())),
+    ) {
+        super::activate::unarchive(app, id, out);
+    }
+}
+
+/// A right-click's first half on a drawer line, `select_clicked_row`'s
+/// arm: the cursor on it, as a left click leaves it. False off the grid.
+pub(super) fn select_drawer_entry(
+    app: &mut App,
+    band: usize,
+    entry: usize,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    point_at_drawer(app, band, entry, out).is_some()
+}
+
+/// The pointer landing on line `entry` of band `band`'s ARCHIVED
+/// DRAWER, either button: the cursor goes there, the PANE unfolded as a
+/// click on a card unfolds it ([`point_at`]). None off the grid.
+fn point_at_drawer(
+    app: &mut App,
+    band: usize,
+    entry: usize,
+    out: &mut Vec<ClientRequest>,
+) -> Option<AgentId> {
+    let bands = view::bands(app);
+    let id = bands.get(band)?.drawer().get(entry)?.agent.id.clone();
+    if app.launcher_pane_hidden {
+        toggle_pane(app);
+    }
+    select(app, id.clone(), out);
+    Some(id)
 }
 
 /// `^``, and every other chord the pane fold answers to: the way out of
@@ -268,10 +279,8 @@ pub(super) fn toggle_pane(app: &mut App) {
         // come back to the cards, the way `^q` hands them back.
         app.focus = Focus::Sessions;
         app.term_locked = false;
-        app.flash = Some(pane_hidden(app));
     } else {
         take_aim(app);
-        app.flash = Some(PANE_SHOWN.into());
     }
     app.dirty = true;
 }
@@ -289,13 +298,6 @@ pub(super) fn move_pane(app: &mut App) {
     cfg.session_pane = to.as_str().into();
     if super::save_config(app, &cfg) {
         super::apply_config(app, &cfg);
-        app.flash = Some(
-            match to {
-                view::PaneSide::Right => PANE_MOVED_RIGHT,
-                view::PaneSide::Bottom => PANE_MOVED_BOTTOM,
-            }
-            .into(),
-        );
     }
     app.dirty = true;
 }
@@ -315,34 +317,10 @@ pub(super) fn center_pane(app: &mut App) {
         return;
     }
     app.set_launcher_pane(app.launcher_pane_midpoint());
-    app.flash = Some(PANE_CENTERED.into());
     app.dirty = true;
 }
 
 // ---- the BANDS ----
-
-/// What `` ` `` says with no terminal to walk to in the checkout.
-fn no_terminals(app: &App) -> String {
-    format!(
-        "no terminal in this checkout — {} opens one",
-        key_of(app, Action::NewTerminal, "New shell terminal")
-    )
-}
-
-/// What it says over a full-screen session, which has no grid to walk:
-/// the way back down to it.
-pub(super) fn no_pane_here(app: &App) -> String {
-    format!(
-        "the terminals are cards on the grid — {} back to it",
-        key_of(app, Action::UnlockTerminal, "Esc")
-    )
-}
-
-/// What `t` says when it opened the terminal on the ROOT checkout for
-/// want of a band under the cursor.
-const TERMINAL_ON_ROOT: &str = "nothing selected — the terminal opens on the root checkout";
-/// And what it says with no root checkout to fall back on.
-const NO_ROOT_FOR_TERMINAL: &str = "no checkout selected — ↑/↓ onto a worktree, then t";
 
 /// The band the cursor wears — None once the aim has been let go of
 /// (`App::launcher_unaimed`), as `ui::launcher_view::wearing` draws it.
@@ -428,16 +406,6 @@ pub(super) fn select_card(app: &mut App, sref: SessionRef, out: &mut Vec<ClientR
     }
 }
 
-/// What Tab says on a LIST band that already lists every entry it has.
-const ALL_LISTED: &str = "every session in this worktree is already listed";
-
-/// What Tab says with every band open at once: there is no ACCORDION.
-const ALL_OPEN: &str =
-    "every worktree is already open (Settings → Appearance → Expand all worktrees)";
-
-/// What a terminal that left the tree between the draw and the key says.
-const TERMINAL_GONE: &str = "that terminal is gone";
-
 /// [`select`] for a TERMINAL: the selection onto its row — its project,
 /// its checkout, the row in that checkout's list — and the pane reading
 /// it, as walking onto a card does. The `/` PALETTE has no terminal
@@ -463,7 +431,6 @@ fn select_terminal(app: &mut App, id: orion_core::TerminalId, out: &mut Vec<Clie
             .flatten()
     });
     let Some(wt_index) = landed else {
-        app.flash = Some(TERMINAL_GONE.into());
         return;
     };
     app.sel_worktree = wt_index;
@@ -472,7 +439,6 @@ fn select_terminal(app: &mut App, id: orion_core::TerminalId, out: &mut Vec<Clie
         .iter()
         .position(|r| matches!(r, SessionRow::Terminal(t) if t.id == id))
     else {
-        app.flash = Some(TERMINAL_GONE.into());
         return;
     };
     app.sel_session = index;
@@ -491,18 +457,16 @@ fn select_terminal(app: &mut App, id: orion_core::TerminalId, out: &mut Vec<Clie
 /// Never what Enter does: Enter always opens the card itself
 /// ([`enter_pane`]), expanded or not. With every band open at once
 /// (Settings → Appearance → **Expand all worktrees**) there is nothing to
-/// open or fold, and the footer says so.
+/// open or fold.
 ///
 /// INPUT PARITY: the one function behind the key and a second click on
 /// a band's rule ([`click_band`]).
 pub(super) fn toggle_band_expand(app: &mut App, out: &mut Vec<ClientRequest>) {
     if app.launcher_all_open {
-        app.flash = Some(ALL_OPEN.into());
         return;
     }
     let bands = view::bands(app);
     if bands.is_empty() {
-        app.flash = Some(nothing_here(app));
         return;
     }
     let index = match wearing_band(app, &bands) {
@@ -514,7 +478,6 @@ pub(super) fn toggle_band_expand(app: &mut App, out: &mut Vec<ClientRequest>) {
     };
     if bands[index].cards.is_empty() {
         // An EMPTY BAND has no cards to open onto rows.
-        app.flash = Some(no_sessions(app));
         take_aim(app);
         return;
     }
@@ -523,7 +486,6 @@ pub(super) fn toggle_band_expand(app: &mut App, out: &mut Vec<ClientRequest>) {
     if app.launcher_list && !open && bands[index].cards.len() <= view::LIST_RECENT {
         // The LIST already shows every entry of a band this short:
         // opening it would change nothing on screen but the rule's word.
-        app.flash = Some(ALL_LISTED.into());
         take_aim(app);
         return;
     }
@@ -545,26 +507,22 @@ pub(super) fn show_created_terminal(app: &mut App) {
 
 /// `t` on the grid: a shell terminal in the cursor's checkout — the band
 /// the cursor is on, or the worktree the grid is inside — and, with no
-/// band aimed at (Esc let it go), the project's ROOT checkout, the footer
-/// saying so. The Ack lands on the new chip inside its worktree with the
-/// keys in the pane ([`show_created_terminal`]). The grid offers no `+`
-/// for a terminal: the key, and an EMPTY BAND's **New terminal**, are
-/// how one opens.
+/// band aimed at (Esc let it go), the project's ROOT checkout. The Ack
+/// lands on the new chip inside its worktree with the keys in the pane
+/// ([`show_created_terminal`]). The grid offers no `+` for a terminal:
+/// the key, and an EMPTY BAND's **New terminal**, are how one opens.
 pub(super) fn new_terminal(app: &mut App, out: &mut Vec<ClientRequest>) {
     if !app.launcher_unaimed && app.selected_worktree().is_some() {
         super::create_terminal_for_context(app, out);
         return;
     }
     let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
-        app.flash = Some("add a project first".into());
         return;
     };
     let Some(root) = view::root_checkout(app, &project) else {
-        app.flash = Some(NO_ROOT_FOR_TERMINAL.into());
         return;
     };
     super::create_terminal(app, root, out);
-    app.flash = Some(TERMINAL_ON_ROOT.into());
 }
 
 /// `` ` `` on the grid: the next TERMINAL chip in the cursor's checkout —
@@ -574,7 +532,6 @@ pub(super) fn new_terminal(app: &mut App, out: &mut Vec<ClientRequest>) {
 pub(super) fn walk_terminals(app: &mut App, out: &mut Vec<ClientRequest>) {
     let bands = view::bands(app);
     let Some(band) = view::band_cursor(app, &bands) else {
-        app.flash = Some(nothing_here(app));
         return;
     };
     let cards = &bands[band].cards;
@@ -585,7 +542,6 @@ pub(super) fn walk_terminals(app: &mut App, out: &mut Vec<ClientRequest>) {
         .map(|(i, _)| i)
         .collect();
     if terminals.is_empty() {
-        app.flash = Some(no_terminals(app));
         return;
     }
     let at = wearing_card(app, &bands[band]);
@@ -611,9 +567,8 @@ pub(super) fn walk_terminals(app: &mut App, out: &mut Vec<ClientRequest>) {
 pub(super) fn walk_band(app: &mut App, dx: i64, out: &mut Vec<ClientRequest>) {
     let bands = view::bands(app);
     let Some(band) = view::band_cursor(app, &bands) else {
-        match bands.first() {
-            Some(first) => select_band(app, first.worktree.clone(), out),
-            None => app.flash = Some(nothing_here(app)),
+        if let Some(first) = bands.first() {
+            select_band(app, first.worktree.clone(), out);
         }
         return;
     };
@@ -728,6 +683,10 @@ pub(super) fn handle_action(
         // group fold: there is no ARCHIVED group to open, only the other
         // list of cards.
         Action::ToggleArchived => toggle_archived(app, out),
+        // `z` folds or unfolds the ARCHIVED DRAWER under the cursor's band:
+        // the same sessions `⇧A` lists, one checkout's, without leaving
+        // the live grid.
+        Action::ToggleArchivedDrawer => toggle_drawer(app, out),
         // Space on a card: its FOLLOW-UP MODAL, a box over the grid —
         // the card itself has no room to grow one, and the pane stays
         // exactly as it is.
@@ -773,15 +732,13 @@ pub(super) fn handle_action(
 /// the box is to hand a session its next turn and move to the next card,
 /// without ever stepping into one.
 ///
-/// What a row refuses, and the word it refuses with, comes from the same
-/// [`super::activate::no_follow_up`] the panel's box asks.
+/// What a row refuses is `App::takes_follow_up`'s, as the panel's box
+/// asks.
 pub(super) fn follow_up(app: &mut App) {
     let Some(row) = app.selected_session_row() else {
-        app.flash = Some(nothing_here(app));
         return;
     };
-    if let Some(why) = super::activate::no_follow_up(app, &row) {
-        app.flash = Some(why);
+    if !app.takes_follow_up(&row) {
         return;
     }
     let crate::app::SessionRow::Agent(agent) = row else {
@@ -789,11 +746,6 @@ pub(super) fn follow_up(app: &mut App) {
     };
     super::open_follow_up(app, agent.id, String::new());
 }
-
-/// What `⇧V` says with no card under the cursor to read a pull request
-/// off — the aim let go of, or a grid with no sessions in it.
-const NO_CARD_FOR_PR: &str =
-    "no card selected — ↑/↓ onto one, and its pull request opens from there";
 
 /// `⇧V` on the grid, and **Open pull request** in a card's menu: the pull
 /// request of the checkout under the cursor — the `#42 title` on its
@@ -805,34 +757,20 @@ const NO_CARD_FOR_PR: &str =
 /// INPUT PARITY: the menu row's `MenuAction::OpenLink` carries the URL
 /// this reads, and ends in the same `open_link`.
 pub(super) fn open_pull_request(app: &mut App, out: &mut Vec<ClientRequest>) {
-    match card_pull_request(app, NO_CARD_FOR_PR) {
-        Ok(pr) => super::open_link(app, &pr.url, out),
-        Err(why) => app.flash = Some(why),
+    if let Some(pr) = card_pull_request(app) {
+        super::open_link(app, &pr.url, out);
     }
 }
 
-/// What `y` says with no card under the cursor to comment on the pull
-/// request of.
-pub(super) const NO_CARD_FOR_COMMENT: &str =
-    "no card selected — ↑/↓ onto one, then Comment on pull request from the command palette";
-
 /// The pull request of the checkout under the grid's cursor — the
-/// `#42 title` on its band's rule — or what to say instead: `no_card`
-/// with the aim let go of, or that the checkout has none yet. `⇧V` opens
-/// it in the browser; `y` comments on it.
-pub(super) fn card_pull_request(app: &App, no_card: &str) -> Result<view::RowPr, String> {
+/// `#42 title` on its band's rule — or None with the aim let go of, or
+/// when the checkout has none yet. `⇧V` opens it in the browser; `y`
+/// comments on it.
+pub(super) fn card_pull_request(app: &App) -> Option<view::RowPr> {
     let aimed = !(app.launcher_grid() && app.launcher_unaimed);
     let bands = view::bands(app);
-    let Some(band) = view::band_cursor(app, &bands).filter(|_| aimed) else {
-        return Err(no_card.into());
-    };
-    let band = &bands[band];
-    band.pr.clone().ok_or_else(|| {
-        format!(
-            "no pull request on {} yet — ⇧R reloads from GitHub",
-            band.branch
-        )
-    })
+    let band = view::band_cursor(app, &bands).filter(|_| aimed)?;
+    bands[band].pr.clone()
 }
 
 /// A click on the pull request on a band's rule — its `↗ #42 title`
@@ -841,7 +779,7 @@ pub(super) fn card_pull_request(app: &App, no_card: &str) -> Result<view::RowPr,
 /// the grid is already on that checkout, inside it or not, where the
 /// cursor stays exactly as it is — and the pull request opens in the
 /// browser through the very [`open_pull_request`] `⇧V` runs — marked
-/// read on the way out, the footer saying where it went. INPUT PARITY:
+/// read on the way out. INPUT PARITY:
 /// the click and the key end in the same state. Unlike a click on a
 /// card ([`point_at`]), it leaves a folded pane folded: the link leaves
 /// orion for the browser, and a pane unfolded under a window that just
@@ -858,12 +796,6 @@ pub(super) fn click_pull_request(
     open_pull_request(app, out);
 }
 
-/// What `⇧I` says with no card under the cursor to read an issue off.
-const NO_CARD_FOR_ISSUE: &str = "no card selected — ↑/↓ onto one, and its issue opens from there";
-
-/// What `⇧I` says on a card that was not started from an issue.
-const NO_ISSUE: &str = "this session wasn't started from an issue — i lists the project's issues";
-
 /// `⇧I` on a card, and **Open issue** in its menu: the GitHub issue the
 /// card's session was started from (an ISSUE SESSION, launched out of the
 /// ISSUES MODAL — `Agent::issue_url`), in the browser. `i` lists the
@@ -875,12 +807,10 @@ const NO_ISSUE: &str = "this session wasn't started from an issue — i lists th
 pub(super) fn open_issue(app: &mut App, out: &mut Vec<ClientRequest>) {
     let aimed = !(app.launcher_grid() && app.launcher_unaimed);
     let Some(agent) = app.selected_session().filter(|_| aimed) else {
-        app.flash = Some(NO_CARD_FOR_ISSUE.into());
         return;
     };
-    match agent.issue_url {
-        Some(url) => super::open_link(app, &url, out),
-        None => app.flash = Some(NO_ISSUE.into()),
+    if let Some(url) = agent.issue_url {
+        super::open_link(app, &url, out);
     }
 }
 
@@ -913,10 +843,6 @@ pub(super) fn select_issue_card(app: &mut App, id: &AgentId, out: &mut Vec<Clien
     at.is_some_and(|at| select_card_row(app, at, out))
 }
 
-/// What `⇧P` says with no card under the cursor to copy the settings of.
-const NO_CARD_TO_DUPLICATE: &str =
-    "no card selected — ↑/↓ onto one, then Duplicate session from the command palette";
-
 /// `⇧P` on a card, and **Duplicate** in its menu: the QUICK PROMPT, set to
 /// launch what the card runs — the same harness, model and effort, into
 /// the same checkout, for the same issue where the card is an ISSUE
@@ -939,7 +865,6 @@ const NO_CARD_TO_DUPLICATE: &str =
 pub(super) fn duplicate_session(app: &mut App) {
     let aimed = !(app.launcher_grid() && app.launcher_unaimed);
     let Some(agent) = app.selected_session().filter(|_| aimed) else {
-        app.flash = Some(NO_CARD_TO_DUPLICATE.into());
         return;
     };
     duplicate_agent(app, agent.id);
@@ -961,13 +886,11 @@ pub(super) fn duplicate_agent(app: &mut App, id: AgentId) {
         .find(|w| w.id == agent.worktree_id)
         .cloned()
     else {
-        app.flash = Some("worktree no longer exists".into());
         return;
     };
     // A stand-in checkout git is still cutting: the box would only be
-    // refused at Enter, as `p` says on one.
+    // refused at Enter, as `p` is on one.
     if app.is_placeholder_worktree(&worktree.id) {
-        app.flash = Some("quick prompt: worktree is still being created".into());
         return;
     }
     let issue = agent
@@ -987,10 +910,6 @@ pub(super) fn duplicate_agent(app: &mut App, id: AgentId) {
     crate::quick_prompt::reopen(app, launch, "");
 }
 
-/// What `⇧C` says with no card under the cursor to carry over.
-const NO_CARD_TO_CONTINUE: &str =
-    "no card selected — ↑/↓ onto a Claude session to continue it elsewhere";
-
 /// **Continue on Claude B**, one row per account `targets` names, for
 /// session `a`: what its right-click menu and `⇧C`'s list offer.
 pub(super) fn continue_items(
@@ -1005,7 +924,6 @@ pub(super) fn continue_items(
                 MenuAction::ContinueOn {
                     id: a.id.clone(),
                     harness,
-                    label,
                 },
             )
         })
@@ -1016,44 +934,33 @@ pub(super) fn continue_items(
 /// PALETTE: the accounts the Claude session under the cursor can be
 /// carried onto, as a small menu over the grid — the choice is the
 /// confirmation, since going ends the CLI running there. A row with
-/// nowhere to go says why instead: a terminal, a Cloud or archived
-/// session, one off Claude's dialect, or no second account set up.
+/// nowhere to go — a terminal, a Cloud or archived session, one off
+/// Claude's dialect — opens nothing; with no second account set up, the
+/// footer says where to add one.
 ///
 /// INPUT PARITY: a row of the list is the right-click menu's own
 /// `MenuAction::ContinueOn`, ending in the same [`continue_on_harness`].
 pub(super) fn continue_on(app: &mut App) {
     let aimed = !(app.launcher_grid() && app.launcher_unaimed);
     let Some(agent) = app.selected_session().filter(|_| aimed) else {
-        app.flash = Some(NO_CARD_TO_CONTINUE.into());
         return;
     };
-    let why_not = if agent.cloud_session_id.is_some() {
-        Some("a Claude Cloud session runs on the account that launched it")
-    } else if agent.archived {
-        Some("archived — unarchive it first")
-    } else {
-        None
-    };
-    if let Some(why) = why_not {
-        app.flash = Some(why.into());
+    // A Claude Cloud session runs on the account that launched it, and
+    // an archived one has no CLI to carry over.
+    if agent.cloud_session_id.is_some() || agent.archived {
         return;
     }
     let cfg = crate::config::Config::load();
     let from = cfg.effective_harness(agent.kind, agent.custom_harness.as_deref());
     if agent.kind != orion_core::AgentKind::Claude && !from.claude_like() {
-        app.flash = Some(format!(
-            "only a Claude session moves to another account — this one runs {}",
-            from.display_label()
-        ));
         return;
     }
     let targets = cfg.continue_targets(&agent);
     if targets.is_empty() {
-        app.flash = Some(
+        app.flash = Some(crate::flash::Flash::setup(
             "no other Claude account to continue on — add one in Settings → Agents → \
-             Claude accounts"
-                .into(),
-        );
+             Claude accounts",
+        ));
         return;
     }
     // Going to an account signed in as this one's email gains nothing:
@@ -1062,11 +969,10 @@ pub(super) fn continue_on(app: &mut App) {
         .iter()
         .any(|(_, label)| label.ends_with(crate::config::SAME_ACCOUNT))
     {
-        app.flash = Some(
-            "⚠ an account marked \"same account\" is signed in as this session's email — \
-             one limit; sign it in as the other in Settings → Agents → Claude accounts"
-                .into(),
-        );
+        app.flash = Some(crate::flash::Flash::setup(
+            "an account marked \"same account\" is signed in as this session's email — \
+             one limit; sign it in as the other in Settings → Agents → Claude accounts",
+        ));
     }
     app.overlay = Some(Overlay::Menu(ContextMenu {
         title: Some(format!("Continue {} on", agent.name)),
@@ -1079,35 +985,20 @@ pub(super) fn continue_on(app: &mut App) {
     }));
 }
 
-/// Carry session `id` onto harness `harness` (`label` to the user): the
-/// DAEMON stops it, copies its conversation into that account and
-/// resumes it there (`ClientRequest::ContinueAgentOn`). The footer says
-/// it is going, then where it went — or why it could not.
+/// Carry session `id` onto harness `harness`: the DAEMON stops it, copies its conversation into that account and
+/// resumes it there (`ClientRequest::ContinueAgentOn`). A refusal flashes
+/// why.
 pub(super) fn continue_on_harness(
     app: &mut App,
     id: AgentId,
     harness: String,
-    label: String,
     out: &mut Vec<ClientRequest>,
 ) {
-    let name = app
-        .tree
-        .agents
-        .iter()
-        .find(|a| a.id == id)
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| "the session".into());
-    app.flash = Some(format!("moving {name} to {label}…"));
-    super::send_with(
-        app,
-        out,
-        crate::app::PendingIntent::Note(format!("{name} continues on {label}")),
-        |req_id| ClientRequest::ContinueAgentOn {
-            req_id,
-            id,
-            harness,
-        },
-    );
+    super::send(app, out, |req_id| ClientRequest::ContinueAgentOn {
+        req_id,
+        id,
+        harness,
+    });
 }
 
 /// The issue an ISSUE SESSION's card was started from, as the box carries
@@ -1189,7 +1080,9 @@ pub(super) fn tab_menu(app: &mut App, id: &ProjectId, out: &mut Vec<ClientReques
 pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientRequest>) {
     let bands = view::bands(app);
     if bands.is_empty() {
-        app.flash = Some(nothing_here(app));
+        return;
+    }
+    if step_in_drawer(app, &bands, dy, out) {
         return;
     }
     // The cursor itself, aimed or not: a step from a card let go of
@@ -1214,11 +1107,24 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
             take_aim(app);
             return;
         }
+        // Against the open band's last row: down into its ARCHIVED
+        // DRAWER when that is unfolded.
+        if dy > 0 && into_drawer(app, &bands[band], out) {
+            return;
+        }
         // Against the open band's first or last row: on to the band
         // above or below it, as from any other band.
     } else if dy == 0 {
         walk_band(app, dx, out);
         return;
+    } else if let Some(band) = view::band_cursor(app, &bands) {
+        // Down off a collapsed band's row of cards — or an EMPTY BAND's
+        // line — into its unfolded ARCHIVED DRAWER.
+        let on_band =
+            view::card_cursor(app, &bands[band]).is_some() || bands[band].cards.is_empty();
+        if dy > 0 && on_band && into_drawer(app, &bands[band], out) {
+            return;
+        }
     }
     let at = view::band_cursor(app, &bands);
     let last = bands.len() as i64 - 1;
@@ -1227,7 +1133,43 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
         None => last as usize,
         Some(b) => (b as i64 + dy).clamp(0, last) as usize,
     };
-    if (app.launcher_list || app.launcher_all_open) && Some(next) != at {
+    if Some(next) == at {
+        // On the band already, but on none of its cards — the selection
+        // on a row the grid has no card for: its first card, as `h`/`l`
+        // take it. An EMPTY BAND has none: the cursor is on all of it.
+        if view::card_cursor(app, &bands[next]).is_none() {
+            match bands[next].cards.first() {
+                Some(first) => select_card(app, first.sref(), out),
+                None => take_aim(app),
+            }
+            return;
+        }
+        take_aim(app);
+        return;
+    }
+    onto_band(app, &bands, next, dy, col, out);
+}
+
+/// The cursor stepping onto band `next` from the band above it (`dy` >
+/// 0) or below it, in column `col`: from below, onto the last line of its
+/// unfolded ARCHIVED DRAWER, the line nearest; in the LIST, or with every
+/// band open, onto the edge row nearest, in that column; else onto the
+/// band itself, its remembered card ([`select_band`]).
+fn onto_band(
+    app: &mut App,
+    bands: &[view::Band],
+    next: usize,
+    dy: i64,
+    col: usize,
+    out: &mut Vec<ClientRequest>,
+) {
+    if dy < 0 {
+        if let Some(row) = bands[next].drawer().last() {
+            select(app, row.agent.id.clone(), out);
+            return;
+        }
+    }
+    if app.launcher_list || app.launcher_all_open {
         // The LIST reads as one column down every band: `j` off a band's
         // last line lands on the next band's first, `k` off its first on
         // the band above's last — not on whichever card that band last
@@ -1249,21 +1191,61 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
             return;
         }
     }
-    if Some(next) == at {
-        // On the band already, but on none of its cards — the selection
-        // on a row the grid has no card for: its first card, as `h`/`l`
-        // take it. An EMPTY BAND has none: the cursor is on all of it.
-        if view::card_cursor(app, &bands[next]).is_none() {
-            match bands[next].cards.first() {
-                Some(first) => select_card(app, first.sref(), out),
-                None => take_aim(app),
-            }
-            return;
-        }
-        take_aim(app);
-        return;
-    }
     select_band(app, bands[next].worktree.clone(), out);
+}
+
+/// Down into `band`'s unfolded ARCHIVED DRAWER, onto its first line.
+/// False with the drawer folded, or nothing in it.
+fn into_drawer(app: &mut App, band: &view::Band, out: &mut Vec<ClientRequest>) -> bool {
+    let Some(first) = band.drawer().first() else {
+        return false;
+    };
+    select(app, first.agent.id.clone(), out);
+    true
+}
+
+/// A step with the cursor on a line of an ARCHIVED DRAWER — true when
+/// it was, and the step is taken: `j`/`k` walk the drawer's lines; `k`
+/// off its first goes back up onto the band's cards (its last row of
+/// them, the first card on it), or to the band above when there are
+/// none; `j` off its last goes on to the band below. A line has nothing
+/// beside it, so `h`/`l` only take the aim back.
+fn step_in_drawer(
+    app: &mut App,
+    bands: &[view::Band],
+    dy: i64,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    let Some(index) = view::band_cursor(app, bands) else {
+        return false;
+    };
+    let band = &bands[index];
+    let Some(at) = view::drawer_cursor(app, band) else {
+        return false;
+    };
+    let drawer = band.drawer();
+    if dy == 0 {
+        take_aim(app);
+    } else if dy > 0 && at + 1 < drawer.len() {
+        select(app, drawer[at + 1].agent.id.clone(), out);
+    } else if dy < 0 && at > 0 {
+        select(app, drawer[at - 1].agent.id.clone(), out);
+    } else if dy < 0 && !band.cards.is_empty() {
+        let card = app
+            .walked_band(bands)
+            .filter(|(b, _)| *b == index)
+            .and_then(|(_, layout)| layout.rows.last().and_then(|row| row.first().copied()))
+            .unwrap_or(0);
+        select_card(app, band.cards[card].sref(), out);
+    } else {
+        let next = index as i64 + dy.signum();
+        if next < 0 || next >= bands.len() as i64 {
+            take_aim(app);
+        } else {
+            onto_band(app, bands, next as usize, dy, 0, out);
+        }
+    }
+    true
 }
 
 /// [`step_grid`], and — where `→` found nowhere to go along the row and
@@ -1301,8 +1283,8 @@ fn step_or_enter_pane(
 const INTO_PANE: &str = "Focus the pane";
 
 /// `k` (↑): a row up the grid — and on the top row, where there is no
-/// row above, the edge of a DOUBLE TAP: the first press stays put and
-/// says what a second one does, the second walks up into the PROJECT
+/// row above, the edge of a DOUBLE TAP: the first press stays put, the
+/// second walks up into the PROJECT
 /// TABS ([`focus_tabs`]). The top row is the first band — the first row
 /// of its cards when it is the one open as the ACCORDION; a grid with no
 /// cards on it is all top row. Only `k` itself: `^u`'s half page stops
@@ -1315,12 +1297,15 @@ fn step_up(
     out: &mut Vec<ClientRequest>,
 ) {
     let bands = view::bands(app);
-    let top = match app.walked_band(&bands) {
-        Some((band, layout)) => {
-            band == 0 && layout.on_top_row(view::card_cursor(app, &bands[band]))
-        }
-        None => view::band_cursor(app, &bands).map_or(bands.is_empty(), |b| b == 0),
-    };
+    let in_drawer = view::band_cursor(app, &bands)
+        .is_some_and(|b| view::drawer_cursor(app, &bands[b]).is_some());
+    let top = !in_drawer
+        && match app.walked_band(&bands) {
+            Some((band, layout)) => {
+                band == 0 && layout.on_top_row(view::card_cursor(app, &bands[band]))
+            }
+            None => view::band_cursor(app, &bands).map_or(bands.is_empty(), |b| b == 0),
+        };
     if !top {
         step_grid(app, 0, -1, out);
     } else if super::double_tapped(app, Action::MoveUp, armed, chord, "project tabs") {
@@ -1373,22 +1358,8 @@ fn crumb_anchor(app: &App, crumb: &HitTarget) -> (u16, u16) {
         .unwrap_or(super::KEYBOARD_MENU_ANCHOR)
 }
 
-/// What the tab keys say over a full-screen session, where the header
-/// they walk is not on screen.
-pub(super) fn no_tabs_here(app: &App) -> String {
-    format!(
-        "project tabs are on the grid's header — {} back to it",
-        key_of(app, Action::UnlockTerminal, "Esc")
-    )
-}
-/// What the tab keys say with nothing to move between.
-const NO_TABS: &str = "no projects open — + in the header opens one";
-const ONE_TAB: &str = "one project open — + in the header opens another";
 /// The PROJECT DROPDOWN's last row: a folder that is not a project yet.
 const OPEN_FOLDER: &str = "+ open a folder…";
-/// What closing the last tab says: orion is back on the splash, and
-/// nothing about the projects changed.
-const LAST_TAB: &str = "all projects closed — their sessions run on; + opens one again";
 
 /// A click on a PROJECT TAB, `[` / `]` onto it, and the tab that slides
 /// into a closed one's place: that project's sessions, through the one
@@ -1413,7 +1384,6 @@ fn open_tab_slot(app: &mut App, slot: u8, out: &mut Vec<ClientRequest>) {
         .get(usize::from(slot).saturating_sub(1))
         .cloned()
     else {
-        app.flash = Some(format!("no project tab {slot} — + in the header opens one"));
         return;
     };
     open_tab(app, &id, out);
@@ -1433,7 +1403,6 @@ pub(super) fn step_tab(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) 
     app.settle_project_tabs();
     let tabs = open_tabs(app);
     let Some(last) = tabs.len().checked_sub(1) else {
-        app.flash = Some(NO_TABS.into());
         return;
     };
     let at = app
@@ -1447,9 +1416,6 @@ pub(super) fn step_tab(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) 
     // The end of the row — `[` on the first tab, `]` on the last — goes
     // nowhere.
     if Some(next) == at {
-        if last == 0 {
-            app.flash = Some(ONE_TAB.into());
-        }
         return;
     }
     open_tab(app, &tabs[next], out);
@@ -1466,7 +1432,6 @@ pub(super) fn focus_tabs(app: &mut App) {
     app.settle_project_tabs();
     let tabs = open_tabs(app);
     let Some(first) = tabs.first().cloned() else {
-        app.flash = Some(NO_TABS.into());
         return;
     };
     let on = app
@@ -1553,7 +1518,6 @@ fn walk_tab_cursor(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
         return;
     };
     if tabs.len() == 1 {
-        app.flash = Some(ONE_TAB.into());
         return;
     }
     let next = (at as i64 + delta).clamp(0, tabs.len() as i64 - 1) as usize;
@@ -1643,9 +1607,8 @@ fn close_active_tab(app: &mut App, out: &mut Vec<ClientRequest>) {
         .selected_project()
         .map(|p| p.id.clone())
         .filter(|id| open_tabs(app).contains(id));
-    match active {
-        Some(id) => close_tab(app, &id, out),
-        None => app.flash = Some(NO_TABS.into()),
+    if let Some(id) = active {
+        close_tab(app, &id, out);
     }
 }
 
@@ -1697,7 +1660,6 @@ fn close_every_project(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
     app.focus = Focus::Sessions;
     app.projects_closed = true;
-    app.flash = Some(LAST_TAB.into());
     app.dirty = true;
 }
 
@@ -1736,7 +1698,6 @@ pub(super) fn open_project_menu(app: &mut App) {
         .flatten();
     let cards = view::project_cards(app);
     if cards.is_empty() {
-        app.flash = Some(no_projects(app));
         return;
     }
     let mut items: Vec<MenuItem> = cards
@@ -1812,7 +1773,6 @@ pub(super) fn open_more_tabs_menu(app: &mut App) {
 fn select_project(app: &mut App, id: &ProjectId) {
     take_aim(app);
     if !select_project_row_by_id(app, id) {
-        app.flash = Some("project no longer exists".into());
         return;
     }
     restore_project_cursors(app);
@@ -1838,7 +1798,6 @@ fn select_project(app: &mut App, id: &ProjectId) {
 /// on it folds away ([`fold_empty_grid`]).
 pub(super) fn open_project(app: &mut App, id: &ProjectId, out: &mut Vec<ClientRequest>) {
     let Some(card) = view::project_cards(app).into_iter().find(|c| &c.id == id) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let land = last_focused(app, &card).or_else(|| card.sessions.first().map(|a| a.id.clone()));
@@ -1870,13 +1829,12 @@ pub(super) fn open_project(app: &mut App, id: &ProjectId, out: &mut Vec<ClientRe
 
 /// Nothing to aim at: with no card the PANE along the bottom has no
 /// session to be, so it folds and the grid takes the body — the hero, and
-/// the word for how to fill it.
+/// its word for how to fill it.
 ///
 /// INPUT PARITY: the one landing for a grid with no cards, whether a
 /// project with none was opened ([`open_project`]) or the last card was
 /// archived or deleted out of it ([`keep_cursor`]).
 fn fold_empty_grid(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let word = nothing_here(app);
     clear_aim(app);
     // Nothing left to keep open either: the grid is the (empty) bands.
     app.launcher_expanded = None;
@@ -1887,7 +1845,6 @@ fn fold_empty_grid(app: &mut App, out: &mut Vec<ClientRequest>) {
     if app.term.is_some() {
         super::detach_pane(app, out);
     }
-    app.flash = Some(word);
 }
 
 /// The card project `card` was last left on: the session under the cursor
@@ -1965,6 +1922,34 @@ pub(super) fn click_band(app: &mut App, index: usize, out: &mut Vec<ClientReques
     ) {
         toggle_band_expand(app, out);
     }
+}
+
+/// A click on the FOOTER's breadcrumb (`HitTarget::FooterCrumb`): back
+/// down onto the grid — out of HOME, a full screen or the pane — at the
+/// part clicked: the project's whole grid with no card aimed at, as the
+/// first Esc leaves it, the checkout's band, or the session's card.
+pub(super) fn click_crumb(
+    app: &mut App,
+    part: crate::app::CrumbPart,
+    out: &mut Vec<ClientRequest>,
+) {
+    if app.home {
+        super::leave_home(app);
+    }
+    if !app.launcher_active() {
+        return;
+    }
+    super::leave_terminal_lock(app);
+    match part {
+        crate::app::CrumbPart::Project => clear_aim(app),
+        crate::app::CrumbPart::Worktree => {
+            if let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) {
+                select_band(app, worktree, out);
+            }
+        }
+        crate::app::CrumbPart::Session => take_aim(app),
+    }
+    app.dirty = true;
 }
 
 /// A click on the MORE HINT under a band's row (`HitTarget::LauncherBandMore`):
@@ -2190,7 +2175,6 @@ pub(super) fn enter_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
         return;
     }
     let Some(sref) = cursor_or_first(app) else {
-        app.flash = Some(nothing_here(app));
         return;
     };
     match sref {
@@ -2201,10 +2185,9 @@ pub(super) fn enter_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
         }
         SessionRef::Agent(id) => {
             // An ARCHIVED card has no session to read: the daemon reaped
-            // it when it was archived. Say what to press rather than
-            // handing the keys to an empty pane.
+            // it when it was archived. The keys stay on the grid rather
+            // than going to an empty pane.
             if is_archived(app, &id) {
-                app.flash = Some(super::AGENT_ARCHIVED.into());
                 return;
             }
             jump_to_target(app, PaletteTarget::Session(id), Landing::Attach, out);
@@ -2347,7 +2330,6 @@ pub(super) fn pane_key(
 /// comes up.
 pub(super) fn open_session(app: &mut App, out: &mut Vec<ClientRequest>) {
     let Some(sref) = cursor_or_first(app) else {
-        app.flash = Some(nothing_here(app));
         return;
     };
     match sref {
@@ -2358,7 +2340,6 @@ pub(super) fn open_session(app: &mut App, out: &mut Vec<ClientRequest>) {
         }
         SessionRef::Agent(id) => {
             if is_archived(app, &id) {
-                app.flash = Some(super::AGENT_ARCHIVED.into());
                 return;
             }
             take_aim(app);
@@ -2448,6 +2429,7 @@ pub(super) fn open_box_field(app: &mut App, field: BoxField, back: QuickReturn) 
         BoxField::Agent => crate::quick_prompt::open_launch_picker(app, back),
         BoxField::Model => open_model_picker(app, back),
         BoxField::Effort => open_effort_picker(app, back),
+        BoxField::Mode => super::cycle_mode(app),
         BoxField::Preset => crate::quick_prompt::open_preset_picker(app, back),
     }
 }
@@ -2475,25 +2457,7 @@ pub(super) fn click_box_field(app: &mut App, field: BoxField) {
 /// Only ever reached from a box that is up, so its `back` always hands
 /// one back ([`handle_picker_key`]).
 fn open_project_picker(app: &mut App, back: QuickReturn) {
-    if let Some(issue) = &back.launch.issue {
-        app.flash = Some(format!(
-            "this box is for issue #{} — its project is fixed",
-            issue.number
-        ));
-        return;
-    }
-    if let Some(linear) = &back.launch.linear {
-        app.flash = Some(format!(
-            "this box is for {} — its project is fixed",
-            linear.ids()
-        ));
-        return;
-    }
-    if let Some(pr) = &back.launch.pr {
-        app.flash = Some(format!(
-            "this box is for PR #{} — its project is fixed",
-            pr.number
-        ));
+    if back.launch.issue.is_some() || back.launch.linear.is_some() || back.launch.pr.is_some() {
         return;
     }
     let picker = ProjectPicker::new(app, back);
@@ -2507,14 +2471,9 @@ fn open_project_picker(app: &mut App, back: QuickReturn) {
 pub(super) fn open_model_picker(app: &mut App, back: QuickReturn) {
     let (kind, custom) = (back.launch.kind, back.launch.custom.clone());
     if crate::config::model_choices(kind, custom.as_deref()).is_empty() {
-        let harness = crate::agent_picker::harness_label(kind, custom.as_deref());
-        app.flash = Some(format!(
-            "{harness} has no model list — Tab picks the harness"
-        ));
         return;
     }
     let Some(worktree) = crate::quick_prompt::picker_context(app, &back.launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let pr = back.launch.pr.clone();
@@ -2550,12 +2509,9 @@ pub(super) fn open_effort_picker(app: &mut App, back: QuickReturn) {
         .clone()
         .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into());
     if crate::config::effort_choices(kind, Some(&model), custom.as_deref()).is_empty() {
-        let harness = crate::agent_picker::harness_label(kind, custom.as_deref());
-        app.flash = Some(format!("{harness} has no effort to pick"));
         return;
     }
     let Some(worktree) = crate::quick_prompt::picker_context(app, &back.launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let row = MenuItem::new(
@@ -2595,12 +2551,9 @@ pub(super) fn open_effort_picker(app: &mut App, back: QuickReturn) {
 pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
     use std::cmp::Reverse;
     if back.launch.pr.is_some() {
-        app.flash =
-            Some("quick prompt: a PR session runs in the pull request's own checkout".into());
         return;
     }
     let Some(project) = view::project_of(app, &back.launch.target) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let mut checkouts: Vec<_> = app
@@ -3170,7 +3123,7 @@ mod tests {
                 app.launcher_pane_drag.is_none(),
                 "the double-click arms no drag"
             );
-            assert_eq!(app.flash.as_deref(), Some(super::PANE_CENTERED));
+            assert!(app.flash.is_none());
             mouse(&mut app, MouseEventKind::Up(MouseButton::Left), edge_x, row);
 
             draw(&mut app);
@@ -3289,7 +3242,7 @@ mod tests {
             click(&mut app);
             assert_eq!(app.launcher_pane_at, PaneSide::Bottom);
             assert_eq!(crate::config::Config::load().pane_side(), PaneSide::Bottom);
-            assert_eq!(app.flash.as_deref(), Some(super::PANE_MOVED_BOTTOM));
+            assert!(app.flash.is_none());
 
             let terminal = draw(&mut app);
             assert_eq!(app.launcher_pane_side(), PaneSide::Bottom);
@@ -3300,7 +3253,7 @@ mod tests {
             click(&mut app);
             assert_eq!(app.launcher_pane_at, PaneSide::Right);
             assert_eq!(crate::config::Config::load().pane_side(), PaneSide::Right);
-            assert_eq!(app.flash.as_deref(), Some(super::PANE_MOVED_RIGHT));
+            assert!(app.flash.is_none());
             let terminal = draw(&mut app);
             assert_eq!(app.launcher_pane_side(), PaneSide::Right);
             assert!(
@@ -3351,7 +3304,7 @@ mod tests {
         });
     }
 
-    /// A digit opens the PROJECT TAB it counts to from the left — the
+    /// ⌘ and a digit opens the PROJECT TAB it counts to from the left — the
     /// click on that tab, through the same [`open_tab`] — and one past the
     /// last tab says so rather than doing nothing. `w` means nothing on
     /// the grid: there is no level above it to walk to.
@@ -3359,26 +3312,19 @@ mod tests {
     fn the_digits_open_the_project_tabs() {
         with_default_config(|| {
             let mut by_key = two_tabs();
-            key(&mut by_key, KeyCode::Char('1'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('1'), KeyModifiers::SUPER);
             let mut by_click = two_tabs();
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherTab(ProjectId("p2".into())));
             mouse(&mut by_click, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(tab_state(&by_key), tab_state(&by_click));
             assert_eq!(tab_state(&by_key).0.as_deref(), Some("web"));
 
-            key(&mut by_key, KeyCode::Char('2'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('2'), KeyModifiers::SUPER);
             assert_eq!(tab_state(&by_key).0.as_deref(), Some("demo"));
 
-            key(&mut by_key, KeyCode::Char('9'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('9'), KeyModifiers::SUPER);
             assert_eq!(tab_state(&by_key).0.as_deref(), Some("demo"));
-            assert!(
-                by_key
-                    .flash
-                    .as_deref()
-                    .is_some_and(|f| f.contains("no project tab 9")),
-                "{:?}",
-                by_key.flash
-            );
+            assert_eq!(by_key.flash, None, "no tab 9 opens nothing");
 
             let before = tab_state(&by_key);
             key(&mut by_key, KeyCode::Char('w'), KeyModifiers::NONE);
@@ -3502,7 +3448,7 @@ mod tests {
                     Some((KeyCode::Char('t'), KeyModifiers::CONTROL)),
                 ),
                 ("harness", Some((KeyCode::Tab, KeyModifiers::NONE))),
-                ("preset", Some((KeyCode::BackTab, KeyModifiers::SHIFT))),
+                ("preset", Some((KeyCode::Char('x'), KeyModifiers::CONTROL))),
                 ("project", Some((KeyCode::Char('p'), KeyModifiers::CONTROL))),
             ];
             for (surface, open) in surfaces {
@@ -3550,6 +3496,49 @@ mod tests {
                     assert_eq!(launch(&app).1, TYPED, "{what}: the box came back");
                 }
             }
+        });
+    }
+
+    /// ⌘. as macOS hands it over — Cancel, an Escape still holding ⌘ —
+    /// is **Select worktree**, never the Esc that closes what it was
+    /// pressed in: over the new-agent box it opens the worktree picker
+    /// with the box's text owed back, and over the NEW AGENT PICKER
+    /// (**New agent — choose harness**) the same picker, aimed where the
+    /// box would be.
+    #[test]
+    fn cmd_period_sent_as_cancel_opens_the_worktree_picker_and_closes_nothing() {
+        let worktree_picker = |app: &App| {
+            matches!(&app.overlay, Some(Overlay::Menu(m))
+                if m.title.as_deref() == Some("Worktree"))
+        };
+        with_default_config(|| {
+            // Over the box.
+            let mut app = two_sessions();
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            type_text(&mut app, "ship it");
+            key(&mut app, KeyCode::Esc, KeyModifiers::SUPER);
+            assert!(worktree_picker(&app), "over the box: {:?}", app.overlay);
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "ship it", "the box survived, text and all");
+
+            // Over the harness-first picker.
+            let mut app = two_sessions();
+            draw(&mut app);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
+            };
+            let aimed = super::super::menu_quick_return(menu)
+                .expect("the rows owe a box")
+                .launch
+                .target;
+            key(&mut app, KeyCode::Esc, KeyModifiers::SUPER);
+            let Some(Overlay::Menu(picker)) = &app.overlay else {
+                panic!("over the picker: {:?}", app.overlay);
+            };
+            assert!(worktree_picker(&app), "over the picker: {:?}", picker.title);
+            let back = super::super::menu_quick_return(picker).expect("it owes a box");
+            assert_eq!(back.launch.target, aimed);
         });
     }
 
@@ -3627,7 +3616,7 @@ mod tests {
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "ship it");
             let before = launch(&app).0;
-            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                 panic!("expected the preset picker, got {:?}", app.overlay);
             };
@@ -3738,7 +3727,7 @@ mod tests {
                 ),
                 (BoxField::Agent, KeyCode::Tab, KeyModifiers::NONE),
                 (BoxField::Model, KeyCode::Char('/'), KeyModifiers::CONTROL),
-                (BoxField::Preset, KeyCode::BackTab, KeyModifiers::SHIFT),
+                (BoxField::Preset, KeyCode::Char('x'), KeyModifiers::CONTROL),
             ] {
                 let mut by_key = two_sessions();
                 opened(&mut by_key);
@@ -3972,6 +3961,194 @@ mod tests {
     /// [`two_sessions`] with **Show all worktrees** on and a third
     /// checkout of `demo` — `idle`, with nothing running in it — its
     /// EMPTY BAND the grid's last, under `feat`'s.
+    /// `⌘W` is `Backspace` on the agent or terminal the pane shows: the
+    /// very confirm, asked before anything goes — from the card, and from
+    /// inside the locked pane, which it leaves on the way. `^W` stays the
+    /// agent's delete-word there.
+    #[test]
+    fn cmd_w_closes_the_session_in_front_behind_backspaces_confirm() {
+        with_default_config(|| {
+            let cmd_w = |app: &mut App| key(app, KeyCode::Char('w'), KeyModifiers::SUPER);
+            let mut by_backspace = two_sessions();
+            draw(&mut by_backspace);
+            to_feat(&mut by_backspace);
+            key(&mut by_backspace, KeyCode::Backspace, KeyModifiers::NONE);
+            // The worktree's last card: its question folded in.
+            assert!(
+                matches!(&by_backspace.overlay, Some(Overlay::Confirm(c))
+                    if c.title == "Delete agent"),
+                "{:?}",
+                by_backspace.overlay
+            );
+
+            let mut on_card = two_sessions();
+            draw(&mut on_card);
+            to_feat(&mut on_card);
+            let sent = cmd_w(&mut on_card);
+            assert!(sent.is_empty(), "asked first: {sent:?}");
+            assert_eq!(
+                format!("{:?}", on_card.overlay),
+                format!("{:?}", by_backspace.overlay),
+                "the card's own confirm"
+            );
+
+            let mut locked = two_sessions();
+            draw(&mut locked);
+            to_feat(&mut locked);
+            key(&mut locked, KeyCode::Enter, KeyModifiers::NONE);
+            if locked.term.is_none() {
+                locked.term = Some(crate::app::AttachedTerm::new(
+                    SessionRef::Agent(AgentId("a2".into())),
+                    40,
+                    10,
+                ));
+            }
+            assert!(locked.term_locked, "Enter put the keys in the pane");
+            let sent = key(&mut locked, KeyCode::Char('w'), KeyModifiers::CONTROL);
+            assert!(
+                locked.overlay.is_none() && locked.term_locked,
+                "^W is the agent's"
+            );
+            assert!(
+                matches!(sent.last(), Some(ClientRequest::Input { .. })),
+                "down the PTY: {sent:?}"
+            );
+            let sent = cmd_w(&mut locked);
+            assert!(!sent
+                .iter()
+                .any(|r| matches!(r, ClientRequest::Input { .. })));
+            assert!(!locked.term_locked, "the lock is left on the way");
+            assert_eq!(
+                format!("{:?}", locked.overlay),
+                format!("{:?}", by_backspace.overlay),
+                "the same confirm from inside the pane"
+            );
+            key(&mut locked, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(locked.overlay.is_none(), "Esc keeps the agent");
+        });
+    }
+
+    /// `⌘W` on a TERMINAL's chip closes that terminal, behind its own
+    /// confirm, as `Backspace` there does.
+    #[test]
+    fn cmd_w_on_a_terminal_closes_the_terminal() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            seed_terminal(&mut app, "t1", "w2", "shell-1");
+            draw(&mut app);
+            to_feat(&mut app);
+            key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if matches!(c.action, PendingAction::CloseTerminal(_))),
+                "the terminal's close: {:?}",
+                app.overlay
+            );
+        });
+    }
+
+    /// `⌘W` closes agents and terminals only: on an EMPTY BAND it says so
+    /// rather than ask to delete the worktree `Backspace` would, and over
+    /// a modal or HOME it does nothing at all.
+    #[test]
+    fn cmd_w_never_reaches_a_worktree_a_modal_or_home() {
+        with_default_config(|| {
+            let cmd_w = |app: &mut App| key(app, KeyCode::Char('w'), KeyModifiers::SUPER);
+            let mut app = with_empty_band();
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
+            let sent = cmd_w(&mut app);
+            assert!(
+                sent.is_empty() && app.overlay.is_none(),
+                "{:?}",
+                app.overlay
+            );
+            assert_eq!(app.flash, None);
+
+            let mut app = two_sessions();
+            draw(&mut app);
+            to_feat(&mut app);
+            key(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
+            let before = format!("{:?}", app.overlay);
+            assert!(matches!(app.overlay, Some(Overlay::Menu(_))));
+            cmd_w(&mut app);
+            assert_eq!(
+                format!("{:?}", app.overlay),
+                before,
+                "the modal is untouched"
+            );
+
+            app.overlay = None;
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(app.home);
+            cmd_w(&mut app);
+            assert!(app.home && app.overlay.is_none(), "{:?}", app.overlay);
+        });
+    }
+
+    /// The pull requests open on `⌘U` (`^V`); the bare `v` is free again.
+    #[test]
+    fn cmd_u_opens_the_pull_requests_and_v_does_not() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            for (letter, mods) in [('u', KeyModifiers::SUPER), ('v', KeyModifiers::CONTROL)] {
+                key(&mut app, KeyCode::Char(letter), mods);
+                assert!(
+                    matches!(app.overlay, Some(Overlay::PullRequests(_))),
+                    "{mods:?}: {:?}",
+                    app.overlay
+                );
+                app.overlay = None;
+            }
+        });
+    }
+
+    /// HOME's `⌘⇧R` asks before it restarts orion, over HOME, in a dialog
+    /// sized to its lines; Esc keeps everything up, and `y` quits the TUI
+    /// marked for the restart the binary then runs.
+    #[test]
+    fn cmd_shift_r_on_home_asks_then_quits_for_a_restart() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(app.home);
+            assert!(
+                footer_text(&app).contains("restart orion"),
+                "{}",
+                footer_text(&app)
+            );
+            let restart = |app: &mut App| {
+                key(
+                    app,
+                    KeyCode::Char('R'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                )
+            };
+            restart(&mut app);
+            let Some(Overlay::Confirm(c)) = &app.overlay else {
+                panic!("the restart confirm, got {:?}", app.overlay)
+            };
+            assert_eq!(c.action, PendingAction::Restart);
+            assert!(
+                c.message.lines().all(|l| l.chars().count() < 52),
+                "{:?}",
+                c.message
+            );
+            assert!(app.home, "asked over HOME");
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(app.overlay.is_none() && !app.should_quit && !app.restart);
+
+            restart(&mut app);
+            key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+            assert!(app.should_quit && app.restart);
+        });
+    }
+
     fn with_empty_band() -> App {
         let mut app = two_sessions();
         app.show_all_worktrees = true;
@@ -4064,10 +4241,7 @@ mod tests {
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             assert_eq!(app.launcher_expanded, None);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some(super::no_sessions(&app).as_str())
-            );
+            assert!(app.flash.is_none());
         });
     }
 
@@ -4333,11 +4507,11 @@ mod tests {
             );
             assert_eq!(app.pr_tabs.tab, PrTab::Checks);
             draw_tall(&mut app);
-            app.flash = None;
+            crate::event_loop::take_opened();
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(
-                app.flash.as_deref(),
-                Some("opened github.com/o/demo/actions/runs/1"),
+                crate::event_loop::take_opened(),
+                ["https://github.com/o/demo/actions/runs/1"],
                 "a check's page"
             );
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
@@ -4403,6 +4577,54 @@ mod tests {
                 "{}",
                 footer_text(&app)
             );
+        });
+    }
+
+    /// The footer's BREADCRUMB names the selection in the grid's own marks
+    /// — the project, the checkout behind its SCOPE MARK, the session
+    /// behind its STATUS MARK — and each part is a link back to the grid:
+    /// from a full-screen session a click on the checkout lands on its
+    /// band with the keys on the grid, and one on the project lets the
+    /// aim go, the whole project's grid in view.
+    #[test]
+    fn the_footer_crumb_speaks_the_grids_marks_and_links_back() {
+        use crate::app::CrumbPart;
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            to_feat(&mut app);
+            let screen = buffer_text(&draw(&mut app));
+            let footer = screen.lines().last().unwrap_or_default().to_string();
+            let plate = concat!(" v", env!("CARGO_PKG_VERSION"), "  ·  demo ⎇ feat ");
+            assert!(footer.contains(plate), "{footer}");
+
+            full_screen(&mut app);
+            assert!(app.collapsed);
+            draw(&mut app);
+            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Worktree));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(!app.collapsed && !app.term_locked);
+            assert_eq!(app.focus, Focus::Sessions);
+            assert_eq!(
+                app.selected_worktree().map(|w| w.branch.clone()).as_deref(),
+                Some("feat")
+            );
+
+            draw(&mut app);
+            assert!(!app.launcher_unaimed);
+            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Project));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(app.launcher_unaimed, "the aim let go");
+
+            // From HOME too: the crumb is drawn over the splash, and a
+            // click on it comes back down onto the grid.
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+            assert!(app.home);
+            draw(&mut app);
+            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Session));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(!app.home && app.launcher_active());
+            assert!(!app.launcher_unaimed, "aimed at the card again");
         });
     }
 
@@ -4717,7 +4939,6 @@ mod tests {
             let mut app = two_sessions();
             draw(&mut app);
             let id = app.selected_session().map(|a| a.id.clone()).unwrap();
-            let name = app.selected_session().map(|a| a.name.clone()).unwrap();
 
             key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
             type_text(&mut app, "rebase onto main");
@@ -4729,10 +4950,7 @@ mod tests {
                 "the prompt, then the Enter that submits it: {out:?}"
             );
             assert!(app.overlay.is_none(), "the box closed: {:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some(format!("sent to {name}").as_str())
-            );
+            assert_eq!(app.flash, None, "the turn in the pane says it went");
         });
     }
 
@@ -4832,11 +5050,10 @@ mod tests {
         });
     }
 
-    /// A row that takes no follow-up says why rather than opening a box
-    /// over it — the SESSIONS PANEL's own message, from the one
-    /// `activate::no_follow_up` both composers ask.
+    /// A row that takes no follow-up opens no box over it — the rule the
+    /// SESSIONS PANEL's own composer follows (`App::takes_follow_up`).
     #[test]
-    fn a_cloud_card_says_what_it_takes_instead() {
+    fn a_cloud_card_opens_no_follow_up_box() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
@@ -4846,10 +5063,7 @@ mod tests {
             }
             key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
             assert!(app.overlay.is_none(), "no box over a cloud session");
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("cloud sessions take a queued message — right-click, then Send to cloud session"),
-            );
+            assert_eq!(app.flash, None);
         });
     }
 
@@ -4949,7 +5163,7 @@ mod tests {
 
             // Over the box, which stays on screen behind it.
             let text = buffer_text(&draw_at(&mut app, 140, 40));
-            assert!(text.contains("New session"), "the box's title: {text}");
+            assert!(text.contains("New agent"), "the box's title: {text}");
             assert!(text.contains("fix the nav"), "the task: {text}");
             assert!(text.contains("+ new worktree"), "the picker: {text}");
 
@@ -5431,7 +5645,7 @@ mod tests {
             keys(&mut app, &[KeyCode::Esc, KeyCode::Down]);
             let text = buffer_text(&draw(&mut app));
             assert!(
-                text.contains("polish-nav  ↳ feat"),
+                text.contains("polish-nav  ⎇ feat"),
                 "the pane names the cursor's card and its checkout: {text}"
             );
             assert_eq!(
@@ -5559,8 +5773,10 @@ mod tests {
             assert!(app.collapsed, "full-screen, not a pane beside the grid");
             let text = buffer_text(&draw(&mut app));
             assert!(
-                text.contains("‹ sessions / ● polish-nav"),
-                "the breadcrumb names the session: {text}"
+                crate::app::SPINNER
+                    .iter()
+                    .any(|g| text.contains(&format!("‹ sessions / {g} polish-nav"))),
+                "the breadcrumb names the session, its spinner ahead of it: {text}"
             );
             assert!(
                 tabs_drawn(&app).is_empty(),
@@ -5586,7 +5802,7 @@ mod tests {
                 ["demo"],
                 "the grid, not the panels: {text}"
             );
-            assert!(text.contains("1 session"), "inside feat: {text}");
+            assert!(text.contains("⎇ feat"), "inside feat: {text}");
         });
     }
 
@@ -5817,8 +6033,8 @@ mod tests {
                 Some("docs".into())
             );
 
-            // A letter nothing matches leaves the list as it was, and says
-            // so; Esc then closes the list, query and all. The `+` moved
+            // A letter nothing matches leaves the list as it was; Esc then
+            // closes the list, query and all. The `+` moved
             // right to make room for `docs`'s new tab.
             draw(&mut app);
             let (x, y) = crumb_cell(&app, HitTarget::LauncherTabAdd);
@@ -5827,7 +6043,7 @@ mod tests {
             let narrowed = labels(&app);
             key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
             assert_eq!(labels(&app), narrowed, "the list never empties");
-            assert!(app.flash.is_some(), "and the refusal says so");
+            assert_eq!(app.flash, None);
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.overlay.is_none(), "Esc closes: {:?}", app.overlay);
         });
@@ -5922,14 +6138,11 @@ mod tests {
                 Some("docs".into())
             );
             assert!(app.launcher_unaimed, "no card to aim at, so the pane folds");
-            assert_eq!(
-                app.flash.as_deref(),
-                Some(super::no_sessions(&app).as_str())
-            );
+            assert!(app.flash.is_none());
             let text = buffer_text(&draw(&mut app));
             assert_eq!(tabs_drawn(&app), ["docs", "demo"], "{text}");
             assert!(
-                text.contains("press  ^N  to prompt"),
+                text.contains("press  ^N  to start an agent"),
                 "the grid says what starts one: {text}"
             );
         });
@@ -5983,10 +6196,7 @@ mod tests {
                     !super::has_pane(&app),
                     "ack_first={ack_first}: the pane folded away: {text}"
                 );
-                assert_eq!(
-                    app.flash.as_deref(),
-                    Some(super::no_sessions(&app).as_str())
-                );
+                assert!(app.flash.is_none());
                 assert!(text.contains("Welcome to orion"), "{text}");
                 assert!(!text.contains("shell-1"), "no terminal of demo's: {text}");
             }
@@ -6018,10 +6228,7 @@ mod tests {
                 Some("docs".into())
             );
             assert!(!super::has_pane(&app), "the pane folded away");
-            assert_eq!(
-                app.flash.as_deref(),
-                Some(super::no_sessions(&app).as_str())
-            );
+            assert!(app.flash.is_none());
         });
     }
 
@@ -6083,11 +6290,7 @@ mod tests {
                     text.contains("nothing running"),
                     "{way}: docs' empty band is the grid: {text}"
                 );
-                assert_eq!(
-                    app.flash.as_deref(),
-                    Some(super::no_sessions(&app).as_str()),
-                    "{way}"
-                );
+                assert!(app.flash.is_none(), "{way}");
 
                 // `j` takes the aim back, onto the band: the pane it
                 // brings up is docs', and docs has nothing to read.
@@ -6327,7 +6530,7 @@ mod tests {
             let terminal = draw(&mut by_click);
             let text = buffer_text(&terminal);
             assert!(text.contains("Welcome to orion"), "{text}");
-            assert!(text.contains("press  ^N  to prompt"), "{text}");
+            assert!(text.contains("press  ^N  to start an agent"), "{text}");
             assert!(!text.contains("type a task"), "only the welcome: {text}");
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherWelcomePrompt);
             let cap = &terminal.backend().buffer()[(x + 7, y)];
@@ -6382,7 +6585,7 @@ mod tests {
             let sky = glyphs(&terminal, grid.y..key_y - 3);
             assert!(sky > 40, "{sky} specks of dust: {}", buffer_text(&terminal));
             assert!(row(&terminal, key_y - 2).contains("   Welcome to orion   "));
-            assert!(row(&terminal, key_y).contains("   press  ^N  to prompt   "));
+            assert!(row(&terminal, key_y).contains("   press  ^N  to start an agent   "));
             assert!(!app.welcome_active(), "animations off: a still frame");
 
             let mut small = on_an_empty_project();
@@ -6510,8 +6713,16 @@ mod tests {
 
     /// [`two_sessions`] with both projects open — `web` opened last, so
     /// its tab leads — and the grid on `demo`, the tab on the right.
+    ///
+    /// **Close project tab** ships with no key (a bare `x` closed tabs by
+    /// accident), so these tests bind it to `x` the way a user's rebind
+    /// would, and the close itself is what they exercise.
     fn two_tabs() -> App {
         let mut app = two_sessions();
+        app.keymap = crate::keymap::Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "close_project_tab".to_string(),
+            "x".to_string(),
+        )]));
         draw(&mut app);
         app.launcher_tabs = vec![ProjectId("p2".into()), ProjectId("p1".into())];
         draw(&mut app);
@@ -6748,10 +6959,7 @@ mod tests {
     fn a_tab_comes_back_on_the_card_it_was_left_on() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(
-                &mut app,
-                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
-            );
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Right]);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "demo's second card");
 
             keys(&mut app, &[KeyCode::Char('['), KeyCode::Char(']')]);
@@ -6759,8 +6967,9 @@ mod tests {
             assert_eq!(selected(&app).as_deref(), Some("a1"), "by `[` / `]`");
             assert_eq!(pane(&app), Some(SessionRef::Agent(AgentId("a1".into()))));
 
-            keys(&mut app, &[KeyCode::Char('1'), KeyCode::Char('2')]);
-            assert_eq!(selected(&app).as_deref(), Some("a1"), "by the digits");
+            key(&mut app, KeyCode::Char('1'), KeyModifiers::SUPER);
+            key(&mut app, KeyCode::Char('2'), KeyModifiers::SUPER);
+            assert_eq!(selected(&app).as_deref(), Some("a1"), "by ⌘ and the digits");
 
             keys(&mut app, &[KeyCode::Char('[')]);
             draw(&mut app);
@@ -6808,7 +7017,7 @@ mod tests {
             assert!(by_key.launcher_tabs.is_empty(), "the last tab closes");
             assert!(by_key.projects_closed);
             assert!(!by_key.launcher_active() && by_key.splash_showing());
-            assert_eq!(by_key.flash.as_deref(), Some(super::LAST_TAB));
+            assert!(by_key.flash.is_none());
             assert_eq!(by_key.tree.projects.len(), 2, "no project went");
             draw(&mut by_key);
             assert!(by_key.launcher_tabs.is_empty(), "the draw gives none back");
@@ -7035,13 +7244,8 @@ mod tests {
 
             key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, None, "one press stays put");
-            assert!(
-                app.flash
-                    .as_deref()
-                    .is_some_and(|f| f.ends_with("again: project tabs")),
-                "{:?}",
-                app.flash
-            );
+            assert!(app.edge_tap.is_some(), "and arms the second");
+            assert_eq!(app.flash, None);
             key(&mut app, KeyCode::Up, KeyModifiers::NONE);
             assert_eq!(
                 app.launcher_tab_cursor,
@@ -7127,22 +7331,14 @@ mod tests {
     fn j_j_from_the_tabs_goes_back_down_to_the_card_left() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(
-                &mut app,
-                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
-            );
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Right]);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the second card");
             keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
 
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, Some(ProjectId("p1".into())));
-            assert!(
-                app.flash
-                    .as_deref()
-                    .is_some_and(|f| f.ends_with("again: into demo")),
-                "{:?}",
-                app.flash
-            );
+            assert!(app.edge_tap.is_some(), "one press arms the second");
+            assert_eq!(app.flash, None);
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(app.launcher_tab_cursor, None);
             assert_eq!(tab_state(&app).0.as_deref(), Some("demo"));
@@ -7165,10 +7361,7 @@ mod tests {
 
             // And back up and over to demo, which comes up on the card it
             // was left on rather than its first.
-            keys(
-                &mut app,
-                &[KeyCode::Up, KeyCode::Up, KeyCode::Right],
-            );
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Right]);
             assert_eq!(tab_state(&app).0.as_deref(), Some("demo"));
             assert_eq!(selected(&app).as_deref(), Some("a1"));
         });
@@ -7182,14 +7375,8 @@ mod tests {
     fn esc_or_another_key_hands_the_keys_back_to_the_cards() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(
-                &mut app,
-                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
-            );
-            keys(
-                &mut app,
-                &[KeyCode::Up, KeyCode::Up, KeyCode::Left],
-            );
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Right]);
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Left]);
             assert!(app.launcher_tab_cursor.is_some());
             let walked = tab_state(&app);
             assert_eq!(walked.0.as_deref(), Some("web"));
@@ -7273,12 +7460,7 @@ mod tests {
             let before = tab_state(&app);
             keys(
                 &mut app,
-                &[
-                    KeyCode::Up,
-                    KeyCode::Up,
-                    KeyCode::Left,
-                    KeyCode::Char('x'),
-                ],
+                &[KeyCode::Up, KeyCode::Up, KeyCode::Left, KeyCode::Char('x')],
             );
             assert_eq!(
                 app.launcher_tabs,
@@ -7695,7 +7877,7 @@ mod tests {
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(c))
                     if c.action == PendingAction::ArchiveAgent(AgentId("a1".into()))),
@@ -7708,8 +7890,8 @@ mod tests {
                 "nothing ran, so no key to watch"
             );
             for _ in 0..5 {
-                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
-                key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Repeat);
+                key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             }
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(_))),
@@ -7721,7 +7903,7 @@ mod tests {
                 ["a9", "a2", "a1"],
                 "a held `a` archives nothing"
             );
-            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Release);
+            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Release);
 
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(app.overlay.is_none(), "Enter answers it");
@@ -7758,7 +7940,7 @@ mod tests {
             let (x, y) = row_cell(&app, 2);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert_eq!(cards(&app), ["a9", "a2"], "the press unarchives one");
             assert_eq!(
                 selected(&app).as_deref(),
@@ -7772,7 +7954,7 @@ mod tests {
                 app.release_watch.is_some(),
                 "another key let go changes nothing"
             );
-            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
+            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Repeat);
             assert_eq!(cards(&app), ["a9", "a2"], "the held `u` is still swallowed");
 
             key_kind(&mut app, KeyCode::Left, KeyModifiers::NONE, Repeat);
@@ -7809,11 +7991,11 @@ mod tests {
             // archived ones relative to before the press.
             let archived = |app: &App| app.tree.agents.iter().filter(|a| a.archived).count();
             let before = archived(&app);
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert_eq!(archived(&app), before - 1, "the press unarchives one");
             assert!(app.release_watch.is_some(), "and the key is watched");
             for _ in 0..5 {
-                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
+                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Repeat);
             }
             assert_eq!(archived(&app), before - 1, "held, it unarchives no more");
         });
@@ -7829,7 +8011,7 @@ mod tests {
             draw(&mut app);
             to_feat(&mut app);
             assert_eq!(selected(&app).as_deref(), Some("a2"));
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(
                 app.tree.agents.iter().any(|a| a.id.0 == "a2" && a.archived),
@@ -7872,7 +8054,7 @@ mod tests {
                 "feat's band open"
             );
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a1"]);
             assert_eq!(
@@ -7950,7 +8132,7 @@ mod tests {
                 "whose checkout also holds the LAST card's session",
             );
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a2", "a1"]);
             assert_eq!(
@@ -7977,7 +8159,7 @@ mod tests {
             draw(&mut app);
             super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
             assert_eq!(selected(&app).as_deref(), Some("a2"), "the middle card");
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the card after it");
 
@@ -8069,14 +8251,14 @@ mod tests {
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a2"]);
             assert_eq!(selected(&app).as_deref(), Some("a9"), "the card before it");
         });
     }
 
-    /// The ONLY card leaving — archived with `a` or deleted with ⌫, each
+    /// The ONLY card leaving — archived with `^A` or deleted with ⌫, each
     /// behind its confirm — leaves nothing for the PANE to read, so it
     /// folds away and the empty grid takes the body, the way a project
     /// opened with no sessions lands. INPUT PARITY: both verbs end in the
@@ -8085,8 +8267,14 @@ mod tests {
     fn the_last_card_leaving_folds_the_pane_away() {
         with_default_config(|| {
             for keys in [
-                &[KeyCode::Char('a'), KeyCode::Char('y')][..],
-                &[KeyCode::Backspace, KeyCode::Char('y')][..],
+                &[
+                    (KeyCode::Char('a'), KeyModifiers::CONTROL),
+                    (KeyCode::Char('y'), KeyModifiers::NONE),
+                ][..],
+                &[
+                    (KeyCode::Backspace, KeyModifiers::NONE),
+                    (KeyCode::Char('y'), KeyModifiers::NONE),
+                ][..],
             ] {
                 let mut app = two_sessions();
                 super::open_project(&mut app, &ProjectId("p2".into()), &mut Vec::new());
@@ -8094,19 +8282,16 @@ mod tests {
                 assert_eq!(cards(&app), ["a3"], "web's one card");
                 assert!(super::has_pane(&app), "{keys:?}: the pane reads it");
 
-                for code in keys {
-                    key(&mut app, *code, KeyModifiers::NONE);
+                for (code, mods) in keys {
+                    key(&mut app, *code, *mods);
                 }
                 assert!(cards(&app).is_empty(), "{keys:?}: the card left");
                 assert!(app.launcher_unaimed, "{keys:?}: nothing left to aim at");
                 assert!(!super::has_pane(&app), "{keys:?}: and the pane folded");
-                assert_eq!(
-                    app.flash.as_deref(),
-                    Some(super::no_sessions(&app).as_str())
-                );
+                assert!(app.flash.is_none());
                 let text = buffer_text(&draw(&mut app));
                 assert!(
-                    text.contains("press  ^N  to prompt"),
+                    text.contains("press  ^N  to start an agent"),
                     "{keys:?}: the empty grid says what starts one: {text}"
                 );
             }
@@ -8392,7 +8577,7 @@ mod tests {
             type_text(&mut app, "fix the nav");
             let box_behind = |app: &mut App, what: &str| {
                 let text = buffer_text(&draw(app));
-                assert!(text.contains("New session"), "{what}: the title: {text}");
+                assert!(text.contains("New agent"), "{what}: the title: {text}");
                 assert!(
                     text.contains("project demo ^P"),
                     "{what}: the details row: {text}"
@@ -8441,7 +8626,7 @@ mod tests {
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("type a project name"), "the picker: {text}");
-            assert!(text.contains("New session"), "the box's title: {text}");
+            assert!(text.contains("New agent"), "the box's title: {text}");
             assert!(text.contains("project demo ^P"), "its details row: {text}");
             assert!(text.contains("fix the nav"), "and the task in it: {text}");
 
@@ -8896,23 +9081,23 @@ mod tests {
                 "the cursor lands on the first card of the list that arrived"
             );
 
-            // Enter has no session to step into there.
+            // Enter has no session to step into there: the keys stay on
+            // the grid.
             app.flash = None;
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some(crate::event_loop::AGENT_ARCHIVED),
+            assert!(
+                app.focus != Focus::Terminal && !app.term_locked && app.flash.is_none(),
                 "inside={} unaimed={} focus={:?} hidden={} collapsed={} overlay={}",
                 app.launcher_expanded.is_some(),
                 app.launcher_unaimed,
                 app.focus,
                 app.launcher_pane_hidden,
                 app.collapsed,
-                app.overlay.is_some()
+                app.overlay.is_some(),
             );
 
             // `u` unarchives the card under the cursor where it stands.
-            let out = key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            let out = key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert!(
                 out.iter().any(|r| matches!(
                     r,
@@ -8952,14 +9137,11 @@ mod tests {
         });
     }
 
-    /// A PANE that loses the KEYBOARD says so. The input lock decides
-    /// where a keystroke lands, so a drop nobody asked for — here a
-    /// redraw that finds the pane folded out from under a locked cursor —
-    /// leaves the very next key meaning something else entirely: `x`
-    /// closes the project's tab, `⇧M` opens the memory modal.
-    /// Handing the keys over in silence is the bug the flash closes.
+    /// A PANE that loses the KEYBOARD hands the keys back to the grid —
+    /// here a redraw that finds the pane folded out from under a locked
+    /// cursor — without a word in the footer.
     #[test]
-    fn a_pane_losing_the_keyboard_says_so() {
+    fn a_pane_losing_the_keyboard_hands_the_keys_back() {
         with_default_config(|| {
             let mut app = two_sessions();
             app.term = Some(crate::app::AttachedTerm::new(
@@ -8977,20 +9159,9 @@ mod tests {
             draw(&mut app);
 
             assert!(!app.term_locked, "the keys are the grid's now");
-            assert_eq!(
-                app.flash.as_deref(),
-                Some(crate::app::TERMINAL_RELEASED),
-                "and the handover said so"
-            );
-            assert!(
-                buffer_text(&draw(&mut app)).contains("the keys are the grid's again"),
-                "and it is on screen, not just in the field"
-            );
-
-            // Said once, on the handover — not repainted every frame.
-            app.flash = None;
+            assert_eq!(app.flash, None, "and the footer stays quiet");
             draw(&mut app);
-            assert_eq!(app.flash, None, "once, not every frame");
+            assert_eq!(app.flash, None, "on every frame after");
         });
     }
 
@@ -9073,11 +9244,11 @@ mod tests {
             };
             assert_eq!(view.project, project);
             let clicked = app.overlay.take();
-            key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('u'), KeyModifiers::SUPER);
             assert_eq!(
                 format!("{:?}", app.overlay),
                 format!("{clicked:?}"),
-                "the click is `v`"
+                "the click is `⌘U`"
             );
 
             app.overlay = None;
@@ -9125,22 +9296,22 @@ mod tests {
             assert_eq!(tabs_drawn(&app), ["demo"], "the header's tabs: {text}");
             assert!(text.contains("2 sessions"), "{text}");
             assert!(text.contains("polish-nav"), "{text}");
-            // Each band names the checkout its cards run in, in the SCOPE
-            // COLOR's own glyph: `↳` for a worktree of its own, `⌂` for
-            // the project's root branch — and not the project, which the
-            // whole grid is scoped to and the header already names. The
-            // cards under it say what runs there.
-            assert!(text.contains("↳ feat"), "{text}");
+            // Each band names the checkout its cards run in by its SCOPE
+            // MARK: `⎇` for a worktree of its own, `⌂` for the project's
+            // root branch — and not the project, which the whole grid is
+            // scoped to and the header already names. The cards under it
+            // say what runs there.
+            assert!(text.contains("⎇ feat"), "{text}");
             assert!(text.contains("claude"), "{text}");
             assert!(
-                !text.contains("demo ▸ ↳") && !text.contains("demo ▸ ⌂"),
+                !text.contains("demo ▸ ⎇") && !text.contains("demo ▸ ⌂"),
                 "the project is the grid's scope, not a line on every card: {text}"
             );
             assert!(
                 !text.contains("tidy-css"),
                 "the project beside it is a level up, not in this grid: {text}"
             );
-            assert!(text.contains("#42 Polish the nav"), "{text}");
+            assert!(text.contains("↗ #42 ready"), "{text}");
             assert!(text.contains("⌂ main"), "{text}");
         });
     }
@@ -9227,12 +9398,11 @@ mod tests {
     fn shift_v_opens_the_cards_pull_request_as_its_menu_row_does() {
         with_default_config(|| {
             let mut by_key = card_on_a_pull_request();
-            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
-            assert_eq!(
-                by_key.flash.as_deref(),
-                Some("opened github.com/o/demo/pull/42")
-            );
+            assert_eq!(crate::event_loop::take_opened(), [PR_42]);
+            assert_eq!(by_key.flash, None);
             assert!(
                 sent.iter()
                     .any(|r| matches!(r, ClientRequest::MarkPrSeen { url, .. } if url == PR_42)),
@@ -9246,6 +9416,7 @@ mod tests {
             }
             let sent_by_menu = key(&mut by_menu, KeyCode::Enter, KeyModifiers::NONE);
             assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
+            assert_eq!(crate::event_loop::take_opened(), [PR_42]);
             assert_eq!(by_menu.flash, by_key.flash);
             assert_eq!(format!("{sent_by_menu:?}"), format!("{sent:?}"));
             assert_eq!(by_menu.pr_seen, by_key.pr_seen);
@@ -9270,30 +9441,22 @@ mod tests {
             assert!(sent.is_empty(), "gh runs client-side: {sent:?}");
             assert!(app.pr_refresh_requested, "the pull requests are re-asked");
             assert!(app.issues_failed.contains(&pid), "and the issues with them");
-            assert_eq!(app.flash.as_deref(), Some(crate::event_loop::RELOAD_FLASH));
+            assert!(app.flash.is_none());
         });
     }
 
-    /// A card whose checkout has no pull request yet says so, naming the
-    /// branch, and its menu carries no row for one.
+    /// A card whose checkout has no pull request yet opens nothing, and
+    /// its menu carries no row for one.
     #[test]
-    fn shift_v_on_a_card_with_no_pull_request_says_so() {
+    fn shift_v_on_a_card_with_no_pull_request_opens_nothing() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            let branch = app
-                .selected_session()
-                .and_then(|a| crate::launcher::row(&app, &a.id))
-                .map(|row| row.branch)
-                .expect("a card under the cursor");
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
-            assert_eq!(
-                app.flash,
-                Some(format!(
-                    "no pull request on {branch} yet — ⇧R reloads from GitHub"
-                ))
-            );
+            assert!(crate::event_loop::take_opened().is_empty());
+            assert_eq!(app.flash, None);
             assert_eq!(pr_menu_row(&mut app), None);
         });
     }
@@ -9307,9 +9470,10 @@ mod tests {
             let mut app = card_on_a_pull_request();
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.launcher_unaimed);
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
-            assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_PR));
+            assert!(app.flash.is_none());
         });
     }
 
@@ -9320,7 +9484,8 @@ mod tests {
     fn commenting_on_a_card_comments_on_its_pull_request() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             match &app.overlay {
                 Some(Overlay::Prompt(prompt)) => match &prompt.kind {
@@ -9341,30 +9506,24 @@ mod tests {
     /// Commenting refuses as opening the pull request does: with no card
     /// selected, and on a card whose checkout has no pull request yet.
     #[test]
-    fn commenting_without_a_cards_pull_request_says_why() {
+    fn commenting_without_a_cards_pull_request_opens_no_box() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_COMMENT));
+            assert!(app.flash.is_none());
 
             let mut app = two_sessions();
             draw(&mut app);
             crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert!(
-                app.flash
-                    .as_deref()
-                    .is_some_and(|f| f.starts_with("no pull request on ")),
-                "{:?}",
-                app.flash
-            );
+            assert_eq!(app.flash, None);
         });
     }
 
     /// The pull request on a band's rule is a link: a click on its
-    /// `↗ #42 title` opens it in the browser exactly as `⇧V` does — the
+    /// `↗ #42 ready` opens it in the browser exactly as `⇧V` does — the
     /// same URL, marked read the same way — and the target is only as
     /// wide as its text: the rest of the rule is the band's.
     #[test]
@@ -9386,7 +9545,7 @@ mod tests {
             assert_eq!(line.y, rule.y, "on the band's rule");
             assert_eq!(
                 line.width as usize,
-                "↗ #42 Polish the nav ready".chars().count(),
+                "↗ #42 ready".chars().count(),
                 "the link is its text, not the rule's width"
             );
             assert_eq!(
@@ -9402,8 +9561,9 @@ mod tests {
             let sent = click_at(&mut by_click, line.x + 3, line.y);
             assert!(by_click.overlay.is_none(), "{:?}", by_click.overlay);
             assert_eq!(
-                by_click.flash.as_deref(),
-                Some("opened github.com/o/demo/pull/42")
+                crate::event_loop::take_opened(),
+                [PR_42, PR_42],
+                "the key's, then the click's"
             );
             assert!(
                 sent.iter()
@@ -9452,8 +9612,8 @@ mod tests {
                 "the cursor is on the band whose link was clicked"
             );
             assert_eq!(
-                app.flash.as_deref(),
-                Some("opened github.com/o/demo/pull/43"),
+                crate::event_loop::take_opened(),
+                ["https://github.com/o/demo/pull/43"],
                 "and it is that band's pull request that opened"
             );
             assert!(
@@ -9491,8 +9651,8 @@ mod tests {
         });
     }
 
-    /// The pointer resting on a band's pull request underlines its
-    /// `#42 title` — nothing about a rule says part of it is a link — and
+    /// The pointer resting on a band's pull request underlines its `#42` —
+    /// nothing about a rule says part of it is a link — and
     /// only while it is there: off the link, the underline goes with it.
     #[test]
     fn the_pointer_marks_the_bands_pull_request() {
@@ -9511,7 +9671,7 @@ mod tests {
 
             mouse(&mut app, MouseEventKind::Moved, line.x + 2, line.y);
             assert_eq!(app.hover_crumb, Some(HitTarget::LauncherBandPr(worktree)));
-            assert_eq!(underlined(&draw(&mut app)), "#42 Polish the nav");
+            assert_eq!(underlined(&draw(&mut app)), "#42");
 
             mouse(&mut app, MouseEventKind::Moved, line.x, line.y + 2);
             assert_eq!(app.hover_crumb, None, "the card under the rule is no link");
@@ -9584,7 +9744,8 @@ mod tests {
     fn shift_p_no_longer_opens_the_cards_pull_request() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             quick_box(&app);
             assert_ne!(
@@ -9650,7 +9811,8 @@ mod tests {
         with_default_config(|| {
             let mut by_key = card_with_settings();
             let card = by_key.selected_session().expect("a card under the cursor");
-            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut by_key, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "nothing starts until Enter: {sent:?}");
             let launch = quick_box(&by_key);
             assert_eq!(
@@ -9716,10 +9878,11 @@ mod tests {
             let mut app = card_with_settings();
             keys(&mut app, &[KeyCode::Esc, KeyCode::Esc]);
             assert!(app.launcher_unaimed);
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_TO_DUPLICATE));
+            assert!(app.flash.is_none());
         });
     }
 
@@ -9771,10 +9934,7 @@ mod tests {
                     created: None,
                 },
             );
-            assert_eq!(
-                by_key.flash.as_deref(),
-                Some(format!("{} continues on Claude B", card.name).as_str())
-            );
+            assert_eq!(by_key.flash, None, "the card says where it went");
 
             let mut by_menu = two_sessions();
             draw(&mut by_menu);
@@ -9827,10 +9987,7 @@ mod tests {
             );
             assert!(key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).is_empty());
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("only a Claude session moves to another account — this one runs Codex")
-            );
+            assert_eq!(app.flash, None);
             right_click_card(&mut app);
             assert!(
                 !menu_labels(&app)
@@ -9894,7 +10051,8 @@ mod tests {
             );
             draw(&mut app);
             assert_eq!(app.selected_session().map(|a| a.id), Some(id));
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             let launch = quick_box(&app);
             assert!(launch.cloud, "{launch:?}");
@@ -9944,8 +10102,8 @@ mod tests {
             let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenIssue);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
             assert_eq!(
-                by_key.flash.as_deref(),
-                Some("opened github.com/o/demo/issues/15")
+                crate::event_loop::take_opened(),
+                ["https://github.com/o/demo/issues/15"]
             );
 
             let mut by_menu = card_from_an_issue();
@@ -9955,6 +10113,10 @@ mod tests {
             }
             let sent_by_menu = key(&mut by_menu, KeyCode::Enter, KeyModifiers::NONE);
             assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
+            assert_eq!(
+                crate::event_loop::take_opened(),
+                ["https://github.com/o/demo/issues/15"]
+            );
             assert_eq!(by_menu.flash, by_key.flash);
             assert_eq!(format!("{sent_by_menu:?}"), format!("{sent:?}"));
         });
@@ -9986,7 +10148,7 @@ mod tests {
             draw(&mut app);
             let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenIssue);
             assert!(sent.is_empty(), "{sent:?}");
-            assert_eq!(app.flash.as_deref(), Some(super::NO_ISSUE));
+            assert!(app.flash.is_none());
             assert_eq!(issue_menu_row(&mut app), None);
         });
     }
@@ -10000,7 +10162,7 @@ mod tests {
             assert!(app.launcher_unaimed);
             let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenIssue);
             assert!(sent.is_empty(), "{sent:?}");
-            assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_ISSUE));
+            assert!(app.flash.is_none());
         });
     }
 
@@ -10089,14 +10251,15 @@ mod tests {
         cells[at..at + want.len()].iter().map(|c| c.fg).collect()
     }
 
-    /// A PROJECT TAB's name sweeps on the loudest thing its sessions are
-    /// doing, lit tab or not: yellow while one runs, red while one waits
-    /// on you whatever else runs, and blue once none is live but a finish
-    /// is left unread — for as long as it stays unread, so the sweep clock
-    /// keeps running for it — then still once it is read. The animations
-    /// setting stops all three.
+    /// An unlit PROJECT TAB's name shimmers in the done color for as long
+    /// as a finish there is left unread — so the sweep clock keeps running
+    /// for it — and holds still once it is read. It takes the red one-shot
+    /// for the seconds after something there starts needing you, then
+    /// holds still, bright, while it waits. Work in progress never sweeps a
+    /// tab (the spinner says that), and the lit tab never sweeps at all:
+    /// its accent says where you are. The animations setting stops it all.
     #[test]
-    fn a_project_tabs_name_sweeps_the_loudest_status_under_it() {
+    fn a_project_tabs_name_shimmers_while_a_finish_there_is_unread() {
         with_default_config(|| {
             let mut app = two_sessions();
             app.launcher_tabs.push(ProjectId("p2".into()));
@@ -10105,58 +10268,84 @@ mod tests {
             let sweeps = |term: &Terminal<TestBackend>, name: &str, ramp: [Color; 3]| {
                 tab_name_colors(term, name).iter().all(|c| ramp.contains(c))
             };
-            let set = |app: &mut App, id: &str, status: AgentStatus, unseen: bool| {
+            // The project list sorts what wants you first; keep the grid on
+            // demo whatever web does, so web's tab stays the unlit one.
+            let set = |app: &mut App, id: &str, status: AgentStatus, unseen: bool, at: i64| {
                 let a = app.tree.agents.iter_mut().find(|a| a.id.0 == id).unwrap();
                 a.status = status;
                 a.unseen = unseen;
+                a.status_changed_at = at;
+                let rows = app.project_rows();
+                app.sel_project = rows
+                    .iter()
+                    .position(|&i| app.tree.projects[i].id.0 == "p1")
+                    .unwrap();
             };
 
             let term = draw(&mut app);
-            assert!(sweeps(&term, "demo", th.warn_sweep), "polish-nav runs");
-            assert!(sweeps(&term, "web", th.warn_sweep), "the tab not lit too");
-
-            set(&mut app, "a1", AgentStatus::NeedsFeedback, false);
-            assert!(
-                sweeps(&draw(&mut app), "demo", th.err_sweep),
-                "red outranks the one still running"
-            );
-
-            set(&mut app, "a1", AgentStatus::Finished, true);
-            assert!(
-                sweeps(&draw(&mut app), "demo", th.warn_sweep),
-                "a finish is not the project done while another runs"
-            );
-
-            set(&mut app, "a2", AgentStatus::Finished, true);
-            set(&mut app, "a3", AgentStatus::Finished, false);
-            let term = draw(&mut app);
-            assert!(sweeps(&term, "demo", th.done_sweep), "all done: blue");
             assert_eq!(
                 tab_name_colors(&term, "web"),
-                vec![th.muted; 3],
-                "web is quiet"
+                vec![th.dim; 3],
+                "tidy-css runs: the spinner says so, the name holds still"
             );
-            assert!(
-                app.status_anim_active(),
-                "long-finished, but unread: the blue keeps the clock running"
-            );
-
-            set(&mut app, "a1", AgentStatus::Finished, false);
-            set(&mut app, "a2", AgentStatus::Finished, false);
-            let term = draw(&mut app);
             assert_eq!(
                 tab_name_colors(&term, "demo"),
                 vec![th.accent; 4],
+                "the lit tab holds still"
+            );
+
+            set(
+                &mut app,
+                "a3",
+                AgentStatus::NeedsFeedback,
+                false,
+                crate::app::now_ms(),
+            );
+            let term = draw(&mut app);
+            assert!(
+                sweeps(&term, "web", th.err_sweep),
+                "it just started needing you: the red one-shot, got {:?}",
+                tab_name_colors(&term, "web")
+            );
+            set(&mut app, "a3", AgentStatus::NeedsFeedback, false, 1);
+            assert_eq!(
+                tab_name_colors(&draw(&mut app), "web"),
+                vec![th.text; 3],
+                "announced already: still, and bright while it waits"
+            );
+
+            set(&mut app, "a3", AgentStatus::Finished, true, 1);
+            let term = draw(&mut app);
+            assert!(sweeps(&term, "web", th.done_sweep), "unread, however old");
+            assert!(
+                app.status_anim_active(),
+                "long-finished, but unread: the shimmer keeps the clock running"
+            );
+
+            set(&mut app, "a1", AgentStatus::Finished, true, 1);
+            assert_eq!(
+                tab_name_colors(&draw(&mut app), "demo"),
+                vec![th.accent; 4],
+                "the lit tab holds still, unread or not"
+            );
+
+            for id in ["a1", "a2", "a3"] {
+                set(&mut app, id, AgentStatus::Finished, false, 1);
+            }
+            let term = draw(&mut app);
+            assert_eq!(
+                tab_name_colors(&term, "web"),
+                vec![th.dim; 3],
                 "read: still"
             );
             assert!(!app.status_anim_active(), "and nothing left to tick for");
 
-            set(&mut app, "a2", AgentStatus::Running, false);
+            set(&mut app, "a3", AgentStatus::Finished, true, 1);
             app.animations = false;
             assert_eq!(
-                tab_name_colors(&draw(&mut app), "demo"),
-                vec![th.accent; 4],
-                "animations off"
+                tab_name_colors(&draw(&mut app), "web"),
+                vec![th.text; 3],
+                "animations off: bright, still"
             );
         });
     }
@@ -10384,10 +10573,7 @@ mod tests {
             by_key.flash = None;
             key(&mut by_key, KeyCode::Esc, KeyModifiers::NONE);
             assert!(by_key.launcher_unaimed, "Esc lets the card go");
-            assert_eq!(
-                by_key.flash.as_deref(),
-                Some(super::unaimed(&by_key).as_str())
-            );
+            assert!(by_key.flash.is_none());
 
             // With the band open, Esc closes it first, and only the
             // second press lets the card go.
@@ -10405,10 +10591,7 @@ mod tests {
             assert_eq!(by_key.flash, None);
             key(&mut by_key, KeyCode::Esc, KeyModifiers::NONE);
             assert!(by_key.launcher_unaimed, "the second lets the card go");
-            assert_eq!(
-                by_key.flash.as_deref(),
-                Some(super::unaimed(&by_key).as_str())
-            );
+            assert!(by_key.flash.is_none());
         });
     }
 
@@ -10858,7 +11041,7 @@ mod tests {
         key(app, KeyCode::Enter, KeyModifiers::NONE);
     }
 
-    /// `n` is not `p`: it asks which harness first — the NEW SESSION
+    /// `n` is not `p`: it asks which harness first — the NEW AGENT
     /// PICKER, with no box drawn behind it — and Enter on a row opens the
     /// box set to that harness, in the checkout `p` would take (the
     /// worktree under the cursor). Esc on the picker opens nothing: no
@@ -10875,9 +11058,9 @@ mod tests {
 
             crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             let back = super::super::menu_quick_return(menu).expect("the rows owe a box");
             assert!(!back.from_box, "no box is up under the picker");
             assert_eq!(back.launch.target, feat, "the checkout p would take");
@@ -11209,7 +11392,7 @@ mod tests {
             // A band the accordion remembered stays remembered, unread.
             app.launcher_expanded = Some(bands[1].worktree.clone());
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert_eq!(app.flash.as_deref(), Some(super::ALL_OPEN));
+            assert!(app.flash.is_none());
             assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[1].worktree));
             draw_tall(&mut app);
             assert_eq!(drawn_entries(&app, 0).len(), 5, "still every card");
@@ -11222,13 +11405,13 @@ mod tests {
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             draw_tall(&mut app);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            assert_eq!(app.flash.as_deref(), Some(super::ALL_OPEN), "as Tab says");
+            assert!(app.flash.is_none(), "as Tab says");
             assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[1].worktree));
 
             app.flash = None;
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.launcher_unaimed, "the first Esc lets the card go");
-            assert_eq!(app.flash.as_deref(), Some(super::unaimed(&app).as_str()));
+            assert!(app.flash.is_none());
         });
     }
 
@@ -11307,7 +11490,7 @@ mod tests {
             super::select_card(&mut app, bands[1].cards[0].sref(), &mut Vec::new());
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             assert_eq!(app.launcher_expanded, None);
-            assert_eq!(app.flash.as_deref(), Some(super::ALL_LISTED));
+            assert!(app.flash.is_none());
         });
     }
 
@@ -11336,6 +11519,265 @@ mod tests {
             let hint = app.hit_rect(&HitTarget::LauncherBandMore(0)).unwrap();
             click_at(&mut app, hint.x + 1, hint.y);
             assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[0].worktree));
+        });
+    }
+
+    // ---- the ARCHIVED DRAWER ----
+
+    /// [`three_sessions`] with the root's `agent-1` archived: the root
+    /// band holds `ship-docs` alone, with one session in its drawer.
+    fn one_archived() -> App {
+        let mut app = three_sessions();
+        for agent in &mut app.tree.agents {
+            if agent.id.0 == "a1" {
+                agent.archived = true;
+                agent.archived_at = 5;
+                agent.alive = false;
+            }
+        }
+        draw(&mut app);
+        super::select(&mut app, AgentId("a9".into()), &mut Vec::new());
+        draw(&mut app);
+        app
+    }
+
+    fn is_archived_now(app: &App, id: &str) -> bool {
+        app.tree.agents.iter().any(|a| a.id.0 == id && a.archived)
+    }
+
+    /// Folded, the drawer is only its count under the band: the session
+    /// is no card, and nothing of it is a line the cursor walks onto.
+    #[test]
+    fn a_folded_drawer_counts_the_bands_archived_sessions() {
+        with_default_config(|| {
+            let app = one_archived();
+            assert_eq!(cards(&app), ["a9", "a2"], "the archived one is no card");
+            let bands = crate::launcher::bands(&app);
+            assert_eq!(bands[0].archived.len(), 1);
+            assert!(!bands[0].drawer_open);
+            assert!(bands[0].drawer().is_empty());
+            assert!(bands[1].archived.is_empty(), "feat has none to count");
+            assert!(app.hit_rect(&HitTarget::LauncherDrawer(0)).is_some());
+            assert!(app.hit_rect(&HitTarget::LauncherDrawer(1)).is_none());
+        });
+    }
+
+    /// `z` unfolds the drawer with the cursor on its newest line, and `u`
+    /// there brings the session back — the cursor staying on it, now a
+    /// card again.
+    #[test]
+    fn z_then_u_brings_the_last_archived_session_back() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(app.archived_open.contains(&WorktreeId("w1".into())));
+            assert_eq!(
+                selected(&app).as_deref(),
+                Some("a1"),
+                "on the drawer's line"
+            );
+            draw(&mut app);
+            assert!(app
+                .hit_rect(&HitTarget::LauncherDrawerEntry(0, 0))
+                .is_some());
+
+            let sent = key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+            assert!(
+                sent.iter().any(|r| matches!(r,
+                    ClientRequest::UnarchiveAgent { id, .. } if id.0 == "a1")),
+                "{sent:?}"
+            );
+            assert!(!is_archived_now(&app, "a1"));
+            draw(&mut app);
+            assert!(cards(&app).contains(&"a1".to_string()), "a card again");
+            assert_eq!(
+                selected(&app).as_deref(),
+                Some("a1"),
+                "the cursor kept on it"
+            );
+            assert!(crate::launcher::bands(&app)[0].archived.is_empty());
+        });
+    }
+
+    /// `↓` off a band's cards walks into its unfolded drawer and on to
+    /// the band below; `↑` from that band comes back up through the
+    /// drawer onto the cards — and never, from a drawer line on the top
+    /// band, up into the PROJECT TABS.
+    #[test]
+    fn arrows_walk_through_an_unfolded_drawer() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a9"), "↑: up onto the card");
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a1"), "↓: into the drawer");
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a2"), "↓: on to feat");
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a1"), "↑: back up into it");
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            assert_eq!(selected(&app).as_deref(), Some("a9"));
+            assert!(app.launcher_tab_cursor.is_none(), "not up into the tabs");
+        });
+    }
+
+    /// `z` again folds it, and the cursor that was in it goes back onto
+    /// the band's cards; on a band with nothing archived `z` does nothing.
+    #[test]
+    fn z_folds_the_drawer_back_onto_the_cards() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(app.archived_open.is_empty());
+            assert_eq!(selected(&app).as_deref(), Some("a9"));
+
+            super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(app.archived_open.is_empty());
+            assert_eq!(app.flash, None);
+        });
+    }
+
+    /// INPUT PARITY: a click on `▸ 1 archived` is `z`, and a second click
+    /// on a drawer line is `u`.
+    #[test]
+    fn clicks_on_the_drawer_are_z_and_u() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            let head = app.hit_rect(&HitTarget::LauncherDrawer(0)).unwrap();
+            click_at(&mut app, head.x + 1, head.y);
+            assert!(app.archived_open.contains(&WorktreeId("w1".into())));
+            assert_eq!(selected(&app).as_deref(), Some("a1"));
+
+            draw(&mut app);
+            let line = app.hit_rect(&HitTarget::LauncherDrawerEntry(0, 0)).unwrap();
+            click_at(&mut app, line.x + 6, line.y);
+            assert!(is_archived_now(&app, "a1"), "one click only lands on it");
+            draw(&mut app);
+            click_at(&mut app, line.x + 6, line.y);
+            assert!(!is_archived_now(&app, "a1"), "the second brings it back");
+        });
+    }
+
+    /// A band whose last card is archived with its drawer unfolded stays
+    /// on the grid, holding the session just filed; folded, it goes.
+    #[test]
+    fn an_unfolded_drawer_keeps_its_band_on_the_grid() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            app.archived_open.insert(WorktreeId("w2".into()));
+            super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(is_archived_now(&app, "a2"));
+            let bands = crate::launcher::bands(&app);
+            let feat = bands
+                .iter()
+                .find(|b| b.worktree.0 == "w2")
+                .expect("feat's band");
+            assert!(feat.cards.is_empty());
+            assert_eq!(feat.drawer().len(), 1);
+
+            app.archived_open.remove(&WorktreeId("w2".into()));
+            let bands = crate::launcher::bands(&app);
+            assert!(bands.iter().all(|b| b.worktree.0 != "w2"));
+        });
+    }
+
+    /// Cycle mode steps a Claude box edit → plan → edit (Claude has no
+    /// ask), the header reading the step at once, and Enter sends the
+    /// mode with the create.
+    #[test]
+    fn cycle_mode_steps_the_box_and_rides_the_create() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            type_text(&mut app, "how does auth work");
+            assert_eq!(launch(&app).0.mode, orion_core::AgentMode::Edit);
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("mode edit"), "{text}");
+
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            let (stepped, typed) = launch(&app);
+            assert_eq!(stepped.mode, orion_core::AgentMode::Plan);
+            assert_eq!(typed, "how does auth work", "the text is kept");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("mode plan"), "{text}");
+
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            assert_eq!(
+                launch(&app).0.mode,
+                orion_core::AgentMode::Edit,
+                "round again"
+            );
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+
+            let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                out.iter().any(|r| matches!(
+                    r,
+                    ClientRequest::CreateAgent {
+                        mode: orion_core::AgentMode::Plan,
+                        ..
+                    }
+                )),
+                "{out:?}"
+            );
+        });
+    }
+
+    /// `@` in the box lists the files of the checkout the launch runs in,
+    /// narrowed as you type; Tab writes the pick in as `@path`, and Enter
+    /// after it sends the box as usual.
+    #[test]
+    fn an_at_lists_the_checkouts_files_and_tab_writes_one_in() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let git = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .output()
+                    .unwrap()
+            };
+            git(&["init", "-q"]);
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/auth.rs"), "").unwrap();
+            std::fs::write(repo.join("README.md"), "").unwrap();
+            let mut app = App::new();
+            app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
+            seed_tree(&mut app);
+            seed_feat(&mut app, repo.to_path_buf());
+            seed_web(&mut app);
+            // The box on `feat`, the checkout under the cursor.
+            crate::quick_prompt::open_box(
+                &mut app,
+                QuickLaunch::from_config(
+                    QuickTarget::Worktree(WorktreeId("w2".into())),
+                    &crate::config::Config::load(),
+                ),
+            );
+            type_text(&mut app, "fix @aut");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("src/auth.rs"), "{text}");
+            assert!(!text.contains("README.md"), "narrowed: {text}");
+
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "fix @src/auth.rs ");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(!text.contains(" files "), "the list went: {text}");
+
+            // Esc puts a list away and leaves the box up.
+            type_text(&mut app, "@");
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "fix @src/auth.rs @");
         });
     }
 }

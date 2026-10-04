@@ -376,7 +376,7 @@ pub fn run(app: &mut App, plan: &Plan) -> bool {
                 true
             }
             Err(msg) => {
-                app.flash = Some(msg);
+                app.flash = Some(crate::flash::Flash::failed(msg));
                 false
             }
         }
@@ -432,15 +432,22 @@ pub fn exited(app: &mut App) {
 }
 
 /// The install modal closed: say how it went where the user is looking —
-/// the onboarding page, the settings overlay, else the footer — and let
-/// the editor fallback be noted afresh.
+/// the onboarding page, the settings overlay, else (only when it is still
+/// not on PATH: the modal's title already said it went in) the footer —
+/// and let the editor fallback be noted afresh.
 pub fn closed(app: &mut App, program: &str) {
-    let note = outcome(program, crate::config::program_installed(program));
+    let installed = crate::config::program_installed(program);
+    let note = outcome(program, installed);
     app.editor_fallback_noted = None;
     match &mut app.overlay {
         Some(crate::app::Overlay::Onboard(view)) => view.note = Some(note),
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
-        _ => app.flash = Some(note),
+        // The footer leads with its own `✕`, so not the outcome's `✗`.
+        _ if !installed => {
+            let words = note.trim_start_matches("✗ ").to_string();
+            app.flash = Some(crate::flash::Flash::failed(words));
+        }
+        _ => {}
     }
     app.dirty = true;
 }

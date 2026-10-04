@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 use crate::harness::HarnessDescriptor;
 
 /// One extra Claude account, as `claude_accounts` in config.json holds it:
-/// `{"id": "claude-2", "config_dir": "~/.claude-2"}`. Built-in Claude is
-/// the default account and has no entry.
+/// `{"id": "claude-2", "config_dir": "~/.claude-2"}`, plus `"name":
+/// "Work"` once it has a display name. Built-in Claude is the default
+/// account and has no entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeAccount {
     /// Stable id: the registry id the account's sessions point back at
@@ -35,6 +36,14 @@ pub struct ClaudeAccount {
     /// where it is used, so the entry travels to another machine as
     /// written.
     pub config_dir: String,
+    /// The name it goes by, as the user typed it — `Work`, `Work
+    /// Laptop` — shown before the email it is signed in as (`Work
+    /// (a@b.co)`). Empty: no name of its own, so it is `Claude (a@b.co)`.
+    /// A rename changes this alone, never the id or the dir its sessions
+    /// and its login hang off; written only while set, so an unnamed
+    /// entry stays the two keys above.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Whether the pickers offer it — the Agents tab's switch. Written
     /// only while off, so an entry stays the two keys above.
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_on")]
@@ -90,13 +99,14 @@ impl ClaudeAccount {
 
     /// The registry row this account launches as: `claude` — the
     /// effective row, the `harnesses` map's deltas for it included — under
-    /// the account's id, with its own switch, no label of its own (the
-    /// TUI names it after the email it is signed in as) and its config
-    /// dir in `env`, on top of any env Claude's row carries.
+    /// the account's id, with its own switch, its [`ClaudeAccount::name`]
+    /// for a label — empty while it has none, never Claude's (the TUI
+    /// adds the email it is signed in as) — and its config dir in `env`,
+    /// on top of any env Claude's row carries.
     pub fn descriptor(&self, claude: &HarnessDescriptor) -> HarnessDescriptor {
         let mut descriptor = claude.clone();
         descriptor.id = self.id.trim().to_string();
-        descriptor.label = String::new();
+        descriptor.label = self.name.trim().to_string();
         descriptor.enabled = self.enabled;
         descriptor.env.insert(
             crate::env::CLAUDE_CONFIG_DIR.to_string(),
@@ -182,6 +192,7 @@ mod tests {
         ClaudeAccount {
             id: id.into(),
             config_dir: dir.into(),
+            name: String::new(),
             enabled: true,
         }
     }
@@ -202,6 +213,31 @@ mod tests {
             ..read
         };
         assert_eq!(serde_json::to_value(&off).unwrap()["enabled"], false);
+    }
+
+    /// A display name is a third key, written only while there is one, and
+    /// an entry an older build wrote — no `name` — reads as unnamed.
+    #[test]
+    fn a_name_is_written_only_while_set() {
+        let named: ClaudeAccount = serde_json::from_str(
+            r#"{"id": "claude-work", "config_dir": "~/.claude-work", "name": "Work Laptop"}"#,
+        )
+        .unwrap();
+        assert_eq!(named.name, "Work Laptop");
+        assert_eq!(
+            serde_json::to_value(&named).unwrap(),
+            serde_json::json!({
+                "id": "claude-work", "config_dir": "~/.claude-work", "name": "Work Laptop"
+            })
+        );
+        let unnamed = ClaudeAccount {
+            name: String::new(),
+            ..named
+        };
+        assert_eq!(
+            serde_json::to_value(&unnamed).unwrap(),
+            serde_json::json!({"id": "claude-work", "config_dir": "~/.claude-work"})
+        );
     }
 
     #[test]
@@ -243,6 +279,14 @@ mod tests {
         assert!(row.takes_claude_sessions());
         let home = crate::env::home_dir().unwrap();
         assert_eq!(row.pinned_claude_config_dir(), Some(home.join(".claude-2")));
+        // A name is the row's label; the id, and so the sessions on it,
+        // stay where they were.
+        let named = ClaudeAccount {
+            name: " Work ".into(),
+            ..off
+        };
+        let row = named.descriptor(&claude);
+        assert_eq!((row.id.as_str(), row.label.as_str()), ("claude-2", "Work"));
     }
 
     /// Claude Code's own rule: `.claude.json` sits inside a config dir

@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "orion"
-version = "0.42.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "orion-core"
-version = "0.42.0"
+version = "1.0.0"
 dependencies = [
  "directories",
  "rmp-serde",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "orion-daemon"
-version = "0.42.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1298,11 +1298,11 @@ dependencies = [
 
 [[package]]
 name = "orion-fuzzy"
-version = "0.42.0"
+version = "1.0.0"
 
 [[package]]
 name = "orion-tui"
-version = "0.42.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",

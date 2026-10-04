@@ -1,4 +1,4 @@
-//! The one AGENT KIND picker behind every launch surface — the NEW SESSION
+//! The one AGENT KIND picker behind every launch surface — the NEW AGENT
 //! PICKER (`n` on the grid, which opens the QUICK PROMPT on the pick; from
 //! a menu's "New agent" row it launches outright), the PR SESSION picker
 //! (`Tab` in the PULL REQUESTS MODAL) and the QUICK PROMPT's `Tab`. Each is one
@@ -18,6 +18,13 @@ use orion_core::{Agent, AgentKind, WorktreeId};
 pub(crate) const NO_HARNESS_FLASH: &str =
     "every harness is disabled — enable one in Settings › Agents";
 
+/// The NEW AGENT PICKER's title, and the label of **New agent — choose
+/// harness**, the action that opens it: the same new agent `⌘N` starts,
+/// with its harness asked first. It names an AGENT, never a session — a
+/// session is an agent or a terminal, and this only ever starts the first.
+/// `ContextMenu::hovered_claude_cloud` gates Cloud mode on it.
+pub(crate) const NEW_AGENT_PICKER_TITLE: &str = "New agent — choose harness";
+
 /// What one kind picker opens with: its title, where its rows launch, and
 /// the context every row carries.
 #[derive(Debug, Clone)]
@@ -36,10 +43,10 @@ pub(crate) struct KindPicker {
 }
 
 impl KindPicker {
-    /// The NEW SESSION PICKER: plain rows into `worktree`.
+    /// The NEW AGENT PICKER: plain rows into `worktree`.
     pub fn new_session(worktree: WorktreeId) -> Self {
         Self {
-            title: "New session".into(),
+            title: NEW_AGENT_PICKER_TITLE.into(),
             worktree,
             pr: None,
             quick: None,
@@ -53,7 +60,7 @@ impl KindPicker {
     /// the DAEMON puts a PR SESSION in the head branch's own checkout.
     pub fn pr_session(worktree: WorktreeId, pr: &OpenPr) -> Self {
         Self {
-            title: format!("New PR session · #{}", pr.number),
+            title: format!("New PR agent · #{}", pr.number),
             worktree,
             pr: Some(PrLaunch::of(pr)),
             quick: None,
@@ -72,7 +79,7 @@ impl KindPicker {
         }
     }
 
-    /// `n` on the grid: the NEW SESSION PICKER with no box up yet — the
+    /// `n` on the grid: the NEW AGENT PICKER with no box up yet — the
     /// harness is asked first, and Enter on a row OPENS the QUICK PROMPT
     /// set to it (`back.from_box` is false: Esc closes the picker and
     /// opens nothing). The cursor starts on the harness the box would
@@ -80,7 +87,7 @@ impl KindPicker {
     /// HARNESS writes the last launch into — so `Enter` at once is `p`.
     pub fn new_session_box(worktree: WorktreeId, back: QuickReturn) -> Self {
         Self {
-            title: "New session".into(),
+            title: NEW_AGENT_PICKER_TITLE.into(),
             worktree,
             pr: None,
             hover: Some(HarnessRow {
@@ -111,7 +118,7 @@ pub(crate) fn enabled_harnesses_or_flash(app: &mut App, cfg: &Config) -> Option<
         .map(|(kind, custom)| HarnessRow { kind, custom })
         .collect();
     if rows.is_empty() {
-        app.flash = Some(NO_HARNESS_FLASH.into());
+        app.flash = Some(crate::flash::Flash::setup(NO_HARNESS_FLASH));
         return None;
     }
     Some(rows)
@@ -451,7 +458,7 @@ mod tests {
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("{:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             assert_eq!(labels(menu), offered);
             assert_eq!(menu.hover, 0);
 
@@ -462,7 +469,7 @@ mod tests {
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("{:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New PR session · #7"));
+            assert_eq!(menu.title.as_deref(), Some("New PR agent · #7"));
             assert_eq!(labels(menu), offered);
             assert!(menu.items.iter().all(|item| matches!(
                 &item.action,
@@ -483,6 +490,7 @@ mod tests {
                     linear: None,
                     under: None,
                     cloud: false,
+                    mode: orion_core::AgentMode::Edit,
                 },
                 text: "typed so far".into(),
                 from_box: true,
@@ -503,7 +511,7 @@ mod tests {
                     if back.text == "typed so far"
             )));
 
-            // `n` on the grid: the same rows under the NEW SESSION title,
+            // `n` on the grid: the same rows under the NEW AGENT PICKER's title,
             // owing a box that is not up yet.
             open_kind_picker(
                 &mut app,
@@ -519,7 +527,7 @@ mod tests {
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("{:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             assert_eq!(labels(menu), offered);
             assert_eq!(menu.hover, 1, "starts on the harness the box would open on");
             assert!(menu.items.iter().all(|item| matches!(
@@ -538,7 +546,7 @@ mod tests {
         });
     }
 
-    /// The QUICK PROMPT's picker offers the NEW SESSION PICKER's cloud
+    /// The QUICK PROMPT's picker offers the NEW AGENT PICKER's cloud
     /// toggle on its Claude row, and opens with it on for a box already set
     /// to cloud — but not for a box the DAEMON would refuse a cloud task
     /// for, one carrying a pull request or an issue.
@@ -585,7 +593,7 @@ mod tests {
         });
     }
 
-    /// REMEMBER HARNESS on: the NEW SESSION and PR SESSION pickers open on
+    /// REMEMBER HARNESS on: the NEW AGENT and PR SESSION pickers open on
     /// the last launch's harness — the `quick_prompt_kind` it wrote; off,
     /// on the first row whatever that setting says. A remembered harness
     /// switched off since steps to the first enabled one, and the QUICK
@@ -633,6 +641,7 @@ mod tests {
                         linear: None,
                         under: None,
                         cloud: false,
+                        mode: orion_core::AgentMode::Edit,
                     },
                     text: String::new(),
                     from_box: true,

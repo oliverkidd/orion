@@ -383,10 +383,7 @@ mod tests {
         let cmd = remote_command(URL, 7681, None, Some("eyJ4IjoxfQ=="));
         assert!(cmd.ends_with("7681 '' 'eyJ4IjoxfQ=='"), "{cmd}");
         let export = REMOTE_SCRIPT
-            .find(&format!(
-                "export {}=\"$4\"",
-                orion_core::env::IMPORT_BUNDLE
-            ))
+            .find(&format!("export {}=\"$4\"", orion_core::env::IMPORT_BUNDLE))
             .expect("exports the bundle");
         let start = REMOTE_SCRIPT.find("exec orion browser").unwrap();
         assert!(export < start, "{REMOTE_SCRIPT}");

@@ -1,0 +1,5 @@
+# The new session box stepped into plan mode: `^N`, a question typed, then ⇧Tab — the header's
+# `mode` field beside the agent reads `plan`, in colour, and the agent name is cut to ten columns.
+C-n
+How should we split the token store out of the auth module?
+BTab

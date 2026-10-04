@@ -16,13 +16,31 @@ use std::path::PathBuf;
 /// size of [`App::sweep_phase`] (one text cell per frame).
 pub const SWEEP_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// How long a ONE-SHOT SWEEP runs: the sweep a row takes for a change that
-/// happened while nobody was looking — a turn finishing unread (blue), a
-/// checkout's pull request merging (purple) — before it settles into its
-/// still color. Two or three passes of the band: long enough to catch the
-/// eye from another panel, short enough that motion keeps meaning *live*.
-/// Only running and needs-feedback rows sweep for as long as they last.
+/// How long a ONE-SHOT SWEEP runs: the sweep a row takes when it changes
+/// into a state that wants you — a session starting to need you or
+/// crashing (red), a checkout's pull request merging (purple) — before it
+/// settles into its still color. Two or three passes of the band: long
+/// enough to catch the eye from another panel, short enough that motion
+/// keeps meaning *news*. The one sweep that does not run out is the UNREAD
+/// SHIMMER: a finish nobody has looked at sweeps until somebody does.
 pub const ONE_SHOT_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Frames of the WORKING SPINNER, the dot a running session wears: a
+/// quarter turn every [`SPIN_FRAMES_PER_STEP`] sweep frames.
+pub const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// Sweep frames ([`SWEEP_FRAME`]) per quarter turn of the spinner.
+pub const SPIN_FRAMES_PER_STEP: usize = 2;
+
+/// The WORKING SPINNER's frame at sweep phase `phase`.
+pub fn spin_step(phase: usize) -> usize {
+    phase / SPIN_FRAMES_PER_STEP
+}
+
+/// The WORKING SPINNER's glyph at `spin` ([`App::spin_phase`]); its first
+/// frame, held still, with animations off.
+pub fn spinner_frame(spin: Option<usize>) -> &'static str {
+    SPINNER[spin.unwrap_or(0) % SPINNER.len()]
+}
 
 /// How many recently shown sessions keep their screen ([`App::term_cache`]):
 /// enough for a rotation through the sessions of a couple of worktrees.
@@ -62,6 +80,18 @@ pub enum Focus {
     Worktrees,
     Sessions,
     Terminal,
+}
+
+/// The three parts of the FOOTER's breadcrumb, each a link back to where
+/// it is on the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrumbPart {
+    /// The project: its grid, no card aimed at.
+    Project,
+    /// The checkout: the cursor on its BAND.
+    Worktree,
+    /// The session: the cursor on its card.
+    Session,
 }
 
 /// What a screen cell maps to; rebuilt on every draw for hit-testing.
@@ -107,6 +137,15 @@ pub enum HitTarget {
     /// it as the ACCORDION, the very toggle Tab runs
     /// (`event_loop::launcher::click_band_more`).
     LauncherBandMore(usize),
+    /// The `▸ 3 archived` line under a BAND, by the band's place in
+    /// `launcher::bands`: a click puts the cursor on the band and folds
+    /// or unfolds its ARCHIVED DRAWER, as `z` does
+    /// (`event_loop::launcher::click_drawer`).
+    LauncherDrawer(usize),
+    /// An archived session's line in an unfolded ARCHIVED DRAWER: the
+    /// band's place, then the line's. A click lands the cursor on it; a
+    /// second brings it back (`event_loop::launcher::click_drawer_entry`).
+    LauncherDrawerEntry(usize, usize),
     /// The `‹ sessions` crumb in a full-screen session's header
     /// (LAUNCHER VIEW): a click leaves the session for the grid, as `^q`
     /// does.
@@ -155,16 +194,20 @@ pub enum HitTarget {
     /// The ISSUE COUNT beside it (`1 issue`): a click opens that
     /// project's open issues — the modal `i` opens.
     LauncherIssues,
-    /// The key cap in the empty GRID's welcome (`press p to prompt`): a
+    /// The key cap in the empty GRID's welcome (`press ⌘N to start an agent`): a
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
     LauncherWelcomePrompt,
-    /// The footer's right-edge readout (`2 agents · 1 term · 412 MB`): a
+    /// The footer's right-edge readout (`2 agents · 412 MB`): a
     /// click opens the memory modal — the one `⇧M` opens.
     FooterUsage,
-    /// The footer's nameplate at the far left (`orion v0.42.0`): a click
-    /// goes HOME, or back from it — what `⌘G` does.
+    /// The footer's nameplate at the far left (`v1.0.0`): a click goes
+    /// HOME, or back from it — what `⌘G` does.
     FooterHome,
+    /// A part of the footer's breadcrumb: a click goes back down onto the
+    /// grid with the cursor on that part
+    /// (`event_loop::launcher::click_crumb`).
+    FooterCrumb(CrumbPart),
     /// The `↗ open in browser` BUTTON on the ISSUES and PULL REQUESTS
     /// MODALS' reading pane, pinned right on its top border: a click opens
     /// the row under the cursor in the browser, through the very function
@@ -194,14 +237,6 @@ pub const MIN_DIFF_FILES_W: u16 = 16;
 pub const SETTINGS_MEMORY_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// The diff pane always keeps at least this much width.
 pub const MIN_DIFF_PANE_W: u16 = 24;
-
-/// What a PANE losing the keyboard says ([`App::release_terminal`]). The
-/// input lock is what decides where a keystroke lands, so a drop the user
-/// did not ask for silently changes what every key they type next MEANS —
-/// `x` closes the project's tab, `⇧M` opens the memory modal — and the
-/// one thing it must not be is quiet.
-pub const TERMINAL_RELEASED: &str =
-    "the keys are the grid's again — Enter steps back into the session";
 
 // ---- list-view arithmetic shared by every overlay with a cursor ----
 
@@ -314,12 +349,10 @@ pub enum MenuAction {
     DuplicateAgent(AgentId),
     /// **Continue on** another account: carry this Claude session onto the
     /// harness `harness` (a registry id) — another account — and resume
-    /// it there (`ClientRequest::ContinueAgentOn`). `label` is what the
-    /// footer names once it has gone.
+    /// it there (`ClientRequest::ContinueAgentOn`).
     ContinueOn {
         id: AgentId,
         harness: String,
-        label: String,
     },
     EditLink(LinkId),
     DeleteLink(LinkId),
@@ -347,7 +380,7 @@ pub enum MenuAction {
     /// Flip the `hide_draft_prs` SETTING from the Worktrees panel menu:
     /// drafts out of the group and `/`, or back in.
     ToggleDraftPrs,
-    /// A row of the WORKTREE PICKER `^T` (or a click on the NEW SESSION
+    /// A row of the WORKTREE PICKER `^T` (or a click on the NEW AGENT
     /// box's branch) opens: aim this one launch at `target` — one of the project's
     /// checkouts, or a fresh worktree — and hand the box back with its
     /// text. It picks where the session runs, never what branch a checkout
@@ -526,7 +559,7 @@ impl ContextMenu {
             .any(|i| matches!(i.action, MenuAction::OpenProject(_)))
     }
 
-    /// Is this the WORKTREE PICKER `^T` (or a click on the NEW SESSION
+    /// Is this the WORKTREE PICKER `^T` (or a click on the NEW AGENT
     /// box's branch) opens? It is drawn hanging from that branch.
     pub fn is_launch_worktree_picker(&self) -> bool {
         self.items
@@ -539,8 +572,8 @@ impl ContextMenu {
     /// everywhere else: the picker's Claude row, and every row of the
     /// Claude MODEL / EFFORT lists under it — reached with `→`, or opened
     /// straight onto by the box's Select model and its effort field.
-    /// Two pickers offer it: the NEW SESSION PICKER (its `"New session"`
-    /// title is the gate — the PR SESSION picker and a PR row's menu share
+    /// Two pickers offer it: the NEW AGENT PICKER (its
+    /// [`crate::agent_picker::NEW_AGENT_PICKER_TITLE`] is the gate — the PR SESSION picker and a PR row's menu share
     /// these rows but never launch cloud, the daemon refusing a PR launch
     /// with a cloud task) and the QUICK PROMPT's `Tab` picker, whose pick
     /// makes the box a cloud one — unless the box is for an issue or a PR
@@ -561,7 +594,9 @@ impl ContextMenu {
             } => {
                 let offered = match quick {
                     Some(back) => back.launch.takes_cloud(),
-                    None => root.title.as_deref() == Some("New session"),
+                    None => {
+                        root.title.as_deref() == Some(crate::agent_picker::NEW_AGENT_PICKER_TITLE)
+                    }
                 };
                 offered.then_some(*cloud)
             }
@@ -570,7 +605,7 @@ impl ContextMenu {
     }
 
     /// The harnessed launch under the cursor, if the hovered row starts
-    /// one: the New session picker, its PR sibling, the quick prompt
+    /// one: the NEW AGENT PICKER, its PR sibling, the quick prompt
     /// picker, and their model/effort submenus all carry it. Gates the
     /// `?` jump to agent settings.
     pub fn hovered_agent_kind(&self) -> Option<(AgentKind, Option<String>)> {
@@ -724,12 +759,22 @@ pub enum PendingAction {
         id: String,
     },
     /// `⌫` on an added account's row: take it out of config.json —
-    /// keeping its config dir (`Enter`/`y`), or moving it to the Trash
-    /// (`t`). Every answer reopens the settings overlay.
+    /// keeping its config dir (`Enter`/`y`), listed under SAVED ON THIS
+    /// MACHINE from then on, or moving it to the Trash (`t`). Every answer
+    /// reopens the settings overlay.
     RemoveClaudeAccount {
         id: String,
     },
+    /// `⌫` on a dir SAVED ON THIS MACHINE: move it — its login and
+    /// transcripts with it — to the Trash. Every answer reopens the
+    /// settings overlay.
+    TrashClaudeDir {
+        dir: std::path::PathBuf,
+    },
     Quit,
+    /// **Restart orion** (`⌘⇧R`): quit, stop the daemon and every session
+    /// in it, and start the binary again (`App::restart`).
+    Restart,
 }
 
 impl PendingAction {
@@ -749,6 +794,7 @@ impl PendingAction {
                 | PendingAction::AddClaudeAccount(_)
                 | PendingAction::SignOutClaude { .. }
                 | PendingAction::RemoveClaudeAccount { .. }
+                | PendingAction::TrashClaudeDir { .. }
         )
     }
 }
@@ -801,7 +847,7 @@ pub enum PromptKind {
     /// the typed text as its STARTING PROMPT. It carries the whole launch
     /// spec, resolved when the dialog opens so the title can show what
     /// Enter is about to start — and rewritten in place by the box's `Tab`
-    /// / `Shift+Tab` pickers. The NEW SESSION PICKER never ends here: its
+    /// / `Shift+Tab` pickers. The NEW AGENT PICKER never ends here: its
     /// pick creates the session outright.
     QuickPrompt(crate::quick_prompt::QuickLaunch),
     /// A message to queue on a row's Claude Cloud session
@@ -887,10 +933,23 @@ pub enum PromptKind {
     ClaudeSignIn {
         id: String,
     },
-    /// Enter on **Add account**: the new account's short name — empty for
-    /// the next `claude-N`. Enter asks whether to share the default
-    /// account's setup with it; Esc puts the overlay back.
+    /// Enter on **Add account**: the new account's name — empty for the
+    /// next `claude-N`, with no name. Enter asks whether to share the
+    /// default account's setup; Esc puts the overlay back.
     AddClaudeAccount,
+    /// `r` on a CLAUDE ACCOUNTS row: the name account `id` goes by,
+    /// prefilled with the one it has. Enter saves it — empty takes it
+    /// away, back to `Claude (a@b.co)` — and Esc keeps it; both put the
+    /// overlay back on the row. The id and the dir never change.
+    RenameClaudeAccount {
+        id: String,
+    },
+    /// Enter on a dir SAVED ON THIS MACHINE: the name to add it back under,
+    /// prefilled from its folder (`~/.claude-work` → `work`). Enter adds
+    /// it, dir and login as they are; Esc puts the overlay back.
+    AdoptClaudeDir {
+        dir: std::path::PathBuf,
+    },
 }
 
 impl PromptKind {
@@ -952,6 +1011,13 @@ pub struct PromptDialog {
     /// branch is not drawn or names nothing to pick — a PR SESSION's
     /// checkout is the DAEMON's.
     pub branch_area: Rect,
+    /// A QUICK PROMPT opened on the SAVED DRAFT or the DRAFT slot rather
+    /// than empty: its explanation line leads with `draft restored`, until
+    /// the first edit makes the text simply what is being typed.
+    pub draft_restored: bool,
+    /// The FILE MENTION list an `@` puts up in a box whose text goes to a
+    /// local agent (`mention`).
+    pub mention: crate::mention::Mention,
 }
 
 impl PromptDialog {
@@ -973,6 +1039,8 @@ impl PromptDialog {
             editor_area: Rect::default(),
             detail_areas: Vec::new(),
             branch_area: Rect::default(),
+            draft_restored: false,
+            mention: crate::mention::Mention::default(),
         };
         // The task and comment boxes hold line breaks; the rest are one
         // line. The field itself then knows which keys break a line and
@@ -1257,6 +1325,22 @@ pub struct DiffView {
     /// branch's — kept for as long as the modal is up and brought back
     /// with their row. The uncommitted changes' are on disk instead.
     pub scope_marks: HashMap<crate::git_diff::DiffScope, HashMap<String, u64>>,
+    /// The PULL REQUESTS MODAL this viewer was opened from, as it was:
+    /// the viewer is a level inside it, and Esc or a click outside puts
+    /// it back on the same row and tab rather than closing onto the grid.
+    pub back: Option<Box<crate::pr_modal::PullRequestsView>>,
+    /// The **Ticked commits** SETTING as the viewer opened: the COMMIT
+    /// LIST reads two or more ticked commits ONE AT A TIME from the start
+    /// (`commit_list::install`). The list's own `one_at_a_time` is how it
+    /// reads them now.
+    pub open_one_at_a_time: bool,
+    /// A file to put the cursor on once the next scope's files land — a
+    /// pull request's file, asked for before its commits were read.
+    pub want_path: Option<String>,
+    /// A pull request read from this repo's git (`event_loop::
+    /// open_pr_review`): what to read from GitHub instead should its
+    /// commits turn out not to be here.
+    pub pr_review: Option<crate::event_loop::PrReview>,
 }
 
 /// The most diff text a DIFF VIEWER keeps beyond the one on screen. Two
@@ -1269,14 +1353,16 @@ pub const DIFF_CACHE_ENTRY_MAX: usize = 512 * 1024;
 impl DiffView {
     /// A view up before its file list is: `g` opens this at once and
     /// `event_loop::land_view_answer` fills it when `git status` answers.
+    /// Without BACKGROUND READS (a view a test builds) the listing is read
+    /// inline and handed to the same landing.
     pub fn opening(
         root: PathBuf,
         branch: String,
-        jobs: crate::view_jobs::Jobs,
+        jobs: Option<crate::view_jobs::Jobs>,
         listing: u64,
     ) -> Self {
         let mut view = Self::new(root, branch, Vec::new(), true);
-        view.jobs = Some(jobs);
+        view.jobs = jobs;
         view.listing = Some(listing);
         view.commits = Some(Box::new(crate::commit_list::CommitList::reading()));
         view
@@ -1392,6 +1478,10 @@ impl DiffView {
             head: Vec::new(),
             header_read: false,
             scope_marks: HashMap::new(),
+            back: None,
+            open_one_at_a_time: false,
+            want_path: None,
+            pr_review: None,
         };
         view.apply_filter();
         view
@@ -2205,7 +2295,7 @@ pub struct PlaceholderRows {
 }
 
 /// A `CreateAgent` (or `CreatePrAgent`) as a launch surface drafts it —
-/// the NEW SESSION PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
+/// the NEW AGENT PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
 /// the ISSUES MODAL. `event_loop::create_agent` turns it into the request
 /// and the PENDING INTENT that attaches the row; a draft aimed at a
 /// stand-in checkout waits on that checkout's own intent instead
@@ -2213,7 +2303,7 @@ pub struct PlaceholderRows {
 ///
 /// An empty `name` takes the generated default (agent-1, …) and opts the
 /// session into agent-driven auto-titling (`orion rename` on the first
-/// prompt) — what every launch from the NEW SESSION PICKER and the QUICK
+/// prompt) — what every launch from the NEW AGENT PICKER and the QUICK
 /// PROMPT does. A name a surface does set is the user's choice and stays.
 #[derive(Debug, Clone)]
 pub struct AgentLaunchDraft {
@@ -2253,6 +2343,9 @@ pub struct AgentLaunchDraft {
     /// the user navigated away from: the create is born in
     /// `App::left_behind`, so the manual move still outranks the follow.
     pub follow: bool,
+    /// The mode the CLI starts in (see `ClientRequest::CreateAgent::mode`):
+    /// edit for every launch but a QUICK PROMPT stepped to plan or ask.
+    pub mode: orion_core::AgentMode,
 }
 
 impl AgentLaunchDraft {
@@ -2285,6 +2378,7 @@ impl AgentLaunchDraft {
             focus_pane: true,
             placeholder: None,
             follow: true,
+            mode: orion_core::AgentMode::Edit,
         }
     }
 }
@@ -2320,12 +2414,6 @@ pub enum PendingIntent {
         kind: PromptKind,
         text: String,
         note: String,
-    },
-    /// A menu's **Run** / **Stop run** (`StartRun` / `StopRun`): once the
-    /// DAEMON has done it, flash what happened in `branch`.
-    RunToggled {
-        branch: String,
-        started: bool,
     },
     /// Select the added project and step into its Worktrees panel.
     SelectCreatedProject,
@@ -2389,9 +2477,6 @@ pub enum PendingIntent {
     /// A row renamed, archived, unarchived or deleted on the keypress
     /// (`event_loop::optimistic`): put it back on Error.
     Undo(Undo),
-    /// Flash this once the DAEMON has done it (an Error flashes its own
-    /// reason instead).
-    Note(String),
     None,
 }
 
@@ -2617,8 +2702,9 @@ pub enum RowKey {
     Worktree(WorktreeId),
 }
 
-/// Aggregate status for a worktree row: red > yellow > green > gray,
-/// archived agents excluded. Free-standing so the `/` palette can roll a
+/// Aggregate status for a worktree row, loudest first — needs you, then
+/// working, then finished, then the rest — archived agents excluded.
+/// Free-standing so the `/` palette can roll a
 /// row up straight from the tree, with no `App` in hand.
 pub fn worktree_rollup(tree: &Tree, worktree_id: &WorktreeId) -> Option<AgentStatus> {
     rollup(
@@ -2664,17 +2750,39 @@ pub fn project_unseen(tree: &Tree, project_id: &ProjectId) -> usize {
         .sum()
 }
 
-/// Whether the agent's unread finish is recent enough (`ONE_SHOT_SWEEP`) to
-/// still be sweeping at `now` epoch ms. `unseen` is only ever true on a
-/// finished row, so `status_changed_at` is the finish itself. The stamp is
-/// the DAEMON's clock and `now` this client's, so the window is taken either
-/// side of it: a skewed pair sweeps a little off-time, never for an hour.
-pub fn fresh_done(agent: &Agent, now: i64) -> bool {
+/// Whether the agent changed into a state that wants you — NEEDS YOU or
+/// FAILED (a crash) — recently enough (`ONE_SHOT_SWEEP`) to still be
+/// sweeping at `now` epoch ms. `status_changed_at` is that change itself.
+/// The stamp is the DAEMON's clock and `now` this client's, so the window
+/// is taken either side of it: a skewed pair sweeps a little off-time,
+/// never for an hour.
+pub fn fresh_alarm(agent: &Agent, now: i64) -> bool {
     let window = ONE_SHOT_SWEEP.as_millis() as i64;
-    agent.unseen
-        && !agent.archived
+    matches!(
+        agent.status,
+        AgentStatus::NeedsFeedback | AgentStatus::Terminated
+    ) && !agent.archived
         && agent.status_changed_at > 0
         && (now - agent.status_changed_at).abs() < window
+}
+
+/// A finished turn nobody has looked at yet: DONE, NOT SEEN, the state the
+/// UNREAD SHIMMER marks until the session is read. `unseen` is only ever
+/// true on a finished row.
+pub fn unread_finish(agent: &Agent) -> bool {
+    agent.unseen && !agent.archived && agent.status == AgentStatus::Finished
+}
+
+/// Whether `agent` is drawn COLD: its PTY is gone — reaped, or lost to a
+/// daemon restart — and nothing it last did is still true. A crash, or a
+/// finish nobody has read, still is, and keeps its color; working or
+/// asking stopped being true with the process, so the row draws gray and
+/// still, and counts on no PROJECT TAB.
+pub fn drawn_cold(agent: &Agent) -> bool {
+    !agent.alive
+        && agent.cloud_session_id.is_none()
+        && agent.status != AgentStatus::Terminated
+        && !unread_finish(agent)
 }
 
 /// A session that is mid-turn or blocked on the user. These count as
@@ -3157,6 +3265,10 @@ pub struct UiState {
     /// start opens on the splash too. Absent in older blobs.
     #[serde(default)]
     pub projects_closed: bool,
+    /// The checkouts whose ARCHIVED DRAWER was left unfolded
+    /// ([`App::archived_open`]), by worktree id. Absent in older blobs.
+    #[serde(default)]
+    pub archived_open: Vec<String>,
 }
 
 /// A mouse selection over the terminal pane (drag or double-click word),
@@ -3320,10 +3432,28 @@ pub struct CloudPreview {
 /// coalesce those while still beating the steady beat by a wide margin.
 pub const OPEN_PRS_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// One session that stopped to ask the user, as the desktop notification
-/// names it: the row's name and where it runs.
+/// Which status edge a desktop notification is about — what its summary
+/// says, and which sound's setting switches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertKind {
+    /// The edge into NEEDS FEEDBACK: a question, a permission prompt, or a
+    /// usage limit (`FeedbackAlert::limit`). Rides the FEEDBACK SOUND.
+    NeedsFeedback,
+    /// A live turn whose CLI died with an error — the edge from RUNNING or
+    /// NEEDS FEEDBACK into TERMINATED. Nothing will carry it on until the
+    /// user does, so it rides the FEEDBACK SOUND too.
+    Crashed,
+    /// A turn that finished with nobody looking, once it has settled
+    /// ([`DoneSounds`]). Rides the DONE SOUND.
+    Finished,
+}
+
+/// One session a desktop notification names: the edge it took, the row's
+/// name and where it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedbackAlert {
+    /// What happened to it.
+    pub kind: AlertKind,
     /// The session row's name.
     pub session: String,
     /// `<project> · <branch>`, the worktree it runs in; empty when the tree
@@ -3333,6 +3463,115 @@ pub struct FeedbackAlert {
     /// of the usage limit it stopped on (`limit reached`), from
     /// `Agent::limit_reached`.
     pub limit: Option<&'static str>,
+}
+
+/// DONE SETTLE: how long a finish has to stand before its DONE SOUND
+/// rings. Long enough to outlast the flickers — a subagent's `SubagentStart`
+/// healing a finish its `Stop` raced, a queued message starting the next
+/// turn — short enough to still read as the moment it finished.
+pub const DONE_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// DONE FOLD: a DONE SOUND due within this long of the last sound of either
+/// kind is not rung — the one that just rang already said "go and look".
+pub const DONE_FOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The DONE SOUND between a status edge and the speaker. A finish rings
+/// only when it is news:
+///
+/// - UNSEEN only. A turn that finishes in the pane on screen was watched
+///   — the edge takes its `Agent::unseen` straight down — so it rings
+///   nothing; neither does an archived row's, which never raises the flag.
+/// - SETTLE. The sound is due [`DONE_SETTLE`] after the edge, and stands
+///   down if by then the row has left FINISHED, been seen, or gone
+///   (deleted, archived). A finish that flickers rings once, where it
+///   lands.
+/// - ONCE PER UNSEEN SPELL. An agent whose finish has been announced rings
+///   nothing more until the user has seen it: the wake-up turns a task
+///   notification or a queued message starts, each finishing on its own,
+///   and the subagent drain that reopens a finished row and closes it
+///   again 180 s later, are one thing to go and read, not a sound each.
+/// - FOLD. A sound due within [`DONE_FOLD`] of the last sound of either
+///   kind is dropped. The finish still counts as announced — the sound
+///   that just rang covers it — and still gets its desktop notification.
+///
+/// The event loop feeds it (`finished` on the edge, `seen` from
+/// `mark_agent_seen`), wakes for [`DoneSounds::next_due`], and rings what
+/// [`DoneSounds::settle`] hands back.
+#[derive(Debug, Default)]
+pub struct DoneSounds {
+    /// Finishes waiting out the SETTLE, each with when it is due. Another
+    /// finish of the same agent meanwhile starts its wait over.
+    pub due: HashMap<AgentId, std::time::Instant>,
+    /// Agents announced in their current UNSEEN SPELL.
+    pub announced: std::collections::HashSet<AgentId>,
+    /// When a sound of either kind last rang, for the FOLD.
+    pub last_rang: Option<std::time::Instant>,
+}
+
+impl DoneSounds {
+    /// A live turn of `agent` reached FINISHED at `now` and is unseen after
+    /// the pane on screen had its say: start the SETTLE — unless this
+    /// UNSEEN SPELL has been announced already.
+    pub fn finished(&mut self, agent: &AgentId, now: std::time::Instant) {
+        if !self.announced.contains(agent) {
+            self.due.insert(agent.clone(), now + DONE_SETTLE);
+        }
+    }
+
+    /// The user has seen `agent` — its pane came on screen, here or in
+    /// another client: its UNSEEN SPELL is over, so its next finish is news
+    /// again, and a finish still settling is not.
+    pub fn seen(&mut self, agent: &AgentId) {
+        self.announced.remove(agent);
+        self.due.remove(agent);
+    }
+
+    /// When the next settling finish falls due — the event loop's wake-up
+    /// for it, since nothing else need be moving on screen by then.
+    pub fn next_due(&self) -> Option<std::time::Instant> {
+        self.due.values().min().copied()
+    }
+
+    /// The finishes whose SETTLE ran out by `now` and that still stand —
+    /// the row in `tree` still FINISHED, still unseen, not archived — in
+    /// tree order, each now announced for its UNSEEN SPELL. Those that no
+    /// longer stand are dropped without a sound.
+    pub fn settle(&mut self, tree: &Tree, now: std::time::Instant) -> Vec<AgentId> {
+        if self.next_due().is_none_or(|due| due > now) {
+            return Vec::new();
+        }
+        let mut ripe = std::collections::HashSet::new();
+        self.due.retain(|agent, due| {
+            let keep = *due > now;
+            if !keep {
+                ripe.insert(agent.clone());
+            }
+            keep
+        });
+        let settled: Vec<AgentId> = tree
+            .agents
+            .iter()
+            .filter(|a| ripe.contains(&a.id) && unread_finish(a))
+            .map(|a| a.id.clone())
+            .collect();
+        // A deleted agent is never seen again to end its spell.
+        self.announced
+            .retain(|agent| tree.agents.iter().any(|a| a.id == *agent));
+        self.announced.extend(settled.iter().cloned());
+        settled
+    }
+
+    /// Whether a DONE SOUND due `now` rings, rather than FOLD into a sound
+    /// that rang within [`DONE_FOLD`].
+    pub fn may_ring(&self, now: std::time::Instant) -> bool {
+        self.last_rang
+            .is_none_or(|rang| now.saturating_duration_since(rang) >= DONE_FOLD)
+    }
+
+    /// A sound of either kind just rang.
+    pub fn rang(&mut self, now: std::time::Instant) {
+        self.last_rang = Some(now);
+    }
 }
 
 /// The FOLLOW-UP COMPOSER: the box a session card grows when it is
@@ -3387,6 +3626,9 @@ struct RowsKey {
     cursor: (usize, usize, usize),
     shape: [usize; 5],
     show_archived: bool,
+    /// How many ARCHIVED DRAWERS are open: an open one lists its
+    /// checkout's archived rows ([`App::sessions_in`]).
+    drawers: usize,
 }
 
 impl RowsMemo {
@@ -3499,7 +3741,11 @@ pub struct App {
     /// after teardown the binary execs `orion ssh` at it, replacing this
     /// process with a fresh connection.
     pub pending_ssh: Option<crate::hosts::HostEntry>,
-    pub flash: Option<String>,
+    /// Set with `should_quit` by **Restart orion**: after teardown the
+    /// binary stops the daemon and execs itself afresh (`crate::restart`).
+    pub restart: bool,
+    /// The FOOTER's one line in place of its key hints, until the next key.
+    pub flash: Option<crate::flash::Flash>,
     /// The newest release published on GitHub (`0.22.0`) when it is newer
     /// than this build — the footer's `⇡ v0.22.0` beside the version
     /// nameplate. `None` until the update check finds one; a check that
@@ -3521,6 +3767,11 @@ pub struct App {
     /// not the screen.
     pub follow_up: Option<FollowUp>,
     pub show_archived: bool,
+    /// The checkouts whose ARCHIVED DRAWER is unfolded on the grid (`z`,
+    /// or a click on its `▸ N archived` line): their archived sessions
+    /// listed one faint line apiece under the band, where the cursor
+    /// walks onto them and `u` brings one back. Rides the UI-state blob.
+    pub archived_open: std::collections::HashSet<WorktreeId>,
     /// The Worktrees panel's OPEN PRS group folded down to its header (a
     /// click on it). Like `show_archived`, it rides the UI-state blob so a
     /// restart brings it back folded.
@@ -3721,10 +3972,6 @@ pub struct App {
     pub select_project_when_seen: Option<ProjectId>,
     /// Worktree created by us, awaiting its upsert to fix the selection.
     pub select_worktree_when_seen: Option<WorktreeId>,
-    /// A RUN TERMINAL `r` started whose upsert had not landed when its Ack
-    /// did, and the branch it runs in: the flash names the command once
-    /// the row arrives.
-    pub run_flash_when_seen: Option<(TerminalId, String)>,
     /// Last selected worktree per project — switching back to a project
     /// returns to the worktree the user left it on.
     pub last_worktree_for_project: HashMap<ProjectId, WorktreeId>,
@@ -3746,8 +3993,15 @@ pub struct App {
     /// The QUICK PROMPT box last abandoned with something typed in it
     /// (`quick_prompt::QuickDraft`) — Esc, a click outside, the HARDWIRED
     /// UNLOCK. The next box opened takes it back, so a press that closes
-    /// the box costs nothing typed; one slot, never written to disk.
+    /// the box costs nothing typed; one slot, in memory — the SAVED DRAFT
+    /// below is what outlives the process.
     pub quick_draft: Option<crate::quick_prompt::QuickDraft>,
+    /// The SAVED DRAFT (`saved_draft`): the QUICK PROMPT's unsent text on
+    /// disk, written as it is typed, so a window closed mid-sentence keeps
+    /// the sentence for the next box. The main loop installs the DATA
+    /// DIR's at startup; the unit tests leave it `None` (or install a
+    /// temporary one), so no test touches the real user's draft.
+    pub saved_draft: Option<crate::saved_draft::SavedDraft>,
     /// Debounced attach: the session the pane is showing but the daemon has
     /// not been told about yet. Stepping a selection is not a decision to
     /// boot a CLI — walking the grid past four cards must not cold-spawn
@@ -3794,9 +4048,15 @@ pub struct App {
     pub term_file_links: Vec<crate::links::FileLink>,
     /// File-list width of the diff modal, remembered across opens.
     pub diff_files_width: u16,
-    /// The diff modal lists its files as a directory tree (`Ctrl+t` inside
-    /// it), remembered across opens and launches like the width.
+    /// The diff modal opens with its files as a directory tree: the
+    /// **Files as a tree** SETTING (Settings → Review), mirrored by
+    /// `apply_config`. `Ctrl+t` flips the open viewer alone.
     pub diff_tree: bool,
+    /// The diff modal's panel with the keys as it opens — the **Start
+    /// on** SETTING — and whether it reads ticked commits one at a time
+    /// from the start — **Ticked commits**. Mirrored by `apply_config`.
+    pub diff_start: DiffFocus,
+    pub diff_one_at_a_time: bool,
     /// Selected tab of the settings modal, remembered across opens.
     pub settings_tab: usize,
     /// Cursor row of the settings modal, one per tab, remembered across
@@ -3822,17 +4082,24 @@ pub struct App {
     /// when the copy has to be delegated to the attached terminal (see
     /// `copy_and_flash`). The main loop writes and clears it.
     pub pending_clipboard: Option<String>,
-    /// A turn reached FINISHED since the last frame: the main loop rings
-    /// the DONE SOUND (`Config::done_sound`) once and clears it — once per
-    /// frame however many rows finished together.
-    pub pending_ding: bool,
-    /// Sessions that reached NEEDS FEEDBACK since the last frame, one entry
-    /// each: the main loop rings the FEEDBACK SOUND (`Config::feedback_sound`)
-    /// once for the lot, posts a desktop notification per entry while the
-    /// terminal window is in the background, and clears it. A session whose
-    /// pane the user is locked into typing at, window focused, is never
-    /// queued — that prompt is already in front of them.
+    /// The DONE SOUND's finishes on their way to the speaker — settling,
+    /// announced, and when anything last rang (see [`DoneSounds`]). The
+    /// main loop rings what settles, once per frame however many rows
+    /// settled together, and names each in a desktop notification while
+    /// the terminal window is in the background.
+    pub done_sounds: DoneSounds,
+    /// Sessions that reached NEEDS FEEDBACK, or crashed mid-turn, since the
+    /// last frame, one entry each: the main loop rings the FEEDBACK SOUND
+    /// (`Config::feedback_sound`) once for the lot, posts a desktop
+    /// notification per entry while the terminal window is in the
+    /// background, and clears it. A session whose pane the user is locked
+    /// into typing at, window focused, is never queued — that prompt, or
+    /// that error, is already in front of them.
     pub pending_feedback: Vec<FeedbackAlert>,
+    /// A sound the settings overlay just stepped `done_sound` or
+    /// `feedback_sound` onto: the main loop plays it once, so picking one
+    /// is hearing it.
+    pub pending_sound_preview: Option<crate::config::Sound>,
     /// Whether the terminal window has focus, from the focus reports
     /// (mode 1004) `setup_terminal` asks for. True until the terminal says
     /// otherwise, so one that never reports (tmux without `focus-events`)
@@ -3891,9 +4158,13 @@ pub struct App {
     /// The checkout the sweep is reading right now; its answer clears it.
     pub worktree_changes_inflight: Option<WorktreeId>,
     /// The lines added and removed in each checkout, read beside its
-    /// changed-file count: what its cards print after `+3 files`. Only a
+    /// changed-file count: what its band's rule prints after `*3`. Only a
     /// checkout with changed lines has an entry.
     pub worktree_lines: HashMap<WorktreeId, crate::git_diff::LineChanges>,
+    /// How far each checkout's HEAD is from the base it was cut from, read
+    /// beside its changed files: commits ahead, commits behind — a band's
+    /// `⇡4 ⇣1`. Only a checkout that is either has an entry.
+    pub worktree_ahead: HashMap<WorktreeId, (usize, usize)>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -3912,6 +4183,13 @@ pub struct App {
     /// or whose first answer ever says merged, landed some other day and
     /// paints solid purple from the first frame.
     pub merge_landed: HashMap<WorktreeId, std::time::Instant>,
+    /// The ATTENTION WALK in progress (`.` / `,`): the session it last
+    /// landed on and the ring as it stood when the walk began. Landing on
+    /// an unread finish reads it, which re-sorts it behind the running
+    /// sessions; walking on from the ring as it was keeps the next step
+    /// from skipping them. A walk resumes from this only while the cursor
+    /// is still where it landed and the same sessions are in the ring.
+    pub attention_walk: Option<(AgentId, Vec<AgentId>)>,
     /// How far the user has read into each pull request's conversation,
     /// keyed by PR URL — the daemon's `pr_seen` rows, plus whatever this
     /// session has marked since. What's newer than the mark is what the
@@ -3997,6 +4275,10 @@ pub struct App {
     /// Where a finished `gh pr comment` lands (`PrCommentAnswer`);
     /// installed by the loop at startup like `pr_diff_tx`.
     pub pr_comment_tx: Option<tokio::sync::mpsc::UnboundedSender<PrCommentAnswer>>,
+    /// Where the PULL REQUESTS MODAL's forms' git and `gh` land — a new
+    /// pull request, a merge (`pr_actions::Answer`); None in unit tests,
+    /// which send nothing.
+    pub pr_actions_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::pr_actions::Answer>>,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
     /// this instance has one: the main loop installs the real one at
     /// startup and hydrates from it; the unit tests leave it `None`, so no
@@ -4006,8 +4288,9 @@ pub struct App {
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
     /// Where a file dropped onto a prompt box bound for an agent is copied
-    /// before macOS deletes it (`dropped_files`): the main loop installs
-    /// the DATA DIR's `attachments/` at startup; the unit tests leave it
+    /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
+    /// clipboard's image (`clipboard_image`): the main loop installs the
+    /// DATA DIR's `attachments/` at startup; the unit tests leave it
     /// `None`, so a paste there is never staged into the real user's dir.
     pub attachments_dir: Option<std::path::PathBuf>,
     /// Bodies in `pr_detail` that came from the cache rather than from
@@ -4165,12 +4448,14 @@ impl App {
             dirty: true,
             should_quit: false,
             pending_ssh: None,
+            restart: false,
             flash: None,
             update_available: None,
             edge_tap: None,
             release_watch: None,
             overlay: None,
             show_archived: false,
+            archived_open: Default::default(),
             open_prs_collapsed: false,
             issues_collapsed: false,
             collapsed: false,
@@ -4207,12 +4492,12 @@ impl App {
             just_launched: None,
             select_project_when_seen: None,
             select_worktree_when_seen: None,
-            run_flash_when_seen: None,
             last_worktree_for_project: HashMap::new(),
             last_session_for_worktree: HashMap::new(),
             pending_prewarm: None,
             parked_pr_prompt: None,
             quick_draft: None,
+            saved_draft: None,
             pending_attach: None,
             attached_sref: None,
             next_keepwarm: None,
@@ -4226,6 +4511,8 @@ impl App {
             term_file_links: Vec::new(),
             diff_files_width: DEFAULT_DIFF_FILES_W,
             diff_tree: false,
+            diff_start: DiffFocus::Files,
+            diff_one_at_a_time: false,
             settings_tab: 0,
             settings_selected: vec![0; crate::config::tab_count()],
             settings_on_tabs: true,
@@ -4233,8 +4520,9 @@ impl App {
             keymap: crate::keymap::Keymap::default(),
             pointer_shape: PointerShape::default(),
             pending_clipboard: None,
-            pending_ding: false,
+            done_sounds: DoneSounds::default(),
             pending_feedback: Vec::new(),
+            pending_sound_preview: None,
             window_focused: true,
             body_area: Rect::default(),
             hostname: orion_core::host::hostname(),
@@ -4252,8 +4540,10 @@ impl App {
             worktree_changes: HashMap::new(),
             worktree_changes_inflight: None,
             worktree_lines: HashMap::new(),
+            worktree_ahead: HashMap::new(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
+            attention_walk: None,
             pr_seen: HashMap::new(),
             pr_inflight: std::collections::HashSet::new(),
             pr_recheck: HashMap::new(),
@@ -4275,6 +4565,7 @@ impl App {
             pr_comment_inflight: std::collections::HashSet::new(),
             pr_comment_drafts: HashMap::new(),
             pr_comment_tx: None,
+            pr_actions_tx: None,
             pr_cache: None,
             pr_cache_dirty: false,
             attachments_dir: None,
@@ -4480,30 +4771,22 @@ impl App {
         self.launcher_active() && !self.collapsed
     }
 
-    /// Take the keyboard back from the session in the PANE, and say so
-    /// when it was really being typed into.
+    /// Take the keyboard back from the session in the PANE.
     ///
     /// Every UNASKED drop goes through here: a redraw that finds the pane
     /// gone ([`App::settle_launcher_focus`]), a row archived, deleted or
     /// reaped out from under the pane showing it, a stand-in replaced by
-    /// the session it stood for. None of those is a key the user pressed,
-    /// and each one leaves the next thing they type meaning something
-    /// else — so each one flashes [`TERMINAL_RELEASED`].
+    /// the session it stood for.
     ///
     /// The guard lives here rather than at the call sites: they run from
     /// draws and from daemon events and cannot know whether the lock was
-    /// held, and a flash on every frame would be noise. Only a lock that
-    /// was actually HELD says anything.
-    ///
-    /// The deliberate ways out of a pane — `^q`, `^z`, Esc up a level —
-    /// name what they did themselves and do not come through here.
+    /// held, and a redraw on every frame would be waste. Only a lock that
+    /// was actually HELD marks the frame dirty.
     pub fn release_terminal(&mut self) {
-        if !self.term_locked {
-            return;
+        if self.term_locked {
+            self.term_locked = false;
+            self.dirty = true;
         }
-        self.term_locked = false;
-        self.flash = Some(TERMINAL_RELEASED.into());
-        self.dirty = true;
     }
 
     /// FOCUS as the LAUNCHER VIEW's GRID has it: the cards, or the PANE
@@ -4531,7 +4814,7 @@ impl App {
         // (`event_loop`'s `PanelBg` arm) before letting the card go, and
         // the input lock left behind would have gone on eating keys with
         // no pane on screen to type into. `release_terminal` is a no-op
-        // on a lock that was never held, so only a real one says so.
+        // on a lock that was never held.
         self.release_terminal();
     }
 
@@ -4558,20 +4841,18 @@ impl App {
         self.animations && self.welcome_on_screen && self.vim.is_none()
     }
 
-    /// Some sidebar row is showing a running (yellow) or needs-feedback
-    /// (red) status, or is inside a ONE-SHOT SWEEP — a turn that just
-    /// finished unread (blue), a checkout whose pull request was just seen
-    /// to merge (purple) — so its text sweep should be ticking. Any agent
-    /// in one of those states surfaces somewhere — its own row, or a
-    /// worktree / project rollup — unless the panels are hidden (collapsed,
-    /// editor modal, splash) or animations are switched off. A merged
-    /// checkout only shows while its project is selected, so only those
-    /// keep the clock running. The one-shots run out on the clock, so an
-    /// idle app with a week-old merged checkout on screen repaints nothing.
-    /// The exception is a PROJECT TAB: its name sweeps blue for as long as
-    /// its project has a finish left unread and nothing live, so the clock
-    /// runs while one does (the cheap scan for any unread finish first,
-    /// since this is asked on every turn of the event loop).
+    /// Something on screen moves, so the clock should be ticking: a
+    /// running session's WORKING SPINNER, a finish nobody has read (the
+    /// UNREAD SHIMMER, on its row and its project's tab, until it is read),
+    /// or a ONE-SHOT SWEEP still inside its window — a session that just
+    /// started needing you or crashed, a checkout whose pull request was
+    /// just seen to merge. Any agent in one of those states surfaces
+    /// somewhere — its own row, a tab, the jump list — unless the panels
+    /// are hidden (collapsed, editor modal, splash) or animations are
+    /// switched off. A merged checkout only shows while its project is
+    /// selected, so only those keep the clock running; a FLASH saying what
+    /// it waits on turns the footer's spinner. The one-shots run out on the
+    /// clock, so an idle app with everything read repaints nothing.
     pub fn status_anim_active(&self) -> bool {
         let now = now_ms();
         self.animations
@@ -4579,29 +4860,49 @@ impl App {
             && self.vim.is_none()
             && !self.splash_active()
             && (self.tree.agents.iter().any(|a| {
-                !a.archived
-                    && (matches!(a.status, AgentStatus::Running | AgentStatus::NeedsFeedback)
-                        || fresh_done(a, now))
+                !a.archived && (self.spins(a) || self.shows_unread(a) || fresh_alarm(a, now))
             }) || self
                 .visible_worktrees()
                 .iter()
-                .any(|w| self.worktree_wears_merge(&w.id) && self.merge_is_fresh(&w.id))
-                || self.tab_sweeps_done())
+                .any(|w| self.merge_sweeping(&w.id))
+                || self
+                    .flash
+                    .as_ref()
+                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Working))
     }
 
-    /// Some PROJECT TAB sweeps blue: its project has an unread finish on
-    /// the grid ([`crate::launcher::project_tally`]'s `done`).
-    fn tab_sweeps_done(&self) -> bool {
-        self.launcher_active()
-            && self
-                .tree
-                .agents
-                .iter()
-                .any(|a| !a.archived && a.unseen && a.status == AgentStatus::Finished)
-            && self
-                .launcher_tabs
-                .iter()
-                .any(|id| crate::launcher::project_tally(self, id).done > 0)
+    /// Whether `agent`'s dot is the turning WORKING SPINNER: a session
+    /// still starting, or one running with its PTY alive. A row left
+    /// running by a process that is gone is drawn COLD and still.
+    pub fn spins(&self, agent: &Agent) -> bool {
+        self.is_placeholder_agent(&agent.id)
+            || (agent.status == AgentStatus::Running && !drawn_cold(agent))
+    }
+
+    /// Whether an unread finish shimmers anywhere: on the grid's own rows
+    /// and on an open PROJECT TAB (the lit one is always open), in the
+    /// jump list while it is up, and on every row of the old panels. One
+    /// in a project whose tab is closed shows nowhere, and keeps no clock
+    /// running.
+    fn shows_unread(&self, agent: &Agent) -> bool {
+        unread_finish(agent)
+            && (!self.launcher_active()
+                || matches!(self.overlay, Some(Overlay::Palette(_)))
+                || self.tree.worktrees.iter().any(|w| {
+                    w.id == agent.worktree_id && self.launcher_tabs.contains(&w.project_id)
+                }))
+    }
+
+    /// Whether a desktop notification reaches anyone: the terminal window
+    /// is in the background, and this is the machine the user sits at (not
+    /// over `orion ssh`, where the desktop is the wrong one).
+    pub fn may_notify_desktop(&self) -> bool {
+        !self.window_focused && !self.is_remote
+    }
+
+    /// Whether `worktree`'s MERGED BAND is still inside its ONE-SHOT SWEEP.
+    pub fn merge_sweeping(&self, worktree: &WorktreeId) -> bool {
+        self.worktree_wears_merge(worktree) && self.merge_is_fresh(worktree)
     }
 
     /// This client just saw `worktree`'s pull request turn merged: start
@@ -4622,9 +4923,16 @@ impl App {
             .is_some_and(|at| at.elapsed() < ONE_SHOT_SWEEP)
     }
 
-    /// Whether the session's unread finish still sweeps ([`fresh_done`]).
-    pub fn agent_fresh_done(&self, agent: &Agent) -> bool {
-        fresh_done(agent, now_ms())
+    /// Whether the session's change into needing you, or its crash, still
+    /// sweeps ([`fresh_alarm`]).
+    pub fn agent_fresh_alarm(&self, agent: &Agent) -> bool {
+        fresh_alarm(agent, now_ms())
+    }
+
+    /// The WORKING SPINNER's frame right now, or `None` with the
+    /// animations off (a still `◐`).
+    pub fn spin_phase(&self) -> Option<usize> {
+        self.animations.then(|| spin_step(self.sweep_phase()))
     }
 
     /// Frame counter for the status-sweep text animation — a pure function
@@ -4935,6 +5243,7 @@ impl App {
                 self.tree.links.len(),
             ],
             show_archived: self.show_archived,
+            drawers: self.archived_open.len(),
         }
     }
 
@@ -5005,6 +5314,12 @@ impl App {
     /// has been read there, or when nothing changed by the line.
     pub fn worktree_lines(&self, id: &WorktreeId) -> Option<crate::git_diff::LineChanges> {
         self.worktree_lines.get(id).copied()
+    }
+
+    /// A checkout's last-read commits ahead of and behind its base; none
+    /// either way until one has been read there.
+    pub fn worktree_ahead_behind(&self, id: &WorktreeId) -> (usize, usize) {
+        self.worktree_ahead.get(id).copied().unwrap_or_default()
     }
 
     /// Does the cache describe a different worktree than the selection?
@@ -5628,7 +5943,10 @@ impl App {
         if let Some(id) = &self.just_launched {
             rows.sort_by_key(|a| &a.id != id);
         }
-        if self.show_archived {
+        // The ARCHIVED VIEW lists every checkout's archived rows; on the
+        // live grid, a checkout whose ARCHIVED DRAWER is open lists its
+        // own, so the cursor can rest on one there.
+        if self.show_archived || self.archived_open.contains(wt) {
             let mut archived: Vec<Agent> = self
                 .tree
                 .agents
@@ -5770,8 +6088,8 @@ impl App {
         (prs, issues)
     }
 
-    /// Aggregate status for a worktree row: red > yellow > green > gray,
-    /// archived agents excluded.
+    /// Aggregate status for a worktree row ([`worktree_rollup`]), archived
+    /// agents excluded.
     pub fn worktree_rollup(&self, worktree_id: &WorktreeId) -> Option<AgentStatus> {
         worktree_rollup(&self.tree, worktree_id)
     }
@@ -5782,7 +6100,7 @@ impl App {
     /// branch has landed is the one to archive or delete — so its row says
     /// so in purple, from across the room. A live session still wins: a
     /// running or asking agent is exactly the thing not to delete a
-    /// checkout out from under, and its yellow or red is the warning.
+    /// checkout out from under, and its spinner or crimson is the warning.
     pub fn worktree_wears_merge(&self, worktree_id: &WorktreeId) -> bool {
         let merged = self
             .pull_requests

@@ -8,7 +8,7 @@ use crate::app::{
     PointerShape, PromptDialog, PromptKind, SessionRow, SettingsView, SubmenuKind, TermSelection,
     WorktreeRollback,
 };
-use crate::app::{PrCommentAnswer, PrDiffAnswer};
+use crate::app::{AlertKind, PrCommentAnswer, PrDiffAnswer};
 use crate::pull_request::Lookup;
 use crate::text_input::TextInput;
 use crate::tree_browser::TreeBrowser;
@@ -34,6 +34,7 @@ mod focus_walk;
 mod host_terminal;
 mod launcher;
 mod menus;
+mod notifier_app;
 mod optimistic;
 mod pacing;
 mod placeholder;
@@ -91,19 +92,6 @@ pub(super) const KEYBOARD_MENU_ANCHOR: (u16, u16) = (30, 4);
 /// vim…) takes it as one paste rather than typing to auto-indent.
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// Flash for an action that needs a checkout to act on and has none.
-const SELECT_CONTEXT_FIRST: &str = "select a project or worktree first";
-
-/// Flash for a session pick that lost a race with its removal.
-const SESSION_GONE: &str = "session no longer exists";
-/// Flash for a `/` pull-request pick whose row a refresh retired meanwhile.
-const PR_GONE: &str = "pull request is no longer open";
-/// `.` / `,` with no session anywhere to land on.
-const NO_SESSIONS_TO_JUMP: &str = "no sessions to jump to";
-
-/// Flash for an action an archived agent refuses until it's unarchived.
-pub(crate) const AGENT_ARCHIVED: &str = "agent is archived — unarchive first (u)";
 
 /// How often the worktree panel's changed-file badge re-reads `git status`
 /// for the selected checkout, so agent edits surface without a keypress.
@@ -250,7 +238,20 @@ const SWEEP_FRAME: Duration = crate::app::SWEEP_FRAME;
 
 /// `Some(entry)` = quit via the hosts picker: the caller should exec
 /// `orion ssh` at it now that the terminal is restored.
-pub async fn run_app() -> Result<Option<crate::hosts::HostEntry>> {
+/// How the TUI ended, for the binary to act on once the terminal is
+/// restored.
+#[derive(Debug)]
+pub enum Exit {
+    Quit,
+    /// The hosts picker chose a destination: exec `orion ssh` at it, the
+    /// local daemon and its sessions left up.
+    Ssh(crate::hosts::HostEntry),
+    /// **Restart orion**: stop the daemon, then exec this binary afresh
+    /// (`crate::restart`).
+    Restart,
+}
+
+pub async fn run_app() -> Result<Exit> {
     let conn = ipc::connect_or_spawn().await?;
     let mut channels = ipc::split_connection(conn);
     channels.tx.send(ClientRequest::Subscribe).await?;
@@ -264,7 +265,7 @@ pub async fn run_app() -> Result<Option<crate::hosts::HostEntry>> {
 async fn main_loop(
     terminal: &mut Terminal<CrosstermBackend<BufWriter<Stdout>>>,
     channels: &mut ipc::IpcChannels,
-) -> Result<Option<crate::hosts::HostEntry>> {
+) -> Result<Exit> {
     let mut app = App::new();
     app.conn = ConnState::Connected;
     // The repo orion was started in, for the first run's "open this
@@ -281,6 +282,9 @@ async fn main_loop(
     // A screenshot dropped onto a prompt box is copied here the moment it
     // lands, before macOS deletes the file behind its thumbnail.
     app.attachments_dir = Some(crate::dropped_files::default_dir());
+    // The QUICK PROMPT's unsent text, as the last run left it — a window
+    // closed mid-sentence keeps the sentence (`saved_draft`).
+    app.saved_draft = Some(crate::saved_draft::SavedDraft::default_location());
     // The Cursor MODEL / EFFORT lists: cached `cursor-agent --list-models`
     // now, a background refresh when the cache is a day old.
     crate::cursor_catalogue::bootstrap(cfg.cursor_enabled);
@@ -341,6 +345,11 @@ async fn main_loop(
     let (prcomment_tx, mut prcomment_rx) =
         tokio::sync::mpsc::unbounded_channel::<PrCommentAnswer>();
     app.pr_comment_tx = Some(prcomment_tx);
+    // The PULL REQUESTS MODAL's forms: a new pull request's branches,
+    // fill, push and create, and a merge.
+    let (pr_actions_tx, mut pr_actions_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::pr_actions::Answer>();
+    app.pr_actions_tx = Some(pr_actions_tx);
     // The ISSUES MODAL's `gh issue list` / `gh issue view` answers, on the
     // same footing: the modal's own handlers start the fetch, the loop
     // lands it.
@@ -350,7 +359,8 @@ async fn main_loop(
     let (linear_tx, mut linear_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::linear::LinearAnswer>();
     app.linear_tx = Some(linear_tx);
-    app.linear_links = crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
+    app.linear_links =
+        crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
     // The BRANCH SWITCHER's git — the listing, the changed-file count,
     // the background fetch and the switch itself — lands here too.
     let (branch_tx, mut branch_rx) =
@@ -421,6 +431,12 @@ async fn main_loop(
         let drag_autoscroll_deadline = app
             .next_drag_autoscroll
             .map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std);
+        // When the next settling finish is due its DONE SOUND (its arm
+        // below).
+        let done_sound_deadline = app
+            .done_sounds
+            .next_due()
+            .map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std);
         tokio::select! {
             // Pending redraw: wake at the frame boundary even if no new
             // events arrive.
@@ -470,7 +486,7 @@ async fn main_loop(
             // Metrics poll: always on for the footer's memory/session
             // readout, tightened while the metrics modal is open (its
             // initial reading is requested by the M keypress itself).
-            _ = tokio::time::sleep_until(next_metrics_poll) => {
+            _ = tokio::time::sleep_until(next_metrics_poll), if matches!(app.conn, ConnState::Connected) => {
                 request_metrics(&mut app, &mut out);
                 let period = if matches!(app.overlay, Some(Overlay::Metrics(_))) {
                     METRICS_POLL
@@ -483,7 +499,9 @@ async fn main_loop(
             // on a beat of its own for as long as any is on screen — with
             // the grid folded away or no terminal drawn there is nothing
             // to ask after, and the beat sleeps with it.
-            _ = tokio::time::sleep_until(next_tail_poll), if !app.tail_cards.is_empty() => {
+            _ = tokio::time::sleep_until(next_tail_poll),
+                if !app.tail_cards.is_empty() && matches!(app.conn, ConnState::Connected) =>
+            {
                 request_terminal_tails(&mut app, &mut out);
                 next_tail_poll = tokio::time::Instant::now() + TAIL_POLL;
             }
@@ -546,6 +564,12 @@ async fn main_loop(
             _ = tokio::time::sleep_until(drag_autoscroll_deadline), if app.next_drag_autoscroll.is_some() => {
                 drag_autoscroll_tick(&mut app, &mut out);
             }
+            // A finish has waited out the DONE SOUND's SETTLE. An idle app
+            // may have nothing else to wake it — the animations off, or
+            // the finish off every tab, and no output — so the deadline
+            // takes a wake of its own; the frame's drain below does the
+            // ringing.
+            _ = tokio::time::sleep_until(done_sound_deadline), if app.done_sounds.next_due().is_some() => {}
             // The selection rested past the debounce: tell the daemon what
             // the pane has been showing since the cursor landed here.
             _ = tokio::time::sleep(app.attach_delay().unwrap_or_default()),
@@ -601,7 +625,10 @@ async fn main_loop(
                 }
                 Some(Err(_)) | None => app.should_quit = true,
             },
-            ev = channels.rx.recv() => match ev {
+            // Guarded: a closed channel answers `None` at once, every
+            // time, and unguarded that spun the loop flat out from the
+            // moment the DAEMON went.
+            ev = channels.rx.recv(), if matches!(app.conn, ConnState::Connected) => match ev {
                 Some(server_event) => {
                     log_server_event(&server_event);
                     if let Some(perf) = &mut perf {
@@ -609,11 +636,7 @@ async fn main_loop(
                     }
                     handle_server_event(&mut app, server_event, &mut out);
                 }
-                None => {
-                    app.conn = ConnState::Disconnected;
-                    app.flash = Some("daemon connection lost".into());
-                    app.dirty = true;
-                }
+                None => connection_lost(&mut app, &mut out),
             },
             ev = vim_rx.recv() => {
                 // Never None: app.vim_tx keeps a sender alive.
@@ -635,9 +658,10 @@ async fn main_loop(
             }
             answer = git_rx.recv() => {
                 // Never None: `git_tx` lives as long as the loop.
-                if let Some((worktree, files, lines)) = answer {
+                if let Some((worktree, files, lines, ahead)) = answer {
                     let count = files.as_ref().map(Vec::len);
                     note_worktree_lines(&mut app, &worktree, lines);
+                    note_worktree_ahead(&mut app, &worktree, ahead);
                     keep_changed_files(&mut app, &worktree, files);
                     land_git_changes(&mut app, worktree, count);
                     // The selection moved on while this one was being read:
@@ -649,8 +673,9 @@ async fn main_loop(
             }
             answer = sweep_git_rx.recv() => {
                 // Never None: `sweep_git_tx` lives as long as the loop.
-                if let Some((worktree, count, lines)) = answer {
+                if let Some((worktree, count, lines, ahead)) = answer {
                     note_worktree_lines(&mut app, &worktree, lines);
+                    note_worktree_ahead(&mut app, &worktree, ahead);
                     land_swept_changes(&mut app, worktree, count);
                 }
             }
@@ -692,6 +717,11 @@ async fn main_loop(
             answer = prcomment_rx.recv() => {
                 if let Some(answer) = answer {
                     land_pr_comment(&mut app, answer);
+                }
+            }
+            answer = pr_actions_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::pr_actions::land_answer(&mut app, answer);
                 }
             }
             // The ISSUES MODAL's hover debounce: the cursor has rested on
@@ -746,7 +776,9 @@ async fn main_loop(
         // has the backtrace.
         if take_worker_panic() {
             repaint(terminal)?;
-            app.flash = Some("a background task crashed — logged to tui.log".into());
+            app.flash = Some(crate::flash::Flash::failed(
+                "a background task crashed — logged to tui.log",
+            ));
             app.dirty = true;
         }
 
@@ -774,36 +806,70 @@ async fn main_loop(
             let _ = backend.flush();
         }
 
-        // A turn reached FINISHED: ring the DONE SOUND. The bell goes out
-        // through the same terminal as the OSC writes above, so over ssh it
-        // rings the terminal the user is sitting at. CONFIG.JSON is read
-        // fresh, like every other setting.
-        if std::mem::take(&mut app.pending_ding) {
-            if let Some(sound) = crate::config::Config::load().done_sound() {
-                alerts::play_sound(terminal.backend_mut(), sound);
-            }
+        // The settings overlay stepped a sound row: play the new choice.
+        if let Some(sound) = app.pending_sound_preview.take() {
+            alerts::play_sound(terminal.backend_mut(), sound);
         }
 
-        // One or more turns stopped to ask the user: ring the FEEDBACK
-        // SOUND once for the lot and, while the terminal window is in the
-        // background, name each of them in a desktop notification — never
-        // over ssh, where the desktop is the wrong machine's. `off` is
-        // silence for both.
+        // One or more turns stopped to ask the user, or died mid-turn: ring
+        // the FEEDBACK SOUND once for the lot and, while the terminal
+        // window is in the background, name each of them in a desktop
+        // notification — never over ssh, where the desktop is the wrong
+        // machine's. `off` is silence for both. The bell goes out through
+        // the same terminal as the OSC writes above, so over ssh it rings
+        // the terminal the user is sitting at. CONFIG.JSON is read fresh,
+        // like every other setting.
         let alerts = std::mem::take(&mut app.pending_feedback);
         if !alerts.is_empty() {
             if let Some(sound) = crate::config::Config::load().feedback_sound() {
                 alerts::play_sound(terminal.backend_mut(), sound);
-                if !app.window_focused && !app.is_remote {
+                app.done_sounds.rang(std::time::Instant::now());
+                if app.may_notify_desktop() {
                     alerts::notify_desktop(&alerts);
                 }
             }
         }
 
-        for req in out.drain(..) {
-            if channels.tx.send(req).await.is_err() {
-                app.conn = ConnState::Disconnected;
-                app.dirty = true;
+        // Unseen finishes that have settled ring the DONE SOUND — once for
+        // the lot, and not at all inside the FOLD of the last sound, the
+        // FEEDBACK SOUND just above included — and each is named in a
+        // desktop notification on the same terms as the feedback ones,
+        // folded or not. `done_sound` is their one switch.
+        let now = std::time::Instant::now();
+        let settled = app.done_sounds.settle(&app.tree, now);
+        if !settled.is_empty() {
+            if let Some(sound) = crate::config::Config::load().done_sound() {
+                if app.done_sounds.may_ring(now) {
+                    alerts::play_sound(terminal.backend_mut(), sound);
+                    app.done_sounds.rang(now);
+                }
+                if app.may_notify_desktop() {
+                    let alerts: Vec<_> = settled
+                        .iter()
+                        .filter_map(|id| alerts::alert_for(&app.tree, id, AlertKind::Finished))
+                        .collect();
+                    alerts::notify_desktop(&alerts);
+                }
             }
+        }
+
+        // Once the connection is gone nothing is sent — a request queued
+        // to a writer that has died would vanish without a word — and each
+        // round's requests fail through `connection_lost` instead, so a
+        // launch typed after the DAEMON went comes back with its text.
+        let mut lost = false;
+        for req in out.drain(..) {
+            if !matches!(app.conn, ConnState::Connected) || channels.tx.send(req).await.is_err() {
+                lost = true;
+            }
+        }
+        if lost {
+            // What the reader already took off the socket still counts: an
+            // Ack in there is a create the DAEMON made, not one to roll back.
+            while let Ok(ev) = channels.rx.try_recv() {
+                handle_server_event(&mut app, ev, &mut out);
+            }
+            connection_lost(&mut app, &mut out);
         }
 
         if app.should_quit {
@@ -820,7 +886,11 @@ async fn main_loop(
                     json: ui_state_json(&app),
                 })
                 .await;
-            return Ok(app.pending_ssh.take());
+            return Ok(if app.restart {
+                Exit::Restart
+            } else {
+                app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
+            });
         }
     }
 }
@@ -845,27 +915,49 @@ fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSende
     app.git_changes_inflight = Some(id.clone());
     let git_tx = git_tx.clone();
     tokio::task::spawn_blocking(move || {
-        let files = crate::git_diff::changed_files(&path).ok();
-        let lines = line_changes_of(&path, files.as_deref());
-        let _ = git_tx.send((id, files, lines));
+        let (files, lines, ahead) = read_checkout(&path);
+        let _ = git_tx.send((id, files, lines, ahead));
     });
 }
 
-/// What the badge's `git status` found in a checkout, and the lines behind
-/// it; None when git could not say.
+/// What the badge's `git status` found in a checkout, the lines behind it
+/// and its commits ahead of and behind its base; None when git could not
+/// say.
 type ChangedFiles = (
     WorktreeId,
     Option<Vec<crate::git_diff::DiffFile>>,
     Option<crate::git_diff::LineChanges>,
+    Option<(usize, usize)>,
 );
 
-/// The sweep's answer for one checkout: its changed-file count and its
-/// line counts.
+/// The sweep's answer for one checkout: its changed-file count, its line
+/// counts and its commits ahead and behind.
 type SweptChanges = (
     WorktreeId,
     Option<usize>,
     Option<crate::git_diff::LineChanges>,
+    Option<(usize, usize)>,
 );
+
+/// What [`read_checkout`] found: the changed files, the lines behind them,
+/// and the commits ahead of and behind the base.
+type CheckoutRead = (
+    Option<Vec<crate::git_diff::DiffFile>>,
+    Option<crate::git_diff::LineChanges>,
+    Option<(usize, usize)>,
+);
+
+/// One read of a checkout for the badge and its band's rule: its changed
+/// files, the lines behind them, and its commits ahead of and behind the
+/// base it is measured against — the `worktree_base_branch` setting's,
+/// read fresh like every other (`commit_list::ahead_behind`). Blocking:
+/// run off the loop.
+fn read_checkout(path: &std::path::Path) -> CheckoutRead {
+    let files = crate::git_diff::changed_files(path).ok();
+    let lines = line_changes_of(path, files.as_deref());
+    let base = crate::config::Config::load().worktree_base_branch;
+    (files, lines, crate::commit_list::ahead_behind(path, &base))
+}
 
 /// The line counts behind `files` when the `git status` read them; a
 /// second git process, so only then.
@@ -890,6 +982,20 @@ fn note_worktree_lines(
         None => app.worktree_lines.remove(worktree),
     };
     if before != lines {
+        app.dirty = true;
+    }
+}
+
+/// Record how far a read found `worktree` from its base, for its band's
+/// rule; None (unreadable) or level with it drops what was there. A change
+/// redraws.
+fn note_worktree_ahead(app: &mut App, worktree: &WorktreeId, ahead: Option<(usize, usize)>) {
+    let ahead = ahead.filter(|&(a, b)| a > 0 || b > 0);
+    let before = match ahead {
+        Some(ab) => app.worktree_ahead.insert(worktree.clone(), ab),
+        None => app.worktree_ahead.remove(worktree),
+    };
+    if before != ahead {
         app.dirty = true;
     }
 }
@@ -953,24 +1059,24 @@ fn sweep_git_changes(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<Swep
     app.worktree_changes_inflight = Some(id.clone());
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
-        let files = crate::git_diff::changed_files(&path).ok();
-        let lines = line_changes_of(&path, files.as_deref());
-        let _ = tx.send((id, files.map(|f| f.len()), lines));
+        let (files, lines, ahead) = read_checkout(&path);
+        let _ = tx.send((id, files.map(|f| f.len()), lines, ahead));
     });
 }
 
-/// The checkout the cards' sweep spends this tick on: of the unselected
-/// checkouts the grid has a card for, the one read least recently — never
-/// read at all first, so a card that just appeared gets its count on the
-/// next tick. Nothing off the grid: the collapsed view draws no cards.
+/// The checkout the bands' sweep spends this tick on: of the unselected
+/// checkouts the grid has a band for — an EMPTY BAND too, whose rule
+/// prints the same counts — the one read least recently — never read at
+/// all first, so a band that just appeared gets its counts on the next
+/// tick. Nothing off the grid: the collapsed view draws no bands.
 fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
     if !app.launcher_grid() {
         return None;
     }
     let selected = app.selected_worktree().map(|w| &w.id);
-    let held: std::collections::HashSet<WorktreeId> = crate::launcher::rows(app)
+    let held: std::collections::HashSet<WorktreeId> = crate::launcher::bands(app)
         .into_iter()
-        .map(|row| row.agent.worktree_id)
+        .map(|band| band.worktree)
         .collect();
     app.tree
         .worktrees
@@ -1409,10 +1515,8 @@ fn reconcile_open_pr_cursor(
                 restore_session(app, out);
             }
             // The pane is showing something else now: rewind it and fetch
-            // whatever the cursor landed on. Say why, too — a row that
-            // evaporates mid-read is otherwise just the cursor jumping.
+            // whatever the cursor landed on.
             schedule_pr_detail(app);
-            app.flash = Some(format!("#{} is no longer open", was.number));
             app.dirty = true;
         }
     }
@@ -1613,6 +1717,7 @@ fn land_pr_detail(
             app.pr_detail.insert(url.clone(), detail);
             app.pr_detail_stale.remove(&url);
             app.pr_cache_dirty |= changed;
+            crate::pr_actions::detail_landed(app, &url);
             if retired {
                 drop_retired_pr(app, &url, out);
             }
@@ -1628,33 +1733,26 @@ fn land_pr_detail(
 /// Sessions panel's PR ROW — or **Comment…** from either row's menu: the
 /// COMMENT BOX, a multi-row task box titled with the row, whose Enter
 /// posts the text on that pull request through `gh pr comment`
-/// (`post_pr_comment`). Off a pull request row the key only says what it
-/// wants. A draft a refused post handed back while another modal was up
+/// (`post_pr_comment`). Off a pull request row the key does nothing. A
+/// draft a refused post handed back while another modal was up
 /// (`pr_comment_drafts`) fills the box, so the refusal cost nothing typed.
 fn open_pr_comment(app: &mut App) {
     // The pane reading a pull request (a `/` jump lands on one) is the one
     // to comment on; otherwise, on the grid, the card's — the pull request
     // `⇧V` opens.
     let found = match app.previewed_pr() {
-        Some(pr) => Ok(pr),
+        Some(pr) => Some(pr),
         None if app.launcher_grid() => {
-            launcher::card_pull_request(app, launcher::NO_CARD_FOR_COMMENT).map(|pr| {
-                crate::app::PreviewedPr {
-                    label: crate::pull_request::numbered_label(pr.number, &pr.title),
-                    number: pr.number,
-                    url: pr.url,
-                }
+            launcher::card_pull_request(app).map(|pr| crate::app::PreviewedPr {
+                label: crate::pull_request::numbered_label(pr.number, &pr.title),
+                number: pr.number,
+                url: pr.url,
             })
         }
-        None => Err("move onto a pull request row to comment on it".into()),
+        None => None,
     };
-    let pr = match found {
-        Ok(pr) => pr,
-        Err(why) => {
-            app.flash = Some(why);
-            app.dirty = true;
-            return;
-        }
+    let Some(pr) = found else {
+        return;
     };
     let draft = app.pr_comment_drafts.remove(&pr.url).unwrap_or_default();
     reopen_prompt_with(
@@ -1672,10 +1770,10 @@ fn open_pr_comment(app: &mut App) {
 /// Enter in the COMMENT BOX: post `body` on pull request `number` off the
 /// loop, as the `gh` user, from the selected project's checkout — `gh pr
 /// comment` resolves the number from any checkout of the repo, as the
-/// detail fetch does — and say it is on its way. The outcome lands in
-/// `land_pr_comment`. A post that cannot even start — one already running
-/// on this pull request, no checkout on disk — says why and hands the box
-/// straight back with its text. A box that stood in for the PULL REQUESTS
+/// detail fetch does. The outcome lands in `land_pr_comment`. A post that
+/// cannot even start — one already running on this pull request, no
+/// checkout on disk (which the footer names) — hands the box straight
+/// back with its text. A box that stood in for the PULL REQUESTS
 /// MODAL (`back`) puts the modal back on its row as the post goes out.
 fn post_pr_comment(
     app: &mut App,
@@ -1686,22 +1784,18 @@ fn post_pr_comment(
     back: Option<Box<crate::pr_modal::PullRequestsView>>,
 ) {
     let dir = app.selected_project().map(|p| p.repo_path.clone());
-    let refused = if app.pr_comment_inflight.contains(&url) {
-        Some(format!("still posting the last comment on #{number}…"))
-    } else {
-        match &dir {
-            Some(dir) if !dir.is_dir() => {
-                Some(format!("repo path missing on disk: {}", dir.display()))
-            }
-            None => Some("no project selected to post from".into()),
-            // Never in the running TUI: the loop installs the channel at
-            // startup. Handing the box back beats losing the text.
-            Some(_) if app.pr_comment_tx.is_none() => Some("not ready to post yet".into()),
-            Some(_) => None,
+    let busy = app.pr_comment_inflight.contains(&url);
+    let missing = dir.as_ref().filter(|dir| !dir.is_dir());
+    // The loop installs the channel at startup, so a post without one is
+    // never in the running TUI: handing the box back beats losing the text.
+    let refused = busy || dir.is_none() || missing.is_some() || app.pr_comment_tx.is_none();
+    if refused {
+        if let Some(dir) = missing.filter(|_| !busy) {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "repo path missing on disk: {}",
+                dir.display()
+            )));
         }
-    };
-    if let Some(why) = refused {
-        app.flash = Some(why);
         reopen_prompt_with(
             app,
             PromptKind::PrComment {
@@ -1722,7 +1816,6 @@ fn post_pr_comment(
         return;
     };
     app.pr_comment_inflight.insert(url.clone());
-    app.flash = Some(format!("posting a comment on #{number}…"));
     app.dirty = true;
     tokio::spawn(async move {
         let result = crate::pull_request::comment(&dir, number, &body).await;
@@ -1736,8 +1829,8 @@ fn post_pr_comment(
     });
 }
 
-/// A `gh pr comment` landed. Posted: say so, and read the pull request
-/// again so the pane's conversation carries the new comment — in place
+/// A `gh pr comment` landed. Posted: read the pull request again so the
+/// pane's conversation carries the new comment — in place
 /// when the pane is still on it (`refetch_pr_detail`, which keeps the
 /// reader's scroll), and on the next visit otherwise (`pr_detail_stale`).
 /// Refused: say why, in `gh`'s words, and put the box back with the text
@@ -1756,7 +1849,6 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
     app.pr_comment_inflight.remove(&url);
     match result {
         Ok(_) => {
-            app.flash = Some(format!("comment posted on #{number}"));
             app.pr_detail_stale.insert(url.clone());
             if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
                 // The modal reads its row again, the new comment in.
@@ -1766,7 +1858,9 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
             }
         }
         Err(why) => {
-            app.flash = Some(format!("couldn't post the comment on #{number}: {why}"));
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't post the comment on #{number}: {why}"
+            )));
             let back = match &app.overlay {
                 None => Some(None),
                 Some(Overlay::PullRequests(view)) => Some(Some(Box::new(view.clone()))),
@@ -1828,26 +1922,201 @@ pub enum PrReviewAt {
     Commit(String),
 }
 
+/// A pull request the DIFF VIEWER is reading from this repo's git, and
+/// where it was asked to open: kept on the view (`DiffView::pr_review`)
+/// so that, should the commits turn out not to be here, the same request
+/// is read from GitHub instead ([`land_diff_listing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrReview {
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    pub at: PrReviewAt,
+}
+
+/// What a pull request read from git says when this repo does not have
+/// its head commit — never shown: the view falls back to GitHub on it.
+const PR_NOT_LOCAL: &str = "the pull request's commits aren't in this repo";
+
 /// THE way into the DIFF VIEWER for a pull request of the selected
 /// project, titled `title` — the pane's `⌘E`, the PULL REQUESTS MODAL's
 /// `^G`, a PR tab's file or commit. The viewer is the same one `⌘E` opens
-/// on a checkout: wrapped, numbered, syntax-coloured, the same keys. A
-/// pull request's whole diff comes from one `gh pr diff` (cached, and
-/// refreshed under the open modal); one commit of it from the repo's git.
+/// on a checkout: wrapped, numbered, syntax-coloured, the same keys.
+///
+/// When the repo has the pull request's head commit — a branch of yours,
+/// or one fetched since — the viewer reads it from git, the COMMIT LIST
+/// over its files with every commit ticked: the whole pull request, its
+/// commits there to read one at a time or a few together, as a
+/// checkout's are ([`open_local_pr_review`]). Otherwise its whole diff
+/// comes from one `gh pr diff` (cached, and refreshed under the open
+/// modal), and one commit of it from the repo's git or from GitHub.
+///
+/// Opened from the PULL REQUESTS MODAL, the viewer is a level inside it:
+/// Esc puts the modal back as it was (`DiffView::back`).
 pub fn open_pr_review(app: &mut App, number: u64, url: String, title: String, at: PrReviewAt) {
+    // A file the PULL REQUEST PAGE's Changes tab asked for, for this pull
+    // request (`pr_preview::run_act`).
+    let at = match (at, app.pr_diff_at.as_ref()) {
+        (PrReviewAt::Top, Some((asked, path))) if *asked == url => PrReviewAt::File(path.clone()),
+        (at, _) => at,
+    };
+    let review = PrReview {
+        number,
+        url,
+        title,
+        at,
+    };
+    if open_local_pr_review(app, &review) {
+        app.pr_diff_at = None;
+        return;
+    }
+    open_github_pr_review(app, review);
+}
+
+/// [`open_pr_review`] from GitHub: the whole diff `gh pr diff` gives, or
+/// one commit's.
+fn open_github_pr_review(app: &mut App, review: PrReview) {
+    let PrReview {
+        number,
+        url,
+        title,
+        at,
+    } = review;
     match at {
         PrReviewAt::Top => fetch_pr_diff(app, number, url, title, None),
         PrReviewAt::File(path) => fetch_pr_diff(app, number, url, title, Some(path)),
         PrReviewAt::Commit(sha) => {
             if !open_pr_commit(app, &title, &sha) {
                 request_pr_commit_diff(app, number, &url, &sha, "");
-                let short: String = sha.chars().take(7).collect();
-                app.flash = Some(format!(
-                    "{short} isn't in this repo yet — fetching it from GitHub…"
-                ));
+                // Only a fetch still out says why it is fetching: a cached
+                // diff opened at once, and a refusal said its own.
+                let opened = matches!(app.overlay, Some(Overlay::Diff(_)));
+                let refused = app
+                    .flash
+                    .as_ref()
+                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Failed);
+                if !opened && !refused {
+                    let short: String = sha.chars().take(7).collect();
+                    app.flash = Some(crate::flash::Flash::working(format!(
+                        "{short} isn't in this repo yet — fetching it from GitHub…"
+                    )));
+                }
             }
         }
     }
+}
+
+/// The PULL REQUESTS MODAL as it is now, when it is what is up: the
+/// level a DIFF VIEWER opened from it goes back to (`DiffView::back`).
+fn pr_modal_under(app: &App) -> Option<Box<crate::pr_modal::PullRequestsView>> {
+    match &app.overlay {
+        Some(Overlay::PullRequests(view)) => Some(Box::new(view.clone())),
+        _ => None,
+    }
+}
+
+/// Dress a DIFF VIEWER about to go up the way every one opens: its column
+/// at the width it was last dragged to; the **Review** SETTINGS — the
+/// files as a tree, the panel with the keys (the commits only where there
+/// are any to tick: `commits`), how ticked commits read; and, opened from
+/// the PULL REQUESTS MODAL, the modal to go back to. Before its files are
+/// selected or filled in: a tree toggled after would land elsewhere.
+fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
+    use crate::app::DiffFocus;
+    view.files_width = app.diff_files_width;
+    if app.diff_tree && view.tree.is_none() {
+        view.toggle_tree();
+    }
+    view.focus = match app.diff_start {
+        DiffFocus::Commits if !commits => DiffFocus::Files,
+        focus => focus,
+    };
+    view.open_one_at_a_time = app.diff_one_at_a_time;
+    view.back = pr_modal_under(app);
+}
+
+/// [`open_pr_review`] from this repo's git, when the pull request's body
+/// is in (`App::pr_detail`, for its head commit and base): the viewer
+/// goes up at once, its commits and files read underneath as a BACKGROUND
+/// READ ([`read_pr_opening`]) — inline in a view built without a handle.
+/// Whether the repo has the commit is that read's to say; when it does
+/// not, the view falls back to GitHub (`land_diff_listing`). False when
+/// there is nothing to read from git with, and GitHub is asked straight
+/// away.
+fn open_local_pr_review(app: &mut App, review: &PrReview) -> bool {
+    let Some(detail) = app.pr_detail.get(&review.url) else {
+        return false;
+    };
+    let (tip, base) = (detail.head_sha.clone(), detail.base.clone());
+    if tip.is_empty() || base.is_empty() {
+        return false;
+    }
+    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
+        return false;
+    };
+    if !dir.is_dir() {
+        return false;
+    }
+    let ticket = crate::view_jobs::ticket();
+    let jobs = app.view_jobs.clone();
+    let mut view = DiffView::opening(dir.clone(), review.title.clone(), jobs.clone(), ticket);
+    view.pr_url = Some(review.url.clone());
+    if let PrReviewAt::File(path) = &review.at {
+        view.want_path = Some(path.clone());
+    }
+    view.pr_review = Some(review.clone());
+    dress_viewer(app, &mut view, true);
+    app.overlay = Some(Overlay::Diff(view));
+    app.dirty = true;
+    match jobs {
+        Some(jobs) => jobs.run(move || {
+            Some(crate::view_jobs::Answer::DiffListing {
+                ticket,
+                result: read_pr_opening(&dir, &base, &tip),
+            })
+        }),
+        None => land_diff_listing(app, ticket, read_pr_opening(&dir, &base, &tip)),
+    }
+    true
+}
+
+/// What a pull request read from git opens on: its COMMIT LIST to `tip`
+/// against `base` (`commit_list::read_tip`) and nothing uncommitted — or
+/// [`PR_NOT_LOCAL`].
+fn read_pr_opening(
+    dir: &std::path::Path,
+    base: &str,
+    tip: &str,
+) -> Result<crate::view_jobs::DiffListing, String> {
+    let listing = crate::commit_list::read_tip(dir, base, tip).ok_or(PR_NOT_LOCAL)?;
+    Ok(crate::view_jobs::DiffListing {
+        files: Vec::new(),
+        head: Some(tip.to_string()),
+        reviewed: std::collections::HashMap::new(),
+        commits: Some(listing),
+    })
+}
+
+/// A pull request read from git, its listing in: opened on one of its
+/// commits (the Commits tab's row), that commit alone is what is on
+/// screen — nothing ticked, the cursor on it — rather than the whole pull
+/// request.
+fn land_pr_review_at(view: &mut DiffView) {
+    let Some(PrReviewAt::Commit(sha)) = view.pr_review.as_ref().map(|r| r.at.clone()) else {
+        return;
+    };
+    let Some(list) = &mut view.commits else {
+        return;
+    };
+    let Some(i) = list
+        .commits
+        .iter()
+        .position(|c| c.sha.starts_with(&sha) || sha.starts_with(&c.sha))
+    else {
+        return;
+    };
+    list.show_only(crate::commit_list::Row::Commit(i));
+    crate::commit_list::show_selected(view);
 }
 
 /// [`PrReviewAt::Commit`]: the DIFF VIEWER on one commit of the selected
@@ -1862,13 +2131,10 @@ fn open_pr_commit(app: &mut App, title: &str, sha: &str) -> bool {
     };
     let mut view = DiffView::new(dir, title.to_string(), Vec::new(), true);
     view.jobs = app.view_jobs.clone();
-    view.files_width = app.diff_files_width;
     let mut head = vec![crate::diff_doc::Head::Meta(title.to_string())];
     head.extend(commit.head(crate::app::now_ms(), None));
     view.head = head;
-    if app.diff_tree {
-        view.toggle_tree();
-    }
+    dress_viewer(app, &mut view, false);
     crate::commit_list::show_scope(&mut view, commit.scope());
     app.overlay = Some(Overlay::Diff(view));
     app.dirty = true;
@@ -1879,14 +2145,16 @@ fn open_pr_commit(app: &mut App, title: &str, sha: &str) -> bool {
 /// at `file`, when one is asked for.
 fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: Option<String>) {
     if app.pr_diff_inflight == Some(number) {
-        app.flash = Some(format!("still fetching the diff for #{number}…"));
         return;
     }
     let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
         return;
     };
     if !dir.is_dir() {
-        app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
         return;
     }
     let Some(prdiff_tx) = app.pr_diff_tx.clone() else {
@@ -1895,7 +2163,11 @@ fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: O
     if open_cached_pr_diff(app, number, &url, &title, file.as_deref()) {
         app.pr_diff_refreshing.insert(url.clone());
     } else {
-        app.flash = Some(format!("fetching the diff for #{number}…"));
+        // Nothing else on screen marks the `gh pr diff` under way, and it
+        // takes seconds: the footer is the only sign Enter was heard.
+        app.flash = Some(crate::flash::Flash::working(format!(
+            "fetching the diff for #{number}…"
+        )));
     }
     app.pr_diff_inflight = Some(number);
     app.dirty = true;
@@ -1925,14 +2197,16 @@ pub(crate) fn request_pr_commit_diff(
     subject: &str,
 ) {
     if app.pr_diff_inflight == Some(number) {
-        app.flash = Some(format!("still fetching a diff for #{number}…"));
         return;
     }
     let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
         return;
     };
     if !dir.is_dir() {
-        app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
         return;
     }
     let Some(prdiff_tx) = app.pr_diff_tx.clone() else {
@@ -1940,11 +2214,15 @@ pub(crate) fn request_pr_commit_diff(
     };
     let url = crate::pull_request::commit_url(pr_url, sha);
     let short = sha.get(..7).unwrap_or(sha);
-    let title = format!("#{number} {short} {subject}").trim_end().to_string();
+    let title = format!("#{number} {short} {subject}")
+        .trim_end()
+        .to_string();
     if open_cached_pr_diff(app, number, &url, &title, None) {
         app.pr_diff_refreshing.insert(url.clone());
     } else {
-        app.flash = Some(format!("fetching the diff of {short}…"));
+        app.flash = Some(crate::flash::Flash::working(format!(
+            "fetching the diff of {short}…"
+        )));
     }
     app.pr_diff_inflight = Some(number);
     app.dirty = true;
@@ -1993,6 +2271,15 @@ fn land_pr_diff(app: &mut App, answer: PrDiffAnswer) {
     if let Some(diff) = &diff {
         crate::pr_cache::remember_diff(app, &url, diff);
     }
+    // The wait is over, whichever way it went: the spinner that said so
+    // goes, and anything worth saying about the answer is said below.
+    if app
+        .flash
+        .as_ref()
+        .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
+    {
+        app.flash = None;
+    }
     if !app.pr_diff_refreshing.remove(&url) {
         open_pr_diff_view(app, number, &url, title, diff, file.as_deref());
         return;
@@ -2012,7 +2299,6 @@ fn land_pr_diff(app: &mut App, answer: PrDiffAnswer) {
         return;
     }
     if refresh_pr_diff_view(view, &diff) {
-        app.flash = Some(format!("#{number}'s diff changed since it was last read"));
         app.dirty = true;
     }
 }
@@ -2085,14 +2371,16 @@ fn open_pr_diff_view(
         app.pr_diff_inflight = None;
     }
     let Some(diff) = diff else {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::failed(format!(
             "couldn't read the diff for #{number} — is `gh` set up?"
-        ));
+        )));
         return;
     };
     let chunks = crate::pull_request::split_unified_diff(&diff);
     if chunks.is_empty() {
-        app.flash = Some(format!("#{number} changes no files"));
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "#{number} changes no files"
+        )));
         return;
     }
     let files = pr_diff_files(&chunks);
@@ -2106,14 +2394,11 @@ fn open_pr_diff_view(
     let mut view = DiffView::new(root, title.clone(), files, true);
     view.prefetched = Some(chunks.into_iter().collect());
     view.pr_url = Some(url.to_string());
-    view.files_width = app.diff_files_width;
     view.head = vec![
         crate::diff_doc::Head::Title(title),
         crate::diff_doc::Head::Meta("the pull request's whole diff, as GitHub has it".into()),
     ];
-    if app.diff_tree {
-        view.toggle_tree();
-    }
+    dress_viewer(app, &mut view, false);
     // On a file: the one asked for here (`open_pr_review`), else the one
     // the PULL REQUEST PAGE's Changes tab left for this pull request. The
     // page's request is spent either way.
@@ -2181,9 +2466,6 @@ fn schedule_pull_request_refresh(app: &mut App) {
     schedule_pr_lookup(app);
 }
 
-/// What `Shift+R` says in the footer the moment it is heard.
-pub(crate) const RELOAD_FLASH: &str = "reloading pull requests and issues from GitHub…";
-
 /// `Shift+R`, from any panel: reload from GitHub *now* — the selected
 /// project's open list and its open issues (`issues::reload_selected`),
 /// every one of its checkouts' own PR, and the body
@@ -2194,8 +2476,7 @@ pub(crate) const RELOAD_FLASH: &str = "reloading pull requests and issues from G
 /// list lookups fire on the loop's next turn rather than the next git
 /// tick. The other checkouts follow at the sweep's one-per-tick pace, so
 /// the key spends one process per row over the next seconds, never a
-/// burst. The flash is the only immediate feedback: the rows repaint once
-/// the answers land, and a machine with no `gh` never repaints at all.
+/// burst. The rows repaint once the answers land.
 fn refresh_pull_requests(app: &mut App) {
     let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
         return;
@@ -2208,7 +2489,6 @@ fn refresh_pull_requests(app: &mut App) {
     refetch_pr_detail(app);
     app.pr_refresh_requested = true;
     crate::issues::reload_selected(app);
-    app.flash = Some(RELOAD_FLASH.into());
     app.dirty = true;
 }
 
@@ -2400,6 +2680,12 @@ fn ui_state_json(app: &App) -> String {
         launcher_open_bands: saved_open_bands(app),
         launcher_tabs: app.launcher_tabs.iter().map(|id| id.to_string()).collect(),
         projects_closed: app.projects_closed,
+        archived_open: app
+            .archived_open
+            .iter()
+            .filter(|id| app.tree.worktrees.iter().any(|w| &w.id == *id))
+            .map(|id| id.to_string())
+            .collect(),
     };
     serde_json::to_string(&state).unwrap_or_else(|_| "{}".into())
 }
@@ -2437,13 +2723,16 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
         return false;
     };
     app.show_archived = state.show_archived;
+    app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
     app.issues_collapsed = state.issues_collapsed;
     if let Some(w) = state.diff_files_width {
         // The draw re-caps it to the actual modal width.
         app.diff_files_width = w.clamp(crate::app::MIN_DIFF_FILES_W, MAX_RESTORED_WIDTH);
     }
-    app.diff_tree = state.diff_tree;
+    // `diff_tree` in the blob is what `Ctrl+t` was last left on, from
+    // builds before the **Files as a tree** SETTING: the setting decides
+    // now (`apply_config`).
     // The next draw re-fits it to the body actually on screen
     // (`launcher::pane_height`); the cap here only keeps a nonsense blob
     // from carrying a wild number around.
@@ -2738,8 +3027,12 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
         }
         Event::Paste(text) if app.vim.is_some() => {
             if let Some(vim) = &mut app.vim {
-                // Bracketed paste so vim doesn't auto-indent it to mush.
-                vim.input(&bracketed(&text));
+                // Bracketed when the child asked, so vim doesn't auto-indent
+                // it to mush; as typed when it never did — `claude auth
+                // login` reads its code with a plain readline, and took the
+                // markers for part of the code (`Invalid code`).
+                let data = pasted(vim.parser.screen(), &text);
+                vim.input(&data);
             }
         }
         // A MARKDOWN PAGE has nothing to paste into, and the overlay under
@@ -2890,6 +3183,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
             };
             prompt.input.insert_str(&text);
             prompt.refresh_dirs();
+            crate::mention::sync(app);
         }
         Overlay::Palette(palette) => {
             palette.query.insert_str(text);
@@ -2935,6 +3229,8 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         }
         _ => return false,
     }
+    // A paste into the QUICK PROMPT is the SAVED DRAFT now.
+    crate::saved_draft::note_edit(app);
     app.dirty = true;
     true
 }
@@ -2963,14 +3259,93 @@ fn paste_into_follow_up(app: &mut App, text: &str) -> bool {
 /// agent types back as a space. Anything but a drop comes back as it came,
 /// as does everything when no `dir` is installed (the unit tests). A copy
 /// that failed says so in `flash` and leaves its path as dropped.
-fn staged_drop(dir: Option<&std::path::Path>, text: &str, flash: &mut Option<String>) -> String {
+fn staged_drop(
+    dir: Option<&std::path::Path>,
+    text: &str,
+    flash: &mut Option<crate::flash::Flash>,
+) -> String {
     let Some(staged) = dir.and_then(|dir| crate::dropped_files::stage(text, dir)) else {
         return text.to_string();
     };
     if let Some((name, err)) = staged.failed.first() {
-        *flash = Some(format!("couldn't keep a copy of {name}: {err}"));
+        *flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't keep a copy of {name}: {err}"
+        )));
     }
     staged.text
+}
+
+/// `^V` in a box bound for an agent on this machine: the image on the
+/// system clipboard, kept in the attachments folder a drop is copied to,
+/// its path at the caret (`clipboard_image`). Reading the clipboard is
+/// `osascript` starting up — a good part of a second, too long to hold
+/// the loop — so it runs on the blocking pool and lands as
+/// `Answer::ClipboardImage`; without a pool (the unit tests, which stub
+/// the clipboard) it runs inline. No attachments folder (the unit tests
+/// that install none) is no paste.
+fn paste_clipboard_image(app: &mut App) {
+    let Some(dir) = app.attachments_dir.clone() else {
+        app.flash = Some(crate::flash::Flash::failed(
+            "no attachments folder to keep a pasted image in",
+        ));
+        return;
+    };
+    match app.view_jobs.clone() {
+        Some(jobs) => {
+            app.flash = Some(crate::flash::Flash::working("reading the clipboard…"));
+            jobs.run(move || {
+                Some(crate::view_jobs::Answer::ClipboardImage(
+                    crate::clipboard_image::paste_into(&dir),
+                ))
+            });
+        }
+        None => land_clipboard_image(app, crate::clipboard_image::paste_into(&dir)),
+    }
+}
+
+/// What a `^V` found, landed: the image's path into the box bound for a
+/// local agent that is up — the prompt box, else an open FOLLOW-UP
+/// COMPOSER — over its selection or at its caret, as a staged drop lands.
+/// No image says so in the footer; an image with no box left to take it
+/// (closed while the clipboard was read) says where it was kept.
+pub(crate) fn land_clipboard_image(app: &mut App, pasted: crate::clipboard_image::Pasted) {
+    use crate::clipboard_image::{insertion, Pasted};
+    app.dirty = true;
+    let path = match pasted {
+        Pasted::Saved(path) => path,
+        Pasted::NoImage => {
+            app.flash = Some(crate::flash::Flash::note(
+                "no image on the clipboard to paste",
+            ));
+            return;
+        }
+        Pasted::Failed(why) => {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't paste the image: {why}"
+            )));
+            return;
+        }
+    };
+    app.flash = None;
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if prompt.kind.reaches_local_agent() {
+            let text = insertion(&path, prompt.input.char_before_insert());
+            prompt.input.insert_str(&text);
+            crate::saved_draft::note_edit(app);
+            return;
+        }
+    }
+    if app.follow_up_live() {
+        if let Some(follow_up) = &mut app.follow_up {
+            let text = insertion(&path, follow_up.input.char_before_insert());
+            follow_up.input.insert_str(&text);
+            return;
+        }
+    }
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "image kept at {}",
+        path.display()
+    )));
 }
 
 /// One key while the composer is open and the SESSIONS PANEL has focus.
@@ -3011,6 +3386,8 @@ fn follow_up_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) -> 
         {
             send_follow_up(app, out);
         }
+        // `^V`: the clipboard's image, as the prompt boxes take it.
+        _ if ui::task_keys::IMAGE.matches(&key) => paste_clipboard_image(app),
         _ => {
             if let Some(follow_up) = &mut app.follow_up {
                 if follow_up.input.handle_key(&key).consumed() {
@@ -3095,10 +3472,6 @@ fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientReques
     let sref = SessionRef::Agent(id.clone());
     if !agent.alive {
         attach_now(app, sref, out);
-        app.flash = Some(format!(
-            "starting {} — press Enter again once it is up",
-            agent.name
-        ));
         return TurnSent::Booting;
     }
     let data = if text.contains('\n') {
@@ -3115,7 +3488,6 @@ fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientReques
         session: sref,
         data: b"\r".to_vec(),
     });
-    app.flash = Some(format!("sent to {}", agent.name));
     TurnSent::Sent
 }
 
@@ -3191,6 +3563,17 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // ⌘. may arrive as macOS's Cancel — an Escape still holding ⌘ — and
+    // must never reach an Esc arm as one: the new-agent box would close
+    // under its own **Select worktree** key.
+    let key = crate::keymap::untangle_cmd_period(key);
+    // `⌘W` closes the agent or terminal in the pane, never a modal: over
+    // the editor, a markdown page or any overlay it does nothing at all,
+    // rather than reach the editor as its `^W` or a list as a `w`.
+    let modal_up = app.vim.is_some() || app.page.is_some() || app.overlay.is_some();
+    if modal_up && closes_pane(app, &key) {
+        return;
+    }
     // The editor modal sits above every overlay: all keys forward to it —
     // vim needs Esc — except Ctrl+Q, the same hatch the terminal lock uses.
     if app.vim.is_some() {
@@ -3251,6 +3634,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             crate::key_combo::note(app, &[chord], None);
         }
         handle_overlay_key(app, key, out);
+        crate::mention::sync(app);
         return;
     }
 
@@ -3503,6 +3887,7 @@ fn dispatch_action(
     use crate::keymap::Action;
     match action {
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
+        Action::Restart => app.overlay = Some(Overlay::Confirm(confirm_restart())),
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
@@ -3558,9 +3943,7 @@ fn dispatch_action(
         // still what `^q` comes back to — and before the first project,
         // where there are no cards to have a pane under.
         Action::ToggleLauncherPane if app.launcher_active() => launcher::toggle_pane(app),
-        Action::ToggleLauncherPane => {
-            app.flash = Some("no cards to fold a pane under — add a project first".into())
-        }
+        Action::ToggleLauncherPane => {}
         // Full-screen, and back down. The grid takes this key itself
         // (`launcher::handle_action`), as does a LOCKED PANE; it reaches
         // here from a full-screen session that is not typing — one that
@@ -3568,15 +3951,12 @@ fn dispatch_action(
         Action::ToggleFullScreen if app.launcher_active() => {
             launcher::toggle_full_screen(app, out);
         }
-        Action::ToggleFullScreen => {
-            app.flash = Some("no session to full-screen — add a project first".into())
-        }
+        Action::ToggleFullScreen => {}
         // The strip across the LAUNCHER PANE's header. The grid takes this
         // key itself (`launcher::handle_action`); it reaches here over a
         // full-screen session, which has no strip, and before the first
         // project, where there is no pane at all.
-        Action::PaneTabs if app.launcher_active() => app.flash = Some(launcher::no_pane_here(app)),
-        Action::PaneTabs => app.flash = Some("no pane here — add a project first".into()),
+        Action::PaneTabs => {}
         // The header's PROJECT TABS. The grid takes these keys itself
         // (`launcher::handle_action`); they reach here with a session
         // full-screen over it, where the header is not on screen.
@@ -3587,7 +3967,7 @@ fn dispatch_action(
         | Action::PrevProjectTab
         | Action::CloseProjectTab
         | Action::SelectProjectTab(_)
-        | Action::ProjectDropdown => app.flash = Some(launcher::no_tabs_here(app)),
+        | Action::ProjectDropdown => {}
         Action::MoveDown => move_selection(app, 1, out),
         Action::MoveUp => move_selection(app, -1, out),
         // The first-run SPLASH, started inside a git repo: Enter opens it —
@@ -3676,14 +4056,14 @@ fn dispatch_action(
                     // for both ways, as the card menu's row reads.
                     Some(SessionRow::Agent(a)) => {
                         activate::unarchive(app, a.id, out);
-                        release_watch::arm(&mut app.release_watch, *chord, std::time::Instant::now());
+                        release_watch::arm(
+                            &mut app.release_watch,
+                            *chord,
+                            std::time::Instant::now(),
+                        );
                     }
-                    Some(SessionRow::Terminal(_)) => {
-                        app.flash = Some("terminals can't be archived — d closes them".into());
-                    }
-                    Some(SessionRow::Link(_)) => {
-                        app.flash = Some("links can't be archived — d deletes them".into());
-                    }
+                    // Terminals and links can't be archived: `d` closes or
+                    // deletes them.
                     _ => {}
                 }
             }
@@ -3703,6 +4083,9 @@ fn dispatch_action(
                 }
             }
         }
+        // The grid's own key (`launcher::handle_action`): with a session
+        // full-screen over the view there is no band to fold one under.
+        Action::ToggleArchivedDrawer => {}
         // The grid takes this itself (`launcher::handle_action`); it
         // reaches here from the menu and with a session full-screen over
         // the view, where there are no cards to swap.
@@ -3736,6 +4119,7 @@ fn dispatch_action(
             jump_attention(app, -1, attaches, out);
         }
         Action::Delete => open_delete_confirm(app),
+        Action::ClosePane => close_pane(app),
         // Delete EVERY row of the focused panel (behind a confirm that
         // lists the casualties).
         Action::DeleteAll => open_delete_all_confirm(app),
@@ -3881,6 +4265,43 @@ fn select_model(app: &mut App) {
     launcher::open_model_picker(app, back);
 }
 
+/// `⇧Tab` in the box, or a click on its `mode` field: the box's next mode
+/// — edit, plan, ask, round again — among the ones its harness has, shown
+/// at once in its header. Per box: nothing is saved, so the next box opens
+/// on edit.
+pub(crate) fn cycle_mode(app: &mut App) {
+    let Some(back) = ensure_launch_box(app) else {
+        return;
+    };
+    let cfg = crate::config::Config::load();
+    let modes = back.launch.modes(&cfg);
+    if modes.len() < 2 {
+        return;
+    }
+    let at = modes
+        .iter()
+        .position(|&m| m == back.launch.mode)
+        .unwrap_or(0);
+    let mode = modes[(at + 1) % modes.len()];
+    app.dirty = true;
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if let PromptKind::QuickPrompt(launch) = &mut prompt.kind {
+            launch.mode = mode;
+            prompt.title = launch.title();
+            return;
+        }
+    }
+    let stepped = crate::quick_prompt::QuickLaunch {
+        mode,
+        ..back.launch.clone()
+    };
+    if back.from_box {
+        crate::quick_prompt::reopen(app, stepped, &back.text);
+    } else {
+        crate::quick_prompt::open_picked_box(app, stepped);
+    }
+}
+
 /// Cycle effort (`⌘Y` / `^Y`): the next effort on the model the box is
 /// set to — `default`, then the harness's list, round again — shown at
 /// once in the box's header. Over one of the box's pickers it hands the
@@ -3905,10 +4326,6 @@ fn cycle_box_effort(app: &mut App, back: crate::quick_prompt::QuickReturn) {
     );
     let choices = crate::config::effort_choices(kind, model, custom);
     if choices.is_empty() {
-        app.flash = Some(format!(
-            "{} has no effort to cycle",
-            crate::agent_picker::harness_label(kind, custom)
-        ));
         return;
     }
     let current = launch
@@ -3955,10 +4372,6 @@ fn cycle_default_effort(app: &mut App) {
         .default_model()
         .map(str::to_string);
     if crate::config::effort_choices(kind, model.as_deref(), custom.as_deref()).is_empty() {
-        app.flash = Some(format!(
-            "{} has no effort to cycle",
-            crate::agent_picker::harness_label(kind, custom.as_deref())
-        ));
         return;
     }
     let id = custom
@@ -3968,7 +4381,9 @@ fn cycle_default_effort(app: &mut App) {
     cfg.cycle_agent_row(&id, crate::config::HarnessField::Effort, 1);
     let next = cfg.agent_value(&id, crate::config::HarnessField::Effort);
     let _ = cfg.try_save();
-    app.flash = Some(format!("effort: {next}"));
+    // No box is up to show the default it stepped: the footer is the only
+    // place the new effort is seen.
+    app.flash = Some(crate::flash::Flash::done(format!("effort: {next}")));
     app.dirty = true;
 }
 
@@ -4184,10 +4599,37 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             );
             (
                 "Add a Claude account".into(),
-                format!("short name — its config dir is ~/.claude-<name> (empty = {next})").into(),
+                format!(
+                    "name it goes by — its config dir is ~/.claude-<name> (empty = {next}, \
+                     no name)"
+                )
+                .into(),
                 String::new(),
             )
         }
+        PromptKind::RenameClaudeAccount { id } => {
+            let cfg = crate::config::Config::load();
+            let dir = cfg
+                .harness_registry()
+                .iter()
+                .find(|entry| entry.id == *id)
+                .and_then(crate::claude_accounts::dir_of)
+                .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
+            (
+                format!("Rename · {dir}").into(),
+                format!(
+                    "name it goes by, before its email (empty = {}) — {id} and {dir} stay",
+                    crate::claude_accounts::DEFAULT_NAME
+                )
+                .into(),
+                crate::claude_accounts::current_name(&cfg, id),
+            )
+        }
+        PromptKind::AdoptClaudeDir { dir } => (
+            format!("Add back · {}", crate::claude_accounts::tilde(dir)).into(),
+            "name it goes by — its login and transcripts come with it (empty = no name)".into(),
+            crate::claude_accounts::suggested_name(dir),
+        ),
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -4322,6 +4764,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::NextAttention
             | Action::PrevAttention
             | Action::Quit
+            | Action::Restart
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
@@ -4366,10 +4809,9 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
     let known = canon
         .ancestors()
         .find_map(|dir| app.tree.project_at_path(dir))
-        .map(|p| (p.id.clone(), p.name.clone()));
-    if let Some((id, name)) = known {
+        .map(|p| p.id.clone());
+    if let Some(id) = known {
         launcher::open_project(app, &id, out);
-        app.flash = Some(format!("{name} is already a project — opened it"));
         return;
     }
     if canon.is_dir() && !in_git_repo(&canon) {
@@ -4413,23 +4855,24 @@ fn open_repo_in_browser(app: &mut App) {
         .filter(|path| path.is_dir())
         .or_else(|| app.selected_project().map(|p| p.repo_path.clone()));
     let Some(root) = root else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
-    // Not open_link: this is a repo page, never a PR row to mark read.
-    let open = move || match crate::remote::repo_url(&root) {
-        Ok(url) if open_url(&url) => format!("opened {}", crate::app::pretty_url(&url)),
-        Ok(url) => format!("couldn't open {url}"),
-        Err(msg) => msg,
+    // Not open_link: this is a repo page, never a PR row to mark read. The
+    // page opening is the answer; only a page that won't says why.
+    let failed = move || match crate::remote::repo_url(&root) {
+        Ok(url) if open_url(&url) => None,
+        Ok(url) => Some(format!("couldn't open {url}")),
+        Err(msg) => Some(msg),
     };
     // Which page it is takes a `git remote get-url` to know: asked off the
-    // loop, with the outcome flashed when it lands.
+    // loop, with a failure flashed when it lands.
     match app.view_jobs.clone() {
-        Some(jobs) => {
-            app.flash = Some("opening the repository's page…".into());
-            jobs.run(move || Some(crate::view_jobs::Answer::Flash(open())));
+        Some(jobs) => jobs.run(move || failed().map(crate::view_jobs::Answer::Flash)),
+        None => {
+            if let Some(why) = failed() {
+                app.flash = Some(crate::flash::Flash::failed(why));
+            }
         }
-        None => app.flash = Some(open()),
     }
 }
 
@@ -4437,7 +4880,7 @@ fn open_repo_in_browser(app: &mut App) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OutsideApp {
     bundle: std::path::PathBuf,
-    /// What one hand-off opens, for the flash: "Ghostty tab".
+    /// What one hand-off opens, for a failure's flash: "Ghostty tab".
     opens: &'static str,
 }
 
@@ -4474,9 +4917,9 @@ fn outside_app(choice: crate::config::OutsideTerminal) -> Option<OutsideApp> {
 /// setting. `open -a` hands the app a folder, which Ghostty takes like one
 /// dropped on its Dock icon — a tab in the front window under the default
 /// `macos-dock-drop-behavior = new-tab` — and Terminal.app as a new window
-/// there. Silent — no flash at all — when there is no app to hand it to:
+/// there. Silent when it opens, and when there is no app to hand it to:
 /// off macOS, or over ssh, where `open` would reach the remote machine's
-/// screen instead of the one being looked at.
+/// screen instead of the one being looked at. A failure says why.
 fn open_outside_terminal(app: &mut App) {
     let choice = crate::config::Config::load().outside_terminal();
     open_outside_terminal_with(app, outside_app(choice));
@@ -4486,28 +4929,34 @@ fn open_outside_terminal_with(app: &mut App, outside: Option<OutsideApp>) {
     let Some(outside) = outside.filter(|_| !app.is_remote) else {
         return;
     };
-    app.flash = Some(match context_dir(app) {
-        Ok(dir) if open_in_app(&outside.bundle, &dir) => {
-            format!("opened a {} in {}", outside.opens, dir.display())
+    match context_dir(app) {
+        Some(Ok(dir)) => {
+            if !open_in_app(&outside.bundle, &dir) {
+                app.flash = Some(crate::flash::Flash::failed(format!(
+                    "couldn't open a {} in {}",
+                    outside.opens,
+                    dir.display()
+                )));
+            }
         }
-        Ok(dir) => format!("couldn't open a {} in {}", outside.opens, dir.display()),
-        Err(why) => why,
-    });
+        Some(Err(why)) => app.flash = Some(crate::flash::Flash::failed(why)),
+        None => {}
+    }
 }
 
 /// The checkout the cursor is on — the selected worktree, else its
 /// project's repo — while it is still on disk, or what to say instead.
-fn context_dir(app: &App) -> Result<std::path::PathBuf, String> {
+/// None with nothing selected.
+fn context_dir(app: &App) -> Option<Result<std::path::PathBuf, String>> {
     let dir = app
         .selected_worktree()
         .map(|w| w.path.clone())
-        .or_else(|| app.selected_project().map(|p| p.repo_path.clone()))
-        .ok_or_else(|| SELECT_CONTEXT_FIRST.to_string())?;
-    if dir.is_dir() {
+        .or_else(|| app.selected_project().map(|p| p.repo_path.clone()))?;
+    Some(if dir.is_dir() {
         Ok(dir)
     } else {
         Err(format!("path missing on disk: {}", dir.display()))
-    }
+    })
 }
 
 /// The OPEN MENU's **Checkout in <app>**: the checkout under the cursor as
@@ -4515,56 +4964,40 @@ fn context_dir(app: &App) -> Result<std::path::PathBuf, String> {
 /// remote machine's screen, so it says so instead; a failure says why.
 fn open_checkout_outside(app: &mut App) {
     if app.is_remote {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::note(format!(
             "{} would open on the remote machine — nothing opened",
             crate::outside_editor::hint_name()
-        ));
+        )));
         return;
     }
     let dir = match context_dir(app) {
-        Ok(dir) => dir,
-        Err(why) => {
-            app.flash = Some(why);
+        Some(Ok(dir)) => dir,
+        Some(Err(why)) => {
+            app.flash = Some(crate::flash::Flash::failed(why));
             return;
         }
+        None => return,
     };
-    let pending = format!(
-        "opening {} in {}…",
-        dir.display(),
-        crate::outside_editor::hint_name()
-    );
-    hand_off(app, pending, move || {
+    hand_off(app, move || {
         let target = crate::outside_editor::configured()?;
         let (program, args) = target.dir_command(&dir);
-        match crate::outside_editor::launch(&program, &args) {
-            Ok(()) => Ok(format!("opened {} in {}", dir.display(), target.name)),
-            Err(why) => Err(format!(
-                "couldn't open {} in {}: {why}",
-                dir.display(),
-                target.name
-            )),
-        }
+        crate::outside_editor::launch(&program, &args)
+            .map_err(|why| format!("couldn't open {} in {}: {why}", dir.display(), target.name))
     });
 }
 
 /// Run `open` — a hand-off to an app outside orion, whose tool takes a
 /// second or so to pass the file to the running app — off the loop: the
-/// footer says it is under way, then what came of it, a failure with its
+/// app coming up is the answer, and a failure lands in the footer with its
 /// reason. Inline where there is no loop to land it on (unit tests).
-fn hand_off(
-    app: &mut App,
-    pending: String,
-    open: impl FnOnce() -> Result<String, String> + Send + 'static,
-) {
-    let said = |outcome: Result<String, String>| match outcome {
-        Ok(done) | Err(done) => done,
-    };
+fn hand_off(app: &mut App, open: impl FnOnce() -> Result<(), String> + Send + 'static) {
     match app.view_jobs.clone() {
-        Some(jobs) => {
-            app.flash = Some(pending);
-            jobs.run(move || Some(crate::view_jobs::Answer::Flash(said(open()))));
+        Some(jobs) => jobs.run(move || open().err().map(crate::view_jobs::Answer::Flash)),
+        None => {
+            if let Err(why) = open() {
+                app.flash = Some(crate::flash::Flash::failed(why));
+            }
         }
-        None => app.flash = Some(said(open())),
     }
 }
 
@@ -4627,17 +5060,14 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
 
 /// The file in the OPEN IN APP editor — on its checkout's window at the
 /// line, where the app takes one — off the loop ([`hand_off`]), the footer
-/// saying where it went or why it didn't.
+/// saying why when it didn't go.
 fn open_in_outside_app(app: &mut App, root: &std::path::Path, file: &str, line: u64) {
-    let pending = format!("opening {file} in {}…", crate::outside_editor::hint_name());
     let (root, file) = (root.to_path_buf(), file.to_string());
-    hand_off(app, pending, move || {
+    hand_off(app, move || {
         let target = crate::outside_editor::configured()?;
         let (program, args) = target.file_command(&root, &file, line);
-        match crate::outside_editor::launch(&program, &args) {
-            Ok(()) => Ok(format!("opened {file} in {}", target.name)),
-            Err(why) => Err(format!("couldn't open {file} in {}: {why}", target.name)),
-        }
+        crate::outside_editor::launch(&program, &args)
+            .map_err(|why| format!("couldn't open {file} in {}: {why}", target.name))
     });
 }
 
@@ -4672,12 +5102,11 @@ fn open_in_app(bundle: &std::path::Path, path: &std::path::Path) -> bool {
 /// `r` on the Worktrees panel: start the selected checkout's RUN COMMAND,
 /// or stop it when it is already up.
 fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
+    // A pull request row has no checkout to run.
     if app.selected_worktree_pr().is_some() {
-        app.flash = Some("a pull request has no checkout to run — pick a worktree".into());
         return;
     }
     let Some(w) = app.selected_worktree().cloned() else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
     toggle_run_in(app, &w, out);
@@ -4686,16 +5115,11 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// Ask the DAEMON to start `worktree`'s run, or to stop it while it runs.
 fn toggle_run_in(app: &mut App, worktree: &orion_core::Worktree, out: &mut Vec<ClientRequest>) {
     if app.is_placeholder_worktree(&worktree.id) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     }
     let start = !app.worktree_running(&worktree.id);
-    let intent = PendingIntent::RunToggled {
-        branch: worktree.branch.clone(),
-        started: start,
-    };
     let id = worktree.id.clone();
-    send_with(app, out, intent, |req_id| {
+    send(app, out, |req_id| {
         if start {
             ClientRequest::StartRun {
                 req_id,
@@ -4712,12 +5136,11 @@ fn toggle_run_in(app: &mut App, worktree: &orion_core::Worktree, out: &mut Vec<C
 
 /// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
 fn open_selected_worktree(app: &mut App) {
+    // A pull request row has no checkout to open.
     if app.selected_worktree_pr().is_some() {
-        app.flash = Some("a pull request has no checkout to open — pick a worktree".into());
         return;
     }
     let Some(w) = app.selected_worktree().cloned() else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
     open_worktree(app, &w);
@@ -4729,8 +5152,8 @@ const NO_OPEN_COMMAND: &str =
     "no open command for this worktree — set one in Settings (s) → Project, \
                                or add .orion.json with {\"open\": \"open http://localhost:3000\"}";
 
-/// Run `worktree`'s OPEN COMMAND once and say so: the project's **Open
-/// command** setting (Settings → Project) when it is set, else the
+/// Run `worktree`'s OPEN COMMAND once — saying why when there is none or
+/// it won't start: the project's **Open command** setting (Settings → Project) when it is set, else the
 /// checkout's `.orion.json` `open`. The TUI runs it, not the DAEMON: it
 /// opens a browser or an editor on the machine the user is sitting at.
 fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
@@ -4743,14 +5166,15 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
     let command = match open_command_for(&worktree.path, &main) {
         Ok(command) => command,
         Err(msg) => {
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             return;
         }
     };
-    app.flash = Some(match spawn_open_command(&command, &worktree.path) {
-        Ok(()) => format!("↗ {command}"),
-        Err(e) => format!("couldn't run {command}: {e}"),
-    });
+    if let Err(e) = spawn_open_command(&command, &worktree.path) {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't run {command}: {e}"
+        )));
+    }
 }
 
 /// The OPEN COMMAND for a checkout, resolved the way the DAEMON resolves
@@ -4806,41 +5230,35 @@ fn spawn_open_command(command: &str, cwd: &std::path::Path) -> std::io::Result<(
 }
 
 /// The selected worktree's checkout — path and branch — for the modals that
-/// read it. Flashes and returns None when no worktree is selected or its
+/// read it. None when no worktree is selected, and, flashing why, when its
 /// path is gone from disk.
 fn selected_checkout(app: &mut App) -> Option<(std::path::PathBuf, String)> {
     // Clone before touching app.overlay — selected_worktree borrows app.
-    let Some((path, branch)) = app
+    let (path, branch) = app
         .selected_worktree()
-        .map(|w| (w.path.clone(), w.branch.clone()))
-    else {
-        app.flash = Some("no worktree selected".into());
-        return None;
-    };
+        .map(|w| (w.path.clone(), w.branch.clone()))?;
     if !path.is_dir() {
-        app.flash = Some(format!("worktree path missing on disk: {}", path.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "worktree path missing on disk: {}",
+            path.display()
+        )));
         return None;
     }
     Some((path, branch))
 }
 
 /// Every tracked + untracked file of a checkout, plus the configured editor
-/// command, for the finder and tree modals. Flashes and returns None when
-/// git fails or the checkout has no files.
-fn load_worktree_files(
-    app: &mut App,
-    path: &std::path::Path,
-    branch: &str,
-) -> Option<(Vec<String>, String)> {
+/// command, for the finder and tree modals. None when the checkout has no
+/// files, and, flashing why, when git fails.
+fn load_worktree_files(app: &mut App, path: &std::path::Path) -> Option<(Vec<String>, String)> {
     let files = match crate::git_diff::list_files(path) {
         Ok(files) => files,
         Err(msg) => {
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             return None;
         }
     };
     if files.is_empty() {
-        app.flash = Some(format!("no files in {branch}"));
         return None;
     }
     let editor = crate::config::Config::load().editor_command();
@@ -4862,11 +5280,10 @@ fn load_worktree_files(
 /// LIST (`git_diff::read_opening`), so a checkout with nothing uncommitted
 /// but commits of its own opens on those instead of saying "no changes".
 ///
-/// A checkout the changed-files badge already knows to be clean is told so
-/// on the spot instead of being shown a modal that closes again; the badge
-/// can be two seconds behind an agent, so git is still asked, and the
-/// modal opens after all if it disagrees — or if the branch has commits to
-/// show (`App::diff_probe`).
+/// A checkout the changed-files badge already knows to be clean opens no
+/// modal that would only close again; the badge can be two seconds behind
+/// an agent, so git is still asked, and the modal opens after all if it
+/// disagrees — or if the branch has commits to show (`App::diff_probe`).
 fn open_diff_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -4876,7 +5293,7 @@ fn open_diff_view(app: &mut App) {
         // No loop to land an answer on (unit tests): read inline.
         match crate::git_diff::read_opening(&path, &base) {
             Ok(listing) => show_diff_listing(app, path, branch, listing),
-            Err(msg) => app.flash = Some(msg),
+            Err(msg) => app.flash = Some(crate::flash::Flash::failed(msg)),
         }
         return;
     };
@@ -4885,14 +5302,10 @@ fn open_diff_view(app: &mut App) {
     let known_clean =
         matches!(&app.git_changes, Some((id, Some(0))) if Some(id) == selected.as_ref());
     if known_clean {
-        app.flash = Some(format!("no changes in {branch}"));
         app.diff_probe = Some((ticket, path.clone(), branch));
     } else {
-        let mut view = DiffView::opening(path.clone(), branch, jobs.clone(), ticket);
-        view.files_width = app.diff_files_width;
-        if app.diff_tree {
-            view.toggle_tree();
-        }
+        let mut view = DiffView::opening(path.clone(), branch, Some(jobs.clone()), ticket);
+        dress_viewer(app, &mut view, true);
         // The badge's last `git status` — two seconds old at most — is the
         // list to open on: the files are up on this keypress and the first
         // diff is being read while the `git status` below checks them, not
@@ -4915,8 +5328,8 @@ fn open_diff_view(app: &mut App) {
     });
 }
 
-/// Open the DIFF VIEWER on a listing already in hand — or say there is
-/// nothing to show.
+/// Open the DIFF VIEWER on a listing already in hand — nothing, when it
+/// has nothing to show.
 fn show_diff_listing(
     app: &mut App,
     path: std::path::PathBuf,
@@ -4924,23 +5337,20 @@ fn show_diff_listing(
     listing: crate::view_jobs::DiffListing,
 ) {
     if listing.is_empty() {
-        app.flash = Some(format!("no changes in {branch}"));
         return;
     }
     let mut view = DiffView::new(path, branch, Vec::new(), true);
     view.jobs = app.view_jobs.clone();
-    view.files_width = app.diff_files_width;
+    dress_viewer(app, &mut view, listing.commits.is_some());
+    // The tree the listing lands in is folded from it, on the first
+    // unreviewed file as the flat list is (`fill_view`).
     crate::git_diff::fill_view(&mut view, listing);
-    // After the marks: the tree opens on the first unreviewed file too.
-    if app.diff_tree && view.toggle_tree() {
-        crate::git_diff::load_selected_diff(&mut view);
-    }
     app.overlay = Some(Overlay::Diff(view));
 }
 
 /// Fuzzy file finder over every tracked + untracked file of the selected
-/// worktree (`f`). Same shell as `open_diff_view`: flash instead of opening
-/// when there's no worktree, the path is gone, or git fails.
+/// worktree (`f`). Same shell as `open_diff_view`: nothing opens with no
+/// worktree, and the footer says why when the path is gone or git fails.
 /// `Shift+H`: destinations remembered by `orion ssh`, newest first. Opens even
 /// when empty — the modal's hint is how the feature introduces itself.
 fn open_hosts_picker(app: &mut App) {
@@ -4963,7 +5373,7 @@ fn open_file_finder(app: &mut App) {
         )));
         return;
     }
-    let Some((files, editor)) = load_worktree_files(app, &path, &branch) else {
+    let Some((files, editor)) = load_worktree_files(app, &path) else {
         return;
     };
     app.overlay = Some(Overlay::Files(FileFinder::new(path, branch, editor, files)));
@@ -4985,8 +5395,8 @@ fn request_worktree_files(jobs: &crate::view_jobs::Jobs, path: &std::path::Path)
 
 /// Tree browser (`b`): full file tree of the selected worktree with a
 /// content preview, filterable by file name. Same shell as `open_diff_view`:
-/// flash instead of opening when there's no worktree, the path is gone, or
-/// git fails.
+/// nothing opens with no worktree, and the footer says why when the path is
+/// gone or git fails.
 fn open_tree_browser(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -5000,7 +5410,7 @@ fn open_tree_browser(app: &mut App) {
         )));
         return;
     }
-    let Some((files, editor)) = load_worktree_files(app, &path, &branch) else {
+    let Some((files, editor)) = load_worktree_files(app, &path) else {
         return;
     };
     app.overlay = Some(Overlay::Tree(TreeBrowser::new(path, branch, editor, files)));
@@ -5065,9 +5475,10 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         Answer::Skills { ticket, skills } => crate::skills::land(app, ticket, skills),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
-            app.flash = Some(flash);
+            app.flash = Some(crate::flash::Flash::done(flash));
         }
-        Answer::Flash(message) => app.flash = Some(message),
+        Answer::ClipboardImage(pasted) => land_clipboard_image(app, pasted),
+        Answer::Flash(message) => app.flash = Some(crate::flash::Flash::failed(message)),
         Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
             Some(Overlay::Diff(view)) => crate::git_diff::diff_slow(view, ticket),
@@ -5080,25 +5491,29 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
 }
 
 /// `git ls-files` came back for the FILE FINDER or the TREE BROWSER that
-/// opened ahead of it. A checkout with nothing to list, or one git could
-/// not list, closes the modal with the reason — what `f` and `b` used to
-/// say instead of opening.
+/// opened ahead of it. A checkout with nothing to list closes the modal;
+/// one git could not list closes it with the reason.
 fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, String>) {
-    let branch = match &app.overlay {
-        Some(Overlay::Files(finder)) if finder.listing == Some(ticket) => finder.branch.clone(),
-        Some(Overlay::Tree(view)) if view.listing == Some(ticket) => view.branch.clone(),
-        _ => return,
+    if crate::mention::land(app, ticket, &result) {
+        return;
+    }
+    let waiting = match &app.overlay {
+        Some(Overlay::Files(finder)) => finder.listing == Some(ticket),
+        Some(Overlay::Tree(view)) => view.listing == Some(ticket),
+        _ => false,
     };
+    if !waiting {
+        return;
+    }
     let files = match result {
         Ok(files) if !files.is_empty() => files,
         Ok(_) => {
             app.overlay = None;
-            app.flash = Some(format!("no files in {branch}"));
             return;
         }
         Err(msg) => {
             app.overlay = None;
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             return;
         }
     };
@@ -5110,10 +5525,10 @@ fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, S
 }
 
 /// `git status` came back for a `g`: fill the DIFF VIEWER that opened ahead
-/// of it — or close it, saying why, when there is nothing to show — or, for
-/// the checkout that was told "no changes" off the badge, open it after all
-/// when git found some, or the branch has commits to show, and nothing
-/// else has taken the screen since.
+/// of it — or close it when there is nothing to show (saying why when git
+/// failed) — or, for the checkout the badge said was clean, open it after
+/// all when git found changes, or the branch has commits to show, and
+/// nothing else has taken the screen since.
 fn land_diff_listing(
     app: &mut App,
     ticket: u64,
@@ -5130,31 +5545,49 @@ fn land_diff_listing(
                 && app.vim.is_none()
                 && app.page.is_none()
             {
-                app.flash = None;
                 show_diff_listing(app, path, branch, listing);
             }
         }
         return;
     }
-    let branch = match &app.overlay {
-        Some(Overlay::Diff(view)) if view.listing == Some(ticket) => view.branch.clone(),
-        _ => return,
-    };
+    if !matches!(&app.overlay, Some(Overlay::Diff(view)) if view.listing == Some(ticket)) {
+        return;
+    }
+    if result.is_err() && fall_back_to_github(app) {
+        return;
+    }
     match result {
         Ok(listing) if !listing.is_empty() => {
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
                 crate::git_diff::fill_view(view, listing);
+                land_pr_review_at(view);
             }
         }
-        Ok(_) => {
-            app.overlay = None;
-            app.flash = Some(format!("no changes in {branch}"));
-        }
+        Ok(_) => app.overlay = None,
         Err(msg) => {
             app.overlay = None;
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
         }
     }
+}
+
+/// A pull request read from git whose commits are not here after all: the
+/// PULL REQUESTS MODAL it was opened from goes back up — on its row, as
+/// Esc would put it — and GitHub is asked instead. False for any other
+/// viewer, whose failed listing is its own to report.
+fn fall_back_to_github(app: &mut App) -> bool {
+    let Some(Overlay::Diff(view)) = &mut app.overlay else {
+        return false;
+    };
+    let Some(review) = view.pr_review.take() else {
+        return false;
+    };
+    match view.back.take() {
+        Some(back) => crate::pr_modal::reopen(app, *back),
+        None => app.overlay = None,
+    }
+    open_github_pr_review(app, review);
+    true
 }
 
 /// Enter on a grep hit: spawn the editor at `path:line` inside the modal
@@ -5239,7 +5672,7 @@ pub(crate) fn spawn_editor_modal(
             true
         }
         Err(msg) => {
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             false
         }
     }
@@ -5256,9 +5689,9 @@ fn note_editor_fallback(app: &mut App, spawned: &str) {
     if app.editor_fallback_noted.as_deref() == Some(missing.as_str()) {
         return;
     }
-    app.flash = Some(format!(
+    app.flash = Some(crate::flash::Flash::setup(format!(
         "{missing} isn't installed — opened {spawned} instead (Settings → File editor)"
-    ));
+    )));
     app.editor_fallback_noted = Some(missing);
 }
 
@@ -5343,11 +5776,12 @@ pub(crate) fn vim_size_guess(app: &App) -> (u16, u16) {
 /// referenced line — a markdown file as its MARKDOWN PAGE.
 fn open_file_link(app: &mut App, path: &str, line: Option<u64>) {
     let Some(root) = attached_worktree_root(app) else {
-        app.flash = Some("no worktree for this session".into());
         return;
     };
     let Some(file) = resolve_file_link(&root, path) else {
-        app.flash = Some(format!("file not found: {path}"));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "file not found: {path}"
+        )));
         return;
     };
     let editor = crate::config::Config::load().editor_command();
@@ -5507,10 +5941,10 @@ fn open_editor_file_outside(app: &mut App) {
     };
     let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line);
     if app.is_remote {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::note(format!(
             "{} would open on the remote machine — the file stays here",
             crate::outside_editor::hint_name()
-        ));
+        )));
         return;
     }
     open_in_outside_app(app, &root, &file, line);
@@ -5556,7 +5990,12 @@ fn handle_page_key(app: &mut App, key: KeyEvent) {
 /// on the dialog's Enter ([`archive_agent_now`]).
 fn archive_agent(app: &mut App, id: AgentId) {
     if let Some(a) = app.tree.agents.iter().find(|a| a.id == id) {
-        app.overlay = Some(Overlay::Confirm(confirm_archive_agent(&a.name, id)));
+        let undo = crate::hints::key_or(
+            &app.keymap,
+            crate::keymap::Action::Unarchive,
+            "Unarchive in its menu",
+        );
+        app.overlay = Some(Overlay::Confirm(confirm_archive_agent(&a.name, id, &undo)));
     }
 }
 
@@ -5568,11 +6007,11 @@ fn archive_agent_now(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
 }
 
 /// The confirm before an agent is archived. The message says why saying
-/// yes is cheap: `u` undoes it.
-fn confirm_archive_agent(name: &str, id: AgentId) -> ConfirmDialog {
+/// yes is cheap: `undo`, the unarchive key, brings it back.
+fn confirm_archive_agent(name: &str, id: AgentId, undo: &str) -> ConfirmDialog {
     ConfirmDialog {
         title: "Archive agent".into(),
-        message: format!("Archive agent '{name}'? It leaves the list; u brings it back."),
+        message: format!("Archive agent '{name}'? It leaves the list; {undo} brings it back."),
         action: PendingAction::ArchiveAgent(id),
         area: ratatui::layout::Rect::default(),
     }
@@ -5669,7 +6108,6 @@ fn follow_checkout(app: &mut App, id: Option<&WorktreeId>) {
 /// attaches it, so one keypress lands in a ready shell.
 fn create_terminal_for_context(app: &mut App, out: &mut Vec<ClientRequest>) {
     let Some(worktree) = worktree_in_context(app) else {
-        app.flash = Some(SELECT_CONTEXT_FIRST.into());
         return;
     };
     create_terminal(app, worktree, out);
@@ -5678,7 +6116,6 @@ fn create_terminal_for_context(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// Ask the daemon for a shell terminal in `worktree`; the Ack attaches it.
 fn create_terminal(app: &mut App, worktree: WorktreeId, out: &mut Vec<ClientRequest>) {
     if app.is_placeholder_worktree(&worktree) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     }
     worked_in(app, &worktree);
@@ -5742,6 +6179,39 @@ fn open_delete_confirm(app: &mut App) {
     }
 }
 
+/// Whether `key` is a ⌘ chord bound to **Close agent or terminal** — the
+/// one the modal guard in [`handle_key`] swallows. Only a ⌘ chord: one
+/// rebound onto a bare key keeps that key a modal's own.
+fn closes_pane(app: &App, key: &KeyEvent) -> bool {
+    let chord = crate::keymap::KeyChord::from_event(key);
+    chord.mods.contains(KeyModifiers::SUPER)
+        && app.keymap.lookup(crate::keymap::Scope::Global, &chord)
+            == Some(crate::keymap::Action::ClosePane)
+}
+
+/// `⌘W`: close the agent or terminal the PANE shows — from its card, the
+/// pane holding the keys, or typing inside it (the lock, and full screen,
+/// are left on the way: `handle_key`'s ⌘ chord path). The confirm is the
+/// very one `Backspace` asks on the card, the worktree question folded in
+/// on a linked worktree's last card. Only a session: an EMPTY BAND, a
+/// link row or a pane reading a pull request closes nothing.
+fn close_pane(app: &mut App) {
+    let on_cards = matches!(app.focus, Focus::Sessions | Focus::Terminal);
+    let aimed = !(app.launcher_grid() && app.launcher_unaimed);
+    let row = (on_cards && aimed && launcher::empty_band(app).is_none())
+        .then(|| app.selected_session_row())
+        .flatten();
+    match row {
+        Some(SessionRow::Agent(a)) => {
+            app.overlay = Some(Overlay::Confirm(confirm_delete_agent_in(app, &a)));
+        }
+        Some(SessionRow::Terminal(t)) => {
+            app.overlay = Some(Overlay::Confirm(confirm_close_terminal_in(app, &t)));
+        }
+        _ => {}
+    }
+}
+
 /// The confirm before an agent is deleted — from the `d` key and the row
 /// menu alike, so the two never drift apart in wording.
 fn confirm_delete_agent(name: &str, id: AgentId) -> ConfirmDialog {
@@ -5777,6 +6247,24 @@ fn confirm_quit() -> ConfirmDialog {
     }
 }
 
+/// The confirm before **Restart orion** (`⌘⇧R`, HOME's key): the TUI
+/// quits, the DAEMON is stopped with every session in it, and the binary
+/// starts again from scratch (`crate::restart`). The message says what is
+/// lost — a running turn, a terminal's shell — and what is not.
+fn confirm_restart() -> ConfirmDialog {
+    ConfirmDialog {
+        title: "Restart orion".into(),
+        // Sized to the longest line, never wrapped: keep each under 52.
+        message: "Stop the daemon and every session in it,\n\
+                  then start orion again from scratch?\n\
+                  Agents pick their conversation back up;\n\
+                  terminals start a new shell."
+            .into(),
+        action: PendingAction::Restart,
+        area: ratatui::layout::Rect::default(),
+    }
+}
+
 /// The confirm before a project is dropped from the list (key and menu).
 pub(super) fn confirm_remove_project(name: &str, id: ProjectId) -> ConfirmDialog {
     ConfirmDialog {
@@ -5790,9 +6278,8 @@ pub(super) fn confirm_remove_project(name: &str, id: ProjectId) -> ConfirmDialog
 /// Edit the URL behind a link row. The detected pull request has no stored
 /// row to rewrite — it comes back from git on every lookup.
 fn edit_link(app: &mut App, row: &LinkRow) {
-    match row.id() {
-        Some(id) => open_prompt(app, PromptKind::EditLink { id: id.clone() }),
-        None => app.flash = Some("the pull request comes from git and can't be edited".into()),
+    if let Some(id) = row.id() {
+        open_prompt(app, PromptKind::EditLink { id: id.clone() });
     }
 }
 
@@ -5801,7 +6288,6 @@ fn edit_link(app: &mut App, row: &LinkRow) {
 /// lookup.
 fn delete_link(app: &mut App, row: &LinkRow) {
     let Some(id) = row.id() else {
-        app.flash = Some("the pull request link can't be deleted — it comes from git".into());
         return;
     };
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
@@ -5847,7 +6333,6 @@ fn open_delete_all_confirm(app: &mut App) {
                 .filter(|w| !w.is_main)
                 .collect();
             if doomed.is_empty() {
-                app.flash = Some("no deletable worktrees (the main checkout stays)".into());
                 return;
             }
             let killed = app
@@ -5878,18 +6363,13 @@ fn open_delete_all_confirm(app: &mut App) {
         Focus::Sessions => {
             // What the panel shows is what dies — terminals too, archived
             // rows only when the archived toggle has them visible.
-            let doomed = app.visible_session_rows();
-            if doomed.is_empty() {
-                app.flash = Some("no sessions to delete".into());
-                return;
-            }
             // Links are bookmarks, not sessions: `D` never touches them.
-            let doomed: Vec<SessionRow> = doomed
+            let doomed: Vec<SessionRow> = app
+                .visible_session_rows()
                 .into_iter()
                 .filter(|r| r.as_link().is_none())
                 .collect();
             if doomed.is_empty() {
-                app.flash = Some("no sessions to delete".into());
                 return;
             }
             let names: Vec<String> = doomed.iter().map(|r| r.name().to_string()).collect();
@@ -6098,9 +6578,8 @@ pub(super) fn open_menu(app: &mut App, items: Vec<MenuItem>, at: (u16, u16)) {
 /// CONTEXT MENU's "New terminal" already cover it.
 fn open_new_agent_picker(app: &mut App, worktree: WorktreeId) {
     // A stand-in checkout is not a place the DAEMON knows yet; better to
-    // say so here than after a kind and a model were picked.
+    // refuse here than after a kind and a model were picked.
     if app.is_placeholder_worktree(&worktree) {
-        app.flash = Some(WORKTREE_STILL_CREATING.into());
         return;
     }
     // Only the AGENT KINDS still enabled in the SETTINGS OVERLAY's Agents
@@ -6116,7 +6595,7 @@ fn selected_project_main_worktree(app: &App) -> Option<WorktreeId> {
     app.root_worktree(&project.id)
 }
 
-/// `n` on a PROJECT OPEN PRS GROUP row: the NEW SESSION PICKER's harness
+/// `n` on a PROJECT OPEN PRS GROUP row: the NEW AGENT PICKER's harness
 /// rows, every one carrying the PR's URL and — through the same MODEL /
 /// EFFORT submenus, and as directly on Enter — launching a PR SESSION.
 pub(super) fn open_pr_agent_picker(app: &mut App) {
@@ -6124,7 +6603,6 @@ pub(super) fn open_pr_agent_picker(app: &mut App) {
         return;
     };
     let Some(worktree) = selected_project_main_worktree(app) else {
-        app.flash = Some("the project has no ROOT WORKTREE for this PR session".into());
         return;
     };
     agent_picker::open_kind_picker(app, KindPicker::pr_session(worktree, &pr));
@@ -6202,7 +6680,10 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
         ),
     };
     let configured = configured.unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into());
-    let catalog = cfg.effective_harness(*kind, custom.as_deref()).model.catalog;
+    let catalog = cfg
+        .effective_harness(*kind, custom.as_deref())
+        .model
+        .catalog;
     let items: Vec<MenuItem> = choices
         .iter()
         .map(|choice| {
@@ -6402,8 +6883,11 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
 fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientRequest>) -> bool {
     match *target {
         HitTarget::LauncherCard(at) => launcher::select_card_row(app, at, out),
-        HitTarget::LauncherBand(i) | HitTarget::LauncherBandMore(i) => {
-            launcher::select_band_row(app, i, out)
+        HitTarget::LauncherBand(i)
+        | HitTarget::LauncherBandMore(i)
+        | HitTarget::LauncherDrawer(i) => launcher::select_band_row(app, i, out),
+        HitTarget::LauncherDrawerEntry(band, entry) => {
+            launcher::select_drawer_entry(app, band, entry, out)
         }
         HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
         HitTarget::LauncherCardIssue(ref id) => launcher::select_issue_card(app, id, out),
@@ -6440,6 +6924,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
     }
     if matches!(&app.overlay, Some(Overlay::FileTabs(_))) {
         crate::file_tabs::handle_key(app, key);
+        return;
+    }
+    // A box's FILE MENTION list, while it is up, has first refusal on the
+    // keys that walk it and write a path in.
+    if crate::mention::handle_key(app, &key) {
         return;
     }
     // The chord that dropped the PROJECT DROPDOWN (`⌘P`) puts it away
@@ -6564,10 +7053,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     && c != ' '
                     && !key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                let query = format!("{}{c}", menu.filter_query());
-                if !menu.type_filter(c) {
-                    app.flash = Some(format!("no row matches '{query}'"));
-                }
+                menu.type_filter(c);
             }
             _ if ui::menu_keys::WIDEN.matches(&key) && menu.filter.is_some() => menu.pop_filter(),
             // Esc never lands here: `closes_on_esc` closes the menu from any
@@ -6589,7 +7075,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     *menu = *parent;
                 }
             }
-            // The NEW SESSION PICKER's Claude row — and the QUICK PROMPT
+            // The NEW AGENT PICKER's Claude row — and the QUICK PROMPT
             // `Tab` picker's, for a box that can go to the cloud — owns
             // Tab as a launch-mode toggle, and so do the rows of the
             // Claude MODEL / EFFORT lists behind it (`→`, or the box's
@@ -6619,6 +7105,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     PromptKind::SettingText { .. }
                         | PromptKind::ClaudeSignIn { .. }
                         | PromptKind::AddClaudeAccount
+                        | PromptKind::RenameClaudeAccount { .. }
+                        | PromptKind::AdoptClaudeDir { .. }
                 );
                 // The comment box stood in for the ISSUES MODAL: Esc puts
                 // the modal back on its row, the comment unposted.
@@ -6681,6 +7169,13 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 app.overlay = None;
                 submit_prompt(app, prompt, out);
             }
+            // `^V` in a box bound for an agent on this machine: the
+            // image on the system clipboard, kept where the agent can open
+            // it, its path at the caret (`clipboard_image`). Every other
+            // prompt leaves `^V` to nothing, as the line editor does.
+            _ if ui::task_keys::IMAGE.matches(&key) && prompt.kind.reaches_local_agent() => {
+                paste_clipboard_image(app)
+            }
             // `⌘P` / `^P`: the PROJECT PICKER over the box. The checkout,
             // the model and the effort keys are the keymap's (Select
             // worktree, Select model, Cycle effort): `handle_key` takes
@@ -6692,16 +7187,22 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     launcher::open_box_field(app, crate::launcher::BoxField::Project, back);
                 }
             }
-            // Tab / Shift+Tab retarget this one launch: the harness (and
-            // its MODEL / EFFORT submenus) or a saved AGENT PRESET. Both
-            // are free here — `TextInput` ignores them — and both come back
-            // with the text. Only the QUICK PROMPT has anything to retarget.
+            // Tab retargets this one launch — the harness, and its MODEL /
+            // EFFORT submenus — and ⇧Tab steps its mode, as it does in
+            // Claude Code and Cursor; ⌘U / ^X picks a saved AGENT PRESET.
+            // All are free here — `TextInput` ignores them — and all keep
+            // the text. Only the QUICK PROMPT has anything to retarget.
             _ if ui::task_keys::AGENT.matches(&key)
                 && matches!(prompt.kind, PromptKind::QuickPrompt(_)) =>
             {
                 if let Some(back) = quick_return_of(prompt) {
                     crate::quick_prompt::open_launch_picker(app, back);
                 }
+            }
+            _ if ui::task_keys::MODE.matches(&key)
+                && matches!(prompt.kind, PromptKind::QuickPrompt(_)) =>
+            {
+                cycle_mode(app)
             }
             _ if ui::task_keys::PRESET.matches(&key)
                 && matches!(prompt.kind, PromptKind::QuickPrompt(_)) =>
@@ -6754,6 +7255,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 let edit = prompt.input.handle_key(&key);
                 if edit.changed() {
                     prompt.refresh_dirs();
+                    // A QUICK PROMPT's text is the SAVED DRAFT as typed.
+                    crate::saved_draft::note_edit(app);
                 } else if !edit.consumed() && prompt.is_multiline() {
                     match key.code {
                         KeyCode::Up => prompt.input.cursor_to_start(),
@@ -6879,11 +7382,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 // Ctrl+t flips the file list between flat paths and the
                 // directory tree (`diff_tree`), the cursor staying on its
-                // file; remembered for the next open, like the list's width.
-                _ if TREE.matches(&key) => {
-                    activate::diff_tree_toggled(view);
-                    app.diff_tree = view.tree.is_some();
-                }
+                // file — this viewer's alone: the **Files as a tree**
+                // SETTING is how the next one opens.
+                _ if TREE.matches(&key) => activate::diff_tree_toggled(view),
                 // The COMMIT LIST's own: tick, all or none, and how the
                 // ticked are read — ^G from anywhere, the rest where its
                 // cursor is.
@@ -7152,15 +7653,16 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let tabs = crate::config::tab_count();
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    // A CLAUDE ACCOUNTS row's own verbs: `o` signs it out, `⌫` removes it.
-    let account = || {
-        !on_tabs
-            && tab == crate::config::agents_tab()
-            && matches!(
-                crate::config::Config::load().account_row(selected),
-                Some(crate::config::AccountRow::Account(_))
-            )
+    // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
+    // out, `⌫` removes it — and `⌫` on a dir SAVED ON THIS MACHINE moves
+    // it to the Trash.
+    let account_row = || {
+        (!on_tabs && tab == crate::config::agents_tab())
+            .then(|| crate::config::Config::load().account_row(selected))
+            .flatten()
     };
+    let account = || matches!(account_row(), Some(crate::config::AccountRow::Account(_)));
+    let on_disk = || matches!(account_row(), Some(crate::config::AccountRow::OnDisk(_)));
 
     use crate::ui::settings_keys as keys;
     let cmd = match key.code {
@@ -7193,8 +7695,11 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => SettingsCmd::Move(selected - 1),
         _ if keys::CHOOSE.matches(&key) => activate::settings_row_cmd(hotkeys, selected),
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
+        _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
-        _ if keys::REMOVE.matches(&key) && account() => SettingsCmd::RemoveAccount(selected),
+        _ if keys::REMOVE.matches(&key) && (account() || on_disk()) => {
+            SettingsCmd::RemoveAccount(selected)
+        }
         _ if keys::ADD.matches(&key) && hotkeys => SettingsCmd::Capture { add: true },
         _ if keys::DEFAULT.matches(&key) && hotkeys => SettingsCmd::ResetHotkey,
         _ if keys::UNBIND.matches(&key) && hotkeys => SettingsCmd::ClearHotkey,
@@ -7253,6 +7758,14 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
         }
         SettingsCmd::Apply(i, delta) => apply_setting_at(app, tab, i, delta),
         SettingsCmd::Install(i) => ask_install(app, tab, i),
+        SettingsCmd::RenameAccount(i) => {
+            if let Some(crate::config::AccountRow::Account(id)) =
+                crate::config::Config::load().account_row(i)
+            {
+                app.remember_settings_row(tab, i);
+                open_prompt(app, PromptKind::RenameClaudeAccount { id });
+            }
+        }
         SettingsCmd::SignOut(i) => confirm_sign_out(app, i),
         SettingsCmd::RemoveAccount(i) => confirm_remove_account(app, i),
         SettingsCmd::Capture { add } => {
@@ -7345,11 +7858,15 @@ enum SettingsCmd {
     Apply(usize, i32),
     /// `i` on a row whose program isn't on PATH.
     Install(usize),
+    /// `r` on a CLAUDE ACCOUNTS row.
+    RenameAccount(usize),
     /// `o` on a CLAUDE ACCOUNTS row.
     SignOut(usize),
-    /// `⌫` on a CLAUDE ACCOUNTS row.
+    /// `⌫` on a CLAUDE ACCOUNTS row, or on a dir SAVED ON THIS MACHINE.
     RemoveAccount(usize),
-    Capture { add: bool },
+    Capture {
+        add: bool,
+    },
     ResetHotkey,
     ClearHotkey,
     Nudge,
@@ -7476,7 +7993,7 @@ fn edit_keymap(app: &mut App, edit: impl FnOnce(&mut crate::keymap::Keymap)) -> 
 
 /// REMEMBER HARNESS (Settings → Experimental): make a launch's harness —
 /// and a model or effort picked for it — the defaults the next NEW
-/// SESSION PICKER and QUICK PROMPT start from
+/// AGENT PICKER and QUICK PROMPT start from
 /// (`Config::remember_launch`). Nothing is written while the switch is
 /// off or the pick already is the default; a failed write flashes.
 fn remember_launch(
@@ -7497,7 +8014,9 @@ fn save_config(app: &mut App, cfg: &crate::config::Config) -> bool {
     match cfg.save() {
         Ok(()) => true,
         Err(err) => {
-            app.flash = Some(format!("couldn't save settings: {err}"));
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't save settings: {err}"
+            )));
             false
         }
     }
@@ -7507,7 +8026,8 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
-    // the new one's name.
+    // the new one's name, and a dir SAVED ON THIS MACHINE for the name to
+    // add it back under.
     if tab == crate::config::agents_tab() {
         use crate::config::AccountRow;
         match (crate::config::Config::load().account_row(index), delta) {
@@ -7518,6 +8038,16 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             (Some(AccountRow::Add), _) => {
                 if let Some(view) = settings_mut(app) {
                     view.info("Enter: name a new account");
+                }
+                return;
+            }
+            (Some(AccountRow::OnDisk(dir)), 0) => {
+                app.remember_settings_row(tab, index);
+                return open_prompt(app, PromptKind::AdoptClaudeDir { dir });
+            }
+            (Some(AccountRow::OnDisk(_)), _) => {
+                if let Some(view) = settings_mut(app) {
+                    view.info("Enter: add it back · ⌫: move it to the Trash");
                 }
                 return;
             }
@@ -7583,6 +8113,13 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         return;
     }
     apply_config(app, &cfg);
+    // Stepping a sound row plays the sound it landed on, so the choice is
+    // made by ear; `off` stays silent.
+    app.pending_sound_preview = match crate::config::setting_at(tab, index).map(|spec| spec.kind) {
+        Some(crate::config::SettingKind::DoneSound) => cfg.done_sound(),
+        Some(crate::config::SettingKind::FeedbackSound) => cfg.feedback_sound(),
+        _ => None,
+    };
     let ghostty_row = crate::config::setting_at(tab, index).is_some_and(|spec| {
         matches!(
             spec.kind,
@@ -7594,7 +8131,7 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         if let (Some(note), Some(view)) =
             (crate::ghostty_config::ensure_for(&cfg), settings_mut(app))
         {
-            view.info(note);
+            view.info(note.text);
         }
         crate::keymap::set_ghostty_unbound(
             cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
@@ -7616,6 +8153,9 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.launcher_pane_at = cfg.pane_side();
     app.launcher_list = cfg.list_layout();
     app.launcher_all_open = cfg.expand_all_worktrees;
+    app.diff_tree = cfg.diff_tree_view;
+    app.diff_start = cfg.diff_start();
+    app.diff_one_at_a_time = cfg.diff_one_at_a_time();
     set_hide_draft_prs(app, cfg.hide_draft_prs);
 }
 
@@ -7639,7 +8179,11 @@ fn reset_settings(app: &mut App) {
                 view.info("every setting is back to its default");
             }
         }
-        Err(err) => app.flash = Some(format!("couldn't reset settings: {err}")),
+        Err(err) => {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't reset settings: {err}"
+            )))
+        }
     }
 }
 
@@ -7700,13 +8244,17 @@ fn confirm_sign_out(app: &mut App, index: usize) {
 
 /// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
 /// config.json, behind a confirm asking whether its config dir goes to
-/// the Trash too — kept unless `t` says so. The default account and a
-/// hand-written `harnesses` entry are not orion's to remove: the notice
-/// says what to do instead.
+/// the Trash too — kept unless `t` says so, and listed under SAVED ON
+/// THIS MACHINE once kept. The default account and a hand-written
+/// `harnesses` entry are not orion's to remove: the notice says what to
+/// do instead. On a dir SAVED ON THIS MACHINE, the Trash, behind its own
+/// confirm.
 fn confirm_remove_account(app: &mut App, index: usize) {
     let cfg = crate::config::Config::load();
-    let Some(crate::config::AccountRow::Account(id)) = cfg.account_row(index) else {
-        return;
+    let id = match cfg.account_row(index) {
+        Some(crate::config::AccountRow::Account(id)) => id,
+        Some(crate::config::AccountRow::OnDisk(dir)) => return confirm_trash_dir(app, index, dir),
+        _ => return,
     };
     if !cfg.is_extra_account(&id) {
         let why = if AgentKind::parse(&id) == Some(AgentKind::Claude) {
@@ -7726,8 +8274,9 @@ fn confirm_remove_account(app: &mut App, index: usize) {
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Remove account".into(),
         message: format!(
-            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. {dir} — its \
-             login,\nsettings and transcripts — stays on disk unless it goes to the Trash.",
+            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. \
+             {dir} — its login,\nsettings and transcripts — stays on disk, listed under Saved \
+             on this machine\nto add back or trash later, unless it goes to the Trash now.",
             entry.display_label()
         ),
         action: PendingAction::RemoveClaudeAccount { id },
@@ -7755,13 +8304,29 @@ fn ask_to_share(app: &mut App, name: &str) {
     }
     let from = crate::claude_accounts::default_dir(&cfg)
         .map_or_else(|| "~/.claude".into(), |d| crate::claude_accounts::tilde(&d));
+    let shown = crate::claude_accounts::tilde(&new.dir);
+    // A dir already there is adopted, login and all: say so before it is.
+    let own = if new.dir.is_dir() {
+        let who = match crate::claude_accounts::dir_state(&new.dir) {
+            Some(crate::claude_accounts::SignIn::As(email)) => format!(", signed in as {email}"),
+            _ => String::new(),
+        };
+        format!(
+            "{shown} is already on this machine{who}: its login, history and transcripts \
+             come with it."
+        )
+    } else {
+        "Its login, history and transcripts stay its own.".to_string()
+    };
+    let named = match new.name.as_str() {
+        "" => new.id.clone(),
+        name => format!("{name} ({})", new.id),
+    };
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Add a Claude account".into(),
         message: format!(
-            "Add {} in {}, and share {from}'s setup with it?\nLinked, so an edit in either \
-             account is an edit in both: {}.\nIts login, history and transcripts stay its own.",
-            new.id,
-            crate::claude_accounts::tilde(&new.dir),
+            "Add {named} in {shown}, and share {from}'s setup with it?\nLinked, so an edit in \
+             either account is an edit in both: {}.\n{own}",
             shared.join(", ")
         ),
         action: PendingAction::AddClaudeAccount(new),
@@ -7775,12 +8340,7 @@ fn add_claude_account(app: &mut App, new: crate::claude_accounts::NewAccount, sh
     let result = crate::claude_accounts::add(&new, share);
     open_claude_accounts(app, Some(&new.id));
     crate::claude_accounts::request_refresh(app, true);
-    if let Some(view) = settings_mut(app) {
-        match result {
-            Ok(note) => view.info(note),
-            Err(why) => view.warn(why),
-        }
-    }
+    settings_note(app, result);
 }
 
 /// Remove account `id` — its config dir to the Trash when `trash` says
@@ -7789,12 +8349,73 @@ fn remove_claude_account(app: &mut App, id: &str, trash: bool) {
     let result = crate::claude_accounts::remove(id, trash);
     open_claude_accounts(app, None);
     crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
+}
+
+/// The answer of an account verb in the overlay's notice: what happened,
+/// or why nothing did.
+fn settings_note(app: &mut App, result: Result<String, String>) {
     if let Some(view) = settings_mut(app) {
         match result {
             Ok(note) => view.info(note),
             Err(why) => view.warn(why),
         }
     }
+}
+
+/// `r`'s name typed: give account `id` it — only the name; its id and dir
+/// stay — and land back on its row, the cards renamed at the next read.
+fn rename_claude_account(app: &mut App, id: &str, name: &str) {
+    let result = crate::claude_accounts::rename(id, name);
+    open_claude_accounts(app, Some(id));
+    crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
+}
+
+/// Enter's name typed on a dir SAVED ON THIS MACHINE: add it back as an
+/// account, dir and login as they are — no setup shared into it, which it
+/// has its own of — and land on its row.
+fn adopt_claude_dir(app: &mut App, dir: &std::path::Path, name: &str) {
+    let cfg = crate::config::Config::load();
+    let new = match crate::claude_accounts::plan_adopt(&cfg, dir, name) {
+        Ok(new) => new,
+        Err(why) => {
+            reopen_settings(app);
+            return settings_note(app, Err(why));
+        }
+    };
+    let result = crate::claude_accounts::add(&new, false);
+    open_claude_accounts(app, Some(&new.id));
+    crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
+}
+
+/// `⌫` on a dir SAVED ON THIS MACHINE: move it to the Trash, behind a
+/// confirm that says what goes with it.
+fn confirm_trash_dir(app: &mut App, index: usize, dir: std::path::PathBuf) {
+    let shown = crate::claude_accounts::tilde(&dir);
+    let who = match crate::claude_accounts::dir_state(&dir) {
+        Some(crate::claude_accounts::SignIn::As(email)) => format!("its login as {email}"),
+        _ => "its login".to_string(),
+    };
+    app.remember_settings_row(crate::config::agents_tab(), index);
+    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
+        title: "Move to the Trash".into(),
+        message: format!(
+            "Move {shown} to the Trash?\nNo account runs in it; {who}, its settings and its \
+             transcripts\ngo with it. The Trash can still put it back."
+        ),
+        action: PendingAction::TrashClaudeDir { dir },
+        area: ratatui::layout::Rect::default(),
+    }));
+}
+
+/// Move `dir` to the Trash and land back on the section.
+fn trash_claude_dir(app: &mut App, dir: &std::path::Path) {
+    let result = crate::claude_accounts::trash_dir(dir);
+    open_claude_accounts(app, None);
+    crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
 }
 
 /// Swap a session picker for the settings overlay parked on that
@@ -7897,11 +8518,6 @@ fn toggle_hide_draft_prs(app: &mut App, out: &mut Vec<ClientRequest>) {
         restore_session(app, out);
         fire_pending_attach(app, out);
     }
-    app.flash = Some(if cfg.hide_draft_prs {
-        "draft pull requests hidden (Settings → Appearance)".into()
-    } else {
-        "draft pull requests shown".into()
-    });
 }
 
 /// Open `kind`'s prompt and send it straight on, empty — Enter on the box
@@ -7946,6 +8562,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             PromptKind::IssueComment { .. } => (None, "comment"),
             // And an empty follow-up: the turn is simply not sent.
             PromptKind::FollowUp { .. } => (None, "follow-up"),
+            // A typed setting over several lines (the Linear task
+            // template): empty is its default, as on every typed row.
+            PromptKind::SettingText { .. } => (None, "text"),
             _ => (Some("Claude Cloud needs a task"), "Claude Cloud task"),
         };
         let error = if let Some(needs) = needs.filter(|_| value.is_empty()) {
@@ -7977,7 +8596,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             None
         };
         if let Some(error) = error {
-            app.flash = Some(error);
+            app.flash = Some(crate::flash::Flash::failed(error));
             app.overlay = Some(Overlay::Prompt(prompt));
             return;
         }
@@ -7997,6 +8616,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         | PromptKind::SettingText { .. }
         | PromptKind::ClaudeSignIn { .. }
         | PromptKind::AddClaudeAccount
+        | PromptKind::RenameClaudeAccount { .. }
+        | PromptKind::AdoptClaudeDir { .. }
         | PromptKind::AgentPresetTask { .. } => true,
         PromptKind::QuickPrompt(launch) => launch.launches_empty(),
         _ => false,
@@ -8017,8 +8638,11 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             PromptKind::NewSkill { view } => crate::skills::reopen(app, (**view).clone()),
             _ => {}
         }
-        app.flash = Some("cancelled: empty input".into());
         return;
+    }
+    // A QUICK PROMPT sending the SAVED DRAFT spends it.
+    if matches!(prompt.kind, PromptKind::QuickPrompt(_)) {
+        crate::saved_draft::launched(app, prompt.input.as_str());
     }
     match prompt.kind {
         PromptKind::AddProject => open_folder(app, shellexpand_home(&value), out),
@@ -8189,6 +8813,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             crate::claude_accounts::sign_in(app, &id, Some(&value));
         }
         PromptKind::AddClaudeAccount => ask_to_share(app, &value),
+        PromptKind::RenameClaudeAccount { id } => rename_claude_account(app, &id, &value),
+        PromptKind::AdoptClaudeDir { dir } => adopt_claude_dir(app, &dir, &value),
     }
 }
 
@@ -8258,10 +8884,11 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
         } => {
             let mut presets = crate::agent_presets::load();
             if index < presets.len() {
-                let removed = presets.remove(index);
-                match crate::agent_presets::save(&presets) {
-                    Ok(()) => app.flash = Some(format!("deleted preset '{}'", removed.name)),
-                    Err(err) => app.flash = Some(format!("could not save agent presets: {err}")),
+                presets.remove(index);
+                if let Err(err) = crate::agent_presets::save(&presets) {
+                    app.flash = Some(crate::flash::Flash::failed(format!(
+                        "could not save agent presets: {err}"
+                    )));
                 }
             }
             crate::preset_overlays::reopen_presets_list(
@@ -8271,7 +8898,9 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                 index,
             );
         }
-        PendingAction::TrashSkill { view, dir, name } => crate::skills::trash(app, *view, dir, name),
+        PendingAction::TrashSkill { view, dir, name } => {
+            crate::skills::trash(app, *view, dir, name)
+        }
         PendingAction::ResetSettings => reset_settings(app),
         PendingAction::AddClaudeAccount(new) => add_claude_account(app, new, true),
         PendingAction::SignOutClaude { id } => {
@@ -8281,7 +8910,12 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             crate::claude_accounts::sign_out(app, &id);
         }
         PendingAction::RemoveClaudeAccount { id } => remove_claude_account(app, &id, false),
+        PendingAction::TrashClaudeDir { dir } => trash_claude_dir(app, &dir),
         PendingAction::Quit => app.should_quit = true,
+        PendingAction::Restart => {
+            app.restart = true;
+            app.should_quit = true;
+        }
     }
 }
 
@@ -8437,7 +9071,9 @@ fn ask_to_force_delete(app: &mut App, id: WorktreeId, files: usize) {
     if !ids.contains(&id) {
         ids.push(id);
     }
-    app.overlay = Some(Overlay::Confirm(confirm_force_delete_worktrees(app, ids, files)));
+    app.overlay = Some(Overlay::Confirm(confirm_force_delete_worktrees(
+        app, ids, files,
+    )));
 }
 
 /// The dialog [`ask_to_force_delete`] puts up. `files` is the newest
@@ -8481,8 +9117,8 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::SendCloudMessage(id) => open_prompt(app, PromptKind::CloudMessage { id }),
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
-        MenuAction::ContinueOn { id, harness, label } => {
-            launcher::continue_on_harness(app, id, harness, label, out)
+        MenuAction::ContinueOn { id, harness } => {
+            launcher::continue_on_harness(app, id, harness, out)
         }
         MenuAction::RenameAgent(id) => open_prompt(app, PromptKind::RenameAgent { id }),
         MenuAction::ArchiveAgent(id) => archive_agent(app, id),
@@ -8542,11 +9178,12 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                     // The Claude row's `Tab` toggle rides the pick: the box
                     // comes back a CLAUDE CLOUD one, where it can be one.
                     .with_cloud(cloud)
+                    .with_mode(back.launch.mode, &crate::config::Config::load())
                     .with_under(back.launch.under.clone());
                 if back.from_box {
                     crate::quick_prompt::reopen(app, launch, &back.text);
                 } else {
-                    // No box was up (`n`'s NEW SESSION PICKER): the pick
+                    // No box was up (`n`'s NEW AGENT PICKER): the pick
                     // OPENS one, on the spec just chosen.
                     crate::quick_prompt::open_picked_box(app, launch);
                 }
@@ -8694,8 +9331,7 @@ fn detach_if_attached(app: &mut App, sref: &SessionRef, out: &mut Vec<ClientRequ
     if showing {
         app.pending_attach = None;
         app.term = None;
-        // The row went away under the pane — not a key anyone pressed, so
-        // it says that the keys are the grid's now.
+        // The row went away under the pane: the keys are the grid's now.
         app.release_terminal();
         if app.focus == Focus::Terminal {
             app.focus = Focus::Sessions;
@@ -8983,7 +9619,6 @@ fn jump_to_target_inner(
                 .is_some_and(|pid| select_project_row_by_id(app, &pid));
             let index = found.then(|| app.worktree_row_of(&id)).flatten();
             let Some(index) = index else {
-                app.flash = Some("worktree no longer exists".into());
                 return;
             };
             app.sel_worktree = index;
@@ -9012,7 +9647,6 @@ fn jump_to_target_inner(
                 .then(|| worktree.as_ref().and_then(|wid| app.worktree_row_of(wid)))
                 .flatten();
             let Some(wt_index) = wt_index else {
-                app.flash = Some(SESSION_GONE.into());
                 return;
             };
             app.sel_worktree = wt_index;
@@ -9025,7 +9659,6 @@ fn jump_to_target_inner(
                 // its worktree instead of attaching.
                 restore_session(app, out);
                 app.focus = Focus::Sessions;
-                app.flash = Some(SESSION_GONE.into());
                 return;
             };
             app.sel_session = index;
@@ -9054,7 +9687,6 @@ fn jump_to_target_inner(
                 .map(|p| p.id != project)
                 .unwrap_or(true);
             if !select_project_row_by_id(app, &project) {
-                app.flash = Some("project no longer exists".into());
                 return;
             }
             if changed {
@@ -9065,7 +9697,6 @@ fn jump_to_target_inner(
                 app.dirty = true;
             }
             let Some(row) = app.open_pr_row_of(&url) else {
-                app.flash = Some(PR_GONE.into());
                 return;
             };
             // Re-picking the row the cursor is already on keeps the
@@ -9112,7 +9743,6 @@ fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
         .then(|| worktree.as_ref().and_then(|wid| app.worktree_row_of(wid)))
         .flatten();
     let Some(wt_index) = wt_index else {
-        app.flash = Some(SESSION_GONE.into());
         return;
     };
     app.sel_worktree = wt_index;
@@ -9123,7 +9753,6 @@ fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
     else {
         restore_session(app, out);
         app.focus = Focus::Sessions;
-        app.flash = Some(SESSION_GONE.into());
         return;
     };
     app.sel_session = index;
@@ -9192,9 +9821,20 @@ fn session_needs_feedback(app: &App, id: &AgentId) -> bool {
 /// starts at the top and `,` at the bottom, so the two stay each other's
 /// reverse.
 fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<ClientRequest>) {
-    let ring = crate::palette::attention_sessions(&app.tree);
+    let current = crate::palette::attention_sessions(&app.tree);
+    // A walk in progress keeps the ring it started on (`App::attention_walk`)
+    // while the cursor is where it last landed and nothing joined or left.
+    let ring = match app.attention_walk.take() {
+        Some((landed, ring))
+            if app.selected_session().is_some_and(|a| a.id == landed)
+                && ring.len() == current.len()
+                && current.iter().all(|id| ring.contains(id)) =>
+        {
+            ring
+        }
+        _ => current,
+    };
     if ring.is_empty() {
-        app.flash = Some(NO_SESSIONS_TO_JUMP.into());
         return;
     }
     let len = ring.len() as i64;
@@ -9206,9 +9846,11 @@ fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<Client
         None if step > 0 => 0,
         None => len - 1,
     };
-    let target = PaletteTarget::Session(ring[next as usize].clone());
+    let landed = ring[next as usize].clone();
+    let target = PaletteTarget::Session(landed.clone());
     let landing = Landing::for_enter_on(app, &target, attaches);
     jump_to_target(app, target, landing, out);
+    app.attention_walk = Some((landed, ring));
 }
 
 fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
@@ -9394,17 +10036,16 @@ fn leave_terminal_lock(app: &mut App) {
     app.focus = Focus::Sessions;
 }
 
-/// Open a saved link in the browser, reporting either way — the browser
-/// comes up in front of the terminal, so a silent failure would read as
-/// "orion did nothing". A pull request is marked read on the way out: the
-/// conversation is about to be on screen, so the row's unread count starts
-/// again from here.
+/// Open a saved link in the browser, saying so when it couldn't — the
+/// browser comes up in front of the terminal on success, so a silent
+/// failure would read as "orion did nothing". A pull request is marked
+/// read on the way out: the conversation is about to be on screen, so the
+/// row's unread count starts again from here.
 pub(crate) fn open_link(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
     if open_url(url) {
-        app.flash = Some(format!("opened {}", crate::app::pretty_url(url)));
         mark_pr_seen(app, url, out);
     } else {
-        app.flash = Some(format!("couldn't open {url}"));
+        app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
     }
 }
 
@@ -9438,7 +10079,13 @@ fn mark_pr_seen(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
 /// rows. Applied locally as well as sent, so the counts drop on this frame
 /// instead of waiting for the daemon's upsert — and skipped entirely when
 /// there is nothing to clear.
+///
+/// Seen is seen whatever the row says now: a session looked at mid-way
+/// through a wake-up turn, its flag already down, has still been seen, so
+/// its UNSEEN SPELL ends here too and its next finish may ring the DONE
+/// SOUND again (`DoneSounds::seen`).
 fn mark_agent_seen(app: &mut App, id: &AgentId, out: &mut Vec<ClientRequest>) {
+    app.done_sounds.seen(id);
     let Some(a) = app.tree.agents.iter_mut().find(|a| &a.id == id && a.unseen) else {
         return;
     };
@@ -9678,10 +10325,6 @@ fn fire_pending_prewarm(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.next_keepwarm = Some(std::time::Instant::now() + KEEPWARM_REFRESH);
 }
 
-/// Flashed at a launch, a delete or a terminal aimed at a QUICK PROMPT
-/// stand-in checkout the DAEMON has not cut yet.
-const WORKTREE_STILL_CREATING: &str = "worktree is still being created";
-
 /// The PROJECT a checkout belongs to — what `CreatePrAgent` is addressed
 /// to. None only if the row went away between the picker and Enter.
 fn project_of_worktree(app: &App, worktree: &WorktreeId) -> Option<ProjectId> {
@@ -9724,6 +10367,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
         focus_pane,
         placeholder,
         follow,
+        mode,
     } = draft;
     // A PR SESSION is addressed to the PROJECT, not to a checkout: the
     // DAEMON runs it in the PR head branch's own worktree, creating that
@@ -9731,7 +10375,6 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
     let pr = match pr {
         Some(pr) => {
             let Some(project) = project_of_worktree(app, &worktree) else {
-                app.flash = Some("worktree no longer exists".into());
                 return;
             };
             // The checkout it runs in: the project's worktree already on
@@ -9756,7 +10399,6 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
                     if let Some((kind, text)) = reopen_on_error {
                         reopen_prompt_with(app, kind, text);
                     }
-                    app.flash = Some(WORKTREE_STILL_CREATING.into());
                     return;
                 }
                 Some(_) => None,
@@ -9845,6 +10487,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
                 pr_url: pr.url,
                 head: pr.head,
                 starting_prompt,
+                mode,
             }
         }
         None => ClientRequest::CreateAgent {
@@ -9859,6 +10502,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
             cloud_prompt,
             starting_prompt,
             issue_url,
+            mode,
         },
     });
     // The create consumes (or, off-spec, discards) the worktree's warm
@@ -10279,7 +10923,7 @@ pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
     // Unit tests exercise the copy flows; don't clobber the developer's real
     // clipboard, and don't depend on their terminal or their $SSH_TTY.
     if cfg!(test) {
-        app.flash = Some(label.to_string());
+        app.flash = Some(crate::flash::Flash::done(label));
         return;
     }
     let via_terminal = format!("{label} (via terminal)");
@@ -10288,7 +10932,7 @@ pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
     // all but never fails here, so the flash says so now, and the rare
     // failure falls back to the terminal's OSC 52 when it is known.
     if let (false, Some(jobs)) = (app.is_remote, app.view_jobs.clone()) {
-        app.flash = Some(label.to_string());
+        app.flash = Some(crate::flash::Flash::done(label));
         let text = text.to_string();
         jobs.run(move || {
             (!copy_to_clipboard(&text)).then(|| crate::view_jobs::Answer::ClipboardViaTerminal {
@@ -10299,11 +10943,11 @@ pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
         return;
     }
     if !app.is_remote && copy_to_clipboard(text) {
-        app.flash = Some(label.to_string());
+        app.flash = Some(crate::flash::Flash::done(label));
         return;
     }
     app.pending_clipboard = Some(base64_encode(text.as_bytes()));
-    app.flash = Some(via_terminal);
+    app.flash = Some(crate::flash::Flash::done(via_terminal));
 }
 
 /// Base64 (RFC 4648, padded) for OSC 52 payloads.
@@ -10366,6 +11010,8 @@ pub(crate) fn open_url(url: &str) -> bool {
         return false;
     }
     if cfg!(test) {
+        #[cfg(test)]
+        OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
         return true;
     }
     #[cfg(target_os = "macos")]
@@ -10378,6 +11024,17 @@ pub(crate) fn open_url(url: &str) -> bool {
     {
         false
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The URLs [`open_url`] handed the browser on this test's thread, taken.
+#[cfg(test)]
+pub(crate) fn take_opened() -> Vec<String> {
+    OPENED.with(|opened| std::mem::take(&mut *opened.borrow_mut()))
 }
 
 /// Start `command` and let it finish on its own: true once it is running.
@@ -10509,6 +11166,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherStripLeft(_)
                 | HitTarget::LauncherStripRight(_)
                 | HitTarget::LauncherBandMore(_)
+                | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
                 | HitTarget::LauncherPaneSide
@@ -10521,6 +11179,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherWelcomePrompt
                 | HitTarget::FooterUsage
                 | HitTarget::FooterHome
+                | HitTarget::FooterCrumb(_)
         )
     });
     // The ISSUES and PULL REQUESTS MODALS' `↗ open in browser` button is
@@ -11119,11 +11778,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     .find(|link| link.contains(cell))
                     .map(|link| link.url.clone())
                 {
-                    app.flash = Some(if open_url(&url) {
-                        format!("opened {url}")
-                    } else {
-                        format!("open failed: {url}")
-                    });
+                    if !open_url(&url) {
+                        app.flash =
+                            Some(crate::flash::Flash::failed(format!("open failed: {url}")));
+                    }
                     app.dirty = true;
                     return;
                 }
@@ -11187,6 +11845,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // `▾ 6 more · Tab: see all 8` under a band's row: the band
                 // opens, the very toggle Tab runs.
                 Some(HitTarget::LauncherBandMore(i)) => launcher::click_band_more(app, i, out),
+                // `▸ 3 archived` under a band: its ARCHIVED DRAWER folds
+                // or unfolds, as `z` does.
+                Some(HitTarget::LauncherDrawer(i)) => launcher::click_drawer(app, i, out),
+                // An archived session's line in an unfolded drawer: the
+                // cursor onto it; a second click brings it back.
+                Some(HitTarget::LauncherDrawerEntry(band, entry)) => {
+                    launcher::click_drawer_entry(app, band, entry, out)
+                }
                 // The PULL REQUEST on a band's rule: it opens in the
                 // browser, through the very `open_pull_request` `⇧V` runs.
                 Some(HitTarget::LauncherBandPr(wid)) => {
@@ -11228,6 +11894,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The footer's nameplate: HOME, through the `toggle_home`
                 // its key runs — and from HOME, back down to the grid.
                 Some(HitTarget::FooterHome) => toggle_home(app),
+                // A part of the footer's breadcrumb: down onto the grid with
+                // the cursor on it.
+                Some(HitTarget::FooterCrumb(part)) => launcher::click_crumb(app, part, out),
                 // The CLOSE BUTTON at the strip's right end: the pane
                 // folds away through the one `toggle_pane` `^~` runs. It
                 // is only drawn on a pane that is showing, so the toggle
@@ -11405,6 +12074,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherStripLeft(_)
                             | HitTarget::LauncherStripRight(_)
                             | HitTarget::LauncherBandMore(_)
+                            | HitTarget::LauncherDrawer(_)
+                            | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
                     )
                 )
@@ -11513,6 +12184,35 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
 }
 
+/// What a launch refused for a lost DAEMON connection says, beside the
+/// footer's `✗ disconnected`: the TUI never reconnects, so the way out is
+/// a fresh start.
+const CONNECTION_LOST: &str =
+    "lost the orion daemon — nothing here reaches it now; quit and start orion again";
+
+/// The DAEMON connection is gone, and the TUI never makes another, so no
+/// Ack or Error will come for anything in flight. Each pending intent fails
+/// the way a refusal does — a QUICK PROMPT's box comes back with its text,
+/// an optimistic row goes back — instead of waiting forever with the
+/// user's words in a request nobody will read. Oldest first, so of two
+/// QUICK PROMPT launches the newer one's box is the one left on screen.
+fn connection_lost(app: &mut App, out: &mut Vec<ClientRequest>) {
+    app.conn = ConnState::Disconnected;
+    let mut in_flight: Vec<u64> = app.pending.keys().copied().collect();
+    in_flight.sort_unstable();
+    for req_id in in_flight {
+        let refusal = ServerEvent::Error {
+            req_id: Some(req_id),
+            message: CONNECTION_LOST.into(),
+        };
+        handle_server_event(app, refusal, out);
+    }
+    // Nothing is left to carry what the rollbacks queued.
+    out.clear();
+    app.flash = Some(crate::flash::Flash::failed(CONNECTION_LOST));
+    app.dirty = true;
+}
+
 fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
     match event {
         ServerEvent::Snapshot {
@@ -11612,7 +12312,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                     // remote host.
                     if let Some(payload) = term.take_clipboard() {
                         app.pending_clipboard = Some(payload);
-                        app.flash = Some("copied (via terminal)".into());
+                        app.flash = Some(crate::flash::Flash::done("copied (via terminal)"));
                     }
                     app.dirty = true;
                 }
@@ -11644,24 +12344,12 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // re-sorts those columns too.
             // Every cursor stays on the row it was on.
             let before = selection_snapshot(app);
-            let mut went_red = false;
+            // Which sound, if any, this edge is news for (`edge_alert`): a
+            // re-stamp of the status a row already wears, and the startup
+            // Snapshot, never get one.
+            let mut edge = None;
             if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id == agent) {
-                // The RUNNING / NEEDS FEEDBACK → FINISHED edge — the one
-                // that raises UNSEEN — rings the DONE SOUND, whether or not
-                // the session is on screen. A re-stamp of a finished row
-                // and the startup Snapshot never get here.
-                if status == orion_core::AgentStatus::Finished
-                    && matches!(
-                        a.status,
-                        orion_core::AgentStatus::Running | orion_core::AgentStatus::NeedsFeedback
-                    )
-                {
-                    app.pending_ding = true;
-                }
-                // The edge *into* NEEDS FEEDBACK is the FEEDBACK SOUND's;
-                // a re-stamp of a row already red is not.
-                went_red = status == orion_core::AgentStatus::NeedsFeedback
-                    && a.status != orion_core::AgentStatus::NeedsFeedback;
+                edge = alerts::edge_alert(a.status, status);
                 a.status = status;
                 a.status_changed_at = changed_at;
                 a.unseen = unseen;
@@ -11683,16 +12371,30 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             if unseen && on_screen {
                 mark_agent_seen(app, &agent, out);
             }
-            // A prompt in the pane the user is locked into typing at, with
-            // the window focused, is already under their hands: a sound
-            // there is noise. Previewing the pane from a panel is not
-            // typing at it, and a window in the background can't be seen —
-            // both ring, and the second is the whole point.
+            // A prompt — or a crash — in the pane the user is locked into
+            // typing at, with the window focused, is already under their
+            // hands: a sound there is noise. Previewing the pane from a
+            // panel is not typing at it, and a window in the background
+            // can't be seen — both ring, and the second is the whole point.
             let under_hands = on_screen && app.term_locked && app.window_focused;
-            if went_red && !under_hands {
-                if let Some(alert) = alerts::alert_for(&app.tree, &agent) {
-                    app.pending_feedback.push(alert);
+            match edge {
+                // The DONE SOUND is for a finish nobody saw land: one still
+                // UNSEEN once the pane on screen has had its say above. It
+                // rings only after it settles (`DoneSounds`), from the
+                // frame's drain.
+                Some(AlertKind::Finished) => {
+                    if app.tree.agents.iter().any(|a| a.id == agent && a.unseen) {
+                        app.done_sounds.finished(&agent, std::time::Instant::now());
+                    }
                 }
+                // Into NEEDS FEEDBACK, or a live turn's CLI dying: the
+                // FEEDBACK SOUND, on this frame.
+                Some(kind) if !under_hands => {
+                    if let Some(alert) = alerts::alert_for(&app.tree, &agent, kind) {
+                        app.pending_feedback.push(alert);
+                    }
+                }
+                _ => {}
             }
             // Nothing left any list, so this only re-seats the cursors.
             reconcile_selection_inner(app, before, out);
@@ -11738,41 +12440,8 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                         _ => placeholder::discard_pr(app, &placeholder, out),
                     }
                 }
-                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _)
-                | (Some(PendingIntent::Note(note)), _) => {
-                    app.flash = Some(note);
-                }
-                (
-                    Some(PendingIntent::RunToggled {
-                        branch,
-                        started: true,
-                    }),
-                    created,
-                ) => {
-                    // The reply usually beats the broadcast upsert, so the
-                    // row naming the command may not be in the tree yet:
-                    // then the flash names it when the row lands.
-                    match created {
-                        Some(EntityId::Terminal(id)) => match run_command_of(app, &id) {
-                            Some(command) => {
-                                app.flash = Some(format!("▶ running {command} in {branch}"));
-                            }
-                            None => {
-                                app.flash = Some(format!("▶ running in {branch}"));
-                                app.run_flash_when_seen = Some((id, branch));
-                            }
-                        },
-                        _ => app.flash = Some(format!("▶ running in {branch}")),
-                    }
-                }
-                (
-                    Some(PendingIntent::RunToggled {
-                        branch,
-                        started: false,
-                    }),
-                    _,
-                ) => {
-                    app.flash = Some(format!("■ stopped the run in {branch}"));
+                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _) => {
+                    app.flash = Some(crate::flash::Flash::failed(note));
                 }
                 (Some(PendingIntent::SelectCreatedProject), Some(EntityId::Project(id))) => {
                     // Its upsert usually lands just before this Ack; if not,
@@ -12051,7 +12720,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 }) => placeholder::discard_agent(app, &stand_in, out),
                 _ => {}
             }
-            app.flash = Some(message);
+            app.flash = Some(crate::flash::Flash::failed(message));
             app.dirty = true;
         }
         _ => {}
@@ -12129,6 +12798,8 @@ fn attach_created(
 pub(crate) fn reopen_prompt_with(app: &mut App, mut kind: PromptKind, text: String) {
     if let PromptKind::QuickPrompt(launch) = &mut kind {
         crate::quick_prompt::restack(app, launch);
+        // The launch spent the SAVED DRAFT; the text is the draft again.
+        crate::saved_draft::refused(app, &text);
     }
     open_prompt(app, kind);
     if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
@@ -12156,7 +12827,24 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
                 }
             }
         }
-        Entity::Worktree(w) => upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id),
+        Entity::Worktree(w) => {
+            // A checkout switched to another branch outside orion: what
+            // `gh pr view` found was the old branch's pull request, and the
+            // commits ahead and behind were the old branch's too. Both go,
+            // and the lookup is due at once, so the band never wears the
+            // last branch's pull request into the new one.
+            let switched = app
+                .tree
+                .worktrees
+                .iter()
+                .any(|x| x.id == w.id && x.branch != w.branch);
+            if switched {
+                app.pull_requests.remove(&w.id);
+                app.pr_recheck.remove(&w.id);
+                app.worktree_ahead.remove(&w.id);
+            }
+            upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id)
+        }
         Entity::Agent(a) => {
             // A row the daemon re-homed (`orion worktree`, a hook cwd in
             // another checkout) takes the cursor with it when it was the
@@ -12168,39 +12856,27 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
                 .agents
                 .iter()
                 .any(|x| x.id == a.id && x.worktree_id != a.worktree_id);
+            // A finish read somewhere else — another client put it on
+            // screen — ends its UNSEEN SPELL here as well.
+            let read_elsewhere = !a.unseen
+                && a.status == orion_core::AgentStatus::Finished
+                && app
+                    .tree
+                    .agents
+                    .iter()
+                    .any(|x| x.id == a.id && crate::app::unread_finish(x));
+            if read_elsewhere {
+                app.done_sounds.seen(&a.id);
+            }
             let id = a.id.clone();
             upsert_by(&mut app.tree.agents, a, |x, y| x.id == y.id);
             if moved && selected.as_ref() == Some(&id) {
                 app.select_when_seen = Some(SessionRef::Agent(id));
             }
         }
-        Entity::Terminal(t) => {
-            let id = t.id.clone();
-            upsert_by(&mut app.tree.terminals, t, |x, y| x.id == y.id);
-            if app
-                .run_flash_when_seen
-                .as_ref()
-                .is_some_and(|(want, _)| *want == id)
-            {
-                if let (Some(command), Some((_, branch))) =
-                    (run_command_of(app, &id), app.run_flash_when_seen.take())
-                {
-                    app.flash = Some(format!("▶ running {command} in {branch}"));
-                }
-            }
-        }
+        Entity::Terminal(t) => upsert_by(&mut app.tree.terminals, t, |x, y| x.id == y.id),
         Entity::Link(l) => upsert_by(&mut app.tree.links, l, |x, y| x.id == y.id),
     }
-}
-
-/// The command a RUN TERMINAL in the tree runs; None for a plain shell or
-/// a row not seen yet.
-fn run_command_of(app: &App, id: &TerminalId) -> Option<String> {
-    app.tree
-        .terminals
-        .iter()
-        .find(|t| &t.id == id)
-        .and_then(|t| t.run_command.clone())
 }
 
 /// Replace the first entry of `list` that `same` pairs with `item`, or
@@ -12629,49 +13305,309 @@ mod tests {
         );
     }
 
-    /// The DONE SOUND rings on the RUNNING / NEEDS FEEDBACK → FINISHED
-    /// edge only — not on the way into NEEDS FEEDBACK, not on a re-stamp
-    /// of a row already finished — and the flag is one bool, so a frame
-    /// with several finishes rings once.
+    /// `agent` flipping to `status` as the daemon says it: a live turn
+    /// landing on FINISHED raises UNSEEN, every other flip drops it.
+    fn flip_to(agent: &str, status: orion_core::AgentStatus) -> ServerEvent {
+        ServerEvent::StatusChanged {
+            agent: AgentId(agent.into()),
+            status,
+            changed_at: crate::app::now_ms(),
+            unseen: status == orion_core::AgentStatus::Finished,
+        }
+    }
+
+    /// The DONE SOUND for an unseen finish is not rung on the edge but
+    /// scheduled a SETTLE later, and rings — once, announced for its UNSEEN
+    /// SPELL — when the drain finds it due and still standing. The edge
+    /// into NEEDS FEEDBACK schedules nothing, nor does a re-stamp of a row
+    /// already finished.
     #[test]
-    fn a_finish_rings_the_done_sound_once() {
+    fn an_unseen_finish_rings_the_done_sound_once_it_settles() {
+        use crate::app::DONE_SETTLE;
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_agent(&mut app, AgentStatus::Running);
-        assert!(!app.pending_ding, "the snapshot is silent");
         let a2 = AgentId("a2".into());
-        let flip = |status: AgentStatus| ServerEvent::StatusChanged {
-            agent: a2.clone(),
-            status,
-            changed_at: crate::app::now_ms(),
-            unseen: status == AgentStatus::Finished,
+        assert_eq!(app.done_sounds.next_due(), None, "the snapshot is silent");
+
+        hse(&mut app, flip_to("a2", AgentStatus::NeedsFeedback));
+        assert_eq!(
+            app.done_sounds.next_due(),
+            None,
+            "waiting on the user is not done"
+        );
+        let edge = std::time::Instant::now();
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        let due = app
+            .done_sounds
+            .next_due()
+            .expect("NEEDS FEEDBACK -> FINISHED");
+        assert!(
+            due >= edge + DONE_SETTLE && due <= std::time::Instant::now() + DONE_SETTLE,
+            "due a SETTLE after the edge"
+        );
+
+        let early = due - Duration::from_millis(1);
+        assert!(
+            app.done_sounds.settle(&app.tree, early).is_empty(),
+            "not yet"
+        );
+        assert_eq!(app.done_sounds.settle(&app.tree, due), vec![a2.clone()]);
+        assert!(app.done_sounds.announced.contains(&a2));
+        assert_eq!(app.done_sounds.next_due(), None, "rung once, then gone");
+
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(
+            app.done_sounds.next_due(),
+            None,
+            "a re-stamp of a finished row is silent"
+        );
+    }
+
+    /// A finish in the pane on screen was watched, so it is not news: the
+    /// edge reads the row as already seen and schedules nothing — whether
+    /// the user is typing there or only previewing it.
+    #[test]
+    fn a_finish_in_the_pane_on_screen_rings_no_done_sound() {
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+        app.term = Some(AttachedTerm::new(
+            SessionRef::Agent(AgentId("a2".into())),
+            40,
+            10,
+        ));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.next_due(), None);
+
+        // Another session's pane on screen: this one finished unwatched.
+        app.term = Some(AttachedTerm::new(
+            SessionRef::Agent(AgentId("a1".into())),
+            40,
+            10,
+        ));
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert!(app.done_sounds.next_due().is_some());
+    }
+
+    /// ONCE PER UNSEEN SPELL: after a finish has rung, the wake-up turns
+    /// that follow — started by a task notification or a queued message,
+    /// each ending on its own — ring nothing until the user has seen the
+    /// session. Seeing it, here or in another client, starts the next
+    /// spell, and its first finish rings again.
+    #[test]
+    fn later_finishes_ring_nothing_until_the_session_is_seen() {
+        use orion_core::{AgentStatus, Entity};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+        let a2 = AgentId("a2".into());
+        let ring = |app: &mut App| {
+            let due = app.done_sounds.next_due()?;
+            app.done_sounds.settle(&app.tree, due).into_iter().next()
         };
 
-        hse(&mut app, flip(AgentStatus::NeedsFeedback));
-        assert!(!app.pending_ding, "waiting on the user is not done");
-        hse(&mut app, flip(AgentStatus::Finished));
-        assert!(app.pending_ding, "NEEDS FEEDBACK -> FINISHED rings");
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(ring(&mut app), Some(a2.clone()));
 
-        app.pending_ding = false;
-        hse(&mut app, flip(AgentStatus::Finished));
-        assert!(!app.pending_ding, "a re-stamp of a finished row is silent");
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.next_due(), None, "a wake-up turn's finish");
 
-        hse(&mut app, flip(AgentStatus::Running));
-        assert!(!app.pending_ding);
-        // On screen or not makes no difference to the sound.
-        app.term = Some(AttachedTerm::new(SessionRef::Agent(a2.clone()), 40, 10));
-        hse(&mut app, flip(AgentStatus::Finished));
-        assert!(
-            app.pending_ding,
-            "RUNNING -> FINISHED rings, even on screen"
+        // Seen mid-way through another wake-up turn: its flag is already
+        // down, and it was seen all the same.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        let mut out = Vec::new();
+        mark_agent_seen(&mut app, &a2, &mut out);
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(ring(&mut app), Some(a2.clone()), "a new spell rings");
+
+        // Read in another client: the daemon's upsert drops the flag on a
+        // row still finished, which ends the spell here too.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.next_due(), None);
+        let mut read = app.tree.agents.iter().find(|a| a.id == a2).unwrap().clone();
+        read.unseen = false;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(read),
+            },
         );
-        hse(&mut app, flip(AgentStatus::Running));
-        hse(&mut app, flip(AgentStatus::Finished));
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(ring(&mut app), Some(a2));
+    }
+
+    /// SETTLE: a finish that does not stand for the whole wait rings
+    /// nothing — the row went back to work (a subagent's start healing it,
+    /// the next queued turn), was seen, archived or deleted. A finish that
+    /// flickers back and forth inside the wait rings once, a SETTLE after
+    /// where it landed.
+    #[test]
+    fn a_finish_that_does_not_stand_through_the_settle_rings_nothing() {
+        use orion_core::{AgentStatus, Entity, EntityId};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+        let a2 = AgentId("a2".into());
+        let settle_all = |app: &mut App| {
+            let due = app.done_sounds.next_due().expect("a finish is settling");
+            app.done_sounds.settle(&app.tree, due)
+        };
+
+        // Back to work inside the wait.
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        assert!(settle_all(&mut app).is_empty(), "it left FINISHED");
         assert!(
-            app.pending_ding,
-            "two finishes in a frame are still one ding"
+            !app.done_sounds.announced.contains(&a2),
+            "nothing was announced, so the real finish still rings"
         );
+
+        // Flickering: the second finish restarts the one wait.
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        let first = app.done_sounds.next_due().unwrap();
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        assert_eq!(app.done_sounds.due.len(), 1);
+        assert!(app.done_sounds.next_due().unwrap() >= first);
+        assert_eq!(settle_all(&mut app), vec![a2.clone()]);
+
+        // Seen inside the wait.
+        let mut out = Vec::new();
+        mark_agent_seen(&mut app, &a2, &mut out);
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        mark_agent_seen(&mut app, &a2, &mut out);
+        assert_eq!(app.done_sounds.next_due(), None, "seen: nothing to settle");
+
+        // Archived inside the wait — read off the row itself, ahead of the
+        // daemon dropping the flag with it.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        let mut archived = app.tree.agents.iter().find(|a| a.id == a2).unwrap().clone();
+        archived.archived = true;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(archived.clone()),
+            },
+        );
+        assert!(settle_all(&mut app).is_empty(), "archived");
+        archived.archived = false;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(archived),
+            },
+        );
+
+        // Deleted inside the wait.
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        hse(
+            &mut app,
+            ServerEvent::EntityRemoved {
+                id: EntityId::Agent(a2.clone()),
+            },
+        );
+        assert!(settle_all(&mut app).is_empty(), "deleted");
+    }
+
+    /// FOLD: of two DONE SOUNDs due within ten seconds of each other only
+    /// the first rings — and a FEEDBACK SOUND that just rang folds one the
+    /// same way. Each folded finish is still announced (the notification
+    /// names it); past the FOLD the next one rings again.
+    #[test]
+    fn done_sounds_due_inside_the_fold_ring_once() {
+        use crate::app::{DoneSounds, DONE_FOLD, DONE_SETTLE};
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Finished);
+        for a in &mut app.tree.agents {
+            a.status = AgentStatus::Finished;
+            a.unseen = true;
+        }
+        let (a1, a2) = (AgentId("a1".into()), AgentId("a2".into()));
+        let t0 = std::time::Instant::now();
+        let mut sounds = DoneSounds::default();
+        let mut rung = Vec::new();
+        let mut ring_due = |sounds: &mut DoneSounds, now: std::time::Instant| {
+            let settled = sounds.settle(&app.tree, now);
+            if !settled.is_empty() && sounds.may_ring(now) {
+                sounds.rang(now);
+                rung.push(now);
+            }
+            settled
+        };
+
+        sounds.finished(&a1, t0);
+        sounds.finished(&a2, t0 + Duration::from_secs(5));
+        assert_eq!(ring_due(&mut sounds, t0 + DONE_SETTLE), vec![a1.clone()]);
+        let later = t0 + Duration::from_secs(5) + DONE_SETTLE;
+        assert_eq!(ring_due(&mut sounds, later), vec![a2.clone()], "announced");
+        assert_eq!(rung, [t0 + DONE_SETTLE], "the second folded into the first");
+        assert!(sounds.announced.contains(&a2));
+
+        // A feedback sound a moment before a finish settles folds it too.
+        let mut sounds = DoneSounds::default();
+        sounds.rang(t0);
+        assert!(!sounds.may_ring(t0 + DONE_FOLD - Duration::from_millis(1)));
+        assert!(sounds.may_ring(t0 + DONE_FOLD), "the FOLD has passed");
+        assert!(DoneSounds::default().may_ring(t0), "nothing has rung yet");
+    }
+
+    /// A live turn whose CLI dies with an error queues the FEEDBACK SOUND
+    /// as a crash — under the same gate as a question: never for the pane
+    /// the user is typing at with the window focused. A row that was not
+    /// mid-turn dying is not news.
+    #[test]
+    fn a_crash_mid_turn_queues_the_feedback_alert() {
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Running);
+
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert_eq!(
+            app.pending_feedback,
+            vec![FeedbackAlert {
+                kind: AlertKind::Crashed,
+                session: "agent-2".into(),
+                place: "demo · main".into(),
+                limit: None,
+            }]
+        );
+        assert_eq!(app.done_sounds.next_due(), None, "a crash is not done");
+
+        app.pending_feedback.clear();
+        hse(&mut app, flip_to("a2", AgentStatus::NeedsFeedback));
+        app.pending_feedback.clear();
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert_eq!(app.pending_feedback.len(), 1, "dying while red counts");
+
+        app.pending_feedback.clear();
+        hse(&mut app, flip_to("a2", AgentStatus::Finished));
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert!(app.pending_feedback.is_empty(), "no turn was live");
+
+        // Under the user's hands: locked into the pane, window focused.
+        app.term = Some(AttachedTerm::new(
+            SessionRef::Agent(AgentId("a2".into())),
+            40,
+            10,
+        ));
+        app.focus = Focus::Terminal;
+        app.term_locked = true;
+        hse(&mut app, flip_to("a2", AgentStatus::Running));
+        hse(&mut app, flip_to("a2", AgentStatus::Terminated));
+        assert!(app.pending_feedback.is_empty(), "the error is on screen");
     }
 
     /// A turn that finishes in the pane the user is already looking at was
@@ -12729,12 +13665,17 @@ mod tests {
         assert_eq!(
             app.pending_feedback,
             vec![FeedbackAlert {
+                kind: AlertKind::NeedsFeedback,
                 session: "agent-2".into(),
                 place: "demo · main".into(),
                 limit: None,
             }]
         );
-        assert!(!app.pending_ding, "waiting on the user is not done");
+        assert_eq!(
+            app.done_sounds.next_due(),
+            None,
+            "waiting on the user is not done"
+        );
 
         hse(&mut app, flip("a2", AgentStatus::NeedsFeedback));
         assert_eq!(
@@ -12749,7 +13690,7 @@ mod tests {
             app.pending_feedback.is_empty(),
             "leaving red is the done sound's edge"
         );
-        assert!(app.pending_ding);
+        assert!(app.done_sounds.next_due().is_some());
 
         // Two sessions stopping in one frame: two names for the
         // notification; the drain plays the sound once for both.
@@ -12813,7 +13754,7 @@ mod tests {
         let mut out = Vec::new();
 
         let mut app = locked_pane_app();
-        app.flash = Some("copied".into());
+        app.flash = Some(crate::flash::Flash::done("copied"));
         handle_terminal_event(
             &mut app,
             key(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -12918,11 +13859,12 @@ mod tests {
     }
 
     /// A session with no live PTY behind it — reaped, or not booted since
-    /// the daemon started — wears a gray dot whatever its last status was,
-    /// and takes its color back once it is warm again. An unread finish
-    /// keeps its loud `done` badge while cold: the dot says the process is
-    /// gone, the badge that there is still a result to read. A Cloud row has
-    /// no local PTY to be warm, so it keeps its status color.
+    /// the daemon started — wears the faintest gray for whatever it last
+    /// did that stopped being true with the process, and its own color
+    /// again once it is warm. A finish nobody has read is still true cold:
+    /// it keeps its done color and its `done` badge, there still being a
+    /// result to read. A Cloud row has no local PTY to be warm, so it keeps
+    /// its status color.
     #[test]
     fn cold_session_dot_is_gray_until_warm() {
         use orion_core::{AgentStatus, Entity};
@@ -12962,11 +13904,11 @@ mod tests {
         };
 
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.ok, "warm: the finished green: {row}");
+        assert_eq!(fg, app.theme.dim, "warm, read: at rest: {row}");
 
         upsert(&mut app, &|a| a.alive = false);
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.dim, "cold: gray: {row}");
+        assert_eq!(fg, app.theme.faint, "cold: the faintest gray: {row}");
 
         hse(
             &mut app,
@@ -12978,13 +13920,13 @@ mod tests {
             },
         );
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.dim, "cold wins over unread: {row}");
+        assert_eq!(fg, app.theme.done, "unread is still true cold: {row}");
         let tail = &row[row.find("agent-2").unwrap()..];
-        assert!(tail.contains(" done"), "the badge still says so: {row}");
+        assert!(tail.contains(" done"), "the badge says so too: {row}");
 
         upsert(&mut app, &|a| a.alive = true);
         let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.done, "warm again: unread blue: {row}");
+        assert_eq!(fg, app.theme.done, "warm again: unread: {row}");
 
         upsert(&mut app, &|a| {
             a.alive = false;
@@ -13360,11 +14302,13 @@ mod tests {
         app.is_remote = false;
         seed_worktree_at(&mut app, dir.path());
         app.flash = None;
-        open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(
-            app.flash,
-            Some(format!("opened a Ghostty tab in {}", dir.path().display()))
+            context_dir(&app),
+            Some(Ok(dir.path().to_path_buf())),
+            "the selected worktree is the folder handed over"
         );
+        open_outside_terminal_with(&mut app, ghostty());
+        assert_eq!(app.flash, None, "the tab coming up is the answer");
         open_outside_terminal_with(
             &mut app,
             Some(OutsideApp {
@@ -13372,10 +14316,7 @@ mod tests {
                 opens: "Terminal window",
             }),
         );
-        assert_eq!(
-            app.flash,
-            Some(format!("opened a Terminal window in {}", dir.path().display()))
-        );
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -13422,8 +14363,8 @@ mod tests {
         app.flash = None;
         open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(
-            app.flash,
-            Some(format!("path missing on disk: {}", gone.display()))
+            app.flash.as_deref(),
+            Some(format!("path missing on disk: {}", gone.display()).as_str())
         );
     }
 
@@ -13616,8 +14557,8 @@ mod tests {
         out.clear();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some(&*format!("opened claude.ai/code/{CLOUD_ID}"))
+            take_opened(),
+            [format!("https://claude.ai/code/{CLOUD_ID}")]
         );
         assert_eq!(app.focus, Focus::Sessions);
         assert!(!app.term_locked);
@@ -13637,8 +14578,8 @@ mod tests {
             .expect("the link is a hit target");
         click(&mut app, link.x + 1, link.y, &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some(&*format!("opened claude.ai/code/{CLOUD_ID}"))
+            take_opened(),
+            [format!("https://claude.ai/code/{CLOUD_ID}")]
         );
     }
 
@@ -13846,7 +14787,7 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Enter open your first project"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
-        assert!(text.contains("q quit"), "{text}");
+        assert!(text.contains("^C quit"), "{text}");
         for dead in ["⌫ delete", "t terminal", "a archive"] {
             assert!(
                 !text.contains(dead),
@@ -13973,7 +14914,10 @@ mod tests {
         let mut app = App::new();
         let tmp = launched_in_alpha(&mut app);
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AddProject));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::AddProject,
+        ));
         let Some(Overlay::Prompt(p)) = &app.overlay else {
             panic!("expected the open-project prompt, got {:?}", app.overlay);
         };
@@ -14011,10 +14955,7 @@ mod tests {
                 .any(|r| matches!(r, ClientRequest::AddProject { .. })),
             "{out:?}"
         );
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("demo is already a project — opened it")
-        );
+        assert_eq!(app.flash, None);
         assert_eq!(
             app.selected_project().map(|p| p.name.as_str()),
             Some("demo")
@@ -14030,7 +14971,10 @@ mod tests {
             seed_tree(&mut app);
             app.focus = focus;
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AddProject));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AddProject,
+            ));
             let Some(Overlay::Prompt(p)) = &app.overlay else {
                 panic!(
                     "expected add-project prompt at {focus:?}, got {:?}",
@@ -14573,7 +15517,12 @@ mod tests {
         app.focus = Focus::Sessions;
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "number".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -14627,7 +15576,12 @@ mod tests {
         assert_eq!(app.worktree_row_count(), 1, "folded: only the checkout");
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "#7".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -14648,7 +15602,12 @@ mod tests {
         seed_open_prs(&mut app, &[(7, "Attach links to worktrees")]);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "attach".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -14659,7 +15618,7 @@ mod tests {
             &mut out,
         );
         assert!(app.overlay.is_none(), "the palette closes");
-        assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r/pull/7"));
+        assert_eq!(take_opened(), ["https://github.com/o/r/pull/7"]);
         assert_eq!(app.selected_worktree_pr().map(|pr| pr.number), Some(7));
         assert_eq!(app.focus, Focus::Worktrees);
     }
@@ -14697,7 +15656,12 @@ mod tests {
             vec![(7, "Attach links", false), (9, "Number the lines", true)],
         );
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         // The overview is the sessions; `#` reaches the pull requests, each
         // with its project in front of it like every other row.
         press(&mut app, KeyCode::Char('#'), KeyModifiers::NONE, &mut out);
@@ -14713,20 +15677,24 @@ mod tests {
             text.contains("↗ demo/#9 Number the lines draft"),
             "a draft says so after its title:\n{text}"
         );
-        // The colors are the sidebar's: accent arrow and plain title for
-        // the ready one, dim arrow and dim title for the draft — the same
-        // `pr_row::look` both panels paint from.
+        // The colors are the band rule's: a muted arrow and plain title for
+        // the ready one, a faint arrow and dim title for the draft — the
+        // same `pr_row::look` both paint from.
         let buffer = terminal.backend().buffer();
         let (x, y) = find_cell(&terminal, "↗ demo/#7");
-        assert_eq!(buffer[(x, y)].fg, th.accent, "ready: the accent arrow");
+        assert_eq!(buffer[(x, y)].fg, th.muted, "ready: the muted arrow");
         // Past the dim crumb and the `#` the query lit: the title proper.
         let title_x = x + "↗ demo/#7 ".chars().count() as u16;
         assert_eq!(buffer[(title_x, y)].fg, th.text, "ready: the title reads");
         let (x, y) = find_cell(&terminal, "↗ demo/#9");
-        assert_eq!(buffer[(x, y)].fg, th.dim, "draft: the dim arrow");
+        assert_eq!(buffer[(x, y)].fg, th.faint, "draft: the faint arrow");
         assert_eq!(buffer[(title_x, y)].fg, th.dim, "draft: dimmed end to end");
         let badge_x = x + "↗ demo/#9 Number the lines ".chars().count() as u16;
-        assert_eq!(buffer[(badge_x, y)].fg, th.dim, "draft: the badge is dim");
+        assert_eq!(
+            buffer[(badge_x, y)].fg,
+            th.faint,
+            "draft: the badge is faint"
+        );
 
         // Park the cursor on the draft, then let a refresh say it was
         // marked ready for review: the word flips, the cursor stays.
@@ -14799,7 +15767,7 @@ mod tests {
             Landing::FocusOnly,
             &mut out,
         );
-        assert_eq!(app.flash.as_deref(), Some(PR_GONE));
+        assert!(app.flash.is_none());
         assert!(app.selected_worktree_pr().is_none());
         assert_eq!(app.sel_worktree, 0, "the cursor stays on the checkout");
     }
@@ -14814,7 +15782,12 @@ mod tests {
         seed_open_prs(&mut app, &[(7, "Attach links to worktrees")]);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "demo #7".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -14965,11 +15938,7 @@ mod tests {
 
         assert_eq!(open_pr_numbers(&app), vec![9]);
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(9));
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("#7 is no longer open"),
-            "a row that evaporates mid-read says why"
-        );
+        assert_eq!(app.flash, None);
 
         // A draft is open, so nothing about it is retired.
         let mut draft = a_detail(9, "still cooking", vec![]);
@@ -15173,7 +16142,12 @@ mod tests {
         app.pr_diff_inflight = Some(7);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_ne!(
             app.flash.as_deref(),
             Some("still fetching the diff for #7…"),
@@ -15201,7 +16175,10 @@ mod tests {
         app.focus = Focus::Worktrees;
         app.sel_worktree = 1;
         let mut out = Vec::new();
-        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
+        out.extend(run_action(
+            &mut app,
+            crate::keymap::Action::CommentPullRequest,
+        ));
         let Some(Overlay::Prompt(prompt)) = &app.overlay else {
             panic!("expected the COMMENT BOX, got {:?}", app.overlay);
         };
@@ -15241,7 +16218,10 @@ mod tests {
         seed_branch_pr(&mut app, 9, "Fix login");
         app.focus = Focus::Sessions;
         app.sel_session = sessions_pr_row(&app);
-        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
+        out.extend(run_action(
+            &mut app,
+            crate::keymap::Action::CommentPullRequest,
+        ));
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p))
                 if matches!(&p.kind, PromptKind::PrComment { number: 9, .. })),
@@ -15258,7 +16238,10 @@ mod tests {
         app.sel_session = (0..app.visible_session_rows().len())
             .find(|i| *i != pr_row)
             .expect("an agent row");
-        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
+        out.extend(run_action(
+            &mut app,
+            crate::keymap::Action::CommentPullRequest,
+        ));
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p))
                 if matches!(&p.kind, PromptKind::PrComment { number: 9, .. })),
@@ -15295,14 +16278,20 @@ mod tests {
         };
 
         // Nothing typed: the box closes and nothing is posted.
-        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
+        out.extend(run_action(
+            &mut app,
+            crate::keymap::Action::CommentPullRequest,
+        ));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
+        assert_eq!(app.flash, None);
 
         // Shift+Enter breaks a line; Enter posts — here from a checkout
         // that is not on disk, so the box comes back with the text.
-        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
+        out.extend(run_action(
+            &mut app,
+            crate::keymap::Action::CommentPullRequest,
+        ));
         type_text(&mut app, "Looks good", &mut out);
         press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
         type_text(&mut app, "to me", &mut out);
@@ -15320,16 +16309,14 @@ mod tests {
 
         // One already on its way to this pull request: wait, text kept.
         app.pr_comment_inflight.insert(pr_url(7));
+        app.flash = None;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Looks good\nto me"),
             "{:?}",
             app.overlay
         );
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("still posting the last comment on #7…")
-        );
+        assert_eq!(app.flash, None, "the box back with the text says it");
         app.pr_comment_inflight.clear();
         app.overlay = None;
 
@@ -15356,7 +16343,10 @@ mod tests {
             app.overlay
         );
         app.overlay = None;
-        out.extend(run_action(&mut app, crate::keymap::Action::CommentPullRequest));
+        out.extend(run_action(
+            &mut app,
+            crate::keymap::Action::CommentPullRequest,
+        ));
         assert!(
             matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Second try"),
             "{:?}",
@@ -15369,11 +16359,12 @@ mod tests {
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pending_pr_detail = None;
         app.pr_preview_scroll = 3;
+        app.flash = None;
         land_pr_comment(
             &mut app,
             answer("Looks good", Ok(format!("{}#issuecomment-1", pr_url(7)))),
         );
-        assert_eq!(app.flash.as_deref(), Some("comment posted on #7"));
+        assert_eq!(app.flash, None, "the conversation says it");
         assert!(
             app.pending_pr_detail
                 .as_ref()
@@ -15711,7 +16702,10 @@ diff --git a/docs/keys.md b/docs/keys.md
         );
         assert!(diff_view(&app).diff.contains("+new-b"));
         assert_eq!(diff_view(&app).scroll, 3, "same file: the place is kept");
-        assert!(app.diff_tree, "remembered for the next open");
+        assert!(
+            !app.diff_tree,
+            "this viewer's alone: the setting decides the next open"
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -15822,7 +16816,12 @@ diff --git a/docs/keys.md b/docs/keys.md
         }
         assert_eq!(diff_tree_rows(&app), ["docs", "*keys.md"]);
         assert!(diff_view(&app).diff.contains("+new-keys"));
-        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_eq!(
             diff_tree_rows(&app),
             ["crates/tui/src", "*a.rs", "b.rs", "docs", "keys.md"],
@@ -15847,8 +16846,9 @@ diff --git a/docs/keys.md b/docs/keys.md
     }
 
     /// A fresh `gh pr diff` landing under the tree keeps what the reader
-    /// folded and the file they were on; `diff_tree` rides the UI state
-    /// blob, so the next launch opens the modal the way this one left it.
+    /// folded and the file they were on. How the next launch opens is the
+    /// **Files as a tree** SETTING's to say, not the UI state blob's: a
+    /// blob from before the setting no longer flips it either way.
     #[test]
     fn the_diff_tree_survives_a_refresh_and_a_relaunch() {
         let mut app = pr_diff_app(true);
@@ -15877,11 +16877,14 @@ diff --git a/docs/keys.md b/docs/keys.md
         let json = ui_state_json(&app);
         let mut next = App::new();
         seed_tree(&mut next);
+        let cfg = crate::config::Config::default();
+        apply_config(&mut next, &cfg);
+        assert!(next.diff_tree, "the setting's default is the tree");
+        let mut flat = cfg.clone();
+        flat.diff_tree_view = false;
+        apply_config(&mut next, &flat);
         restore_ui_state(&mut next, &json);
-        assert!(next.diff_tree);
-        // A blob from before the tree existed keeps the flat list.
-        restore_ui_state(&mut next, "{\"show_archived\":false,\"collapsed\":false}");
-        assert!(!next.diff_tree);
+        assert!(!next.diff_tree, "a blob saying tree doesn't overrule it");
     }
 
     /// A diff `gh` couldn't fetch flashes and leaves the modal shut, and a
@@ -15927,11 +16930,10 @@ diff --git a/docs/keys.md b/docs/keys.md
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.pr_diff_tx = Some(tx);
         app.pr_diff_inflight = Some(7);
+        app.flash = None;
         request_pr_diff(&mut app);
-        assert_eq!(
-            app.flash.as_deref(),
-            Some("still fetching the diff for #7…")
-        );
+        assert_eq!(app.flash, None, "the first fetch already said so");
+        assert_eq!(app.pr_diff_inflight, Some(7));
     }
 
     /// The PULL REQUEST PAGE's Changes tab opens the DIFF VIEWER through
@@ -15960,7 +16962,14 @@ diff --git a/src/b.rs b/src/b.rs
 +y
 ";
         app.pr_diff_at = Some((pr_url(7), "src/b.rs".into()));
-        open_pr_diff_view(&mut app, 7, &pr_url(7), "#7".into(), Some(diff.into()), None);
+        open_pr_diff_view(
+            &mut app,
+            7,
+            &pr_url(7),
+            "#7".into(),
+            Some(diff.into()),
+            None,
+        );
         let Some(Overlay::Diff(view)) = &app.overlay else {
             panic!("expected the diff modal, got {:?}", app.overlay);
         };
@@ -15970,7 +16979,14 @@ diff --git a/src/b.rs b/src/b.rs
 
         app.overlay = None;
         app.pr_diff_at = Some((pr_url(8), "src/b.rs".into()));
-        open_pr_diff_view(&mut app, 7, &pr_url(7), "#7".into(), Some(diff.into()), None);
+        open_pr_diff_view(
+            &mut app,
+            7,
+            &pr_url(7),
+            "#7".into(),
+            Some(diff.into()),
+            None,
+        );
         let Some(Overlay::Diff(view)) = &app.overlay else {
             panic!("expected the diff modal");
         };
@@ -16063,54 +17079,80 @@ diff --git a/src/b.rs b/src/b.rs
         assert!(app.worktree_wears_merge(&w1), "the row keeps its merge");
     }
 
-    /// A turn that finishes unread sweeps blue for `ONE_SHOT_SWEEP` on its
-    /// card, so the sweep clock runs for those seconds and no longer. Reading it ends the sweep on the spot;
-    /// an old unread finish, an unstamped one and an archived one never ask
-    /// for a frame.
+    /// A finish nobody has read shimmers until it is read, however old, so
+    /// the sweep clock runs for it until then. A session that starts needing
+    /// you, or crashes, sweeps red for `ONE_SHOT_SWEEP` and no longer; an
+    /// unstamped one and an archived one never ask for a frame.
     #[test]
-    fn a_fresh_unread_finish_keeps_the_sweep_ticking_for_a_few_seconds() {
+    fn an_alarm_sweeps_for_a_few_seconds_and_an_unread_finish_until_read() {
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app);
-        let now = crate::app::now_ms();
-        let finish = |app: &mut App, at: i64| {
-            let a = &mut app.tree.agents[0];
+        for a in &mut app.tree.agents {
             a.status = AgentStatus::Finished;
-            a.unseen = true;
+            a.unseen = false;
+        }
+        let now = crate::app::now_ms();
+        let set = |app: &mut App, status: AgentStatus, unseen: bool, at: i64| {
+            let a = &mut app.tree.agents[0];
+            a.status = status;
+            a.unseen = unseen;
             a.archived = false;
             a.status_changed_at = at;
         };
-        let fresh = |app: &App| app.agent_fresh_done(&app.tree.agents[0]);
+        let fresh = |app: &App| app.agent_fresh_alarm(&app.tree.agents[0]);
+        assert!(!app.status_anim_active(), "everything read and at rest");
 
-        finish(&mut app, now);
-        assert!(fresh(&app), "the card sweeps");
-        assert!(app.status_anim_active());
+        // An unread finish shimmers until it is read, however old — where it
+        // shows: its project's tab open, or the jump list up.
+        set(
+            &mut app,
+            AgentStatus::Finished,
+            true,
+            now - settled().as_millis() as i64,
+        );
+        assert!(
+            !app.status_anim_active(),
+            "its project's tab closed: nothing shows it, nothing ticks"
+        );
+        app.launcher_tabs.push(orion_core::ProjectId("p1".into()));
+        assert!(app.status_anim_active(), "unread: the shimmer ticks");
         app.animations = false;
         assert!(!app.status_anim_active(), "unless animations are off");
         app.animations = true;
-
         app.tree.agents[0].unseen = false;
-        assert!(!fresh(&app), "read: over");
-        assert!(!app.status_anim_active());
+        assert!(!app.status_anim_active(), "read: still");
 
-        finish(&mut app, now - settled().as_millis() as i64);
+        // Needing you sweeps once, for a few seconds after it starts.
+        set(&mut app, AgentStatus::NeedsFeedback, false, now);
+        assert!(fresh(&app), "the card sweeps");
+        assert!(app.status_anim_active());
+        set(
+            &mut app,
+            AgentStatus::NeedsFeedback,
+            false,
+            now - settled().as_millis() as i64,
+        );
         assert!(!fresh(&app), "settled");
-        assert!(!app.status_anim_active(), "an old unread finish is still");
-
-        finish(&mut app, 0);
+        assert!(
+            !app.status_anim_active(),
+            "a question already announced holds still"
+        );
+        set(&mut app, AgentStatus::Terminated, false, now);
+        assert!(fresh(&app), "a crash sweeps once too");
+        set(&mut app, AgentStatus::NeedsFeedback, false, 0);
         assert!(!fresh(&app), "never stamped");
-
-        finish(&mut app, now);
+        set(&mut app, AgentStatus::NeedsFeedback, false, now);
         app.tree.agents[0].archived = true;
         assert!(!fresh(&app), "archived: out of sight");
         assert!(!app.status_anim_active());
 
         // A DAEMON clock a little ahead of this one still sweeps — and one
         // an hour ahead does not sweep for an hour.
-        finish(&mut app, now + 2_000);
-        assert!(app.agent_fresh_done(&app.tree.agents[0]), "small skew");
-        finish(&mut app, now + 3_600_000);
-        assert!(!app.agent_fresh_done(&app.tree.agents[0]), "large skew");
+        set(&mut app, AgentStatus::NeedsFeedback, false, now + 2_000);
+        assert!(fresh(&app), "small skew");
+        set(&mut app, AgentStatus::NeedsFeedback, false, now + 3_600_000);
+        assert!(!fresh(&app), "large skew");
     }
 
     /// A branch lookup that never reached GitHub leaves the row alone — the
@@ -16449,7 +17491,7 @@ diff --git a/src/c.rs b/src/c.rs
             "the reader's file, refreshed: {}",
             view.diff
         );
-        assert!(app.flash.as_deref().is_some_and(|f| f.contains("changed")));
+        assert_eq!(app.flash, None, "the refreshed rows say it");
         assert_eq!(
             crate::pr_cache::recall_diff(&app, &url).as_deref(),
             Some(fresh),
@@ -16538,7 +17580,12 @@ diff --git a/src/c.rs b/src/c.rs
         note_pr_answer(&mut app, &other, true);
         assert!(!app.pr_lookup_due(&other), "swept minutes from now");
 
-        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.open_prs_lookup_due(&pid), "the key skips the floor");
         assert!(app.pr_lookup_due(&wid), "and the beat");
         assert!(
@@ -16550,7 +17597,7 @@ diff --git a/src/c.rs b/src/c.rs
             "fired on the loop's next turn, not the next git tick"
         );
         assert!(app.overlay.is_none(), "nothing to rename here");
-        assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
+        assert!(app.flash.is_none());
         assert!(out.is_empty(), "no daemon traffic — gh runs client-side");
 
         // The same from an open-PR row of the group, which the pane is
@@ -16559,7 +17606,12 @@ diff --git a/src/c.rs b/src/c.rs
         app.sel_worktree = app.visible_worktrees().len();
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pr_refresh_requested = false;
-        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.pr_refresh_requested);
         assert_eq!(
             app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
@@ -16609,9 +17661,14 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.pr_lookup_due(&wid));
 
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.overlay.is_none(), "no prompt");
-        assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
+        assert!(app.flash.is_none());
         assert!(app.pr_lookup_due(&wid), "the row's own lookup is due");
         assert!(app.pr_refresh_requested);
         let (pending, at) = app
@@ -16634,16 +17691,26 @@ diff --git a/src/c.rs b/src/c.rs
         // One already in flight is left to land: nothing is stacked on it.
         app.pending_pr_detail = None;
         app.pr_detail_inflight.insert(url.clone());
-        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.pending_pr_detail.is_none());
 
         // From an agent row the key refreshes all the same…
         app.sel_session = 0;
         app.pr_refresh_requested = false;
         app.flash = None;
-        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.pr_refresh_requested && app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some(RELOAD_FLASH));
+        assert!(app.flash.is_none());
 
         // …while `r` there still renames.
         press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
@@ -16664,7 +17731,10 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_link(&mut app, "https://example.dev/spec");
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::DeleteAll,
+        ));
         let Some(Overlay::Confirm(c)) = &app.overlay else {
             panic!("expected the bulk confirm, got {:?}", app.overlay);
         };
@@ -16686,7 +17756,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "demo".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -17162,7 +18237,7 @@ diff --git a/src/c.rs b/src/c.rs
         })
     }
 
-    /// Esc on the NEW SESSION PICKER sends nothing: opening it warmed
+    /// Esc on the NEW AGENT PICKER sends nothing: opening it warmed
     /// nothing, and only Enter on a row creates.
     #[test]
     fn esc_on_the_new_session_picker_sends_nothing() {
@@ -17280,16 +18355,16 @@ diff --git a/src/c.rs b/src/c.rs
     /// is not.
     #[test]
     fn footer_shows_the_orion_version_but_never_truncates_a_flash() {
-        let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
+        let stamp = concat!(" v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
 
         // A flash short enough to share the bar keeps the nameplate.
-        app.flash = Some("saved".into());
+        app.flash = Some(crate::flash::Flash::done("saved"));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
@@ -17297,7 +18372,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         // One that isn't takes the whole left edge instead.
         let long = "the pull request link can't be deleted from here, close it on github";
-        app.flash = Some(long.into());
+        app.flash = Some(crate::flash::Flash::failed(long));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(
@@ -17311,10 +18386,10 @@ diff --git a/src/c.rs b/src/c.rs
     /// one.
     #[test]
     fn footer_flags_a_newer_release_beside_the_nameplate() {
-        let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
+        let stamp = concat!(" v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(!buffer_text(&terminal).contains('⇡'), "nothing to flag yet");
 
@@ -17327,7 +18402,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         // A flash that would be clipped drops the whole plate, indicator too.
         let long = "the pull request link can't be deleted from here, close it on github";
-        app.flash = Some(long.into());
+        app.flash = Some(crate::flash::Flash::failed(long));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(
@@ -17375,9 +18450,97 @@ diff --git a/src/c.rs b/src/c.rs
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(
-            text.contains("1 agent · 1 term · 1.0 GB"),
+            text.contains("1 agent · 1.0 GB"),
             "footer readout rendered:\n{text}"
         );
+    }
+
+    /// A FLASH reads its kind at a glance: a failure in the needs-you
+    /// crimson behind `✕`, a setting to change in the working gold behind
+    /// `⚠`, a result in the done green behind `✓`, a wait behind the gold
+    /// WORKING SPINNER over muted words, and a heads-up muted behind `·`.
+    #[test]
+    fn a_flash_wears_its_kinds_mark_and_color() {
+        use crate::flash::Flash;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let th = app.theme;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut look = |flash: Flash| -> (char, ratatui::style::Color, ratatui::style::Color) {
+            let words: Vec<char> = flash.text.chars().collect();
+            app.flash = Some(flash);
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let buf = terminal.backend().buffer();
+            let y = buf.area.height - 1;
+            let cells: Vec<_> = (0..buf.area.width).map(|x| buf[(x, y)].clone()).collect();
+            let text: Vec<char> = cells
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            let at = text
+                .windows(words.len())
+                .position(|w| w == words.as_slice())
+                .unwrap_or_else(|| panic!("{:?}", text.iter().collect::<String>()));
+            (text[at - 2], cells[at - 2].fg, cells[at].fg)
+        };
+        assert_eq!(look(Flash::failed("couldn't post")), ('✕', th.err, th.err));
+        assert_eq!(look(Flash::setup("set an editor")), ('⚠', th.warn, th.warn));
+        assert_eq!(look(Flash::done("copied")), ('✓', th.ok, th.ok));
+        assert_eq!(
+            look(Flash::note("already there")),
+            ('·', th.muted, th.muted)
+        );
+        let (spinner, mark, words) = look(Flash::working("fetching the diff…"));
+        assert!(
+            crate::app::SPINNER.contains(&spinner.to_string().as_str()),
+            "{spinner}"
+        );
+        assert_eq!((mark, words), (th.warn, th.muted));
+    }
+
+    /// A checkout switched to another branch outside orion drops the pull
+    /// request and the commits ahead and behind read for the old branch,
+    /// and its lookup is due at once, so the band never wears the last
+    /// branch's pull request into the new one. A re-stamp of the same
+    /// branch keeps them.
+    #[test]
+    fn a_branch_switch_outside_orion_drops_the_old_branchs_pull_request() {
+        use orion_core::{Entity, ProjectId, Worktree};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let later = std::time::Duration::from_secs(300);
+        app.pull_requests.insert(w1.clone(), None);
+        app.pr_recheck
+            .insert(w1.clone(), (std::time::Instant::now() + later, later));
+        app.worktree_ahead.insert(w1.clone(), (2, 0));
+        let upsert = |app: &mut App, branch: &str| {
+            hse(
+                app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Worktree(Worktree {
+                        id: WorktreeId("w1".into()),
+                        project_id: ProjectId("p1".into()),
+                        path: "/tmp/demo".into(),
+                        branch: branch.into(),
+                        is_main: true,
+                        sort_order: 0,
+                    }),
+                },
+            )
+        };
+        upsert(&mut app, "main");
+        assert!(
+            app.pull_requests.contains_key(&w1),
+            "the same branch keeps it"
+        );
+        assert!(!app.pr_lookup_due(&w1));
+        assert_eq!(app.worktree_ahead_behind(&w1), (2, 0));
+
+        upsert(&mut app, "feat/other");
+        assert!(!app.pull_requests.contains_key(&w1));
+        assert!(app.pr_lookup_due(&w1), "asked again at once");
+        assert_eq!(app.worktree_ahead_behind(&w1), (0, 0));
     }
 
     /// INPUT PARITY: the footer's readout is a button. Its target is the
@@ -17421,7 +18584,7 @@ diff --git a/src/c.rs b/src/c.rs
         let word: String = line[rect.x as usize..(rect.x + rect.width) as usize]
             .iter()
             .collect();
-        assert_eq!(word, "1 agent · 0 terms · 1.0 GB", "the words, no padding");
+        assert_eq!(word, "1 agent · 1.0 GB", "the words, no padding");
         assert_eq!(rect.y, 29, "on the bar's own row");
         assert_eq!(row(&terminal, true), "", "at rest, nothing is underlined");
 
@@ -18006,16 +19169,16 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         let mut out = Vec::new();
 
-        // Panel focus: 'q' asks first, then quits on `y`.
+        // Panel focus: ^C asks first, then quits on `y`.
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut out,
         );
-        assert!(!app.should_quit, "q asks before it quits");
+        assert!(!app.should_quit, "^C asks before it quits");
         assert!(
             matches!(&app.overlay, Some(Overlay::Confirm(c)) if c.action == PendingAction::Quit),
-            "q opens the quit confirm"
+            "^C opens the quit confirm"
         );
         handle_key(
             &mut app,
@@ -18046,15 +19209,13 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.term_locked, "Ctrl+q clears the input lock");
     }
 
-    /// `q` sits among the panel hotkeys, so a letter meant for an agent used
-    /// to end the client outright. Both quit chords ask first, and backing
-    /// out leaves the app exactly where it was.
+    /// A letter meant for an agent used to end the client outright, so
+    /// quit is no bare key at all, and its chord asks first; backing out
+    /// leaves the app exactly where it was.
     #[test]
     fn quit_asks_before_it_closes_the_tui() {
-        for chord in [
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        ] {
+        {
+            let chord = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             let mut app = App::new();
             seed_tree(&mut app);
             let mut out = Vec::new();
@@ -18132,7 +19293,7 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected agent-type picker, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             assert_eq!(
                 menu.items.len(),
                 AgentKind::ALL.len() - 1,
@@ -18363,7 +19524,11 @@ diff --git a/src/c.rs b/src/c.rs
                 assert!(hint.contains(key), "{key}: {hint}");
             }
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(menu(&app).items[2].label, "opus · latest", "a model row stays one");
+            assert_eq!(
+                menu(&app).items[2].label,
+                "opus · latest",
+                "a model row stays one"
+            );
             assert!(menu(&app).lists_claude_cloud());
             assert!(keys(&app).contains("Tab cloud on · "), "{}", keys(&app));
 
@@ -18724,7 +19889,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "`?` leaves other menus alone"
             );
 
-            // The New session picker itself advertises the jump.
+            // The NEW AGENT PICKER itself advertises the jump.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             open_picker(&mut app);
             let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -19069,7 +20234,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert_eq!(
@@ -19107,7 +20277,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "the fire is the change of default"
             );
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("{:?}", app.overlay);
             };
@@ -19129,10 +20304,20 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             // "reviewer": claude · opus · high, the first preset.
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
@@ -19170,7 +20355,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             open_picker(&mut app);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
             };
             let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
             assert_eq!(
@@ -19363,7 +20548,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert!(matches!(
             &app.overlay,
-            Some(Overlay::Menu(m)) if m.title.as_deref() == Some("New session")
+            Some(Overlay::Menu(m)) if m.title.as_deref() == Some("New agent — choose harness")
         ));
     }
 
@@ -19385,7 +20570,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `r` on the Worktrees panel runs the checkout — nothing is renamed
-    /// there — the Ack names what is running, and `r` again stops it.
+    /// there — the run's terminal is what shows it, and `r` again stops it.
     #[test]
     fn r_on_a_worktree_starts_its_run_and_again_stops_it() {
         use orion_core::{Entity, TerminalId, TerminalTab, WorktreeId};
@@ -19424,9 +20609,8 @@ diff --git a/src/c.rs b/src/c.rs
                 created: Some(EntityId::Terminal(TerminalId("run1".into()))),
             },
         );
-        assert_eq!(app.flash.as_deref(), Some("▶ running npm run dev in main"));
+        assert_eq!(app.flash, None, "the running terminal says it");
         assert!(app.worktree_running(&WorktreeId("w1".into())));
-        assert_eq!(app.run_flash_when_seen, None);
 
         out.clear();
         press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
@@ -19439,10 +20623,10 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// The DAEMON's reply to `StartRun` usually reaches the TUI before the
-    /// broadcast upsert of the terminal it started: the flash names the
-    /// branch at once and the command when the row lands.
+    /// broadcast upsert of the terminal it started: the Ack lands quietly,
+    /// and the checkout reads as running once the row does.
     #[test]
-    fn a_run_ack_ahead_of_its_terminal_names_the_command_when_it_lands() {
+    fn a_run_ack_ahead_of_its_terminal_lands_quietly() {
         use orion_core::{Entity, TerminalTab, WorktreeId};
         let mut app = App::new();
         seed_tree(&mut app);
@@ -19463,7 +20647,8 @@ diff --git a/src/c.rs b/src/c.rs
                 created: Some(EntityId::Terminal(TerminalId("run1".into()))),
             },
         );
-        assert_eq!(app.flash.as_deref(), Some("▶ running in main"));
+        assert_eq!(app.flash, None);
+        assert!(!app.worktree_running(&WorktreeId("w1".into())));
 
         hse(
             &mut app,
@@ -19478,8 +20663,8 @@ diff --git a/src/c.rs b/src/c.rs
                 }),
             },
         );
-        assert_eq!(app.flash.as_deref(), Some("▶ running bun dev in main"));
-        assert_eq!(app.run_flash_when_seen, None, "spent");
+        assert_eq!(app.flash, None);
+        assert!(app.worktree_running(&WorktreeId("w1".into())));
     }
 
     /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
@@ -19499,7 +20684,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             let mut out = Vec::new();
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            let flash = app.flash.clone().unwrap_or_default();
+            let flash = app.flash.as_deref().unwrap_or_default().to_string();
             assert!(
                 flash.contains("no open command")
                     && flash.contains("Settings")
@@ -19513,22 +20698,28 @@ diff --git a/src/c.rs b/src/c.rs
                 r#"{"open": "open http://localhost:3000"}"#,
             )
             .unwrap();
+            let fires = || open_command_for(dir.path(), dir.path());
+            assert_eq!(fires().as_deref(), Ok("open http://localhost:3000"));
+            app.flash = None;
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:3000"));
+            assert_eq!(app.flash, None, "what it opens is the answer");
 
             // The setting wins over the file, and is read fresh per press.
             let mut cfg = crate::config::Config::load();
             assert!(cfg.set_project_text(dir.path(), OpenCommand, "open http://localhost:5173"));
             cfg.save_to(&config_path).unwrap();
+            assert_eq!(fires().as_deref(), Ok("open http://localhost:5173"));
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
+            assert_eq!(app.flash, None);
 
             // Sessions panel: the same worktree is under the
             // cursor, so the same command fires, and focus stays put.
             app.focus = Focus::Sessions;
-            app.flash = None;
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash.as_deref(), Some("↗ open http://localhost:5173"));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::OpenWorktree,
+            ));
+            assert_eq!(app.flash, None);
             assert_eq!(app.focus, Focus::Sessions);
             assert!(
                 out.is_empty(),
@@ -21299,10 +22490,11 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened https://example.com"),
+            take_opened(),
+            ["https://example.com"],
             "the URL under the cursor is opened"
         );
+        assert!(app.flash.is_none());
         assert_eq!(app.focus, Focus::Projects, "focus is untouched");
         assert!(!app.term_locked, "input stays unlocked");
         assert!(app.term_selection.is_none(), "no selection armed");
@@ -22707,7 +23899,6 @@ diff --git a/src/c.rs b/src/c.rs
         app.focus = Focus::Worktrees;
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "main checkout never gets a confirm");
-        assert!(app.flash.is_some(), "main checkout delete flashes instead");
 
         app.focus = Focus::Sessions;
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
@@ -22811,13 +24002,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.sel_worktree = 1;
         press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        assert!(
-            app.flash
-                .as_deref()
-                .is_some_and(|f| f.contains("root checkout")),
-            "{:?}",
-            app.flash
-        );
+        assert_eq!(app.flash, None);
 
         app.focus = Focus::Projects;
         press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
@@ -22908,7 +24093,7 @@ diff --git a/src/c.rs b/src/c.rs
 
     // ---- git-diff modal ----
 
-    /// The NEW SESSION PICKER for the selected checkout — what the card
+    /// The NEW AGENT PICKER for the selected checkout — what the card
     /// menu's **New agent** opens, and what the Sessions panel's `n` used
     /// to. The GRID's `n` is the QUICK PROMPT box, so the picker is opened
     /// here rather than typed into being.
@@ -23046,7 +24231,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         match &app.overlay {
             Some(Overlay::Diff(v)) => {
                 assert_eq!(v.files.len(), 2, "{:?}", v.files);
@@ -23064,22 +24254,20 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn g_with_clean_repo_flashes_no_changes() {
+    fn g_with_clean_repo_opens_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let repo = test_repo(&dir);
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
-        assert!(app.overlay.is_none(), "clean tree opens no modal");
-        assert!(
-            app.flash
-                .as_deref()
-                .unwrap_or("")
-                .contains("no changes in main"),
-            "{:?}",
-            app.flash
+        press(
+            &mut app,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            &mut out,
         );
+        assert!(app.overlay.is_none(), "clean tree opens no modal");
+        assert_eq!(app.flash, None);
     }
 
     /// `G` turns the checkout's remote into a page and hands it to the
@@ -23096,8 +24284,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenRepo));
-        assert_eq!(app.flash.as_deref(), Some("opened github.com/o/r"));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::OpenRepo,
+        ));
+        assert_eq!(take_opened(), ["https://github.com/o/r"]);
+        assert_eq!(app.flash, None);
         assert!(app.overlay.is_none(), "the browser is the whole feature");
         assert!(out.is_empty(), "nothing to tell the daemon about");
     }
@@ -23109,7 +24301,10 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenRepo));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::OpenRepo,
+        ));
         assert_eq!(app.flash.as_deref(), Some("no git remote on this repo"));
     }
 
@@ -23183,8 +24378,8 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.git_changes_stale(), "the failed read is still cached");
     }
 
-    /// A band's rule prints its checkout's changed-file count right behind
-    /// the branch, from whichever read landed there last; a clean checkout,
+    /// A band's rule prints its checkout's changed-file count at its right
+    /// end, `*2`, from whichever read landed there last; a clean checkout,
     /// and a count read in some other checkout, print nothing — and the
     /// footer no longer carries it at all.
     #[test]
@@ -23192,39 +24387,38 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let rule = |terminal: &Terminal<TestBackend>| -> String {
+            buffer_text(terminal)
+                .lines()
+                .find(|l| l.contains("⌂ main ─"))
+                .unwrap_or_default()
+                .to_string()
+        };
 
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(
-            !buffer_text(&terminal).contains("⌂ main +"),
+            !rule(&terminal).contains('*'),
             "no count before one is read"
         );
 
         land_git_changes(&mut app, WorktreeId("w1".into()), Some(2));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(rule(&terminal).contains(" *2 ──"), "{}", rule(&terminal));
         let text = buffer_text(&terminal);
-        assert!(text.contains("⌂ main +2 files"), "card:\n{text}");
         let footer = text.lines().last().unwrap_or_default();
-        assert!(!footer.contains("+2 file"), "footer: {footer}");
-
-        land_git_changes(&mut app, WorktreeId("w1".into()), Some(1));
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("⌂ main +1 file "), "singular:\n{text}");
+        assert!(!footer.contains("*2"), "footer: {footer}");
 
         land_git_changes(&mut app, WorktreeId("w1".into()), Some(0));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(
-            !buffer_text(&terminal).contains("⌂ main +"),
+            !rule(&terminal).contains('*'),
             "a clean checkout stays quiet"
         );
 
-        // Another checkout's count stays on that checkout's cards.
+        // Another checkout's count stays on that checkout's band.
         land_swept_changes(&mut app, WorktreeId("w2".into()), Some(5));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(
-            !buffer_text(&terminal).contains("+5 file"),
-            "no card of w1 wears w2's count"
-        );
+        assert!(!rule(&terminal).contains("*5"), "{}", rule(&terminal));
     }
 
     /// The cards' sweep reads the grid's other checkouts, never the
@@ -23286,7 +24480,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &dir.path().join("nope"));
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.overlay.is_none());
         assert!(
             app.flash.as_deref().unwrap_or("").contains("missing"),
@@ -23507,6 +24706,50 @@ diff --git a/src/c.rs b/src/c.rs
             .collect()
     }
 
+    /// Opened as a tree (the **Files as a tree** SETTING), a checkout's
+    /// viewer lands on the first file not yet reviewed, as the flat list
+    /// does — not on a directory, and not on the file a ✓ already covers —
+    /// with that file's diff on screen.
+    #[test]
+    fn a_tree_opens_on_the_first_unreviewed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::review::with_store_path(dir.path().join("reviewed.json"), || {
+            let repo = test_repo(&dir);
+            std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+            std::fs::create_dir(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/b.txt"), "bee\n").unwrap();
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            let mut out = Vec::new();
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(
+                &mut app,
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(diff_view(&app).reviewed.contains_key("a.txt"));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            app.diff_tree = true;
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            let view = diff_view(&app);
+            assert!(view.tree.is_some(), "opened as the tree");
+            assert_eq!(view.selected_path(), Some("src/b.txt"));
+            assert!(view.diff.contains("+bee"), "{}", view.diff);
+        });
+    }
+
     #[test]
     fn ctrl_r_toggles_reviewed_and_marks_survive_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -23518,7 +24761,12 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             // Status is path-ordered, so a.txt is the selected file. Marking
             // sinks it below z.txt and advances to the next file.
             press(
@@ -23542,7 +24790,12 @@ diff --git a/src/c.rs b/src/c.rs
             // Reopen: the mark comes back from the store, already sunk, and
             // the first unreviewed file starts selected.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert_eq!(diff_order(&app), ["z.txt", "a.txt"], "restored + sunk");
             assert_eq!(diff_view(&app).selected_file().unwrap().path, "z.txt");
 
@@ -23565,7 +24818,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "selection follows the unmarked file"
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(diff_view(&app).reviewed.is_empty(), "unmark persisted");
             assert!(out.is_empty(), "reviewed marks never talk to the daemon");
         });
@@ -23581,7 +24839,12 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(
                 &mut app,
                 KeyCode::Char('r'),
@@ -23592,7 +24855,12 @@ diff --git a/src/c.rs b/src/c.rs
 
             // The approved diff no longer matches what's on disk.
             std::fs::write(repo.join("a.txt"), "changed again\n").unwrap();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(
                 diff_view(&app).reviewed.is_empty(),
                 "an edited file comes back unreviewed"
@@ -23610,7 +24878,12 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(
                 &mut app,
                 KeyCode::Char('r'),
@@ -23623,7 +24896,12 @@ diff --git a/src/c.rs b/src/c.rs
             run_git(&repo, &["add", "."]);
             run_git(&repo, &["commit", "-m", "wip"]);
             std::fs::write(repo.join("a.txt"), "post-commit\n").unwrap();
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(
                 diff_view(&app).reviewed.is_empty(),
                 "a commit resets the worktree's marks"
@@ -23710,6 +24988,123 @@ diff --git a/src/c.rs b/src/c.rs
                 assert!(screen.contains(needle), "{needle:?}\n{screen}");
             }
             assert!(app.flash.is_none(), "{:?}", app.flash);
+        });
+    }
+
+    /// A pull request whose head commit the repo has is read from git:
+    /// acted on from the PULL REQUESTS MODAL's Changes tab, the DIFF
+    /// VIEWER opens inside the modal — on that file, the COMMIT LIST over
+    /// the files with every commit ticked, the keys on the commits (the
+    /// **Start on** SETTING) — and Esc puts the modal back on its row and
+    /// tab. A commit acted on from the Commits tab is that commit alone.
+    /// A pull request the repo doesn't have falls back to GitHub, the
+    /// modal still up.
+    #[test]
+    fn a_local_pull_request_is_reviewed_from_git_inside_the_pr_modal() {
+        use crate::app::DiffFocus;
+        use crate::pr_modal::PrFocus;
+        use crate::pr_preview::PrTab;
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = repo_with_commits(&dir);
+            let tip = String::from_utf8(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string();
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            app.diff_start = DiffFocus::Commits;
+            seed_open_prs(&mut app, &[(7, "Attach links")]);
+            let mut detail = a_detail(7, "Adds b, edits a.", vec![]);
+            detail.head_sha = tip.clone();
+            detail.files = ["a.txt", "b.txt"]
+                .iter()
+                .map(|path| crate::pull_request::PrFile {
+                    path: path.to_string(),
+                    additions: 1,
+                    deletions: 0,
+                    change: "MODIFIED".into(),
+                })
+                .collect();
+            detail.commits = vec![crate::pull_request::PrCommit {
+                sha: tip.clone(),
+                subject: "edit a".into(),
+                ..Default::default()
+            }];
+            app.pr_detail.insert(pr_url(7), detail);
+            let mut out = Vec::new();
+
+            let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+            crate::pr_modal::open(&mut app);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            // The listing walks its rows once it has been drawn.
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let view = diff_view(&app);
+            assert!(view.back.is_some(), "a level inside the modal");
+            assert_eq!(view.focus, DiffFocus::Commits);
+            let list = view.commits.as_ref().expect("the PR's commits");
+            assert_eq!(list.commits.len(), 2);
+            assert!(list.all_ticked(), "the whole pull request");
+            assert_eq!(diff_paths(&app), ["a.txt", "b.txt"]);
+            assert_eq!(
+                view.selected_path(),
+                Some("b.txt"),
+                "on the file the tab was on"
+            );
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let screen = buffer_text(&terminal);
+            assert!(screen.contains("#7 › Commits · 2 since"), "{screen}");
+            assert!(screen.contains("Esc back to the pull request"), "{screen}");
+
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::PullRequests(modal)) = &app.overlay else {
+                panic!("expected the modal back, got {:?}", app.overlay);
+            };
+            assert_eq!(modal.tabs.tab, PrTab::Changes);
+            assert_eq!(modal.focus, PrFocus::Page);
+
+            // The Commits tab's row: that commit alone.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let list = diff_view(&app).commits.as_ref().expect("the PR's commits");
+            assert!(list.ticked.is_empty());
+            assert_eq!(
+                list.selected_row(),
+                Some(crate::commit_list::Row::Commit(0))
+            );
+            assert_eq!(diff_paths(&app), ["a.txt"]);
+
+            // A head this repo has never seen: the whole diff from GitHub
+            // (`^G` on the Description tab), the modal still up meanwhile.
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            if let Some(detail) = app.pr_detail.get_mut(&pr_url(7)) {
+                detail.head_sha = "0".repeat(40);
+            }
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(
+                matches!(&app.overlay, Some(Overlay::PullRequests(_))),
+                "{:?}",
+                app.overlay
+            );
         });
     }
 
@@ -24260,7 +25655,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         let texts: Vec<&str> = palette(&app)
             .items
             .iter()
@@ -24289,7 +25689,11 @@ diff --git a/src/c.rs b/src/c.rs
             .collect();
         assert_eq!(
             shown,
-            ["demo/main/agent-1", "orion/feat-x/codex-1", crate::palette::ADD_PROJECT_ROW]
+            [
+                "demo/main/agent-1",
+                "orion/feat-x/codex-1",
+                crate::palette::ADD_PROJECT_ROW
+            ]
         );
         assert!(out.is_empty(), "opening the palette sends nothing");
     }
@@ -24305,7 +25709,12 @@ diff --git a/src/c.rs b/src/c.rs
             seed_second_project(&mut app);
             app.show_archived = show_archived;
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let listed: Vec<&str> = palette(&app)
                 .items
                 .iter()
@@ -24324,7 +25733,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "main".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24353,7 +25767,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -24380,7 +25799,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -24422,7 +25846,12 @@ diff --git a/src/c.rs b/src/c.rs
                 unseen: false,
             },
         );
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -24452,7 +25881,12 @@ diff --git a/src/c.rs b/src/c.rs
                 unseen: false,
             },
         );
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -24476,7 +25910,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -24500,7 +25939,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -24577,8 +26021,10 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `.` walks the ring `/` shows before a query: NEEDS FEEDBACK, then
-    /// RUNNING, then UNSEEN, then the rest — crossing projects as it goes,
+    /// UNSEEN, then RUNNING, then the rest — crossing projects as it goes,
     /// skipping the archived row, and wrapping from the bottom to the top.
+    /// Landing on the unread finish reads it, and the walk still goes on to
+    /// the running session after it rather than skipping it.
     #[test]
     fn next_attention_walks_the_palette_order_and_wraps() {
         let mut app = App::new();
@@ -24591,7 +26037,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert_eq!(
             walk_attention(&mut app, 1, 6),
-            ["codex-1", "ask", "run", "unread", "agent-1", "codex-1"]
+            ["codex-1", "ask", "unread", "run", "agent-1", "codex-1"]
         );
         assert_eq!(app.selected_project().unwrap().name, "orion");
         assert_eq!(app.selected_worktree().unwrap().branch, "feat-x");
@@ -24610,7 +26056,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert_eq!(
             walk_attention(&mut app, -1, 6),
-            ["unread", "run", "ask", "codex-1", "agent-1", "unread"]
+            ["run", "unread", "ask", "codex-1", "agent-1", "run"]
         );
     }
 
@@ -24852,7 +26298,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_default_config(|| {
             press(&mut app, KeyCode::Char('.'), KeyModifiers::NONE, &mut out);
         });
-        assert_eq!(app.flash.as_deref(), Some(NO_SESSIONS_TO_JUMP));
+        assert!(app.flash.is_none());
         assert_eq!(app.focus, Focus::Sessions);
         assert!(out.is_empty(), "nothing to attach: {out:?}");
     }
@@ -24863,7 +26309,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "featx".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -24897,8 +26348,17 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
-        assert_eq!(palette(&app).items.len(), 4, "the tree's three and Add project…");
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        assert_eq!(
+            palette(&app).items.len(),
+            4,
+            "the tree's three and Add project…"
+        );
         // The cursor opens on the session row, above Add project…, and
         // stays there while the tree churns.
 
@@ -24939,7 +26399,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         // Tall enough that the sidebar's headers show past the modal.
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -24949,11 +26414,12 @@ diff --git a/src/c.rs b/src/c.rs
             text.contains("type to search"),
             "query placeholder rendered:\n{text}"
         );
-        // Palette rows carry per-kind glyphs, FLAT: ● the session on a line
-        // of its own, the project it lives in in front of it — but not the
-        // branch, which is searched and not drawn.
+        // Palette rows carry per-kind glyphs, FLAT: the session on a line
+        // of its own behind its STATUS MARK (`○`, never run), the project
+        // it lives in in front of it — but not the branch, which is
+        // searched and not drawn.
         assert!(
-            text.contains("● demo/agent-1"),
+            text.contains("○ demo/agent-1"),
             "session row with its project in front:\n{text}"
         );
         assert!(
@@ -24981,7 +26447,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -25011,23 +26482,23 @@ diff --git a/src/c.rs b/src/c.rs
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
 
-        // The one running agent lights its own row's glyph…
-        let (x, y) = find_cell(&terminal, "● demo/agent-1");
-        assert_eq!(
-            terminal.backend().buffer()[(x, y)].fg,
-            th.warn,
-            "the session glyph reads running"
+        // The one running agent wears the WORKING SPINNER on its own
+        // row, in the working gold…
+        let (x, y) = find_cell(&terminal, "demo/agent-1");
+        let glyph = &terminal.backend().buffer()[(x - 2, y)];
+        assert!(
+            crate::app::SPINNER.contains(&glyph.symbol()),
+            "the session glyph is the spinner, got {:?}",
+            glyph.symbol()
         );
+        assert_eq!(glyph.fg, th.warn, "the session glyph reads working");
         // ...and its title — its own name, past the dim project crumb —
-        // rides the running sweep, not plain text.
+        // holds still: work in progress is the spinner's to say.
         let buffer = terminal.backend().buffer();
-        let title_x = x + "● demo/".chars().count() as u16;
+        let title_x = x + "demo/".chars().count() as u16;
         for i in 0.."agent-1".chars().count() as u16 {
             let fg = buffer[(title_x + i, y)].fg;
-            assert!(
-                th.warn_sweep.contains(&fg),
-                "title cell {i} is on the sweep ramp, got {fg:?}"
-            );
+            assert_eq!(fg, th.text, "title cell {i} is plain text");
         }
         // …and so do its worktree's and its project's rollups, once a query
         // reaches those rows.
@@ -25054,7 +26525,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         app.tree.agents.clear();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "demo".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25441,6 +26917,26 @@ diff --git a/src/c.rs b/src/c.rs
                 "Fix {ids}\n{issues}"
             );
             assert_eq!(settings_view(&app).selected, row, "back on the row");
+
+            // Emptied, the box goes back to the default — never the cloud
+            // box's "needs a task", which only a cloud launch says.
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
+                panic!("expected the template's box, got {:?}", app.overlay);
+            };
+            prompt.input.set_text("");
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(app.overlay, Some(Overlay::Settings(_))),
+                "{:?} / {:?}",
+                app.overlay,
+                app.flash
+            );
+            assert!(app.flash.is_none(), "{:?}", app.flash);
+            assert_eq!(
+                crate::config::Config::load().linear_template(),
+                crate::config::DEFAULT_LINEAR_TEMPLATE
+            );
         });
     }
 
@@ -25717,12 +27213,13 @@ diff --git a/src/c.rs b/src/c.rs
             let ran = crate::claude_accounts::take_ran();
             assert_eq!(ran.len(), 1);
             assert_eq!(ran[0].args, ["auth", "login", "--email", "c@d.co"]);
+            // Its dir first; on a Mac, the private-window BROWSER after it.
             assert_eq!(
-                ran[0].env,
-                [(
+                ran[0].env[0],
+                (
                     "CLAUDE_CONFIG_DIR".to_string(),
                     root.join(".claude-2").display().to_string()
-                )]
+                )
             );
             // Esc on the email backs out to the row, nothing run.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -25870,10 +27367,187 @@ diff --git a/src/c.rs b/src/c.rs
                 "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
                 "private browser window",
                 "Claude (a@b.co) · ~/.claude-2",
-                "Enter sign in · o sign out",
+                "Enter sign in · r rename · o sign out",
             ] {
                 assert!(text.contains(needle), "{needle}:\n{text}");
             }
+        });
+    }
+
+    /// `r` asks for a name, prefilled with the one it has; Enter keeps it
+    /// — the id and the dir unmoved — and Esc leaves it. The default
+    /// account is renamed the same way, and an empty name puts it back on
+    /// `Claude`.
+    #[test]
+    fn r_renames_an_account_and_only_its_name() {
+        with_two_accounts(|root| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 1, &mut out);
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::RenameClaudeAccount { id: "claude-2".into() }
+                        && p.input.as_str().is_empty()),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "Work", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert_eq!(
+                settings_view(&app).selected,
+                crate::config::AGENTS_HEAD.len() + 1,
+                "back on its row"
+            );
+            let cfg = crate::config::Config::load();
+            let account = &cfg.claude_accounts[0];
+            assert_eq!(
+                (account.id.as_str(), account.name.as_str()),
+                ("claude-2", "Work")
+            );
+            assert_eq!(account.dir(), root.join(".claude-2"));
+            assert_eq!(
+                cfg.effective_harness_by_id("claude-2").display_label(),
+                "Work (not signed in)"
+            );
+            // Prefilled with it next time; Esc keeps it.
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Work"));
+            type_text(&mut app, " Laptop", &mut out);
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert_eq!(
+                crate::config::Config::load().claude_accounts[0].name,
+                "Work"
+            );
+
+            // The default account.
+            press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            type_text(&mut app, "Personal", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let cfg = crate::config::Config::load();
+            assert_eq!(
+                cfg.effective_harness_by_id("claude").display_label(),
+                "Personal (a@b.co)"
+            );
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            for _ in 0.."Personal".len() {
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let cfg = crate::config::Config::load();
+            assert_eq!(
+                cfg.effective_harness_by_id("claude").display_label(),
+                "Claude (a@b.co)"
+            );
+            assert!(!cfg.harnesses.contains_key("claude"));
+        });
+    }
+
+    /// SAVED ON THIS MACHINE in the overlay: a removed account's dir is
+    /// listed under the accounts with who it is; Enter adds it back under
+    /// the name typed (prefilled from its folder), and `⌫` moves one to
+    /// the Trash behind a confirm.
+    #[test]
+    fn saved_dirs_come_back_or_go_to_the_trash() {
+        with_two_accounts(|root| {
+            std::fs::create_dir_all(root.join(".claude-old")).unwrap();
+            std::fs::write(
+                root.join(".claude-old/.claude.json"),
+                r#"{"oauthAccount": {"emailAddress": "old@b.co"}}"#,
+            )
+            .unwrap();
+            crate::claude_accounts::refresh_now();
+            let bin = root.join(".Trash");
+            let skills = crate::skills::Places {
+                home: Some(root.to_path_buf()),
+                trash: Some(crate::skills::Trash::Mac(bin.clone())),
+                ..Default::default()
+            };
+            crate::skills::with_places(skills, || {
+                let mut app = App::new();
+                let mut out = Vec::new();
+                // claude, claude-2, Add account, then the saved dir.
+                open_account_row(&mut app, 3, &mut out);
+                let mut terminal = Terminal::new(TestBackend::new(110, 50)).unwrap();
+                terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let text = buffer_text(&terminal);
+                for needle in [
+                    "Saved on this machine",
+                    "~/.claude-old",
+                    "[not in orion · signed in as old@b.co]",
+                    "Enter add it back",
+                ] {
+                    assert!(text.contains(needle), "{needle}:\n{text}");
+                }
+
+                // Enter: back as an account, under the name typed.
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(
+                    matches!(&app.overlay, Some(Overlay::Prompt(p))
+                        if p.kind == PromptKind::AdoptClaudeDir { dir: root.join(".claude-old") }
+                            && p.input.as_str() == "old"),
+                    "{:?}",
+                    app.overlay
+                );
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                type_text(&mut app, "Old Job", &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                let cfg = crate::config::Config::load();
+                let back = cfg.claude_accounts.last().unwrap();
+                assert_eq!(
+                    (back.id.as_str(), back.name.as_str()),
+                    ("claude-old", "Old Job")
+                );
+                assert_eq!(back.dir(), root.join(".claude-old"));
+                assert_eq!(
+                    settings_view(&app).selected,
+                    crate::config::AGENTS_HEAD.len() + 2,
+                    "on its own row"
+                );
+                assert!(crate::claude_accounts::on_disk(&cfg).is_empty());
+
+                // Removed again, kept: listed again, and the confirm said so.
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if c.message.contains("listed under Saved on this machine")));
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert_eq!(
+                    crate::claude_accounts::on_disk(&crate::config::Config::load()),
+                    [root.join(".claude-old")]
+                );
+
+                // `⌫` on it: the Trash, behind a confirm; Esc first keeps it.
+                // The removal landed on the section's first row.
+                for _ in 0..3 {
+                    press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+                }
+                assert_eq!(
+                    settings_view(&app).selected,
+                    crate::config::AGENTS_HEAD.len() + 3
+                );
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if c.action == PendingAction::TrashClaudeDir { dir: root.join(".claude-old") }
+                        && c.message.contains("its login as old@b.co")));
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+                assert!(root.join(".claude-old").is_dir());
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+                assert!(!root.join(".claude-old").exists());
+                assert!(bin.join(".claude-old").is_dir());
+                assert!(crate::claude_accounts::on_disk(&crate::config::Config::load()).is_empty());
+                assert!(
+                    root.join(".claude-2").is_dir(),
+                    "an account's dir never goes"
+                );
+            });
         });
     }
 
@@ -25939,9 +27613,17 @@ diff --git a/src/c.rs b/src/c.rs
         press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Char('3'), KeyModifiers::NONE, &mut out);
         assert_eq!(settings_view(&app).tab, 2);
-        // A digit past the last tab is ignored rather than clamped.
-        press(&mut app, KeyCode::Char('9'), KeyModifiers::NONE, &mut out);
-        assert_eq!(settings_view(&app).tab, 2);
+        // A digit past the last tab is ignored rather than clamped — while
+        // the strip is short enough for one to be past it.
+        let tabs = crate::config::tab_count();
+        if let Some(past) = char::from_digit(tabs as u32 + 1, 10) {
+            press(&mut app, KeyCode::Char(past), KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).tab, 2);
+        }
+        if let Some(last) = char::from_digit(tabs as u32, 10) {
+            press(&mut app, KeyCode::Char(last), KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).tab, tabs - 1);
+        }
     }
 
     /// The arrows do double duty: cycling a value inside the list, walking
@@ -26028,9 +27710,7 @@ diff --git a/src/c.rs b/src/c.rs
         let ids: Vec<&str> = crate::config::settings_rows(crate::config::hotkeys_tab())
             .into_iter()
             .filter_map(|row| match row {
-                crate::config::SettingsRow::Hotkey(i) => {
-                    crate::keymap::spec_at(i).map(|s| s.id)
-                }
+                crate::config::SettingsRow::Hotkey(i) => crate::keymap::spec_at(i).map(|s| s.id),
                 _ => None,
             })
             .collect();
@@ -26106,7 +27786,12 @@ diff --git a/src/c.rs b/src/c.rs
             let changes = app.keymap.label(crate::keymap::Action::GitDiff);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             // `^e` is Changes' — capturing it must not silently steal it.
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let view = settings_view(&app);
             let (text, level) = view.notice.clone().expect("a warning");
             assert_eq!(level, crate::app::NoticeLevel::Warn);
@@ -26138,7 +27823,12 @@ diff --git a/src/c.rs b/src/c.rs
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert_eq!(app.keymap.label(crate::keymap::Action::Help), "^E");
             assert_eq!(
@@ -26150,7 +27840,12 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             seed_tree(&mut app);
             app.focus = Focus::Worktrees;
-            press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(matches!(app.overlay, Some(Overlay::Help(_))));
         });
     }
@@ -26242,8 +27937,13 @@ diff --git a/src/c.rs b/src/c.rs
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            // 'q' would close the overlay; here it is just a key.
-            press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, &mut out);
+            // ^C would close the overlay; here it is just a key.
+            press(
+                &mut app,
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(
                 matches!(app.overlay, Some(Overlay::Settings(_))),
                 "the overlay stayed open"
@@ -26400,7 +28100,10 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Metrics,
+        ));
         assert!(matches!(app.overlay, Some(Overlay::Metrics(_))));
 
         // The keypress itself fires the initial reading's request.
@@ -26474,23 +28177,25 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Metrics,
+        ));
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
             other => panic!("expected GetMetrics, got {other:?}"),
         };
-        let spare =
-            |id: &str, pid: u32, mb: u64, model: Option<&str>| orion_core::SessionMetrics {
-                session: SessionRef::Agent(AgentId(id.into())),
-                pid,
-                rss_bytes: mb * 1024 * 1024,
-                procs: 3,
-                prewarm: Some(orion_core::PrewarmInfo {
-                    worktree: orion_core::WorktreeId("w1".into()),
-                    kind: orion_core::AgentKind::Claude,
-                    model: model.map(str::to_string),
-                }),
-            };
+        let spare = |id: &str, pid: u32, mb: u64, model: Option<&str>| orion_core::SessionMetrics {
+            session: SessionRef::Agent(AgentId(id.into())),
+            pid,
+            rss_bytes: mb * 1024 * 1024,
+            procs: 3,
+            prewarm: Some(orion_core::PrewarmInfo {
+                worktree: orion_core::WorktreeId("w1".into()),
+                kind: orion_core::AgentKind::Claude,
+                model: model.map(str::to_string),
+            }),
+        };
         hse(
             &mut app,
             ServerEvent::Metrics {
@@ -26575,7 +28280,10 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Metrics,
+        ));
         request_metrics(&mut app, &mut out);
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
@@ -26637,7 +28345,10 @@ diff --git a/src/c.rs b/src/c.rs
             KeyModifiers::CONTROL,
             &mut out,
         );
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Metrics,
+        ));
         request_metrics(&mut app, &mut out);
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
@@ -26667,7 +28378,10 @@ diff --git a/src/c.rs b/src/c.rs
     fn metrics_reply_after_close_is_dropped() {
         let mut app = App::new();
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Metrics));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Metrics,
+        ));
         let req_id = match out.last() {
             Some(ClientRequest::GetMetrics { req_id }) => *req_id,
             other => panic!("expected GetMetrics, got {other:?}"),
@@ -26717,7 +28431,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let files = &finder(&app).files;
             assert!(files.contains(&"a.txt".to_string()), "{files:?}");
             assert!(files.contains(&"fresh.txt".to_string()), "{files:?}");
@@ -26785,14 +28504,22 @@ diff --git a/src/c.rs b/src/c.rs
         let mut out = Vec::new();
 
         // A shell stands in for the editor.
-        with_config_json(r#"{"editor": "/bin/sh", "close_finder_on_open": true}"#, || {
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
-            for c in ['n', 'o', 't'] {
-                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
-            }
-            assert_eq!(finder(&app).selected_path(), Some("notes.md"));
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        });
+        with_config_json(
+            r#"{"editor": "/bin/sh", "close_finder_on_open": true}"#,
+            || {
+                press(
+                    &mut app,
+                    KeyCode::Char('p'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
+                for c in ['n', 'o', 't'] {
+                    press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+                }
+                assert_eq!(finder(&app).selected_path(), Some("notes.md"));
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            },
+        );
         assert!(app.vim.is_none(), "no editor: the page alone");
         let page = app.page.as_ref().expect("the page");
         assert_eq!(page.file, "notes.md");
@@ -26813,7 +28540,12 @@ diff --git a/src/c.rs b/src/c.rs
             .unwrap()
             .set_modified(later)
             .unwrap();
-        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.vim.is_none());
         assert_eq!(
             app.page.as_ref().map(|p| p.text.as_str()),
@@ -26850,7 +28582,12 @@ diff --git a/src/c.rs b/src/c.rs
         // The TREE BROWSER's Enter on a markdown file: the page over the
         // tree, which stays underneath.
         with_config_json(r#"{"editor": "/bin/sh"}"#, || {
-            press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
         });
         for c in ['n', 'o', 't', 'e', 's'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -26930,7 +28667,12 @@ diff --git a/src/c.rs b/src/c.rs
             micro
         };
         app.vim = Some(micro());
-        press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.vim.is_some(), "micro's own quit, not ours");
         press(
             &mut app,
@@ -26956,6 +28698,47 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert!(app.vim.is_none(), "the force close");
+    }
+
+    /// A paste into the modal reaches a child that never turned bracketed
+    /// paste on as typed — `claude auth login`'s `Paste code here if
+    /// prompted >` is a plain readline, and a code wrapped in the markers
+    /// was an `Invalid code` — and one that did (vim) in the markers.
+    #[test]
+    fn a_paste_into_the_modal_is_bracketed_only_when_the_child_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let script = "printf 'Paste code here if prompted > '; read -r line; \
+                      printf 'GOT:'; printf %s \"$line\" | od -An -tx1 | tr -d ' \\n'; \
+                      printf '\\033[?2004h'; stty raw -echo; printf ' ASKED'; \
+                      dd bs=1 count=13 2>/dev/null | od -An -tx1 | tr -d ' \\n'; \
+                      printf ' DONE'; sleep 30";
+        let mut vim = VimTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), script.into()],
+            dir.path(),
+            "t".into(),
+            80,
+            24,
+            1,
+            tx,
+        )
+        .unwrap();
+        vim.account_auth = true;
+        let mut app = App::new();
+        app.vim = Some(vim);
+        let mut out = Vec::new();
+        pump_editor(&mut app, &mut rx, |s| s.contains("prompted >"));
+        handle_terminal_event(&mut app, Event::Paste("ab#cd".into()), &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("ASKED"));
+        assert!(shown.contains("GOT:6162236364 "), "the code alone: {shown}");
+        handle_terminal_event(&mut app, Event::Paste("x".into()), &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("DONE"));
+        assert!(shown.contains("1b5b3230307e781b5b3230317e"), "{shown}");
+        if let Some(vim) = &mut app.vim {
+            vim.kill();
+        }
     }
 
     /// Output a child printed, pumped into the modal until `done`.
@@ -27073,7 +28856,10 @@ diff --git a/src/c.rs b/src/c.rs
             (KeyCode::Char('p'), cmd),
         ] {
             press(&mut app, code, mods, &mut out);
-            assert!(app.overlay.is_none(), "{code:?} {mods:?} opened orion's own");
+            assert!(
+                app.overlay.is_none(),
+                "{code:?} {mods:?} opened orion's own"
+            );
         }
         press(
             &mut app,
@@ -27176,7 +28962,12 @@ diff --git a/src/c.rs b/src/c.rs
         app.vim_tx = Some(tx);
         let mut out = Vec::new();
         with_config_json(r#"{"editor": "/bin/sh"}"#, || {
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Char('o'), KeyModifiers::SUPER, &mut out);
         });
         let vim = app.vim.as_ref().expect("the built-in editor instead");
@@ -27196,7 +28987,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             // A shell stands in for vim (`sh +1 a.txt` still spawns fine).
             if let Some(Overlay::Files(f)) = &mut app.overlay {
                 f.editor = "/bin/sh".into();
@@ -27230,7 +29026,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             if let Some(Overlay::Files(f)) = &mut app.overlay {
                 f.editor = "/nonexistent/orion-not-an-editor".into();
             }
@@ -27277,7 +29078,12 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert_eq!(finder(&app).editor, expect);
             app.overlay = None;
             press(
@@ -27288,7 +29094,12 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert_eq!(tree_view(&app).editor, expect);
             app.overlay = None;
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                &mut out,
+            );
             let Some(Overlay::Grep(view)) = &app.overlay else {
                 panic!("F opens the grep overlay");
             };
@@ -27297,12 +29108,17 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn f_without_worktree_flashes() {
+    fn f_without_worktree_opens_nothing() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -27358,7 +29174,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut out = Vec::new();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in ['n', 'o', 't'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -27391,7 +29212,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(tree_view(&app).preview_line_count, 3, "the source lines");
 
         // Off markdown, Ctrl+r reaches the filter, which ignores it.
-        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in ['a', '.', 't'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -27404,7 +29230,12 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert_eq!(tree_view(&app).filter.as_str(), "a.t", "not typed");
-        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in ['n', 'o', 't'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -27427,7 +29258,12 @@ diff --git a/src/c.rs b/src/c.rs
         app.vim_tx = Some(tx);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_eq!(tree_view(&app).file_count, 3);
         // Collapsed by default: dirs first, then top-level files; the
         // selected dir previews its children.
@@ -27484,7 +29320,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(tree_view(&app).preview, "deeper");
 
         // Ctrl+u clears the filter (restoring the folded tree); Esc closes.
-        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_eq!(tree_view(&app).filter, "", "Ctrl+u clears the filter");
         assert_eq!(tree_rows(&app), vec!["src", "a.txt"]);
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
@@ -27501,7 +29342,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in ['l', 'i', 'b'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -27536,12 +29382,17 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn b_without_worktree_flashes() {
+    fn b_without_worktree_opens_nothing() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -27551,7 +29402,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -27575,7 +29431,12 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in ['l', 'i', 'b'] {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -27612,7 +29473,12 @@ diff --git a/src/c.rs b/src/c.rs
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.vim_tx = Some(tx);
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
 
         // A draw teaches the browser its preview rect, so the editor can
         // spawn at the pane's size. Row 0 is a.txt (the only file).
@@ -27673,7 +29539,12 @@ diff --git a/src/c.rs b/src/c.rs
         seed_repo_tree(&mut app, &repo);
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            &mut out,
+        );
         assert!(grep_view(&app).hits.is_empty(), "opens with no results");
         assert!(out.is_empty(), "opening the overlay sends nothing");
 
@@ -27687,7 +29558,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(view.hits[0].text, "needle here");
 
         // Ctrl+u clears the query; Esc closes.
-        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_eq!(grep_view(&app).query, "", "Ctrl+u clears the query");
         assert!(
             grep_view(&app).hits.is_empty(),
@@ -27698,12 +29574,17 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn shift_f_without_worktree_flashes() {
+    fn shift_f_without_worktree_opens_nothing() {
         let mut app = App::new();
         let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            &mut out,
+        );
         assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("no worktree selected"));
+        assert_eq!(app.flash, None);
     }
 
     #[test]
@@ -27720,7 +29601,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                &mut out,
+            );
             for c in "orig".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
@@ -27770,7 +29656,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                &mut out,
+            );
             for c in "orig".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
@@ -27976,7 +29867,10 @@ diff --git a/src/c.rs b/src/c.rs
         }
         app.focus = Focus::Worktrees;
 
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::DeleteAll,
+        ));
         let Some(Overlay::Confirm(c)) = &app.overlay else {
             panic!("Shift+D confirms first: {:?}", app.overlay);
         };
@@ -28020,14 +29914,17 @@ diff --git a/src/c.rs b/src/c.rs
     /// With only the main checkout, Shift+D has nothing to offer — flash,
     /// no dialog.
     #[test]
-    fn shift_d_with_only_the_main_checkout_flashes() {
+    fn shift_d_with_only_the_main_checkout_does_nothing() {
         let mut app = App::new();
         seed_tree(&mut app); // p1/w1(main) + agent-1
         let mut out = Vec::new();
         app.focus = Focus::Worktrees;
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::DeleteAll,
+        ));
         assert!(app.overlay.is_none(), "nothing to confirm");
-        assert!(app.flash.is_some(), "the refusal explains itself");
+        assert_eq!(app.flash, None);
         assert!(out.is_empty(), "nothing is requested");
     }
 
@@ -28072,7 +29969,10 @@ diff --git a/src/c.rs b/src/c.rs
         app.term = Some(AttachedTerm::new(sref.clone(), 40, 10));
         let mut out = Vec::new();
 
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::DeleteAll,
+        ));
         let Some(Overlay::Confirm(c)) = &app.overlay else {
             panic!("Shift+D confirms first: {:?}", app.overlay);
         };
@@ -28161,8 +30061,13 @@ diff --git a/src/c.rs b/src/c.rs
         app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
 
         let mut out = Vec::new();
-        // `a` asks first; Enter on the confirm is the archive.
-        press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+        // `^A` asks first; Enter on the confirm is the archive.
+        press(
+            &mut app,
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(
             app.overlay.is_none(),
@@ -28222,7 +30127,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(
                 matches!(
                     &app.overlay,
@@ -28253,7 +30163,12 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(app.term.is_some(), "backing out keeps the pane");
 
             // Enter goes through, exactly as the bare key would have.
-            press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "Enter closes the confirm");
             assert!(
@@ -28700,7 +30615,12 @@ diff --git a/src/c.rs b/src/c.rs
         );
         let mut out = Vec::new();
 
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         for c in "hush".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -28959,7 +30879,10 @@ diff --git a/src/c.rs b/src/c.rs
             let before = agents_under_root(&app);
             let mut out = Vec::new();
 
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             for _ in 0..skip_row {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
@@ -29043,7 +30966,10 @@ diff --git a/src/c.rs b/src/c.rs
                 app.focus = focus;
                 assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
                 let mut out = Vec::new();
-                out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+                out.extend(crate::event_loop::run_action(
+                    &mut app,
+                    crate::keymap::Action::AgentPresets,
+                ));
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                     panic!(
                         "e from {focus:?} opens the PR preset picker, got {:?} ({:?})",
@@ -29072,7 +30998,10 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             app.sel_worktree = 1;
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             // The row names, and the cursor, of the PR picker on screen.
             fn pr_picker(app: &App) -> (Vec<String>, usize) {
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
@@ -29191,7 +31120,10 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             let mut out = Vec::new();
 
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                 panic!(
                     "e on a PR row opens the preset picker, got {:?}",
@@ -29226,10 +31158,7 @@ diff --git a/src/c.rs b/src/c.rs
                 KeyModifiers::CONTROL,
                 &mut out,
             );
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("quick prompt: a PR session runs in the pull request's own checkout")
-            );
+            assert_eq!(app.flash, None);
             assert!(
                 matches!(
                     &app.overlay,
@@ -29315,7 +31244,10 @@ diff --git a/src/c.rs b/src/c.rs
             app.sel_worktree = app.open_pr_row_of(&pr_url(7)).expect("#7 is a row");
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             let rows = app.tree.worktrees.len();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             type_text(&mut app, "Fix auth", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -29348,7 +31280,10 @@ diff --git a/src/c.rs b/src/c.rs
                 skip_task: true,
             });
             crate::agent_presets::save(&presets).unwrap();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -29425,7 +31360,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(on_row(&app), "an empty box is a cancel: {:?}", app.overlay);
-        assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
+        assert_eq!(app.flash, None);
 
         // Enter with text: posted — or, off a checkout that isn't on disk,
         // the box comes back with the text, newline and all.
@@ -30192,7 +32127,7 @@ diff --git a/src/c.rs b/src/c.rs
             // `q` matches nothing: refused, the list still up.
             type_text(&mut app, "q", &mut out);
             assert_eq!(list(&app).filter, "e", "a dead letter is refused");
-            assert_eq!(app.flash.as_deref(), Some("no preset matches 'eq'"));
+            assert_eq!(app.flash, None);
 
             // Backspace widens; "scr" finds the second row and the cursor
             // follows it.
@@ -30357,7 +32292,7 @@ diff --git a/src/c.rs b/src/c.rs
                 }
                 other => panic!("delete should reopen the list, got {other:?}"),
             }
-            assert_eq!(app.flash.as_deref(), Some("deleted preset 'reviewer'"));
+            assert_eq!(app.flash, None, "the list without it says it");
             let left = crate::agent_presets::load();
             assert_eq!(left.len(), 1, "removal reached the store");
             assert_eq!(left[0].name, "scratch");
@@ -30617,7 +32552,12 @@ diff --git a/src/c.rs b/src/c.rs
                 app.focus = Focus::Projects;
                 let worktree = app.selected_worktree().unwrap().id.clone();
 
-                press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+                press(
+                    &mut app,
+                    KeyCode::Char('n'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
                 let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                     panic!("p should open the quick prompt, got {:?}", app.overlay);
                 };
@@ -30896,7 +32836,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "the cursor is on the root row"
             );
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             pick_fresh_worktree(&mut app, &mut out);
             let branch = match &app.overlay {
                 Some(Overlay::Prompt(prompt)) => match &prompt.kind {
@@ -31001,7 +32946,12 @@ diff --git a/src/c.rs b/src/c.rs
 
             // A worktree the daemon refuses (a branch that exists, a fetch
             // that failed) hands the text back for a retry.
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             pick_fresh_worktree(&mut app, &mut out);
             assert!(paste_into_overlay(&mut app, "Try again"));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -31132,7 +33082,12 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
 
             let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -31170,7 +33125,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `Tab` in the box retargets this one launch: the same harness rows
-    /// the NEW SESSION PICKER offers, with the MODEL / EFFORT submenus
+    /// the NEW AGENT PICKER offers, with the MODEL / EFFORT submenus
     /// behind them — and the typed text survives the trip.
     #[test]
     fn tab_in_the_quick_prompt_picks_the_harness_and_keeps_the_text() {
@@ -31181,7 +33136,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
@@ -31231,7 +33191,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `Tab` on the Claude row of the box's own `Tab` picker is the NEW
-    /// SESSION PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
+    /// AGENT PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
     /// box with the text kept, the next `Tab` opens on the toggle as the
     /// box left it, and Enter sends the text as the cloud task — never as
     /// a STARTING PROMPT, and with no warm slot consumed or refilled.
@@ -31244,7 +33204,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
@@ -31298,11 +33263,19 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
-            for open in [KeyCode::Tab, KeyCode::BackTab] {
-                press(&mut app, open, KeyModifiers::NONE, &mut out);
+            for (open, mods) in [
+                (KeyCode::Tab, KeyModifiers::NONE),
+                (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            ] {
+                press(&mut app, open, mods, &mut out);
                 assert!(
                     !matches!(&app.overlay, Some(Overlay::Prompt(_))),
                     "{open:?} should open a picker"
@@ -31339,7 +33312,12 @@ diff --git a/src/c.rs b/src/c.rs
             );
 
             // A box with a harness picked in it and a prompt typed.
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -31353,7 +33331,12 @@ diff --git a/src/c.rs b/src/c.rs
 
             // The same place: the box comes back whole, and the slot is
             // empty again.
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -31381,7 +33364,12 @@ diff --git a/src/c.rs b/src/c.rs
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
             );
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -31397,7 +33385,12 @@ diff --git a/src/c.rs b/src/c.rs
             pick_fresh_worktree(&mut app, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.quick_draft.is_some(), "Esc parks the re-aimed box");
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -31420,7 +33413,12 @@ diff --git a/src/c.rs b/src/c.rs
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
             );
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
@@ -31440,27 +33438,42 @@ diff --git a/src/c.rs b/src/c.rs
             }
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.quick_draft.is_none(), "an empty box parks nothing");
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.is_empty()));
             assert!(out.is_empty(), "none of this launches anything: {out:?}");
         });
     }
 
-    /// `Shift+Tab` picks a saved AGENT PRESET for this launch: its harness,
+    /// `^X` picks a saved AGENT PRESET for this launch: its harness,
     /// its MODEL / EFFORT, and its prefix/postfix around what was typed.
     #[test]
-    fn shift_tab_applies_a_preset_and_wraps_the_task() {
+    fn the_preset_key_applies_a_preset_and_wraps_the_task() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("⇧Tab should open the presets, got {:?}", app.overlay);
+                panic!("^X should open the presets, got {:?}", app.overlay);
             };
             assert!(view.is_picker(), "opened to pick, not to manage");
             assert_eq!(view.presets[0].name, "reviewer");
@@ -31528,7 +33541,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// is on launches on prefix + postfix. A `skip_task` preset picked over
     /// an empty box launches at once; over typed text it is only applied.
     #[test]
-    fn shift_tab_presets_make_the_quick_prompt_task_optional() {
+    fn presets_make_the_quick_prompt_task_optional() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -31547,8 +33560,18 @@ diff --git a/src/c.rs b/src/c.rs
             };
 
             // An ordinary preset: picked, then the empty box sent.
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Prompt(_))),
@@ -31567,9 +33590,19 @@ diff --git a/src/c.rs b/src/c.rs
 
             // Over typed text it is applied, not launched.
             out.clear();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("typed text keeps the box, got {:?}", app.overlay);
@@ -31579,8 +33612,18 @@ diff --git a/src/c.rs b/src/c.rs
 
             // Over an empty box it launches the moment it is picked.
             app.overlay = None;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "launched: {:?}", app.overlay);
             assert!(wrapped(&out), "{out:?}");
@@ -31592,7 +33635,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// lands back in the picker on it, and Enter hands the box back, text
     /// intact, under that preset.
     #[test]
-    fn shift_tab_without_presets_opens_a_picker_that_adds_one() {
+    fn the_preset_key_without_presets_opens_a_picker_that_adds_one() {
         with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
             crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
@@ -31600,9 +33643,19 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut out = Vec::new();
                 seed_tree(&mut app);
                 app.focus = Focus::Sessions;
-                press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+                press(
+                    &mut app,
+                    KeyCode::Char('n'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
                 assert!(paste_into_overlay(&mut app, "Fix auth"));
-                press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+                press(
+                    &mut app,
+                    KeyCode::Char('x'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                     panic!("an empty picker, got {:?}", app.overlay);
                 };
@@ -31661,7 +33714,12 @@ diff --git a/src/c.rs b/src/c.rs
             let mut out = Vec::new();
             seed_tree(&mut app);
             app.focus = Focus::Sessions;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let words: Vec<String> = (0..300).map(|i| format!("w{i:03}")).collect();
             let long = words.join(" ");
             assert!(paste_into_overlay(&mut app, &long));
@@ -31774,7 +33832,12 @@ diff --git a/src/c.rs b/src/c.rs
                 other => panic!("expected the box, got {other:?}"),
             };
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             assert_eq!(state(&app).0, QuickTarget::Worktree(selected.clone()));
 
@@ -31903,7 +33966,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 app.overlay.is_none(),
@@ -31939,7 +34007,12 @@ diff --git a/src/c.rs b/src/c.rs
             // The cloud box is the one that cannot: there is nothing to
             // send as the task.
             out.clear();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -31952,13 +34025,13 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(prompt.title, "Quick prompt (claude · cloud)");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(app.flash.as_deref(), Some("cancelled: empty input"));
+            assert_eq!(app.flash, None);
             assert!(out.is_empty(), "a cloud box needs its task: {out:?}");
         });
     }
 
     /// The agent has to run somewhere: with no checkout under the cursor
-    /// (an empty tree) `p` says so instead of opening a box that cannot
+    /// (an empty tree) `p` opens nothing rather than a box that cannot
     /// launch. On the WORKTREES PANEL the checkout is cut on the way, so
     /// only a PROJECT is needed — and an empty tree has none of those
     /// either. (A cursor parked on an OPEN PRS row is not this case: the
@@ -31968,21 +34041,25 @@ diff --git a/src/c.rs b/src/c.rs
         with_default_config(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("quick prompt: select a worktree first")
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
             );
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert_eq!(app.flash, None);
             assert!(out.is_empty(), "{out:?}");
 
             app.focus = Focus::Worktrees;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("quick prompt: select a project first")
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
             );
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert_eq!(app.flash, None);
             assert!(out.is_empty(), "{out:?}");
         });
     }
@@ -32125,14 +34202,14 @@ diff --git a/src/c.rs b/src/c.rs
                 "query in the title:\n{text}"
             );
 
-            // A letter no row matches is refused and flashed.
+            // A letter no row matches is refused.
             type_text(&mut app, "z", &mut out);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 unreachable!()
             };
             assert_eq!(menu.filter_query(), "opus");
             assert_eq!(menu.items.len(), 2);
-            assert!(app.flash.as_deref().is_some_and(|f| f.contains("opusz")));
+            assert_eq!(app.flash, None);
 
             // ↓ moves within the matches; → drills the hovered family into
             // its efforts, which start with an empty filter of their own.
@@ -32230,13 +34307,13 @@ diff --git a/src/c.rs b/src/c.rs
                 "filter beside the value:\n{text}"
             );
 
-            // A refused letter leaves everything as it was and flashes.
+            // A refused letter leaves everything as it was.
             type_text(&mut app, "q", &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 unreachable!()
             };
             assert_eq!(editor.filter, "sol");
-            assert!(app.flash.as_deref().is_some_and(|f| f.contains("solq")));
+            assert_eq!(app.flash, None);
             // Backspace to "so": sol still matches, so the value stays;
             // Esc clears the filter but keeps the value; a second Esc
             // backs out to the list as before.
@@ -32366,7 +34443,10 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             app.sel_worktree = 1;
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
 
             // The delete keys ask first, and backing out of the confirm
             // lands in the PR picker again.
@@ -32443,7 +34523,10 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             app.sel_worktree = 1;
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let list = match &app.overlay {
                 Some(Overlay::AgentPresets(view)) => view.list_area,
@@ -32503,13 +34586,11 @@ diff --git a/src/c.rs b/src/c.rs
                 terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                 let text = buffer_text(&terminal);
                 assert!(text.contains("no presets yet — ^A creates one"), "{text}");
-                // Enter and Ctrl+e on nothing only nudge toward Ctrl+a.
+                // Enter and Ctrl+e on nothing do nothing: the hint names
+                // Ctrl+a.
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
-                assert_eq!(
-                    app.flash.as_deref(),
-                    Some("no preset selected — ^A creates one")
-                );
+                assert_eq!(app.flash, None);
                 press(
                     &mut app,
                     KeyCode::Char('e'),
@@ -32541,7 +34622,10 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             let Some(Overlay::Hosts(view)) = &app.overlay else {
                 panic!(
                     "shift+h should open the hosts picker, got {:?}",
@@ -32573,7 +34657,10 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.should_quit, "Enter hands off by quitting");
@@ -32589,7 +34676,10 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             match &app.overlay {
                 Some(Overlay::Hosts(view)) => {
@@ -32610,7 +34700,10 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             // Draw once so the modal writes back its hit-test rects.
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -32634,7 +34727,10 @@ diff --git a/src/c.rs b/src/c.rs
             // Reopened, a click outside the modal closes it.
             app.should_quit = false;
             app.pending_ssh = None;
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             handle_mouse(
                 &mut app,
@@ -32741,7 +34837,7 @@ diff --git a/src/c.rs b/src/c.rs
                 .any(|r| matches!(r, ClientRequest::Attach { .. })),
             "it was booted: {out:?}"
         );
-        assert!(app.flash.as_deref().is_some_and(|f| f.contains("starting")));
+        assert_eq!(app.flash, None, "the box still holding the text says it");
     }
 
     /// The FOLLOW-UP box is a modal over the grid, so Esc is the way out
@@ -32826,6 +34922,286 @@ diff --git a/src/c.rs b/src/c.rs
         dispatch_terminal_event(&mut app, Event::Paste(dropped.clone()), &mut out);
 
         assert_eq!(follow_up_text(&app), Some(dropped));
+    }
+
+    // ---- CLIPBOARD IMAGES ----
+
+    /// A PNG's bytes, as a stubbed clipboard holds them.
+    fn clipboard_png() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\nscreenshot pixels".to_vec()
+    }
+
+    /// What the open prompt box holds.
+    fn box_text(app: &App) -> String {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => p.input.as_str().to_string(),
+            other => panic!("no prompt box up: {other:?}"),
+        }
+    }
+
+    fn type_into(app: &mut App, text: &str, out: &mut Vec<ClientRequest>) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c), KeyModifiers::NONE, out);
+        }
+    }
+
+    /// `^V` in the QUICK PROMPT keeps the clipboard's image in the
+    /// attachments folder and writes its path at the caret, a word apart
+    /// from the text around it — never reading the real clipboard here.
+    #[test]
+    fn ctrl_v_pastes_the_clipboard_image_into_the_quick_prompt() {
+        with_default_config(|| {
+            let root = tempfile::tempdir().unwrap();
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            app.attachments_dir = Some(root.path().join("attachments"));
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            type_into(&mut app, "what is this", &mut out);
+
+            crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+                press(
+                    &mut app,
+                    KeyCode::Char('v'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
+            });
+
+            let text = box_text(&app);
+            let kept: Vec<_> = std::fs::read_dir(root.path().join("attachments"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            assert_eq!(std::fs::read(&kept[0]).unwrap(), clipboard_png());
+            assert_eq!(
+                text,
+                format!(
+                    "what is this {} ",
+                    crate::dropped_files::quoted(&kept[0].to_string_lossy())
+                )
+            );
+            assert_eq!(app.flash, None);
+            assert!(out.is_empty(), "nothing sent: {out:?}");
+        });
+    }
+
+    /// No image on the clipboard: the footer says so and the box is left
+    /// as it was; and a box whose text goes nowhere local (a cloud
+    /// message, a rename) leaves `^V` alone altogether.
+    #[test]
+    fn ctrl_v_with_no_image_says_so_and_pastes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = follow_up_app();
+        app.attachments_dir = Some(root.path().join("attachments"));
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+        type_into(&mut app, "see", &mut out);
+        crate::clipboard_image::with_clipboard(None, || {
+            press(
+                &mut app,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert_eq!(follow_up_text(&app).as_deref(), Some("see"));
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("no image on the clipboard to paste")
+        );
+        assert!(!root.path().join("attachments").exists());
+
+        // The FOLLOW-UP box takes an image as the QUICK PROMPT does.
+        crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+            press(
+                &mut app,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert!(follow_up_text(&app).is_some_and(|t| t.starts_with("see ") && t.ends_with(".png ")));
+
+        let mut rename = follow_up_app();
+        rename.attachments_dir = Some(root.path().join("elsewhere"));
+        let id = rename.tree.agents[0].id.clone();
+        open_prompt(&mut rename, PromptKind::RenameAgent { id });
+        crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+            press(
+                &mut rename,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert!(!root.path().join("elsewhere").exists(), "no image kept");
+    }
+
+    // ---- the SAVED DRAFT ----
+
+    /// The QUICK PROMPT up, by `^N` from the SESSIONS PANEL.
+    fn open_quick_box(app: &mut App, out: &mut Vec<ClientRequest>) {
+        press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(p.kind, PromptKind::QuickPrompt(_))),
+            "{:?}",
+            app.overlay
+        );
+    }
+
+    /// A fresh app — the process after a restart — whose SAVED DRAFT is
+    /// the file at `path`.
+    fn restarted(path: &std::path::Path) -> App {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        app.focus = Focus::Sessions;
+        app.saved_draft = Some(crate::saved_draft::SavedDraft::at(path.to_path_buf()));
+        app
+    }
+
+    /// What is typed into the box is on disk as it is typed — no exit
+    /// hook to wait for — and a box opened after a restart starts from it,
+    /// caret at its end, saying so until the first edit.
+    #[test]
+    fn the_quick_prompt_is_saved_as_typed_and_restored_after_a_restart() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "Fix auth", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            type_into(&mut app, "then ship", &mut out);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship"
+            );
+            // A paste is an edit too.
+            assert!(paste_into_overlay(&mut app, " it"));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship it"
+            );
+
+            // The window closes: no Esc, no clean shutdown.
+            drop(app);
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            assert_eq!(prompt.input.as_str(), "Fix auth\nthen ship it");
+            assert_eq!(prompt.input.cursor_chars(), "Fix auth\nthen ship it".len());
+            assert!(prompt.draft_restored, "the box says the draft came back");
+            type_into(&mut app, "!", &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            assert!(!prompt.draft_restored, "an edit lets the cue go");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship it!"
+            );
+
+            // Emptied by hand, the draft goes with the text.
+            press(&mut app, KeyCode::Char('a'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_text(&app), "");
+            assert!(!path.exists(), "an empty box is no draft");
+        });
+    }
+
+    /// Launching the box spends the draft: the next box opens empty.
+    #[test]
+    fn launching_the_quick_prompt_clears_the_draft() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "Fix auth", &mut out);
+            assert!(path.exists());
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                out.iter()
+                    .any(|r| matches!(r, ClientRequest::CreateAgent { .. })),
+                "{out:?}"
+            );
+            assert!(!path.exists(), "the launch spent the draft");
+            open_quick_box(&mut app, &mut out);
+            assert_eq!(box_text(&app), "");
+        });
+    }
+
+    /// A box with text of its own — a refused launch handed back — keeps
+    /// that text and leaves the draft on disk alone; and the boxes that
+    /// are not the QUICK PROMPT (a preset's task, the FOLLOW-UP) never
+    /// open on it.
+    #[test]
+    fn the_draft_never_lands_in_a_box_with_text_of_its_own() {
+        with_seeded_presets(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            std::fs::write(&path, "my draft").unwrap();
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = app.overlay.take() else {
+                unreachable!();
+            };
+            let PromptKind::QuickPrompt(launch) = prompt.kind else {
+                unreachable!();
+            };
+            reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "refused".into());
+            assert_eq!(box_text(&app), "refused");
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if !p.draft_restored));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+            app.overlay = None;
+
+            let worktree = app.selected_worktree().unwrap().id.clone();
+            let preset = crate::agent_presets::load().into_iter().next().unwrap();
+            open_prompt(&mut app, PromptKind::AgentPresetTask { worktree, preset });
+            assert_eq!(box_text(&app), "");
+            app.overlay = None;
+
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert_eq!(follow_up_text(&app).as_deref(), Some(""));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+        });
+    }
+
+    /// A launch the DAEMON refuses comes back with its text, and that
+    /// text is the draft on disk again.
+    #[test]
+    fn a_refused_launch_puts_the_draft_back() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            let PromptKind::QuickPrompt(launch) = prompt.kind.clone() else {
+                unreachable!();
+            };
+            type_into(&mut app, "Fix auth", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(!path.exists());
+            reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "Fix auth".into());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "Fix auth");
+        });
     }
 
     // ---- INPUT PARITY: a row chosen by the pointer is the row chosen by key ----
@@ -33020,10 +35396,7 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
-            assert_eq!(
-                by_menu.flash.as_deref(),
-                Some("cannot delete the main checkout")
-            );
+            assert_eq!(by_menu.flash, None);
 
             // Attach: Enter on the row.
             let on_session = || {
@@ -33118,7 +35491,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A click on a row of a picking list is Enter with the cursor on that
-    /// row: the `/` palette, the NEW SESSION PICKER's menu, the AGENT
+    /// row: the `/` palette, the NEW AGENT PICKER's menu, the AGENT
     /// PRESETS list in both of its modes.
     #[test]
     fn a_click_on_a_list_row_is_enter_on_it() {
@@ -33133,12 +35506,18 @@ diff --git a/src/c.rs b/src/c.rs
             };
             let presets: Open = |app, out| {
                 app.focus = Focus::Sessions;
-                out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
+                out.extend(crate::event_loop::run_action(
+                    app,
+                    crate::keymap::Action::AgentPresets,
+                ));
             };
             let pr_presets: Open = |app, out| {
                 seed_open_prs(app, &[(7, "Attach links")]);
                 app.sel_worktree = app.open_pr_row_of(&pr_url(7)).expect("#7 is a row");
-                out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
+                out.extend(crate::event_loop::run_action(
+                    app,
+                    crate::keymap::Action::AgentPresets,
+                ));
             };
             let surfaces: [(&str, Open); 4] = [
                 ("palette", palette),
@@ -33210,7 +35589,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.vim_tx = Some(tx);
             let mut out = Vec::new();
             with_config_json(r#"{"editor": "/bin/sh"}"#, || {
-                press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, &mut out);
+                press(
+                    &mut app,
+                    KeyCode::Char('p'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
             });
             for c in ['n', 'o', 't'] {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -33321,7 +35705,10 @@ diff --git a/src/c.rs b/src/c.rs
     fn help_click_outside_closes_and_inside_stays() {
         let mut app = App::new();
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Help));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Help,
+        ));
         let area = drawn_modal_area(&mut app);
         click(&mut app, area.x + 2, area.y + 2, &mut out);
         assert!(
@@ -33339,7 +35726,10 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_link(&mut app, "https://example.dev/spec");
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::DeleteAll));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::DeleteAll,
+        ));
         assert!(
             matches!(app.overlay, Some(Overlay::Confirm(_))),
             "{:?}",
@@ -33437,7 +35827,10 @@ diff --git a/src/c.rs b/src/c.rs
         ));
         app.focus = Focus::Sessions;
         let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Help));
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Help,
+        ));
         let modal = drawn_modal_area(&mut app);
         // The modal is centred over the pane; its bottom-right cell is not.
         let pane = app.term_area;
@@ -33515,7 +35908,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "Palette",
                 |app| {
                     seed_tree(app);
-                    press(app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut Vec::new());
+                    press(
+                        app,
+                        KeyCode::Char('k'),
+                        KeyModifiers::CONTROL,
+                        &mut Vec::new(),
+                    );
                 },
                 None,
             ),
@@ -33582,7 +35980,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "PullRequests",
                 |app| {
                     seed_tree(app);
-                    press(app, KeyCode::Char('v'), KeyModifiers::NONE, &mut Vec::new());
+                    press(
+                        app,
+                        KeyCode::Char('u'),
+                        KeyModifiers::SUPER,
+                        &mut Vec::new(),
+                    );
                 },
                 None,
             ),
@@ -33661,7 +36064,12 @@ diff --git a/src/c.rs b/src/c.rs
                 "ProjectPicker",
                 |app| {
                     seed_tree(app);
-                    press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut Vec::new());
+                    press(
+                        app,
+                        KeyCode::Char('n'),
+                        KeyModifiers::CONTROL,
+                        &mut Vec::new(),
+                    );
                     press(
                         app,
                         KeyCode::Char('p'),
@@ -33946,7 +36354,10 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut out = Vec::new();
                 seed_tree(app);
                 app.focus = Focus::Sessions;
-                out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
+                out.extend(crate::event_loop::run_action(
+                    app,
+                    crate::keymap::Action::AgentPresets,
+                ));
                 press(app, KeyCode::Char('a'), KeyModifiers::CONTROL, &mut out);
                 assert!(
                     matches!(app.overlay, Some(Overlay::AgentPresetEditor(_))),
@@ -33987,14 +36398,17 @@ diff --git a/src/c.rs b/src/c.rs
     #[test]
     fn clicking_outside_a_quick_prompt_picker_restores_the_box() {
         with_seeded_presets(|| {
-            for opener in [KeyCode::Tab, KeyCode::BackTab] {
+            for (opener, mods) in [
+                (KeyCode::Tab, KeyModifiers::NONE),
+                (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            ] {
                 let picker = |app: &mut App| {
                     let mut out = Vec::new();
                     seed_tree(app);
                     app.focus = Focus::Sessions;
                     press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
                     assert!(paste_into_overlay(app, "Fix auth"));
-                    press(app, opener, KeyModifiers::NONE, &mut out);
+                    press(app, opener, mods, &mut out);
                 };
 
                 let mut app = App::new();
@@ -34067,7 +36481,10 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
             // While typing, list verbs are just characters — q must not
             // close, d must not delete.
@@ -34100,7 +36517,10 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_hosts(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             match &app.overlay {
@@ -34127,7 +36547,10 @@ diff --git a/src/c.rs b/src/c.rs
         crate::hosts::with_hosts_path(path, || {
             let mut app = App::new();
             let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::Hosts));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::Hosts,
+            ));
             assert!(matches!(app.overlay, Some(Overlay::Hosts(_))));
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -34160,7 +36583,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.key_combo.is_none(), "nothing pressed yet");
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         assert_eq!(combo_text(&app).as_deref(), Some("↓ - Move down"));
-        press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_eq!(combo_text(&app).as_deref(), Some("^E - Changes"));
         app.overlay = None;
         press(&mut app, KeyCode::Char(';'), KeyModifiers::NONE, &mut out);
@@ -34172,7 +36600,12 @@ diff --git a/src/c.rs b/src/c.rs
 
         // The palette is a modal with a text field: what is typed into it
         // never shows, its navigation keys show bare.
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         assert_eq!(combo_text(&app).as_deref(), Some("^K - Jump to…"));
         assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
         press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
@@ -34195,7 +36628,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.overlay.is_none());
 
         // The hardwired hatch out of any modal names itself.
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &mut out);
+        press(
+            &mut app,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         press(
             &mut app,
             KeyCode::Char('q'),
@@ -34316,7 +36754,10 @@ diff --git a/src/c.rs b/src/c.rs
             "  ↓  - Move down",
             "the row above the bar, at the far left"
         );
-        assert!(rows[29].contains("orion v"), "the bar itself is untouched");
+        assert!(
+            rows[29].contains(concat!(" v", env!("CARGO_PKG_VERSION"))),
+            "the bar itself is untouched"
+        );
         let cell = &terminal.backend().buffer()[(2, 28)];
         assert_eq!(cell.symbol(), "↓");
         assert_eq!(cell.bg, app.theme.sel_bg, "the key sits in a keycap");
@@ -34450,9 +36891,11 @@ diff --git a/src/c.rs b/src/c.rs
             let req_id = out
                 .iter()
                 .find_map(|r| match r {
-                    ClientRequest::DeleteWorktree { req_id, id, force: false } if id.0 == "w2" => {
-                        Some(*req_id)
-                    }
+                    ClientRequest::DeleteWorktree {
+                        req_id,
+                        id,
+                        force: false,
+                    } if id.0 == "w2" => Some(*req_id),
                     _ => None,
                 })
                 .expect("an unforced worktree delete");
@@ -34481,7 +36924,9 @@ diff --git a/src/c.rs b/src/c.rs
                 PendingAction::ForceDeleteWorktrees(vec![WorktreeId("w2".into())])
             );
             assert!(
-                dialog.message.contains("'feature' has 3 uncommitted or untracked file(s)"),
+                dialog
+                    .message
+                    .contains("'feature' has 3 uncommitted or untracked file(s)"),
                 "{}",
                 dialog.message
             );

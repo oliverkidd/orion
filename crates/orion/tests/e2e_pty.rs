@@ -449,6 +449,7 @@ async fn full_crud_attach_and_restart_persistence() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 3,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -882,6 +883,7 @@ async fn hook_post_from_agent_pty_drives_status() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "hooked".into(),
@@ -1221,6 +1223,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 3,
             worktree: main_worktree.id.clone(),
             name: "mover".into(),
@@ -1349,6 +1352,7 @@ async fn claude_session_title_and_row_name_stay_tied() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "Typed In Orion".into(),
@@ -1514,6 +1518,7 @@ async fn restart_rebinds_an_attached_client_to_the_new_pty() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -1650,6 +1655,7 @@ async fn codex_hooks_install_and_drive_status() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "codexed".into(),
@@ -2246,6 +2252,7 @@ async fn prewarmed_session_is_adopted_by_create_agent() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "warm-agent".into(),
@@ -2394,6 +2401,7 @@ async fn dead_prewarm_falls_back_to_cold_spawn() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "fallback-agent".into(),
@@ -2452,6 +2460,7 @@ async fn create_agent_refuses_when_the_cli_is_not_installed() {
         write_frame(
             &mut c,
             &ClientRequest::CreateAgent {
+                mode: Default::default(),
                 req_id,
                 worktree: worktree.id.clone(),
                 name: format!("agent-{req_id}"),
@@ -2539,6 +2548,7 @@ async fn create_agent_succeeds_when_the_cli_is_on_the_login_shell_path() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 7,
             worktree: worktree.id.clone(),
             name: "real-agent".into(),
@@ -2582,6 +2592,42 @@ async fn create_agent_succeeds_when_the_cli_is_on_the_login_shell_path() {
     wait_for_exit(&mut daemon);
 }
 
+/// A TUI built off other protocol types than the daemon it reaches — a
+/// fresh install talking to a daemon still running the old build, with
+/// PROTOCOL_VERSION left where it was — sends a request the daemon can't
+/// decode. The daemon refuses that one request by its req_id, so the
+/// launch waiting on it fails visibly, and goes on serving. It used to end
+/// the connection: the TUI sat connected to nothing, and every launch
+/// typed into it went nowhere, its prompt with it.
+#[tokio::test]
+async fn an_undecodable_request_is_refused_and_the_connection_kept() {
+    let env = TestEnv::new();
+    let mut daemon = env.spawn_daemon();
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+
+    // `{variant: [fields…]}` is how a request travels; this one names a
+    // real variant with fields no build of it has.
+    let skewed = std::collections::HashMap::from([("CreateAgent", (9u64, "plan"))]);
+    write_frame(&mut c, &skewed).await.unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter().any(|e| matches!(e, ServerEvent::Error { .. }))
+    })
+    .await;
+    match events.last() {
+        Some(ServerEvent::Error { req_id, message }) => {
+            assert_eq!(*req_id, Some(9), "the refusal names the request");
+            assert_eq!(message, orion_core::UNDECODABLE_FRAME_HINT);
+        }
+        other => panic!("expected an Error, got {other:?}"),
+    }
+
+    subscribe(&mut c).await;
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 fn pid_alive(pid: i32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -2611,6 +2657,7 @@ async fn create_agent_get_id(
     write_frame(
         c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id,
             worktree: worktree.clone(),
             name: name.into(),
@@ -2780,6 +2827,7 @@ async fn archive_sigkills_an_agent_that_ignores_sighup() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "stubborn".into(),
@@ -2920,6 +2968,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "warmed".into(),
@@ -2968,6 +3017,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 4,
             worktree: worktree.id.clone(),
             name: "shelved".into(),
@@ -3085,6 +3135,7 @@ async fn prewarm_worktree_sessions_boots_nothing_when_switched_off() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "cold".into(),
@@ -3229,6 +3280,7 @@ async fn idle_sessions_reap_unwatched_but_spare_busy_and_attached() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "idler".into(),
@@ -3555,6 +3607,7 @@ async fn auto_title_instruction_and_rename_flow() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "agent-1".into(),
@@ -3758,6 +3811,7 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -4028,6 +4082,7 @@ async fn orion_spawn_cli_starts_a_sibling_session_in_the_same_worktree() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -4131,11 +4186,7 @@ async fn orion_spawn_cli_starts_a_sibling_session_in_the_same_worktree() {
 
 /// Run the `orion` CLI the way a hook would inside an agent session: the
 /// test daemon's runtime dir plus the session's `ORION_AGENT_ID`.
-fn agent_cli(
-    env: &TestEnv,
-    agent_id: &orion_core::AgentId,
-    args: &[&str],
-) -> std::process::Output {
+fn agent_cli(env: &TestEnv, agent_id: &orion_core::AgentId, args: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_orion"))
         .args(args)
         .env(env::RUNTIME_DIR, &env.runtime_dir)
@@ -4280,6 +4331,7 @@ exit 0
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 10,
             worktree: main_worktree.id.clone(),
             // The stand-in name the TUI sends with AUTO-TITLE on: the

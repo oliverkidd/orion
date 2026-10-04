@@ -324,7 +324,7 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
             keys::TOGGLE.hint_as("on/off").kept(),
             keys::ENTER.hint_as("model"),
         ],
-        Page::Accounts => match cfg.account_rows().get(view.row) {
+        Page::Accounts => match cfg.registered_account_rows().get(view.row) {
             Some(AccountRow::Add) => vec![keys::ENTER.hint_as("add an account").kept()],
             _ => vec![keys::ENTER.hint_as("sign in").kept()],
         },
@@ -393,7 +393,7 @@ fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
         Page::Welcome | Page::Ready => String::new(),
         Page::Agents => agent_explanation(cfg, view.row),
         Page::Accounts => cfg
-            .account_rows()
+            .registered_account_rows()
             .get(view.row)
             .map(|row| cfg.account_hint(row))
             .unwrap_or_default(),
@@ -815,7 +815,7 @@ fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width:
         dim,
     );
     body.blank();
-    let rows = cfg.account_rows();
+    let rows = cfg.registered_account_rows();
     let mut cells: Vec<Vec<String>> = vec![vec![
         "Account".into(),
         "Config dir".into(),
@@ -825,6 +825,7 @@ fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width:
         let label = match row {
             AccountRow::Account(id) => cfg.effective_harness_by_id(id).display_label().to_string(),
             AccountRow::Add => "Add account".into(),
+            AccountRow::OnDisk(dir) => crate::claude_accounts::tilde(dir),
         };
         let (dir, state) = cfg.account_parts(row);
         cells.push(vec![label, dir, state]);
@@ -894,7 +895,10 @@ fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width:
             );
             body.blank();
             body.prose(
-                &format!("Name it — its dir is ~/.claude-<name> (empty = {next}):"),
+                &format!(
+                    "Name it — it goes by that name, its dir is ~/.claude-<name> (empty = \
+                     {next}, no name):"
+                ),
                 width,
                 text,
             );
@@ -1236,7 +1240,7 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
     let agents = if on.is_empty() {
         Chosen {
             what: "Agents",
-            value: "none on — turn one on in Settings → Agents to start a session".into(),
+            value: "none on — turn one on in Settings → Agents to start an agent".into(),
             warn: true,
         }
     } else {
@@ -1321,6 +1325,10 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
 fn next_keys(keymap: &Keymap) -> Vec<(String, &'static str)> {
     [
         (Action::QuickPrompt, "start an agent: type the task, Enter"),
+        (
+            Action::NewTerminal,
+            "open a terminal: a plain shell, no agent",
+        ),
         (Action::Palette, "jump to any project, worktree or session"),
         (Action::Linear, "your Linear issues"),
         (Action::CommandPalette, "every action by name"),
@@ -1379,7 +1387,7 @@ fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
         body.row(
             false,
             vec![
-                (key, Style::default().fg(th.accent)),
+                (key, crate::hints::key_style(th)),
                 (does.to_string(), Style::default().fg(th.text)),
             ],
             &widths,
@@ -1389,28 +1397,37 @@ fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
 }
 
 /// A multi-row field drawn in place: its rows at `width`, at most `max`
-/// of them — the window round the caret — the caret a `▌` where it is.
+/// of them — the window round the caret — the caret a `▌` where it is,
+/// and its SELECTION on the selection background every field draws one on
+/// (`ui::field_spans`).
 fn field_rows(input: &TextInput, width: u16, max: usize, th: Theme) -> Vec<Line<'static>> {
+    use crate::ui::FieldCell;
     let text: Vec<char> = input.as_str().chars().collect();
     let rows = input.rows(usize::from(width.max(1)));
     let caret_row = input.caret_row(&rows);
     let caret = input.cursor_chars();
+    let selection = input.selection_chars();
     let first = (caret_row + 1).saturating_sub(max);
+    let plain = Style::default().fg(th.accent);
+    let selected = crate::ui::selected_style(th.accent, th);
     rows.iter()
         .enumerate()
         .skip(first)
         .take(max)
         .map(|(i, &(start, end))| {
-            let mut row: String = text[start..end].iter().collect();
+            // The `▌` stands between two characters rather than on one, so
+            // every char here is text or selected, never the caret's cell.
+            let mut cells: Vec<(char, FieldCell)> = (start..end)
+                .filter(|at| text[*at] != '\n')
+                .map(|at| (text[at], FieldCell::at(at, usize::MAX, selection)))
+                .collect();
             if i == caret_row {
-                let at = caret.saturating_sub(start).min(row.chars().count());
-                let byte = row.char_indices().nth(at).map_or(row.len(), |(b, _)| b);
-                row.insert(byte, '▌');
+                let at = caret.saturating_sub(start).min(cells.len());
+                cells.insert(at, ('▌', FieldCell::Plain));
             }
-            Line::from(Span::styled(
-                format!("   {}", row.trim_end_matches('\n')),
-                Style::default().fg(th.accent),
-            ))
+            let mut spans = vec![Span::styled("   ", plain)];
+            spans.extend(crate::ui::field_spans(cells, plain, selected, plain));
+            Line::from(spans)
         })
         .collect()
 }
@@ -1463,7 +1480,7 @@ fn landing_row(page: Page, cfg: &Config) -> usize {
 fn page_rows(page: Page, cfg: &Config) -> usize {
     match page {
         Page::Agents => cfg.harness_registry().len(),
-        Page::Accounts => cfg.account_rows().len(),
+        Page::Accounts => cfg.registered_account_rows().len(),
         Page::Editor => editor_rows().len(),
         Page::Worktrees | Page::Linear | Page::Terminal => setting_rows(page).len(),
         Page::Welcome | Page::Ready => 0,
@@ -1501,13 +1518,14 @@ fn activate(app: &mut App) {
         Page::Welcome | Page::Ready => next(app),
         Page::Agents => cycle_selected_model(app),
         Page::Accounts => {
-            let step = match cfg.account_rows().into_iter().nth(row) {
+            let step = match cfg.registered_account_rows().into_iter().nth(row) {
                 Some(AccountRow::Account(id)) => AccountStep::Email {
                     id,
                     input: TextInput::new(),
                 },
                 Some(AccountRow::Add) => AccountStep::Name(TextInput::new()),
-                None => return,
+                // The wizard lists no dirs SAVED ON THIS MACHINE.
+                Some(AccountRow::OnDisk(_)) | None => return,
             };
             if let Some(Overlay::Onboard(view)) = &mut app.overlay {
                 view.account = step;
@@ -1549,7 +1567,7 @@ fn cycle_setting(app: &mut App, kind: SettingKind) {
         if let (Some(note), Some(Overlay::Onboard(view))) =
             (crate::ghostty_config::ensure_for(&cfg), &mut app.overlay)
         {
-            view.note = Some(note);
+            view.note = Some(note.text);
         }
         crate::keymap::set_ghostty_unbound(
             cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
@@ -1659,7 +1677,7 @@ fn account_step_key(app: &mut App, key: KeyEvent) {
 fn add_account(app: &mut App, new: NewAccount, share: bool) {
     let result = crate::claude_accounts::add(&new, share);
     let row = Config::load()
-        .account_rows()
+        .registered_account_rows()
         .iter()
         .position(|row| matches!(row, AccountRow::Account(id) if *id == new.id));
     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
@@ -2018,6 +2036,26 @@ mod tests {
                 root.join(".claude/CLAUDE.md")
             );
             assert_eq!(Config::load().claude_accounts[0].id, "claude-2");
+            assert_eq!(Config::load().claude_accounts[0].name, "", "nothing typed");
+            // A typed name is the one it goes by, as typed.
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Enter);
+            for c in "Work Laptop".chars() {
+                press(&mut app, KeyCode::Char(c));
+            }
+            press(&mut app, KeyCode::Enter);
+            press(&mut app, KeyCode::Char('n'));
+            let cfg = Config::load();
+            let work = &cfg.claude_accounts[1];
+            assert_eq!(
+                (work.id.as_str(), work.name.as_str()),
+                ("claude-work-laptop", "Work Laptop")
+            );
+            assert_eq!(
+                cfg.effective_harness_by_id("claude-work-laptop")
+                    .display_label(),
+                "Work Laptop (not signed in)"
+            );
         });
     }
 

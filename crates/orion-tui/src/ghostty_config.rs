@@ -7,7 +7,11 @@
 //! ([`unbinds`]), plus the editing chords the built-in editor takes
 //! ([`EDITOR_CHORDS`]), and nothing orion does not use. A few Ghostty chords are
 //! never taken whatever the keymap says ([`NEVER_RELEASED`]): copy, paste,
-//! quit, and the window and tab keys.
+//! quit, new tab and the window keys — all but ⌘W, which orion answers
+//! itself, closing the agent or terminal in front rather than the window.
+//! A chord macOS itself steals before a terminal can send it is not merely
+//! released but bound to the bytes orion expects for it
+//! ([`SENT_AS_KITTY`]) — ⌘. is Cancel, Escape's twin, everywhere on a Mac.
 //!
 //! The lines live in one marked block orion owns and rewrites in place.
 //! Everything outside it is the user's and is never touched, and a block
@@ -21,13 +25,15 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 /// The Ghostty chords orion never releases, in Ghostty's spelling, even
-/// with an action rebound onto one: copy, paste, quit, close, new tab, the
-/// tab digits and the window keys stay Ghostty's.
+/// with an action rebound onto one: copy, paste, quit, new tab and the
+/// window keys stay Ghostty's. The tab digits (⌘1–⌘9) go to orion's
+/// PROJECT TABS. Plain ⌘W is not among them: a stray one used to close the
+/// whole orion window, so orion takes it (`Action::ClosePane`) and ⌘⇧W
+/// stays the way to close the window.
 pub const NEVER_RELEASED: &[&str] = &[
     "super+c",
     "super+v",
     "super+q",
-    "super+w",
     "super+shift+w",
     "super+alt+w",
     "super+alt+shift+w",
@@ -35,19 +41,11 @@ pub const NEVER_RELEASED: &[&str] = &[
     "super+shift+t",
     "super+enter",
     "super+ctrl+f",
-    "super+1",
-    "super+2",
-    "super+3",
-    "super+4",
-    "super+5",
-    "super+6",
-    "super+7",
-    "super+8",
-    "super+9",
 ];
 
 /// First and last line of the block orion owns.
-const BEGIN: &str = "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
+const BEGIN: &str =
+    "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
 const END: &str = "# <<< orion keybinds <<<";
 
 /// `chord` in Ghostty's trigger spelling — `super+shift+p`, `super+/`,
@@ -111,6 +109,13 @@ pub fn trigger(chord: &KeyChord) -> Option<String> {
 /// are not here: Ghostty types `^A`/`^E` for them, which the editor reads
 /// as the line's ends, and which a shell outside orion still needs. Copy
 /// and paste stay Ghostty's.
+///
+/// Every typed field (`text_input`) takes two of them as well: ⌘A selects
+/// the field's whole text and ⇧⌘↑/⇧⌘↓ select to its ends. Its other
+/// selection chords need nothing here — Ghostty binds no ⇧⌘←/⇧⌘→ or
+/// ⌥⇧←/⌥⇧→, and its ⇧-arrow, ⇧Home/⇧End and ⇧PgUp/⇧PgDn binds are
+/// `performable` (they adjust a terminal selection only when one exists),
+/// so all of them arrive as modified keys.
 pub const EDITOR_CHORDS: &[&str] = &[
     "super+s",
     "super+z",
@@ -130,6 +135,36 @@ pub const EDITOR_CHORDS: &[&str] = &[
     "super+/",
     "super+shift+p",
 ];
+
+/// The ⌘ chords macOS turns into something else before the terminal can
+/// encode them, each with the bytes the block makes Ghostty send in its
+/// place. Unbinding one is not enough: the press still goes through
+/// Cocoa's key handling, which reads it as a command, not a key.
+///
+/// * `⌘.` is Cancel — `cancelOperation:`, the command Escape sends — in
+///   every Mac app, so with only `unbind` it reaches orion as an Escape
+///   (at best one still carrying ⌘), and **Select worktree** closed the
+///   new-agent box it was pressed in instead of opening its picker.
+///   Ghostty's `csi:` action writes `ESC [` and the text after it, and
+///   `46;9u` is the KITTY PROTOCOL's own spelling of ⌘. — codepoint 46,
+///   modifiers 1 + 8 (super) — which crossterm reads as `Char('.')` with
+///   SUPER, the chord the keymap binds. orion folds an Escape carrying ⌘
+///   into the same chord ([`crate::keymap::untangle_cmd_period`]) for a
+///   terminal or a config without this line.
+///
+/// A trigger here is bound this way only when the block would release it
+/// anyway — some action answers to it — and the rest of the keymap's ⌘
+/// chords are plain `unbind`s.
+pub const SENT_AS_KITTY: &[(&str, &str)] = &[("super+.", "csi:46;9u")];
+
+/// What the block binds `trigger` to: its [`SENT_AS_KITTY`] bytes, or
+/// `unbind` — handed to the program inside as Ghostty encodes it.
+pub fn action(trigger: &str) -> &'static str {
+    SENT_AS_KITTY
+        .iter()
+        .find(|(t, _)| *t == trigger)
+        .map_or("unbind", |(_, sent)| sent)
+}
 
 /// Whether the block releases `chord`: a ⌘ chord not on
 /// [`NEVER_RELEASED`].
@@ -179,12 +214,13 @@ fn keymap_unbinds(keymap: &Keymap) -> Vec<String> {
 }
 
 /// The block as written for `keymap`: the markers around one
-/// `keybind = <trigger>=unbind` per [`unbinds`] entry.
+/// `keybind = <trigger>=<action>` per [`unbinds`] entry — `unbind`, or
+/// the bytes [`SENT_AS_KITTY`] sends for a chord macOS steals.
 pub fn block(keymap: &Keymap) -> String {
     let mut out = String::from(BEGIN);
     out.push('\n');
     for trigger in unbinds(keymap) {
-        out.push_str(&format!("keybind = {trigger}=unbind\n"));
+        out.push_str(&format!("keybind = {trigger}={}\n", action(&trigger)));
     }
     out.push_str(END);
     out.push('\n');
@@ -292,10 +328,10 @@ pub fn inside_ghostty() -> bool {
 /// the **Outside terminal** — make sure the block for the config's keymap
 /// (its `keybindings` over the defaults) is in Ghostty's config
 /// (`ORION_GHOSTTY_CONFIG` names another file, or `off` none). The flash
-/// to show when the file changed or could not be written; None when there
-/// was nothing to do. Unit tests never get past the first check: they must
-/// not write the machine's real config.
-pub fn ensure_for(cfg: &crate::config::Config) -> Option<String> {
+/// to show when the file changed — Ghostty has to reload it — or could
+/// not be written; None when there was nothing to do. Unit tests never get
+/// past the first check: they must not write the machine's real config.
+pub fn ensure_for(cfg: &crate::config::Config) -> Option<crate::flash::Flash> {
     if cfg!(test)
         || !cfg.ghostty_keybinds
         || !cfg!(target_os = "macos")
@@ -319,12 +355,15 @@ pub fn ensure_for(cfg: &crate::config::Config) -> Option<String> {
         }
     };
     match ensure(&path, &cfg.keymap()) {
-        Ok(true) => Some(format!(
+        Ok(true) => Some(crate::flash::Flash::setup(format!(
             "updated orion's keybinds in {} — reload Ghostty's config (⌘⇧,) to use ⌘ chords",
             path.display()
-        )),
+        ))),
         Ok(false) => None,
-        Err(e) => Some(format!("couldn't update Ghostty's config {}: {e}", path.display())),
+        Err(e) => Some(crate::flash::Flash::failed(format!(
+            "couldn't update Ghostty's config {}: {e}",
+            path.display()
+        ))),
     }
 }
 
@@ -374,6 +413,39 @@ mod tests {
         }
     }
 
+    /// A typed field's ⌘ chords reach it: ⌘A — Ghostty's `select_all` —
+    /// and ⇧⌘↑/⇧⌘↓ — its `jump_to_prompt` — are released, while ⇧⌘←/⇧⌘→,
+    /// which Ghostty binds to nothing, need no line and get none.
+    #[test]
+    fn the_text_fields_cmd_chords_reach_orion() {
+        let all = unbinds(&Keymap::default());
+        let cmd_chords = |key: crate::hints::Key| {
+            key.chords()
+                .into_iter()
+                .filter(|c| c.mods.contains(KeyModifiers::SUPER))
+                .collect::<Vec<_>>()
+        };
+        use crate::text_input::keys::{SELECT_ALL, SELECT_LINE};
+        for chord in cmd_chords(SELECT_ALL) {
+            let t = trigger(&chord).unwrap();
+            assert_eq!(t, "super+a");
+            assert!(all.contains(&t), "{t} not released");
+        }
+        for spec in ["shift+cmd+up", "shift+cmd+down"] {
+            let t = trigger(&KeyChord::parse(spec).unwrap()).unwrap();
+            assert!(all.contains(&t), "{spec} ({t}) not released");
+        }
+        let line = cmd_chords(SELECT_LINE);
+        assert_eq!(line.len(), 2);
+        for chord in line {
+            let t = trigger(&chord).unwrap();
+            assert!(
+                !all.contains(&t),
+                "{t} is not Ghostty's: nothing to release"
+            );
+        }
+    }
+
     /// The default keymap's ⌘ chords, in the order the actions are
     /// declared — and nothing without ⌘.
     #[test]
@@ -383,10 +455,31 @@ mod tests {
             keymap_unbinds(&keymap),
             [
                 "super+k",
+                "super+1",
+                "super+digit_1",
+                "super+2",
+                "super+digit_2",
+                "super+3",
+                "super+digit_3",
+                "super+4",
+                "super+digit_4",
+                "super+5",
+                "super+digit_5",
+                "super+6",
+                "super+digit_6",
+                "super+7",
+                "super+digit_7",
+                "super+8",
+                "super+digit_8",
+                "super+9",
+                "super+digit_9",
                 "super+e",
                 "super+r",
+                "super+u",
                 "super+l",
-                "super+i",
+                "super+shift+a",
+                "super+shift+u",
+                "super+w",
                 "super+n",
                 "super+/",
                 "super+y",
@@ -400,6 +493,7 @@ mod tests {
                 "super+f",
                 "super+g",
                 "super+,",
+                "super+shift+r",
                 "super+shift+p",
                 "super+o",
             ]
@@ -411,6 +505,48 @@ mod tests {
             !block.contains("ctrl+"),
             "a ^ twin is never Ghostty's to give"
         );
+        assert!(block.contains("\nkeybind = super+.=csi:46;9u\n"), "{block}");
+        assert!(!block.contains("super+.=unbind"));
+        assert!(
+            !block.contains("super+i="),
+            "⌘I is no key of orion's: Ghostty keeps it"
+        );
+    }
+
+    /// Every chord macOS steals is sent as the KITTY PROTOCOL spells the
+    /// chord itself — `CSI <codepoint> ; <1 + modifier bits> u` — so it
+    /// arrives as the very chord the keymap binds, and is written only
+    /// while some action answers to it.
+    #[test]
+    fn a_chord_macos_steals_is_sent_as_its_kitty_sequence() {
+        for (trigger, sent) in SENT_AS_KITTY {
+            let spec = trigger.replace("super", "cmd");
+            let chord = KeyChord::parse(&spec).unwrap();
+            assert_eq!(super::trigger(&chord).as_deref(), Some(*trigger));
+            let KeyCode::Char(c) = chord.code else {
+                panic!("{trigger}: not a character key");
+            };
+            let mut bits = 0;
+            for (held, bit) in [
+                (KeyModifiers::SHIFT, 1),
+                (KeyModifiers::ALT, 2),
+                (KeyModifiers::CONTROL, 4),
+                (KeyModifiers::SUPER, 8),
+            ] {
+                if chord.mods.contains(held) {
+                    bits += bit;
+                }
+            }
+            assert_eq!(*sent, format!("csi:{};{}u", c as u32, 1 + bits));
+            assert_eq!(action(trigger), *sent);
+        }
+        assert_eq!(action("super+k"), "unbind");
+        // Rebound off ⌘., the line goes with it: Ghostty has it back.
+        let mut keymap = Keymap::default();
+        let worktree =
+            crate::keymap::index_of(crate::keymap::Action::SelectLaunchWorktree).unwrap();
+        keymap.bind(worktree, KeyChord::parse("cmd+u").unwrap(), false);
+        assert!(!block(&keymap).contains("super+."));
     }
 
     /// Every ⌘ chord an action answers to is released — the derivation
@@ -501,10 +637,10 @@ mod tests {
         // A rebind rewrites it.
         let mut rebound = keymap.clone();
         let index = crate::keymap::index_of(crate::keymap::Action::Skills).unwrap();
-        rebound.bind(index, KeyChord::parse("cmd+u").unwrap(), false);
+        rebound.bind(index, KeyChord::parse("cmd+shift+u").unwrap(), false);
         assert!(ensure(&path, &rebound).unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("keybind = super+u=unbind"));
+        assert!(text.contains("keybind = super+shift+u=unbind"));
         // ⌘S stays released all the same: it is the editor's save.
         assert!(text.contains("keybind = super+s=unbind"));
     }

@@ -8,6 +8,18 @@
 //! ⌥←/⌥→, the readline control chords (Ctrl+A/E/B/F/W/U/K), and word/line
 //! deletes.
 //!
+//! A field holds a SELECTION too, the way a macOS text field does: an
+//! anchor where it began and the caret where it ends. Shift on any motion
+//! extends it — ⇧←/⇧→ by character, ⌥⇧←/⌥⇧→ by word, ⌘⇧←/⌘⇧→ to the
+//! line's ends, ⇧Home/⇧End the same, and in a multi-row field ⇧↑/⇧↓ by
+//! row (past the first or last, to the very start or end) and ⌘⇧↑/⌘⇧↓ to
+//! the text's ends — and ⌘A takes the whole text. The same motion without
+//! Shift lets it go: ←/→ land on its near edge and stop there, every other
+//! motion sets out from that edge. Typing, a paste and a line break
+//! replace it; ⌫, Delete and the word and line deletes remove just it.
+//! Every renderer draws it on the theme's selection background
+//! (`ui::field_spans`).
+//!
 //! A [`TextInput::multiline`] field holds hard line breaks as well, and
 //! takes them the way Claude Code's own prompt does: Shift+Enter,
 //! Option+Enter — the `ESC` `CR` a terminal without the kitty protocol
@@ -65,6 +77,10 @@ pub struct TextInput {
     text: String,
     /// Byte offset into `text`; always on a char boundary, always ≤ len.
     cursor: usize,
+    /// Where the SELECTION began, as a byte offset like `cursor`; it runs
+    /// from here to the caret, either way round. None — or the caret's own
+    /// offset, never kept — is no selection.
+    anchor: Option<usize>,
     /// Hard line breaks allowed: the break keys insert one and a paste
     /// keeps its own. Off, the field is one line whatever comes in.
     multiline: bool,
@@ -95,11 +111,15 @@ fn cells(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
-/// A field's value is its text, caret and shape; the column a run of ↑/↓
-/// aims for and where it was last drawn are not part of it.
+/// A field's value is its text, caret, SELECTION and shape — the range
+/// selected, that is, the anchor being the caret's other end; the column
+/// a run of ↑/↓ aims for and where it was last drawn are not part of it.
 impl PartialEq for TextInput {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.cursor == other.cursor && self.multiline == other.multiline
+        self.text == other.text
+            && self.cursor == other.cursor
+            && self.selection() == other.selection()
+            && self.multiline == other.multiline
     }
 }
 
@@ -192,6 +212,24 @@ impl TextInput {
         self.text[..self.cursor].chars().count()
     }
 
+    /// Cursor as a byte offset into [`as_str`](Self::as_str).
+    pub fn caret_byte(&self) -> usize {
+        self.cursor
+    }
+
+    /// Replace the text from byte `start` up to the caret with `with`, the
+    /// caret landing after it — a completion written over the word it
+    /// completes. A `start` past the caret, or off a char boundary,
+    /// changes nothing.
+    pub fn replace_to_caret(&mut self, start: usize, with: &str) {
+        if start > self.cursor || !self.text.is_char_boundary(start) {
+            return;
+        }
+        self.text.replace_range(start..self.cursor, with);
+        self.cursor = start + with.len();
+        self.goal = None;
+    }
+
     /// Park the caret `at` chars in, clamped to the end of the text.
     fn set_cursor_chars(&mut self, at: usize) {
         self.cursor = self
@@ -202,28 +240,85 @@ impl TextInput {
     }
 
     /// Caret to the very start of the text — ↑ on a task box's top row.
+    /// Lets any SELECTION go.
     pub fn cursor_to_start(&mut self) {
         self.goal = None;
+        self.anchor = None;
         self.cursor = 0;
     }
 
     /// Caret to the very end of the text — ↓ on a task box's bottom row.
+    /// Lets any SELECTION go.
     pub fn cursor_to_end(&mut self) {
         self.goal = None;
+        self.anchor = None;
         self.cursor = self.text.len();
     }
 
-    /// Replace the whole value, cursor to the end.
+    /// Replace the whole value, cursor to the end, nothing selected.
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();
+        self.anchor = None;
         self.goal = None;
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.anchor = None;
         self.goal = None;
+    }
+
+    /// The SELECTION as a byte range, start before end — None when nothing
+    /// is selected.
+    fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor.filter(|a| *a != self.cursor)?;
+        Some((anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+
+    /// The SELECTION as a char range, start before end — the unit the
+    /// renderer draws in, as [`cursor_chars`](Self::cursor_chars) is.
+    /// None when nothing is selected.
+    pub fn selection_chars(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.selection()?;
+        let start_chars = self.text[..start].chars().count();
+        Some((
+            start_chars,
+            start_chars + self.text[start..end].chars().count(),
+        ))
+    }
+
+    /// The selected text, when there is any.
+    pub fn selected(&self) -> Option<&str> {
+        self.selection().map(|(start, end)| &self.text[start..end])
+    }
+
+    /// The char just before where an insert lands — the caret, or the
+    /// start of the SELECTION it would replace. None at the very start.
+    pub fn char_before_insert(&self) -> Option<char> {
+        let at = self.selection().map_or(self.cursor, |(start, _)| start);
+        self.char_before(at)
+    }
+
+    /// ⌘A: the whole text selected, the caret at its end.
+    pub fn select_all(&mut self) {
+        self.goal = None;
+        self.anchor = Some(0);
+        self.cursor = self.text.len();
+    }
+
+    /// Take the SELECTION out of the text, the caret where it began. False
+    /// — the text untouched — when nothing is selected.
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+        self.anchor = None;
+        true
     }
 
     /// The text as the rows a `width`-column box shows it in, as char
@@ -323,6 +418,7 @@ impl TextInput {
         let row = self.caret_row(&rows);
         let into = row.clamp(top, top + height - 1);
         if into != row {
+            self.anchor = None;
             let col = self
                 .goal
                 .map_or(self.cursor_chars() - rows[row].0, usize::from);
@@ -337,6 +433,7 @@ impl TextInput {
     /// past it, and the end of the text, clicked below the last row.
     pub fn click(&mut self, row: u16, col: u16) {
         self.goal = None;
+        self.anchor = None;
         let rows = self.rows(self.view.width.into());
         let row = usize::from(self.view.top) + usize::from(row);
         match rows.get(row) {
@@ -345,15 +442,19 @@ impl TextInput {
         }
     }
 
+    /// Type `c` at the caret — over the SELECTION, when there is one.
     pub fn insert_char(&mut self, c: char) {
+        self.delete_selection();
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
-    /// Insert a whole run at the cursor — a bracketed paste. A multi-row
-    /// field keeps its line breaks (`\r\n` and a bare `\r` become `\n`);
-    /// a one-line field turns each into a space.
+    /// Insert a whole run at the cursor — a bracketed paste — over the
+    /// SELECTION, when there is one. A multi-row field keeps its line
+    /// breaks (`\r\n` and a bare `\r` become `\n`); a one-line field
+    /// turns each into a space.
     pub fn insert_str(&mut self, s: &str) {
+        self.delete_selection();
         let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
         let run = if self.multiline {
             normalized
@@ -370,13 +471,16 @@ impl TextInput {
     pub fn handle_key(&mut self, key: &KeyEvent) -> Edit {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // Shift on a motion key extends the SELECTION rather than moving.
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         // Cmd on macOS, when a terminal delivers it at all: line-wise.
         let cmd = key
             .modifiers
             .intersects(KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::HYPER);
         // A run of ↑/↓ (PageUp/PageDown) keeps aiming for the column it
-        // set out from; any other key starts afresh.
-        let goal = self.goal.take();
+        // set out from; any other key starts afresh — and so does a plain
+        // ↑/↓ that lets a selection go, setting out from its edge.
+        let goal = self.goal.take().filter(|_| shift || self.anchor.is_none());
 
         match key.code {
             // ---- line breaks (multi-row fields only) ----
@@ -385,19 +489,34 @@ impl TextInput {
                 Edit::Changed
             }
 
+            // ---- selection ----
+            // ⌘A, where the terminal hands ⌘ over (Ghostty, once the
+            // GHOSTTY KEYBINDS block releases it from its select-all).
+            // Never Ctrl+A: that is the line's start, and what Ghostty
+            // types for ⌘←.
+            KeyCode::Char('a' | 'A') if cmd && !ctrl && !alt => {
+                self.select_all();
+                Edit::Moved
+            }
+
             // ---- motion ----
             // Line-wise keys work on the line under the caret — the whole
-            // text, in a one-line field.
-            KeyCode::Left if cmd => self.move_to(self.line_start(self.cursor)),
-            KeyCode::Left if alt || ctrl => self.move_to(self.word_left(self.cursor)),
-            KeyCode::Left => self.move_to(self.prev_boundary(self.cursor)),
-            KeyCode::Right if cmd => self.move_to(self.line_end(self.cursor)),
-            KeyCode::Right if alt || ctrl => self.move_to(self.word_right(self.cursor)),
-            KeyCode::Right => self.move_to(self.next_boundary(self.cursor)),
-            KeyCode::Home if ctrl || cmd => self.move_to(0),
-            KeyCode::End if ctrl || cmd => self.move_to(self.text.len()),
-            KeyCode::Home => self.move_to(self.line_start(self.cursor)),
-            KeyCode::End => self.move_to(self.line_end(self.cursor)),
+            // text, in a one-line field. Each extends the SELECTION with
+            // Shift held and lets it go without.
+            KeyCode::Left if cmd => self.motion(shift, true, |s| s.move_to(s.line_start(s.cursor))),
+            KeyCode::Left if alt || ctrl => {
+                self.motion(shift, true, |s| s.move_to(s.word_left(s.cursor)))
+            }
+            KeyCode::Left => self.step_char(shift, true),
+            KeyCode::Right if cmd => self.motion(shift, false, |s| s.move_to(s.line_end(s.cursor))),
+            KeyCode::Right if alt || ctrl => {
+                self.motion(shift, false, |s| s.move_to(s.word_right(s.cursor)))
+            }
+            KeyCode::Right => self.step_char(shift, false),
+            KeyCode::Home if ctrl || cmd => self.motion(shift, true, |s| s.move_to(0)),
+            KeyCode::End if ctrl || cmd => self.motion(shift, false, |s| s.move_to(s.text.len())),
+            KeyCode::Home => self.motion(shift, true, |s| s.move_to(s.line_start(s.cursor))),
+            KeyCode::End => self.motion(shift, false, |s| s.move_to(s.line_end(s.cursor))),
             // ↑/↓ walk a multi-row field's rows as drawn — a paragraph
             // wrapped over five rows is five rows — keeping the column;
             // past the first or last row they are the caller's (a form
@@ -405,66 +524,81 @@ impl TextInput {
             // the paragraph, then the one before or after, as a macOS text
             // view does; Cmd+↑/↓ (Ctrl+Home/End) to the text's very start
             // or end; PageUp/PageDown a screenful. A one-line field has no
-            // second row: all of these stay the caller's there.
+            // second row: all of these stay the caller's there, shifted
+            // or not.
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
                 if !self.multiline =>
             {
                 Edit::Ignored
             }
-            KeyCode::Up if cmd => self.move_to(0),
-            KeyCode::Down if cmd => self.move_to(self.text.len()),
-            KeyCode::Up if alt => self.paragraph_up(),
-            KeyCode::Down if alt => self.paragraph_down(),
-            KeyCode::Up => self.move_rows(-1, goal),
-            KeyCode::Down => self.move_rows(1, goal),
-            KeyCode::PageUp => self.page(-1, goal),
-            KeyCode::PageDown => self.page(1, goal),
+            KeyCode::Up if cmd => self.motion(shift, true, |s| s.move_to(0)),
+            KeyCode::Down if cmd => self.motion(shift, false, |s| s.move_to(s.text.len())),
+            KeyCode::Up if alt => self.motion(shift, true, Self::paragraph_up),
+            KeyCode::Down if alt => self.motion(shift, false, Self::paragraph_down),
+            // ⇧↑ on the first row (⇧↓ on the last) selects on to the very
+            // start (end), as a macOS text view does, rather than handing
+            // the key to the caller with half a selection made.
+            KeyCode::Up if shift => self.motion(true, true, |s| match s.move_rows(-1, goal) {
+                Edit::Ignored => s.move_to(0),
+                moved => moved,
+            }),
+            KeyCode::Down if shift => self.motion(true, false, |s| match s.move_rows(1, goal) {
+                Edit::Ignored => s.move_to(s.text.len()),
+                moved => moved,
+            }),
+            KeyCode::Up => self.motion(false, true, |s| s.move_rows(-1, goal)),
+            KeyCode::Down => self.motion(false, false, |s| s.move_rows(1, goal)),
+            KeyCode::PageUp => self.motion(shift, true, |s| s.page(-1, goal)),
+            KeyCode::PageDown => self.motion(shift, false, |s| s.page(1, goal)),
 
             // ---- deletion ----
-            // Cmd+⌫ kills the line, ⌥⌫ / Ctrl+⌫ the previous word.
-            KeyCode::Backspace if cmd => self.delete(self.line_start(self.cursor), self.cursor),
+            // Cmd+⌫ kills the line, ⌥⌫ / Ctrl+⌫ the previous word — and
+            // every one of them just the SELECTION, when there is one.
+            KeyCode::Backspace if cmd => self.kill(self.line_start(self.cursor), self.cursor),
             KeyCode::Backspace if alt || ctrl => {
-                self.delete(self.word_left(self.cursor), self.cursor)
+                self.kill(self.word_left(self.cursor), self.cursor)
             }
-            KeyCode::Backspace => self.delete(self.prev_boundary(self.cursor), self.cursor),
-            KeyCode::Delete if cmd => self.delete(self.cursor, self.line_end(self.cursor)),
-            KeyCode::Delete if alt || ctrl => {
-                self.delete(self.cursor, self.word_right(self.cursor))
-            }
-            KeyCode::Delete => self.delete(self.cursor, self.next_boundary(self.cursor)),
+            KeyCode::Backspace => self.kill(self.prev_boundary(self.cursor), self.cursor),
+            KeyCode::Delete if cmd => self.kill(self.cursor, self.line_end(self.cursor)),
+            KeyCode::Delete if alt || ctrl => self.kill(self.cursor, self.word_right(self.cursor)),
+            KeyCode::Delete => self.kill(self.cursor, self.next_boundary(self.cursor)),
 
             // ---- readline chords ----
             // Cmd+key never means "type this" — leave it to the caller.
             KeyCode::Char(_) if cmd => Edit::Ignored,
             KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
-                'a' => self.move_to(self.line_start(self.cursor)),
-                'e' => self.move_to(self.line_end(self.cursor)),
-                'b' => self.move_to(self.prev_boundary(self.cursor)),
-                'f' => self.move_to(self.next_boundary(self.cursor)),
-                'd' => self.delete(self.cursor, self.next_boundary(self.cursor)),
-                'w' => self.delete(self.word_left(self.cursor), self.cursor),
-                'u' => self.delete(self.line_start(self.cursor), self.cursor),
+                'a' => self.motion(false, true, |s| s.move_to(s.line_start(s.cursor))),
+                'e' => self.motion(false, false, |s| s.move_to(s.line_end(s.cursor))),
+                'b' => self.step_char(false, true),
+                'f' => self.step_char(false, false),
+                'd' => self.kill(self.cursor, self.next_boundary(self.cursor)),
+                'w' => self.kill(self.word_left(self.cursor), self.cursor),
+                'u' => self.kill(self.line_start(self.cursor), self.cursor),
                 // To the end of the line — or, standing at its end, the
                 // line break itself, as readline does.
                 'k' => match self.line_end(self.cursor) {
                     end if end == self.cursor => {
-                        self.delete(self.cursor, self.next_boundary(self.cursor))
+                        self.kill(self.cursor, self.next_boundary(self.cursor))
                     }
-                    end => self.delete(self.cursor, end),
+                    end => self.kill(self.cursor, end),
                 },
                 _ => Edit::Ignored,
             },
-            // ⌥b/⌥f are what macOS terminals send for ⌥←/⌥→; ⌥d is
-            // readline's kill-word-forward.
-            KeyCode::Char(c) if alt => match c.to_ascii_lowercase() {
-                'b' => self.move_to(self.word_left(self.cursor)),
-                'f' => self.move_to(self.word_right(self.cursor)),
-                'd' => self.delete(self.cursor, self.word_right(self.cursor)),
-                // Some emulators send ⌥⌫ as ESC + DEL rather than a
-                // modified Backspace key.
-                '\u{7f}' | '\u{8}' => self.delete(self.word_left(self.cursor), self.cursor),
-                _ => Edit::Ignored,
-            },
+            // ⌥b/⌥f are what macOS terminals send for ⌥←/⌥→ — shifted
+            // (`ESC B` / `ESC F`), they select; ⌥d is readline's
+            // kill-word-forward.
+            KeyCode::Char(c) if alt => {
+                let select = shift || c.is_ascii_uppercase();
+                match c.to_ascii_lowercase() {
+                    'b' => self.motion(select, true, |s| s.move_to(s.word_left(s.cursor))),
+                    'f' => self.motion(select, false, |s| s.move_to(s.word_right(s.cursor))),
+                    'd' => self.kill(self.cursor, self.word_right(self.cursor)),
+                    // Some emulators send ⌥⌫ as ESC + DEL rather than a
+                    // modified Backspace key.
+                    '\u{7f}' | '\u{8}' => self.kill(self.word_left(self.cursor), self.cursor),
+                    _ => Edit::Ignored,
+                }
+            }
 
             // ---- text ----
             // Plain (or shifted) printable keys, including the glyphs a Mac
@@ -484,7 +618,69 @@ impl TextInput {
         Edit::Moved
     }
 
+    /// One motion key, `step` being where it takes the caret. With
+    /// `select` the SELECTION grows or shrinks with it, anchored where it
+    /// began — or at the caret, starting one. Without, a selection is let
+    /// go first, the caret setting out from its edge `toward_start` or the
+    /// other; a key that then has nowhere to go still counts as Moved, the
+    /// selection having gone.
+    fn motion(
+        &mut self,
+        select: bool,
+        toward_start: bool,
+        step: impl FnOnce(&mut Self) -> Edit,
+    ) -> Edit {
+        if select {
+            let anchor = self.anchor.unwrap_or(self.cursor);
+            let edit = step(self);
+            self.anchor = (anchor != self.cursor).then_some(anchor);
+            return edit;
+        }
+        let collapsed = match self.selection() {
+            Some((start, end)) => {
+                self.cursor = if toward_start { start } else { end };
+                true
+            }
+            None => false,
+        };
+        self.anchor = None;
+        match step(self) {
+            Edit::Ignored if collapsed => Edit::Moved,
+            edit => edit,
+        }
+    }
+
+    /// ←/→ (Ctrl+B/F): a character over, or with `select` the SELECTION
+    /// one wider or narrower. Plain, over a selection, the caret lands on
+    /// its near edge and goes no further, as in any macOS text field.
+    fn step_char(&mut self, select: bool, back: bool) -> Edit {
+        if !select {
+            if let Some((start, end)) = self.selection() {
+                self.anchor = None;
+                return self.move_to(if back { start } else { end });
+            }
+        }
+        self.motion(select, back, |s| {
+            let to = if back {
+                s.prev_boundary(s.cursor)
+            } else {
+                s.next_boundary(s.cursor)
+            };
+            s.move_to(to)
+        })
+    }
+
+    /// A delete key's cut, `start..end` — or the SELECTION in its place,
+    /// when there is one: ⌫, ⌥⌫ and ^U alike take just what is selected.
+    fn kill(&mut self, start: usize, end: usize) -> Edit {
+        if self.delete_selection() {
+            return Edit::Changed;
+        }
+        self.delete(start, end)
+    }
+
     fn delete(&mut self, start: usize, end: usize) -> Edit {
+        self.anchor = None;
         if start >= end {
             // Backspace at column 0 is still the field's key — swallow it so
             // an overlay doesn't read it as "delete the selected row".
@@ -680,7 +876,39 @@ pub mod keys {
     pub const LINE_ENDS: Key = Key::new(&["ctrl+a", "ctrl+e"], "start / end of line").show(2);
     pub const DELETE_WORD: Key = Key::new(&["alt+backspace"], "delete a word");
     pub const KILL: Key = Key::new(&["ctrl+u", "ctrl+k"], "kill to start / end").show(2);
-    pub const ALL: &[Key] = &[WORD, LINE_ENDS, DELETE_WORD, KILL];
+    /// The SELECTION, a character at a time. ⇧↑/⇧↓ select by row too, but
+    /// only in a multi-row box — a one-line field leaves them to the list
+    /// under it — so Help, which speaks for every field, names just these.
+    pub const SELECT: Key = Key::new(&["shift+left", "shift+right"], "select").show(2);
+    /// By word: what Ghostty sends for ⌥⇧←/⌥⇧→, which it binds to nothing.
+    pub const SELECT_WORD: Key =
+        Key::new(&["alt+shift+left", "alt+shift+right"], "select by word").show(2);
+    /// To the line's ends: ⌘⇧←/⌘⇧→ where ⌘ arrives (Ghostty binds neither,
+    /// unlike plain ⌘←/⌘→), ⇧Home/⇧End everywhere.
+    pub const SELECT_LINE: Key = Key::new(
+        &[
+            "cmd+shift+left",
+            "cmd+shift+right",
+            "shift+home",
+            "shift+end",
+        ],
+        "select to start / end",
+    )
+    .show(2);
+    /// ⌘A — never `^A`, which is the line's start and what Ghostty types
+    /// for ⌘←. Ghostty keeps ⌘A for its own select-all until the GHOSTTY
+    /// KEYBINDS block releases it (`ghostty_config::EDITOR_CHORDS`).
+    pub const SELECT_ALL: Key = Key::new(&["cmd+a"], "select all");
+    pub const ALL: &[Key] = &[
+        WORD,
+        LINE_ENDS,
+        DELETE_WORD,
+        KILL,
+        SELECT,
+        SELECT_WORD,
+        SELECT_LINE,
+        SELECT_ALL,
+    ];
 }
 
 /// Test-only accessors: nothing in the app reads these any more.
@@ -697,7 +925,8 @@ mod tests {
     use super::*;
 
     /// Every chord Help names for the line editor is one it answers:
-    /// pressed mid-word in a field, each moves the caret or deletes.
+    /// pressed mid-word in a one-line field, each moves the caret, selects
+    /// or deletes.
     #[test]
     fn every_key_help_names_is_the_editors() {
         for key in keys::ALL {
@@ -707,10 +936,19 @@ mod tests {
                 input.set_text("one two three");
                 input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
                 input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-                let before = (input.as_str().to_string(), input.cursor_chars());
+                let state = |input: &TextInput| {
+                    (
+                        input.as_str().to_string(),
+                        input.cursor_chars(),
+                        input.selection_chars(),
+                    )
+                };
+                let before = state(&input);
                 let edit = input.handle_key(&KeyEvent::new(chord.code, chord.mods));
-                let after = (input.as_str().to_string(), input.cursor_chars());
-                assert!(edit.consumed() && before != after, "{chord} did nothing");
+                assert!(
+                    edit.consumed() && before != state(&input),
+                    "{chord} did nothing"
+                );
             }
         }
     }
@@ -1248,5 +1486,274 @@ mod tests {
         assert_eq!(input.cursor_chars(), 4);
         press(&mut input, KeyCode::Backspace, KeyModifiers::NONE);
         assert_eq!(input.as_str(), "not");
+    }
+
+    // ---- the SELECTION ----
+
+    const SHIFT: KeyModifiers = KeyModifiers::SHIFT;
+
+    fn mods(list: &[KeyModifiers]) -> KeyModifiers {
+        list.iter().fold(KeyModifiers::NONE, |all, m| all | *m)
+    }
+
+    /// The selected text, or "" with none.
+    fn sel(input: &TextInput) -> &str {
+        input.selected().unwrap_or("")
+    }
+
+    /// ⇧←/⇧→ grow and shrink the selection a character at a time from
+    /// where it began; plain ←/→ then land on its near edge and stop, as
+    /// in a macOS text field.
+    #[test]
+    fn shift_arrows_select_by_character_and_plain_arrows_collapse_to_an_edge() {
+        let mut input = typed("hello world");
+        for _ in 0..5 {
+            assert_eq!(press(&mut input, KeyCode::Left, SHIFT), Edit::Moved);
+        }
+        assert_eq!(sel(&input), "world");
+        assert_eq!(input.selection_chars(), Some((6, 11)));
+        press(&mut input, KeyCode::Right, SHIFT);
+        assert_eq!(sel(&input), "orld", "shrinks back toward the anchor");
+        // ← lands on the start and goes no further.
+        assert_eq!(
+            press(&mut input, KeyCode::Left, KeyModifiers::NONE),
+            Edit::Moved
+        );
+        assert_eq!((input.cursor_chars(), input.selected()), (7, None));
+        // → from a selection made leftward lands on its end.
+        press(&mut input, KeyCode::Left, SHIFT);
+        press(&mut input, KeyCode::Left, SHIFT);
+        press(&mut input, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!((input.cursor_chars(), input.selected()), (7, None));
+        // Back over the anchor, the selection flips sides.
+        press(&mut input, KeyCode::Right, SHIFT);
+        press(&mut input, KeyCode::Left, SHIFT);
+        press(&mut input, KeyCode::Left, SHIFT);
+        assert_eq!(sel(&input), "w");
+        assert_eq!(input.cursor_chars(), 6);
+    }
+
+    /// ⌥⇧←/⌥⇧→ by word — the modified arrows Ghostty sends, and the
+    /// `ESC B` / `ESC F` a readline-minded terminal would — and ^⇧←/^⇧→
+    /// the same.
+    #[test]
+    fn option_shift_arrows_select_by_word() {
+        let mut input = typed("fix the login redirect");
+        let alt_shift = mods(&[KeyModifiers::ALT, SHIFT]);
+        press(&mut input, KeyCode::Left, alt_shift);
+        assert_eq!(sel(&input), "redirect");
+        press(&mut input, KeyCode::Left, alt_shift);
+        assert_eq!(sel(&input), "login redirect");
+        press(&mut input, KeyCode::Right, alt_shift);
+        assert_eq!(sel(&input), " redirect");
+        let mut esc = typed("fix the login");
+        press(&mut esc, KeyCode::Char('B'), alt_shift);
+        assert_eq!(sel(&esc), "login");
+        press(&mut esc, KeyCode::Char('B'), KeyModifiers::ALT);
+        assert_eq!(sel(&esc), "the login", "an uppercase B is a shifted one");
+        press(&mut esc, KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!((esc.selected(), esc.cursor_chars()), (None, 0));
+        let mut ctrl = typed("one two");
+        press(
+            &mut ctrl,
+            KeyCode::Left,
+            mods(&[KeyModifiers::CONTROL, SHIFT]),
+        );
+        assert_eq!(sel(&ctrl), "two");
+    }
+
+    /// ⌘⇧←/⌘⇧→ and ⇧Home/⇧End select to the ends of the line under the
+    /// caret; ⌘⇧↑/⌘⇧↓ and ^⇧Home/^⇧End to the ends of the text.
+    #[test]
+    fn line_and_text_ends_extend_the_selection() {
+        let cmd_shift = mods(&[KeyModifiers::SUPER, SHIFT]);
+        let mut input = TextInput::multiline_with_text("first line\nsecond line");
+        press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        press(&mut input, KeyCode::Left, cmd_shift);
+        assert_eq!(sel(&input), "second li");
+        press(&mut input, KeyCode::Right, cmd_shift);
+        assert_eq!(sel(&input), "ne", "back over the anchor to the line's end");
+        press(&mut input, KeyCode::Home, SHIFT);
+        assert_eq!(sel(&input), "second li");
+        press(&mut input, KeyCode::End, SHIFT);
+        assert_eq!(sel(&input), "ne");
+        press(&mut input, KeyCode::Up, cmd_shift);
+        assert_eq!(sel(&input), "first line\nsecond li");
+        press(&mut input, KeyCode::Down, cmd_shift);
+        assert_eq!(sel(&input), "ne");
+        press(
+            &mut input,
+            KeyCode::Home,
+            mods(&[KeyModifiers::CONTROL, SHIFT]),
+        );
+        assert_eq!(sel(&input), "first line\nsecond li");
+        // A one-line field takes the line's ends the same way.
+        let mut one = typed("solo");
+        press(&mut one, KeyCode::Home, SHIFT);
+        assert_eq!(sel(&one), "solo");
+    }
+
+    /// ⇧↑/⇧↓ select by row as drawn, keeping the column; past the first
+    /// or last row they select on to the very start or end. A one-line
+    /// field leaves them to its caller, as it does plain ↑/↓.
+    #[test]
+    fn shift_up_and_down_select_by_row() {
+        let mut input = drawn("one two\nthree four\nfive", 80, 5);
+        press(&mut input, KeyCode::Up, SHIFT);
+        assert_eq!(sel(&input), "e four\nfive", "column 4 on the row above");
+        press(&mut input, KeyCode::Up, SHIFT);
+        assert_eq!(sel(&input), "two\nthree four\nfive");
+        assert_eq!(press(&mut input, KeyCode::Up, SHIFT), Edit::Moved);
+        assert_eq!(
+            sel(&input),
+            "one two\nthree four\nfive",
+            "the top row: to the start"
+        );
+        // Plain ↓ lets it go from its end — the text's end — and has
+        // nowhere further to go, but the key was still the field's.
+        assert_eq!(
+            press(&mut input, KeyCode::Down, KeyModifiers::NONE),
+            Edit::Moved
+        );
+        assert_eq!((input.selected(), input.cursor_chars()), (None, 23));
+        let mut one = typed("solo");
+        assert_eq!(press(&mut one, KeyCode::Up, SHIFT), Edit::Ignored);
+        assert_eq!(press(&mut one, KeyCode::Down, SHIFT), Edit::Ignored);
+        assert_eq!(one.selected(), None);
+    }
+
+    /// Plain ↑ over a selection sets out from its start, ↓ from its end.
+    #[test]
+    fn plain_rows_set_out_from_the_selections_edge() {
+        let mut input = drawn("alpha\nbravo\ncharlie", 80, 5);
+        press(&mut input, KeyCode::Up, KeyModifiers::NONE);
+        press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        press(&mut input, KeyCode::Left, SHIFT);
+        press(&mut input, KeyCode::Left, SHIFT);
+        assert_eq!(sel(&input), "av");
+        press(&mut input, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            (input.selected(), input.cursor_chars()),
+            (None, 2),
+            "al|pha"
+        );
+    }
+
+    /// ⌘A takes the whole text, multi-row or not; ^A is still the line's
+    /// start — what Ghostty types for ⌘← — and never selects.
+    #[test]
+    fn cmd_a_selects_everything_and_ctrl_a_does_not() {
+        let mut input = TextInput::multiline_with_text("one\ntwo");
+        press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(
+            press(&mut input, KeyCode::Char('a'), KeyModifiers::SUPER),
+            Edit::Moved
+        );
+        assert_eq!(sel(&input), "one\ntwo");
+        assert_eq!(input.cursor_chars(), 7);
+        press(&mut input, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!((input.selected(), input.cursor_chars()), (None, 0));
+        // Other ⌘ letters stay the caller's.
+        assert_eq!(
+            press(&mut input, KeyCode::Char('p'), KeyModifiers::SUPER),
+            Edit::Ignored
+        );
+    }
+
+    /// Typing, a paste and a line break all replace the selection.
+    #[test]
+    fn typing_pasting_and_breaking_a_line_replace_the_selection() {
+        let mut input = TextInput::multiline_with_text("fix the bug now");
+        for _ in 0.."bug now".len() {
+            press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        }
+        for _ in 0.."bug".len() {
+            press(&mut input, KeyCode::Right, SHIFT);
+        }
+        assert_eq!(
+            press(&mut input, KeyCode::Char('X'), SHIFT),
+            Edit::Changed,
+            "a shifted letter types"
+        );
+        assert_eq!(input.as_str(), "fix the X now");
+        assert_eq!(input.selected(), None);
+        press(&mut input, KeyCode::Char('a'), KeyModifiers::SUPER);
+        input.insert_str("pasted");
+        assert_eq!((input.as_str(), input.cursor_chars()), ("pasted", 6));
+        press(&mut input, KeyCode::Left, SHIFT);
+        press(&mut input, KeyCode::Enter, SHIFT);
+        assert_eq!(input.as_str(), "paste\n");
+    }
+
+    /// ⌫, Delete and every word or line delete remove just the selection.
+    #[test]
+    fn deletes_take_only_the_selection() {
+        let select_two = |input: &mut TextInput| {
+            input.set_text("one two three");
+            for _ in 0.." three".len() {
+                press(input, KeyCode::Left, KeyModifiers::NONE);
+            }
+            press(input, KeyCode::Left, mods(&[KeyModifiers::ALT, SHIFT]));
+            assert_eq!(sel(input), "two");
+        };
+        let mut input = TextInput::new();
+        for (code, m) in [
+            (KeyCode::Backspace, KeyModifiers::NONE),
+            (KeyCode::Delete, KeyModifiers::NONE),
+            (KeyCode::Backspace, KeyModifiers::ALT),
+            (KeyCode::Backspace, KeyModifiers::SUPER),
+            (KeyCode::Delete, KeyModifiers::ALT),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+            (KeyCode::Char('d'), KeyModifiers::CONTROL),
+            (KeyCode::Char('d'), KeyModifiers::ALT),
+        ] {
+            select_two(&mut input);
+            assert_eq!(press(&mut input, code, m), Edit::Changed, "{code:?} {m:?}");
+            assert_eq!(input.as_str(), "one  three", "{code:?} {m:?}");
+            assert_eq!(
+                (input.cursor_chars(), input.selected()),
+                (4, None),
+                "{code:?} {m:?}"
+            );
+        }
+    }
+
+    /// A selection over multi-byte characters moves, draws and deletes by
+    /// whole characters, in chars for the renderer.
+    #[test]
+    fn a_selection_over_multibyte_text_is_whole_characters() {
+        let mut input = typed("naïve → café");
+        press(&mut input, KeyCode::Left, mods(&[KeyModifiers::ALT, SHIFT]));
+        assert_eq!(sel(&input), "café");
+        assert_eq!(input.selection_chars(), Some((8, 12)));
+        press(&mut input, KeyCode::Left, SHIFT);
+        press(&mut input, KeyCode::Left, SHIFT);
+        assert_eq!(sel(&input), "→ café");
+        press(&mut input, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!((input.as_str(), input.cursor_chars()), ("naïve ", 6));
+    }
+
+    /// Two fields that differ only in their selection are not equal — and
+    /// only in which way round it was made, they are. Replacing the text,
+    /// or a click, lets it go.
+    #[test]
+    fn the_selection_is_part_of_a_fields_value() {
+        let plain = typed("abc");
+        let mut left = typed("abc");
+        press(&mut left, KeyCode::Home, SHIFT);
+        assert_ne!(left, plain);
+        let mut right = typed("abc");
+        press(&mut right, KeyCode::Home, KeyModifiers::NONE);
+        press(&mut right, KeyCode::End, SHIFT);
+        assert_eq!(sel(&right), sel(&left));
+        assert_eq!(right.selection_chars(), left.selection_chars());
+        left.set_text("abc");
+        assert_eq!(left, plain);
+        press(&mut right, KeyCode::Home, SHIFT);
+        right.click(0, 1);
+        assert_eq!(right.selected(), None);
     }
 }

@@ -21,8 +21,7 @@ use crate::registry::Daemon;
 /// look at what it wrote names the path and waits to be asked. Claude and
 /// pi, like the worktree and spawn guidance (all three take
 /// `--append-system-prompt`): codex and cursor have no such flag.
-pub const CLAUDE_OPEN_GUIDANCE: &str =
-    "[orion] Only when the user explicitly asks you to open or \
+pub const CLAUDE_OPEN_GUIDANCE: &str = "[orion] Only when the user explicitly asks you to open or \
 show a file in orion (\"open it\", \"show me the file\", \"open these in orion\") — and never on \
 your own initiative — run this shell command, exactly once per set of files:\n\n  orion open \
 <file> [<file>…]\n\nwith paths relative to your working directory or absolute. A file you wrote or \

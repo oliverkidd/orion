@@ -52,17 +52,15 @@ const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 /// ONBOARDING wizard already seen (it would cover the grid every test
 /// drives) and the agents it offers switched on, which a fresh install
 /// leaves off.
-fn seed_onboarded_config(data_dir: &std::path::Path) {
+fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
-    std::fs::write(
-        data_dir.join("config.local.json"),
-        r#"{"onboarded": true}"#,
-    )
-    .unwrap();
+    std::fs::write(data_dir.join("config.local.json"), r#"{"onboarded": true}"#).unwrap();
     std::fs::write(
         data_dir.join("config.json"),
-        r#"{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
-            "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true}"#,
+        format!(
+            r#"{{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
+            "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true{settings}}}"#
+        ),
     )
     .unwrap();
 }
@@ -86,6 +84,16 @@ impl TuiHarness {
     /// a stub `gh` on PATH so the pull-request row can be driven without a
     /// GitHub account.
     fn spawn_with_env(extra_env: &[(&str, String)]) -> Self {
+        Self::spawn_with(extra_env, "")
+    }
+
+    /// `spawn`, with `settings` — `, "key": value` pairs — added to the
+    /// seeded config.json.
+    fn spawn_with_settings(settings: &str) -> Self {
+        Self::spawn_with(&[], settings)
+    }
+
+    fn spawn_with(extra_env: &[(&str, String)], settings: &str) -> Self {
         // Socket paths must stay under SUN_LEN (~104 bytes) — keep the
         // runtime dir short. Tests share one process, so a per-harness
         // sequence keeps each test on its own daemon.
@@ -96,7 +104,7 @@ impl TuiHarness {
         let data_dir = PathBuf::from(format!("/tmp/oriontui-data-{pid}-{seq}"));
         let _ = std::fs::remove_dir_all(&runtime_dir);
         let _ = std::fs::remove_dir_all(&data_dir);
-        seed_onboarded_config(&data_dir);
+        seed_onboarded_config(&data_dir, settings);
         let repos = tempfile::tempdir().unwrap();
 
         let pty = native_pty_system()
@@ -458,7 +466,7 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
     add_project(&mut tui, &second, "cwd-second");
     tui.wait_for_working_directory(&second);
 
-    tui.send(b"q");
+    tui.send(&[0x03]); // ^C: quit has no bare key
     tui.wait_for_text("Quit orion");
     tui.send(ENTER);
     tui.wait_for_working_directory(&tui._repos.path().canonicalize().unwrap());
@@ -704,7 +712,6 @@ fn tui_issues_modal_edits_the_issue_in_place() {
 
     // Enter sends the edit and the pane comes back on the new text.
     tui.send(ENTER);
-    tui.wait_for_text("issue #15 updated");
     tui.wait_for_gone("Edit issue #15");
     tui.wait_for_text("#15 Fix login redirect!");
     let sent = std::fs::read_to_string(&edits).unwrap();
@@ -724,9 +731,12 @@ fn tui_issues_modal_edits_the_issue_in_place() {
     tui.wait_for_gone("Issues — issues-proj");
 }
 
+/// The DIFF VIEWER's flat file list: opened with the keys on the files
+/// and the list flat (Settings → Review), the way this walk reads it.
 #[test]
 fn tui_git_diff_modal() {
-    let mut tui = TuiHarness::spawn();
+    let mut tui =
+        TuiHarness::spawn_with_settings(r#", "diff_start": "files", "diff_tree_view": false"#);
     let repo = tui.make_repo("diff-proj");
 
     tui.wait_for_text("open your first project");
@@ -788,14 +798,24 @@ fn tui_git_diff_modal() {
         tui.screen_text()
     );
 
-    // ---- clean tree flashes instead of opening ----
+    // ---- a clean tree opens nothing ----
     repo_git(&repo, &["add", "."]);
     repo_git(&repo, &["commit", "-m", "wip"]);
     tui.send(CTRL_E);
-    tui.wait_for_text("no changes in main");
+    // Opened ahead of `git status` off a badge that has not caught up yet,
+    // the modal closes again once git says there is nothing to show.
+    if tui.try_wait_for_text("Files (", Duration::from_secs(2)) {
+        tui.wait_for_gone("Files (");
+    }
+    assert!(
+        !tui.screen_text().contains("Files ("),
+        "a clean tree opens no modal\n--- screen ---\n{}",
+        tui.screen_text()
+    );
 }
 
-/// The DIFF VIEWER's COMMIT LIST end to end: a clean checkout with commits
+/// The DIFF VIEWER's COMMIT LIST end to end, on the Review tab's defaults
+/// — the keys on the commits as it opens: a clean checkout with commits
 /// of its own opens on the whole branch, every commit ticked, instead of
 /// saying "no changes"; `^A` unticks them and the cursor's commit shows
 /// exactly its files under its message; `⇧←`/`⇧→` step older and newer
@@ -836,8 +856,8 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     tui.wait_for_text("Files (2)");
     tui.wait_for_text("+ alpha line");
 
-    // ---- ⇧Tab, ^A: nothing ticked, the newest commit, exactly its files ----
-    tui.send(SHIFT_TAB);
+    // ---- ^A, the keys already on the commits: nothing ticked, the
+    // newest commit, exactly its files ----
     tui.send(CTRL_A);
     tui.wait_for_text("Files (1)");
     tui.wait_for_text("+ beta line");
@@ -877,9 +897,10 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
 }
 
 /// The BRANCH SWITCHER end to end: `c` lists the repo's branches, typing
-/// narrows them, `Enter` moves the root checkout on disk and the flash says
-/// where it landed; a dirty checkout stops on the prompt instead, where `s`
-/// stashes the changes under a named entry and switches.
+/// narrows them, `Enter` moves the root checkout on disk and the modal
+/// closes on it; a dirty checkout stops on the prompt instead, where `s`
+/// stashes the changes under a named entry and switches, the footer
+/// naming the entry.
 #[test]
 fn tui_branch_switcher_moves_the_root_checkout() {
     let head = |repo: &Path| {
@@ -906,7 +927,6 @@ fn tui_branch_switcher_moves_the_root_checkout() {
     tui.type_str("login");
     tui.wait_for_gone("release-2");
     tui.send(ENTER);
-    tui.wait_for_text("⌂ root is on feature-login");
     tui.wait_for_gone("Switch branch —");
     assert_eq!(head(&repo), "feature-login");
 
@@ -1014,7 +1034,6 @@ fn tui_skills_browser_lists_filters_reads_and_trashes() {
     tui.send(CTRL_D);
     tui.wait_for_text("Move the skill 'release-notes' to the Trash?");
     tui.send(ENTER);
-    tui.wait_for_text("moved release-notes to the Trash");
     tui.wait_for_text("Skills — skills-proj (2)");
     let trashed = if cfg!(target_os = "macos") {
         home.path().join(".Trash/release-notes")
@@ -1105,7 +1124,12 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     let (header_row, content_top, row58, col58) = {
         let parser = tui.parser.lock().unwrap();
         let screen = parser.screen();
-        let (header_row, _) = find_text(screen, "● agent-1  ⌂").expect("the pane header");
+        // The session's mark is the WORKING SPINNER while it runs, on
+        // whichever quarter turn the frame caught.
+        let (header_row, _) = ["◐", "◓", "◑", "◒", "●"]
+            .iter()
+            .find_map(|mark| find_text(screen, &format!("{mark} agent-1  ⌂")))
+            .expect("the pane header");
         let (row58, col58) = find_text(screen, "row 58").expect("row 58 on screen");
         (header_row, header_row + 2, row58, col58)
     };

@@ -1,0 +1,3 @@
+# `@` in the new session box: the checkout's files under the word, narrowed by what follows it.
+C-n
+Make the refresh flow retry once, see @auth

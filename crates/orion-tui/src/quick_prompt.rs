@@ -1,6 +1,6 @@
 //! The QUICK PROMPT: the hotkey that opens a task box anywhere in the TUI
-//! and launches an AGENT on what you type, without walking the NEW SESSION
-//! PICKER first. The two are the two ways to start a session: `p` starts
+//! and launches an AGENT on what you type, without walking the NEW AGENT
+//! PICKER first. The two are the two ways to start an agent: `p` starts
 //! one on a typed task, `n` starts one bare — a harness pick, and the first
 //! prompt typed in the CLI — so the picker never ends in this box.
 //!
@@ -8,7 +8,7 @@
 //! and MODEL / EFFORT the `quick_prompt_kind` SETTING resolves to, which
 //! AGENT PRESET (if any) wraps the text, and the [`QuickTarget`] it lands
 //! in — the selected WORKTREE, or one that does not exist yet — plus the
-//! two pickers that rewrite it for one launch (`Tab`, `Shift+Tab`) and
+//! two pickers that rewrite it for one launch (`Tab`, `⌘U` / `^X`) and
 //! the [`QuickReturn`] they — and the box's other pickers, the worktree
 //! one whose first row is a fresh worktree among them — carry so the
 //! round trip loses neither the spec nor the typed text. The dialog
@@ -24,14 +24,16 @@
 //! A box closed without launching does not take what was typed with it:
 //! Esc, a click outside and the HARDWIRED UNLOCK park it as a
 //! [`QuickDraft`] (`App::quick_draft`), and the next box opened takes it
-//! back ([`open_box`]).
+//! back ([`open_box`]). Nor does a window closed with the box up: the text
+//! is the SAVED DRAFT on disk as it is typed (`saved_draft`), and a fresh
+//! box after a restart opens on it.
 
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Focus, Overlay, PromptDialog, PromptKind};
 use crate::config::{fit_effort, Config};
 use crate::pull_request::{OpenPr, PrLaunch};
 use crate::text_input::TextInput;
-use orion_core::{AgentKind, ProjectId, WorktreeId};
+use orion_core::{AgentKind, AgentMode, ProjectId, WorktreeId};
 
 /// Where a QUICK PROMPT launch lands.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +49,8 @@ pub enum QuickTarget {
 
 /// Everything one QUICK PROMPT will launch with. Resolved from the config
 /// when the box opens and rewritten in place by the box's own pickers —
-/// `Tab` (harness, then MODEL / EFFORT) and `Shift+Tab` (an AGENT PRESET).
+/// `Tab` (harness, then MODEL / EFFORT), `⌘U` / `^X` (an AGENT PRESET) and
+/// `⇧Tab` (the mode).
 /// Per-dialog: none of it is written back to CONFIG.JSON, so the next `p`
 /// starts from the `quick_prompt_kind` SETTING again.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +61,7 @@ pub struct QuickLaunch {
     pub custom: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// The AGENT PRESET `Shift+Tab` picked: its prefix and postfix wrap
+    /// The AGENT PRESET `⌘U` / `^X` picked: its prefix and postfix wrap
     /// the typed text into the STARTING PROMPT, and it pins the harness.
     /// `Tab` picking a harness clears it — a launch spec has one source.
     pub preset: Option<AgentPreset>,
@@ -87,12 +90,19 @@ pub struct QuickLaunch {
     /// the issue is; `^P` is refused, the issues being this project's.
     pub linear: Option<crate::linear::LinearBatch>,
     /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
-    /// `Tab` picker toggles it, as it does in the NEW SESSION PICKER, and
+    /// `Tab` picker toggles it, as it does in the NEW AGENT PICKER, and
     /// Enter sends the typed text as the cloud task (`claude --cloud
     /// <task>`) rather than as a STARTING PROMPT. Only ever on a plain
     /// Claude launch ([`QuickLaunch::with_cloud`]): the DAEMON refuses a
     /// cloud task beside a preset, an issue or a pull request.
     pub cloud: bool,
+    /// The mode the CLI starts in — edit, plan or ask — stepped by Cycle
+    /// `⇧Tab` — as in Claude Code and Cursor — or a click on the header's
+    /// `mode` field, among
+    /// the ones the harness has ([`QuickLaunch::modes`]). Per box, as the
+    /// harness pick is: every box opens on edit, the mode every CLI starts
+    /// in, so a plan launch is always one somebody asked for.
+    pub mode: AgentMode,
     /// The modal the box was opened over — `Enter` / `p` in the ISSUES
     /// MODAL or the PULL REQUESTS MODAL — which it stands on rather than
     /// takes away: drawn under the box, and put back when the box goes
@@ -134,7 +144,7 @@ impl ModalUnder {
 
 /// The modal under `overlay`: the box's own, or the one under the box a
 /// picker opened from it is drawn over — `Tab`'s harness list, `^P`'s
-/// PROJECT PICKER, `Shift+Tab`'s AGENT PRESETS — so the layers stay put
+/// PROJECT PICKER, `^X`'s AGENT PRESETS — so the layers stay put
 /// while the box's spec is rewritten. A picker the modal opened itself
 /// (`Shift+Tab` in the ISSUES MODAL) stands on it the same way.
 pub(crate) fn modal_under(overlay: &Overlay) -> Option<ModalUnder> {
@@ -184,7 +194,7 @@ pub(crate) fn restack(app: &App, launch: &mut QuickLaunch) {
 pub struct QuickReturn {
     pub launch: QuickLaunch,
     pub text: String,
-    /// Was the box up when the picker opened (`Tab` / `Shift+Tab` in it)?
+    /// Was the box up when the picker opened (`Tab` / `^X` in it)?
     /// Esc puts the box back only then. A picker reached with no box up —
     /// `e` on a pull request or an issue — closes on Esc instead, as the
     /// manager does: it used to put up an empty box nobody asked for. A
@@ -255,7 +265,10 @@ pub(crate) fn draft_of_return(back: &QuickReturn) -> Option<QuickDraft> {
 /// coming back to the harness or AGENT PRESET picked in it, while a box
 /// aimed somewhere else keeps the aim and spec it was opened with. Either
 /// way the slot is emptied: the draft is in this box now, and clearing it
-/// here and pressing Esc is how it is thrown away.
+/// here and pressing Esc is how it is thrown away. With the slot empty —
+/// after a restart, a window closed on the box — the text comes back from
+/// the SAVED DRAFT on disk instead (`saved_draft::restore`), caret at its
+/// end; either way the box says `draft restored`.
 pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
     let (launch, restored) = match app.quick_draft.take() {
         // What the box stands on is where it is opened now, never where
@@ -268,26 +281,36 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
             Some(draft.input),
         ),
         Some(draft) => (launch, Some(draft.input)),
-        None => (launch, None),
+        None => (launch, crate::saved_draft::restore(app)),
     };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
+    put_restored(app, restored);
+}
+
+/// Put a restored draft's field into the box [`open_box`] or
+/// [`open_picked_box`] just opened, marked so its explanation line says
+/// so.
+fn put_restored(app: &mut App, restored: Option<TextInput>) {
     if let (Some(input), Some(Overlay::Prompt(prompt))) = (restored, &mut app.overlay) {
         prompt.input = input;
+        prompt.draft_restored = true;
     }
 }
 
-/// Open the box a picker reached with NO box up owes — `n`'s NEW SESSION
+/// Open the box a picker reached with NO box up owes — `n`'s NEW AGENT
 /// PICKER (`QuickReturn::from_box` false): the pick is the spec, and the
 /// DRAFT the last abandoned box left hands back its text alone. The
 /// harness was chosen a moment ago, on purpose, so no parked spec
 /// overrides it the way [`open_box`]'s same-aim rule would; the slot is
-/// emptied all the same, the text being in this box now.
+/// emptied all the same, the text being in this box now. An empty slot
+/// falls back to the SAVED DRAFT, as [`open_box`]'s does.
 pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
-    let restored = app.quick_draft.take().map(|draft| draft.input);
+    let restored = match app.quick_draft.take() {
+        Some(draft) => Some(draft.input),
+        None => crate::saved_draft::restore(app),
+    };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
-    if let (Some(input), Some(Overlay::Prompt(prompt))) = (restored, &mut app.overlay) {
-        prompt.input = input;
-    }
+    put_restored(app, restored);
 }
 
 /// What the box calls the harness it launches: its id — `claude`, a
@@ -355,6 +378,7 @@ impl QuickLaunch {
             linear: None,
             under: None,
             cloud: false,
+            mode: AgentMode::Edit,
         }
     }
 
@@ -368,7 +392,7 @@ impl QuickLaunch {
 
     /// The same launch, for the pull request `pr` (or for none). What
     /// every picker's return trip does to the launch it rebuilt, so the
-    /// PR survives a `Tab` or `Shift+Tab` pick as the issue does.
+    /// PR survives a `Tab` or `^X` pick as the issue does.
     pub fn with_pr(mut self, pr: Option<PrLaunch>) -> Self {
         self.pr = pr;
         self
@@ -376,7 +400,7 @@ impl QuickLaunch {
 
     /// The same launch, for `issue` (or for nothing, with `None`). What
     /// every picker's return trip does to the launch it rebuilt, so the
-    /// issue survives a `Tab` or `Shift+Tab` pick.
+    /// issue survives a `Tab` or `^X` pick.
     pub fn with_issue(mut self, issue: Option<crate::issues::IssueRef>) -> Self {
         self.issue = issue;
         self
@@ -384,7 +408,7 @@ impl QuickLaunch {
 
     /// The same launch, for the LINEAR issues `linear` (or for none). What
     /// every picker's return trip does to the launch it rebuilt, so the
-    /// batch survives a `Tab` or `Shift+Tab` pick as the issue does.
+    /// batch survives a `Tab` or `^X` pick as the issue does.
     pub fn with_linear(mut self, linear: Option<crate::linear::LinearBatch>) -> Self {
         self.linear = linear;
         self
@@ -400,6 +424,32 @@ impl QuickLaunch {
             && self.custom.is_none()
             && self.preset.is_none()
             && self.takes_cloud();
+        self
+    }
+
+    /// The modes this launch can start in, in the order Cycle mode steps
+    /// them: edit, then whichever of plan and ask the harness has. Edit
+    /// alone — and no `mode` field in the header — for a harness with
+    /// neither, and for a CLAUDE CLOUD launch, which runs in the sandbox.
+    pub fn modes(&self, cfg: &Config) -> Vec<AgentMode> {
+        if self.cloud {
+            return vec![AgentMode::Edit];
+        }
+        cfg.effective_harness(self.kind, self.custom.as_deref())
+            .mode
+            .offered()
+    }
+
+    /// The same launch, in `mode` where its harness has it and in edit
+    /// where it does not. What every picker's return trip does to the
+    /// launch it rebuilt, so a plan box stays one across a model, effort
+    /// or harness pick that can still plan.
+    pub fn with_mode(mut self, mode: AgentMode, cfg: &Config) -> Self {
+        self.mode = if self.modes(cfg).contains(&mode) {
+            mode
+        } else {
+            AgentMode::Edit
+        };
         self
     }
 
@@ -427,7 +477,7 @@ impl QuickLaunch {
     /// Does Enter on an empty box launch? Every box but a CLAUDE CLOUD
     /// one does: the session starts on the harness, MODEL and EFFORT the
     /// title names with no first prompt — the CLI's own input is it, as
-    /// after the NEW SESSION PICKER (`n`) — and a box an AGENT PRESET is
+    /// after the NEW AGENT PICKER (`n`) — and a box an AGENT PRESET is
     /// on sends the prefix and postfix alone (nothing at all for a bare
     /// preset). A cloud box cannot: `claude --cloud` takes its task on the
     /// command line, so its empty box is a change of mind. (An ISSUE
@@ -485,6 +535,7 @@ impl QuickLaunch {
         let harness = harness_name(self.kind, self.custom.as_deref());
         let opts: Vec<&str> = std::iter::once(harness.as_str())
             .chain(self.cloud.then_some("cloud"))
+            .chain((self.mode != AgentMode::Edit).then(|| self.mode.as_str()))
             .chain(self.model.as_deref())
             .chain(self.effort.as_deref())
             .collect();
@@ -554,7 +605,10 @@ impl QuickLaunch {
             ) => a == b,
             _ => false,
         };
-        same_place && self.issue == other.issue && self.pr == other.pr && self.linear == other.linear
+        same_place
+            && self.issue == other.issue
+            && self.pr == other.pr
+            && self.linear == other.linear
     }
 
     /// Does Enter cut a fresh worktree before it launches? The box's frame
@@ -570,7 +624,7 @@ impl QuickLaunch {
 /// AGENT PRESETS list this does not ask for FOCUS on the SESSIONS PANEL —
 /// the point of a quick prompt is that it works from wherever you are —
 /// but it still needs a checkout to run in, so a PROJECT with no worktree
-/// selected flashes instead.
+/// selected opens nothing.
 ///
 /// The one exception is the WORKTREES PANEL: `p` there means "a fresh
 /// worktree, then this task in it", whatever checkout the cursor is
@@ -601,7 +655,6 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
     }
     if app.focus == Focus::Worktrees {
         let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
-            app.flash = Some("quick prompt: select a project first".into());
             return;
         };
         let branch = crate::branch_name::random_name(&app.project_branches(&project));
@@ -609,13 +662,11 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
         return;
     }
     let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) else {
-        app.flash = Some("quick prompt: select a worktree first".into());
         return;
     };
     // The stand-in a previous `p` put up: git is still cutting it, and
     // the box would only be refused at Enter.
     if app.is_placeholder_worktree(&worktree) {
-        app.flash = Some("quick prompt: worktree is still being created".into());
         return;
     }
     open_for(app, QuickTarget::Worktree(worktree));
@@ -635,8 +686,7 @@ pub(crate) fn open_for(app: &mut App, target: QuickTarget) {
 /// PROJECT has no checkout on the head branch yet, puts the stand-in rows
 /// up at once, nested under the pull request where the DAEMON's real row
 /// will list (`create_agent`, through `placeholder::stage`). Nothing to
-/// open when the project has no ROOT WORKTREE to address it to; the
-/// footer says so.
+/// open when the project has no ROOT WORKTREE to address it to.
 fn open_for_pr(app: &mut App) {
     if let Some(launch) = pr_launch(app) {
         open_pr_box(app, launch);
@@ -669,9 +719,9 @@ pub(crate) fn open_pr_box(app: &mut App, launch: QuickLaunch) {
 /// Worktrees cursor carried as `QuickLaunch::pr`, and the PROJECT's ROOT
 /// WORKTREE as the target, which only names the project the create is
 /// addressed to (as the `n` picker's does) — the DAEMON picks the
-/// checkout, the PR head branch's own. None off a pull request row, and,
-/// with a flash, when the project has no root to address it to.
-fn pr_launch(app: &mut App) -> Option<QuickLaunch> {
+/// checkout, the PR head branch's own. None off a pull request row, and
+/// when the project has no root to address it to.
+fn pr_launch(app: &App) -> Option<QuickLaunch> {
     let pr = app.selected_worktree_pr().cloned()?;
     let project = app.selected_project()?.id.clone();
     pr_launch_for(app, &project, &pr)
@@ -679,17 +729,10 @@ fn pr_launch(app: &mut App) -> Option<QuickLaunch> {
 
 /// The PR SESSION launch for `pr` on `project` — what [`pr_launch`] builds
 /// for the Worktrees cursor's row, for any open pull request: the PULL
-/// REQUESTS MODAL's rows launch through it too. None, with a flash, when
-/// the project has no ROOT WORKTREE to address the create to.
-pub(crate) fn pr_launch_for(
-    app: &mut App,
-    project: &ProjectId,
-    pr: &OpenPr,
-) -> Option<QuickLaunch> {
-    let Some(root) = app.root_worktree(project) else {
-        app.flash = Some("the project has no ROOT WORKTREE for this PR session".into());
-        return None;
-    };
+/// REQUESTS MODAL's rows launch through it too. None when the project
+/// has no ROOT WORKTREE to address the create to.
+pub(crate) fn pr_launch_for(app: &App, project: &ProjectId, pr: &OpenPr) -> Option<QuickLaunch> {
+    let root = app.root_worktree(project)?;
     Some(
         QuickLaunch::from_config(QuickTarget::Worktree(root), &Config::load())
             .with_pr(Some(PrLaunch::of(pr))),
@@ -750,13 +793,12 @@ pub(crate) fn target_branch(app: &App, launch: &QuickLaunch) -> Option<String> {
 }
 
 /// `Tab` in the box: which harness this one launch uses. The same AGENT
-/// KIND rows the NEW SESSION PICKER offers — so `→` drills into the same
+/// KIND rows the NEW AGENT PICKER offers — so `→` drills into the same
 /// MODEL / EFFORT submenus with the same TYPE-AHEAD — but the pick comes
 /// back here instead of creating a session, and it clears any AGENT PRESET
 /// (a launch spec has one source).
 pub(crate) fn open_launch_picker(app: &mut App, back: QuickReturn) {
     let Some(context) = picker_context(app, &back.launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     crate::agent_picker::open_kind_picker(
@@ -765,7 +807,7 @@ pub(crate) fn open_launch_picker(app: &mut App, back: QuickReturn) {
     );
 }
 
-/// `Shift+Tab` in the box: the saved AGENT PRESETS as a picker. The list is
+/// `⌘U` / `^X` in the box: the saved AGENT PRESETS as a picker. The list is
 /// the one `e` opens in the SESSIONS PANEL, in picker mode — Enter adopts
 /// the row's harness, MODEL / EFFORT and prefix/postfix for this launch and
 /// Esc comes back unchanged, while `Ctrl+a` / `Ctrl+e` / `Ctrl+d` manage
@@ -780,7 +822,6 @@ pub(crate) fn open_preset_picker(app: &mut App, back: QuickReturn) {
         .and_then(|p| presets.iter().position(|row| row.name == p.name))
         .unwrap_or(0);
     let Some(context) = picker_context(app, &back.launch) else {
-        app.flash = Some("project no longer exists".into());
         return;
     };
     let mut view = crate::preset_overlays::AgentPresetsView::new(context, presets);
@@ -862,7 +903,7 @@ mod tests {
     }
 
     /// A harness switched off on the AGENTS TAB after it was chosen would
-    /// otherwise launch a kind the NEW SESSION PICKER no longer offers.
+    /// otherwise launch a kind the NEW AGENT PICKER no longer offers.
     #[test]
     fn a_disabled_harness_steps_on_to_an_enabled_one() {
         let cfg = Config {

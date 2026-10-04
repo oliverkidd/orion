@@ -1,0 +1,16 @@
+# ^T in the PULL REQUESTS MODAL: the new pull request form. ⇧Tab twice is From,
+# whose list is the repo's branches; typing narrows it, Enter takes feature-x
+# and Into's Enter takes main — and the title and description fill from the
+# commit between them.
+v
+Home
+C-t
+Home
+BTab
+BTab
+f
+e
+a
+t
+Enter
+Enter

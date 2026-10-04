@@ -81,6 +81,25 @@ pub const PANE_SIDES: &[&str] = &[
 /// ([`crate::launcher::LIST_RECENT`]).
 pub const WORKTREE_LAYOUTS: &[&str] = &["cards", "list"];
 
+/// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
+/// that has the keys when it opens, the default first.
+pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
+const START_ON_FILES: &str = "files";
+const START_ON_DIFF: &str = "diff";
+
+/// The **Ticked commits** choices (Settings → Review): how the DIFF
+/// VIEWER reads two or more ticked commits when it opens.
+pub const DIFF_TICKED: &[&str] = &["together", ONE_AT_A_TIME];
+const ONE_AT_A_TIME: &str = "one at a time";
+
+/// The **Merge method** choices (Settings → Review), the default first
+/// (`pr_actions::MergeMethod`).
+pub const MERGE_METHODS: &[&str] = &[
+    crate::pr_actions::MergeMethod::Squash.as_str(),
+    crate::pr_actions::MergeMethod::Merge.as_str(),
+    crate::pr_actions::MergeMethod::Rebase.as_str(),
+];
+
 /// The **Preset text** choices (Settings → Sessions), in the order the row
 /// cycles them: the [`PresetText`] sides by label.
 pub const PRESET_TEXTS: &[&str] = &[
@@ -90,8 +109,9 @@ pub const PRESET_TEXTS: &[&str] = &[
 ];
 
 /// Values the settings overlay cycles through for `done_sound` (what rings
-/// when a turn reaches FINISHED) and `feedback_sound` (what rings when one
-/// stops at NEEDS FEEDBACK). `off` is silence, `bell` the terminal BEL
+/// when a turn nobody watched reaches FINISHED) and `feedback_sound` (what
+/// rings when one stops at NEEDS FEEDBACK, or dies mid-turn). `off` is
+/// silence, `bell` the terminal BEL
 /// (the one sound that reaches the local terminal over `orion ssh` — but
 /// silent in Ghostty out of the box, whose `bell-features` default to
 /// `no-audio`), the rest are macOS system sounds in `/System/Library/Sounds`,
@@ -166,7 +186,10 @@ pub fn model_choices(kind: AgentKind, custom: Option<&str>) -> Vec<String> {
 
 /// How a model id is shown in Agents and the pickers: Claude family
 /// aliases are the CLI's "latest of that family" names, so the row says so.
-pub fn model_row_label(model: &str, catalog: Option<orion_core::harness::HarnessCatalog>) -> String {
+pub fn model_row_label(
+    model: &str,
+    catalog: Option<orion_core::harness::HarnessCatalog>,
+) -> String {
     if catalog == Some(orion_core::harness::HarnessCatalog::Claude)
         && matches!(model, "opus" | "sonnet" | "haiku" | "fable")
     {
@@ -395,6 +418,11 @@ pub enum TabBody {
 /// head and the per-harness sections ([`Config::account_rows`]).
 pub const ACCOUNTS_GROUP: &str = "Claude accounts";
 
+/// The Agents tab's section right under it: SAVED ON THIS MACHINE, the
+/// Claude config dirs no account runs in ([`AccountRow::OnDisk`]). Shown
+/// only while there is one.
+pub const MACHINE_GROUP: &str = "Saved on this machine";
+
 /// What **Continue on** says after an account signed in as the session's
 /// own email ([`Config::continue_targets`]).
 pub const SAME_ACCOUNT: &str = " · same account";
@@ -407,25 +435,25 @@ pub const AGENTS_HEAD: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::QuickPromptKind,
         label: "Agent",
-        hint: "Harness the quick prompt hotkey launches, with that kind's model/effort",
+        hint: "Harness a new agent starts on, with that kind's model/effort",
         group: "Quick prompt",
     },
     SettingSpec {
         kind: SettingKind::QuickPromptFocus,
         label: "Focus",
-        hint: "Enter the new session's terminal on launch (off = just select its row)",
+        hint: "Enter the new agent's terminal on launch (off = just select its row)",
         group: "Quick prompt",
     },
     SettingSpec {
         kind: SettingKind::FollowNewSession,
         label: "Follow new",
-        hint: "Move the cursor onto the new session's card, the grid scrolled to it, without entering it (off = stay on the card you're on)",
+        hint: "Move the cursor onto the new agent's card, the grid scrolled to it, without entering it (off = stay on the card you're on)",
         group: "Quick prompt",
     },
     SettingSpec {
         kind: SettingKind::HideUninstalledHarnesses,
         label: "Hide missing CLIs",
-        hint: "List only harnesses found on PATH in the New session picker (daemon still checks at launch)",
+        hint: "List only harnesses found on PATH when you start an agent (daemon still checks at launch)",
         group: "Quick prompt",
     },
 ];
@@ -483,6 +511,12 @@ pub enum SettingKind {
     OpenCommand,
     RememberHarness,
     HideUninstalledHarnesses,
+    DiffTreeView,
+    DiffStart,
+    DiffTicked,
+    PrMergeMethod,
+    PrDeleteBranch,
+    PrDraft,
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
@@ -505,6 +539,10 @@ pub enum AccountRow {
     Account(String),
     /// **Add account**: a new config dir and its entry.
     Add,
+    /// SAVED ON THIS MACHINE: a `~/.claude-*` Claude Code config dir no
+    /// account runs in ([`crate::claude_accounts::on_disk`]) — Enter adds
+    /// it back, `⌫` moves it to the Trash.
+    OnDisk(std::path::PathBuf),
 }
 
 impl HarnessField {
@@ -609,6 +647,12 @@ impl SettingKind {
             | SettingKind::LinearKey
             | SettingKind::LinearTest
             | SettingKind::OutsideEditor => (2026, 10, 3),
+            SettingKind::DiffTreeView
+            | SettingKind::DiffStart
+            | SettingKind::DiffTicked
+            | SettingKind::PrMergeMethod
+            | SettingKind::PrDeleteBranch
+            | SettingKind::PrDraft => (2026, 10, 4),
         }
     }
 
@@ -732,13 +776,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::DoneSound,
                 label: "Done sound",
-                hint: "Ding when a turn finishes: off, the terminal bell, or a macOS system sound",
+                hint: "Ding, and notify an unfocused window, when a turn you haven't seen finishes (←/→ plays each; off silences both)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::FeedbackSound,
                 label: "Feedback sound",
-                hint: "Ring, and notify an unfocused window, when a turn stops to ask you (off silences both)",
+                hint: "Ring, and notify an unfocused window, when a turn stops to ask you or crashes (←/→ plays each; off silences both)",
                 group: "",
             },
             SettingSpec {
@@ -827,6 +871,50 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "Agents",
         body: TabBody::Agents,
+    },
+    // How the DIFF VIEWER opens, and the PULL REQUESTS MODAL's create and
+    // merge forms: the choices a review would otherwise make by hand
+    // every time.
+    SettingsTab {
+        title: "Review",
+        body: TabBody::Values(&[
+            SettingSpec {
+                kind: SettingKind::DiffTreeView,
+                label: "Files as a tree",
+                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^T flips one open viewer)",
+                group: "Changes",
+            },
+            SettingSpec {
+                kind: SettingKind::DiffStart,
+                label: "Start on",
+                hint: "Which panel has the keys when the changes viewer opens: the commits to tick, the files, or the diff (Tab moves on from there)",
+                group: "Changes",
+            },
+            SettingSpec {
+                kind: SettingKind::DiffTicked,
+                label: "Ticked commits",
+                hint: "How two or more ticked commits read when the viewer opens: together as one diff, or one at a time from the oldest (^G flips it)",
+                group: "Changes",
+            },
+            SettingSpec {
+                kind: SettingKind::PrMergeMethod,
+                label: "Merge method",
+                hint: "How a pull request's merge (^X in the pull requests modal) lands: squash, a merge commit or a rebase — the first the repo allows when it refuses this one",
+                group: "Pull requests",
+            },
+            SettingSpec {
+                kind: SettingKind::PrDeleteBranch,
+                label: "Delete merged branch",
+                hint: "The merge deletes the pull request's branch from GitHub once it lands (never a fork's; the local branch and its worktree stay)",
+                group: "Pull requests",
+            },
+            SettingSpec {
+                kind: SettingKind::PrDraft,
+                label: "New PRs as drafts",
+                hint: "A new pull request (^T in the pull requests modal) opens with its Draft box ticked",
+                group: "Pull requests",
+            },
+        ]),
     },
     // Every Linear option in one place: the onboarding wizard's Linear
     // page draws the same rows (`LINEAR_SETTINGS`).
@@ -1091,12 +1179,20 @@ pub fn settings_rows(tab: usize) -> Vec<SettingsRow> {
             let cfg = Config::load();
             let head = AGENTS_HEAD.iter().map(|s| s.group.to_string());
             let accounts = cfg.account_rows();
-            let section = accounts.iter().map(|_| ACCOUNTS_GROUP.to_string());
+            let section = accounts.iter().map(|row| match row {
+                AccountRow::OnDisk(_) => MACHINE_GROUP.to_string(),
+                _ => ACCOUNTS_GROUP.to_string(),
+            });
             let rows = cfg.agent_rows();
             let groups = rows.iter().map(|(id, _)| cfg.section_title(id));
             let mut out = grouped(head.chain(section).chain(groups), SettingsRow::Setting);
-            // The same-account warning, under the accounts it is about.
-            let last = SettingsRow::Setting(AGENTS_HEAD.len() + accounts.len() - 1);
+            // The same-account warning, under the accounts it is about:
+            // after **Add account**, above anything saved on this machine.
+            let add = accounts
+                .iter()
+                .position(|row| *row == AccountRow::Add)
+                .unwrap_or(accounts.len() - 1);
+            let last = SettingsRow::Setting(AGENTS_HEAD.len() + add);
             if let Some(at) = out.iter().position(|row| *row == last) {
                 let notes = cfg.account_notes().into_iter().map(SettingsRow::Note);
                 out.splice(at + 1..at + 1, notes);
@@ -1244,18 +1340,23 @@ pub struct Config {
     /// rests on it, so attaching lands on a booted screen. Daemon-owned and
     /// TUI-written, same as above.
     pub prewarm_sessions: bool,
-    /// What rings when a turn reaches FINISHED: "off", "bell" (terminal
-    /// BEL) or the name of a macOS system sound (`Glass` by default,
-    /// `Ping`, …; see [`SOUNDS`]). Resolved by [`Config::done_sound`],
-    /// which falls back to the bell wherever `afplay` can't reach the
-    /// user's speakers.
+    /// What rings when a turn reaches FINISHED with nobody watching it:
+    /// "off", "bell" (terminal BEL) or the name of a macOS system sound
+    /// (`Glass` by default, `Ping`, …; see [`SOUNDS`]). Resolved by
+    /// [`Config::done_sound`], which falls back to the bell wherever
+    /// `afplay` can't reach the user's speakers. When it rings — once the
+    /// finish settles, once per unseen spell, never inside the fold of the
+    /// last sound — is up to `app::DoneSounds`. The one knob for both the DONE
+    /// SOUND and the `<session> finished` desktop notification an
+    /// unfocused terminal window gets: "off" silences the pair.
     pub done_sound: String,
     /// What rings when a turn stops at NEEDS FEEDBACK — a permission
-    /// prompt or a question the agent is parked on. Same values and
-    /// resolution as `done_sound`; `Sosumi` by default so red and green
-    /// sound different from the next room. The one knob for both the
-    /// FEEDBACK SOUND and the desktop notification an unfocused terminal
-    /// window gets: "off" silences the pair.
+    /// prompt or a question the agent is parked on — or its CLI dies with
+    /// an error mid-turn. Same values and resolution as `done_sound`;
+    /// `Sosumi` by default so red and green sound different from the next
+    /// room. The one knob for both the FEEDBACK SOUND and the desktop
+    /// notification an unfocused terminal window gets: "off" silences the
+    /// pair.
     pub feedback_sound: String,
     /// PRESET TEXT: which side of the task a new AGENT PRESET's text goes
     /// — `prefix` (one box, sent before the task), `postfix` (one box,
@@ -1355,6 +1456,29 @@ pub struct Config {
     /// the SESSIONS PANEL — those describe work you have, not work you are
     /// browsing. Off by default: a config predating the key hides nothing.
     pub hide_draft_prs: bool,
+    /// How the DIFF VIEWER opens (Settings → Review): its file list as
+    /// the directory tree rather than flat paths (`Ctrl+t` still flips
+    /// one open viewer), on by default.
+    pub diff_tree_view: bool,
+    /// Which of the DIFF VIEWER's panels has the keys when it opens:
+    /// `commits` (the COMMIT LIST, where there is one — the default, so
+    /// the ticks come first), `files` or `diff`. Read through
+    /// [`Config::diff_start`]; a word off the list is the commits.
+    pub diff_start: String,
+    /// How the DIFF VIEWER reads ticked commits when it opens: `together`
+    /// as one diff, the default, or `one at a time` (`^G` flips it).
+    pub diff_ticked: String,
+    /// How the PULL REQUESTS MODAL's merge form opens (Settings →
+    /// Review): `squash`, `merge` or `rebase` — the first the repo allows
+    /// when it refuses this one.
+    pub pr_merge_method: String,
+    /// The merge form opens with the pull request's branch deleted from
+    /// GitHub once it merges. On by default; a fork's branch is never
+    /// ours to delete.
+    pub pr_delete_branch: bool,
+    /// The new pull request form opens with its Draft box ticked. Off by
+    /// default.
+    pub pr_draft: bool,
     /// RETIRED with the line counts always drawn. Through 0.37 the **Card
     /// line counts** SETTING (Settings → Appearance, off by default)
     /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
@@ -1364,7 +1488,7 @@ pub struct Config {
     pub card_line_changes: bool,
     /// The key of the **Skip starting prompt** SETTING (Settings →
     /// Sessions, through 0.30): on, `n` created the session straight from
-    /// the NEW SESSION PICKER instead of putting a task box up first.
+    /// the NEW AGENT PICKER instead of putting a task box up first.
     /// Every `n` does that now — a launch that starts from a typed task is
     /// the QUICK PROMPT's — so this build never reads it and no tab edits
     /// it any more. Still loaded and written back as stored, so an older
@@ -1447,7 +1571,7 @@ pub struct Config {
     /// not one project.
     pub projects: BTreeMap<PathBuf, ProjectSettings>,
     /// Experimental: REMEMBER HARNESS — a launch walked through the NEW
-    /// SESSION PICKER, the PR SESSION picker or the QUICK PROMPT's `Tab`
+    /// AGENT PICKER, the PR SESSION picker or the QUICK PROMPT's `Tab`
     /// picker writes its harness into `quick_prompt_kind`, and a model or
     /// effort a submenu chose into that harness's own rows, so the next
     /// picker starts on it and the next `p` launches it
@@ -1494,7 +1618,7 @@ pub struct Config {
     /// variant picked inside its own TUI — so its Agents section has no
     /// Effort row and nothing to store for one.
     pub opencode_model: String,
-    /// Which AGENT KINDS the NEW SESSION PICKER offers. Off leaves that
+    /// Which AGENT KINDS the NEW AGENT PICKER offers. Off leaves that
     /// harness out of the picker and the PR SESSION picker (and, for
     /// Claude, out of the standing PREWARM POOL slot); sessions that already
     /// exist keep attaching, resuming and restarting as before. Off until
@@ -1506,13 +1630,13 @@ pub struct Config {
     pub pi_enabled: bool,
     pub muse_enabled: bool,
     pub opencode_enabled: bool,
-    /// When on, the New session picker lists only enabled harnesses whose
+    /// When on, the NEW AGENT PICKER lists only enabled harnesses whose
     /// CLI is found on this machine's PATH. Off by default: a login shell
     /// (mise, brew shims) can see CLIs a plain PATH lookup misses, and the
     /// daemon re-checks through the login shell at launch anyway.
     pub hide_uninstalled_harnesses: bool,
     /// User-defined harnesses (`custom_harnesses` in config.json): offered
-    /// in the New session picker after the built-ins when enabled, launched
+    /// in the NEW AGENT PICKER after the built-ins when enabled, launched
     /// with the entry's program and model flag, with process-based status
     /// unless the entry names a hook dialect. Empty by default. Legacy:
     /// new harnesses belong in `harnesses` as full descriptors, where
@@ -1549,7 +1673,7 @@ pub struct Config {
     /// fired from, so firing one off does not interrupt what you were
     /// doing — and where the cursor goes is [`Config::follow_new_session`]'s
     /// to say. Only the QUICK PROMPT reads this — every other launch
-    /// (the NEW SESSION PICKER, an AGENT PRESET, a PR SESSION, a Cloud task)
+    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION, a Cloud task)
     /// still enters the pane.
     pub quick_prompt_focus: bool,
     /// FOLLOW NEW SESSION: a QUICK PROMPT launch lands the cursor on the
@@ -1704,6 +1828,12 @@ impl Default for Config {
             hide_card_prompt: false,
             card_issue_number: true,
             hide_draft_prs: false,
+            diff_tree_view: true,
+            diff_start: DIFF_STARTS[0].into(),
+            diff_ticked: DIFF_TICKED[0].into(),
+            pr_merge_method: MERGE_METHODS[0].into(),
+            pr_delete_branch: true,
+            pr_draft: false,
             card_line_changes: false,
             skip_session_naming: false,
             confirm_on_archive: false,
@@ -1940,6 +2070,33 @@ impl Config {
         crate::theme::Theme::by_name(&self.theme)
     }
 
+    /// `diff_start` as one of [`DIFF_STARTS`]; a word off the list is the
+    /// commits.
+    fn diff_start_word(&self) -> &'static str {
+        DIFF_STARTS[cycled_index(&self.diff_start, DIFF_STARTS, 0)]
+    }
+
+    /// The DIFF VIEWER panel the **Start on** SETTING hands the keys to as
+    /// it opens.
+    pub fn diff_start(&self) -> crate::app::DiffFocus {
+        match self.diff_start_word() {
+            START_ON_FILES => crate::app::DiffFocus::Files,
+            START_ON_DIFF => crate::app::DiffFocus::Diff,
+            _ => crate::app::DiffFocus::Commits,
+        }
+    }
+
+    /// `diff_ticked` as one of [`DIFF_TICKED`]; a word off the list is
+    /// together.
+    fn diff_ticked_word(&self) -> &'static str {
+        DIFF_TICKED[cycled_index(&self.diff_ticked, DIFF_TICKED, 0)]
+    }
+
+    /// The **Ticked commits** SETTING says one at a time.
+    pub fn diff_one_at_a_time(&self) -> bool {
+        self.diff_ticked_word() == ONE_AT_A_TIME
+    }
+
     /// `session_pane` resolved to the side the LAUNCHER VIEW lays its pane
     /// out on.
     pub fn pane_side(&self) -> crate::launcher::PaneSide {
@@ -2174,7 +2331,7 @@ impl Config {
         fit_effort_in(&descriptor, model.as_deref(), effort)
     }
 
-    /// Whether the NEW SESSION PICKER offers `kind` at all.
+    /// Whether the NEW AGENT PICKER offers `kind` at all.
     pub fn kind_enabled(&self, kind: AgentKind) -> bool {
         if kind == AgentKind::Custom {
             // A bare Custom kind is never enabled: entries gate themselves.
@@ -2328,8 +2485,22 @@ impl Config {
 
     /// The CLAUDE ACCOUNTS section's rows, below the Agents head: every
     /// Claude account in registry order — the default one, built-in
-    /// Claude, first; on or off — then **Add account**.
+    /// Claude, first; on or off — then **Add account**, then SAVED ON THIS
+    /// MACHINE: each config dir the last refresh found that no account
+    /// runs in.
     pub fn account_rows(&self) -> Vec<AccountRow> {
+        let mut rows = self.registered_account_rows();
+        rows.extend(
+            crate::claude_accounts::on_disk(self)
+                .into_iter()
+                .map(AccountRow::OnDisk),
+        );
+        rows
+    }
+
+    /// [`Config::account_rows`] without SAVED ON THIS MACHINE: the
+    /// accounts and **Add account** — the onboarding wizard's page.
+    pub fn registered_account_rows(&self) -> Vec<AccountRow> {
         let mut rows: Vec<AccountRow> = self
             .raw_harness_registry()
             .into_iter()
@@ -2365,10 +2536,11 @@ impl Config {
     /// What a CLAUDE ACCOUNTS row says beside its name: on or off, its
     /// config dir, and who it is signed in as — or which account it
     /// shares its email with. The **Add account** row says where a new
-    /// one would go.
+    /// one would go; a dir SAVED ON THIS MACHINE who it is signed in as.
     pub fn account_value(&self, row: &AccountRow) -> String {
         match row {
             AccountRow::Add => self.next_account_dir(),
+            AccountRow::OnDisk(dir) => format!("not in orion · {}", dir_sign_in(dir)),
             AccountRow::Account(id) => match self.account_status(id) {
                 Some((enabled, dir, state)) => format!("{} · {dir} · {state}", on_off(enabled)),
                 None => "n/a".into(),
@@ -2383,6 +2555,7 @@ impl Config {
     pub fn account_parts(&self, row: &AccountRow) -> (String, String) {
         match row {
             AccountRow::Add => (self.next_account_dir(), String::new()),
+            AccountRow::OnDisk(dir) => (crate::claude_accounts::tilde(dir), dir_sign_in(dir)),
             AccountRow::Account(id) => match self.account_status(id) {
                 Some((_, dir, state)) => (dir, state),
                 None => ("n/a".into(), String::new()),
@@ -2434,6 +2607,13 @@ impl Config {
                 return format!(
                     "A new config dir with its own login; then asks whether to share {from}'s \
                      CLAUDE.md, settings, skills…"
+                );
+            }
+            AccountRow::OnDisk(dir) => {
+                return format!(
+                    "{}: a Claude Code config dir no account runs in, its login and \
+                     transcripts still in it — add it back under a name, or trash it",
+                    crate::claude_accounts::tilde(dir)
                 );
             }
             AccountRow::Account(id) => id,
@@ -2506,7 +2686,7 @@ impl Config {
         let label = descriptor.display_label();
         let mut hint = match field {
             HarnessField::Enabled => format!(
-                "Offer {label} in the New session picker (off hides it; existing sessions keep running)"
+                "Offer {label} when you start an agent (off hides it; its running agents keep running)"
             ),
             HarnessField::Model => match descriptor.model.catalog {
                 Some(orion_core::harness::HarnessCatalog::Claude) => format!(
@@ -2782,7 +2962,7 @@ impl Config {
         out
     }
 
-    /// The harness the NEW SESSION PICKER (and the PR SESSION picker)
+    /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
     /// starts on: the last launch's while REMEMBER HARNESS is on — read
     /// through [`Config::quick_prompt_harness`], so one switched off since
     /// steps aside — and None, the first row, while it is off.
@@ -2944,6 +3124,16 @@ impl Config {
             SettingKind::ExpandAllWorktrees => on_off(self.expand_all_worktrees).into(),
             SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
+            SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
+            SettingKind::DiffStart => self.diff_start_word().into(),
+            SettingKind::DiffTicked => self.diff_ticked_word().into(),
+            SettingKind::PrMergeMethod => {
+                crate::pr_actions::MergeMethod::parse(&self.pr_merge_method)
+                    .as_str()
+                    .into()
+            }
+            SettingKind::PrDeleteBranch => on_off(self.pr_delete_branch).into(),
+            SettingKind::PrDraft => on_off(self.pr_draft).into(),
             // A project row with no project to speak of: what one without
             // an entry would show.
             SettingKind::RunCommand | SettingKind::OpenCommand => {
@@ -3095,6 +3285,27 @@ impl Config {
             SettingKind::HideDraftPrs => {
                 self.hide_draft_prs = !self.hide_draft_prs;
             }
+            SettingKind::DiffTreeView => {
+                self.diff_tree_view = !self.diff_tree_view;
+            }
+            // A hand edit off the list steps on from the first, the word
+            // it reads as.
+            SettingKind::DiffStart => {
+                self.diff_start = cycle_choice(&self.diff_start, DIFF_STARTS, step).into();
+            }
+            SettingKind::DiffTicked => {
+                self.diff_ticked = cycle_choice(&self.diff_ticked, DIFF_TICKED, step).into();
+            }
+            SettingKind::PrMergeMethod => {
+                self.pr_merge_method =
+                    cycle_choice(&self.pr_merge_method, MERGE_METHODS, step).into();
+            }
+            SettingKind::PrDeleteBranch => {
+                self.pr_delete_branch = !self.pr_delete_branch;
+            }
+            SettingKind::PrDraft => {
+                self.pr_draft = !self.pr_draft;
+            }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}
             SettingKind::RememberHarness => {
@@ -3171,8 +3382,10 @@ pub enum Sound {
 }
 
 impl Config {
-    /// The sound to play for a finish, or `None` for silence. A named
-    /// system sound only resolves to its file on macOS, on a local
+    /// The sound to play for an unseen finish, or `None` for silence —
+    /// which also stands down the `<session> finished` desktop
+    /// notification. A named system sound only resolves to its file on
+    /// macOS, on a local
     /// terminal, and when the file exists — over ssh `afplay` would ring
     /// the *remote* box, so the bell stands in there, as it does off
     /// macOS and for a name the sound folder doesn't hold.
@@ -3184,8 +3397,9 @@ impl Config {
         )
     }
 
-    /// The sound to play when a turn stops to ask the user, or `None` for
-    /// silence — which also stands down the desktop notification, since
+    /// The sound to play when a turn stops to ask the user or dies
+    /// mid-turn, or `None` for silence — which also stands down their
+    /// desktop notifications, since
     /// `feedback_sound` is the one switch for both. Same fallbacks as
     /// [`Config::done_sound`].
     pub fn feedback_sound(&self) -> Option<Sound> {
@@ -3288,6 +3502,17 @@ fn on_off(v: bool) -> &'static str {
         "on"
     } else {
         "off"
+    }
+}
+
+/// Who a dir SAVED ON THIS MACHINE is signed in as, as its row says it:
+/// `signed in as a@b.co`, `not signed in`, or `checking…` before the
+/// first read lands — never a read here.
+fn dir_sign_in(dir: &std::path::Path) -> String {
+    match crate::claude_accounts::dir_state(dir) {
+        Some(crate::claude_accounts::SignIn::As(email)) => format!("signed in as {email}"),
+        Some(crate::claude_accounts::SignIn::Out) => "not signed in".into(),
+        None => "checking…".into(),
     }
 }
 
@@ -3565,6 +3790,10 @@ mod tests {
         (
             "0.42.0",
             include_str!("../../orion-core/fixtures/config-0.42.0.json"),
+        ),
+        (
+            "1.0.0",
+            include_str!("../../orion-core/fixtures/config-1.0.0.json"),
         ),
     ];
 
@@ -4515,6 +4744,53 @@ mod tests {
         assert!(cfg.animations);
     }
 
+    /// The REVIEW TAB: how the changes viewer opens — the tree, the keys
+    /// on the commits, ticked commits together — and how the pull request
+    /// forms open — a squash, the branch deleted, not a draft — each row
+    /// cycling its own words and a word off the list reading as the
+    /// default.
+    #[test]
+    fn the_review_tab_holds_the_viewer_and_pull_request_defaults() {
+        use crate::app::DiffFocus;
+        let mut cfg = Config::default();
+        assert!(cfg.diff_tree_view);
+        assert_eq!(cfg.diff_start(), DiffFocus::Commits);
+        assert!(!cfg.diff_one_at_a_time());
+        assert_eq!(cfg.value_label(SettingKind::PrMergeMethod), "squash");
+        assert!(cfg.pr_delete_branch && !cfg.pr_draft);
+        for kind in [
+            SettingKind::DiffTreeView,
+            SettingKind::DiffStart,
+            SettingKind::DiffTicked,
+            SettingKind::PrMergeMethod,
+            SettingKind::PrDeleteBranch,
+            SettingKind::PrDraft,
+        ] {
+            let (tab, _) = locate(kind).unwrap();
+            assert_eq!(SETTINGS_TABS[tab].title, "Review", "{kind:?}");
+        }
+        let (tab, row) = locate(SettingKind::DiffStart).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.diff_start(), DiffFocus::Files);
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.diff_start(), DiffFocus::Diff);
+        assert_eq!(cfg.value_label(SettingKind::DiffStart), "diff");
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.diff_start(), DiffFocus::Commits, "round again");
+        let (tab, row) = locate(SettingKind::DiffTicked).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert!(cfg.diff_one_at_a_time());
+        let (tab, row) = locate(SettingKind::PrMergeMethod).unwrap();
+        cfg.cycle(tab, row, -1);
+        assert_eq!(cfg.pr_merge_method, "rebase");
+
+        let odd: Config =
+            serde_json::from_str(r#"{"diff_start": "sideways", "pr_merge_method": "yolo"}"#)
+                .unwrap();
+        assert_eq!(odd.diff_start(), DiffFocus::Commits);
+        assert_eq!(odd.value_label(SettingKind::PrMergeMethod), "squash");
+    }
+
     /// DRAFT PULL REQUESTS: an Appearance row that reads `shown` / `hidden`
     /// like the panel rows beside it, shown by default so a config that
     /// predates the key keeps every draft on screen, and persisted under
@@ -4617,8 +4893,7 @@ mod tests {
         assert!(cfg.card_issue_number, "stored default unchanged");
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert!(legacy.card_issue_number);
-        let loaded: Config =
-            serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
+        let loaded: Config = serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
         assert!(!loaded.card_issue_number);
     }
 
@@ -6037,6 +6312,7 @@ mod tests {
                             (Some(spec), _) => spec.label.to_string(),
                             (None, Some(AccountRow::Account(id))) => id,
                             (None, Some(AccountRow::Add)) => "Add account".to_string(),
+                            (None, Some(AccountRow::OnDisk(dir))) => dir.display().to_string(),
                             (None, None) => cfg
                                 .agent_row(i)
                                 .map(|(_, field)| field.label().to_string())

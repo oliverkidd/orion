@@ -1171,7 +1171,9 @@ fn open_new_prompt(app: &mut App) {
         return;
     };
     if view.places.user_skills().is_none() {
-        app.flash = Some("no skills folder — neither CLAUDE_CONFIG_DIR nor HOME is set".into());
+        app.flash = Some(crate::flash::Flash::setup(
+            "no skills folder — neither CLAUDE_CONFIG_DIR nor HOME is set",
+        ));
         return;
     }
     let view = Box::new(view.clone());
@@ -1199,7 +1201,6 @@ pub(crate) fn create(app: &mut App, mut view: SkillsView, typed: &str) {
         return;
     };
     if name.is_empty() {
-        app.flash = Some("a skill's name needs a letter or a digit in it".into());
         reopen(app, view);
         return;
     }
@@ -1207,10 +1208,14 @@ pub(crate) fn create(app: &mut App, mut view: SkillsView, typed: &str) {
     let home = view.places.home.clone();
     if let Err(e) = make_skill(&dir, &name) {
         app.flash = Some(match e.kind() {
-            std::io::ErrorKind::AlreadyExists => {
-                format!("{} is there already", tilde(&dir, home.as_deref()))
-            }
-            _ => format!("couldn't make {}: {e}", tilde(&dir, home.as_deref())),
+            std::io::ErrorKind::AlreadyExists => crate::flash::Flash::note(format!(
+                "{} is there already",
+                tilde(&dir, home.as_deref())
+            )),
+            _ => crate::flash::Flash::failed(format!(
+                "couldn't make {}: {e}",
+                tilde(&dir, home.as_deref())
+            )),
         });
         view.focus = std::fs::canonicalize(&dir).ok();
         reopen(app, view);
@@ -1220,10 +1225,6 @@ pub(crate) fn create(app: &mut App, mut view: SkillsView, typed: &str) {
     view.focus = std::fs::canonicalize(&dir).ok();
     let editor = view.editor.clone();
     reopen(app, view);
-    app.flash = Some(format!(
-        "made {}",
-        tilde(&dir.join(SKILL_FILE), home.as_deref())
-    ));
     let size = crate::event_loop::vim_size_guess(app);
     crate::event_loop::spawn_editor_modal(
         app,
@@ -1242,14 +1243,13 @@ fn confirm_trash(app: &mut App) {
         return;
     };
     let Some(skill) = view.selected_skill().cloned() else {
-        app.flash = Some("no skill selected".into());
         return;
     };
     if skill.source.read_only() {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::note(format!(
             "{} comes with its plugin — /plugin in Claude Code removes the plugin",
             skill.name
-        ));
+        )));
         return;
     }
     // A skill folder that is itself a link (into a repo of skills, say) is
@@ -1281,19 +1281,17 @@ fn confirm_trash(app: &mut App) {
 }
 
 /// The confirm's yes: the folder into the Trash, and the browser back on
-/// what is left.
+/// what is left — the footer saying why when it could not go.
 pub(crate) fn trash(app: &mut App, view: SkillsView, dir: PathBuf, name: String) {
-    let home = view.places.home.clone();
-    app.flash = Some(match &view.places.trash {
-        None => format!("couldn't move {name} to the Trash: HOME is not set"),
-        Some(trash) => match move_to_trash(&dir, trash) {
-            Ok(landed) => format!(
-                "moved {name} to the Trash ({})",
-                tilde(&landed, home.as_deref())
-            ),
-            Err(e) => format!("couldn't move {name} to the Trash: {e}"),
-        },
-    });
+    let failed = match &view.places.trash {
+        None => Some("HOME is not set".to_string()),
+        Some(trash) => move_to_trash(&dir, trash).err().map(|e| e.to_string()),
+    };
+    if let Some(why) = failed {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't move {name} to the Trash: {why}"
+        )));
+    }
     reopen(app, view);
 }
 

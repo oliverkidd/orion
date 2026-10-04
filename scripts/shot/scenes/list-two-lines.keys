@@ -1,0 +1,17 @@
+# The compact LIST with three launches from the box: each entry on two lines — name, harness and age
+# over the last thing it was asked.
+C-n
+Migrate the checkout page to the new design tokens
+Enter
+F12
+C-n
+Add a --json flag to every list command
+Enter
+F12
+C-n
+Write integration tests for token expiry and refresh
+Enter
+F12
+F12
+F12
+F12

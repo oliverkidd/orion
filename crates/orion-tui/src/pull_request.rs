@@ -651,8 +651,22 @@ impl PrLaunch {
 /// resolves its repo.
 pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
     let limit = format!("limit={LIST_LIMIT}");
-    let query = format!("query={LIST_QUERY}");
-    let out = gh(
+    let out = repo_graphql(dir, LIST_QUERY, &limit, TIMEOUT).await?;
+    parse_list(&out)
+}
+
+/// One GraphQL `query` about `dir`'s repo through `gh api graphql`, its
+/// `$owner` and `$repo` filled in by `gh` from the checkout and `var`
+/// (`name=value`) the one more variable it takes. `None` when `gh`
+/// couldn't answer within `timeout`.
+async fn repo_graphql(
+    dir: &Path,
+    query: &str,
+    var: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let query = format!("query={query}");
+    gh(
         Some(dir),
         &[
             "api",
@@ -662,14 +676,13 @@ pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
             "-F",
             "repo={repo}",
             "-F",
-            &limit,
+            var,
             "-f",
             &query,
         ],
-        TIMEOUT,
+        timeout,
     )
-    .await?;
-    parse_list(&out)
+    .await
 }
 
 /// The local branch a pull request's checkout is on — [`OpenPr::head`].
@@ -774,6 +787,11 @@ pub struct PrDetail {
     /// Branch this merges into, and the branch it comes from.
     pub base: String,
     pub head: String,
+    /// The head branch's tip commit (`headRefOid`): what the DIFF VIEWER
+    /// reads the pull request from when this repo has it. Empty in a
+    /// cache written before it was asked.
+    #[serde(default)]
+    pub head_sha: String,
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
@@ -897,7 +915,7 @@ impl PrFile {
 }
 
 /// One commit of a pull request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrCommit {
     /// The full sha (`oid`).
     pub sha: String,
@@ -907,6 +925,16 @@ pub struct PrCommit {
     pub author: String,
     /// When it was authored, RFC 3339.
     pub at: String,
+    /// Lines it adds and removes, and the files it touches, as GitHub
+    /// counts them ([`commit_stats`]); None where GitHub did not say — a
+    /// cache written before they were asked, a commit past the last
+    /// hundred.
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
+    #[serde(default)]
+    pub files: Option<u64>,
 }
 
 impl PrCommit {
@@ -1036,20 +1064,93 @@ pub fn rfc3339_secs(stamp: &str) -> Option<i64> {
 /// reviews — in one `gh pr view`. `number` picks the PR, so this works
 /// from any checkout of the repo — the row the cursor is on need not be
 /// checked out anywhere.
+///
+/// `gh pr view` says nothing of how big each commit is, so the Commits
+/// tab's counts come from one GraphQL ask beside it ([`commit_stats`]),
+/// run at the same time and given less time ([`STATS_TIMEOUT`]): a page
+/// whose counts could not be read in time is the page without them.
 pub async fn detail(dir: &Path, number: u64) -> Option<PrDetail> {
-    let number = number.to_string();
-    let out = gh(
-        Some(dir),
-        &["pr", "view", &number, "--json", DETAIL_FIELDS],
-        TIMEOUT,
+    let arg = number.to_string();
+    let args = ["pr", "view", arg.as_str(), "--json", DETAIL_FIELDS];
+    let (view, stats) = tokio::join!(gh(Some(dir), &args, TIMEOUT), commit_stats(dir, number));
+    let mut detail = parse_detail(&view?)?;
+    if let Some(stats) = stats {
+        apply_commit_stats(&mut detail.commits, &stats);
+    }
+    Some(detail)
+}
+
+/// The GraphQL [`commit_stats`] runs: the pull request's newest hundred
+/// commits — the top of the Commits tab — each with its line counts.
+const COMMIT_STATS_QUERY: &str = "query($owner: String!, $repo: String!, $number: Int!) { \
+    repository(owner: $owner, name: $repo) { pullRequest(number: $number) { \
+    commits(last: 100) { nodes { commit { oid additions deletions changedFilesIfAvailable } } } } } }";
+
+/// How long [`commit_stats`] may hold the page up once `gh pr view` has
+/// answered: the counts are an extra, never the reason a page is late.
+const STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// What one commit adds and removes, and how many files it touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitStat {
+    pub additions: u64,
+    pub deletions: u64,
+    pub files: Option<u64>,
+}
+
+/// Each commit's [`CommitStat`] by sha, for pull request `number`; None
+/// when `gh` couldn't ask.
+async fn commit_stats(
+    dir: &Path,
+    number: u64,
+) -> Option<std::collections::HashMap<String, CommitStat>> {
+    let number = format!("number={number}");
+    let out = repo_graphql(dir, COMMIT_STATS_QUERY, &number, STATS_TIMEOUT).await?;
+    parse_commit_stats(&out)
+}
+
+/// [`COMMIT_STATS_QUERY`]'s answer, by sha.
+pub(crate) fn parse_commit_stats(
+    json: &str,
+) -> Option<std::collections::HashMap<String, CommitStat>> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let nodes = v
+        .pointer("/data/repository/pullRequest/commits/nodes")?
+        .as_array()?;
+    Some(
+        nodes
+            .iter()
+            .filter_map(|node| {
+                let c = node.get("commit")?;
+                let sha = str_at(c, "oid");
+                let stat = CommitStat {
+                    additions: c.get("additions")?.as_u64()?,
+                    deletions: c.get("deletions")?.as_u64()?,
+                    files: c.get("changedFilesIfAvailable").and_then(|x| x.as_u64()),
+                };
+                (!sha.is_empty()).then_some((sha, stat))
+            })
+            .collect(),
     )
-    .await?;
-    parse_detail(&out)
+}
+
+/// Put each commit's counts on its row.
+fn apply_commit_stats(
+    commits: &mut [PrCommit],
+    stats: &std::collections::HashMap<String, CommitStat>,
+) {
+    for commit in commits {
+        if let Some(stat) = stats.get(&commit.sha) {
+            commit.additions = Some(stat.additions);
+            commit.deletions = Some(stat.deletions);
+            commit.files = stat.files;
+        }
+    }
 }
 
 /// The fields [`detail`] asks `gh pr view` for.
 pub(crate) const DETAIL_FIELDS: &str = "number,url,title,state,isDraft,mergeable,\
-     statusCheckRollup,author,baseRefName,headRefName,additions,deletions,changedFiles,\
+     statusCheckRollup,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,\
      body,comments,reviews,files,commits,reviewDecision,reviewRequests";
 
 fn parse_detail(json: &str) -> Option<PrDetail> {
@@ -1064,6 +1165,7 @@ fn parse_detail(json: &str) -> Option<PrDetail> {
         author: login(v.get("author")),
         base: str_at(&v, "baseRefName"),
         head: str_at(&v, "headRefName"),
+        head_sha: str_at(&v, "headRefOid"),
         additions: u64_at(&v, "additions"),
         deletions: u64_at(&v, "deletions"),
         changed_files: u64_at(&v, "changedFiles"),
@@ -1122,6 +1224,7 @@ fn commits_newest_first(v: &serde_json::Value) -> Vec<PrCommit> {
                 subject: str_at(c, "messageHeadline"),
                 author,
                 at,
+                ..Default::default()
             })
         })
         .collect();
@@ -1258,46 +1361,70 @@ pub const GH_TIMED_OUT: &str = "gh timed out";
 /// comment is markdown written by a person and may be long, start with a
 /// dash, or hold anything else an argument parser would misread.
 pub async fn comment(dir: &Path, number: u64, body: &str) -> Result<String, String> {
-    use tokio::io::AsyncWriteExt;
     let number = number.to_string();
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args(["pr", "comment", &number, "--body-file", "-"])
-        .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
+        .current_dir(dir);
+    run_piped(cmd, body, COMMENT_TIMEOUT)
+        .await
+        .map(|out| out.trim().to_string())
+}
+
+/// Run `cmd` with `stdin` piped in, under `timeout`: its stdout, or why it
+/// failed — the first line it printed to stderr, else `<program> could not
+/// be run` or `<program> timed out` ([`GH_NOT_RUN`] / [`GH_TIMED_OUT`] for
+/// `gh`). A child the wait gave up on is killed. [`comment`]'s way to
+/// `gh`, and the PULL REQUESTS MODAL's forms' to git and `gh`
+/// (`pr_actions`).
+pub(crate) async fn run_piped(
+    mut cmd: tokio::process::Command,
+    stdin: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     let run = async {
         let mut child = cmd.spawn().ok()?;
-        let mut stdin = child.stdin.take()?;
-        // A `gh` that exits before reading the pipe (bad auth, a usage
+        let mut pipe = child.stdin.take()?;
+        // A program that exits before reading the pipe (bad auth, a usage
         // error) closes its end and the write fails; its stderr says why,
         // and `wait_with_output` is what reads that.
-        let _ = stdin.write_all(body.as_bytes()).await;
-        drop(stdin);
+        let _ = pipe.write_all(stdin.as_bytes()).await;
+        drop(pipe);
         child.wait_with_output().await.ok()
     };
-    let out = match tokio::time::timeout(COMMENT_TIMEOUT, run).await {
+    let not_run = format!("{program} could not be run");
+    let out = match tokio::time::timeout(timeout, run).await {
         Ok(Some(out)) => out,
-        Ok(None) => return Err(GH_NOT_RUN.into()),
-        Err(_) => return Err(GH_TIMED_OUT.into()),
+        Ok(None) => return Err(not_run),
+        Err(_) => return Err(format!("{program} timed out")),
     };
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(comment_error(&String::from_utf8_lossy(&out.stderr)))
+        Err(first_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or(not_run))
     }
+}
+
+/// The first non-empty line of what a program printed: the one line of a
+/// refusal worth flashing.
+fn first_line(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 /// What `gh pr comment` printed when it refused, cut to the one line worth
 /// flashing: its first non-empty line, or [`GH_NOT_RUN`] when it printed
 /// nothing at all.
 pub fn comment_error(stderr: &str) -> String {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| GH_NOT_RUN.to_string())
+    first_line(stderr).unwrap_or_else(|| GH_NOT_RUN.to_string())
 }
 
 /// Cut a unified diff into one chunk per file, in the order git emitted
@@ -1370,6 +1497,38 @@ impl PullRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_stats_parse_by_sha() {
+        let stats = parse_commit_stats(
+            r#"{"data":{"repository":{"pullRequest":{"commits":{"nodes":[
+              {"commit":{"oid":"abc","additions":12,"deletions":3,"changedFilesIfAvailable":2}},
+              {"commit":{"oid":"def","additions":0,"deletions":7,"changedFilesIfAvailable":null}},
+              {"commit":{"oid":"","additions":1,"deletions":1}}
+            ]}}}}}"#,
+        )
+        .expect("parsed");
+        assert_eq!(stats.len(), 2, "a commit with no sha drops out");
+        assert_eq!(
+            stats["abc"],
+            CommitStat {
+                additions: 12,
+                deletions: 3,
+                files: Some(2)
+            }
+        );
+        assert_eq!(stats["def"].files, None);
+        let mut commits = vec![PrCommit {
+            sha: "abc".into(),
+            ..Default::default()
+        }];
+        apply_commit_stats(&mut commits, &stats);
+        assert_eq!(
+            (commits[0].additions, commits[0].deletions, commits[0].files),
+            (Some(12), Some(3), Some(2))
+        );
+        assert!(parse_commit_stats("{}").is_none());
+    }
 
     /// What a refused `gh pr comment` flashes is its first line — the one
     /// that says "not logged in" or "could not resolve" — and a `gh` that

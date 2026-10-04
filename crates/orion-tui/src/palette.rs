@@ -47,16 +47,18 @@ pub const ADD_PROJECT_ROW: &str = "Add project…";
 
 /// Where a `/` row sits before the query has said anything — the tiers of
 /// the PALETTE's attention order, best first. A SESSION waiting on you
-/// (NEEDS FEEDBACK) comes first, then one mid-turn (RUNNING), then one that
-/// finished a turn nobody has read (UNSEEN); every other row — read and
+/// (NEEDS FEEDBACK, or crashed — FAILED wants you just as much) comes
+/// first, then one that finished a turn nobody has read (UNSEEN), then one
+/// mid-turn (RUNNING) — what wants a human before what is merely busy, the
+/// order the PROJECT TABS count in too; every other row — read and
 /// never-run sessions, and every project, worktree and pull request — sorts under those in RECENCY ORDER, so the checkout you were
 /// just in is the first thing after what needs you. ARCHIVED sessions have
 /// no tier because they have no row — see [`build_palette_items`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PaletteTier {
     NeedsFeedback,
-    Running,
     Unseen,
+    Running,
     Rest,
 }
 
@@ -90,9 +92,9 @@ pub struct PaletteItem {
     /// and the text sweep, so a running session reads as running in the
     /// palette too. Refreshed by [`Palette::rebuild`] as upserts land.
     pub status: Option<AgentStatus>,
-    /// Whether anything under this row finished a turn nobody has read.
-    /// Splits a finished dot green (read) from blue (waiting on you),
-    /// exactly as the panel rows do.
+    /// Whether anything under this row finished a turn nobody has read:
+    /// DONE, NOT SEEN, the filled dot in the done color and the `done`
+    /// tag, where a read finish is the gray AT REST dot.
     pub unseen: bool,
     /// The attention tier this row sorts into with an empty query, and the
     /// tiebreak between equal scores once there is one. See [`PaletteTier`].
@@ -296,7 +298,7 @@ pub fn attention_sessions(tree: &Tree) -> Vec<AgentId> {
 /// they are not rows at all.
 fn session_tier(a: &Agent) -> PaletteTier {
     match a.status {
-        AgentStatus::NeedsFeedback => PaletteTier::NeedsFeedback,
+        AgentStatus::NeedsFeedback | AgentStatus::Terminated => PaletteTier::NeedsFeedback,
         AgentStatus::Running => PaletteTier::Running,
         AgentStatus::Finished if a.unseen => PaletteTier::Unseen,
         _ => PaletteTier::Rest,
@@ -546,8 +548,8 @@ mod tests {
             rows(&tree(), ""),
             [
                 "▶demo/ask",
-                "demo/run",
                 "demo/unread",
+                "demo/run",
                 "demo/read",
                 "demo/fresh",
                 "Add project…",
@@ -579,13 +581,10 @@ mod tests {
         let tree = tree();
         let palette = Palette::new(&tree, false, &HashMap::new(), false);
         assert!(
-            palette
-                .matches
-                .iter()
-                .all(|m| matches!(
-                    palette.items[m.item].target,
-                    PaletteTarget::Session(_) | PaletteTarget::AddProject
-                )),
+            palette.matches.iter().all(|m| matches!(
+                palette.items[m.item].target,
+                PaletteTarget::Session(_) | PaletteTarget::AddProject
+            )),
             "only sessions, and the add-a-project row, before a query"
         );
         assert_eq!(rows(&tree, "quiet"), ["▶quiet", "quiet/main"]);
@@ -598,7 +597,7 @@ mod tests {
         // decides — the session waiting on you leads, the project row it
         // used to sit under is just another line further down.
         let demo = rows(&tree, "demo");
-        assert_eq!(demo[..3], ["▶demo/ask", "demo/run", "demo/unread"]);
+        assert_eq!(demo[..3], ["▶demo/ask", "demo/unread", "demo/run"]);
         // A better match still beats a better tier: `read` starts a segment
         // in `feat/read`, sits mid-word in `feat/unread`.
         assert_eq!(rows(&tree, "read"), ["▶demo/read", "demo/unread"]);
@@ -631,7 +630,7 @@ mod tests {
             .into_iter()
             .map(|id| id.0)
             .collect();
-        assert_eq!(ring, ["ask", "run", "unread", "read", "fresh"]);
+        assert_eq!(ring, ["ask", "unread", "run", "read", "fresh"]);
     }
 
     /// `hide_draft_prs` keeps drafts out of `/` exactly as it keeps them

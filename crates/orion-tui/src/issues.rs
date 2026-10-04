@@ -62,7 +62,7 @@ use orion_core::{ClientRequest, ProjectId};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
@@ -74,8 +74,8 @@ use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
 use crate::text_input::{TextInput, TextView};
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, draw_multiline_input, draw_scroll_marks, empty_list_row,
-    fuzzy_highlight_styled, input_spans, panel_block, render_row, row_rect, search_line, truncate,
+    centered_rect_pct, empty_list_row, form_field, form_frame, form_text_box,
+    fuzzy_highlight_styled, panel_block, render_row, row_rect, search_line, truncate,
     visible_positions, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 
@@ -657,7 +657,6 @@ fn day(stamp: &str) -> &str {
 /// project has nothing to list.
 pub(crate) fn open_issues(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
-        app.flash = Some("issues: select a project first".into());
         return;
     };
     let mut view = IssuesView::new(
@@ -1014,13 +1013,12 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                 // again, with the new comment in.
                 app.issue_detail.remove(&issue.url);
                 app.issue_detail_failed.remove(&issue.url);
-                app.flash = Some(format!("comment posted on #{}", issue.number));
                 schedule_detail(app);
             } else {
-                app.flash = Some(format!(
+                app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't post the comment on #{} — is gh logged in?",
                     issue.number
-                ));
+                )));
                 // The box comes back with the text for a retry — unless
                 // something else has been opened over the modal meanwhile,
                 // which the flash must not interrupt.
@@ -1055,7 +1053,6 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                         view.editor = None;
                     }
                 }
-                app.flash = Some(format!("issue #{number} updated"));
                 if let Some(dir) = app
                     .tree
                     .projects
@@ -1080,7 +1077,9 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                     }
                 }
                 if !told {
-                    app.flash = Some(format!("couldn't update issue #{number}: {why}"));
+                    app.flash = Some(crate::flash::Flash::failed(format!(
+                        "couldn't update issue #{number}: {why}"
+                    )));
                 }
             }
         },
@@ -1098,7 +1097,6 @@ fn open_comment_for_selected(app: &mut App) {
     };
     let view = view.clone();
     let Some((issue, _)) = selected_issue(app) else {
-        app.flash = Some("no issue selected".into());
         return;
     };
     crate::event_loop::open_prompt(
@@ -1127,10 +1125,10 @@ fn bring_box_back(app: &mut App, view: IssuesView, issue: IssueRef, text: String
 pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, text: String) {
     let dir = view.dir.clone();
     if !dir.is_dir() {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::failed(format!(
             "couldn't post the comment on #{}: the checkout isn't on disk",
             issue.number
-        ));
+        )));
         bring_box_back(app, view, issue, text);
         return;
     }
@@ -1139,7 +1137,6 @@ pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, tex
         return;
     };
     app.issue_comment_inflight.insert(issue.url.clone());
-    app.flash = Some(format!("posting a comment on #{}…", issue.number));
     let number = issue.number;
     tokio::spawn(async move {
         let posted = comment(&dir, number, &text).await;
@@ -1153,7 +1150,8 @@ pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, tex
 }
 
 /// `Ctrl+r` in the modal: ask for the list again now, and the selected issue's
-/// comments over the cached copy. The rows stay until the answer lands.
+/// comments over the cached copy. The rows stay until the answer lands, the
+/// title saying `refreshing…` meanwhile.
 fn refresh(app: &mut App) {
     let Some(Overlay::Issues(view)) = &app.overlay else {
         return;
@@ -1174,7 +1172,6 @@ fn refresh(app: &mut App) {
             ));
         }
     }
-    app.flash = Some("refreshing issues…".into());
     app.dirty = true;
 }
 
@@ -1281,10 +1278,9 @@ fn clear_query(app: &mut App) {
 
 /// `Ctrl+e`: turn the reading pane into the editor for the issue under the
 /// cursor, prefilled from the row. A list with no rows has nothing to
-/// edit, and says so where the launch keys do.
+/// edit.
 fn open_editor(app: &mut App) {
     let Some((issue, _)) = selected_issue(app) else {
-        app.flash = Some("no issue selected".into());
         return;
     };
     if let Some(Overlay::Issues(view)) = &mut app.overlay {
@@ -1315,7 +1311,6 @@ fn save_editor(app: &mut App) {
     }
     if text == editor.original {
         view.editor = None;
-        app.flash = Some("issue unchanged".into());
         return;
     }
     if !dir.is_dir() {
@@ -1484,21 +1479,16 @@ fn launch_target(app: &App, project: &ProjectId) -> Option<QuickTarget> {
 
 /// The launch a row describes: the `quick_prompt_kind` SETTING's harness
 /// and defaults, aimed at [`launch_target`], carrying the issue.
-fn launch_for_selected(app: &mut App) -> Option<QuickLaunch> {
+fn launch_for_selected(app: &App) -> Option<QuickLaunch> {
     let Some(Overlay::Issues(view)) = &app.overlay else {
         return None;
     };
-    let project = view.project.clone();
-    let Some((issue, _)) = selected_issue(app) else {
-        app.flash = Some("no issue selected".into());
-        return None;
-    };
-    let issue = issue.launch_ref();
-    let Some(target) = launch_target(app, &project) else {
-        app.flash = Some("issues: the project has no worktree to launch into".into());
-        return None;
-    };
-    Some(QuickLaunch::from_config(target, &crate::config::Config::load()).with_issue(Some(issue)))
+    let (issue, _) = selected_issue(app)?;
+    let target = launch_target(app, &view.project)?;
+    Some(
+        QuickLaunch::from_config(target, &crate::config::Config::load())
+            .with_issue(Some(issue.launch_ref())),
+    )
 }
 
 /// `Enter`: the QUICK PROMPT for the issue. The box goes up over the
@@ -1526,13 +1516,10 @@ fn open_preset_for_selected(app: &mut App) {
 /// The launch the PROJECT ISSUES GROUP row under the Worktrees cursor
 /// describes — the modal's for that row: the `quick_prompt_kind`
 /// SETTING's harness aimed at [`launch_target`], carrying the issue.
-fn launch_for_row(app: &mut App) -> Option<QuickLaunch> {
+fn launch_for_row(app: &App) -> Option<QuickLaunch> {
     let issue = app.selected_worktree_issue()?.launch_ref();
     let project = app.selected_project()?.id.clone();
-    let Some(target) = launch_target(app, &project) else {
-        app.flash = Some("issues: the project has no worktree to launch into".into());
-        return None;
-    };
+    let target = launch_target(app, &project)?;
     Some(QuickLaunch::from_config(target, &crate::config::Config::load()).with_issue(Some(issue)))
 }
 
@@ -1554,7 +1541,7 @@ pub(crate) fn open_preset_for_row(app: &mut App) {
 /// `Ctrl+o`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the issue under the cursor in the
 /// browser, through the very `event_loop::open_link` a card's `⇧V` and
-/// `⇧I` run — the footer says where it went, or that it could not.
+/// `⇧I` run — the footer says when it could not.
 /// Nothing under the cursor opens nothing. INPUT PARITY: the key and the
 /// click end in the same state.
 pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
@@ -1707,7 +1694,7 @@ pub fn lines(
             Span::styled(format!("{INDENT}#{} ", issue.number), dim),
             Span::styled(
                 issue.title.clone(),
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
             ),
         ],
         width,
@@ -1716,7 +1703,7 @@ pub fn lines(
         Span::styled(INDENT.to_string(), dim),
         Span::styled(
             "open".to_string(),
-            Style::default().fg(th.ok).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
         ),
     ];
     if !issue.author.is_empty() {
@@ -1731,7 +1718,7 @@ pub fn lines(
         out.push(fit(
             vec![
                 Span::styled(INDENT.to_string(), dim),
-                Span::styled(issue.labels.join(" · "), Style::default().fg(th.warn)),
+                Span::styled(issue.labels.join(" · "), Style::default().fg(th.muted)),
             ],
             width,
         ));
@@ -1774,7 +1761,7 @@ pub fn lines(
                 out.push(Line::from(""));
                 let mut head = vec![Span::styled(
                     format!("{INDENT}{}", c.author),
-                    Style::default().fg(th.accent),
+                    Style::default().fg(th.muted),
                 )];
                 let at = day(&c.at);
                 if !at.is_empty() {
@@ -2035,81 +2022,45 @@ fn draw_editor(
     th: Theme,
 ) -> (Rect, Rect, Option<TextView>, u16) {
     let title = format!("Edit issue #{}", editor.number);
-    let foot = match (&editor.notice, editor.saving) {
-        (Some(notice), _) => Some((format!(" {notice} "), Style::default().fg(th.err))),
-        (None, true) => Some((" saving… ".to_string(), Style::default().fg(th.warn))),
-        (None, false) => None,
-    };
-    let mut block = panel_block(&title, true, th);
-    let mut foot_w = 0;
-    if let Some((foot, style)) = foot {
-        foot_w = foot.chars().count() as u16 + 2;
-        block = block.title_bottom(Line::from(Span::styled(foot, style)).right_aligned());
-    }
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let saving = editor.saving.then_some("saving…");
+    let (inner, foot_w) = form_frame(f, area, &title, editor.notice.as_deref(), saving, true, th);
 
     // Row 0: the title, a one-line field.
     let mut title_area = Rect::default();
     if let Some(row) = row_rect(inner, 0) {
         title_area = row;
-        let focused = editor.field == EditField::Title;
-        let label = format!("{INDENT}Title  ");
-        let label_style = if focused {
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(th.muted)
-        };
-        let budget = (row.width as usize).saturating_sub(label.chars().count() + 1);
-        let mut spans = vec![Span::styled(label, label_style)];
-        if focused {
-            spans.extend(input_spans(&editor.title, budget, th.accent, th));
-        } else if editor.title.trim().is_empty() {
-            spans.push(Span::styled("(required)", Style::default().fg(th.dim)));
-        } else {
-            spans.push(Span::raw(truncate(editor.title.as_str(), budget)));
-        }
+        let on = editor.field == EditField::Title;
+        let spans = form_field(
+            "Title",
+            &editor.title,
+            "(required)",
+            on,
+            row.width.into(),
+            th,
+        );
         f.render_widget(Paragraph::new(Line::from(spans)), row);
     }
 
     // The description box, taking the rest of the pane.
     let box_area = Rect {
-        x: inner.x,
         y: inner.y.saturating_add(1),
-        width: inner.width,
         height: inner.height.saturating_sub(1),
+        ..inner
     };
     let mut body_area = Rect::default();
     let mut body_view = None;
     if box_area.height >= 3 && box_area.width >= 4 {
         body_area = box_area;
-        let focused = editor.field == EditField::Body;
-        let border = if focused { th.accent } else { th.dim };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border))
-            .title(Span::styled(" Description ", Style::default().fg(border)));
-        let box_inner = block.inner(box_area);
-        f.render_widget(block, box_area);
-        if focused {
-            let (view, rows) = draw_multiline_input(f, &editor.body, box_inner, th);
-            draw_scroll_marks(f, box_area, view, rows, th.dim);
-            body_view = Some(view);
-        } else if editor.body.trim().is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "(no description)",
-                    Style::default().fg(th.dim),
-                )),
-                box_inner,
-            );
-        } else {
-            f.render_widget(
-                Paragraph::new(editor.body.as_str().to_string()).wrap(Wrap { trim: false }),
-                box_inner,
-            );
-        }
+        let on = editor.field == EditField::Body;
+        body_view = form_text_box(
+            f,
+            box_area,
+            "Description",
+            &editor.body,
+            on,
+            "(no description)",
+            th,
+        );
     }
     (title_area, body_area, body_view, foot_w)
 }
@@ -2337,7 +2288,7 @@ mod tests {
             matches!(&app.overlay, Some(Overlay::Issues(_))),
             "no rows: the modal stays"
         );
-        assert_eq!(app.flash.as_deref(), Some("no issue selected"));
+        assert_eq!(app.flash, None);
         land_answer(
             &mut app,
             IssuesAnswer::List {
@@ -2453,7 +2404,7 @@ mod tests {
             app.pending_issue_detail.is_some(),
             "…and asked for again as the cursor rests"
         );
-        assert_eq!(app.flash.as_deref(), Some("comment posted on #15"));
+        assert_eq!(app.flash, None, "the conversation says it");
         assert!(matches!(&app.overlay, Some(Overlay::Issues(_))));
 
         app.issue_comment_inflight.insert(fifteen.url.clone());
@@ -2852,7 +2803,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(editor(&empty).is_none());
-        assert_eq!(empty.flash.as_deref(), Some("no issue selected"));
+        assert_eq!(empty.flash, None);
     }
 
     /// Tab moves the caret between the two fields and ↑/↓ do too once
@@ -2997,7 +2948,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(editor(&app).is_none(), "an unchanged form just closes");
-        assert_eq!(app.flash.as_deref(), Some("issue unchanged"));
+        assert_eq!(app.flash, None);
         // A changed one with no sender installed stays put, unsent.
         handle_key(
             &mut app,
@@ -3080,7 +3031,7 @@ mod tests {
         let row = &app.issues[&project].list[0];
         assert_eq!(row.title, "Fix the login redirect");
         assert_eq!(row.body, "Bounces to /.");
-        assert_eq!(app.flash.as_deref(), Some("issue #15 updated"));
+        assert_eq!(app.flash, None, "the row says it");
 
         // A form reopened meanwhile is left alone by a late answer.
         handle_key(
@@ -3450,17 +3401,19 @@ mod tests {
     }
 
     /// The verbs the letters used to be are chords now: Ctrl+r asks
-    /// GitHub again, saying so in the footer, while the plain letters go
-    /// to the filter.
+    /// GitHub again — the selected issue's conversation with the list —
+    /// while the plain letters go to the filter.
     #[test]
     fn the_verb_chords_run_and_the_plain_letters_type() {
         let (mut app, _) = modal_with(vec![issue(15, "Fix login redirect")]);
+        app.pending_issue_detail = None;
         handle_key(
             &mut app,
             key(KeyCode::Char('r'), KeyModifiers::CONTROL),
             &mut Vec::new(),
         );
-        assert_eq!(app.flash.as_deref(), Some("refreshing issues…"));
+        assert!(app.pending_issue_detail.is_some(), "asked for again");
+        assert_eq!(app.flash, None);
         for letter in "roce".chars() {
             handle_key(
                 &mut app,
@@ -3589,10 +3542,9 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened github.com/o/r/issues/15")
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/issues/15"]
         );
-        app.flash = None;
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: at.x,
@@ -3601,8 +3553,8 @@ mod tests {
         };
         handle_mouse(&mut app, click, at, &mut out);
         assert_eq!(
-            app.flash.as_deref(),
-            Some("opened github.com/o/r/issues/15")
+            crate::event_loop::take_opened(),
+            ["https://github.com/o/r/issues/15"]
         );
         assert!(
             matches!(app.overlay, Some(Overlay::Issues(_))),
