@@ -724,10 +724,17 @@ pub enum PendingAction {
         id: String,
     },
     /// `⌫` on an added account's row: take it out of config.json —
-    /// keeping its config dir (`Enter`/`y`), or moving it to the Trash
-    /// (`t`). Every answer reopens the settings overlay.
+    /// keeping its config dir (`Enter`/`y`), listed under SAVED ON THIS
+    /// MACHINE from then on, or moving it to the Trash (`t`). Every answer
+    /// reopens the settings overlay.
     RemoveClaudeAccount {
         id: String,
+    },
+    /// `⌫` on a dir SAVED ON THIS MACHINE: move it — its login and
+    /// transcripts with it — to the Trash. Every answer reopens the
+    /// settings overlay.
+    TrashClaudeDir {
+        dir: std::path::PathBuf,
     },
     Quit,
 }
@@ -749,6 +756,7 @@ impl PendingAction {
                 | PendingAction::AddClaudeAccount(_)
                 | PendingAction::SignOutClaude { .. }
                 | PendingAction::RemoveClaudeAccount { .. }
+                | PendingAction::TrashClaudeDir { .. }
         )
     }
 }
@@ -887,10 +895,23 @@ pub enum PromptKind {
     ClaudeSignIn {
         id: String,
     },
-    /// Enter on **Add account**: the new account's short name — empty for
-    /// the next `claude-N`. Enter asks whether to share the default
-    /// account's setup with it; Esc puts the overlay back.
+    /// Enter on **Add account**: the new account's name — empty for the
+    /// next `claude-N`, with no name. Enter asks whether to share the
+    /// default account's setup; Esc puts the overlay back.
     AddClaudeAccount,
+    /// `r` on a CLAUDE ACCOUNTS row: the name account `id` goes by,
+    /// prefilled with the one it has. Enter saves it — empty takes it
+    /// away, back to `Claude (a@b.co)` — and Esc keeps it; both put the
+    /// overlay back on the row. The id and the dir never change.
+    RenameClaudeAccount {
+        id: String,
+    },
+    /// Enter on a dir SAVED ON THIS MACHINE: the name to add it back under,
+    /// prefilled from its folder (`~/.claude-work` → `work`). Enter adds
+    /// it, dir and login as they are; Esc puts the overlay back.
+    AdoptClaudeDir {
+        dir: std::path::PathBuf,
+    },
 }
 
 impl PromptKind {

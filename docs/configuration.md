@@ -48,7 +48,8 @@ exists only in the file, so it is hand-edit-only. Most rows toggle or cycle on `
 *typed* row (`worktree_base_branch`, the Project tab's **Run command**) opens a one-line prompt on
 `Enter` instead, pre-filled with the stored value, and an empty answer puts its default back — the
 Linear tab's **Task template**, which runs over lines, a multi-row box (`⇧Enter` breaks a line). The Agents tab groups its rows under **Quick
-prompt**, **Claude accounts** (see [Claude accounts](#claude-accounts)), then one header per harness —
+prompt**, **Claude accounts** and — while a removed account's dir is still there — **Saved on this
+machine** (see [Claude accounts](#claude-accounts)), then one header per harness —
 **Claude (you@example.com)**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, **OpenCode** — so a harness's rows read `Enabled` / `Model` /
 `Effort` under its name rather than repeating it. The **Project** tab is the one tab whose rows are
 not orion's but one project's: the project the grid is scoped to, named with its path on
@@ -130,7 +131,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `opencode_model` | string | `"default"` | Agents | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-sonnet-5`, …); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
 | `custom_harnesses` | array | `[]` | Agents | Extra CLIs the NEW SESSION PICKER offers after the built-ins, each with its own Agents tab section (Enabled and Model rows). Each entry is `{id, program}` plus options: `label` (picker text, defaults to the id), `enabled` (default `true`), `model` (default `"default"` = the CLI's pick, else passed verbatim), `model_flag` (default `"--model"`), and `hooks` (a built-in dialect the program speaks: `claude`, `codex`, `cursor`, `pi` or `opencode` — with one set the sessions report status, prompts and permission waits exactly like that harness, including title sync and auto-title for `claude`; without one they stay process-based, running while the PTY is live and never waiting-on-you). Ids use lowercase letters, digits and hyphens and must not collide with a built-in. Legacy: new harnesses belong in `harnesses`, where they also gain resume, effort, system-prompt and hook-dialect rows. Invalid entries never launch — the picker hides them and the daemon refuses them with the reason. |
 | `harnesses` | object | `{"grok": {"enabled": false}}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Pi, Muse, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the **New session** picker, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
-| `claude_accounts` | array | `[]` | Agents | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as. `enabled: false` switches one off (written only while off). The Agents tab's **Claude accounts** section and first-run onboarding add, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
+| `claude_accounts` | array | `[]` | Agents | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its `name` when it has one (`"name": "Work"`, written only while set — `Work (you@example.com)`). `enabled: false` switches one off (written only while off). The Agents tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `keybindings` | object | `{}` | Hotkeys | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "ctrl+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. Only rows that differ from the defaults are written. |
 | `prewarm_agents` | bool | `true` | Sessions | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`), and the memory modal (**Memory usage**) groups it under **warm spares**. Off drains the pool on the DAEMON's next sweep (within 30 s). |
 | `prewarm_sessions` | bool | `true` | Sessions | DAEMON-owned SESSION PREWARM: boot a WORKTREE's dead sessions when your selection rests on it, so attaching shows an already-booted screen instead of a booting shell. **Costs idle shell/CLI processes for sessions you may never open.** Off — for a machine with less memory to spare — landing on a worktree boots nothing: a session forks only when your cursor lands on its row or you attach to it, one at a time; sessions already up stay until the IDLE REAPER takes them. |
@@ -320,7 +321,8 @@ pointed at another dir, so that is all a CLAUDE ACCOUNT is here:
 ```json
 {
   "claude_accounts": [
-    { "id": "claude-2", "config_dir": "~/.claude-2" }
+    { "id": "claude-2", "config_dir": "~/.claude-2" },
+    { "id": "claude-work", "config_dir": "~/.claude-work", "name": "Work" }
   ]
 }
 ```
@@ -332,7 +334,8 @@ the model list, whatever `harnesses.claude` changes — plus `CLAUDE_CONFIG_DIR`
 Claude's row reaches every account and nothing is copied by hand. It also takes Claude's model and
 effort defaults until its own Model / Effort rows on the Agents tab are changed, which write
 `harnesses.<id>`. The `id` is what its sessions point back at, so it stays put; lowercase letters,
-digits and hyphens, never a built-in's. `enabled: false` switches one off like any harness. The
+digits and hyphens, never a built-in's. `name` is the one it goes by, as typed — `Work Laptop` —
+and the only thing a rename changes: never the `id`, never the dir. `enabled: false` switches one off like any harness. The
 list is this machine's logins: an export carries it, but `orion ssh` and `orion tunnel` leave it
 behind, as they leave `harnesses`, so a remote keeps its own accounts. An entry an older orion reads
 is an unknown key it leaves alone: its sessions refuse to start there ("custom harness `claude-2` is
@@ -340,10 +343,12 @@ no longer defined") and nothing is lost.
 
 **Named after who they are.** Everywhere an account is listed — the NEW SESSION PICKER, the QUICK
 PROMPT's `Tab` list, the Agents tab, onboarding, the preset editor, **Continue on** and the card a
-usage limit stops — it reads `Claude (you@example.com)`, `Claude (not signed in)` before its first
-login; an entry with a `label` of its own keeps it, `Claude B (b@example.com)`. Short of room — a
-card, a list row, the quick prompt's `harness` field, a preset's line — it is the email alone, and
-only while the machine has more than one account; with one, `claude` says it all. The email is
+usage limit stops — it reads its name and who it is signed in as: `Work (you@example.com)`,
+`Work (not signed in)` before its first login, and `Claude (you@example.com)` while it has no name
+of its own. The name is an entry's `name`; for the default account it is `harnesses.claude.label`,
+and a hand-written entry's is its `label` (`Claude B (b@example.com)`). Short of room — a card, a
+list row, the quick prompt's `harness` field, a preset's line — it is the name alone, else the
+email, and only while the machine has more than one account; with one, `claude` says it all. The email is
 Claude Code's own record, `oauthAccount.emailAddress` in `.claude.json`: inside the config dir for an
 account (as Claude Code keeps it whenever `CLAUDE_CONFIG_DIR` is set, `~/.claude` named that way
 included), in the home dir — `~/.claude.json` — for the default account. orion reads that one field
@@ -357,14 +362,16 @@ every account under **Claude accounts**, the default first: its name, `on` or `o
 | Key | Action |
 |---|---|
 | `Enter` | sign it in, or in again: asks for the email to sign in as — it fills Claude's login page; empty leaves the choice to the browser — then runs Claude Code's own `claude auth login [--email …]` with the account's `CLAUDE_CONFIG_DIR`, in the editor modal over the overlay. The browser finishes it; the row says who it is once the modal closes. `Ctrl+Q` closes it early |
+| `r` | rename it: a prompt prefilled with its name, `Enter` keeps what is typed and an empty one takes the name away (back to `Claude (you@example.com)`), `Esc` leaves it. Only the name moves — the id its sessions point back at and the dir its login lives in stay. The default account's name is written as `harnesses.claude.label`, a hand-written entry's as its `harnesses` label |
 | `o` | sign it out, behind a confirm: `claude auth logout` in the same modal. Its dir keeps its settings and transcripts |
 | `←` / `→` | switch it on or off — the same switch as its section's **Enabled** row further down |
-| `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk, `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |
+| `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk — listed from then on under **Saved on this machine**, below — `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |
 
-**Add account** asks for a short name — `work` makes `claude-work` in `~/.claude-work`, nothing
-makes the next `claude-2`, `claude-3` … whose dir is not there yet; a name whose dir already exists
-adopts it, login and all — then, when the default account has any of it, asks whether to share its
-setup: `CLAUDE.md`, `settings.json`, `skills`, `agents`, `commands`, `plugins` and
+**Add account** asks for a name — `Work` makes `claude-work` in `~/.claude-work`, going by `Work`
+as typed; nothing makes the next `claude-2`, `claude-3` … whose dir is not there yet, with no name;
+a name whose dir already exists adopts it, login and all, and the question and the notice say so
+(`~/.claude-work is already on this machine, signed in as …`) — then, when the default account has
+any of it, asks whether to share its setup: `CLAUDE.md`, `settings.json`, `skills`, `agents`, `commands`, `plugins` and
 `keybindings.json` are linked from the default dir into the new one (`Enter` / `y`; `n` starts it
 empty). Only those, only the ones that exist, and never over anything the new dir already holds —
 never its login (`.claude.json`, the credentials), `projects`, history, sessions or caches, which are
@@ -372,6 +379,21 @@ what make it another account. Being links, an edit in either account is an edit 
 `Enter` on its row signs it in. First-run onboarding has the same step right after Agents (while
 Claude is on there): the same rows, `Enter` on an account to sign it in, `Enter` on **Add account**
 for the same two questions, and the same warning.
+
+**Saved on this machine.** Removing an account keeps its dir — its login, settings and transcripts
+— and a later **Add account** whose name comes to the same id (`Work` after `work`) takes it back
+whole, so it never sits there unseen: under the accounts, **Saved on this machine** lists every
+`~/.claude-*` folder that looks like a Claude Code config dir (it holds `.claude.json`,
+`.credentials.json`, `projects` or `settings.json`; a real folder, not a symlink) and that no account
+runs in, with who it is signed in as — `~/.claude-work [not in orion · signed in as you@work.com]`.
+The home dir is scanned with the records, off the TUI's loop. On one of those rows:
+
+| Key | Action |
+|---|---|
+| `Enter` | add it back: asks for the name it goes by, prefilled from its folder (`~/.claude-work` → `work`; a number is no name), then adds it as it is — under the id its folder makes, or the next free `claude-work-2` — sharing nothing into it, since it has its own setup |
+| `⌫` | move it to the Trash, behind a confirm that names the login going with it. Never a dir an account runs in, never `~/.claude` |
+
+First-run onboarding lists only the accounts.
 
 **One login, twice.** claude.ai's browser sign-in approves whichever account the browser is
 signed in to, so a second dir signed in from the same browser silently becomes the first account

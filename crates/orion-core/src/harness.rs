@@ -1512,6 +1512,7 @@ mod tests {
         let account = |id: &str, dir: &str| ClaudeAccount {
             id: id.into(),
             config_dir: dir.into(),
+            name: String::new(),
             enabled: true,
         };
         let overrides: BTreeMap<String, HarnessOverride> = [
@@ -1553,7 +1554,7 @@ mod tests {
             "Claude's row, overrides and all"
         );
         assert!(two.enabled, "the account's own switch, not Claude's");
-        assert_eq!(two.label, "", "named after its email, not Claude's label");
+        assert_eq!(two.label, "", "unnamed: never Claude's label");
         assert_eq!(
             two.env["CLAUDE_CONFIG_DIR"], "~/.claude-2",
             "the first entry wins"

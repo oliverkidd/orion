@@ -428,8 +428,9 @@ default back, `x` unbinds it, and `Esc` cancels a capture. A chord another actio
 not taken silently: the row names who has it and a second `Enter` moves it. A ⚠ on a row means the
 chord can't reach orion from this terminal; `R` resets every binding (with a confirmation). On the
 Agents tab's **Claude accounts** rows, `Enter` signs the account in (asking for the email first),
-`o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter` on **Add
-account** names a new one ([Configuration](configuration.md#claude-accounts)). On a row whose
+`r` renames it, `o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
+on **Add account** names a new one; on a **Saved on this machine** row `Enter` adds the dir back
+under a name and `⌫` moves it to the Trash ([Configuration](configuration.md#claude-accounts)). On a row whose
 program isn't on PATH — General's **File editor**, a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor
 modal and anything else leaves it unrun ([Installing editors and agent
