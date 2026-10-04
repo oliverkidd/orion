@@ -468,7 +468,10 @@ fn paint_hunter(
 }
 
 fn stroke(buf: &mut Buffer, area: Rect, carve: Rect, a: (i32, i32), b: (i32, i32), fade: f32) {
-    let steps = (a.0 - b.0).unsigned_abs().max((a.1 - b.1).unsigned_abs()).max(1);
+    let steps = (a.0 - b.0)
+        .unsigned_abs()
+        .max((a.1 - b.1).unsigned_abs())
+        .max(1);
     for i in 1..steps {
         let u = i as f32 / steps as f32;
         let x = a.0 as f32 + (b.0 - a.0) as f32 * u;
@@ -495,11 +498,8 @@ fn stroke(buf: &mut Buffer, area: Rect, carve: Rect, a: (i32, i32), b: (i32, i32
         } else {
             '/'
         };
-        cell.set_char(ch).set_fg(Color::Indexed(if fade > 0.8 {
-            146
-        } else {
-            103
-        }));
+        cell.set_char(ch)
+            .set_fg(Color::Indexed(if fade > 0.8 { 146 } else { 103 }));
     }
 }
 

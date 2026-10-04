@@ -145,8 +145,8 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("orion-project-file-{}", ulid::Ulid::generate()));
+            let dir =
+                std::env::temp_dir().join(format!("orion-project-file-{}", ulid::Ulid::generate()));
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }

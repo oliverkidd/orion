@@ -4673,7 +4673,10 @@ mod tests {
             let screen = buffer_text(&draw(&mut app));
             assert!(screen.contains("Esc back to the grid"), "{screen}");
             assert!(footer_text(&app).starts_with("Esc back to the grid"));
-            assert!(screen.contains("·  home"), "the footer says where: {screen}");
+            assert!(
+                screen.contains("·  home"),
+                "the footer says where: {screen}"
+            );
 
             key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
             assert!(app.home, "a grid key does nothing under HOME");
@@ -7007,10 +7010,7 @@ mod tests {
     fn a_tab_comes_back_on_the_card_it_was_left_on() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(
-                &mut app,
-                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
-            );
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Right]);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "demo's second card");
 
             keys(&mut app, &[KeyCode::Char('['), KeyCode::Char(']')]);
@@ -7386,10 +7386,7 @@ mod tests {
     fn j_j_from_the_tabs_goes_back_down_to_the_card_left() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(
-                &mut app,
-                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
-            );
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Right]);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the second card");
             keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
 
@@ -7424,10 +7421,7 @@ mod tests {
 
             // And back up and over to demo, which comes up on the card it
             // was left on rather than its first.
-            keys(
-                &mut app,
-                &[KeyCode::Up, KeyCode::Up, KeyCode::Right],
-            );
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Right]);
             assert_eq!(tab_state(&app).0.as_deref(), Some("demo"));
             assert_eq!(selected(&app).as_deref(), Some("a1"));
         });
@@ -7441,14 +7435,8 @@ mod tests {
     fn esc_or_another_key_hands_the_keys_back_to_the_cards() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(
-                &mut app,
-                &[KeyCode::Left, KeyCode::Left, KeyCode::Right],
-            );
-            keys(
-                &mut app,
-                &[KeyCode::Up, KeyCode::Up, KeyCode::Left],
-            );
+            keys(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Right]);
+            keys(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Left]);
             assert!(app.launcher_tab_cursor.is_some());
             let walked = tab_state(&app);
             assert_eq!(walked.0.as_deref(), Some("web"));
@@ -7532,12 +7520,7 @@ mod tests {
             let before = tab_state(&app);
             keys(
                 &mut app,
-                &[
-                    KeyCode::Up,
-                    KeyCode::Up,
-                    KeyCode::Left,
-                    KeyCode::Char('x'),
-                ],
+                &[KeyCode::Up, KeyCode::Up, KeyCode::Left, KeyCode::Char('x')],
             );
             assert_eq!(
                 app.launcher_tabs,
@@ -9492,7 +9475,8 @@ mod tests {
     fn shift_v_opens_the_cards_pull_request_as_its_menu_row_does() {
         with_default_config(|| {
             let mut by_key = card_on_a_pull_request();
-            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
             assert_eq!(
                 by_key.flash.as_deref(),
@@ -9551,7 +9535,8 @@ mod tests {
                 .and_then(|a| crate::launcher::row(&app, &a.id))
                 .map(|row| row.branch)
                 .expect("a card under the cursor");
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             assert_eq!(
                 app.flash,
@@ -9572,7 +9557,8 @@ mod tests {
             let mut app = card_on_a_pull_request();
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.launcher_unaimed);
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_FOR_PR));
         });
@@ -9585,7 +9571,8 @@ mod tests {
     fn commenting_on_a_card_comments_on_its_pull_request() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::CommentPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
             match &app.overlay {
                 Some(Overlay::Prompt(prompt)) => match &prompt.kind {
@@ -9849,7 +9836,8 @@ mod tests {
     fn shift_p_no_longer_opens_the_cards_pull_request() {
         with_default_config(|| {
             let mut app = card_on_a_pull_request();
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             quick_box(&app);
             assert_ne!(
@@ -9915,7 +9903,8 @@ mod tests {
         with_default_config(|| {
             let mut by_key = card_with_settings();
             let card = by_key.selected_session().expect("a card under the cursor");
-            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut by_key, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "nothing starts until Enter: {sent:?}");
             let launch = quick_box(&by_key);
             assert_eq!(
@@ -9981,7 +9970,8 @@ mod tests {
             let mut app = card_with_settings();
             keys(&mut app, &[KeyCode::Esc, KeyCode::Esc]);
             assert!(app.launcher_unaimed);
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert_eq!(app.flash.as_deref(), Some(super::NO_CARD_TO_DUPLICATE));
@@ -10159,7 +10149,8 @@ mod tests {
             );
             draw(&mut app);
             assert_eq!(app.selected_session().map(|a| a.id), Some(id));
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
+            let sent =
+                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
             assert!(sent.is_empty(), "{sent:?}");
             let launch = quick_box(&app);
             assert!(launch.cloud, "{launch:?}");

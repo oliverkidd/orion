@@ -532,7 +532,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), FRESH_THEME);
         let theme: serde_json::Value = serde_json::from_str(FRESH_THEME).unwrap();
         assert_eq!(theme["name"], "orion");
-        assert_ne!(theme["editor"]["selection_bg"], theme["editor"]["current_line_bg"]);
+        assert_ne!(
+            theme["editor"]["selection_bg"],
+            theme["editor"]["current_line_bg"]
+        );
         let config: serde_json::Value = serde_json::from_str(FRESH_CONFIG).unwrap();
         assert_eq!(config["theme"], "orion");
         assert_eq!(config["editor"]["cursor_jump_animation"], true);

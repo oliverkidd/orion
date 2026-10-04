@@ -1628,9 +1628,7 @@ impl Keymap {
     /// the one such a host uses.
     pub fn reach_at(&self, index: usize) -> Reach {
         let chords = self.chords_at(index);
-        let has_twin = chords
-            .iter()
-            .any(|c| !c.mods.contains(KeyModifiers::SUPER));
+        let has_twin = chords.iter().any(|c| !c.mods.contains(KeyModifiers::SUPER));
         chords
             .iter()
             .map(|c| match host_warning(c).0 {
@@ -1684,7 +1682,10 @@ mod tests {
         assert_eq!(at("cmd+."), Some(Action::SelectLaunchWorktree));
         assert_eq!(at("ctrl+t"), Some(Action::SelectLaunchWorktree));
         // Terminals deliver ⌘⇧/ as SUPER+SHIFT+/ (keep SHIFT) or as ⌘?.
-        let from_slash = ev(KeyCode::Char('/'), KeyModifiers::SUPER | KeyModifiers::SHIFT);
+        let from_slash = ev(
+            KeyCode::Char('/'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
         assert_eq!(from_slash, shift);
         assert_eq!(
             map.lookup(Scope::Global, &from_slash),
@@ -1981,7 +1982,11 @@ mod tests {
         let map = Keymap::default();
         let finder = map.chords(Action::FindFile);
         let spell = |chords: Vec<KeyChord>| {
-            chords.iter().map(KeyChord::display).collect::<Vec<_>>().join(" ")
+            chords
+                .iter()
+                .map(KeyChord::display)
+                .collect::<Vec<_>>()
+                .join(" ")
         };
         assert_eq!(spell(shown_side(finder, false)), "^P");
         assert_eq!(spell(shown_side(finder, true)), "⌘P");
@@ -2101,7 +2106,13 @@ mod tests {
         let map = Keymap::default();
         for (i, spec) in ACTIONS.iter().enumerate() {
             for chord in map.chords_at(i) {
-                assert_ne!(host_warning(chord).0, Reach::Blocked, "{}: {}", spec.id, chord.spec());
+                assert_ne!(
+                    host_warning(chord).0,
+                    Reach::Blocked,
+                    "{}: {}",
+                    spec.id,
+                    chord.spec()
+                );
             }
         }
     }

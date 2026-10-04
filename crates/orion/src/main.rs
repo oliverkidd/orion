@@ -100,8 +100,7 @@ fn main() -> Result<()> {
             Some(dir) => orion_tui::run_add_project(dir),
             None => {
                 init_tui_logging()?;
-                let handoff =
-                    log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
+                let handoff = log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
                 match handoff {
                     // Hosts-picker handoff: the TUI quit and restored the
                     // terminal so a fresh `orion ssh` can exec over us (the

@@ -336,7 +336,11 @@ pub(super) fn no_follow_up(app: &App, row: &SessionRow) -> Option<String> {
     Some(match row {
         SessionRow::Agent(a) if a.archived => format!(
             "archived sessions take no follow-up — {} brings it back",
-            crate::hints::key_or(&app.keymap, crate::keymap::Action::Unarchive, "Unarchive in its menu")
+            crate::hints::key_or(
+                &app.keymap,
+                crate::keymap::Action::Unarchive,
+                "Unarchive in its menu"
+            )
         ),
         SessionRow::Agent(a) if a.cloud_session_id.is_some() => {
             "cloud sessions take a queued message — right-click, then Send to cloud session".into()

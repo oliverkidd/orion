@@ -355,10 +355,17 @@ pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::
         Kind::Edit => vec![SAVE.hint(), QUIT.hint().kept(), MENU.hint()],
         Kind::Fresh => vec![SAVE.hint(), QUIT.hint().kept(), PALETTE.hint()],
         Kind::Vim | Kind::Helix => vec![Hint::new(":w", "save"), Hint::new(":q", "quit").kept()],
-        Kind::Emacs => vec![Hint::new("^X ^S", "save"), Hint::new("^X ^C", "quit").kept()],
+        Kind::Emacs => vec![
+            Hint::new("^X ^S", "save"),
+            Hint::new("^X ^C", "quit").kept(),
+        ],
         Kind::Other => Vec::new(),
     };
-    hints.push(if vim.quits_itself { FORCE_CLOSE.hint() } else { QUIT_FORCE.hint() });
+    hints.push(if vim.quits_itself {
+        FORCE_CLOSE.hint()
+    } else {
+        QUIT_FORCE.hint()
+    });
     hints.push(crate::hints::in_app_hint());
     hints
 }
@@ -1065,10 +1072,15 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 } else {
                     ""
                 };
-                let chrome = 2 + if !chevron.is_empty() { 2 } else { 0 } + if hint_len > 0 { hint_len + 2 } else { 0 };
+                let chrome = 2
+                    + if !chevron.is_empty() { 2 } else { 0 }
+                    + if hint_len > 0 { hint_len + 2 } else { 0 };
                 let label_room = row_w.saturating_sub(chrome);
                 let label = truncate(&item.label, label_room);
-                let used = 1 + label.chars().count() + if hint_len > 0 { 1 + hint_len } else { 0 } + if !chevron.is_empty() { 2 } else { 0 };
+                let used = 1
+                    + label.chars().count()
+                    + if hint_len > 0 { 1 + hint_len } else { 0 }
+                    + if !chevron.is_empty() { 2 } else { 0 };
                 let pad = row_w.saturating_sub(used + 1);
                 let mut spans = vec![
                     Span::styled(" ", style),

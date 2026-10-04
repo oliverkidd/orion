@@ -569,7 +569,10 @@ impl QuickLaunch {
             ) => a == b,
             _ => false,
         };
-        same_place && self.issue == other.issue && self.pr == other.pr && self.linear == other.linear
+        same_place
+            && self.issue == other.issue
+            && self.pr == other.pr
+            && self.linear == other.linear
     }
 
     /// Does Enter cut a fresh worktree before it launches? The box's frame

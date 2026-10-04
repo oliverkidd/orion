@@ -2995,7 +2995,10 @@ mod tests {
         type_text(&mut app, "main");
         key(&mut app, KeyCode::Enter);
         assert_eq!(view(&app).status.as_ref().unwrap().text, "already on main");
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
         type_text(&mut app, "feature");
         key(&mut app, KeyCode::Enter);
         let status = view(&app).status.clone().unwrap();
