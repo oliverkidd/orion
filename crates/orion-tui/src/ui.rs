@@ -60,8 +60,12 @@ pub(crate) mod task_keys {
     pub const PROJECT: Key = Key::new(&["cmd+p", "ctrl+p"], "project");
     /// The QUICK PROMPT's harness for this one launch.
     pub const AGENT: Key = Key::new(&["tab"], "agent");
-    /// One of the saved AGENT PRESETS.
-    pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
+    /// The QUICK PROMPT's mode — edit, plan, ask — stepped in place, as
+    /// `⇧Tab` steps Claude Code's and Cursor's.
+    pub const MODE: Key = Key::new(&["shift+tab"], "mode");
+    /// One of the saved AGENT PRESETS: `⌘U` where ⌘ arrives, `^X`
+    /// everywhere — `^U` is the field's own delete-to-line-start.
+    pub const PRESET: Key = Key::new(&["cmd+u", "ctrl+x"], "preset");
     /// The image on the system clipboard, pasted as a file the agent can
     /// open (`clipboard_image`) — in a box bound for an agent on this
     /// machine only. `^V`, not ⌘V: Ghostty keeps ⌘V, its text paste.
@@ -71,7 +75,7 @@ pub(crate) mod task_keys {
     #[cfg(test)]
     #[test]
     fn every_task_key_parses_and_newline_is_the_editors() {
-        for key in [SUBMIT, NEWLINE, PROJECT, AGENT, PRESET, IMAGE, CANCEL] {
+        for key in [SUBMIT, NEWLINE, PROJECT, AGENT, MODE, PRESET, IMAGE, CANCEL] {
             assert!(key.parses(), "{:?}", key.chords);
         }
         let input = crate::text_input::TextInput::multiline();
@@ -83,13 +87,13 @@ pub(crate) mod task_keys {
 }
 
 /// The keys on a task box's bottom border. The QUICK PROMPT's project,
-/// worktree, harness, model and effort keys are not here: each sits in
-/// its header beside the thing it changes, and a second copy along the
-/// border was most of what made the box read as a wall of chords. `⇧Tab`
-/// is, until a preset is on — then the header's `preset` field carries
-/// it. Its Esc goes back to the modal it was opened over, where it was
-/// opened over one. A box bound for an agent on this machine names `^V`,
-/// its CLIPBOARD IMAGE paste, the first hint to go on a narrow box.
+/// worktree, harness, mode, model and effort keys are not here: each sits
+/// in its header beside the thing it changes, and a second copy along the
+/// border was most of what made the box read as a wall of chords. The
+/// preset key is, until a preset is on — then the header's `preset` field
+/// carries it. Its Esc goes back to the modal it was opened over, where it
+/// was opened over one. A box bound for an agent on this machine names
+/// `^V`, its CLIPBOARD IMAGE paste, the first hint to go on a narrow box.
 pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hint> {
     use crate::app::PromptKind;
     use task_keys::{CANCEL, IMAGE, NEWLINE, PRESET, SUBMIT};
@@ -872,6 +876,7 @@ fn draw_multiline_prompt(
     if backdrop {
         return branch_area;
     }
+    crate::mention::draw(f, prompt, editor_inner, view, th);
     if let Some(Overlay::Prompt(p)) = &mut app.overlay {
         p.area = area;
         p.editor_area = editor_inner;
@@ -4954,6 +4959,7 @@ mod tests {
             linear: None,
             under: None,
             cloud: false,
+            mode: orion_core::AgentMode::Edit,
         });
         let cloud = PromptKind::CloudMessage {
             id: orion_core::AgentId::from("a".to_string()),
@@ -4991,7 +4997,7 @@ mod tests {
         }
         let full = text(&quick, launcher_view::BOX_SIZE.0 as usize);
         assert_eq!(
-            full, "Enter launch · ^J newline · ⇧Tab preset · ^V paste image · Esc cancel",
+            full, "Enter launch · ^J newline · ^X preset · ^V paste image · Esc cancel",
             "no ⌘ from this terminal, so no kitty ⇧Enter either: ^J"
         );
         for chord in ["^P", "^T", "^/", "^Y", "^N", "Tab agent"] {

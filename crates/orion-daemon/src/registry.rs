@@ -96,6 +96,8 @@ pub(crate) struct CreateAgentSpec {
     /// The GitHub issue an ISSUE SESSION was launched for (see
     /// `pr_scope::issue_rule`). Persisted like `pr_url`.
     pub issue_url: Option<String>,
+    /// The mode the CLI starts in (plan, ask, edit). Request-only.
+    pub mode: orion_core::harness::AgentMode,
 }
 
 /// A pre-spawned agent CLI waiting to be adopted by the next CreateAgent for
@@ -1088,6 +1090,7 @@ impl Daemon {
             starting_prompt,
             pr_url,
             issue_url,
+            mode,
         } = spec;
         let cloud_prompt = match cloud_prompt {
             Some(_) if kind != AgentKind::Claude => {
@@ -1145,12 +1148,14 @@ impl Daemon {
         // name, so the create feels instant. A starting prompt rides the
         // CLI's argv, and a spare already booted bare cannot be handed one;
         // neither can it be handed a PR or issue rule.
+        // Nor can one booted in edit mode be handed plan or ask.
         let adopted = (cloud_prompt.is_none()
             && pr_url.is_none()
             && issue_url.is_none()
-            && starting_prompt.is_none())
-        .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
-        .flatten();
+            && starting_prompt.is_none()
+            && mode == orion_core::harness::AgentMode::Edit)
+            .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
+            .flatten();
         // Only the cold path needs asking: an adopted warm session is proof
         // the CLI runs. Without this, a missing CLI still "succeeds" — the
         // login shell prints `command not found` into a PTY that dies at
@@ -1236,6 +1241,7 @@ impl Daemon {
                 DEFAULT_ROWS,
                 cloud_prompt.as_deref(),
                 starting_prompt.as_deref(),
+                mode,
             );
             self.rollback_agent_on_spawn_error(&agent.id, spawned)?;
         }
@@ -1747,6 +1753,7 @@ impl Daemon {
             DEFAULT_ROWS,
             None,
             prompt.as_deref(),
+            orion_core::harness::AgentMode::Edit,
         );
         let continued = match spawned {
             Ok(_) => prompt.is_some(),
@@ -2403,7 +2410,15 @@ impl Daemon {
         cols: u16,
         rows: u16,
     ) -> Result<Arc<PtySession>> {
-        self.spawn_agent_session_with(agent, worktree, cols, rows, None, None)
+        self.spawn_agent_session_with(
+            agent,
+            worktree,
+            cols,
+            rows,
+            None,
+            None,
+            orion_core::harness::AgentMode::Edit,
+        )
     }
 
     /// The general spawn: `cloud_task` makes it a Claude Cloud dispatch
@@ -2415,6 +2430,7 @@ impl Daemon {
     /// persisted Agent fields — a Cloud row's `cloud_session_id` makes
     /// `restart_agent` and `ensure_session` refuse to boot a local CLI for
     /// it, everything else takes the plain local-session path.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_agent_session_with(
         self: &Arc<Self>,
         agent: &Agent,
@@ -2423,6 +2439,7 @@ impl Daemon {
         rows: u16,
         cloud_task: Option<&str>,
         initial_prompt: Option<&str>,
+        mode: orion_core::harness::AgentMode,
     ) -> Result<Arc<PtySession>> {
         // A session the user sent to Claude's background (`/background`)
         // can't be resumed, only attached to — see `claude_bg`. The probe
@@ -2443,6 +2460,7 @@ impl Daemon {
             cloud_task,
             initial_prompt,
             attach.as_deref(),
+            mode,
         )
     }
 
@@ -2460,6 +2478,7 @@ impl Daemon {
         cloud_task: Option<&str>,
         initial_prompt: Option<&str>,
         attach: Option<&str>,
+        mode: orion_core::harness::AgentMode,
     ) -> Result<Arc<PtySession>> {
         // Whatever spawns this agent, it runs in `worktree` from here: a
         // relocation still pending for it has been overtaken.
@@ -2605,17 +2624,23 @@ impl Daemon {
                     false,
                 )
             }
-            (None, None) => agent_spawn_command_with(
-                &harness,
-                agent.session_id.as_deref(),
-                Some(&worktree.path),
-                agent.model.as_deref(),
-                agent.effort.as_deref(),
-                cmd_override.as_deref(),
-                prompts.initial.as_deref(),
-                prompts.system.as_deref(),
-                true,
-            ),
+            (None, None) => {
+                let (program, mut args, resumed) = agent_spawn_command_with(
+                    &harness,
+                    agent.session_id.as_deref(),
+                    Some(&worktree.path),
+                    agent.model.as_deref(),
+                    agent.effort.as_deref(),
+                    cmd_override.as_deref(),
+                    prompts.initial.as_deref(),
+                    prompts.system.as_deref(),
+                    true,
+                );
+                if !resumed && cmd_override.is_none() {
+                    push_mode(&harness, mode, &mut args);
+                }
+                (program, args, resumed)
+            }
         };
         // Run the agent through the user's login+interactive shell so it sees
         // the same env as a Terminal.app tab (~/.zprofile, ~/.zshrc,
@@ -2730,7 +2755,16 @@ impl Daemon {
                 };
                 tracing::info!(agent = %id, attach = %attach, "resume refused for a backgrounded session — attaching");
                 if self
-                    .spawn_agent_pty(&agent, &worktree, cols, rows, None, None, Some(&attach))
+                    .spawn_agent_pty(
+                        &agent,
+                        &worktree,
+                        cols,
+                        rows,
+                        None,
+                        None,
+                        Some(&attach),
+                        orion_core::harness::AgentMode::Edit,
+                    )
                     .is_ok()
                 {
                     agent.alive = true;
@@ -3324,6 +3358,20 @@ fn agent_spawn_command_with(
         args.push(p);
     }
     (program, args, resumed)
+}
+
+/// Start a fresh CLI in `mode`: its flag and value lead the args — a fresh
+/// launch has no subcommand for them to follow, and every positional
+/// (the first prompt) comes after. Nothing for edit, the mode every CLI
+/// starts in, nor for a mode the harness does not have.
+fn push_mode(
+    harness: &orion_core::harness::HarnessDescriptor,
+    mode: orion_core::harness::AgentMode,
+    args: &mut Vec<String>,
+) {
+    if let Some(pair) = harness.mode.args(mode) {
+        args.splice(0..0, pair.map(str::to_string));
+    }
 }
 
 /// One system-prompt flag carrying orion's guidance (worktree, spawn,
@@ -5160,6 +5208,7 @@ mod tests {
 
         let empty = daemon
             .create_agent(CreateAgentSpec {
+                mode: Default::default(),
                 worktree: worktree.clone(),
                 name: "cloud".into(),
                 kind: AgentKind::Claude,
@@ -5178,6 +5227,7 @@ mod tests {
 
         let nul = daemon
             .create_agent(CreateAgentSpec {
+                mode: Default::default(),
                 worktree: worktree.clone(),
                 name: "cloud".into(),
                 kind: AgentKind::Claude,
@@ -5196,6 +5246,7 @@ mod tests {
 
         let too_long = daemon
             .create_agent(CreateAgentSpec {
+                mode: Default::default(),
                 worktree: worktree.clone(),
                 name: "cloud".into(),
                 kind: AgentKind::Claude,
@@ -5214,6 +5265,7 @@ mod tests {
 
         let wrong_kind = daemon
             .create_agent(CreateAgentSpec {
+                mode: Default::default(),
                 worktree,
                 name: "cloud".into(),
                 kind: AgentKind::Codex,
@@ -5235,6 +5287,7 @@ mod tests {
     async fn pr_launch_context_is_accepted_for_every_kind_but_never_with_cloud() {
         let daemon = test_daemon();
         let spec = |kind: AgentKind, cloud: Option<&str>| CreateAgentSpec {
+            mode: Default::default(),
             worktree: WorktreeId("unused".into()),
             name: "pr".into(),
             kind,
@@ -5268,6 +5321,7 @@ mod tests {
             .unwrap_err();
         assert!(cloud.to_string().contains("not supported for Claude Cloud"));
         let not_a_pr = CreateAgentSpec {
+            mode: Default::default(),
             pr_url: Some("https://github.com/o/r/issues/7".into()),
             ..spec(AgentKind::Codex, None)
         };
@@ -5356,6 +5410,7 @@ mod tests {
         // A bad head never reaches git — it is refused ahead of the lookup.
         let err = daemon
             .create_pr_agent(crate::pr_scope::CreatePrAgentSpec {
+                mode: Default::default(),
                 project: project.clone(),
                 name: "pr".into(),
                 kind: AgentKind::Claude,
@@ -5376,6 +5431,7 @@ mod tests {
         // agent create, where the NUL is refused.
         let err = daemon
             .create_pr_agent(crate::pr_scope::CreatePrAgentSpec {
+                mode: Default::default(),
                 project: project.clone(),
                 name: "pr".into(),
                 kind: AgentKind::Claude,
@@ -5399,6 +5455,7 @@ mod tests {
     async fn issue_launch_context_is_accepted_for_every_kind_but_never_with_cloud() {
         let daemon = test_daemon();
         let spec = |kind: AgentKind, cloud: Option<&str>| CreateAgentSpec {
+            mode: Default::default(),
             worktree: WorktreeId("unused".into()),
             name: "issue".into(),
             kind,
@@ -5425,6 +5482,7 @@ mod tests {
         }
         let cloud = daemon
             .create_agent(CreateAgentSpec {
+                mode: Default::default(),
                 starting_prompt: None,
                 ..spec(AgentKind::Claude, Some("Fix auth"))
             })
@@ -5432,6 +5490,7 @@ mod tests {
             .unwrap_err();
         assert!(cloud.to_string().contains("not supported for Claude Cloud"));
         let not_an_issue = CreateAgentSpec {
+            mode: Default::default(),
             issue_url: Some("https://github.com/o/r/pull/7".into()),
             ..spec(AgentKind::Codex, None)
         };
@@ -5443,6 +5502,7 @@ mod tests {
     async fn starting_prompt_is_validated_and_never_adopts_a_warm_cli() {
         let daemon = test_daemon();
         let spec = |kind: AgentKind, cloud: Option<&str>, starting: Option<&str>| CreateAgentSpec {
+            mode: Default::default(),
             worktree: WorktreeId("unused".into()),
             name: "preset".into(),
             kind,
@@ -5551,6 +5611,7 @@ mod tests {
         // the PTY instead of running anything.
         let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
         let spec = |name: &str, task: Option<&str>| CreateAgentSpec {
+            mode: Default::default(),
             worktree: worktree.id.clone(),
             name: name.into(),
             kind: AgentKind::Claude,
@@ -5815,6 +5876,7 @@ mod tests {
         let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
         let EntityId::Agent(id) = daemon
             .create_agent(CreateAgentSpec {
+                mode: Default::default(),
                 worktree: main.id.clone(),
                 name: "a".into(),
                 kind: AgentKind::Claude,
@@ -7005,5 +7067,44 @@ mod tests {
         }
         daemon.mark_agent_seen(&id).unwrap();
         assert!(rx.try_recv().is_err(), "nothing to say twice");
+    }
+
+    /// A plan or ask launch leads the fresh CLI's args with its mode flag,
+    /// ahead of the first prompt; edit, and a mode the harness lacks, add
+    /// nothing.
+    #[test]
+    fn a_mode_leads_a_fresh_launchs_args() {
+        use orion_core::harness::AgentMode;
+        let all = test_registry();
+        let launch = |kind, mode| {
+            let harness = test_harness(&all, kind);
+            let (_, mut args, _) = agent_spawn_command_with(
+                &harness,
+                None,
+                Some(Path::new(TEST_CWD)),
+                None,
+                None,
+                None,
+                Some("look around"),
+                None,
+                false,
+            );
+            push_mode(&harness, mode, &mut args);
+            args
+        };
+        assert_eq!(
+            launch(AgentKind::Claude, AgentMode::Plan),
+            ["--permission-mode", "plan", "look around"]
+        );
+        assert_eq!(
+            launch(AgentKind::Cursor, AgentMode::Ask),
+            ["--mode", "ask", "--force", "look around"]
+        );
+        assert_eq!(launch(AgentKind::Claude, AgentMode::Edit), ["look around"]);
+        assert_eq!(launch(AgentKind::Claude, AgentMode::Ask), ["look around"]);
+        assert_eq!(
+            launch(AgentKind::Codex, AgentMode::Plan),
+            ["--yolo", "look around"]
+        );
     }
 }

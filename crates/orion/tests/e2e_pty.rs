@@ -449,6 +449,7 @@ async fn full_crud_attach_and_restart_persistence() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 3,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -882,6 +883,7 @@ async fn hook_post_from_agent_pty_drives_status() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "hooked".into(),
@@ -1221,6 +1223,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 3,
             worktree: main_worktree.id.clone(),
             name: "mover".into(),
@@ -1349,6 +1352,7 @@ async fn claude_session_title_and_row_name_stay_tied() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "Typed In Orion".into(),
@@ -1514,6 +1518,7 @@ async fn restart_rebinds_an_attached_client_to_the_new_pty() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -1650,6 +1655,7 @@ async fn codex_hooks_install_and_drive_status() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "codexed".into(),
@@ -2246,6 +2252,7 @@ async fn prewarmed_session_is_adopted_by_create_agent() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "warm-agent".into(),
@@ -2394,6 +2401,7 @@ async fn dead_prewarm_falls_back_to_cold_spawn() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "fallback-agent".into(),
@@ -2452,6 +2460,7 @@ async fn create_agent_refuses_when_the_cli_is_not_installed() {
         write_frame(
             &mut c,
             &ClientRequest::CreateAgent {
+                mode: Default::default(),
                 req_id,
                 worktree: worktree.id.clone(),
                 name: format!("agent-{req_id}"),
@@ -2539,6 +2548,7 @@ async fn create_agent_succeeds_when_the_cli_is_on_the_login_shell_path() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 7,
             worktree: worktree.id.clone(),
             name: "real-agent".into(),
@@ -2611,6 +2621,7 @@ async fn create_agent_get_id(
     write_frame(
         c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id,
             worktree: worktree.clone(),
             name: name.into(),
@@ -2780,6 +2791,7 @@ async fn archive_sigkills_an_agent_that_ignores_sighup() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "stubborn".into(),
@@ -2920,6 +2932,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "warmed".into(),
@@ -2968,6 +2981,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 4,
             worktree: worktree.id.clone(),
             name: "shelved".into(),
@@ -3085,6 +3099,7 @@ async fn prewarm_worktree_sessions_boots_nothing_when_switched_off() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "cold".into(),
@@ -3229,6 +3244,7 @@ async fn idle_sessions_reap_unwatched_but_spare_busy_and_attached() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "idler".into(),
@@ -3555,6 +3571,7 @@ async fn auto_title_instruction_and_rename_flow() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: worktree.id.clone(),
             name: "agent-1".into(),
@@ -3758,6 +3775,7 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -4028,6 +4046,7 @@ async fn orion_spawn_cli_starts_a_sibling_session_in_the_same_worktree() {
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 2,
             worktree: main_worktree.id.clone(),
             name: "agent-1".into(),
@@ -4276,6 +4295,7 @@ exit 0
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
+            mode: Default::default(),
             req_id: 10,
             worktree: main_worktree.id.clone(),
             // The stand-in name the TUI sends with AUTO-TITLE on: the

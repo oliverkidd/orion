@@ -327,6 +327,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     cloud_prompt,
                     starting_prompt,
                     issue_url,
+                    mode,
                 } => {
                     // Logged by mode only — never the task, prompt text or
                     // issue URL.
@@ -349,6 +350,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             starting_prompt,
                             pr_url: None,
                             issue_url,
+                            mode,
                         })
                         .await;
                     if let Some(launch_mode) = launch_mode {
@@ -386,6 +388,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     pr_url,
                     head,
                     starting_prompt,
+                    mode,
                 } => {
                     // A PR SESSION whose checkout does not exist yet is a
                     // fetch, a `git worktree add` and the WORKTREE HOOK
@@ -413,6 +416,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                                 pr_url: pr_url.clone(),
                                 head,
                                 starting_prompt,
+                                mode,
                             })
                             .await;
                         match &result {

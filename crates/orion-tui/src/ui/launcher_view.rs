@@ -1463,15 +1463,9 @@ fn draw_list_band(
         };
         let card = &band.cards[i];
         let selected = on && at == Some(i);
-        draw_list_row(
-            f.buffer_mut(),
-            app,
-            placed.rect,
-            card,
-            (selected, selected && lit),
-            cols,
-            cfg,
-        );
+        draw_cut(f, placed, |buf, r| {
+            draw_list_row(buf, app, r, card, (selected, selected && lit), cols, cfg);
+        });
         note_tail_card(app, card);
         app.hits.push((
             placed.rect,
@@ -1499,14 +1493,16 @@ fn draw_list_band(
     }
 }
 
-/// One entry of the compact LIST, on one line: the cursor mark, the
-/// status dot and name a card heads with, what it runs on, and the last
-/// thing it was asked — `›` as on the card — or, for a terminal, the last
-/// line its shell printed; how long since it moved (or `exited`) at the
-/// right. `cols` are the band's name and runs-on column widths, so the
-/// entries line up. `(selected, lit)`: the cursor's entry wears the mark,
-/// ([`LIST_MARK`]), and the FOCUSED PANEL TINT across the line while the
-/// grid holds the keys.
+/// One entry of the compact LIST, on two lines. The first is what it is:
+/// the cursor mark, the status dot and name a card heads with, what it
+/// runs on, and how long since it moved (or `exited`) at the right. The
+/// second, under the name, is the last thing it was asked — `›` as on
+/// the card, in the text colour so it is what the eye lands on — or, for
+/// a terminal, the last line its shell printed. `cols` are the band's
+/// name and runs-on column widths, so the entries line up. `(selected,
+/// lit)`: the cursor's entry wears the mark ([`LIST_MARK`]) down both
+/// lines, and the FOCUSED PANEL TINT across them while the grid holds
+/// the keys.
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1520,10 +1516,12 @@ fn draw_list_row(
     let width = usize::from(r.width);
     // A bar rather than the rule's `❯`: a shell's own glyph is `❯`, one
     // column over, and the two would read as one mark.
-    let mark = if selected {
-        Span::styled(LIST_MARK, Style::default().fg(th.accent))
-    } else {
-        Span::raw("  ")
+    let mark = || {
+        if selected {
+            Span::styled(LIST_MARK, Style::default().fg(th.accent))
+        } else {
+            Span::raw("  ")
+        }
     };
     struct Entry {
         lead: Span<'static>,
@@ -1591,52 +1589,58 @@ fn draw_list_row(
             badge_style: Style::default().fg(th.exited),
         },
     };
-    let mut spans = vec![mark, e.lead];
-    let mut room = width.saturating_sub(usize::from(LIST_LEAD));
-    // The badge at the right end, while the name keeps a few letters.
+    let room = width.saturating_sub(usize::from(LIST_LEAD));
+
+    // The first line: name, runs-on, and the badge at the right end —
+    // the badge while the name keeps a few letters.
+    let mut head = vec![mark(), e.lead];
+    let mut name_room = room;
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
-    let keep_badge = badge_w > 0 && room >= badge_w + 1 + 8;
+    let keep_badge = badge_w > 0 && name_room >= badge_w + 1 + 8;
     if keep_badge {
-        room -= badge_w + 1;
+        name_room -= badge_w + 1;
     }
-    let name_w = name_col.max(1).min(room);
+    let name_w = name_col.max(1).min(name_room);
     let name = truncate(&e.name, name_w);
     let mut used = name.chars().count();
-    spans.extend(status_name_spans(
+    head.extend(status_name_spans(
         name,
         e.name_style,
         e.ramp,
         app.sweep_phase(),
     ));
-    // What it runs on, in the band's column, and the prompt after it —
-    // each only where there is room for a few letters of it.
+    // What it runs on, in the band's column, only where there is room
+    // for a few letters of it.
     let runs_at = name_w + LIST_GAP;
-    if !e.runs.is_empty() && room >= runs_at + 6 {
-        let runs_w = runs_col.min(room - runs_at);
-        let runs = truncate(&e.runs, runs_w);
-        spans.push(Span::raw(" ".repeat(runs_at - used)));
+    if !e.runs.is_empty() && name_room >= runs_at + 6 {
+        let runs = truncate(&e.runs, runs_col.min(name_room - runs_at));
+        head.push(Span::raw(" ".repeat(runs_at - used)));
         used = runs_at + runs.chars().count();
-        spans.push(Span::styled(runs, e.runs_style));
-        let text_at = runs_at + runs_w + LIST_GAP;
-        let text_mark_w = e.text_mark.chars().count();
-        if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
-            let text = truncate(&e.text, room - text_at - text_mark_w);
-            spans.push(Span::raw(" ".repeat(text_at - used)));
-            spans.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
-            used = text_at + text_mark_w + text.chars().count();
-            spans.push(Span::styled(text, e.text_style));
-        }
+        head.push(Span::styled(runs, e.runs_style));
     }
     if keep_badge {
-        spans.push(Span::raw(" ".repeat(room.saturating_sub(used) + 1)));
-        spans.push(Span::styled(badge, e.badge_style));
+        head.push(Span::raw(" ".repeat(name_room.saturating_sub(used) + 1)));
+        head.push(Span::styled(badge, e.badge_style));
     }
-    let mut line = Paragraph::new(Line::from(spans));
+
+    // The second line, under the name: the prompt across the rest of the
+    // row.
+    let mut body = vec![mark(), Span::raw("  ")];
+    let text_mark_w = e.text_mark.chars().count();
+    if !e.text.is_empty() && room > text_mark_w {
+        body.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
+        body.push(Span::styled(
+            truncate(&e.text, room - text_mark_w),
+            e.text_style,
+        ));
+    }
+
+    let mut lines = Paragraph::new(vec![Line::from(head), Line::from(body)]);
     if lit {
-        line = line.style(Style::default().bg(th.focus_tint));
+        lines = lines.style(Style::default().bg(th.focus_tint));
     }
-    line.render(r, buf);
+    lines.render(r, buf);
 }
 
 /// Draw something the window's edges may cut — a card half scrolled off
@@ -3211,6 +3215,10 @@ pub(super) struct BoxHeader {
 /// `worktree main` never read as one phrase.
 const FIELD_GAP: usize = 3;
 
+/// Widest the `agent` field's value is drawn: a CLAUDE ACCOUNT's label
+/// runs to an email address, which took the row the mode needs.
+const AGENT_W: usize = 10;
+
 /// Fewest columns a value is cut to — `ma…` — before its field gives up
 /// its word, and then the whole field, instead.
 const MIN_VALUE: usize = 3;
@@ -3237,7 +3245,7 @@ fn header_fields(
     cfg: &crate::config::Config,
     th: Theme,
 ) -> [Vec<HeaderField>; 2] {
-    use super::task_keys::{AGENT, PRESET, PROJECT};
+    use super::task_keys::{AGENT, MODE, PRESET, PROJECT};
     let dim = Style::default().fg(th.dim);
     let bold = |fg| Style::default().fg(fg).add_modifier(Modifier::BOLD);
     let action_key = |action| crate::hints::key(&app.keymap, action);
@@ -3297,7 +3305,9 @@ fn header_fields(
     }
 
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
-    let mut agent = harness.display_label().to_string();
+    // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
+    // row room for the mode, the model and the effort beside it.
+    let mut agent = super::truncate(harness.display_label(), AGENT_W);
     // A CLAUDE CLOUD box says so on the field that toggles it.
     if launch.cloud {
         agent.push_str(crate::app::CLOUD_LABEL);
@@ -3325,6 +3335,26 @@ fn header_fields(
             action_key(Action::SelectModel),
         ),
     ];
+    // Beside the agent, since what it can be is the agent's: plan and ask
+    // read in colour, so a launch that will not edit is never mistaken for
+    // one that will.
+    if launch.modes(cfg).len() > 1 {
+        let colour = match launch.mode {
+            orion_core::AgentMode::Edit => th.text,
+            orion_core::AgentMode::Plan => th.warn,
+            orion_core::AgentMode::Ask => th.special,
+        };
+        runs.insert(
+            1,
+            field(
+                BoxField::Mode,
+                "mode",
+                launch.mode.as_str().to_string(),
+                bold(colour),
+                Some(MODE.label()),
+            ),
+        );
+    }
     if !crate::config::effort_choices_in(&harness, launch.model.as_deref()).is_empty() {
         runs.push(field(
             BoxField::Effort,
@@ -3886,7 +3916,9 @@ mod tests {
                 );
                 let head = box_header(&App::new(), &launch, &cfg, 200, Theme::default());
                 let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
-                assert_eq!(agent, "agent   Claude (b@b.co) Tab", "{:?}", rows_of(&head));
+                // Cut to ten columns, the row's room going to the mode,
+                // the model and the effort beside it.
+                assert_eq!(agent, "agent   Claude (b… Tab", "{:?}", rows_of(&head));
             })
         });
     }
@@ -3917,7 +3949,8 @@ mod tests {
                     BoxField::Agent => "Tab",
                     BoxField::Model => "^/",
                     BoxField::Effort => "^Y",
-                    BoxField::Preset => "⇧Tab",
+                    BoxField::Mode => "⇧Tab",
+                    BoxField::Preset => "^X",
                 };
                 assert!(
                     cells.ends_with(&format!(" {key}")),
@@ -3929,7 +3962,8 @@ mod tests {
                 );
             }
             if width >= 60 {
-                assert_eq!(head.fields.len(), 6, "{width}: every field fits: {rows:?}");
+                // Claude has plan, so its box draws the mode field too.
+                assert_eq!(head.fields.len(), 7, "{width}: every field fits: {rows:?}");
                 assert!(
                     !rows.concat().contains('…'),
                     "{width}: nothing cut: {rows:?}"
@@ -4462,13 +4496,15 @@ mod tests {
 
             app.launcher_list = true;
             let lines = drawn_lines(&mut app, body);
-            let line = lines
+            let row = lines
                 .iter()
-                .find(|l| l.contains("s0"))
+                .position(|l| l.contains("s0"))
                 .expect("the session's line");
+            assert!(lines[row].contains("limit reached"), "{:?}", lines[row]);
             assert!(
-                line.contains("limit reached") && line.contains("session limit"),
-                "{line:?}"
+                lines[row + 1].contains("session limit"),
+                "Claude's words on the line under it: {:?}",
+                lines[row + 1]
             );
 
             app.launcher_list = false;
@@ -5197,16 +5233,12 @@ mod tests {
                 200,
             )
         };
-        assert!(
-            border(&launch).contains("⇧Tab preset"),
-            "{}",
-            border(&launch)
-        );
+        assert!(border(&launch).contains("^X preset"), "{}", border(&launch));
         launch.preset = Some(a_preset("reviewer"));
         let head = header(&app, &launch, BOX_SIZE.0 - 4);
         assert_eq!(
             cells_of(&head, BoxField::Preset).as_deref(),
-            Some("preset reviewer ⇧Tab"),
+            Some("preset reviewer ^X"),
             "{:?}",
             rows_of(&head)
         );
@@ -5218,7 +5250,11 @@ mod tests {
             Some(0),
             "on the row of where it runs"
         );
-        assert!(!border(&launch).contains("⇧Tab"), "{}", border(&launch));
+        assert!(
+            !border(&launch).contains(&super::super::task_keys::PRESET.label()),
+            "{}",
+            border(&launch)
+        );
     }
 
     /// One checkout's BAND, with one session in it, for the rule tests.

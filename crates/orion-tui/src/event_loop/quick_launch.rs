@@ -266,6 +266,7 @@ pub(super) fn draft(
         // A PR SESSION's: the create goes to the PROJECT as a
         // `CreatePrAgent`, and `worktree` only names which.
         pr: launch.pr.clone(),
+        mode: launch.mode,
         reopen_on_error: Some((PromptKind::QuickPrompt(launch), text)),
         focus_pane,
         placeholder,

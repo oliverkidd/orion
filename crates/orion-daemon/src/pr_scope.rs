@@ -265,6 +265,8 @@ pub(crate) struct CreatePrAgentSpec {
     /// The CLI's positional first prompt (an AGENT PRESET launched on the
     /// row); checked and sent exactly as `CreateAgentSpec`'s is.
     pub starting_prompt: Option<String>,
+    /// The mode the CLI starts in, as `CreateAgentSpec`'s.
+    pub mode: orion_core::harness::AgentMode,
 }
 
 impl Daemon {
@@ -286,6 +288,7 @@ impl Daemon {
             pr_url,
             head,
             starting_prompt,
+            mode,
         } = spec;
         let pr_url = validate_pr_url(&pr_url)?;
         let number = pr_number(&pr_url)?;
@@ -303,6 +306,7 @@ impl Daemon {
             starting_prompt,
             pr_url: Some(pr_url),
             issue_url: None,
+            mode,
         })
         .await
     }

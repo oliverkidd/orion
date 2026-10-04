@@ -745,13 +745,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::DoneSound,
                 label: "Done sound",
-                hint: "Ding, and notify an unfocused window, when a turn you haven't seen finishes (off silences both)",
+                hint: "Ding, and notify an unfocused window, when a turn you haven't seen finishes (←/→ plays each; off silences both)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::FeedbackSound,
                 label: "Feedback sound",
-                hint: "Ring, and notify an unfocused window, when a turn stops to ask you or crashes (off silences both)",
+                hint: "Ring, and notify an unfocused window, when a turn stops to ask you or crashes (←/→ plays each; off silences both)",
                 group: "",
             },
             SettingSpec {

@@ -2403,6 +2403,7 @@ pub(super) fn open_box_field(app: &mut App, field: BoxField, back: QuickReturn) 
         BoxField::Agent => crate::quick_prompt::open_launch_picker(app, back),
         BoxField::Model => open_model_picker(app, back),
         BoxField::Effort => open_effort_picker(app, back),
+        BoxField::Mode => super::cycle_mode(app),
         BoxField::Preset => crate::quick_prompt::open_preset_picker(app, back),
     }
 }
@@ -3421,7 +3422,7 @@ mod tests {
                     Some((KeyCode::Char('t'), KeyModifiers::CONTROL)),
                 ),
                 ("harness", Some((KeyCode::Tab, KeyModifiers::NONE))),
-                ("preset", Some((KeyCode::BackTab, KeyModifiers::SHIFT))),
+                ("preset", Some((KeyCode::Char('x'), KeyModifiers::CONTROL))),
                 ("project", Some((KeyCode::Char('p'), KeyModifiers::CONTROL))),
             ];
             for (surface, open) in surfaces {
@@ -3589,7 +3590,7 @@ mod tests {
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "ship it");
             let before = launch(&app).0;
-            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                 panic!("expected the preset picker, got {:?}", app.overlay);
             };
@@ -3700,7 +3701,7 @@ mod tests {
                 ),
                 (BoxField::Agent, KeyCode::Tab, KeyModifiers::NONE),
                 (BoxField::Model, KeyCode::Char('/'), KeyModifiers::CONTROL),
-                (BoxField::Preset, KeyCode::BackTab, KeyModifiers::SHIFT),
+                (BoxField::Preset, KeyCode::Char('x'), KeyModifiers::CONTROL),
             ] {
                 let mut by_key = two_sessions();
                 opened(&mut by_key);
@@ -11194,17 +11195,18 @@ mod tests {
                 vec![0, 1, 2],
                 "the three most recent, newest first"
             );
+            let row_h = crate::launcher::LIST_ROW_H;
             for (_, r) in &entries {
-                assert_eq!(r.height, 1, "one line an entry");
+                assert_eq!(r.height, row_h, "two lines an entry");
             }
             assert!(
-                entries.windows(2).all(|w| w[1].1.y == w[0].1.y + 1),
+                entries.windows(2).all(|w| w[1].1.y == w[0].1.y + row_h),
                 "stacked one under the other: {entries:?}"
             );
             let hint = app
                 .hit_rect(&HitTarget::LauncherBandMore(0))
                 .expect("a line counting the rest");
-            assert_eq!(hint.y, entries[2].1.y + 1, "right under the last entry");
+            assert_eq!(hint.y, entries[2].1.y + row_h, "right under the last entry");
             let buf = term.backend().buffer();
             let text: String = (hint.x..hint.x + hint.width)
                 .map(|x| buf[(x, hint.y)].symbol().to_string())
@@ -11618,6 +11620,97 @@ mod tests {
             app.archived_open.remove(&WorktreeId("w2".into()));
             let bands = crate::launcher::bands(&app);
             assert!(bands.iter().all(|b| b.worktree.0 != "w2"));
+        });
+    }
+
+    /// Cycle mode steps a Claude box edit → plan → edit (Claude has no
+    /// ask), the header reading the step at once, and Enter sends the
+    /// mode with the create.
+    #[test]
+    fn cycle_mode_steps_the_box_and_rides_the_create() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            type_text(&mut app, "how does auth work");
+            assert_eq!(launch(&app).0.mode, orion_core::AgentMode::Edit);
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("mode edit"), "{text}");
+
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            let (stepped, typed) = launch(&app);
+            assert_eq!(stepped.mode, orion_core::AgentMode::Plan);
+            assert_eq!(typed, "how does auth work", "the text is kept");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("mode plan"), "{text}");
+
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            assert_eq!(
+                launch(&app).0.mode,
+                orion_core::AgentMode::Edit,
+                "round again"
+            );
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+
+            let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                out.iter().any(|r| matches!(
+                    r,
+                    ClientRequest::CreateAgent {
+                        mode: orion_core::AgentMode::Plan,
+                        ..
+                    }
+                )),
+                "{out:?}"
+            );
+        });
+    }
+
+    /// `@` in the box lists the files of the checkout the launch runs in,
+    /// narrowed as you type; Tab writes the pick in as `@path`, and Enter
+    /// after it sends the box as usual.
+    #[test]
+    fn an_at_lists_the_checkouts_files_and_tab_writes_one_in() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let git = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .output()
+                    .unwrap()
+            };
+            git(&["init", "-q"]);
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/auth.rs"), "").unwrap();
+            std::fs::write(repo.join("README.md"), "").unwrap();
+            let mut app = App::new();
+            app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
+            seed_tree(&mut app);
+            seed_feat(&mut app, repo.to_path_buf());
+            seed_web(&mut app);
+            // The box on `feat`, the checkout under the cursor.
+            crate::quick_prompt::open_box(
+                &mut app,
+                QuickLaunch::from_config(
+                    QuickTarget::Worktree(WorktreeId("w2".into())),
+                    &crate::config::Config::load(),
+                ),
+            );
+            type_text(&mut app, "fix @aut");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("src/auth.rs"), "{text}");
+            assert!(!text.contains("README.md"), "narrowed: {text}");
+
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "fix @src/auth.rs ");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(!text.contains(" files "), "the list went: {text}");
+
+            // Esc puts a list away and leaves the box up.
+            type_text(&mut app, "@");
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "fix @src/auth.rs @");
         });
     }
 }

@@ -993,6 +993,9 @@ pub struct PromptDialog {
     /// than empty: its explanation line leads with `draft restored`, until
     /// the first edit makes the text simply what is being typed.
     pub draft_restored: bool,
+    /// The FILE MENTION list an `@` puts up in a box whose text goes to a
+    /// local agent (`mention`).
+    pub mention: crate::mention::Mention,
 }
 
 impl PromptDialog {
@@ -1015,6 +1018,7 @@ impl PromptDialog {
             detail_areas: Vec::new(),
             branch_area: Rect::default(),
             draft_restored: false,
+            mention: crate::mention::Mention::default(),
         };
         // The task and comment boxes hold line breaks; the rest are one
         // line. The field itself then knows which keys break a line and
@@ -2295,6 +2299,9 @@ pub struct AgentLaunchDraft {
     /// the user navigated away from: the create is born in
     /// `App::left_behind`, so the manual move still outranks the follow.
     pub follow: bool,
+    /// The mode the CLI starts in (see `ClientRequest::CreateAgent::mode`):
+    /// edit for every launch but a QUICK PROMPT stepped to plan or ask.
+    pub mode: orion_core::AgentMode,
 }
 
 impl AgentLaunchDraft {
@@ -2327,6 +2334,7 @@ impl AgentLaunchDraft {
             focus_pane: true,
             placeholder: None,
             follow: true,
+            mode: orion_core::AgentMode::Edit,
         }
     }
 }
@@ -4037,6 +4045,10 @@ pub struct App {
     /// into typing at, window focused, is never queued — that prompt, or
     /// that error, is already in front of them.
     pub pending_feedback: Vec<FeedbackAlert>,
+    /// A sound the settings overlay just stepped `done_sound` or
+    /// `feedback_sound` onto: the main loop plays it once, so picking one
+    /// is hearing it.
+    pub pending_sound_preview: Option<crate::config::Sound>,
     /// Whether the terminal window has focus, from the focus reports
     /// (mode 1004) `setup_terminal` asks for. True until the terminal says
     /// otherwise, so one that never reports (tmux without `focus-events`)
@@ -4449,6 +4461,7 @@ impl App {
             pending_clipboard: None,
             done_sounds: DoneSounds::default(),
             pending_feedback: Vec::new(),
+            pending_sound_preview: None,
             window_focused: true,
             body_area: Rect::default(),
             hostname: orion_core::host::hostname(),

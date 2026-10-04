@@ -71,7 +71,7 @@ pub struct AgentPresetsView {
     /// Screen rect of the preset rows, written back during draw so clicks
     /// can hit-test rows.
     pub list_area: Rect,
-    /// Set when the list was opened as a QUICK PROMPT picker (`Shift+Tab`
+    /// Set when the list was opened as a QUICK PROMPT picker (`^X`
     /// in the box, `e` on a PROJECT OPEN PRS GROUP row): the box to put
     /// back, with the text typed so far. In that mode Enter applies the
     /// row to that launch and Esc returns unchanged; `Ctrl+a` / `Ctrl+e` /
@@ -923,6 +923,7 @@ fn apply_preset_to_quick_prompt(
         .with_issue(back.launch.issue)
         .with_pr(back.launch.pr)
         .with_linear(back.launch.linear)
+        .with_mode(back.launch.mode, &cfg)
         .with_under(back.launch.under);
     if launch_now {
         crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
