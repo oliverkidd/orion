@@ -114,6 +114,13 @@ pub fn trigger(chord: &KeyChord) -> Option<String> {
 /// are not here: Ghostty types `^A`/`^E` for them, which the editor reads
 /// as the line's ends, and which a shell outside orion still needs. Copy
 /// and paste stay Ghostty's.
+///
+/// Every typed field (`text_input`) takes two of them as well: ⌘A selects
+/// the field's whole text and ⇧⌘↑/⇧⌘↓ select to its ends. Its other
+/// selection chords need nothing here — Ghostty binds no ⇧⌘←/⇧⌘→ or
+/// ⌥⇧←/⌥⇧→, and its ⇧-arrow, ⇧Home/⇧End and ⇧PgUp/⇧PgDn binds are
+/// `performable` (they adjust a terminal selection only when one exists),
+/// so all of them arrive as modified keys.
 pub const EDITOR_CHORDS: &[&str] = &[
     "super+s",
     "super+z",
@@ -405,6 +412,39 @@ mod tests {
             "super+alt+arrow_right",
         ] {
             assert!(!all.iter().any(|t| t == kept), "{kept} released");
+        }
+    }
+
+    /// A typed field's ⌘ chords reach it: ⌘A — Ghostty's `select_all` —
+    /// and ⇧⌘↑/⇧⌘↓ — its `jump_to_prompt` — are released, while ⇧⌘←/⇧⌘→,
+    /// which Ghostty binds to nothing, need no line and get none.
+    #[test]
+    fn the_text_fields_cmd_chords_reach_orion() {
+        let all = unbinds(&Keymap::default());
+        let cmd_chords = |key: crate::hints::Key| {
+            key.chords()
+                .into_iter()
+                .filter(|c| c.mods.contains(KeyModifiers::SUPER))
+                .collect::<Vec<_>>()
+        };
+        use crate::text_input::keys::{SELECT_ALL, SELECT_LINE};
+        for chord in cmd_chords(SELECT_ALL) {
+            let t = trigger(&chord).unwrap();
+            assert_eq!(t, "super+a");
+            assert!(all.contains(&t), "{t} not released");
+        }
+        for spec in ["shift+cmd+up", "shift+cmd+down"] {
+            let t = trigger(&KeyChord::parse(spec).unwrap()).unwrap();
+            assert!(all.contains(&t), "{spec} ({t}) not released");
+        }
+        let line = cmd_chords(SELECT_LINE);
+        assert_eq!(line.len(), 2);
+        for chord in line {
+            let t = trigger(&chord).unwrap();
+            assert!(
+                !all.contains(&t),
+                "{t} is not Ghostty's: nothing to release"
+            );
         }
     }
 

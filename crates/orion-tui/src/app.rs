@@ -975,6 +975,10 @@ pub struct PromptDialog {
     /// branch is not drawn or names nothing to pick — a PR SESSION's
     /// checkout is the DAEMON's.
     pub branch_area: Rect,
+    /// A QUICK PROMPT opened on the SAVED DRAFT or the DRAFT slot rather
+    /// than empty: its explanation line leads with `draft restored`, until
+    /// the first edit makes the text simply what is being typed.
+    pub draft_restored: bool,
 }
 
 impl PromptDialog {
@@ -996,6 +1000,7 @@ impl PromptDialog {
             editor_area: Rect::default(),
             detail_areas: Vec::new(),
             branch_area: Rect::default(),
+            draft_restored: false,
         };
         // The task and comment boxes hold line breaks; the rest are one
         // line. The field itself then knows which keys break a line and
@@ -3769,8 +3774,15 @@ pub struct App {
     /// The QUICK PROMPT box last abandoned with something typed in it
     /// (`quick_prompt::QuickDraft`) — Esc, a click outside, the HARDWIRED
     /// UNLOCK. The next box opened takes it back, so a press that closes
-    /// the box costs nothing typed; one slot, never written to disk.
+    /// the box costs nothing typed; one slot, in memory — the SAVED DRAFT
+    /// below is what outlives the process.
     pub quick_draft: Option<crate::quick_prompt::QuickDraft>,
+    /// The SAVED DRAFT (`saved_draft`): the QUICK PROMPT's unsent text on
+    /// disk, written as it is typed, so a window closed mid-sentence keeps
+    /// the sentence for the next box. The main loop installs the DATA
+    /// DIR's at startup; the unit tests leave it `None` (or install a
+    /// temporary one), so no test touches the real user's draft.
+    pub saved_draft: Option<crate::saved_draft::SavedDraft>,
     /// Debounced attach: the session the pane is showing but the daemon has
     /// not been told about yet. Stepping a selection is not a decision to
     /// boot a CLI — walking the grid past four cards must not cold-spawn
@@ -4029,8 +4041,9 @@ pub struct App {
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
     /// Where a file dropped onto a prompt box bound for an agent is copied
-    /// before macOS deletes it (`dropped_files`): the main loop installs
-    /// the DATA DIR's `attachments/` at startup; the unit tests leave it
+    /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
+    /// clipboard's image (`clipboard_image`): the main loop installs the
+    /// DATA DIR's `attachments/` at startup; the unit tests leave it
     /// `None`, so a paste there is never staged into the real user's dir.
     pub attachments_dir: Option<std::path::PathBuf>,
     /// Bodies in `pr_detail` that came from the cache rather than from
@@ -4236,6 +4249,7 @@ impl App {
             pending_prewarm: None,
             parked_pr_prompt: None,
             quick_draft: None,
+            saved_draft: None,
             pending_attach: None,
             attached_sref: None,
             next_keepwarm: None,

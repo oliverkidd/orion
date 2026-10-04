@@ -281,6 +281,9 @@ async fn main_loop(
     // A screenshot dropped onto a prompt box is copied here the moment it
     // lands, before macOS deletes the file behind its thumbnail.
     app.attachments_dir = Some(crate::dropped_files::default_dir());
+    // The QUICK PROMPT's unsent text, as the last run left it — a window
+    // closed mid-sentence keeps the sentence (`saved_draft`).
+    app.saved_draft = Some(crate::saved_draft::SavedDraft::default_location());
     // The Cursor MODEL / EFFORT lists: cached `cursor-agent --list-models`
     // now, a background refresh when the cache is a day old.
     crate::cursor_catalogue::bootstrap(cfg.cursor_enabled);
@@ -2935,6 +2938,8 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         }
         _ => return false,
     }
+    // A paste into the QUICK PROMPT is the SAVED DRAFT now.
+    crate::saved_draft::note_edit(app);
     app.dirty = true;
     true
 }
@@ -2971,6 +2976,70 @@ fn staged_drop(dir: Option<&std::path::Path>, text: &str, flash: &mut Option<Str
         *flash = Some(format!("couldn't keep a copy of {name}: {err}"));
     }
     staged.text
+}
+
+/// `^V` in a box bound for an agent on this machine: the image on the
+/// system clipboard, kept in the attachments folder a drop is copied to,
+/// its path at the caret (`clipboard_image`). Reading the clipboard is
+/// `osascript` starting up — a good part of a second, too long to hold
+/// the loop — so it runs on the blocking pool and lands as
+/// `Answer::ClipboardImage`; without a pool (the unit tests, which stub
+/// the clipboard) it runs inline. No attachments folder (the unit tests
+/// that install none) is no paste.
+fn paste_clipboard_image(app: &mut App) {
+    let Some(dir) = app.attachments_dir.clone() else {
+        app.flash = Some("no attachments folder to keep a pasted image in".into());
+        return;
+    };
+    match app.view_jobs.clone() {
+        Some(jobs) => {
+            app.flash = Some("reading the clipboard…".into());
+            jobs.run(move || {
+                Some(crate::view_jobs::Answer::ClipboardImage(
+                    crate::clipboard_image::paste_into(&dir),
+                ))
+            });
+        }
+        None => land_clipboard_image(app, crate::clipboard_image::paste_into(&dir)),
+    }
+}
+
+/// What a `^V` found, landed: the image's path into the box bound for a
+/// local agent that is up — the prompt box, else an open FOLLOW-UP
+/// COMPOSER — over its selection or at its caret, as a staged drop lands.
+/// No image says so in the footer; an image with no box left to take it
+/// (closed while the clipboard was read) says where it was kept.
+pub(crate) fn land_clipboard_image(app: &mut App, pasted: crate::clipboard_image::Pasted) {
+    use crate::clipboard_image::{insertion, Pasted};
+    app.dirty = true;
+    let path = match pasted {
+        Pasted::Saved(path) => path,
+        Pasted::NoImage => {
+            app.flash = Some("no image on the clipboard to paste".into());
+            return;
+        }
+        Pasted::Failed(why) => {
+            app.flash = Some(format!("couldn't paste the image: {why}"));
+            return;
+        }
+    };
+    app.flash = None;
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if prompt.kind.reaches_local_agent() {
+            let text = insertion(&path, prompt.input.char_before_insert());
+            prompt.input.insert_str(&text);
+            crate::saved_draft::note_edit(app);
+            return;
+        }
+    }
+    if app.follow_up_live() {
+        if let Some(follow_up) = &mut app.follow_up {
+            let text = insertion(&path, follow_up.input.char_before_insert());
+            follow_up.input.insert_str(&text);
+            return;
+        }
+    }
+    app.flash = Some(format!("image kept at {}", path.display()));
 }
 
 /// One key while the composer is open and the SESSIONS PANEL has focus.
@@ -3011,6 +3080,8 @@ fn follow_up_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) -> 
         {
             send_follow_up(app, out);
         }
+        // `^V`: the clipboard's image, as the prompt boxes take it.
+        _ if ui::task_keys::IMAGE.matches(&key) => paste_clipboard_image(app),
         _ => {
             if let Some(follow_up) = &mut app.follow_up {
                 if follow_up.input.handle_key(&key).consumed() {
@@ -5098,6 +5169,7 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             app.pending_clipboard = Some(payload);
             app.flash = Some(flash);
         }
+        Answer::ClipboardImage(pasted) => land_clipboard_image(app, pasted),
         Answer::Flash(message) => app.flash = Some(message),
         Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
@@ -6714,6 +6786,13 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 app.overlay = None;
                 submit_prompt(app, prompt, out);
             }
+            // `^V` in a box bound for an agent on this machine: the
+            // image on the system clipboard, kept where the agent can open
+            // it, its path at the caret (`clipboard_image`). Every other
+            // prompt leaves `^V` to nothing, as the line editor does.
+            _ if ui::task_keys::IMAGE.matches(&key) && prompt.kind.reaches_local_agent() => {
+                paste_clipboard_image(app)
+            }
             // `⌘P` / `^P`: the PROJECT PICKER over the box. The checkout,
             // the model and the effort keys are the keymap's (Select
             // worktree, Select model, Cycle effort): `handle_key` takes
@@ -6787,6 +6866,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 let edit = prompt.input.handle_key(&key);
                 if edit.changed() {
                     prompt.refresh_dirs();
+                    // A QUICK PROMPT's text is the SAVED DRAFT as typed.
+                    crate::saved_draft::note_edit(app);
                 } else if !edit.consumed() && prompt.is_multiline() {
                     match key.code {
                         KeyCode::Up => prompt.input.cursor_to_start(),
@@ -8156,6 +8237,10 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         app.flash = Some("cancelled: empty input".into());
         return;
+    }
+    // A QUICK PROMPT sending the SAVED DRAFT spends it.
+    if matches!(prompt.kind, PromptKind::QuickPrompt(_)) {
+        crate::saved_draft::launched(app, prompt.input.as_str());
     }
     match prompt.kind {
         PromptKind::AddProject => open_folder(app, shellexpand_home(&value), out),
@@ -12269,6 +12354,8 @@ fn attach_created(
 pub(crate) fn reopen_prompt_with(app: &mut App, mut kind: PromptKind, text: String) {
     if let PromptKind::QuickPrompt(launch) = &mut kind {
         crate::quick_prompt::restack(app, launch);
+        // The launch spent the SAVED DRAFT; the text is the draft again.
+        crate::saved_draft::refused(app, &text);
     }
     open_prompt(app, kind);
     if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
@@ -33143,6 +33230,286 @@ diff --git a/src/c.rs b/src/c.rs
         dispatch_terminal_event(&mut app, Event::Paste(dropped.clone()), &mut out);
 
         assert_eq!(follow_up_text(&app), Some(dropped));
+    }
+
+    // ---- CLIPBOARD IMAGES ----
+
+    /// A PNG's bytes, as a stubbed clipboard holds them.
+    fn clipboard_png() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\nscreenshot pixels".to_vec()
+    }
+
+    /// What the open prompt box holds.
+    fn box_text(app: &App) -> String {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => p.input.as_str().to_string(),
+            other => panic!("no prompt box up: {other:?}"),
+        }
+    }
+
+    fn type_into(app: &mut App, text: &str, out: &mut Vec<ClientRequest>) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c), KeyModifiers::NONE, out);
+        }
+    }
+
+    /// `^V` in the QUICK PROMPT keeps the clipboard's image in the
+    /// attachments folder and writes its path at the caret, a word apart
+    /// from the text around it — never reading the real clipboard here.
+    #[test]
+    fn ctrl_v_pastes_the_clipboard_image_into_the_quick_prompt() {
+        with_default_config(|| {
+            let root = tempfile::tempdir().unwrap();
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            app.attachments_dir = Some(root.path().join("attachments"));
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            type_into(&mut app, "what is this", &mut out);
+
+            crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+                press(
+                    &mut app,
+                    KeyCode::Char('v'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
+            });
+
+            let text = box_text(&app);
+            let kept: Vec<_> = std::fs::read_dir(root.path().join("attachments"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            assert_eq!(std::fs::read(&kept[0]).unwrap(), clipboard_png());
+            assert_eq!(
+                text,
+                format!(
+                    "what is this {} ",
+                    crate::dropped_files::quoted(&kept[0].to_string_lossy())
+                )
+            );
+            assert_eq!(app.flash, None);
+            assert!(out.is_empty(), "nothing sent: {out:?}");
+        });
+    }
+
+    /// No image on the clipboard: the footer says so and the box is left
+    /// as it was; and a box whose text goes nowhere local (a cloud
+    /// message, a rename) leaves `^V` alone altogether.
+    #[test]
+    fn ctrl_v_with_no_image_says_so_and_pastes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = follow_up_app();
+        app.attachments_dir = Some(root.path().join("attachments"));
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+        type_into(&mut app, "see", &mut out);
+        crate::clipboard_image::with_clipboard(None, || {
+            press(
+                &mut app,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert_eq!(follow_up_text(&app).as_deref(), Some("see"));
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("no image on the clipboard to paste")
+        );
+        assert!(!root.path().join("attachments").exists());
+
+        // The FOLLOW-UP box takes an image as the QUICK PROMPT does.
+        crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+            press(
+                &mut app,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert!(follow_up_text(&app).is_some_and(|t| t.starts_with("see ") && t.ends_with(".png ")));
+
+        let mut rename = follow_up_app();
+        rename.attachments_dir = Some(root.path().join("elsewhere"));
+        let id = rename.tree.agents[0].id.clone();
+        open_prompt(&mut rename, PromptKind::RenameAgent { id });
+        crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+            press(
+                &mut rename,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert!(!root.path().join("elsewhere").exists(), "no image kept");
+    }
+
+    // ---- the SAVED DRAFT ----
+
+    /// The QUICK PROMPT up, by `^N` from the SESSIONS PANEL.
+    fn open_quick_box(app: &mut App, out: &mut Vec<ClientRequest>) {
+        press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(p.kind, PromptKind::QuickPrompt(_))),
+            "{:?}",
+            app.overlay
+        );
+    }
+
+    /// A fresh app — the process after a restart — whose SAVED DRAFT is
+    /// the file at `path`.
+    fn restarted(path: &std::path::Path) -> App {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        app.focus = Focus::Sessions;
+        app.saved_draft = Some(crate::saved_draft::SavedDraft::at(path.to_path_buf()));
+        app
+    }
+
+    /// What is typed into the box is on disk as it is typed — no exit
+    /// hook to wait for — and a box opened after a restart starts from it,
+    /// caret at its end, saying so until the first edit.
+    #[test]
+    fn the_quick_prompt_is_saved_as_typed_and_restored_after_a_restart() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "Fix auth", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            type_into(&mut app, "then ship", &mut out);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship"
+            );
+            // A paste is an edit too.
+            assert!(paste_into_overlay(&mut app, " it"));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship it"
+            );
+
+            // The window closes: no Esc, no clean shutdown.
+            drop(app);
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            assert_eq!(prompt.input.as_str(), "Fix auth\nthen ship it");
+            assert_eq!(prompt.input.cursor_chars(), "Fix auth\nthen ship it".len());
+            assert!(prompt.draft_restored, "the box says the draft came back");
+            type_into(&mut app, "!", &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            assert!(!prompt.draft_restored, "an edit lets the cue go");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship it!"
+            );
+
+            // Emptied by hand, the draft goes with the text.
+            press(&mut app, KeyCode::Char('a'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_text(&app), "");
+            assert!(!path.exists(), "an empty box is no draft");
+        });
+    }
+
+    /// Launching the box spends the draft: the next box opens empty.
+    #[test]
+    fn launching_the_quick_prompt_clears_the_draft() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "Fix auth", &mut out);
+            assert!(path.exists());
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                out.iter()
+                    .any(|r| matches!(r, ClientRequest::CreateAgent { .. })),
+                "{out:?}"
+            );
+            assert!(!path.exists(), "the launch spent the draft");
+            open_quick_box(&mut app, &mut out);
+            assert_eq!(box_text(&app), "");
+        });
+    }
+
+    /// A box with text of its own — a refused launch handed back — keeps
+    /// that text and leaves the draft on disk alone; and the boxes that
+    /// are not the QUICK PROMPT (a preset's task, the FOLLOW-UP) never
+    /// open on it.
+    #[test]
+    fn the_draft_never_lands_in_a_box_with_text_of_its_own() {
+        with_seeded_presets(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            std::fs::write(&path, "my draft").unwrap();
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = app.overlay.take() else {
+                unreachable!();
+            };
+            let PromptKind::QuickPrompt(launch) = prompt.kind else {
+                unreachable!();
+            };
+            reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "refused".into());
+            assert_eq!(box_text(&app), "refused");
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if !p.draft_restored));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+            app.overlay = None;
+
+            let worktree = app.selected_worktree().unwrap().id.clone();
+            let preset = crate::agent_presets::load().into_iter().next().unwrap();
+            open_prompt(&mut app, PromptKind::AgentPresetTask { worktree, preset });
+            assert_eq!(box_text(&app), "");
+            app.overlay = None;
+
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert_eq!(follow_up_text(&app).as_deref(), Some(""));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+        });
+    }
+
+    /// A launch the DAEMON refuses comes back with its text, and that
+    /// text is the draft on disk again.
+    #[test]
+    fn a_refused_launch_puts_the_draft_back() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            let PromptKind::QuickPrompt(launch) = prompt.kind.clone() else {
+                unreachable!();
+            };
+            type_into(&mut app, "Fix auth", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(!path.exists());
+            reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "Fix auth".into());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "Fix auth");
+        });
     }
 
     // ---- INPUT PARITY: a row chosen by the pointer is the row chosen by key ----

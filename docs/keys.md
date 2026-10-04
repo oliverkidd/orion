@@ -383,6 +383,12 @@ with what you typed as its first prompt. Which CLI it launches is the `Agent` ro
 prompt** in Settings → Agents. `Enter` launches; `Enter` on the box empty starts the session bare.
 `Esc`, a click outside it and `^Q` park what you typed, and the next `⌘N` opens on it.
 
+What you type is also saved as you type it, to `quick_prompt_draft.txt` in the DATA DIR, so closing
+the terminal window with the box up loses nothing: the next `⌘N` after a restart opens on the
+draft, caret at its end, its dim explanation line starting `draft restored ·` until you edit it.
+Launching it, or emptying the box, deletes the file. A box that brings its own text — a launch
+the daemon refused, handed back — never takes the draft or overwrites it.
+
 Its header names everything the launch is made of, each field beside the key that changes it — where
 it runs over what runs it:
 
@@ -401,6 +407,7 @@ sends is the dim line along the bottom of the frame.
 | Key | Action |
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
+| `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
 | `Tab` | pick a different harness for this one launch (`→` drills into its model and effort); in Claude's list `Tab` toggles Claude Cloud |
 | `⇧Tab` | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
@@ -456,7 +463,8 @@ skips the rest — or, while the step asks something, backs out of the question.
 | Where | Key | Action |
 |---|---|---|
 | Any typed field | `←→`/`⌥←→`, `^A`/`^E`, `⌥⌫`, `^U`/`^K` | every prompt, filter and query is the same line editor: move by character / word, jump to ends, delete word, kill line |
-| Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight |
+| Any typed field | `⇧←`/`⇧→`, `⌥⇧←`/`⌥⇧→`, `⌘⇧←`/`⌘⇧→` (`⇧Home`/`⇧End`), `⌘A` | select, as a macOS text field does: by character, by word, to the line's start or end, everything. The same key without `⇧` lets the selection go — `←`/`→` land on its edge — and typing, a paste, a line break, `⌫` or any delete replace or remove just the selection. It draws on the theme's selection background. `⌘A` reaches orion once the [Ghostty keybinds](configuration.md#outside-terminal-and-ghostty-keybinds) block releases it from Ghostty's own select-all; `^A` stays the line's start (Ghostty types it for `⌘←`) |
+| Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight. With `⇧` they select: `⇧↑`/`⇧↓` by row (on the first or last row, on to the start or end), `⌘⇧↑`/`⌘⇧↓` to the ends of the text, `⇧PgUp`/`⇧PgDn` a boxful |
 
 ## Chips and readouts
 

@@ -150,8 +150,11 @@ BUILT-IN EDITOR's chords are released whatever the keymap says ([Keys](keys.md#t
 `⌘Z`, `⌘⇧Z`, `⌘D`, `⌘A`, `⌘X`, and the Mac editing chords — `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓`, which
 were Ghostty's jump to prompt, `⌥⌘↑`/`⌥⌘↓`, which were its split up and down (`⌥⌘←`/`⌥⌘→` stay its
 split left and right), and `⌘⇧L`. `⌘←`/`⌘→` are not taken: Ghostty types `^A`/`^E` for them, which a
-shell outside orion still needs and the editor reads as the line's ends. With the default keymap the
-block reads:
+shell outside orion still needs and the editor reads as the line's ends. Every typed field takes two
+of them too: `⌘A` selects its text and `⇧⌘↑`/`⇧⌘↓` select to its ends ([Keys](keys.md#typed-fields)).
+Its other selection chords need no line — Ghostty binds no `⇧⌘←`/`⇧⌘→` or `⌥⇧←`/`⌥⇧→`, and its
+`⇧←`/`⇧→`/`⇧↑`/`⇧↓`, `⇧Home`/`⇧End` binds only act on a selection made in Ghostty itself, so they
+reach orion as they are. With the default keymap the block reads:
 
 ```
 # >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>
