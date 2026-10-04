@@ -294,6 +294,18 @@ impl CreateForm {
         self.pick = 0;
     }
 
+    /// Text about to land in the branch field with the caret: the first
+    /// of it since the caret came replaces the branch the field held — a
+    /// search for another, not an edit of that one's name. Backspace and
+    /// the arrows still edit the held name, as in any field.
+    fn clear_held_branch(&mut self) {
+        if self.field.is_branch() && !self.typed {
+            if let Some(input) = self.input_mut() {
+                input.clear();
+            }
+        }
+    }
+
     /// The branch list's cursor `delta` rows on, held to the list.
     fn move_pick(&mut self, delta: i64) {
         let len = self.choices().len();
@@ -1372,6 +1384,9 @@ fn create_key(app: &mut App, key: KeyEvent) {
             submit = true
         }
         _ => {
+            if is_char_key(&key) {
+                form.clear_held_branch();
+            }
             if form
                 .input_mut()
                 .is_some_and(|i| i.handle_key(&key).changed())
@@ -1436,7 +1451,8 @@ fn change_merge_row(form: &mut MergeForm, forward: bool) {
 }
 
 /// A paste lands in the create form's field under the caret — lines kept
-/// in the description, flattened anywhere else. True while a form is up.
+/// in the description, flattened anywhere else; in a branch field not yet
+/// typed in, in place of the branch it held. True while a form is up.
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(form) = form(app) else {
         return false;
@@ -1448,6 +1464,7 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
         return true;
     }
     let field = form.field;
+    form.clear_held_branch();
     if let Some(input) = form.input_mut() {
         input.insert_str(text);
         if field.is_branch() {
@@ -1455,6 +1472,16 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
         }
     }
     true
+}
+
+/// A key that types a character, rather than moving the caret or editing
+/// round it.
+fn is_char_key(key: &KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers;
+    matches!(key.code, KeyCode::Char(_))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
 
 /// The mouse while a form is up: a click puts the caret on a field —
@@ -1898,6 +1925,52 @@ mod tests {
             form.field = field;
             crate::hints::assert_hints_from(&hints(&PrForm::Create(form)), keys::ALL);
         }
+    }
+
+    /// A branch field holding a branch takes the first letter typed — or a
+    /// paste — in its place, a search for another; what follows is added
+    /// to it. Nothing typed into the title clears it.
+    #[test]
+    fn typing_in_a_branch_field_starts_a_new_search() {
+        use crossterm::event::KeyModifiers;
+        let mut app = App::new();
+        let mut view =
+            PullRequestsView::new(ProjectId("p".into()), "demo".into(), PathBuf::from("/x"));
+        let mut form = CreateForm::new(
+            ProjectId("p".into()),
+            PathBuf::from("/x"),
+            "feature".into(),
+            false,
+        );
+        form.title.set_text("Fix");
+        form.focus(CreateField::From);
+        view.form = Some(Box::new(PrForm::Create(form)));
+        app.overlay = Some(Overlay::PullRequests(view));
+        let create = |app: &mut App| create_form(app).cloned().expect("the form");
+        let type_char = |app: &mut App, c: char| {
+            handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        };
+
+        type_char(&mut app, 'm');
+        type_char(&mut app, 'a');
+        assert_eq!(
+            create(&mut app).from.as_str(),
+            "ma",
+            "replaced, then added to"
+        );
+
+        handle_key(&mut app, KeyEvent::from(KeyCode::Tab));
+        assert!(paste(&mut app, "origin-main"));
+        assert_eq!(create(&mut app).into.as_str(), "origin-main");
+
+        handle_key(&mut app, KeyEvent::from(KeyCode::Tab));
+        assert_eq!(create(&mut app).field, CreateField::Title);
+        assert!(paste(&mut app, " login"));
+        assert_eq!(
+            create(&mut app).title.as_str(),
+            "Fix login",
+            "the title kept"
+        );
     }
 
     /// A branch field's list shows every branch until it is typed in, the
