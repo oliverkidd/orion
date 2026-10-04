@@ -7,7 +7,7 @@
 //! ([`unbinds`]), plus the editing chords the built-in editor takes
 //! ([`EDITOR_CHORDS`]), and nothing orion does not use. A few Ghostty chords are
 //! never taken whatever the keymap says ([`NEVER_RELEASED`]): copy, paste,
-//! quit, and the window and tab keys.
+//! quit, and the window keys and new/close tab.
 //!
 //! The lines live in one marked block orion owns and rewrites in place.
 //! Everything outside it is the user's and is never touched, and a block
@@ -21,8 +21,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 /// The Ghostty chords orion never releases, in Ghostty's spelling, even
-/// with an action rebound onto one: copy, paste, quit, close, new tab, the
-/// tab digits and the window keys stay Ghostty's.
+/// with an action rebound onto one: copy, paste, quit, close, new tab and the
+/// window keys. The tab digits (⌘1–⌘9) go to orion's PROJECT TABS.
 pub const NEVER_RELEASED: &[&str] = &[
     "super+c",
     "super+v",
@@ -35,15 +35,6 @@ pub const NEVER_RELEASED: &[&str] = &[
     "super+shift+t",
     "super+enter",
     "super+ctrl+f",
-    "super+1",
-    "super+2",
-    "super+3",
-    "super+4",
-    "super+5",
-    "super+6",
-    "super+7",
-    "super+8",
-    "super+9",
 ];
 
 /// First and last line of the block orion owns.
@@ -383,6 +374,24 @@ mod tests {
             keymap_unbinds(&keymap),
             [
                 "super+k",
+                "super+1",
+                "super+digit_1",
+                "super+2",
+                "super+digit_2",
+                "super+3",
+                "super+digit_3",
+                "super+4",
+                "super+digit_4",
+                "super+5",
+                "super+digit_5",
+                "super+6",
+                "super+digit_6",
+                "super+7",
+                "super+digit_7",
+                "super+8",
+                "super+digit_8",
+                "super+9",
+                "super+digit_9",
                 "super+e",
                 "super+r",
                 "super+l",
