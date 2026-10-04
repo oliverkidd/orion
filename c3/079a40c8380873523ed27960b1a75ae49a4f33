@@ -1,0 +1,51 @@
+crates/orion-tui/src/theme.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 259-323
+crates/orion-tui/src/ui/footer.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 157-162,316-327,367
+scripts/shot/scenes/sky-home-slate.setup.sh
+  s_bf0bfc305b0126::t_f89926c58c24ea 1-3
+crates/orion-tui/src/app.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 735-737,3648-3650,4323
+crates/orion-tui/src/ui/launcher_view.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 2010-2011,2570
+crates/orion-tui/src/keymap.rs
+  s_bf0bfc305b0126::t_09706c3ba17fda 2028,2035
+  s_bf0bfc305b0126::t_f89926c58c24ea 76-78,101,125-129,185-187,409,457-459,553-565,788-798
+scripts/shot/scenes/sky-home-slate.keys
+  s_bf0bfc305b0126::t_f89926c58c24ea 1-6
+crates/orion-tui/src/claude_accounts.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 398-409,412-414,443-445,451-457,487-562,1041-1046,1052-1053,1055-1060,1066,1071,1077-1135
+  s_bf0bfc305b0126::t_22faa7f85f5039 1136
+crates/orion-tui/src/event_loop/launcher.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 3699-3892,8926,8930
+crates/orion/src/main.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 103-104,108,112-117
+crates/orion-tui/src/lib.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 88-89,91-94,98-118
+  s_bf0bfc305b0126::t_656c80f5361e74 119-120
+crates/orion-tui/src/splash.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 2-13,22,38-59,70-100,115-165,196-200,207,212,234-252,257,263,265,273,283-284,306,331,435,440-448,458-460,466-476,480-538,541-549,570,573,578-579,581-584,586-595,600-606,609,612-613,617-619,624,629-630,648,657-659,663-704
+docs/configuration.md
+  s_bf0bfc305b0126::t_f89926c58c24ea 359,381-390
+crates/orion-tui/src/event_loop.rs
+  s_bf0bfc305b0126::t_f89926c58c24ea 240-253,267,853-857,2753-2758,3205-3211,3524,3753,4334,5715-5750,5786-5803,8296-8299,26251,26253-26254,26257,27548-27588,34505-34510
+crates/orion-tui/src/ghostty_config.rs
+  s_bf0bfc305b0126::t_09706c3ba17fda 10,25-29
+  s_bf0bfc305b0126::t_f89926c58c24ea 11,404,406,421,523,526
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3079a40c8380873523ed27960b1a75ae49a4f33",
+  "prompts": {},
+  "sessions": {
+    "s_bf0bfc305b0126": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fe852ff6-ce7e-42b8-ab25-42329073dedd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
