@@ -281,6 +281,9 @@ async fn main_loop(
     // A screenshot dropped onto a prompt box is copied here the moment it
     // lands, before macOS deletes the file behind its thumbnail.
     app.attachments_dir = Some(crate::dropped_files::default_dir());
+    // The QUICK PROMPT's unsent text, as the last run left it — a window
+    // closed mid-sentence keeps the sentence (`saved_draft`).
+    app.saved_draft = Some(crate::saved_draft::SavedDraft::default_location());
     // The Cursor MODEL / EFFORT lists: cached `cursor-agent --list-models`
     // now, a background refresh when the cache is a day old.
     crate::cursor_catalogue::bootstrap(cfg.cursor_enabled);
@@ -2412,6 +2415,12 @@ fn ui_state_json(app: &App) -> String {
         launcher_open_bands: saved_open_bands(app),
         launcher_tabs: app.launcher_tabs.iter().map(|id| id.to_string()).collect(),
         projects_closed: app.projects_closed,
+        archived_open: app
+            .archived_open
+            .iter()
+            .filter(|id| app.tree.worktrees.iter().any(|w| &w.id == *id))
+            .map(|id| id.to_string())
+            .collect(),
     };
     serde_json::to_string(&state).unwrap_or_else(|_| "{}".into())
 }
@@ -2449,6 +2458,7 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
         return false;
     };
     app.show_archived = state.show_archived;
+    app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
     app.issues_collapsed = state.issues_collapsed;
     if let Some(w) = state.diff_files_width {
@@ -2951,6 +2961,8 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         }
         _ => return false,
     }
+    // A paste into the QUICK PROMPT is the SAVED DRAFT now.
+    crate::saved_draft::note_edit(app);
     app.dirty = true;
     true
 }
@@ -2987,6 +2999,70 @@ fn staged_drop(dir: Option<&std::path::Path>, text: &str, flash: &mut Option<Str
         *flash = Some(format!("couldn't keep a copy of {name}: {err}"));
     }
     staged.text
+}
+
+/// `^V` in a box bound for an agent on this machine: the image on the
+/// system clipboard, kept in the attachments folder a drop is copied to,
+/// its path at the caret (`clipboard_image`). Reading the clipboard is
+/// `osascript` starting up — a good part of a second, too long to hold
+/// the loop — so it runs on the blocking pool and lands as
+/// `Answer::ClipboardImage`; without a pool (the unit tests, which stub
+/// the clipboard) it runs inline. No attachments folder (the unit tests
+/// that install none) is no paste.
+fn paste_clipboard_image(app: &mut App) {
+    let Some(dir) = app.attachments_dir.clone() else {
+        app.flash = Some("no attachments folder to keep a pasted image in".into());
+        return;
+    };
+    match app.view_jobs.clone() {
+        Some(jobs) => {
+            app.flash = Some("reading the clipboard…".into());
+            jobs.run(move || {
+                Some(crate::view_jobs::Answer::ClipboardImage(
+                    crate::clipboard_image::paste_into(&dir),
+                ))
+            });
+        }
+        None => land_clipboard_image(app, crate::clipboard_image::paste_into(&dir)),
+    }
+}
+
+/// What a `^V` found, landed: the image's path into the box bound for a
+/// local agent that is up — the prompt box, else an open FOLLOW-UP
+/// COMPOSER — over its selection or at its caret, as a staged drop lands.
+/// No image says so in the footer; an image with no box left to take it
+/// (closed while the clipboard was read) says where it was kept.
+pub(crate) fn land_clipboard_image(app: &mut App, pasted: crate::clipboard_image::Pasted) {
+    use crate::clipboard_image::{insertion, Pasted};
+    app.dirty = true;
+    let path = match pasted {
+        Pasted::Saved(path) => path,
+        Pasted::NoImage => {
+            app.flash = Some("no image on the clipboard to paste".into());
+            return;
+        }
+        Pasted::Failed(why) => {
+            app.flash = Some(format!("couldn't paste the image: {why}"));
+            return;
+        }
+    };
+    app.flash = None;
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if prompt.kind.reaches_local_agent() {
+            let text = insertion(&path, prompt.input.char_before_insert());
+            prompt.input.insert_str(&text);
+            crate::saved_draft::note_edit(app);
+            return;
+        }
+    }
+    if app.follow_up_live() {
+        if let Some(follow_up) = &mut app.follow_up {
+            let text = insertion(&path, follow_up.input.char_before_insert());
+            follow_up.input.insert_str(&text);
+            return;
+        }
+    }
+    app.flash = Some(format!("image kept at {}", path.display()));
 }
 
 /// One key while the composer is open and the SESSIONS PANEL has focus.
@@ -3027,6 +3103,8 @@ fn follow_up_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) -> 
         {
             send_follow_up(app, out);
         }
+        // `^V`: the clipboard's image, as the prompt boxes take it.
+        _ if ui::task_keys::IMAGE.matches(&key) => paste_clipboard_image(app),
         _ => {
             if let Some(follow_up) = &mut app.follow_up {
                 if follow_up.input.handle_key(&key).consumed() {
@@ -3202,6 +3280,10 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // ⌘. may arrive as macOS's Cancel — an Escape still holding ⌘ — and
+    // must never reach an Esc arm as one: the new-agent box would close
+    // under its own **Select worktree** key.
+    let key = crate::keymap::untangle_cmd_period(key);
     // `⌘W` closes the agent or terminal in the pane, never a modal: over
     // the editor, a markdown page or any overlay it does nothing at all,
     // rather than reach the editor as its `^W` or a list as a `w`.
@@ -3717,6 +3799,9 @@ fn dispatch_action(
                 }
             }
         }
+        // The grid's own key (`launcher::handle_action`): with a session
+        // full-screen over the view there is no band to fold one under.
+        Action::ToggleArchivedDrawer => {}
         // The grid takes this itself (`launcher::handle_action`); it
         // reaches here from the menu and with a session full-screen over
         // the view, where there are no cards to swap.
@@ -4193,10 +4278,37 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             );
             (
                 "Add a Claude account".into(),
-                format!("short name — its config dir is ~/.claude-<name> (empty = {next})").into(),
+                format!(
+                    "name it goes by — its config dir is ~/.claude-<name> (empty = {next}, \
+                     no name)"
+                )
+                .into(),
                 String::new(),
             )
         }
+        PromptKind::RenameClaudeAccount { id } => {
+            let cfg = crate::config::Config::load();
+            let dir = cfg
+                .harness_registry()
+                .iter()
+                .find(|entry| entry.id == *id)
+                .and_then(crate::claude_accounts::dir_of)
+                .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
+            (
+                format!("Rename · {dir}").into(),
+                format!(
+                    "name it goes by, before its email (empty = {}) — {id} and {dir} stay",
+                    crate::claude_accounts::DEFAULT_NAME
+                )
+                .into(),
+                crate::claude_accounts::current_name(&cfg, id),
+            )
+        }
+        PromptKind::AdoptClaudeDir { dir } => (
+            format!("Add back · {}", crate::claude_accounts::tilde(dir)).into(),
+            "name it goes by — its login and transcripts come with it (empty = no name)".into(),
+            crate::claude_accounts::suggested_name(dir),
+        ),
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -5044,6 +5156,7 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             app.pending_clipboard = Some(payload);
             app.flash = Some(flash);
         }
+        Answer::ClipboardImage(pasted) => land_clipboard_image(app, pasted),
         Answer::Flash(message) => app.flash = Some(message),
         Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
@@ -5528,7 +5641,12 @@ fn handle_page_key(app: &mut App, key: KeyEvent) {
 /// on the dialog's Enter ([`archive_agent_now`]).
 fn archive_agent(app: &mut App, id: AgentId) {
     if let Some(a) = app.tree.agents.iter().find(|a| a.id == id) {
-        app.overlay = Some(Overlay::Confirm(confirm_archive_agent(&a.name, id)));
+        let undo = crate::hints::key_or(
+            &app.keymap,
+            crate::keymap::Action::Unarchive,
+            "Unarchive in its menu",
+        );
+        app.overlay = Some(Overlay::Confirm(confirm_archive_agent(&a.name, id, &undo)));
     }
 }
 
@@ -5540,11 +5658,11 @@ fn archive_agent_now(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
 }
 
 /// The confirm before an agent is archived. The message says why saying
-/// yes is cheap: `u` undoes it.
-fn confirm_archive_agent(name: &str, id: AgentId) -> ConfirmDialog {
+/// yes is cheap: `undo`, the unarchive key, brings it back.
+fn confirm_archive_agent(name: &str, id: AgentId, undo: &str) -> ConfirmDialog {
     ConfirmDialog {
         title: "Archive agent".into(),
-        message: format!("Archive agent '{name}'? It leaves the list; u brings it back."),
+        message: format!("Archive agent '{name}'? It leaves the list; {undo} brings it back."),
         action: PendingAction::ArchiveAgent(id),
         area: ratatui::layout::Rect::default(),
     }
@@ -6131,7 +6249,7 @@ fn selected_project_main_worktree(app: &App) -> Option<WorktreeId> {
     app.root_worktree(&project.id)
 }
 
-/// `n` on a PROJECT OPEN PRS GROUP row: the NEW SESSION PICKER's harness
+/// `n` on a PROJECT OPEN PRS GROUP row: the NEW AGENT PICKER's harness
 /// rows, every one carrying the PR's URL and — through the same MODEL /
 /// EFFORT submenus, and as directly on Enter — launching a PR SESSION.
 pub(super) fn open_pr_agent_picker(app: &mut App) {
@@ -6419,8 +6537,11 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
 fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientRequest>) -> bool {
     match *target {
         HitTarget::LauncherCard(at) => launcher::select_card_row(app, at, out),
-        HitTarget::LauncherBand(i) | HitTarget::LauncherBandMore(i) => {
-            launcher::select_band_row(app, i, out)
+        HitTarget::LauncherBand(i)
+        | HitTarget::LauncherBandMore(i)
+        | HitTarget::LauncherDrawer(i) => launcher::select_band_row(app, i, out),
+        HitTarget::LauncherDrawerEntry(band, entry) => {
+            launcher::select_drawer_entry(app, band, entry, out)
         }
         HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
         HitTarget::LauncherCardIssue(ref id) => launcher::select_issue_card(app, id, out),
@@ -6603,7 +6724,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     *menu = *parent;
                 }
             }
-            // The NEW SESSION PICKER's Claude row — and the QUICK PROMPT
+            // The NEW AGENT PICKER's Claude row — and the QUICK PROMPT
             // `Tab` picker's, for a box that can go to the cloud — owns
             // Tab as a launch-mode toggle, and so do the rows of the
             // Claude MODEL / EFFORT lists behind it (`→`, or the box's
@@ -6633,6 +6754,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     PromptKind::SettingText { .. }
                         | PromptKind::ClaudeSignIn { .. }
                         | PromptKind::AddClaudeAccount
+                        | PromptKind::RenameClaudeAccount { .. }
+                        | PromptKind::AdoptClaudeDir { .. }
                 );
                 // The comment box stood in for the ISSUES MODAL: Esc puts
                 // the modal back on its row, the comment unposted.
@@ -6694,6 +6817,13 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 app.overlay = None;
                 submit_prompt(app, prompt, out);
+            }
+            // `^V` in a box bound for an agent on this machine: the
+            // image on the system clipboard, kept where the agent can open
+            // it, its path at the caret (`clipboard_image`). Every other
+            // prompt leaves `^V` to nothing, as the line editor does.
+            _ if ui::task_keys::IMAGE.matches(&key) && prompt.kind.reaches_local_agent() => {
+                paste_clipboard_image(app)
             }
             // `⌘P` / `^P`: the PROJECT PICKER over the box. The checkout,
             // the model and the effort keys are the keymap's (Select
@@ -6768,6 +6898,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 let edit = prompt.input.handle_key(&key);
                 if edit.changed() {
                     prompt.refresh_dirs();
+                    // A QUICK PROMPT's text is the SAVED DRAFT as typed.
+                    crate::saved_draft::note_edit(app);
                 } else if !edit.consumed() && prompt.is_multiline() {
                     match key.code {
                         KeyCode::Up => prompt.input.cursor_to_start(),
@@ -7166,15 +7298,16 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let tabs = crate::config::tab_count();
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    // A CLAUDE ACCOUNTS row's own verbs: `o` signs it out, `⌫` removes it.
-    let account = || {
-        !on_tabs
-            && tab == crate::config::agents_tab()
-            && matches!(
-                crate::config::Config::load().account_row(selected),
-                Some(crate::config::AccountRow::Account(_))
-            )
+    // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
+    // out, `⌫` removes it — and `⌫` on a dir SAVED ON THIS MACHINE moves
+    // it to the Trash.
+    let account_row = || {
+        (!on_tabs && tab == crate::config::agents_tab())
+            .then(|| crate::config::Config::load().account_row(selected))
+            .flatten()
     };
+    let account = || matches!(account_row(), Some(crate::config::AccountRow::Account(_)));
+    let on_disk = || matches!(account_row(), Some(crate::config::AccountRow::OnDisk(_)));
 
     use crate::ui::settings_keys as keys;
     let cmd = match key.code {
@@ -7207,8 +7340,11 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => SettingsCmd::Move(selected - 1),
         _ if keys::CHOOSE.matches(&key) => activate::settings_row_cmd(hotkeys, selected),
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
+        _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
-        _ if keys::REMOVE.matches(&key) && account() => SettingsCmd::RemoveAccount(selected),
+        _ if keys::REMOVE.matches(&key) && (account() || on_disk()) => {
+            SettingsCmd::RemoveAccount(selected)
+        }
         _ if keys::ADD.matches(&key) && hotkeys => SettingsCmd::Capture { add: true },
         _ if keys::DEFAULT.matches(&key) && hotkeys => SettingsCmd::ResetHotkey,
         _ if keys::UNBIND.matches(&key) && hotkeys => SettingsCmd::ClearHotkey,
@@ -7267,6 +7403,14 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
         }
         SettingsCmd::Apply(i, delta) => apply_setting_at(app, tab, i, delta),
         SettingsCmd::Install(i) => ask_install(app, tab, i),
+        SettingsCmd::RenameAccount(i) => {
+            if let Some(crate::config::AccountRow::Account(id)) =
+                crate::config::Config::load().account_row(i)
+            {
+                app.remember_settings_row(tab, i);
+                open_prompt(app, PromptKind::RenameClaudeAccount { id });
+            }
+        }
         SettingsCmd::SignOut(i) => confirm_sign_out(app, i),
         SettingsCmd::RemoveAccount(i) => confirm_remove_account(app, i),
         SettingsCmd::Capture { add } => {
@@ -7359,9 +7503,11 @@ enum SettingsCmd {
     Apply(usize, i32),
     /// `i` on a row whose program isn't on PATH.
     Install(usize),
+    /// `r` on a CLAUDE ACCOUNTS row.
+    RenameAccount(usize),
     /// `o` on a CLAUDE ACCOUNTS row.
     SignOut(usize),
-    /// `⌫` on a CLAUDE ACCOUNTS row.
+    /// `⌫` on a CLAUDE ACCOUNTS row, or on a dir SAVED ON THIS MACHINE.
     RemoveAccount(usize),
     Capture {
         add: bool,
@@ -7492,7 +7638,7 @@ fn edit_keymap(app: &mut App, edit: impl FnOnce(&mut crate::keymap::Keymap)) -> 
 
 /// REMEMBER HARNESS (Settings → Experimental): make a launch's harness —
 /// and a model or effort picked for it — the defaults the next NEW
-/// SESSION PICKER and QUICK PROMPT start from
+/// AGENT PICKER and QUICK PROMPT start from
 /// (`Config::remember_launch`). Nothing is written while the switch is
 /// off or the pick already is the default; a failed write flashes.
 fn remember_launch(
@@ -7523,7 +7669,8 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
-    // the new one's name.
+    // the new one's name, and a dir SAVED ON THIS MACHINE for the name to
+    // add it back under.
     if tab == crate::config::agents_tab() {
         use crate::config::AccountRow;
         match (crate::config::Config::load().account_row(index), delta) {
@@ -7534,6 +7681,16 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             (Some(AccountRow::Add), _) => {
                 if let Some(view) = settings_mut(app) {
                     view.info("Enter: name a new account");
+                }
+                return;
+            }
+            (Some(AccountRow::OnDisk(dir)), 0) => {
+                app.remember_settings_row(tab, index);
+                return open_prompt(app, PromptKind::AdoptClaudeDir { dir });
+            }
+            (Some(AccountRow::OnDisk(_)), _) => {
+                if let Some(view) = settings_mut(app) {
+                    view.info("Enter: add it back · ⌫: move it to the Trash");
                 }
                 return;
             }
@@ -7716,13 +7873,17 @@ fn confirm_sign_out(app: &mut App, index: usize) {
 
 /// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
 /// config.json, behind a confirm asking whether its config dir goes to
-/// the Trash too — kept unless `t` says so. The default account and a
-/// hand-written `harnesses` entry are not orion's to remove: the notice
-/// says what to do instead.
+/// the Trash too — kept unless `t` says so, and listed under SAVED ON
+/// THIS MACHINE once kept. The default account and a hand-written
+/// `harnesses` entry are not orion's to remove: the notice says what to
+/// do instead. On a dir SAVED ON THIS MACHINE, the Trash, behind its own
+/// confirm.
 fn confirm_remove_account(app: &mut App, index: usize) {
     let cfg = crate::config::Config::load();
-    let Some(crate::config::AccountRow::Account(id)) = cfg.account_row(index) else {
-        return;
+    let id = match cfg.account_row(index) {
+        Some(crate::config::AccountRow::Account(id)) => id,
+        Some(crate::config::AccountRow::OnDisk(dir)) => return confirm_trash_dir(app, index, dir),
+        _ => return,
     };
     if !cfg.is_extra_account(&id) {
         let why = if AgentKind::parse(&id) == Some(AgentKind::Claude) {
@@ -7742,8 +7903,9 @@ fn confirm_remove_account(app: &mut App, index: usize) {
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Remove account".into(),
         message: format!(
-            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. {dir} — its \
-             login,\nsettings and transcripts — stays on disk unless it goes to the Trash.",
+            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. \
+             {dir} — its login,\nsettings and transcripts — stays on disk, listed under Saved \
+             on this machine\nto add back or trash later, unless it goes to the Trash now.",
             entry.display_label()
         ),
         action: PendingAction::RemoveClaudeAccount { id },
@@ -7771,13 +7933,29 @@ fn ask_to_share(app: &mut App, name: &str) {
     }
     let from = crate::claude_accounts::default_dir(&cfg)
         .map_or_else(|| "~/.claude".into(), |d| crate::claude_accounts::tilde(&d));
+    let shown = crate::claude_accounts::tilde(&new.dir);
+    // A dir already there is adopted, login and all: say so before it is.
+    let own = if new.dir.is_dir() {
+        let who = match crate::claude_accounts::dir_state(&new.dir) {
+            Some(crate::claude_accounts::SignIn::As(email)) => format!(", signed in as {email}"),
+            _ => String::new(),
+        };
+        format!(
+            "{shown} is already on this machine{who}: its login, history and transcripts \
+             come with it."
+        )
+    } else {
+        "Its login, history and transcripts stay its own.".to_string()
+    };
+    let named = match new.name.as_str() {
+        "" => new.id.clone(),
+        name => format!("{name} ({})", new.id),
+    };
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Add a Claude account".into(),
         message: format!(
-            "Add {} in {}, and share {from}'s setup with it?\nLinked, so an edit in either \
-             account is an edit in both: {}.\nIts login, history and transcripts stay its own.",
-            new.id,
-            crate::claude_accounts::tilde(&new.dir),
+            "Add {named} in {shown}, and share {from}'s setup with it?\nLinked, so an edit in \
+             either account is an edit in both: {}.\n{own}",
             shared.join(", ")
         ),
         action: PendingAction::AddClaudeAccount(new),
@@ -7791,12 +7969,7 @@ fn add_claude_account(app: &mut App, new: crate::claude_accounts::NewAccount, sh
     let result = crate::claude_accounts::add(&new, share);
     open_claude_accounts(app, Some(&new.id));
     crate::claude_accounts::request_refresh(app, true);
-    if let Some(view) = settings_mut(app) {
-        match result {
-            Ok(note) => view.info(note),
-            Err(why) => view.warn(why),
-        }
-    }
+    settings_note(app, result);
 }
 
 /// Remove account `id` — its config dir to the Trash when `trash` says
@@ -7805,12 +7978,73 @@ fn remove_claude_account(app: &mut App, id: &str, trash: bool) {
     let result = crate::claude_accounts::remove(id, trash);
     open_claude_accounts(app, None);
     crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
+}
+
+/// The answer of an account verb in the overlay's notice: what happened,
+/// or why nothing did.
+fn settings_note(app: &mut App, result: Result<String, String>) {
     if let Some(view) = settings_mut(app) {
         match result {
             Ok(note) => view.info(note),
             Err(why) => view.warn(why),
         }
     }
+}
+
+/// `r`'s name typed: give account `id` it — only the name; its id and dir
+/// stay — and land back on its row, the cards renamed at the next read.
+fn rename_claude_account(app: &mut App, id: &str, name: &str) {
+    let result = crate::claude_accounts::rename(id, name);
+    open_claude_accounts(app, Some(id));
+    crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
+}
+
+/// Enter's name typed on a dir SAVED ON THIS MACHINE: add it back as an
+/// account, dir and login as they are — no setup shared into it, which it
+/// has its own of — and land on its row.
+fn adopt_claude_dir(app: &mut App, dir: &std::path::Path, name: &str) {
+    let cfg = crate::config::Config::load();
+    let new = match crate::claude_accounts::plan_adopt(&cfg, dir, name) {
+        Ok(new) => new,
+        Err(why) => {
+            reopen_settings(app);
+            return settings_note(app, Err(why));
+        }
+    };
+    let result = crate::claude_accounts::add(&new, false);
+    open_claude_accounts(app, Some(&new.id));
+    crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
+}
+
+/// `⌫` on a dir SAVED ON THIS MACHINE: move it to the Trash, behind a
+/// confirm that says what goes with it.
+fn confirm_trash_dir(app: &mut App, index: usize, dir: std::path::PathBuf) {
+    let shown = crate::claude_accounts::tilde(&dir);
+    let who = match crate::claude_accounts::dir_state(&dir) {
+        Some(crate::claude_accounts::SignIn::As(email)) => format!("its login as {email}"),
+        _ => "its login".to_string(),
+    };
+    app.remember_settings_row(crate::config::agents_tab(), index);
+    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
+        title: "Move to the Trash".into(),
+        message: format!(
+            "Move {shown} to the Trash?\nNo account runs in it; {who}, its settings and its \
+             transcripts\ngo with it. The Trash can still put it back."
+        ),
+        action: PendingAction::TrashClaudeDir { dir },
+        area: ratatui::layout::Rect::default(),
+    }));
+}
+
+/// Move `dir` to the Trash and land back on the section.
+fn trash_claude_dir(app: &mut App, dir: &std::path::Path) {
+    let result = crate::claude_accounts::trash_dir(dir);
+    open_claude_accounts(app, None);
+    crate::claude_accounts::request_refresh(app, true);
+    settings_note(app, result);
 }
 
 /// Swap a session picker for the settings overlay parked on that
@@ -8008,6 +8242,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         | PromptKind::SettingText { .. }
         | PromptKind::ClaudeSignIn { .. }
         | PromptKind::AddClaudeAccount
+        | PromptKind::RenameClaudeAccount { .. }
+        | PromptKind::AdoptClaudeDir { .. }
         | PromptKind::AgentPresetTask { .. } => true,
         PromptKind::QuickPrompt(launch) => launch.launches_empty(),
         _ => false,
@@ -8029,6 +8265,10 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             _ => {}
         }
         return;
+    }
+    // A QUICK PROMPT sending the SAVED DRAFT spends it.
+    if matches!(prompt.kind, PromptKind::QuickPrompt(_)) {
+        crate::saved_draft::launched(app, prompt.input.as_str());
     }
     match prompt.kind {
         PromptKind::AddProject => open_folder(app, shellexpand_home(&value), out),
@@ -8199,6 +8439,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             crate::claude_accounts::sign_in(app, &id, Some(&value));
         }
         PromptKind::AddClaudeAccount => ask_to_share(app, &value),
+        PromptKind::RenameClaudeAccount { id } => rename_claude_account(app, &id, &value),
+        PromptKind::AdoptClaudeDir { dir } => adopt_claude_dir(app, &dir, &value),
     }
 }
 
@@ -8292,6 +8534,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             crate::claude_accounts::sign_out(app, &id);
         }
         PendingAction::RemoveClaudeAccount { id } => remove_claude_account(app, &id, false),
+        PendingAction::TrashClaudeDir { dir } => trash_claude_dir(app, &dir),
         PendingAction::Quit => app.should_quit = true,
         PendingAction::Restart => {
             app.restart = true;
@@ -8563,7 +8806,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 if back.from_box {
                     crate::quick_prompt::reopen(app, launch, &back.text);
                 } else {
-                    // No box was up (`n`'s NEW SESSION PICKER): the pick
+                    // No box was up (`n`'s NEW AGENT PICKER): the pick
                     // OPENS one, on the spec just chosen.
                     crate::quick_prompt::open_picked_box(app, launch);
                 }
@@ -10543,6 +10786,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherStripLeft(_)
                 | HitTarget::LauncherStripRight(_)
                 | HitTarget::LauncherBandMore(_)
+                | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
                 | HitTarget::LauncherPaneSide
@@ -11219,6 +11463,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // `▾ 6 more · Tab: see all 8` under a band's row: the band
                 // opens, the very toggle Tab runs.
                 Some(HitTarget::LauncherBandMore(i)) => launcher::click_band_more(app, i, out),
+                // `▸ 3 archived` under a band: its ARCHIVED DRAWER folds
+                // or unfolds, as `z` does.
+                Some(HitTarget::LauncherDrawer(i)) => launcher::click_drawer(app, i, out),
+                // An archived session's line in an unfolded drawer: the
+                // cursor onto it; a second click brings it back.
+                Some(HitTarget::LauncherDrawerEntry(band, entry)) => {
+                    launcher::click_drawer_entry(app, band, entry, out)
+                }
                 // The PULL REQUEST on a band's rule: it opens in the
                 // browser, through the very `open_pull_request` `⇧V` runs.
                 Some(HitTarget::LauncherBandPr(wid)) => {
@@ -11437,6 +11689,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherStripLeft(_)
                             | HitTarget::LauncherStripRight(_)
                             | HitTarget::LauncherBandMore(_)
+                            | HitTarget::LauncherDrawer(_)
+                            | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
                     )
                 )
@@ -12130,6 +12384,8 @@ fn attach_created(
 pub(crate) fn reopen_prompt_with(app: &mut App, mut kind: PromptKind, text: String) {
     if let PromptKind::QuickPrompt(launch) = &mut kind {
         crate::quick_prompt::restack(app, launch);
+        // The launch spent the SAVED DRAFT; the text is the draft again.
+        crate::saved_draft::refused(app, &text);
     }
     open_prompt(app, kind);
     if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
@@ -14100,7 +14356,7 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Enter open your first project"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
-        assert!(text.contains("q quit"), "{text}");
+        assert!(text.contains("^C quit"), "{text}");
         for dead in ["⌫ delete", "t terminal", "a archive"] {
             assert!(
                 !text.contains(dead),
@@ -17543,7 +17799,7 @@ diff --git a/src/c.rs b/src/c.rs
         })
     }
 
-    /// Esc on the NEW SESSION PICKER sends nothing: opening it warmed
+    /// Esc on the NEW AGENT PICKER sends nothing: opening it warmed
     /// nothing, and only Enter on a row creates.
     #[test]
     fn esc_on_the_new_session_picker_sends_nothing() {
@@ -17664,7 +17920,7 @@ diff --git a/src/c.rs b/src/c.rs
         let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
@@ -17695,7 +17951,7 @@ diff --git a/src/c.rs b/src/c.rs
         let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(!buffer_text(&terminal).contains('⇡'), "nothing to flag yet");
 
@@ -18387,16 +18643,16 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         let mut out = Vec::new();
 
-        // Panel focus: 'q' asks first, then quits on `y`.
+        // Panel focus: ^C asks first, then quits on `y`.
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut out,
         );
-        assert!(!app.should_quit, "q asks before it quits");
+        assert!(!app.should_quit, "^C asks before it quits");
         assert!(
             matches!(&app.overlay, Some(Overlay::Confirm(c)) if c.action == PendingAction::Quit),
-            "q opens the quit confirm"
+            "^C opens the quit confirm"
         );
         handle_key(
             &mut app,
@@ -18427,15 +18683,13 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.term_locked, "Ctrl+q clears the input lock");
     }
 
-    /// `q` sits among the panel hotkeys, so a letter meant for an agent used
-    /// to end the client outright. Both quit chords ask first, and backing
-    /// out leaves the app exactly where it was.
+    /// A letter meant for an agent used to end the client outright, so
+    /// quit is no bare key at all, and its chord asks first; backing out
+    /// leaves the app exactly where it was.
     #[test]
     fn quit_asks_before_it_closes_the_tui() {
-        for chord in [
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        ] {
+        {
+            let chord = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             let mut app = App::new();
             seed_tree(&mut app);
             let mut out = Vec::new();
@@ -18513,7 +18767,7 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Menu(menu)) = &app.overlay else {
                 panic!("expected agent-type picker, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             assert_eq!(
                 menu.items.len(),
                 AgentKind::ALL.len() - 1,
@@ -19109,7 +19363,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "`?` leaves other menus alone"
             );
 
-            // The New session picker itself advertises the jump.
+            // The NEW AGENT PICKER itself advertises the jump.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             open_picker(&mut app);
             let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -19570,7 +19824,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             open_picker(&mut app);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
             };
             let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
             assert_eq!(
@@ -19763,7 +20017,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert!(matches!(
             &app.overlay,
-            Some(Overlay::Menu(m)) if m.title.as_deref() == Some("New session")
+            Some(Overlay::Menu(m)) if m.title.as_deref() == Some("New agent — choose harness")
         ));
     }
 
@@ -23308,7 +23562,7 @@ diff --git a/src/c.rs b/src/c.rs
 
     // ---- git-diff modal ----
 
-    /// The NEW SESSION PICKER for the selected checkout — what the card
+    /// The NEW AGENT PICKER for the selected checkout — what the card
     /// menu's **New agent** opens, and what the Sessions panel's `n` used
     /// to. The GRID's `n` is the QUICK PROMPT box, so the picker is opened
     /// here rather than typed into being.
@@ -26402,10 +26656,187 @@ diff --git a/src/c.rs b/src/c.rs
                 "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
                 "private browser window",
                 "Claude (a@b.co) · ~/.claude-2",
-                "Enter sign in · o sign out",
+                "Enter sign in · r rename · o sign out",
             ] {
                 assert!(text.contains(needle), "{needle}:\n{text}");
             }
+        });
+    }
+
+    /// `r` asks for a name, prefilled with the one it has; Enter keeps it
+    /// — the id and the dir unmoved — and Esc leaves it. The default
+    /// account is renamed the same way, and an empty name puts it back on
+    /// `Claude`.
+    #[test]
+    fn r_renames_an_account_and_only_its_name() {
+        with_two_accounts(|root| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            open_account_row(&mut app, 1, &mut out);
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::RenameClaudeAccount { id: "claude-2".into() }
+                        && p.input.as_str().is_empty()),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "Work", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert_eq!(
+                settings_view(&app).selected,
+                crate::config::AGENTS_HEAD.len() + 1,
+                "back on its row"
+            );
+            let cfg = crate::config::Config::load();
+            let account = &cfg.claude_accounts[0];
+            assert_eq!(
+                (account.id.as_str(), account.name.as_str()),
+                ("claude-2", "Work")
+            );
+            assert_eq!(account.dir(), root.join(".claude-2"));
+            assert_eq!(
+                cfg.effective_harness_by_id("claude-2").display_label(),
+                "Work (not signed in)"
+            );
+            // Prefilled with it next time; Esc keeps it.
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Work"));
+            type_text(&mut app, " Laptop", &mut out);
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert_eq!(
+                crate::config::Config::load().claude_accounts[0].name,
+                "Work"
+            );
+
+            // The default account.
+            press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            type_text(&mut app, "Personal", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let cfg = crate::config::Config::load();
+            assert_eq!(
+                cfg.effective_harness_by_id("claude").display_label(),
+                "Personal (a@b.co)"
+            );
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            for _ in 0.."Personal".len() {
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let cfg = crate::config::Config::load();
+            assert_eq!(
+                cfg.effective_harness_by_id("claude").display_label(),
+                "Claude (a@b.co)"
+            );
+            assert!(!cfg.harnesses.contains_key("claude"));
+        });
+    }
+
+    /// SAVED ON THIS MACHINE in the overlay: a removed account's dir is
+    /// listed under the accounts with who it is; Enter adds it back under
+    /// the name typed (prefilled from its folder), and `⌫` moves one to
+    /// the Trash behind a confirm.
+    #[test]
+    fn saved_dirs_come_back_or_go_to_the_trash() {
+        with_two_accounts(|root| {
+            std::fs::create_dir_all(root.join(".claude-old")).unwrap();
+            std::fs::write(
+                root.join(".claude-old/.claude.json"),
+                r#"{"oauthAccount": {"emailAddress": "old@b.co"}}"#,
+            )
+            .unwrap();
+            crate::claude_accounts::refresh_now();
+            let bin = root.join(".Trash");
+            let skills = crate::skills::Places {
+                home: Some(root.to_path_buf()),
+                trash: Some(crate::skills::Trash::Mac(bin.clone())),
+                ..Default::default()
+            };
+            crate::skills::with_places(skills, || {
+                let mut app = App::new();
+                let mut out = Vec::new();
+                // claude, claude-2, Add account, then the saved dir.
+                open_account_row(&mut app, 3, &mut out);
+                let mut terminal = Terminal::new(TestBackend::new(110, 50)).unwrap();
+                terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let text = buffer_text(&terminal);
+                for needle in [
+                    "Saved on this machine",
+                    "~/.claude-old",
+                    "[not in orion · signed in as old@b.co]",
+                    "Enter add it back",
+                ] {
+                    assert!(text.contains(needle), "{needle}:\n{text}");
+                }
+
+                // Enter: back as an account, under the name typed.
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(
+                    matches!(&app.overlay, Some(Overlay::Prompt(p))
+                        if p.kind == PromptKind::AdoptClaudeDir { dir: root.join(".claude-old") }
+                            && p.input.as_str() == "old"),
+                    "{:?}",
+                    app.overlay
+                );
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                type_text(&mut app, "Old Job", &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                let cfg = crate::config::Config::load();
+                let back = cfg.claude_accounts.last().unwrap();
+                assert_eq!(
+                    (back.id.as_str(), back.name.as_str()),
+                    ("claude-old", "Old Job")
+                );
+                assert_eq!(back.dir(), root.join(".claude-old"));
+                assert_eq!(
+                    settings_view(&app).selected,
+                    crate::config::AGENTS_HEAD.len() + 2,
+                    "on its own row"
+                );
+                assert!(crate::claude_accounts::on_disk(&cfg).is_empty());
+
+                // Removed again, kept: listed again, and the confirm said so.
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if c.message.contains("listed under Saved on this machine")));
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert_eq!(
+                    crate::claude_accounts::on_disk(&crate::config::Config::load()),
+                    [root.join(".claude-old")]
+                );
+
+                // `⌫` on it: the Trash, behind a confirm; Esc first keeps it.
+                // The removal landed on the section's first row.
+                for _ in 0..3 {
+                    press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+                }
+                assert_eq!(
+                    settings_view(&app).selected,
+                    crate::config::AGENTS_HEAD.len() + 3
+                );
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if c.action == PendingAction::TrashClaudeDir { dir: root.join(".claude-old") }
+                        && c.message.contains("its login as old@b.co")));
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+                assert!(root.join(".claude-old").is_dir());
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+                assert!(!root.join(".claude-old").exists());
+                assert!(bin.join(".claude-old").is_dir());
+                assert!(crate::claude_accounts::on_disk(&crate::config::Config::load()).is_empty());
+                assert!(
+                    root.join(".claude-2").is_dir(),
+                    "an account's dir never goes"
+                );
+            });
         });
     }
 
@@ -26787,8 +27218,13 @@ diff --git a/src/c.rs b/src/c.rs
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            // 'q' would close the overlay; here it is just a key.
-            press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, &mut out);
+            // ^C would close the overlay; here it is just a key.
+            press(
+                &mut app,
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(
                 matches!(app.overlay, Some(Overlay::Settings(_))),
                 "the overlay stayed open"
@@ -28906,8 +29342,13 @@ diff --git a/src/c.rs b/src/c.rs
         app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
 
         let mut out = Vec::new();
-        // `a` asks first; Enter on the confirm is the archive.
-        press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+        // `^A` asks first; Enter on the confirm is the archive.
+        press(
+            &mut app,
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(
             app.overlay.is_none(),
@@ -28967,7 +29408,12 @@ diff --git a/src/c.rs b/src/c.rs
             app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
             let mut out = Vec::new();
 
-            press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(
                 matches!(
                     &app.overlay,
@@ -28998,7 +29444,12 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(app.term.is_some(), "backing out keeps the pane");
 
             // Enter goes through, exactly as the bare key would have.
-            press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "Enter closes the confirm");
             assert!(
@@ -31955,7 +32406,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `Tab` in the box retargets this one launch: the same harness rows
-    /// the NEW SESSION PICKER offers, with the MODEL / EFFORT submenus
+    /// the NEW AGENT PICKER offers, with the MODEL / EFFORT submenus
     /// behind them — and the typed text survives the trip.
     #[test]
     fn tab_in_the_quick_prompt_picks_the_harness_and_keeps_the_text() {
@@ -32021,7 +32472,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `Tab` on the Claude row of the box's own `Tab` picker is the NEW
-    /// SESSION PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
+    /// AGENT PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
     /// box with the text kept, the next `Tab` opens on the toggle as the
     /// box left it, and Enter sends the text as the cloud task — never as
     /// a STARTING PROMPT, and with no warm slot consumed or refilled.
@@ -33726,6 +34177,286 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(follow_up_text(&app), Some(dropped));
     }
 
+    // ---- CLIPBOARD IMAGES ----
+
+    /// A PNG's bytes, as a stubbed clipboard holds them.
+    fn clipboard_png() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\nscreenshot pixels".to_vec()
+    }
+
+    /// What the open prompt box holds.
+    fn box_text(app: &App) -> String {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => p.input.as_str().to_string(),
+            other => panic!("no prompt box up: {other:?}"),
+        }
+    }
+
+    fn type_into(app: &mut App, text: &str, out: &mut Vec<ClientRequest>) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c), KeyModifiers::NONE, out);
+        }
+    }
+
+    /// `^V` in the QUICK PROMPT keeps the clipboard's image in the
+    /// attachments folder and writes its path at the caret, a word apart
+    /// from the text around it — never reading the real clipboard here.
+    #[test]
+    fn ctrl_v_pastes_the_clipboard_image_into_the_quick_prompt() {
+        with_default_config(|| {
+            let root = tempfile::tempdir().unwrap();
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            app.attachments_dir = Some(root.path().join("attachments"));
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            type_into(&mut app, "what is this", &mut out);
+
+            crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+                press(
+                    &mut app,
+                    KeyCode::Char('v'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
+            });
+
+            let text = box_text(&app);
+            let kept: Vec<_> = std::fs::read_dir(root.path().join("attachments"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            assert_eq!(std::fs::read(&kept[0]).unwrap(), clipboard_png());
+            assert_eq!(
+                text,
+                format!(
+                    "what is this {} ",
+                    crate::dropped_files::quoted(&kept[0].to_string_lossy())
+                )
+            );
+            assert_eq!(app.flash, None);
+            assert!(out.is_empty(), "nothing sent: {out:?}");
+        });
+    }
+
+    /// No image on the clipboard: the footer says so and the box is left
+    /// as it was; and a box whose text goes nowhere local (a cloud
+    /// message, a rename) leaves `^V` alone altogether.
+    #[test]
+    fn ctrl_v_with_no_image_says_so_and_pastes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = follow_up_app();
+        app.attachments_dir = Some(root.path().join("attachments"));
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+        type_into(&mut app, "see", &mut out);
+        crate::clipboard_image::with_clipboard(None, || {
+            press(
+                &mut app,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert_eq!(follow_up_text(&app).as_deref(), Some("see"));
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("no image on the clipboard to paste")
+        );
+        assert!(!root.path().join("attachments").exists());
+
+        // The FOLLOW-UP box takes an image as the QUICK PROMPT does.
+        crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+            press(
+                &mut app,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert!(follow_up_text(&app).is_some_and(|t| t.starts_with("see ") && t.ends_with(".png ")));
+
+        let mut rename = follow_up_app();
+        rename.attachments_dir = Some(root.path().join("elsewhere"));
+        let id = rename.tree.agents[0].id.clone();
+        open_prompt(&mut rename, PromptKind::RenameAgent { id });
+        crate::clipboard_image::with_clipboard(Some(clipboard_png()), || {
+            press(
+                &mut rename,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+        });
+        assert!(!root.path().join("elsewhere").exists(), "no image kept");
+    }
+
+    // ---- the SAVED DRAFT ----
+
+    /// The QUICK PROMPT up, by `^N` from the SESSIONS PANEL.
+    fn open_quick_box(app: &mut App, out: &mut Vec<ClientRequest>) {
+        press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(p.kind, PromptKind::QuickPrompt(_))),
+            "{:?}",
+            app.overlay
+        );
+    }
+
+    /// A fresh app — the process after a restart — whose SAVED DRAFT is
+    /// the file at `path`.
+    fn restarted(path: &std::path::Path) -> App {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        app.focus = Focus::Sessions;
+        app.saved_draft = Some(crate::saved_draft::SavedDraft::at(path.to_path_buf()));
+        app
+    }
+
+    /// What is typed into the box is on disk as it is typed — no exit
+    /// hook to wait for — and a box opened after a restart starts from it,
+    /// caret at its end, saying so until the first edit.
+    #[test]
+    fn the_quick_prompt_is_saved_as_typed_and_restored_after_a_restart() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "Fix auth", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            type_into(&mut app, "then ship", &mut out);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship"
+            );
+            // A paste is an edit too.
+            assert!(paste_into_overlay(&mut app, " it"));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship it"
+            );
+
+            // The window closes: no Esc, no clean shutdown.
+            drop(app);
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            assert_eq!(prompt.input.as_str(), "Fix auth\nthen ship it");
+            assert_eq!(prompt.input.cursor_chars(), "Fix auth\nthen ship it".len());
+            assert!(prompt.draft_restored, "the box says the draft came back");
+            type_into(&mut app, "!", &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            assert!(!prompt.draft_restored, "an edit lets the cue go");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "Fix auth\nthen ship it!"
+            );
+
+            // Emptied by hand, the draft goes with the text.
+            press(&mut app, KeyCode::Char('a'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_text(&app), "");
+            assert!(!path.exists(), "an empty box is no draft");
+        });
+    }
+
+    /// Launching the box spends the draft: the next box opens empty.
+    #[test]
+    fn launching_the_quick_prompt_clears_the_draft() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "Fix auth", &mut out);
+            assert!(path.exists());
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                out.iter()
+                    .any(|r| matches!(r, ClientRequest::CreateAgent { .. })),
+                "{out:?}"
+            );
+            assert!(!path.exists(), "the launch spent the draft");
+            open_quick_box(&mut app, &mut out);
+            assert_eq!(box_text(&app), "");
+        });
+    }
+
+    /// A box with text of its own — a refused launch handed back — keeps
+    /// that text and leaves the draft on disk alone; and the boxes that
+    /// are not the QUICK PROMPT (a preset's task, the FOLLOW-UP) never
+    /// open on it.
+    #[test]
+    fn the_draft_never_lands_in_a_box_with_text_of_its_own() {
+        with_seeded_presets(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            std::fs::write(&path, "my draft").unwrap();
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = app.overlay.take() else {
+                unreachable!();
+            };
+            let PromptKind::QuickPrompt(launch) = prompt.kind else {
+                unreachable!();
+            };
+            reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "refused".into());
+            assert_eq!(box_text(&app), "refused");
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if !p.draft_restored));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+            app.overlay = None;
+
+            let worktree = app.selected_worktree().unwrap().id.clone();
+            let preset = crate::agent_presets::load().into_iter().next().unwrap();
+            open_prompt(&mut app, PromptKind::AgentPresetTask { worktree, preset });
+            assert_eq!(box_text(&app), "");
+            app.overlay = None;
+
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert_eq!(follow_up_text(&app).as_deref(), Some(""));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+        });
+    }
+
+    /// A launch the DAEMON refuses comes back with its text, and that
+    /// text is the draft on disk again.
+    #[test]
+    fn a_refused_launch_puts_the_draft_back() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            open_quick_box(&mut app, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                unreachable!();
+            };
+            let PromptKind::QuickPrompt(launch) = prompt.kind.clone() else {
+                unreachable!();
+            };
+            type_into(&mut app, "Fix auth", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(!path.exists());
+            reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "Fix auth".into());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "Fix auth");
+        });
+    }
+
     // ---- INPUT PARITY: a row chosen by the pointer is the row chosen by key ----
     //
     // `event_loop::activate` is the rule; these are its teeth. Each builds
@@ -34013,7 +34744,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A click on a row of a picking list is Enter with the cursor on that
-    /// row: the `/` palette, the NEW SESSION PICKER's menu, the AGENT
+    /// row: the `/` palette, the NEW AGENT PICKER's menu, the AGENT
     /// PRESETS list in both of its modes.
     #[test]
     fn a_click_on_a_list_row_is_enter_on_it() {

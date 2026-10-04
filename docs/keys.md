@@ -22,8 +22,10 @@ its key, and `Enter` runs it.
   its way out (`Esc`) last; a key is never cut in half.
 - **A modal's explanation** of the row or setting under its cursor is a dim line inside the frame,
   right above the keys — in the SETTINGS OVERLAY, the COMMAND PALETTE, the onboarding wizard.
-- **One spelling for every key.** A letter under a modifier is its capital — `⌘K`, `^K`, `⌥P`,
-  `⇧A` — and a bare letter is the letter you type (`t`). A key that belongs to an action is always
+- **One spelling and one colour for every key.** A letter under a modifier is its capital — `⌘K`,
+  `^K`, `⌥P`, `⇧A` — and a bare letter is the letter you type (`t`). Every key label is drawn in the
+  theme's accent — in the footer, on a modal's border, in the new-agent box's header, the COMMAND
+  PALETTE's key column, Help, the Hotkeys tab — and what it does in dim grey. A key that belongs to an action is always
   spelled from the live keymap, so a rebind shows up everywhere at once, and a terminal that never
   sends ⌘ sees the `^` twin instead; a modal's own keys come from the same table its key handler
   reads.
@@ -33,6 +35,9 @@ its key, and `Enter` runs it.
 
 ## How the keys are laid out
 
+- **A session is an agent or a terminal.** `⌘N` starts an AGENT — an AI coding CLI on a task — and
+  `t` a TERMINAL — a plain shell. Both are SESSIONS, the word for what applies to either card: the
+  attention walk, archive, delete ([Sessions](sessions.md)).
 - **⌘ for the entry points, as in Cursor.** The things you open from anywhere — a new agent, the
   jump list, go to file, changes, the pane — are `⌘` chords, and each has a `Ctrl` twin (`⌘P` and
   `^P`) for a terminal that never sends ⌘. Ghostty and kitty send ⌘ (the KITTY PROTOCOL);
@@ -53,8 +58,9 @@ its key, and `Enter` runs it.
   card under the cursor (below). Everything else lives behind `⌘O` (open outside orion), the
   right-click menu, or the COMMAND PALETTE.
 
-orion writes three `unbind` lines into Ghostty's config, inside an orion-managed block it keeps in
-place, so `⌘⇧P`, `⌘N` and `⌘,` reach it rather than Ghostty — see
+orion writes a line into Ghostty's config for every ⌘ chord it answers to, inside an orion-managed
+block it keeps in place, so `⌘⇧P`, `⌘N`, `⌘,` and the rest reach it rather than Ghostty — and `⌘.`,
+which macOS turns into Escape, arrives as `⌘.` — see
 [Configuration](configuration.md#outside-terminal-and-ghostty-keybinds). Ghostty reads them at launch or on its own
 reload (`⌘⇧,`).
 
@@ -62,7 +68,7 @@ reload (`⌘⇧,`).
 
 | Action | Key | Twin | What it opens |
 |---|---|---|---|
-| New agent | `⌘N`, `⌘I` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
+| New agent | `⌘N` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
 | Select model | `⌘/` | `^/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | `^Y` | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Agents tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
 | Select worktree | `⌘.` | `^T` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree** |
@@ -79,7 +85,7 @@ reload (`⌘⇧,`).
 | Full-screen session | `^F` | | give the session in the pane the whole screen, or bring it back down |
 | Settings | `⌘,` | `s` | the SETTINGS OVERLAY |
 | Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `orion vX.Y.Z` does the same |
-| Quit | `q`, `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
+| Quit | `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
 
 ## The grid
 
@@ -100,8 +106,10 @@ or `Esc` folds it back.
 | `t` | a new shell terminal inside orion, in the cursor's checkout — a chip on the grid with the pane on it and the keys in it. `⌘O` → **Terminal in the checkout** opens one outside orion |
 | `` ` `` | the next TERMINAL chip of the cursor's checkout, round to the first |
 | `r` | rename the session under the cursor |
-| `a` | archive the session, behind a CONFIRM DIALOG (`Enter` or `y` archives, `Esc` or `n` keeps it); on an archived card, unarchive it. A held `a` opens one dialog and archives nothing by itself |
-| `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `a` unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again, or `Esc`, comes back |
+| `⌘⇧A` / `^A` | archive the session, behind a CONFIRM DIALOG (`Enter` or `y` archives, `Esc` or `n` keeps it); on an archived card, unarchive it. Never a bare letter, so a stray keypress can't file a session away. Held, it opens one dialog and archives nothing by itself |
+| `⌘⇧U` / `^U` | unarchive the archived session under the cursor — a line of an ARCHIVED DRAWER, or a card in the ARCHIVED VIEW. The cursor stays on it, a live card again. Held, it unarchives one |
+| `z` | **the ARCHIVED DRAWER**: fold or unfold the `▸ 3 archived` line under the band the cursor is on — that checkout's archived sessions, a faint line apiece, most recently archived first. Unfolding puts the cursor on the newest, so `z` then `⌘⇧U` brings back the session just archived; `↑` / `↓` walk through the drawer between the band's cards and the next band. A click on the line is `z`, a double-click on a session's line unarchives it. Remembered across restarts |
+| `⇧A` | **the ARCHIVED VIEW**: the same grid, of the project's archived sessions. `⌘⇧U` (or `⌘⇧A`) unarchives the card under the cursor and `Backspace` deletes it; `⇧A` again, or `Esc`, comes back |
 | `Backspace` | delete the card under the cursor, behind a confirm. On the last live card of a linked worktree the confirm asks about the checkout too — `y` deletes both, `n` the card only, `Esc` keeps the card. A checkout with uncommitted or untracked work asks once more before it goes, counting the files it would lose (commits on its branch are kept), so nothing is lost by accident. On an EMPTY BAND it asks to delete the worktree itself; on a terminal's chip it closes the terminal and kills its shell |
 | `c` | the BRANCH SWITCHER for the project's root checkout (below) |
 | `⇧C` | **continue on another account**: the Claude session under the cursor, conversation and all, carried onto another Claude account and resumed there — a list of the accounts it can go to, `Enter` goes. For a session stopped at a usage limit (see [Sessions](sessions.md#usage-limits-and-a-second-account)) |
@@ -110,10 +118,9 @@ or `Esc` folds it back.
 | `.` / `,` | next / previous session in attention order — waiting on you first, then running, then the unread finishes, then the rest by last interaction — wrapping at both ends, in any project. Landing on an UNSEEN finish reads it |
 | `[` / `]` | the project tab to the left / right, stopping at the ends |
 | `1`–`9` | that PROJECT TAB, counting from the left; rebindable per slot as `project_tab_1` … `project_tab_9` |
-| `x` | close the project tab the grid is on (the project and its sessions are untouched; `⌘K` opens it again) |
 | right-click | a card's, a band's or a project tab's context menu |
 
-The actions with no key of their own — **New session** (harness picker first), **Agent presets**,
+The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts**,
 **Memory usage**, **Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts** — are
 in the COMMAND PALETTE and, where they apply to a card, its right-click menu. Bind any of them in
@@ -200,7 +207,7 @@ the footer (or the modal's border) always names the way:
 | `↑`,`↑` on the top row of cards | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
 | `←` / `→`, `[` / `]` | walk the header's cursor along the tabs — **the grid switches with it**, each project on the card you last left it on |
 | `Enter`, `↓`,`↓` | hand the keys back to the cards of the project on screen |
-| `x` / `Backspace` | close the tab under the cursor — `x` at once, `Backspace` behind a confirm |
+| `Backspace` | close the tab under the cursor, behind a confirm (or click its `×`; **Close project tab** has no key by default — bind one in Settings → Hotkeys) |
 | `Esc`, a click, any other key | back down to the cards; any other key then means what it means on the grid |
 
 A click on a tab opens it, a tab's `×` closes it, and the `+` in front of the tabs drops the
@@ -377,6 +384,12 @@ with what you typed as its first prompt. Which CLI it launches is the `Agent` ro
 prompt** in Settings → Agents. `Enter` launches; `Enter` on the box empty starts the session bare.
 `Esc`, a click outside it and `^Q` park what you typed, and the next `⌘N` opens on it.
 
+What you type is also saved as you type it, to `quick_prompt_draft.txt` in the DATA DIR, so closing
+the terminal window with the box up loses nothing: the next `⌘N` after a restart opens on the
+draft, caret at its end, its dim explanation line starting `draft restored ·` until you edit it.
+Launching it, or emptying the box, deletes the file. A box that brings its own text — a launch
+the daemon refused, handed back — never takes the draft or overwrites it.
+
 Its header names everything the launch is made of, each field beside the key that changes it — where
 it runs over what runs it:
 
@@ -395,6 +408,7 @@ sends is the dim line along the bottom of the frame.
 | Key | Action |
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
+| `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
 | `Tab` | pick a different harness for this one launch (`→` drills into its model and effort); in Claude's list `Tab` toggles Claude Cloud |
 | `⇧Tab` | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
@@ -428,8 +442,9 @@ default back, `x` unbinds it, and `Esc` cancels a capture. A chord another actio
 not taken silently: the row names who has it and a second `Enter` moves it. A ⚠ on a row means the
 chord can't reach orion from this terminal; `R` resets every binding (with a confirmation). On the
 Agents tab's **Claude accounts** rows, `Enter` signs the account in (asking for the email first),
-`o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter` on **Add
-account** names a new one ([Configuration](configuration.md#claude-accounts)). On a row whose
+`r` renames it, `o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
+on **Add account** names a new one; on a **Saved on this machine** row `Enter` adds the dir back
+under a name and `⌫` moves it to the Trash ([Configuration](configuration.md#claude-accounts)). On a row whose
 program isn't on PATH — General's **File editor**, a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor
 modal and anything else leaves it unrun ([Installing editors and agent
@@ -449,7 +464,8 @@ skips the rest — or, while the step asks something, backs out of the question.
 | Where | Key | Action |
 |---|---|---|
 | Any typed field | `←→`/`⌥←→`, `^A`/`^E`, `⌥⌫`, `^U`/`^K` | every prompt, filter and query is the same line editor: move by character / word, jump to ends, delete word, kill line |
-| Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight |
+| Any typed field | `⇧←`/`⇧→`, `⌥⇧←`/`⌥⇧→`, `⌘⇧←`/`⌘⇧→` (`⇧Home`/`⇧End`), `⌘A` | select, as a macOS text field does: by character, by word, to the line's start or end, everything. The same key without `⇧` lets the selection go — `←`/`→` land on its edge — and typing, a paste, a line break, `⌫` or any delete replace or remove just the selection. It draws on the theme's selection background. `⌘A` reaches orion once the [Ghostty keybinds](configuration.md#outside-terminal-and-ghostty-keybinds) block releases it from Ghostty's own select-all; `^A` stays the line's start (Ghostty types it for `⌘←`) |
+| Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight. With `⇧` they select: `⇧↑`/`⇧↓` by row (on the first or last row, on to the start or end), `⌘⇧↑`/`⌘⇧↓` to the ends of the text, `⇧PgUp`/`⇧PgDn` a boxful |
 
 ## Chips and readouts
 

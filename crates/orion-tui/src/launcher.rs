@@ -241,6 +241,13 @@ pub struct Band {
     pub pr: Option<RowPr>,
     /// The sessions in `rows` order, then the terminals in tree order.
     pub cards: Vec<Card>,
+    /// The checkout's archived sessions, most recently archived first:
+    /// what its ARCHIVED DRAWER counts on its `▸ N archived` line, and
+    /// lists a faint line apiece once unfolded. Always empty in the
+    /// ARCHIVED VIEW, whose cards are those sessions already.
+    pub archived: Vec<LauncherRow>,
+    /// The ARCHIVED DRAWER is unfolded (`App::archived_open`).
+    pub drawer_open: bool,
 }
 
 impl Band {
@@ -256,6 +263,43 @@ impl Band {
     pub fn position(&self, sref: &SessionRef) -> Option<usize> {
         self.cards.iter().position(|c| &c.sref() == sref)
     }
+
+    /// The ARCHIVED DRAWER's lines the cursor can rest on: every archived
+    /// session once it is unfolded, none folded.
+    pub fn drawer(&self) -> &[LauncherRow] {
+        if self.drawer_open {
+            &self.archived
+        } else {
+            &[]
+        }
+    }
+
+    /// Rows the ARCHIVED DRAWER takes under the band: its `▸ N archived`
+    /// line, and a line per session once unfolded. None without an
+    /// archived session to count.
+    pub fn drawer_h(&self) -> u16 {
+        if self.archived.is_empty() {
+            return 0;
+        }
+        DRAWER_HEAD_H + self.drawer().len() as u16 * DRAWER_ROW_H
+    }
+}
+
+/// The ARCHIVED DRAWER's `▸ N archived` line under a band.
+pub const DRAWER_HEAD_H: u16 = 1;
+/// One archived session in an unfolded drawer.
+pub const DRAWER_ROW_H: u16 = 1;
+
+/// The line of the ARCHIVED DRAWER the cursor is on in `band`: the
+/// selected session, when it is one of the unfolded drawer's.
+pub fn drawer_cursor(app: &App, band: &Band) -> Option<usize> {
+    if band.drawer().is_empty() {
+        return None;
+    }
+    let SessionRef::Agent(id) = app.selected_session_row()?.sref()? else {
+        return None;
+    };
+    band.drawer().iter().position(|r| r.agent.id == id)
 }
 
 /// The grid's BANDS: one per checkout of the SELECTED PROJECT that has
@@ -267,6 +311,12 @@ impl Band {
 /// when every checkout gets one, an empty band with no cards on it. The
 /// ARCHIVED VIEW's bands hold the archived sessions alone; a terminal is
 /// never archived, so none is listed there, and no empty band is either.
+///
+/// On the live grid every band carries its checkout's archived sessions
+/// for the ARCHIVED DRAWER under it. A checkout with only archived
+/// sessions gets no band of its own — unless its drawer is unfolded, so
+/// archiving a band's last card with the drawer open leaves the band
+/// standing, holding the session just filed.
 pub fn bands(app: &App) -> Vec<Band> {
     let Some(project) = app.selected_project() else {
         return Vec::new();
@@ -280,6 +330,7 @@ pub fn bands(app: &App) -> Vec<Band> {
             .cloned()
             .map(Card::Session)
             .collect();
+        let mut archived = Vec::new();
         if !app.show_archived {
             cards.extend(
                 app.tree
@@ -289,8 +340,10 @@ pub fn bands(app: &App) -> Vec<Band> {
                     .cloned()
                     .map(Card::Terminal),
             );
+            archived = archived_in(app, &w.id, &project.id);
         }
-        if cards.is_empty() && (app.show_archived || !app.show_all_worktrees) {
+        let drawer_open = !archived.is_empty() && app.archived_open.contains(&w.id);
+        if cards.is_empty() && !drawer_open && (app.show_archived || !app.show_all_worktrees) {
             continue;
         }
         out.push(Band {
@@ -299,9 +352,26 @@ pub fn bands(app: &App) -> Vec<Band> {
             is_main: w.is_main,
             pr: row_pr(app, &w.id, &project.id, &w.branch),
             cards,
+            archived,
+            drawer_open,
         });
     }
     out
+}
+
+/// Checkout `worktree`'s archived sessions as the ARCHIVED DRAWER lists
+/// them: most recently archived first, a row archived before the stamp
+/// existed (0) after every one that has it, in tree order.
+fn archived_in(app: &App, worktree: &WorktreeId, project: &ProjectId) -> Vec<LauncherRow> {
+    let mut rows: Vec<LauncherRow> = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| a.archived && &a.worktree_id == worktree)
+        .filter_map(|a| row_of(app, a, Some(project), Some(true)))
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.agent.archived_at));
+    rows
 }
 
 /// A card's place on the grid: which band, and which card along it.
@@ -951,11 +1021,34 @@ pub struct PanelBand {
     pub open: bool,
     /// Rows the band takes, rule included: [`BAND_H`] collapsed — and
     /// the [`MORE_H`] row under the cards when they do not all fit — or
-    /// its content's height open.
+    /// its content's height open; and its ARCHIVED DRAWER under that.
     pub height: u16,
+    /// Where the ARCHIVED DRAWER's `▸ N archived` line stands, counted
+    /// from the band's rule: under everything else the band draws. Its
+    /// lines follow it, one a session ([`Band::drawer_h`]).
+    pub drawer_y: u16,
 }
 
 impl PanelBand {
+    /// The ARCHIVED DRAWER's `▸ N archived` line, in panel rows, `x` and
+    /// `width` the grid's.
+    pub fn drawer_head(&self, area: Rect) -> Rect {
+        Rect {
+            y: self.rule_y + self.drawer_y,
+            height: DRAWER_HEAD_H,
+            ..area
+        }
+    }
+
+    /// The drawer's line for archived session `entry`, in panel rows.
+    pub fn drawer_row(&self, area: Rect, entry: usize) -> Rect {
+        Rect {
+            y: self.rule_y + self.drawer_y + DRAWER_HEAD_H + entry as u16 * DRAWER_ROW_H,
+            height: DRAWER_ROW_H,
+            ..area
+        }
+    }
+
     /// `card`'s cell on the open band, in panel rows. None collapsed,
     /// where the cards are the STRIP's ([`BandsLayout::strip_at`]).
     pub fn cell(&self, card: usize) -> Option<Rect> {
@@ -1029,12 +1122,14 @@ fn lay_out_panel(body: Rect, bands: &[Band], open: impl Fn(&Band) -> bool) -> Pa
         } else {
             BAND_H
         };
-        let height = content.as_ref().map_or(collapsed, ExpandedLayout::height);
+        let above = content.as_ref().map_or(collapsed, ExpandedLayout::height);
+        let height = above + band.drawer_h();
         out.push(PanelBand {
             rule_y: y,
             open: content.is_some(),
             content,
             height,
+            drawer_y: above,
         });
         y += height + GAP_Y;
     }
@@ -1064,12 +1159,14 @@ pub fn list_panel_layout(
         let open = all_open || expanded == Some(&band.worktree);
         let pin = pin.filter(|p| p.band == index).map(|p| p.card);
         let content = list_layout(body, band, open, pin);
-        let height = content.height();
+        let above = content.height();
+        let height = above + band.drawer_h();
         out.push(PanelBand {
             rule_y: y,
             content: Some(content),
             open,
             height,
+            drawer_y: above,
         });
         y += height + GAP_Y;
     }
@@ -1134,6 +1231,28 @@ impl PanelLayout {
             Some(cell) => (cell.y.saturating_sub(BAND_RULE_H), cell.y + cell.height),
             None => (pb.rule_y, pb.rule_y + pb.height),
         };
+        self.reveal_rows(scroll, top, bottom)
+    }
+
+    /// [`PanelLayout::reveal`] for a line of the band's ARCHIVED DRAWER:
+    /// that line whole on screen, the `▸ N archived` line over it too
+    /// when there is room.
+    pub fn reveal_drawer(&self, scroll: u16, band: usize, entry: usize) -> u16 {
+        let pb = &self.bands[band];
+        let row = pb.drawer_row(self.area, entry);
+        let head = pb.rule_y + pb.drawer_y;
+        let bottom = row.y + row.height;
+        let top = if bottom - head <= self.window().height {
+            head
+        } else {
+            row.y
+        };
+        self.reveal_rows(scroll, top, bottom)
+    }
+
+    /// `scroll` moved just far enough that panel rows `top..bottom` are
+    /// on screen, the top winning when they do not fit.
+    fn reveal_rows(&self, scroll: u16, top: u16, bottom: u16) -> u16 {
         let rows = self.window().height;
         let mut scroll = scroll;
         if bottom > scroll + rows {

@@ -119,6 +119,15 @@ pub enum HitTarget {
     /// it as the ACCORDION, the very toggle Tab runs
     /// (`event_loop::launcher::click_band_more`).
     LauncherBandMore(usize),
+    /// The `▸ 3 archived` line under a BAND, by the band's place in
+    /// `launcher::bands`: a click puts the cursor on the band and folds
+    /// or unfolds its ARCHIVED DRAWER, as `z` does
+    /// (`event_loop::launcher::click_drawer`).
+    LauncherDrawer(usize),
+    /// An archived session's line in an unfolded ARCHIVED DRAWER: the
+    /// band's place, then the line's. A click lands the cursor on it; a
+    /// second brings it back (`event_loop::launcher::click_drawer_entry`).
+    LauncherDrawerEntry(usize, usize),
     /// The `‹ sessions` crumb in a full-screen session's header
     /// (LAUNCHER VIEW): a click leaves the session for the grid, as `^q`
     /// does.
@@ -167,7 +176,7 @@ pub enum HitTarget {
     /// The ISSUE COUNT beside it (`1 issue`): a click opens that
     /// project's open issues — the modal `i` opens.
     LauncherIssues,
-    /// The key cap in the empty GRID's welcome (`press p to prompt`): a
+    /// The key cap in the empty GRID's welcome (`press ⌘N to start an agent`): a
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
     LauncherWelcomePrompt,
@@ -349,7 +358,7 @@ pub enum MenuAction {
     /// Flip the `hide_draft_prs` SETTING from the Worktrees panel menu:
     /// drafts out of the group and `/`, or back in.
     ToggleDraftPrs,
-    /// A row of the WORKTREE PICKER `^T` (or a click on the NEW SESSION
+    /// A row of the WORKTREE PICKER `^T` (or a click on the NEW AGENT
     /// box's branch) opens: aim this one launch at `target` — one of the project's
     /// checkouts, or a fresh worktree — and hand the box back with its
     /// text. It picks where the session runs, never what branch a checkout
@@ -528,7 +537,7 @@ impl ContextMenu {
             .any(|i| matches!(i.action, MenuAction::OpenProject(_)))
     }
 
-    /// Is this the WORKTREE PICKER `^T` (or a click on the NEW SESSION
+    /// Is this the WORKTREE PICKER `^T` (or a click on the NEW AGENT
     /// box's branch) opens? It is drawn hanging from that branch.
     pub fn is_launch_worktree_picker(&self) -> bool {
         self.items
@@ -541,8 +550,8 @@ impl ContextMenu {
     /// everywhere else: the picker's Claude row, and every row of the
     /// Claude MODEL / EFFORT lists under it — reached with `→`, or opened
     /// straight onto by the box's Select model and its effort field.
-    /// Two pickers offer it: the NEW SESSION PICKER (its `"New session"`
-    /// title is the gate — the PR SESSION picker and a PR row's menu share
+    /// Two pickers offer it: the NEW AGENT PICKER (its
+    /// [`crate::agent_picker::NEW_AGENT_PICKER_TITLE`] is the gate — the PR SESSION picker and a PR row's menu share
     /// these rows but never launch cloud, the daemon refusing a PR launch
     /// with a cloud task) and the QUICK PROMPT's `Tab` picker, whose pick
     /// makes the box a cloud one — unless the box is for an issue or a PR
@@ -563,7 +572,9 @@ impl ContextMenu {
             } => {
                 let offered = match quick {
                     Some(back) => back.launch.takes_cloud(),
-                    None => root.title.as_deref() == Some("New session"),
+                    None => {
+                        root.title.as_deref() == Some(crate::agent_picker::NEW_AGENT_PICKER_TITLE)
+                    }
                 };
                 offered.then_some(*cloud)
             }
@@ -572,7 +583,7 @@ impl ContextMenu {
     }
 
     /// The harnessed launch under the cursor, if the hovered row starts
-    /// one: the New session picker, its PR sibling, the quick prompt
+    /// one: the NEW AGENT PICKER, its PR sibling, the quick prompt
     /// picker, and their model/effort submenus all carry it. Gates the
     /// `?` jump to agent settings.
     pub fn hovered_agent_kind(&self) -> Option<(AgentKind, Option<String>)> {
@@ -726,10 +737,17 @@ pub enum PendingAction {
         id: String,
     },
     /// `⌫` on an added account's row: take it out of config.json —
-    /// keeping its config dir (`Enter`/`y`), or moving it to the Trash
-    /// (`t`). Every answer reopens the settings overlay.
+    /// keeping its config dir (`Enter`/`y`), listed under SAVED ON THIS
+    /// MACHINE from then on, or moving it to the Trash (`t`). Every answer
+    /// reopens the settings overlay.
     RemoveClaudeAccount {
         id: String,
+    },
+    /// `⌫` on a dir SAVED ON THIS MACHINE: move it — its login and
+    /// transcripts with it — to the Trash. Every answer reopens the
+    /// settings overlay.
+    TrashClaudeDir {
+        dir: std::path::PathBuf,
     },
     Quit,
     /// **Restart orion** (`⌘⇧R`): quit, stop the daemon and every session
@@ -754,6 +772,7 @@ impl PendingAction {
                 | PendingAction::AddClaudeAccount(_)
                 | PendingAction::SignOutClaude { .. }
                 | PendingAction::RemoveClaudeAccount { .. }
+                | PendingAction::TrashClaudeDir { .. }
         )
     }
 }
@@ -806,7 +825,7 @@ pub enum PromptKind {
     /// the typed text as its STARTING PROMPT. It carries the whole launch
     /// spec, resolved when the dialog opens so the title can show what
     /// Enter is about to start — and rewritten in place by the box's `Tab`
-    /// / `Shift+Tab` pickers. The NEW SESSION PICKER never ends here: its
+    /// / `Shift+Tab` pickers. The NEW AGENT PICKER never ends here: its
     /// pick creates the session outright.
     QuickPrompt(crate::quick_prompt::QuickLaunch),
     /// A message to queue on a row's Claude Cloud session
@@ -892,10 +911,23 @@ pub enum PromptKind {
     ClaudeSignIn {
         id: String,
     },
-    /// Enter on **Add account**: the new account's short name — empty for
-    /// the next `claude-N`. Enter asks whether to share the default
-    /// account's setup with it; Esc puts the overlay back.
+    /// Enter on **Add account**: the new account's name — empty for the
+    /// next `claude-N`, with no name. Enter asks whether to share the
+    /// default account's setup; Esc puts the overlay back.
     AddClaudeAccount,
+    /// `r` on a CLAUDE ACCOUNTS row: the name account `id` goes by,
+    /// prefilled with the one it has. Enter saves it — empty takes it
+    /// away, back to `Claude (a@b.co)` — and Esc keeps it; both put the
+    /// overlay back on the row. The id and the dir never change.
+    RenameClaudeAccount {
+        id: String,
+    },
+    /// Enter on a dir SAVED ON THIS MACHINE: the name to add it back under,
+    /// prefilled from its folder (`~/.claude-work` → `work`). Enter adds
+    /// it, dir and login as they are; Esc puts the overlay back.
+    AdoptClaudeDir {
+        dir: std::path::PathBuf,
+    },
 }
 
 impl PromptKind {
@@ -957,6 +989,10 @@ pub struct PromptDialog {
     /// branch is not drawn or names nothing to pick — a PR SESSION's
     /// checkout is the DAEMON's.
     pub branch_area: Rect,
+    /// A QUICK PROMPT opened on the SAVED DRAFT or the DRAFT slot rather
+    /// than empty: its explanation line leads with `draft restored`, until
+    /// the first edit makes the text simply what is being typed.
+    pub draft_restored: bool,
 }
 
 impl PromptDialog {
@@ -978,6 +1014,7 @@ impl PromptDialog {
             editor_area: Rect::default(),
             detail_areas: Vec::new(),
             branch_area: Rect::default(),
+            draft_restored: false,
         };
         // The task and comment boxes hold line breaks; the rest are one
         // line. The field itself then knows which keys break a line and
@@ -2210,7 +2247,7 @@ pub struct PlaceholderRows {
 }
 
 /// A `CreateAgent` (or `CreatePrAgent`) as a launch surface drafts it —
-/// the NEW SESSION PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
+/// the NEW AGENT PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
 /// the ISSUES MODAL. `event_loop::create_agent` turns it into the request
 /// and the PENDING INTENT that attaches the row; a draft aimed at a
 /// stand-in checkout waits on that checkout's own intent instead
@@ -2218,7 +2255,7 @@ pub struct PlaceholderRows {
 ///
 /// An empty `name` takes the generated default (agent-1, …) and opts the
 /// session into agent-driven auto-titling (`orion rename` on the first
-/// prompt) — what every launch from the NEW SESSION PICKER and the QUICK
+/// prompt) — what every launch from the NEW AGENT PICKER and the QUICK
 /// PROMPT does. A name a surface does set is the user's choice and stays.
 #[derive(Debug, Clone)]
 pub struct AgentLaunchDraft {
@@ -3176,6 +3213,10 @@ pub struct UiState {
     /// start opens on the splash too. Absent in older blobs.
     #[serde(default)]
     pub projects_closed: bool,
+    /// The checkouts whose ARCHIVED DRAWER was left unfolded
+    /// ([`App::archived_open`]), by worktree id. Absent in older blobs.
+    #[serde(default)]
+    pub archived_open: Vec<String>,
 }
 
 /// A mouse selection over the terminal pane (drag or double-click word),
@@ -3533,6 +3574,9 @@ struct RowsKey {
     cursor: (usize, usize, usize),
     shape: [usize; 5],
     show_archived: bool,
+    /// How many ARCHIVED DRAWERS are open: an open one lists its
+    /// checkout's archived rows ([`App::sessions_in`]).
+    drawers: usize,
 }
 
 impl RowsMemo {
@@ -3670,6 +3714,11 @@ pub struct App {
     /// not the screen.
     pub follow_up: Option<FollowUp>,
     pub show_archived: bool,
+    /// The checkouts whose ARCHIVED DRAWER is unfolded on the grid (`z`,
+    /// or a click on its `▸ N archived` line): their archived sessions
+    /// listed one faint line apiece under the band, where the cursor
+    /// walks onto them and `u` brings one back. Rides the UI-state blob.
+    pub archived_open: std::collections::HashSet<WorktreeId>,
     /// The Worktrees panel's OPEN PRS group folded down to its header (a
     /// click on it). Like `show_archived`, it rides the UI-state blob so a
     /// restart brings it back folded.
@@ -3891,8 +3940,15 @@ pub struct App {
     /// The QUICK PROMPT box last abandoned with something typed in it
     /// (`quick_prompt::QuickDraft`) — Esc, a click outside, the HARDWIRED
     /// UNLOCK. The next box opened takes it back, so a press that closes
-    /// the box costs nothing typed; one slot, never written to disk.
+    /// the box costs nothing typed; one slot, in memory — the SAVED DRAFT
+    /// below is what outlives the process.
     pub quick_draft: Option<crate::quick_prompt::QuickDraft>,
+    /// The SAVED DRAFT (`saved_draft`): the QUICK PROMPT's unsent text on
+    /// disk, written as it is typed, so a window closed mid-sentence keeps
+    /// the sentence for the next box. The main loop installs the DATA
+    /// DIR's at startup; the unit tests leave it `None` (or install a
+    /// temporary one), so no test touches the real user's draft.
+    pub saved_draft: Option<crate::saved_draft::SavedDraft>,
     /// Debounced attach: the session the pane is showing but the daemon has
     /// not been told about yet. Stepping a selection is not a decision to
     /// boot a CLI — walking the grid past four cards must not cold-spawn
@@ -4161,8 +4217,9 @@ pub struct App {
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
     /// Where a file dropped onto a prompt box bound for an agent is copied
-    /// before macOS deletes it (`dropped_files`): the main loop installs
-    /// the DATA DIR's `attachments/` at startup; the unit tests leave it
+    /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
+    /// clipboard's image (`clipboard_image`): the main loop installs the
+    /// DATA DIR's `attachments/` at startup; the unit tests leave it
     /// `None`, so a paste there is never staged into the real user's dir.
     pub attachments_dir: Option<std::path::PathBuf>,
     /// Bodies in `pr_detail` that came from the cache rather than from
@@ -4327,6 +4384,7 @@ impl App {
             release_watch: None,
             overlay: None,
             show_archived: false,
+            archived_open: Default::default(),
             open_prs_collapsed: false,
             issues_collapsed: false,
             collapsed: false,
@@ -4368,6 +4426,7 @@ impl App {
             pending_prewarm: None,
             parked_pr_prompt: None,
             quick_draft: None,
+            saved_draft: None,
             pending_attach: None,
             attached_sref: None,
             next_keepwarm: None,
@@ -5104,6 +5163,7 @@ impl App {
                 self.tree.links.len(),
             ],
             show_archived: self.show_archived,
+            drawers: self.archived_open.len(),
         }
     }
 
@@ -5797,7 +5857,10 @@ impl App {
         if let Some(id) = &self.just_launched {
             rows.sort_by_key(|a| &a.id != id);
         }
-        if self.show_archived {
+        // The ARCHIVED VIEW lists every checkout's archived rows; on the
+        // live grid, a checkout whose ARCHIVED DRAWER is open lists its
+        // own, so the cursor can rest on one there.
+        if self.show_archived || self.archived_open.contains(wt) {
             let mut archived: Vec<Agent> = self
                 .tree
                 .agents

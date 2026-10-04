@@ -4,9 +4,15 @@
 
 Everything that can start an AGENT, and what each launch path does differently.
 
-## The NEW SESSION PICKER
+**Session, agent, terminal.** A SESSION is anything with a card on the grid, and it is one of two
+things: an AGENT — an AI coding CLI (Claude, Codex, Cursor, …) working on a task, started with `⌘N` —
+or a TERMINAL — a plain shell, started with `t`. orion says "agent" for what starts or concerns the
+CLI, "terminal" for the shell, and "session" only for what is true of both: the cards, the attention
+walk (`.` / `,`), archiving and deleting.
 
-Run **New session** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
+## The NEW AGENT PICKER
+
+Run **New agent — choose harness** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
 run — **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
 switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
@@ -57,7 +63,7 @@ The picker opens on the Agents tab's **Quick prompt › Agent** harness — the 
 is on (Settings → Experimental, `remember_harness` in CONFIG.JSON). Then every launch you walk
 through this picker, the PR SESSION picker or the QUICK PROMPT's `Tab` picker writes its harness into
 that row, and a model or effort you drilled into through the
-submenus into that harness's own **Model** / **Effort** rows: the next **New session** opens on that harness with
+submenus into that harness's own **Model** / **Effort** rows: the next **New agent — choose harness** opens on that harness with
 its ✓ on that model, the box `Enter` opens is set to it, and `⌘N` launches it too. The rows are the ordinary settings,
 so the Agents tab always shows what the next launch will be, and you can still change them there. An
 AGENT PRESET launch leaves them alone — its harness is the preset's, not a change of mind.
@@ -163,8 +169,8 @@ PTY — the same path your keystrokes take in the pane — so the CLI sees it as
 prompt with line breaks in it crosses as one bracketed paste rather than as typing, so nothing
 auto-indents it to mush.
 
-While the box is open it owns the keyboard: the grid's own verbs are bare letters, so `a`, `t` and `r`
-are letters in your prompt and not archive, delete and rename aimed at the session you are prompting.
+While the box is open it owns the keyboard: the grid's own verbs include bare letters, so `t`, `r` and `s`
+are letters in your prompt and not a terminal, a rename or Settings aimed at the session you are prompting.
 A click outside the box closes it, as it closes any modal.
 
 Nothing about the PANE moves when you use it. It is not unfolded, not swapped onto the card, not
@@ -195,6 +201,28 @@ characters outside ASCII. Other dropped paths — a source file, an image with a
 as pasted, so the agent works on the file itself. Copies older than a week are deleted the next time
 something is dropped. A drop straight into a session's pane goes to the CLI untouched: Claude Code reads
 a dropped image there itself.
+
+An image on the clipboard — a screenshot taken with ⌃⇧⌘4, an image copied from a browser — goes in
+with `^V` in the same boxes (the hint is on each box's bottom border). The terminal's own `⌘V` only
+ever pastes text, so orion reads the clipboard itself: `pngpaste` when it is on PATH, otherwise
+`osascript` asking for the clipboard as PNG (or as TIFF, converted by `sips`). The image is written
+to the same `attachments/` folder as `clipboard-<hash>.png` — the same image pasted twice is one file
+— and its path goes in at the caret, replacing any selection. With no image on the clipboard the
+footer says so and nothing is pasted.
+
+## The quick prompt's draft
+
+The QUICK PROMPT's text is saved to `quick_prompt_draft.txt` in the DATA DIR as you type it — each
+change rewritten whole through a temporary file, nothing written when nothing changed. Closing the
+terminal window kills orion without a clean shutdown, so there is no exit hook to rely on; with the
+text already on disk, the next box opened after a restart starts from it, caret at its end, its
+explanation line reading `draft restored · …` until the first edit. Within one run the box you
+closed comes back the same way, with its harness and preset (`Esc` parks it).
+
+Sending the box deletes the draft, and so does emptying it by hand. A launch the daemon refuses
+comes back with its text, which is the draft again. Boxes that carry their own text — a refused
+launch, a preset's task, the FOLLOW-UP box — never open on the draft, and a box with text of its own
+writes nothing until you edit it, so opening one never overwrites what you were drafting.
 
 ## RECENT PROMPTS
 
@@ -237,11 +265,14 @@ A second Claude account is one more Claude Code config dir with a login of its o
 account** under **Claude accounts** on the settings overlay's Agents tab (or **Claude accounts** in
 the COMMAND PALETTE, or the step first-run onboarding has right after Agents) makes the dir, offers to
 share your setup with it — `CLAUDE.md`, settings, skills, agents, commands, plugins, as links — and
-`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account is named
-after the email it is signed in as, `Claude (you@example.com)`, and on a machine with more than one
-a card says which its session runs on by that email (`you@example.com opus high`) where it would
-say `claude`. See [Configuration](configuration.md#claude-accounts) for the `claude_accounts` entry
-behind it, signing in and out, and removing one.
+`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account goes by the
+name you gave it and the email it is signed in as, `Work (you@example.com)` — `Claude
+(you@example.com)` until it has a name — and `r` on its row renames it, the default account too,
+without moving its sessions or its dir. On a machine with more than one a card says which its
+session runs on by that name, else that email (`Work opus high`), where it would say `claude`. A
+removed account's dir stays, listed under **Saved on this machine** with who it is signed in as, to
+add back or move to the Trash. See [Configuration](configuration.md#claude-accounts) for the
+`claude_accounts` entry behind it, signing in and out, renaming and removing one.
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the
 browser sign-in approves whichever account the browser is signed in to, so it is easy to end up
@@ -339,8 +370,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   walked: `↑`,`↑` on the top row of cards hands the keys up to the tabs, with a cursor of
   their own on the lit tab; `←`/`→` move it and the grid switches with it, each project
   shown on its last-focused card as the cursor passes, and `Enter` — or `↓`,`↓` back
-  down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `x` for the one the
-  grid is on (the one under the header's cursor while it has the keys), closes it and the grid
+  down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `Backspace` on the
+  one under the header's cursor while it has the keys (behind a confirm), closes it and the grid
   moves to the tab that slides into its place. Closing a tab
   changes nothing about the project — its sessions run on. Closing the last tab puts orion back on
   the splash it opens on before there is any project, where `+` lists every project, `Enter` opens
@@ -516,10 +547,10 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
   out to: `Esc` lets the card go, a second does nothing, and `↑` on the first band stays put.
 
-Every other key acts on the session under the cursor — `a` archives, `Backspace` deletes, `⌘E` opens its
-diff, `⌘K` jumps, `s` opens Settings. `a` asks first, always: a CONFIRM DIALOG names
+Every other key acts on the session under the cursor — `⌘⇧A` (`^A`) archives, `Backspace` deletes, `⌘E` opens its
+diff, `⌘K` jumps, `s` opens Settings. `⌘⇧A` asks first, always: a CONFIRM DIALOG names
 the session, `Enter` or `y` archives it and `Esc` or `n` keeps it, so a letter aimed at an agent
-that lands on the grid archives nothing — and saying yes is cheap, since `u` brings it back. The
+that lands on the grid archives nothing — and saying yes is cheap, since `⌘⇧U` (`^U`) brings it back. The
 cursor lands on the card after the one archived in its band — the one that slides up into its
 place — or, when the band's last card went, on the one before it; a band's only card leaving takes
 the band with it, and the cursor lands on the one that slid up into its slot. `Backspace` lands
@@ -529,19 +560,30 @@ before anything is deleted: `Delete agent 'x'? Its session and history go away.`
 `Nothing else is left in worktree 'feature': delete it from disk too?`, with three answers. `Enter`
 or `y` deletes the card and then the worktree, the way `Backspace` on its band would; `n` deletes the card
 and keeps the checkout standing empty; `Esc` cancels, and the card stays alive. The ROOT WORKTREE
-is never offered, and an archive (`a`) never asks: an archived card is still filed under its
+is never offered, and an archive (`⌘⇧A`) never asks: an archived card is still filed under its
 checkout, so the dialog on a worktree that still holds archived sessions counts them, since the
 delete takes their history with it. **Delete emptied worktree** (Settings → Sessions, off by
 default) skips the question: the card's ordinary confirm says the worktree goes with it and `Enter`
 deletes both — except when archived sessions are still filed under it, which always get the
 three-way question. **Show all worktrees** takes the question away, not the setting: with both on,
-the worktree still goes with its last card. A held `a` opens one dialog and
-archives nothing by itself; a held `u` in the ARCHIVED VIEW unarchives one card, and the next needs
+the worktree still goes with its last card. A held `⌘⇧A` opens one dialog and
+archives nothing by itself; a held `⌘⇧U` in the ARCHIVED VIEW unarchives one card, and the next needs
 the key let go and pressed again (on a terminal with the kitty keyboard protocol, which is what
 tells a held key's repeats from a fresh press; without it a long hold still walks the row).
 
+**Every band carries an ARCHIVED DRAWER** under it once its checkout has an archived session: a
+faint `▸ 3 archived` line, folded by default. `z` on the band — or a click on the line — unfolds it
+into one line per archived session, most recently archived first, each drawn in an archived card's
+quiet colors with how long ago it was filed on the right; the cursor lands on the newest, so `z`
+then `⌘⇧U` brings back the session just archived. `↓` off the band's cards walks into the drawer and
+on to the next band, `↑` the other way; `⌘⇧U` on a line (or a double-click) unarchives it, the cursor
+staying on it as a live card, and `Backspace` deletes it. `z` again folds the drawer, the cursor
+back on the band's cards. A checkout with only archived sessions has no band of its own — unless its
+drawer is unfolded, so archiving a band's last card with the drawer open leaves the band standing.
+Which drawers are open is remembered across restarts.
+
 **`⇧A` is the ARCHIVED VIEW**: the same grid, of the project's archived sessions instead of its live
-ones, with the header counting them under their own word (`3 archived sessions`). `u` unarchives the
+ones, with the header counting them under their own word (`3 archived sessions`). `⌘⇧U` unarchives the
 card under the cursor where it stands and `Backspace` deletes it; `⇧A` again comes back to the live
 sessions. The two lists never mix — there is no group to fold, only the other grid — and `Enter`
 on an archived card says to unarchive it first, its session having been reaped when it was

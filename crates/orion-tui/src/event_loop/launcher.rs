@@ -51,7 +51,7 @@ pub(super) fn open_box(app: &mut App) {
     }
 }
 
-/// `n`: the NEW SESSION PICKER first — which harness, `→` its model and
+/// `n`: the NEW AGENT PICKER first — which harness, `→` its model and
 /// effort — and the box after it, set to the pick, in the checkout `p`
 /// would take. The picker's rows carry the box they owe
 /// (`QuickReturn::from_box` false: no box is up yet), so Enter on a row
@@ -139,6 +139,102 @@ pub(crate) fn toggle_archived(app: &mut App, out: &mut Vec<ClientRequest>) {
         None => clear_aim(app),
     }
     app.dirty = true;
+}
+
+/// `z`: fold or unfold the ARCHIVED DRAWER under the band the cursor is
+/// on — its checkout's archived sessions, a faint line apiece under the
+/// band. Unfolding lands the cursor on the most recently archived one, so
+/// `z` then `u` brings back the session just filed; folding with the
+/// cursor in the drawer puts it back on the band's cards.
+///
+/// INPUT PARITY: the one function behind the key and a click on the
+/// drawer's `▸ N archived` line ([`click_drawer`]).
+pub(super) fn toggle_drawer(app: &mut App, out: &mut Vec<ClientRequest>) {
+    // The ARCHIVED VIEW is every drawer at once, so there is none to open.
+    if app.show_archived {
+        return;
+    }
+    let bands = view::bands(app);
+    let Some(index) = view::band_cursor(app, &bands) else {
+        return;
+    };
+    let band = &bands[index];
+    let Some(newest) = band.archived.first() else {
+        take_aim(app);
+        return;
+    };
+    if band.drawer_open {
+        let in_drawer = view::drawer_cursor(app, band).is_some();
+        app.archived_open.remove(&band.worktree);
+        if in_drawer {
+            match band.cards.first() {
+                Some(card) => select_card(app, card.sref(), out),
+                None => select_band(app, band.worktree.clone(), out),
+            }
+        }
+    } else {
+        app.archived_open.insert(band.worktree.clone());
+        select(app, newest.agent.id.clone(), out);
+    }
+    take_aim(app);
+    app.dirty = true;
+}
+
+/// A click on a band's `▸ N archived` line: the cursor onto that band,
+/// then its drawer folded or unfolded, as `z` does there.
+pub(super) fn click_drawer(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
+    if select_band_row(app, index, out) {
+        toggle_drawer(app, out);
+    }
+}
+
+/// A click on an archived session's line in an unfolded drawer: the
+/// cursor onto it, as `j`/`k` land it — and a second click on the same
+/// line brings it back, as `u` does there.
+pub(super) fn click_drawer_entry(
+    app: &mut App,
+    band: usize,
+    entry: usize,
+    out: &mut Vec<ClientRequest>,
+) {
+    let Some(id) = point_at_drawer(app, band, entry, out) else {
+        return;
+    };
+    if is_double_click(
+        &mut app.last_session_click,
+        crate::app::RowKey::Session(SessionRef::Agent(id.clone())),
+    ) {
+        super::activate::unarchive(app, id, out);
+    }
+}
+
+/// A right-click's first half on a drawer line, `select_clicked_row`'s
+/// arm: the cursor on it, as a left click leaves it. False off the grid.
+pub(super) fn select_drawer_entry(
+    app: &mut App,
+    band: usize,
+    entry: usize,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    point_at_drawer(app, band, entry, out).is_some()
+}
+
+/// The pointer landing on line `entry` of band `band`'s ARCHIVED
+/// DRAWER, either button: the cursor goes there, the PANE unfolded as a
+/// click on a card unfolds it ([`point_at`]). None off the grid.
+fn point_at_drawer(
+    app: &mut App,
+    band: usize,
+    entry: usize,
+    out: &mut Vec<ClientRequest>,
+) -> Option<AgentId> {
+    let bands = view::bands(app);
+    let id = bands.get(band)?.drawer().get(entry)?.agent.id.clone();
+    if app.launcher_pane_hidden {
+        toggle_pane(app);
+    }
+    select(app, id.clone(), out);
+    Some(id)
 }
 
 /// `^``, and every other chord the pane fold answers to: the way out of
@@ -587,6 +683,10 @@ pub(super) fn handle_action(
         // group fold: there is no ARCHIVED group to open, only the other
         // list of cards.
         Action::ToggleArchived => toggle_archived(app, out),
+        // `z` folds or unfolds the ARCHIVED DRAWER under the cursor's band:
+        // the same sessions `⇧A` lists, one checkout's, without leaving
+        // the live grid.
+        Action::ToggleArchivedDrawer => toggle_drawer(app, out),
         // Space on a card: its FOLLOW-UP MODAL, a box over the grid —
         // the card itself has no room to grow one, and the pane stays
         // exactly as it is.
@@ -984,6 +1084,9 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
     if bands.is_empty() {
         return;
     }
+    if step_in_drawer(app, &bands, dy, out) {
+        return;
+    }
     // The cursor itself, aimed or not: a step from a card let go of
     // (Esc, the fold) starts where the eye last saw it, and takes the aim
     // back on landing. In the compact LIST every band is a column of
@@ -1006,11 +1109,24 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
             take_aim(app);
             return;
         }
+        // Against the open band's last row: down into its ARCHIVED
+        // DRAWER when that is unfolded.
+        if dy > 0 && into_drawer(app, &bands[band], out) {
+            return;
+        }
         // Against the open band's first or last row: on to the band
         // above or below it, as from any other band.
     } else if dy == 0 {
         walk_band(app, dx, out);
         return;
+    } else if let Some(band) = view::band_cursor(app, &bands) {
+        // Down off a collapsed band's row of cards — or an EMPTY BAND's
+        // line — into its unfolded ARCHIVED DRAWER.
+        let on_band =
+            view::card_cursor(app, &bands[band]).is_some() || bands[band].cards.is_empty();
+        if dy > 0 && on_band && into_drawer(app, &bands[band], out) {
+            return;
+        }
     }
     let at = view::band_cursor(app, &bands);
     let last = bands.len() as i64 - 1;
@@ -1019,7 +1135,43 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
         None => last as usize,
         Some(b) => (b as i64 + dy).clamp(0, last) as usize,
     };
-    if (app.launcher_list || app.launcher_all_open) && Some(next) != at {
+    if Some(next) == at {
+        // On the band already, but on none of its cards — the selection
+        // on a row the grid has no card for: its first card, as `h`/`l`
+        // take it. An EMPTY BAND has none: the cursor is on all of it.
+        if view::card_cursor(app, &bands[next]).is_none() {
+            match bands[next].cards.first() {
+                Some(first) => select_card(app, first.sref(), out),
+                None => take_aim(app),
+            }
+            return;
+        }
+        take_aim(app);
+        return;
+    }
+    onto_band(app, &bands, next, dy, col, out);
+}
+
+/// The cursor stepping onto band `next` from the band above it (`dy` >
+/// 0) or below it, in column `col`: from below, onto the last line of its
+/// unfolded ARCHIVED DRAWER, the line nearest; in the LIST, or with every
+/// band open, onto the edge row nearest, in that column; else onto the
+/// band itself, its remembered card ([`select_band`]).
+fn onto_band(
+    app: &mut App,
+    bands: &[view::Band],
+    next: usize,
+    dy: i64,
+    col: usize,
+    out: &mut Vec<ClientRequest>,
+) {
+    if dy < 0 {
+        if let Some(row) = bands[next].drawer().last() {
+            select(app, row.agent.id.clone(), out);
+            return;
+        }
+    }
+    if app.launcher_list || app.launcher_all_open {
         // The LIST reads as one column down every band: `j` off a band's
         // last line lands on the next band's first, `k` off its first on
         // the band above's last — not on whichever card that band last
@@ -1041,21 +1193,61 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
             return;
         }
     }
-    if Some(next) == at {
-        // On the band already, but on none of its cards — the selection
-        // on a row the grid has no card for: its first card, as `h`/`l`
-        // take it. An EMPTY BAND has none: the cursor is on all of it.
-        if view::card_cursor(app, &bands[next]).is_none() {
-            match bands[next].cards.first() {
-                Some(first) => select_card(app, first.sref(), out),
-                None => take_aim(app),
-            }
-            return;
-        }
-        take_aim(app);
-        return;
-    }
     select_band(app, bands[next].worktree.clone(), out);
+}
+
+/// Down into `band`'s unfolded ARCHIVED DRAWER, onto its first line.
+/// False with the drawer folded, or nothing in it.
+fn into_drawer(app: &mut App, band: &view::Band, out: &mut Vec<ClientRequest>) -> bool {
+    let Some(first) = band.drawer().first() else {
+        return false;
+    };
+    select(app, first.agent.id.clone(), out);
+    true
+}
+
+/// A step with the cursor on a line of an ARCHIVED DRAWER — true when
+/// it was, and the step is taken: `j`/`k` walk the drawer's lines; `k`
+/// off its first goes back up onto the band's cards (its last row of
+/// them, the first card on it), or to the band above when there are
+/// none; `j` off its last goes on to the band below. A line has nothing
+/// beside it, so `h`/`l` only take the aim back.
+fn step_in_drawer(
+    app: &mut App,
+    bands: &[view::Band],
+    dy: i64,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    let Some(index) = view::band_cursor(app, bands) else {
+        return false;
+    };
+    let band = &bands[index];
+    let Some(at) = view::drawer_cursor(app, band) else {
+        return false;
+    };
+    let drawer = band.drawer();
+    if dy == 0 {
+        take_aim(app);
+    } else if dy > 0 && at + 1 < drawer.len() {
+        select(app, drawer[at + 1].agent.id.clone(), out);
+    } else if dy < 0 && at > 0 {
+        select(app, drawer[at - 1].agent.id.clone(), out);
+    } else if dy < 0 && !band.cards.is_empty() {
+        let card = app
+            .walked_band(bands)
+            .filter(|(b, _)| *b == index)
+            .and_then(|(_, layout)| layout.rows.last().and_then(|row| row.first().copied()))
+            .unwrap_or(0);
+        select_card(app, band.cards[card].sref(), out);
+    } else {
+        let next = index as i64 + dy.signum();
+        if next < 0 || next >= bands.len() as i64 {
+            take_aim(app);
+        } else {
+            onto_band(app, bands, next as usize, dy, 0, out);
+        }
+    }
+    true
 }
 
 /// [`step_grid`], and — where `→` found nowhere to go along the row and
@@ -1107,12 +1299,15 @@ fn step_up(
     out: &mut Vec<ClientRequest>,
 ) {
     let bands = view::bands(app);
-    let top = match app.walked_band(&bands) {
-        Some((band, layout)) => {
-            band == 0 && layout.on_top_row(view::card_cursor(app, &bands[band]))
-        }
-        None => view::band_cursor(app, &bands).map_or(bands.is_empty(), |b| b == 0),
-    };
+    let in_drawer = view::band_cursor(app, &bands)
+        .is_some_and(|b| view::drawer_cursor(app, &bands[b]).is_some());
+    let top = !in_drawer
+        && match app.walked_band(&bands) {
+            Some((band, layout)) => {
+                band == 0 && layout.on_top_row(view::card_cursor(app, &bands[band]))
+            }
+            None => view::band_cursor(app, &bands).map_or(bands.is_empty(), |b| b == 0),
+        };
     if !top {
         step_grid(app, 0, -1, out);
     } else if super::double_tapped(app, Action::MoveUp, armed, chord, "project tabs") {
@@ -3277,6 +3472,49 @@ mod tests {
         });
     }
 
+    /// ⌘. as macOS hands it over — Cancel, an Escape still holding ⌘ —
+    /// is **Select worktree**, never the Esc that closes what it was
+    /// pressed in: over the new-agent box it opens the worktree picker
+    /// with the box's text owed back, and over the NEW AGENT PICKER
+    /// (**New agent — choose harness**) the same picker, aimed where the
+    /// box would be.
+    #[test]
+    fn cmd_period_sent_as_cancel_opens_the_worktree_picker_and_closes_nothing() {
+        let worktree_picker = |app: &App| {
+            matches!(&app.overlay, Some(Overlay::Menu(m))
+                if m.title.as_deref() == Some("Worktree"))
+        };
+        with_default_config(|| {
+            // Over the box.
+            let mut app = two_sessions();
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            type_text(&mut app, "ship it");
+            key(&mut app, KeyCode::Esc, KeyModifiers::SUPER);
+            assert!(worktree_picker(&app), "over the box: {:?}", app.overlay);
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(launch(&app).1, "ship it", "the box survived, text and all");
+
+            // Over the harness-first picker.
+            let mut app = two_sessions();
+            draw(&mut app);
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
+            };
+            let aimed = super::super::menu_quick_return(menu)
+                .expect("the rows owe a box")
+                .launch
+                .target;
+            key(&mut app, KeyCode::Esc, KeyModifiers::SUPER);
+            let Some(Overlay::Menu(picker)) = &app.overlay else {
+                panic!("over the picker: {:?}", app.overlay);
+            };
+            assert!(worktree_picker(&app), "over the picker: {:?}", picker.title);
+            let back = super::super::menu_quick_return(picker).expect("it owes a box");
+            assert_eq!(back.launch.target, aimed);
+        });
+    }
+
     /// The effort field is a button too: a click opens the model's EFFORT
     /// list, the box's own effort ticked, and a pick hands the box back
     /// with it in the header — the text, and an AGENT PRESET on the box,
@@ -4856,7 +5094,7 @@ mod tests {
 
             // Over the box, which stays on screen behind it.
             let text = buffer_text(&draw_at(&mut app, 140, 40));
-            assert!(text.contains("New session"), "the box's title: {text}");
+            assert!(text.contains("New agent"), "the box's title: {text}");
             assert!(text.contains("fix the nav"), "the task: {text}");
             assert!(text.contains("+ new worktree"), "the picker: {text}");
 
@@ -5835,7 +6073,7 @@ mod tests {
             let text = buffer_text(&draw(&mut app));
             assert_eq!(tabs_drawn(&app), ["docs", "demo"], "{text}");
             assert!(
-                text.contains("press  ^N  to prompt"),
+                text.contains("press  ^N  to start an agent"),
                 "the grid says what starts one: {text}"
             );
         });
@@ -6223,7 +6461,7 @@ mod tests {
             let terminal = draw(&mut by_click);
             let text = buffer_text(&terminal);
             assert!(text.contains("Welcome to orion"), "{text}");
-            assert!(text.contains("press  ^N  to prompt"), "{text}");
+            assert!(text.contains("press  ^N  to start an agent"), "{text}");
             assert!(!text.contains("type a task"), "only the welcome: {text}");
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherWelcomePrompt);
             let cap = &terminal.backend().buffer()[(x + 7, y)];
@@ -6278,7 +6516,7 @@ mod tests {
             let sky = glyphs(&terminal, grid.y..key_y - 3);
             assert!(sky > 40, "{sky} specks of dust: {}", buffer_text(&terminal));
             assert!(row(&terminal, key_y - 2).contains("   Welcome to orion   "));
-            assert!(row(&terminal, key_y).contains("   press  ^N  to prompt   "));
+            assert!(row(&terminal, key_y).contains("   press  ^N  to start an agent   "));
             assert!(!app.welcome_active(), "animations off: a still frame");
 
             let mut small = on_an_empty_project();
@@ -6406,8 +6644,16 @@ mod tests {
 
     /// [`two_sessions`] with both projects open — `web` opened last, so
     /// its tab leads — and the grid on `demo`, the tab on the right.
+    ///
+    /// **Close project tab** ships with no key (a bare `x` closed tabs by
+    /// accident), so these tests bind it to `x` the way a user's rebind
+    /// would, and the close itself is what they exercise.
     fn two_tabs() -> App {
         let mut app = two_sessions();
+        app.keymap = crate::keymap::Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "close_project_tab".to_string(),
+            "x".to_string(),
+        )]));
         draw(&mut app);
         app.launcher_tabs = vec![ProjectId("p2".into()), ProjectId("p1".into())];
         draw(&mut app);
@@ -7562,7 +7808,7 @@ mod tests {
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(c))
                     if c.action == PendingAction::ArchiveAgent(AgentId("a1".into()))),
@@ -7575,8 +7821,8 @@ mod tests {
                 "nothing ran, so no key to watch"
             );
             for _ in 0..5 {
-                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
-                key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Repeat);
+                key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             }
             assert!(
                 matches!(&app.overlay, Some(Overlay::Confirm(_))),
@@ -7588,7 +7834,7 @@ mod tests {
                 ["a9", "a2", "a1"],
                 "a held `a` archives nothing"
             );
-            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Release);
+            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Release);
 
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(app.overlay.is_none(), "Enter answers it");
@@ -7625,7 +7871,7 @@ mod tests {
             let (x, y) = row_cell(&app, 2);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert_eq!(cards(&app), ["a9", "a2"], "the press unarchives one");
             assert_eq!(
                 selected(&app).as_deref(),
@@ -7639,7 +7885,7 @@ mod tests {
                 app.release_watch.is_some(),
                 "another key let go changes nothing"
             );
-            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
+            key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Repeat);
             assert_eq!(cards(&app), ["a9", "a2"], "the held `u` is still swallowed");
 
             key_kind(&mut app, KeyCode::Left, KeyModifiers::NONE, Repeat);
@@ -7676,11 +7922,11 @@ mod tests {
             // archived ones relative to before the press.
             let archived = |app: &App| app.tree.agents.iter().filter(|a| a.archived).count();
             let before = archived(&app);
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert_eq!(archived(&app), before - 1, "the press unarchives one");
             assert!(app.release_watch.is_some(), "and the key is watched");
             for _ in 0..5 {
-                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, Repeat);
+                key_kind(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL, Repeat);
             }
             assert_eq!(archived(&app), before - 1, "held, it unarchives no more");
         });
@@ -7696,7 +7942,7 @@ mod tests {
             draw(&mut app);
             to_feat(&mut app);
             assert_eq!(selected(&app).as_deref(), Some("a2"));
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(
                 app.tree.agents.iter().any(|a| a.id.0 == "a2" && a.archived),
@@ -7739,7 +7985,7 @@ mod tests {
                 "feat's band open"
             );
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a1"]);
             assert_eq!(
@@ -7817,7 +8063,7 @@ mod tests {
                 "whose checkout also holds the LAST card's session",
             );
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a2", "a1"]);
             assert_eq!(
@@ -7844,7 +8090,7 @@ mod tests {
             draw(&mut app);
             super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
             assert_eq!(selected(&app).as_deref(), Some("a2"), "the middle card");
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the card after it");
 
@@ -7936,14 +8182,14 @@ mod tests {
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
 
-            key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a2"]);
             assert_eq!(selected(&app).as_deref(), Some("a9"), "the card before it");
         });
     }
 
-    /// The ONLY card leaving — archived with `a` or deleted with ⌫, each
+    /// The ONLY card leaving — archived with `^A` or deleted with ⌫, each
     /// behind its confirm — leaves nothing for the PANE to read, so it
     /// folds away and the empty grid takes the body, the way a project
     /// opened with no sessions lands. INPUT PARITY: both verbs end in the
@@ -7952,8 +8198,14 @@ mod tests {
     fn the_last_card_leaving_folds_the_pane_away() {
         with_default_config(|| {
             for keys in [
-                &[KeyCode::Char('a'), KeyCode::Char('y')][..],
-                &[KeyCode::Backspace, KeyCode::Char('y')][..],
+                &[
+                    (KeyCode::Char('a'), KeyModifiers::CONTROL),
+                    (KeyCode::Char('y'), KeyModifiers::NONE),
+                ][..],
+                &[
+                    (KeyCode::Backspace, KeyModifiers::NONE),
+                    (KeyCode::Char('y'), KeyModifiers::NONE),
+                ][..],
             ] {
                 let mut app = two_sessions();
                 super::open_project(&mut app, &ProjectId("p2".into()), &mut Vec::new());
@@ -7961,8 +8213,8 @@ mod tests {
                 assert_eq!(cards(&app), ["a3"], "web's one card");
                 assert!(super::has_pane(&app), "{keys:?}: the pane reads it");
 
-                for code in keys {
-                    key(&mut app, *code, KeyModifiers::NONE);
+                for (code, mods) in keys {
+                    key(&mut app, *code, *mods);
                 }
                 assert!(cards(&app).is_empty(), "{keys:?}: the card left");
                 assert!(app.launcher_unaimed, "{keys:?}: nothing left to aim at");
@@ -7970,7 +8222,7 @@ mod tests {
                 assert!(app.flash.is_none());
                 let text = buffer_text(&draw(&mut app));
                 assert!(
-                    text.contains("press  ^N  to prompt"),
+                    text.contains("press  ^N  to start an agent"),
                     "{keys:?}: the empty grid says what starts one: {text}"
                 );
             }
@@ -8256,7 +8508,7 @@ mod tests {
             type_text(&mut app, "fix the nav");
             let box_behind = |app: &mut App, what: &str| {
                 let text = buffer_text(&draw(app));
-                assert!(text.contains("New session"), "{what}: the title: {text}");
+                assert!(text.contains("New agent"), "{what}: the title: {text}");
                 assert!(
                     text.contains("project demo ^P"),
                     "{what}: the details row: {text}"
@@ -8305,7 +8557,7 @@ mod tests {
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("type a project name"), "the picker: {text}");
-            assert!(text.contains("New session"), "the box's title: {text}");
+            assert!(text.contains("New agent"), "the box's title: {text}");
             assert!(text.contains("project demo ^P"), "its details row: {text}");
             assert!(text.contains("fix the nav"), "and the task in it: {text}");
 
@@ -8776,7 +9028,7 @@ mod tests {
             );
 
             // `u` unarchives the card under the cursor where it stands.
-            let out = key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            let out = key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
             assert!(
                 out.iter().any(|r| matches!(
                     r,
@@ -10720,7 +10972,7 @@ mod tests {
         key(app, KeyCode::Enter, KeyModifiers::NONE);
     }
 
-    /// `n` is not `p`: it asks which harness first — the NEW SESSION
+    /// `n` is not `p`: it asks which harness first — the NEW AGENT
     /// PICKER, with no box drawn behind it — and Enter on a row opens the
     /// box set to that harness, in the checkout `p` would take (the
     /// worktree under the cursor). Esc on the picker opens nothing: no
@@ -10737,9 +10989,9 @@ mod tests {
 
             crate::event_loop::run_action(&mut app, crate::keymap::Action::New);
             let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected the NEW SESSION PICKER, got {:?}", app.overlay);
+                panic!("expected the NEW AGENT PICKER, got {:?}", app.overlay);
             };
-            assert_eq!(menu.title.as_deref(), Some("New session"));
+            assert_eq!(menu.title.as_deref(), Some("New agent — choose harness"));
             let back = super::super::menu_quick_return(menu).expect("the rows owe a box");
             assert!(!back.from_box, "no box is up under the picker");
             assert_eq!(back.launch.target, feat, "the checkout p would take");
@@ -11198,6 +11450,174 @@ mod tests {
             let hint = app.hit_rect(&HitTarget::LauncherBandMore(0)).unwrap();
             click_at(&mut app, hint.x + 1, hint.y);
             assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[0].worktree));
+        });
+    }
+
+    // ---- the ARCHIVED DRAWER ----
+
+    /// [`three_sessions`] with the root's `agent-1` archived: the root
+    /// band holds `ship-docs` alone, with one session in its drawer.
+    fn one_archived() -> App {
+        let mut app = three_sessions();
+        for agent in &mut app.tree.agents {
+            if agent.id.0 == "a1" {
+                agent.archived = true;
+                agent.archived_at = 5;
+                agent.alive = false;
+            }
+        }
+        draw(&mut app);
+        super::select(&mut app, AgentId("a9".into()), &mut Vec::new());
+        draw(&mut app);
+        app
+    }
+
+    fn is_archived_now(app: &App, id: &str) -> bool {
+        app.tree.agents.iter().any(|a| a.id.0 == id && a.archived)
+    }
+
+    /// Folded, the drawer is only its count under the band: the session
+    /// is no card, and nothing of it is a line the cursor walks onto.
+    #[test]
+    fn a_folded_drawer_counts_the_bands_archived_sessions() {
+        with_default_config(|| {
+            let app = one_archived();
+            assert_eq!(cards(&app), ["a9", "a2"], "the archived one is no card");
+            let bands = crate::launcher::bands(&app);
+            assert_eq!(bands[0].archived.len(), 1);
+            assert!(!bands[0].drawer_open);
+            assert!(bands[0].drawer().is_empty());
+            assert!(bands[1].archived.is_empty(), "feat has none to count");
+            assert!(app.hit_rect(&HitTarget::LauncherDrawer(0)).is_some());
+            assert!(app.hit_rect(&HitTarget::LauncherDrawer(1)).is_none());
+        });
+    }
+
+    /// `z` unfolds the drawer with the cursor on its newest line, and `u`
+    /// there brings the session back — the cursor staying on it, now a
+    /// card again.
+    #[test]
+    fn z_then_u_brings_the_last_archived_session_back() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(app.archived_open.contains(&WorktreeId("w1".into())));
+            assert_eq!(
+                selected(&app).as_deref(),
+                Some("a1"),
+                "on the drawer's line"
+            );
+            draw(&mut app);
+            assert!(app
+                .hit_rect(&HitTarget::LauncherDrawerEntry(0, 0))
+                .is_some());
+
+            let sent = key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+            assert!(
+                sent.iter().any(|r| matches!(r,
+                    ClientRequest::UnarchiveAgent { id, .. } if id.0 == "a1")),
+                "{sent:?}"
+            );
+            assert!(!is_archived_now(&app, "a1"));
+            draw(&mut app);
+            assert!(cards(&app).contains(&"a1".to_string()), "a card again");
+            assert_eq!(
+                selected(&app).as_deref(),
+                Some("a1"),
+                "the cursor kept on it"
+            );
+            assert!(crate::launcher::bands(&app)[0].archived.is_empty());
+        });
+    }
+
+    /// `↓` off a band's cards walks into its unfolded drawer and on to
+    /// the band below; `↑` from that band comes back up through the
+    /// drawer onto the cards — and never, from a drawer line on the top
+    /// band, up into the PROJECT TABS.
+    #[test]
+    fn arrows_walk_through_an_unfolded_drawer() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a9"), "↑: up onto the card");
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a1"), "↓: into the drawer");
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a2"), "↓: on to feat");
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            draw(&mut app);
+            assert_eq!(selected(&app).as_deref(), Some("a1"), "↑: back up into it");
+            key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+            assert_eq!(selected(&app).as_deref(), Some("a9"));
+            assert!(app.launcher_tab_cursor.is_none(), "not up into the tabs");
+        });
+    }
+
+    /// `z` again folds it, and the cursor that was in it goes back onto
+    /// the band's cards; on a band with nothing archived `z` does nothing.
+    #[test]
+    fn z_folds_the_drawer_back_onto_the_cards() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(app.archived_open.is_empty());
+            assert_eq!(selected(&app).as_deref(), Some("a9"));
+
+            super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
+            key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(app.archived_open.is_empty());
+            assert_eq!(app.flash, None);
+        });
+    }
+
+    /// INPUT PARITY: a click on `▸ 1 archived` is `z`, and a second click
+    /// on a drawer line is `u`.
+    #[test]
+    fn clicks_on_the_drawer_are_z_and_u() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            let head = app.hit_rect(&HitTarget::LauncherDrawer(0)).unwrap();
+            click_at(&mut app, head.x + 1, head.y);
+            assert!(app.archived_open.contains(&WorktreeId("w1".into())));
+            assert_eq!(selected(&app).as_deref(), Some("a1"));
+
+            draw(&mut app);
+            let line = app.hit_rect(&HitTarget::LauncherDrawerEntry(0, 0)).unwrap();
+            click_at(&mut app, line.x + 6, line.y);
+            assert!(is_archived_now(&app, "a1"), "one click only lands on it");
+            draw(&mut app);
+            click_at(&mut app, line.x + 6, line.y);
+            assert!(!is_archived_now(&app, "a1"), "the second brings it back");
+        });
+    }
+
+    /// A band whose last card is archived with its drawer unfolded stays
+    /// on the grid, holding the session just filed; folded, it goes.
+    #[test]
+    fn an_unfolded_drawer_keeps_its_band_on_the_grid() {
+        with_default_config(|| {
+            let mut app = one_archived();
+            app.archived_open.insert(WorktreeId("w2".into()));
+            super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
+            key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(is_archived_now(&app, "a2"));
+            let bands = crate::launcher::bands(&app);
+            let feat = bands
+                .iter()
+                .find(|b| b.worktree.0 == "w2")
+                .expect("feat's band");
+            assert!(feat.cards.is_empty());
+            assert_eq!(feat.drawer().len(), 1);
+
+            app.archived_open.remove(&WorktreeId("w2".into()));
+            let bands = crate::launcher::bands(&app);
+            assert!(bands.iter().all(|b| b.worktree.0 != "w2"));
         });
     }
 }

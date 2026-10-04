@@ -120,9 +120,23 @@ fn settle_panel_scroll(
     if let Some(index) = cursor {
         let band = &bands[index];
         let at = crate::launcher::card_cursor(app, band);
-        let on = at.and_then(|i| band.cards.get(i)).map(|c| c.sref());
+        // Off the cards, the cursor may be on a line of the band's
+        // ARCHIVED DRAWER: that line is what to keep on screen.
+        let drawer_at = at
+            .is_none()
+            .then(|| crate::launcher::drawer_cursor(app, band))
+            .flatten();
+        let on = match drawer_at {
+            Some(e) => Some(orion_core::SessionRef::Agent(
+                band.drawer()[e].agent.id.clone(),
+            )),
+            None => at.and_then(|i| band.cards.get(i)).map(|c| c.sref()),
+        };
         if app.launcher_reveal || !app.launcher_scroll_held || app.launcher_scroll_on != on {
-            scroll = panel.reveal(scroll, index, at);
+            scroll = match drawer_at {
+                Some(e) => panel.reveal_drawer(scroll, index, e),
+                None => panel.reveal(scroll, index, at),
+            };
             app.launcher_scroll_held = false;
             app.launcher_scroll_on = on;
         }
@@ -856,6 +870,26 @@ fn draw_bands(
             );
             app.hits.extend(hits);
         }
+        // The ARCHIVED DRAWER under everything else the band draws: its
+        // `▸ N archived` line, and its sessions a faint line apiece once
+        // unfolded.
+        draw_drawer(
+            f,
+            app,
+            g,
+            pb,
+            DrawerBand {
+                index,
+                band,
+                window,
+                scroll,
+                at: on
+                    .then(|| crate::launcher::drawer_cursor(app, band))
+                    .flatten(),
+                lit: on && keys,
+            },
+            &mut cfg,
+        );
         if band.cards.is_empty() {
             draw_empty_band(f, app, g, pb, (window, scroll), on && keys);
             continue;
@@ -1236,6 +1270,117 @@ struct StripMore {
     hidden: usize,
     lit: bool,
     centered: bool,
+}
+
+/// One band's ARCHIVED DRAWER as [`draw_drawer`] draws it.
+struct DrawerBand<'a> {
+    index: usize,
+    band: &'a crate::launcher::Band,
+    window: Rect,
+    scroll: u16,
+    /// The drawer line the cursor is on, when it is on one.
+    at: Option<usize>,
+    /// The cursor is on the band, with the keys on the grid.
+    lit: bool,
+}
+
+/// Columns an ARCHIVED DRAWER is set in from the band's edge, so its
+/// lines read as filed under the band rather than as a band of their own.
+const DRAWER_INDENT: u16 = 2;
+
+/// A band's ARCHIVED DRAWER: its `▸ 3 archived` line — `▾` once
+/// unfolded, naming the key that folds it while the band holds the
+/// cursor — and, unfolded, each archived session on a line of its own,
+/// drawn as the compact LIST draws an entry ([`draw_list_row`]) in an
+/// archived session's quiet colors, so the drawer reads as put away
+/// before a word of it is. A click on the first line folds or unfolds
+/// it (`HitTarget::LauncherDrawer`); on a session's, lands the cursor
+/// there (`HitTarget::LauncherDrawerEntry`).
+fn draw_drawer(
+    f: &mut Frame,
+    app: &mut App,
+    g: &crate::launcher::BandsLayout,
+    pb: &crate::launcher::PanelBand,
+    d: DrawerBand<'_>,
+    cfg: &mut Option<crate::config::Config>,
+) {
+    let DrawerBand {
+        index,
+        band,
+        window,
+        scroll,
+        at,
+        lit,
+    } = d;
+    if band.archived.is_empty() {
+        return;
+    }
+    let th = app.theme;
+    let inset = Rect {
+        x: g.area.x + DRAWER_INDENT.min(g.area.width),
+        width: g.area.width.saturating_sub(DRAWER_INDENT),
+        ..g.area
+    };
+    if let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_head(inset)) {
+        let hit = HitTarget::LauncherDrawer(index);
+        let hovered = app.hover_crumb.as_ref() == Some(&hit);
+        let fold = if band.drawer_open { "▾" } else { "▸" };
+        let mut spans = vec![Span::styled(
+            format!("{fold} {} archived", band.archived.len()),
+            Style::default().fg(if hovered { th.accent } else { th.dim }),
+        )];
+        if lit {
+            let key = crate::hints::key_or(&app.keymap, Action::ToggleArchivedDrawer, "");
+            if !key.is_empty() {
+                let does = if band.drawer_open { "hide" } else { "show" };
+                spans.push(Span::styled(" · ", Style::default().fg(th.dim)));
+                spans.push(Span::styled(
+                    key,
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {does}"),
+                    Style::default().fg(th.dim),
+                ));
+            }
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), placed.rect);
+        app.hits.push((placed.rect, hit));
+    }
+    let drawer = band.drawer();
+    if drawer.is_empty() {
+        return;
+    }
+    let cards: Vec<crate::launcher::Card> = drawer
+        .iter()
+        .cloned()
+        .map(crate::launcher::Card::Session)
+        .collect();
+    let mut cols = (0, 0);
+    for row in drawer {
+        cols = (
+            cols.0.max(row.agent.name.chars().count()),
+            cols.1.max(runs_on_line(&row.agent, cfg).chars().count()),
+        );
+    }
+    let cols = (cols.0.min(LIST_NAME_MAX), cols.1.min(LIST_RUNS_MAX));
+    for (i, card) in cards.iter().enumerate() {
+        let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_row(inset, i)) else {
+            continue;
+        };
+        let selected = at == Some(i);
+        draw_list_row(
+            f.buffer_mut(),
+            app,
+            placed.rect,
+            card,
+            (selected, selected && lit),
+            cols,
+            cfg,
+        );
+        app.hits
+            .push((placed.rect, HitTarget::LauncherDrawerEntry(index, i)));
+    }
 }
 
 /// What the cursor's LIST entry wears in front of it.
@@ -2584,7 +2729,7 @@ fn draw_empty(f: &mut Frame, app: &mut App, area: Rect) {
                 .bg(th.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" to prompt", words),
+        Span::styled(" to start an agent", words),
     ]);
     let prompt_w = (prompt.width() as u16).min(area.width);
     let lines = vec![Line::from(welcome), Line::from(""), prompt];
@@ -3204,7 +3349,7 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
         .map(|f| f.label.chars().count())
         .max()
         .unwrap_or(0);
-    let key_style = Style::default().fg(th.accent);
+    let key_style = crate::hints::key_style(th);
     let mut out = BoxHeader::default();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut x = 0usize;
@@ -3291,12 +3436,13 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
         .unwrap_or_else(|| "(project gone)".into())
 }
 
-/// The view's box title: what Enter starts. The harness, the model, the
+/// The view's box title: what Enter starts — always a new AGENT (a
+/// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
 /// keys that change them; what is left here is what the box is *for* — an
 /// issue, a pull request, a Claude Cloud task.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
-    let mut head = vec!["New session".to_string()];
+    let mut head = vec!["New agent".to_string()];
     if let Some(issue) = &launch.issue {
         head.push(format!("issue #{}", issue.number));
     }
@@ -3498,11 +3644,11 @@ mod tests {
         let mut launch = a_launch();
         launch.model = None;
         launch.effort = None;
-        assert_eq!(box_title(&launch), "New session");
+        assert_eq!(box_title(&launch), "New agent");
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
         launch.preset = Some(a_preset("reviewer"));
-        assert_eq!(box_title(&launch), "New session");
+        assert_eq!(box_title(&launch), "New agent");
     }
 
     fn a_preset(name: &str) -> crate::agent_presets::AgentPreset {
@@ -5109,6 +5255,8 @@ mod tests {
                 branch: branch.into(),
                 pr: None,
             })],
+            archived: Vec::new(),
+            drawer_open: false,
         }
     }
 

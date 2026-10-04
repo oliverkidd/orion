@@ -4232,6 +4232,7 @@ mod tests {
         let account = orion_core::claude_account::ClaudeAccount {
             id: "claude-2".into(),
             config_dir: "/home/me/.claude-2".into(),
+            name: String::new(),
             enabled: true,
         };
         let all = harness_registry_in(&std::collections::BTreeMap::new(), &[], &[account]);

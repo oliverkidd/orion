@@ -1,6 +1,6 @@
 //! The QUICK PROMPT: the hotkey that opens a task box anywhere in the TUI
-//! and launches an AGENT on what you type, without walking the NEW SESSION
-//! PICKER first. The two are the two ways to start a session: `p` starts
+//! and launches an AGENT on what you type, without walking the NEW AGENT
+//! PICKER first. The two are the two ways to start an agent: `p` starts
 //! one on a typed task, `n` starts one bare — a harness pick, and the first
 //! prompt typed in the CLI — so the picker never ends in this box.
 //!
@@ -24,7 +24,9 @@
 //! A box closed without launching does not take what was typed with it:
 //! Esc, a click outside and the HARDWIRED UNLOCK park it as a
 //! [`QuickDraft`] (`App::quick_draft`), and the next box opened takes it
-//! back ([`open_box`]).
+//! back ([`open_box`]). Nor does a window closed with the box up: the text
+//! is the SAVED DRAFT on disk as it is typed (`saved_draft`), and a fresh
+//! box after a restart opens on it.
 
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Focus, Overlay, PromptDialog, PromptKind};
@@ -87,7 +89,7 @@ pub struct QuickLaunch {
     /// the issue is; `^P` is refused, the issues being this project's.
     pub linear: Option<crate::linear::LinearBatch>,
     /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
-    /// `Tab` picker toggles it, as it does in the NEW SESSION PICKER, and
+    /// `Tab` picker toggles it, as it does in the NEW AGENT PICKER, and
     /// Enter sends the typed text as the cloud task (`claude --cloud
     /// <task>`) rather than as a STARTING PROMPT. Only ever on a plain
     /// Claude launch ([`QuickLaunch::with_cloud`]): the DAEMON refuses a
@@ -255,7 +257,10 @@ pub(crate) fn draft_of_return(back: &QuickReturn) -> Option<QuickDraft> {
 /// coming back to the harness or AGENT PRESET picked in it, while a box
 /// aimed somewhere else keeps the aim and spec it was opened with. Either
 /// way the slot is emptied: the draft is in this box now, and clearing it
-/// here and pressing Esc is how it is thrown away.
+/// here and pressing Esc is how it is thrown away. With the slot empty —
+/// after a restart, a window closed on the box — the text comes back from
+/// the SAVED DRAFT on disk instead (`saved_draft::restore`), caret at its
+/// end; either way the box says `draft restored`.
 pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
     let (launch, restored) = match app.quick_draft.take() {
         // What the box stands on is where it is opened now, never where
@@ -268,26 +273,36 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
             Some(draft.input),
         ),
         Some(draft) => (launch, Some(draft.input)),
-        None => (launch, None),
+        None => (launch, crate::saved_draft::restore(app)),
     };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
+    put_restored(app, restored);
+}
+
+/// Put a restored draft's field into the box [`open_box`] or
+/// [`open_picked_box`] just opened, marked so its explanation line says
+/// so.
+fn put_restored(app: &mut App, restored: Option<TextInput>) {
     if let (Some(input), Some(Overlay::Prompt(prompt))) = (restored, &mut app.overlay) {
         prompt.input = input;
+        prompt.draft_restored = true;
     }
 }
 
-/// Open the box a picker reached with NO box up owes — `n`'s NEW SESSION
+/// Open the box a picker reached with NO box up owes — `n`'s NEW AGENT
 /// PICKER (`QuickReturn::from_box` false): the pick is the spec, and the
 /// DRAFT the last abandoned box left hands back its text alone. The
 /// harness was chosen a moment ago, on purpose, so no parked spec
 /// overrides it the way [`open_box`]'s same-aim rule would; the slot is
-/// emptied all the same, the text being in this box now.
+/// emptied all the same, the text being in this box now. An empty slot
+/// falls back to the SAVED DRAFT, as [`open_box`]'s does.
 pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
-    let restored = app.quick_draft.take().map(|draft| draft.input);
+    let restored = match app.quick_draft.take() {
+        Some(draft) => Some(draft.input),
+        None => crate::saved_draft::restore(app),
+    };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
-    if let (Some(input), Some(Overlay::Prompt(prompt))) = (restored, &mut app.overlay) {
-        prompt.input = input;
-    }
+    put_restored(app, restored);
 }
 
 /// What the box calls the harness it launches: its id — `claude`, a
@@ -427,7 +442,7 @@ impl QuickLaunch {
     /// Does Enter on an empty box launch? Every box but a CLAUDE CLOUD
     /// one does: the session starts on the harness, MODEL and EFFORT the
     /// title names with no first prompt — the CLI's own input is it, as
-    /// after the NEW SESSION PICKER (`n`) — and a box an AGENT PRESET is
+    /// after the NEW AGENT PICKER (`n`) — and a box an AGENT PRESET is
     /// on sends the prefix and postfix alone (nothing at all for a bare
     /// preset). A cloud box cannot: `claude --cloud` takes its task on the
     /// command line, so its empty box is a change of mind. (An ISSUE
@@ -742,7 +757,7 @@ pub(crate) fn target_branch(app: &App, launch: &QuickLaunch) -> Option<String> {
 }
 
 /// `Tab` in the box: which harness this one launch uses. The same AGENT
-/// KIND rows the NEW SESSION PICKER offers — so `→` drills into the same
+/// KIND rows the NEW AGENT PICKER offers — so `→` drills into the same
 /// MODEL / EFFORT submenus with the same TYPE-AHEAD — but the pick comes
 /// back here instead of creating a session, and it clears any AGENT PRESET
 /// (a launch spec has one source).
@@ -852,7 +867,7 @@ mod tests {
     }
 
     /// A harness switched off on the AGENTS TAB after it was chosen would
-    /// otherwise launch a kind the NEW SESSION PICKER no longer offers.
+    /// otherwise launch a kind the NEW AGENT PICKER no longer offers.
     #[test]
     fn a_disabled_harness_steps_on_to_an_enabled_one() {
         let cfg = Config {

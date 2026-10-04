@@ -1,0 +1,5 @@
+# The new-agent box (⌘N's ^N twin) with a task typed and its last word selected (⇧⌥←): the
+# "New agent" title, the selection highlight, and the bottom border's keys in the accent.
+C-n
+Refactor the token store into its own module
+M-S-Left

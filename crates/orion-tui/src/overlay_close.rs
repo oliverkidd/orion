@@ -160,7 +160,7 @@ fn quick_draft(overlay: &Overlay) -> Option<crate::quick_prompt::QuickDraft> {
 
 /// Close a CONTEXT MENU from any depth, handing the QUICK PROMPT its box
 /// back when the picker was opened from one that was up — not from `n`'s
-/// NEW SESSION PICKER, which owes a box it never showed
+/// NEW AGENT PICKER, which owes a box it never showed
 /// (`QuickReturn::from_box`).
 fn close_menu(app: &mut App) {
     let Some(Overlay::Menu(menu)) = &mut app.overlay else {

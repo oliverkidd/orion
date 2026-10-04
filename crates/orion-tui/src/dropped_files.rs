@@ -24,6 +24,8 @@
 //! agent should work on the file itself, not a copy of it.
 //!
 //! Copies older than [`KEEP`] are pruned whenever another one is made.
+//! A CLIPBOARD IMAGE pasted with `^V` (`clipboard_image`) is kept in the
+//! same folder and pruned by the same rule.
 
 use std::fs;
 use std::io;
@@ -204,7 +206,7 @@ fn plain(path: &str) -> bool {
 
 /// `path` as it goes into the prompt: bare when plain, single-quoted when
 /// not — the DATA DIR is under `Application Support` on macOS.
-fn quoted(path: &str) -> String {
+pub(crate) fn quoted(path: &str) -> String {
     if plain(path) {
         path.to_string()
     } else {
@@ -249,7 +251,7 @@ fn same_bytes(a: &Path, b: &Path) -> bool {
 
 /// `dest` with its mtime set to now, so a copy reused today isn't pruned
 /// tomorrow for the day it was first made.
-fn touched(dest: PathBuf) -> io::Result<PathBuf> {
+pub(crate) fn touched(dest: PathBuf) -> io::Result<PathBuf> {
     fs::File::options()
         .write(true)
         .open(&dest)?
@@ -296,7 +298,7 @@ fn plain_run(s: &str) -> String {
 
 /// Delete the copies in `dir` older than [`KEEP`]. Best effort: a copy
 /// that can't be read or removed is left for the next time.
-fn prune(dir: &Path) {
+pub(crate) fn prune(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };

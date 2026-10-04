@@ -352,11 +352,8 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
     // and whose last row opens a folder. HOME leads with its way back.
     let key = |k: &str, label: &str| {
         vec![
-            Span::styled(
-                k.to_string(),
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" {label}"), Style::default().fg(th.dim)),
+            Span::styled(k.to_string(), crate::hints::key_style(th)),
+            Span::styled(format!(" {label}"), crate::hints::does_style(th)),
         ]
     };
     let sep = || Span::styled("   ·   ", Style::default().fg(th.dim));
