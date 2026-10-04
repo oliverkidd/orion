@@ -150,6 +150,83 @@ pub struct SystemSpec {
     pub prepend_to_first_prompt: bool,
 }
 
+/// What a launch asks the agent to do with the task: change the code
+/// (the CLI's own default), plan the change without making it, or only
+/// answer questions about the code. Cursor's agent picker offers all
+/// three; Claude Code has a plan mode (`--permission-mode plan`) and no
+/// read-only ask mode. Request-only, like a STARTING PROMPT: the mode is
+/// where a session starts, and the CLI's own toggle moves it from there,
+/// so a resume never forces it back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMode {
+    /// Make the change: no flag, the CLI starts as it always does.
+    #[default]
+    Edit,
+    /// Read the code and propose a plan; no edits.
+    Plan,
+    /// Answer questions about the code; no edits.
+    Ask,
+}
+
+impl AgentMode {
+    /// The order the box's mode field cycles through.
+    pub const ALL: [AgentMode; 3] = [AgentMode::Edit, AgentMode::Plan, AgentMode::Ask];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentMode::Edit => "edit",
+            AgentMode::Plan => "plan",
+            AgentMode::Ask => "ask",
+        }
+    }
+}
+
+/// How a harness starts in a mode other than [`AgentMode::Edit`]: the flag
+/// and the value it takes for each mode it has. A mode with no value is
+/// one the CLI does not have, and the box does not offer it; a harness
+/// with neither offers no mode at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeSpec {
+    /// Flag carrying the mode (`--permission-mode`, `--mode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
+    /// The flag's value for [`AgentMode::Plan`] (`plan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// The flag's value for [`AgentMode::Ask`] (`ask`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
+}
+
+impl ModeSpec {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The flag and value that start the CLI in `mode`; None for
+    /// [`AgentMode::Edit`] and for a mode this harness does not have.
+    pub fn args(&self, mode: AgentMode) -> Option<[&str; 2]> {
+        let flag = self.flag.as_deref()?;
+        let value = match mode {
+            AgentMode::Edit => return None,
+            AgentMode::Plan => self.plan.as_deref()?,
+            AgentMode::Ask => self.ask.as_deref()?,
+        };
+        Some([flag, value])
+    }
+
+    /// The modes a launch on this harness can pick, in cycle order:
+    /// [`AgentMode::Edit`] plus each one the CLI has. Edit alone when it
+    /// has none — the box then draws no mode field.
+    pub fn offered(&self) -> Vec<AgentMode> {
+        AgentMode::ALL
+            .into_iter()
+            .filter(|&mode| mode == AgentMode::Edit || self.args(mode).is_some())
+            .collect()
+    }
+}
+
 /// The effective behavior of one harness: what the picker offers, what
 /// spawn builds, which hooks install, and what the Agents tab edits.
 /// Built-ins come from [`builtin`]; user entries merge over them (or over
@@ -209,6 +286,9 @@ pub struct HarnessDescriptor {
     /// (Cursor's family-suffix shape).
     #[serde(default, skip_serializing_if = "is_false")]
     pub compose_model_effort: bool,
+    /// How the CLI starts in plan or ask mode, where it has them.
+    #[serde(default, skip_serializing_if = "ModeSpec::is_empty")]
+    pub mode: ModeSpec,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -511,6 +591,7 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
         hooks: None,
         relocation_prompt: false,
         compose_model_effort: false,
+        mode: ModeSpec::default(),
     };
     Some(match id.trim() {
         "claude" => HarnessDescriptor {
@@ -542,6 +623,13 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
             },
             hooks: Some("claude".into()),
             relocation_prompt: true,
+            // Plan mode is a permission mode; Claude Code has no
+            // read-only ask mode to start in.
+            mode: ModeSpec {
+                flag: Some("--permission-mode".into()),
+                plan: Some("plan".into()),
+                ask: None,
+            },
             ..base
         },
         "codex" => HarnessDescriptor {
@@ -595,6 +683,11 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
             },
             hooks: Some("cursor".into()),
             compose_model_effort: true,
+            mode: ModeSpec {
+                flag: Some("--mode".into()),
+                plan: Some("plan".into()),
+                ask: Some("ask".into()),
+            },
             ..base
         },
         "pi" => HarnessDescriptor {
@@ -965,6 +1058,7 @@ impl CustomHarness {
             hooks: self.hooks.clone(),
             relocation_prompt: false,
             compose_model_effort: false,
+            mode: ModeSpec::default(),
         }
     }
 
@@ -1072,6 +1166,7 @@ pub fn registry(
             hooks: None,
             relocation_prompt: false,
             compose_model_effort: false,
+            mode: ModeSpec::default(),
         };
         // A map-only entry that maps effort shows its Effort row like a
         // built-in; a bare program stays Model-only like a legacy custom.
@@ -1613,5 +1708,32 @@ mod tests {
             "an empty list passes ids verbatim"
         );
         assert!(!legacy.offers_effort("high"), "no Effort row, no effort");
+    }
+
+    /// Claude starts in plan through its permission mode and has no ask;
+    /// Cursor has both through `--mode`; a harness with neither offers
+    /// edit alone, and edit is never a flag.
+    #[test]
+    fn modes_map_to_each_clis_own_flag() {
+        let claude = builtin("claude").unwrap().mode;
+        assert_eq!(claude.offered(), [AgentMode::Edit, AgentMode::Plan]);
+        assert_eq!(
+            claude.args(AgentMode::Plan),
+            Some(["--permission-mode", "plan"])
+        );
+        assert_eq!(claude.args(AgentMode::Ask), None);
+        assert_eq!(claude.args(AgentMode::Edit), None);
+
+        let cursor = builtin("cursor").unwrap().mode;
+        assert_eq!(cursor.offered(), AgentMode::ALL);
+        assert_eq!(cursor.args(AgentMode::Ask), Some(["--mode", "ask"]));
+
+        for id in ["codex", "pi", "muse", "grok", "opencode"] {
+            assert_eq!(
+                builtin(id).unwrap().mode.offered(),
+                [AgentMode::Edit],
+                "{id} has no mode to start in"
+            );
+        }
     }
 }

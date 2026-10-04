@@ -3900,6 +3900,47 @@ fn select_model(app: &mut App) {
     launcher::open_model_picker(app, back);
 }
 
+/// `⇧Tab` in the box, or a click on its `mode` field: the box's next mode
+/// — edit, plan, ask, round again — among the ones its harness has, shown
+/// at once in its header. Per box: nothing is saved, so the next box opens
+/// on edit.
+pub(crate) fn cycle_mode(app: &mut App) {
+    let Some(back) = ensure_launch_box(app) else {
+        return;
+    };
+    let cfg = crate::config::Config::load();
+    let modes = back.launch.modes(&cfg);
+    if modes.len() < 2 {
+        app.flash = Some(format!(
+            "{} has no plan or ask mode",
+            crate::agent_picker::harness_label(back.launch.kind, back.launch.custom.as_deref())
+        ));
+        return;
+    }
+    let at = modes
+        .iter()
+        .position(|&m| m == back.launch.mode)
+        .unwrap_or(0);
+    let mode = modes[(at + 1) % modes.len()];
+    app.dirty = true;
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if let PromptKind::QuickPrompt(launch) = &mut prompt.kind {
+            launch.mode = mode;
+            prompt.title = launch.title();
+            return;
+        }
+    }
+    let stepped = crate::quick_prompt::QuickLaunch {
+        mode,
+        ..back.launch.clone()
+    };
+    if back.from_box {
+        crate::quick_prompt::reopen(app, stepped, &back.text);
+    } else {
+        crate::quick_prompt::open_picked_box(app, stepped);
+    }
+}
+
 /// Cycle effort (`⌘Y` / `^Y`): the next effort on the model the box is
 /// set to — `default`, then the harness's list, round again — shown at
 /// once in the box's header. Over one of the box's pickers it hands the
@@ -6714,16 +6755,22 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     launcher::open_box_field(app, crate::launcher::BoxField::Project, back);
                 }
             }
-            // Tab / Shift+Tab retarget this one launch: the harness (and
-            // its MODEL / EFFORT submenus) or a saved AGENT PRESET. Both
-            // are free here — `TextInput` ignores them — and both come back
-            // with the text. Only the QUICK PROMPT has anything to retarget.
+            // Tab retargets this one launch — the harness, and its MODEL /
+            // EFFORT submenus — and ⇧Tab steps its mode, as it does in
+            // Claude Code and Cursor; ⌘U / ^X picks a saved AGENT PRESET.
+            // All are free here — `TextInput` ignores them — and all keep
+            // the text. Only the QUICK PROMPT has anything to retarget.
             _ if ui::task_keys::AGENT.matches(&key)
                 && matches!(prompt.kind, PromptKind::QuickPrompt(_)) =>
             {
                 if let Some(back) = quick_return_of(prompt) {
                     crate::quick_prompt::open_launch_picker(app, back);
                 }
+            }
+            _ if ui::task_keys::MODE.matches(&key)
+                && matches!(prompt.kind, PromptKind::QuickPrompt(_)) =>
+            {
+                cycle_mode(app)
             }
             _ if ui::task_keys::PRESET.matches(&key)
                 && matches!(prompt.kind, PromptKind::QuickPrompt(_)) =>
@@ -8302,7 +8349,9 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                 index,
             );
         }
-        PendingAction::TrashSkill { view, dir, name } => crate::skills::trash(app, *view, dir, name),
+        PendingAction::TrashSkill { view, dir, name } => {
+            crate::skills::trash(app, *view, dir, name)
+        }
         PendingAction::ResetSettings => reset_settings(app),
         PendingAction::AddClaudeAccount(new) => add_claude_account(app, new, true),
         PendingAction::SignOutClaude { id } => {
@@ -8575,6 +8624,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                     // The Claude row's `Tab` toggle rides the pick: the box
                     // comes back a CLAUDE CLOUD one, where it can be one.
                     .with_cloud(cloud)
+                    .with_mode(back.launch.mode, &crate::config::Config::load())
                     .with_under(back.launch.under.clone());
                 if back.from_box {
                     crate::quick_prompt::reopen(app, launch, &back.text);
@@ -9757,6 +9807,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
         focus_pane,
         placeholder,
         follow,
+        mode,
     } = draft;
     // A PR SESSION is addressed to the PROJECT, not to a checkout: the
     // DAEMON runs it in the PR head branch's own worktree, creating that
@@ -9878,6 +9929,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
                 pr_url: pr.url,
                 head: pr.head,
                 starting_prompt,
+                mode,
             }
         }
         None => ClientRequest::CreateAgent {
@@ -9892,6 +9944,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
             cloud_prompt,
             starting_prompt,
             issue_url,
+            mode,
         },
     });
     // The create consumes (or, off-spec, discards) the worktree's warm
@@ -19311,7 +19364,7 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             // "reviewer": claude · opus · high, the first preset.
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
@@ -26344,9 +26397,7 @@ diff --git a/src/c.rs b/src/c.rs
         let ids: Vec<&str> = crate::config::settings_rows(crate::config::hotkeys_tab())
             .into_iter()
             .filter_map(|row| match row {
-                crate::config::SettingsRow::Hotkey(i) => {
-                    crate::keymap::spec_at(i).map(|s| s.id)
-                }
+                crate::config::SettingsRow::Hotkey(i) => crate::keymap::spec_at(i).map(|s| s.id),
                 _ => None,
             })
             .collect();
@@ -31849,8 +31900,11 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
-            for open in [KeyCode::Tab, KeyCode::BackTab] {
-                press(&mut app, open, KeyModifiers::NONE, &mut out);
+            for (open, mods) in [
+                (KeyCode::Tab, KeyModifiers::NONE),
+                (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            ] {
+                press(&mut app, open, mods, &mut out);
                 assert!(
                     !matches!(&app.overlay, Some(Overlay::Prompt(_))),
                     "{open:?} should open a picker"
@@ -32024,10 +32078,10 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// `Shift+Tab` picks a saved AGENT PRESET for this launch: its harness,
+    /// `^X` picks a saved AGENT PRESET for this launch: its harness,
     /// its MODEL / EFFORT, and its prefix/postfix around what was typed.
     #[test]
-    fn shift_tab_applies_a_preset_and_wraps_the_task() {
+    fn the_preset_key_applies_a_preset_and_wraps_the_task() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -32041,9 +32095,9 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("⇧Tab should open the presets, got {:?}", app.overlay);
+                panic!("^X should open the presets, got {:?}", app.overlay);
             };
             assert!(view.is_picker(), "opened to pick, not to manage");
             assert_eq!(view.presets[0].name, "reviewer");
@@ -32111,7 +32165,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// is on launches on prefix + postfix. A `skip_task` preset picked over
     /// an empty box launches at once; over typed text it is only applied.
     #[test]
-    fn shift_tab_presets_make_the_quick_prompt_task_optional() {
+    fn presets_make_the_quick_prompt_task_optional() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -32130,8 +32184,13 @@ diff --git a/src/c.rs b/src/c.rs
             };
 
             // An ordinary preset: picked, then the empty box sent.
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Prompt(_))),
@@ -32157,7 +32216,7 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("typed text keeps the box, got {:?}", app.overlay);
@@ -32167,8 +32226,13 @@ diff --git a/src/c.rs b/src/c.rs
 
             // Over an empty box it launches the moment it is picked.
             app.overlay = None;
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "launched: {:?}", app.overlay);
             assert!(wrapped(&out), "{out:?}");
@@ -32180,7 +32244,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// lands back in the picker on it, and Enter hands the box back, text
     /// intact, under that preset.
     #[test]
-    fn shift_tab_without_presets_opens_a_picker_that_adds_one() {
+    fn the_preset_key_without_presets_opens_a_picker_that_adds_one() {
         with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
             crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
@@ -32195,7 +32259,7 @@ diff --git a/src/c.rs b/src/c.rs
                     &mut out,
                 );
                 assert!(paste_into_overlay(&mut app, "Fix auth"));
-                press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                     panic!("an empty picker, got {:?}", app.overlay);
                 };
@@ -34664,14 +34728,17 @@ diff --git a/src/c.rs b/src/c.rs
     #[test]
     fn clicking_outside_a_quick_prompt_picker_restores_the_box() {
         with_seeded_presets(|| {
-            for opener in [KeyCode::Tab, KeyCode::BackTab] {
+            for (opener, mods) in [
+                (KeyCode::Tab, KeyModifiers::NONE),
+                (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            ] {
                 let picker = |app: &mut App| {
                     let mut out = Vec::new();
                     seed_tree(app);
                     app.focus = Focus::Sessions;
                     press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
                     assert!(paste_into_overlay(app, "Fix auth"));
-                    press(app, opener, KeyModifiers::NONE, &mut out);
+                    press(app, opener, mods, &mut out);
                 };
 
                 let mut app = App::new();
@@ -35151,9 +35218,11 @@ diff --git a/src/c.rs b/src/c.rs
             let req_id = out
                 .iter()
                 .find_map(|r| match r {
-                    ClientRequest::DeleteWorktree { req_id, id, force: false } if id.0 == "w2" => {
-                        Some(*req_id)
-                    }
+                    ClientRequest::DeleteWorktree {
+                        req_id,
+                        id,
+                        force: false,
+                    } if id.0 == "w2" => Some(*req_id),
                     _ => None,
                 })
                 .expect("an unforced worktree delete");

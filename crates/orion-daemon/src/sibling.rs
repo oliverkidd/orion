@@ -75,6 +75,7 @@ impl Daemon {
             None
         };
         Ok(CreateAgentSpec {
+            mode: Default::default(),
             worktree: caller.worktree_id.clone(),
             name: sibling_name(&taken),
             kind,

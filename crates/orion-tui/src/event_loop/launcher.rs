@@ -2448,6 +2448,7 @@ pub(super) fn open_box_field(app: &mut App, field: BoxField, back: QuickReturn) 
         BoxField::Agent => crate::quick_prompt::open_launch_picker(app, back),
         BoxField::Model => open_model_picker(app, back),
         BoxField::Effort => open_effort_picker(app, back),
+        BoxField::Mode => super::cycle_mode(app),
         BoxField::Preset => crate::quick_prompt::open_preset_picker(app, back),
     }
 }
@@ -3502,7 +3503,7 @@ mod tests {
                     Some((KeyCode::Char('t'), KeyModifiers::CONTROL)),
                 ),
                 ("harness", Some((KeyCode::Tab, KeyModifiers::NONE))),
-                ("preset", Some((KeyCode::BackTab, KeyModifiers::SHIFT))),
+                ("preset", Some((KeyCode::Char('x'), KeyModifiers::CONTROL))),
                 ("project", Some((KeyCode::Char('p'), KeyModifiers::CONTROL))),
             ];
             for (surface, open) in surfaces {
@@ -3627,7 +3628,7 @@ mod tests {
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "ship it");
             let before = launch(&app).0;
-            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                 panic!("expected the preset picker, got {:?}", app.overlay);
             };
@@ -3738,7 +3739,7 @@ mod tests {
                 ),
                 (BoxField::Agent, KeyCode::Tab, KeyModifiers::NONE),
                 (BoxField::Model, KeyCode::Char('/'), KeyModifiers::CONTROL),
-                (BoxField::Preset, KeyCode::BackTab, KeyModifiers::SHIFT),
+                (BoxField::Preset, KeyCode::Char('x'), KeyModifiers::CONTROL),
             ] {
                 let mut by_key = two_sessions();
                 opened(&mut by_key);
@@ -11325,6 +11326,41 @@ mod tests {
             let hint = app.hit_rect(&HitTarget::LauncherBandMore(0)).unwrap();
             click_at(&mut app, hint.x + 1, hint.y);
             assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[0].worktree));
+        });
+    }
+
+    /// Cycle mode steps a Claude box edit → plan → edit (Claude has no
+    /// ask), the header reading the step at once, and Enter sends the
+    /// mode with the create.
+    #[test]
+    fn cycle_mode_steps_the_box_and_rides_the_create() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            type_text(&mut app, "how does auth work");
+            assert_eq!(launch(&app).0.mode, orion_core::AgentMode::Edit);
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("mode edit"), "{text}");
+
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            let (stepped, typed) = launch(&app);
+            assert_eq!(stepped.mode, orion_core::AgentMode::Plan);
+            assert_eq!(typed, "how does auth work", "the text is kept");
+            let text = buffer_text(&draw_at(&mut app, 140, 40));
+            assert!(text.contains("mode plan"), "{text}");
+
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            assert_eq!(launch(&app).0.mode, orion_core::AgentMode::Edit, "round again");
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+
+            let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                out.iter().any(|r| matches!(
+                    r,
+                    ClientRequest::CreateAgent { mode: orion_core::AgentMode::Plan, .. }
+                )),
+                "{out:?}"
+            );
         });
     }
 }

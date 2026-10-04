@@ -1832,7 +1832,10 @@ pub enum BoxField {
     /// Cycle effort (`⌘Y` / `^Y`) steps it; a click opens the model's
     /// EFFORT list. Not drawn for a harness with no effort.
     Effort,
-    /// The box's own `⇧Tab` — the AGENT PRESET on the launch, drawn only
+    /// The box's own `⇧Tab` — edit, plan or ask; a click steps it
+    /// too. Not drawn for a harness with no mode but edit.
+    Mode,
+    /// The box's own `⌘U` / `^X` — the AGENT PRESET on the launch, drawn only
     /// while one is.
     Preset,
 }

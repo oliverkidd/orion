@@ -3077,6 +3077,10 @@ pub(super) struct BoxHeader {
 /// `worktree main` never read as one phrase.
 const FIELD_GAP: usize = 3;
 
+/// Widest the `agent` field's value is drawn: a CLAUDE ACCOUNT's label
+/// runs to an email address, which took the row the mode needs.
+const AGENT_W: usize = 10;
+
 /// Fewest columns a value is cut to — `ma…` — before its field gives up
 /// its word, and then the whole field, instead.
 const MIN_VALUE: usize = 3;
@@ -3103,7 +3107,7 @@ fn header_fields(
     cfg: &crate::config::Config,
     th: Theme,
 ) -> [Vec<HeaderField>; 2] {
-    use super::task_keys::{AGENT, PRESET, PROJECT};
+    use super::task_keys::{AGENT, MODE, PRESET, PROJECT};
     let dim = Style::default().fg(th.dim);
     let bold = |fg| Style::default().fg(fg).add_modifier(Modifier::BOLD);
     let action_key = |action| crate::hints::key(&app.keymap, action);
@@ -3163,7 +3167,9 @@ fn header_fields(
     }
 
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
-    let mut agent = harness.display_label().to_string();
+    // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
+    // row room for the mode, the model and the effort beside it.
+    let mut agent = super::truncate(harness.display_label(), AGENT_W);
     // A CLAUDE CLOUD box says so on the field that toggles it.
     if launch.cloud {
         agent.push_str(crate::app::CLOUD_LABEL);
@@ -3191,6 +3197,26 @@ fn header_fields(
             action_key(Action::SelectModel),
         ),
     ];
+    // Beside the agent, since what it can be is the agent's: plan and ask
+    // read in colour, so a launch that will not edit is never mistaken for
+    // one that will.
+    if launch.modes(cfg).len() > 1 {
+        let colour = match launch.mode {
+            orion_core::AgentMode::Edit => th.text,
+            orion_core::AgentMode::Plan => th.warn,
+            orion_core::AgentMode::Ask => th.special,
+        };
+        runs.insert(
+            1,
+            field(
+                BoxField::Mode,
+                "mode",
+                launch.mode.as_str().to_string(),
+                bold(colour),
+                Some(MODE.label()),
+            ),
+        );
+    }
     if !crate::config::effort_choices_in(&harness, launch.model.as_deref()).is_empty() {
         runs.push(field(
             BoxField::Effort,
@@ -3751,7 +3777,9 @@ mod tests {
                 );
                 let head = box_header(&App::new(), &launch, &cfg, 200, Theme::default());
                 let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
-                assert_eq!(agent, "agent   Claude (b@b.co) Tab", "{:?}", rows_of(&head));
+                // Cut to ten columns, the row's room going to the mode,
+                // the model and the effort beside it.
+                assert_eq!(agent, "agent   Claude (b… Tab", "{:?}", rows_of(&head));
             })
         });
     }
@@ -3782,7 +3810,8 @@ mod tests {
                     BoxField::Agent => "Tab",
                     BoxField::Model => "^/",
                     BoxField::Effort => "^Y",
-                    BoxField::Preset => "⇧Tab",
+                    BoxField::Mode => "⇧Tab",
+                    BoxField::Preset => "^X",
                 };
                 assert!(
                     cells.ends_with(&format!(" {key}")),
@@ -3794,7 +3823,8 @@ mod tests {
                 );
             }
             if width >= 60 {
-                assert_eq!(head.fields.len(), 6, "{width}: every field fits: {rows:?}");
+                // Claude has plan, so its box draws the mode field too.
+                assert_eq!(head.fields.len(), 7, "{width}: every field fits: {rows:?}");
                 assert!(
                     !rows.concat().contains('…'),
                     "{width}: nothing cut: {rows:?}"
@@ -5047,7 +5077,7 @@ mod tests {
             )
         };
         assert!(
-            border(&launch).contains("⇧Tab preset"),
+            border(&launch).contains("^X preset"),
             "{}",
             border(&launch)
         );
@@ -5055,7 +5085,7 @@ mod tests {
         let head = header(&app, &launch, BOX_SIZE.0 - 4);
         assert_eq!(
             cells_of(&head, BoxField::Preset).as_deref(),
-            Some("preset reviewer ⇧Tab"),
+            Some("preset reviewer ^X"),
             "{:?}",
             rows_of(&head)
         );
@@ -5067,7 +5097,11 @@ mod tests {
             Some(0),
             "on the row of where it runs"
         );
-        assert!(!border(&launch).contains("⇧Tab"), "{}", border(&launch));
+        assert!(
+            !border(&launch).contains(&super::super::task_keys::PRESET.label()),
+            "{}",
+            border(&launch)
+        );
     }
 
     /// One checkout's BAND, with one session in it, for the rule tests.

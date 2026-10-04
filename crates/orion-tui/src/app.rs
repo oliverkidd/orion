@@ -2253,6 +2253,9 @@ pub struct AgentLaunchDraft {
     /// the user navigated away from: the create is born in
     /// `App::left_behind`, so the manual move still outranks the follow.
     pub follow: bool,
+    /// The mode the CLI starts in (see `ClientRequest::CreateAgent::mode`):
+    /// edit for every launch but a QUICK PROMPT stepped to plan or ask.
+    pub mode: orion_core::AgentMode,
 }
 
 impl AgentLaunchDraft {
@@ -2285,6 +2288,7 @@ impl AgentLaunchDraft {
             focus_pane: true,
             placeholder: None,
             follow: true,
+            mode: orion_core::AgentMode::Edit,
         }
     }
 }

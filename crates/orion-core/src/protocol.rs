@@ -130,6 +130,13 @@ pub enum ClientRequest {
         /// since a spare booted bare never got it.
         #[serde(default)]
         issue_url: Option<String>,
+        /// The mode the CLI starts in — plan, ask, or the edit it always
+        /// starts in ([`crate::harness::AgentMode`]). Request-only like
+        /// `starting_prompt`: a RESUME starts where the session left off,
+        /// and a mode the harness does not have is dropped. Skips PREWARM
+        /// POOL adoption unless it is edit, a spare having booted in edit.
+        #[serde(default)]
+        mode: crate::harness::AgentMode,
     },
     /// Create a local AGENT of any kind from an OPEN PRS row — a PR
     /// SESSION. It never runs in the ROOT WORKTREE: the daemon finds the
@@ -174,6 +181,9 @@ pub enum ClientRequest {
         /// is the first prompt. Request-only, never persisted.
         #[serde(default)]
         starting_prompt: Option<String>,
+        /// The mode the CLI starts in, under `CreateAgent`'s rules.
+        #[serde(default)]
+        mode: crate::harness::AgentMode,
     },
     /// Fire-and-forget: pre-spawn an agent CLI for this (worktree, kind) so
     /// the next CreateAgent adopts an already-booted session. Sent the

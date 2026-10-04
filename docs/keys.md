@@ -382,12 +382,19 @@ it runs over what runs it:
 
 ```
 project demo ⌘P   worktree main ⌘.
-agent   Claude (you@example.com) Tab   model opus · latest ⌘/   effort high ⌘Y
+agent   Claude (y… Tab   mode plan ⇧Tab   model opus · latest ⌘/   effort high ⌘Y
 ```
+
+The agent's name is cut to ten columns, so a Claude account's long label leaves the row room. The
+`mode` field is there for a harness that can start somewhere other than edit: Claude offers edit and
+plan (`--permission-mode plan`), Cursor edit, plan and ask (`--mode plan` / `--mode ask`). Every box
+opens on edit; plan and ask read in colour, so a launch that will not touch the code is
+never mistaken for one that will. The mode is where the session starts — the CLI's own toggle moves it
+from there, and a resume never forces it back.
 
 The effort is always there — `default` until one is picked — for every harness that has one
 (OpenCode has none, so its box has no effort field); an AGENT PRESET on the launch adds a
-`preset reviewer ⇧Tab` field, and a fresh worktree reads `new worktree <branch>`, in the green the
+`preset reviewer ⌘U` field, and a fresh worktree reads `new worktree <branch>`, in the green the
 frame turns. The worktree, model and effort keys are spelled from the live keymap, so a rebind shows
 there at once; on a narrow screen the fields wrap onto more rows rather than lose a key. What `Enter`
 sends is the dim line along the bottom of the frame.
@@ -396,12 +403,13 @@ sends is the dim line along the bottom of the frame.
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
 | `Tab` | pick a different harness for this one launch (`→` drills into its model and effort); in Claude's list `Tab` toggles Claude Cloud |
-| `⇧Tab` | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
+| `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
+| `⌘U` (`^X`) | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
 | `⌘.` (`^T`) | the WORKTREE PICKER: **+ new worktree** first, then every checkout of the project |
 | `⌘/` (`^/`) | the harness's model list |
 | `⌘Y` (`^Y`) | step the effort, the header showing the step at once — `⇧⌘/` too, where macOS lets it through |
-| a click on a header field | the picker its key opens; on `effort`, the model's effort list |
+| a click on a header field | the picker its key opens; on `effort`, the model's effort list; on `mode`, the next mode |
 
 `⌘.`, `⌘/` and `⌘Y` work the same with one of the box's pickers open over it — the model list,
 the worktree list, the harness or preset picker — and none of them closes the box: the model and
