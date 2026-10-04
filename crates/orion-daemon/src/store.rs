@@ -1439,8 +1439,7 @@ mod tests {
     /// with the table retired rather than erroring partway.
     #[test]
     fn migration_21_retires_notes_from_a_v9_database() {
-        let path =
-            std::env::temp_dir().join(format!("orion-mig21-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("orion-mig21-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
@@ -1484,8 +1483,7 @@ mod tests {
     /// rewriting or invalidating its existing AGENT rows.
     #[test]
     fn migration_22_adds_pr_context_without_backfill() {
-        let path =
-            std::env::temp_dir().join(format!("orion-mig22-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("orion-mig22-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
@@ -1541,8 +1539,7 @@ mod tests {
     /// workspace table left behind.
     #[test]
     fn migration_13_to_28_carries_a_pre_workspace_project_through() {
-        let path =
-            std::env::temp_dir().join(format!("orion-mig13-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("orion-mig13-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
@@ -1576,8 +1573,7 @@ mod tests {
     /// projects underneath load untouched.
     #[test]
     fn migration_18_drops_the_divider_columns() {
-        let path =
-            std::env::temp_dir().join(format!("orion-mig18-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("orion-mig18-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
@@ -1629,8 +1625,7 @@ mod tests {
     /// global again). Each drops the old table — child rows must survive.
     #[test]
     fn migration_14_and_28_rebuilds_keep_the_children() {
-        let path =
-            std::env::temp_dir().join(format!("orion-mig14-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("orion-mig14-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
@@ -1716,8 +1711,7 @@ mod tests {
     /// no workspace behind.
     #[test]
     fn migration_28_folds_a_repo_registered_in_two_workspaces_into_one_project() {
-        let path =
-            std::env::temp_dir().join(format!("orion-mig28-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("orion-mig28-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();

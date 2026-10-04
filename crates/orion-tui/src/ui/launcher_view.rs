@@ -8,8 +8,8 @@
 
 use super::{
     ago_badge, below_first_row, centered_rect, empty_list_row, fit_ago, fuzzy_highlight_spans,
-    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_color,
-    status_dot, status_name_spans, sweep_ramp, truncate, visible_positions, wants_you, NO_MATCHES,
+    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_color, status_dot,
+    status_name_spans, sweep_ramp, truncate, visible_positions, wants_you, NO_MATCHES,
     OVER_BOX_INSET, PENDING_SESSION_BADGE,
 };
 use crate::app::{App, Focus, HitTarget, Overlay};
@@ -1761,7 +1761,11 @@ fn draw_band_rule(
 /// RUN TERMINAL, `❯` for a plain shell, muted while its PTY lives and
 /// faint once it has exited.
 fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'static> {
-    let glyph = if t.run_command.is_some() { "▶ " } else { "❯ " };
+    let glyph = if t.run_command.is_some() {
+        "▶ "
+    } else {
+        "❯ "
+    };
     Span::styled(
         glyph,
         Style::default().fg(if t.alive { th.muted } else { th.faint }),
@@ -3530,8 +3534,7 @@ mod tests {
 
     fn a_launch() -> QuickLaunch {
         let cfg = crate::config::Config::default();
-        let target =
-            crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+        let target = crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
         QuickLaunch::of_kind(
             target,
             orion_core::AgentKind::Claude,
@@ -5427,7 +5430,11 @@ mod tests {
             alive: false,
             ..with(AgentStatus::Terminated, false)
         };
-        assert_eq!(frame(crashed, false, true), th.err, "a cold crash still wants you");
+        assert_eq!(
+            frame(crashed, false, true),
+            th.err,
+            "a cold crash still wants you"
+        );
         let archived = Agent {
             archived: true,
             ..with(AgentStatus::NeedsFeedback, false)

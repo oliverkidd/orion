@@ -1323,7 +1323,10 @@ mod tests {
     /// stand-in id and that request's id.
     fn type_preset_task(app: &mut App, out: &mut Vec<ClientRequest>) -> (WorktreeId, u64) {
         let (placeholder, req_id) = stage_modal(app, out);
-        out.extend(crate::event_loop::run_action(app, crate::keymap::Action::AgentPresets));
+        out.extend(crate::event_loop::run_action(
+            app,
+            crate::keymap::Action::AgentPresets,
+        ));
         assert!(
             matches!(&app.overlay, Some(Overlay::AgentPresets(view)) if view.worktree == placeholder),
             "Agent presets on the new row opens the list for it: {:?}",
@@ -1407,7 +1410,10 @@ mod tests {
             let mut app = App::new();
             let mut out = Vec::new();
             let (placeholder, req_id) = stage_modal(&mut app, &mut out);
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             assert!(
                 matches!(&app.overlay, Some(Overlay::AgentPresets(view)) if view.worktree == placeholder),
                 "{:?}",
@@ -1490,7 +1496,10 @@ mod tests {
             assert_eq!(app.focus, Focus::Sessions);
 
             // A second launch while the first waits is refused as before.
-            out.extend(crate::event_loop::run_action(&mut app, crate::keymap::Action::AgentPresets));
+            out.extend(crate::event_loop::run_action(
+                &mut app,
+                crate::keymap::Action::AgentPresets,
+            ));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.flash.is_none());
@@ -2170,7 +2179,12 @@ mod tests {
             seed_project_that_ran_first(&mut app);
             app.focus = Focus::Projects;
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w1"));
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let req_id = match out.as_slice() {
