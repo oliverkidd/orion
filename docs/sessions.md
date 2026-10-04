@@ -197,6 +197,28 @@ as pasted, so the agent works on the file itself. Copies older than a week are d
 something is dropped. A drop straight into a session's pane goes to the CLI untouched: Claude Code reads
 a dropped image there itself.
 
+An image on the clipboard — a screenshot taken with ⌃⇧⌘4, an image copied from a browser — goes in
+with `^V` in the same boxes (the hint is on each box's bottom border). The terminal's own `⌘V` only
+ever pastes text, so orion reads the clipboard itself: `pngpaste` when it is on PATH, otherwise
+`osascript` asking for the clipboard as PNG (or as TIFF, converted by `sips`). The image is written
+to the same `attachments/` folder as `clipboard-<hash>.png` — the same image pasted twice is one file
+— and its path goes in at the caret, replacing any selection. With no image on the clipboard the
+footer says so and nothing is pasted.
+
+## The quick prompt's draft
+
+The QUICK PROMPT's text is saved to `quick_prompt_draft.txt` in the DATA DIR as you type it — each
+change rewritten whole through a temporary file, nothing written when nothing changed. Closing the
+terminal window kills orion without a clean shutdown, so there is no exit hook to rely on; with the
+text already on disk, the next box opened after a restart starts from it, caret at its end, its
+explanation line reading `draft restored · …` until the first edit. Within one run the box you
+closed comes back the same way, with its harness and preset (`Esc` parks it).
+
+Sending the box deletes the draft, and so does emptying it by hand. A launch the daemon refuses
+comes back with its text, which is the draft again. Boxes that carry their own text — a refused
+launch, a preset's task, the FOLLOW-UP box — never open on the draft, and a box with text of its own
+writes nothing until you edit it, so opening one never overwrites what you were drafting.
+
 ## RECENT PROMPTS
 
 Every session card carries the last thing its session was asked to do, condensed to one line and

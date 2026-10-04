@@ -121,6 +121,9 @@ pub enum Answer {
     /// This process's resident set, for the footer's memory readout and the
     /// memory modal: a `ps`, on a five-second beat.
     ClientRss(u64),
+    /// What `^V` found on the system clipboard (`clipboard_image`): the
+    /// image kept as a file for the box's agent, or why there is none.
+    ClipboardImage(crate::clipboard_image::Pasted),
     /// The outcome of something a key started and did not wait for, in the
     /// footer's words (`Shift+G`: which page was opened, or why not).
     Flash(String),

@@ -62,12 +62,16 @@ pub(crate) mod task_keys {
     pub const AGENT: Key = Key::new(&["tab"], "agent");
     /// One of the saved AGENT PRESETS.
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
+    /// The image on the system clipboard, pasted as a file the agent can
+    /// open (`clipboard_image`) — in a box bound for an agent on this
+    /// machine only. `^V`, not ⌘V: Ghostty keeps ⌘V, its text paste.
+    pub const IMAGE: Key = Key::new(&["ctrl+v"], "paste image");
     pub const CANCEL: Key = Key::new(&["esc"], "cancel");
 
     #[cfg(test)]
     #[test]
     fn every_task_key_parses_and_newline_is_the_editors() {
-        for key in [SUBMIT, NEWLINE, PROJECT, AGENT, PRESET, CANCEL] {
+        for key in [SUBMIT, NEWLINE, PROJECT, AGENT, PRESET, IMAGE, CANCEL] {
             assert!(key.parses(), "{:?}", key.chords);
         }
         let input = crate::text_input::TextInput::multiline();
@@ -84,10 +88,11 @@ pub(crate) mod task_keys {
 /// border was most of what made the box read as a wall of chords. `⇧Tab`
 /// is, until a preset is on — then the header's `preset` field carries
 /// it. Its Esc goes back to the modal it was opened over, where it was
-/// opened over one.
+/// opened over one. A box bound for an agent on this machine names `^V`,
+/// its CLIPBOARD IMAGE paste, the first hint to go on a narrow box.
 pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hint> {
     use crate::app::PromptKind;
-    use task_keys::{CANCEL, NEWLINE, PRESET, SUBMIT};
+    use task_keys::{CANCEL, IMAGE, NEWLINE, PRESET, SUBMIT};
     let (submit, back) = match kind {
         PromptKind::QuickPrompt(launch) => {
             use crate::quick_prompt::ModalUnder;
@@ -101,6 +106,7 @@ pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hin
             if launch.preset.is_none() {
                 hints.push(PRESET.hint());
             }
+            hints.push(IMAGE.hint());
             hints.push(CANCEL.hint_as(back));
             return hints;
         }
@@ -115,11 +121,12 @@ pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hin
         PromptKind::SettingText { .. } => ("save", "back"),
         _ => ("launch", "cancel"),
     };
-    vec![
-        SUBMIT.hint_as(submit).kept(),
-        NEWLINE.hint(),
-        CANCEL.hint_as(back),
-    ]
+    let mut hints = vec![SUBMIT.hint_as(submit).kept(), NEWLINE.hint()];
+    if kind.reaches_local_agent() {
+        hints.push(IMAGE.hint());
+    }
+    hints.push(CANCEL.hint_as(back));
+    hints
 }
 
 /// Width of a one-line prompt, and of the wider one carrying a directory
@@ -740,7 +747,12 @@ fn draw_multiline_prompt(
     let block = crate::hints::modal_block(block, &hints, area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let label = prompt.label.clone();
+    // A box opened on a restored draft says so first, quietly, until the
+    // first edit (`saved_draft`).
+    let label = match quick {
+        Some(_) if prompt.draft_restored => format!("draft restored · {}", prompt.label),
+        _ => prompt.label.clone(),
+    };
     // The QUICK PROMPT says what Enter sends as the modal's EXPLANATION:
     // one dim line along the bottom of its frame, right above its keys.
     let (inner, explain_row) = match quick {
@@ -1322,6 +1334,16 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             Keys(&[crate::text_input::keys::KILL]),
                             "kill to start / end",
                         ),
+                        (Keys(&[crate::text_input::keys::SELECT]), "select"),
+                        (
+                            Keys(&[crate::text_input::keys::SELECT_WORD]),
+                            "select by word",
+                        ),
+                        (
+                            Keys(&[crate::text_input::keys::SELECT_LINE]),
+                            "select to start / end",
+                        ),
+                        (Keys(&[crate::text_input::keys::SELECT_ALL]), "select all"),
                     ],
                 ),
             ];
@@ -4374,10 +4396,74 @@ pub(crate) fn draw_scroll_marks(
     }
 }
 
+/// What one cell of a drawn text field is: text, text inside the field's
+/// SELECTION, or the caret's block. One verdict for every renderer — the
+/// multi-row boxes, the one-line fields, FIRST-RUN SETUP's — so a
+/// selection reads the same in all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FieldCell {
+    Plain,
+    Selected,
+    Caret,
+}
+
+impl FieldCell {
+    /// The cell at char `i` of a field whose caret stands at char `caret`
+    /// with `selection` (as [`TextInput::selection_chars`] gives it)
+    /// selected. The caret's block wins over the selection under it.
+    pub(crate) fn at(i: usize, caret: usize, selection: Option<(usize, usize)>) -> Self {
+        if i == caret {
+            Self::Caret
+        } else if selection.is_some_and(|(start, end)| (start..end).contains(&i)) {
+            Self::Selected
+        } else {
+            Self::Plain
+        }
+    }
+}
+
+/// The text inside a field's SELECTION: the theme's selection background
+/// under the field's own text colour `fg`.
+pub(crate) fn selected_style(fg: Color, th: Theme) -> Style {
+    Style::default().fg(fg).bg(th.sel_bg)
+}
+
+/// A field's cells as spans, each run of one kind of cell in one span —
+/// `plain` text, the `selected` text and the `caret`'s block.
+pub(crate) fn field_spans(
+    cells: impl IntoIterator<Item = (char, FieldCell)>,
+    plain: Style,
+    selected: Style,
+    caret: Style,
+) -> Vec<Span<'static>> {
+    let style = |cell: FieldCell| match cell {
+        FieldCell::Plain => plain,
+        FieldCell::Selected => selected,
+        FieldCell::Caret => caret,
+    };
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut run_cell = FieldCell::Plain;
+    for (c, cell) in cells {
+        if cell != run_cell && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), style(run_cell)));
+        }
+        run_cell = cell;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, style(run_cell)));
+    }
+    spans
+}
+
 /// Word-wrapped rows for a multi-row field, in the field's own layout
 /// ([`TextInput::rows`]) so the rows drawn are the rows ↑/↓ walk. The
 /// returned row index is where the caret rendered, so the caller can keep
-/// that row inside its fixed-height viewport.
+/// that row inside its fixed-height viewport. A SELECTION draws on the
+/// theme's selection background ([`field_spans`]), a selected line break
+/// as one highlighted cell at its row's end, so a selected empty line
+/// shows.
 pub(crate) fn multiline_input_lines(
     input: &TextInput,
     width: usize,
@@ -4386,48 +4472,36 @@ pub(crate) fn multiline_input_lines(
 ) -> (Vec<Line<'static>>, usize) {
     let chars: Vec<char> = input.chars().collect();
     let caret = input.cursor_chars();
+    let selection = input.selection_chars();
     let ranges = input.rows(width.max(1));
 
     let plain = Style::default().fg(th.text);
     let block = Style::default().fg(th.on_accent).bg(cursor);
+    let selected = selected_style(th.text, th);
     let mut caret_row = 0usize;
     let mut found_caret = false;
     let lines = ranges
         .into_iter()
         .enumerate()
         .map(|(row, (start, end))| {
-            let mut cells: Vec<(char, bool)> =
-                (start..end).map(|i| (chars[i], i == caret)).collect();
+            let mut cells: Vec<(char, FieldCell)> = (start..end)
+                .map(|i| (chars[i], FieldCell::at(i, caret, selection)))
+                .collect();
+            let breaks = chars.get(end).is_some_and(|c| *c == '\n');
             // At EOF, on an empty line, or immediately before an explicit
-            // newline, the caret needs its own blank cell.
-            if (start == end && caret == start)
-                || (caret == end
-                    && (end == chars.len() || chars.get(end).is_some_and(|c| *c == '\n')))
+            // newline, the caret needs its own blank cell — and so does a
+            // selected line break.
+            if (start == end && caret == start) || (caret == end && (end == chars.len() || breaks))
             {
-                cells.push((' ', true));
+                cells.push((' ', FieldCell::Caret));
+            } else if breaks && FieldCell::at(end, caret, selection) == FieldCell::Selected {
+                cells.push((' ', FieldCell::Selected));
             }
-            if cells.iter().any(|(_, is_caret)| *is_caret) {
+            if cells.iter().any(|(_, cell)| *cell == FieldCell::Caret) {
                 caret_row = row;
                 found_caret = true;
             }
-
-            let mut spans = Vec::new();
-            let mut run = String::new();
-            let mut run_is_caret = false;
-            for (c, is_caret) in cells {
-                if is_caret != run_is_caret && !run.is_empty() {
-                    spans.push(Span::styled(
-                        std::mem::take(&mut run),
-                        if run_is_caret { block } else { plain },
-                    ));
-                }
-                run_is_caret = is_caret;
-                run.push(c);
-            }
-            if !run.is_empty() {
-                spans.push(Span::styled(run, if run_is_caret { block } else { plain }));
-            }
-            Line::from(spans)
+            Line::from(field_spans(cells, plain, selected, block))
         })
         .collect::<Vec<_>>();
     if !found_caret {
@@ -4437,9 +4511,10 @@ pub(crate) fn multiline_input_lines(
 }
 
 /// Spans for a one-line text field: the value with a block cursor sitting
-/// where the caret is. Long values scroll under the field — the window
-/// keeps the caret near the middle, and a `…` marks each end that has text
-/// scrolled off it.
+/// where the caret is, and its SELECTION on the theme's selection
+/// background. Long values scroll under the field — the window keeps the
+/// caret near the middle, and a `…` marks each end that has text scrolled
+/// off it.
 ///
 /// `cursor` colors the caret block; pass `th.dim` to park it (the prompt
 /// does that while a listing row, not the text, holds Enter).
@@ -4451,6 +4526,7 @@ pub(crate) fn input_spans(
 ) -> Vec<Span<'static>> {
     let chars: Vec<char> = input.chars().collect();
     let caret = input.cursor_chars();
+    let selection = input.selection_chars();
     let budget = budget.max(1);
     // A caret parked past the last character needs one extra cell to sit in.
     let total = chars.len() + usize::from(caret >= chars.len());
@@ -4461,8 +4537,13 @@ pub(crate) fn input_spans(
     };
     let end = (start + budget).min(total);
 
-    let mut cells: Vec<(char, bool)> = (start..end)
-        .map(|i| (chars.get(i).copied().unwrap_or(' '), i == caret))
+    let mut cells: Vec<(char, FieldCell)> = (start..end)
+        .map(|i| {
+            (
+                chars.get(i).copied().unwrap_or(' '),
+                FieldCell::at(i, caret, selection),
+            )
+        })
         .collect();
     // The window is centered on the caret, so an elided edge is never the
     // caret's own cell.
@@ -4479,22 +4560,7 @@ pub(crate) fn input_spans(
 
     let plain = Style::default().fg(th.text);
     let block = Style::default().fg(th.on_accent).bg(cursor);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut run = String::new();
-    let mut run_is_caret = false;
-    for (c, is_caret) in cells {
-        if is_caret != run_is_caret && !run.is_empty() {
-            let style = if run_is_caret { block } else { plain };
-            spans.push(Span::styled(std::mem::take(&mut run), style));
-        }
-        run_is_caret = is_caret;
-        run.push(c);
-    }
-    if !run.is_empty() {
-        let style = if run_is_caret { block } else { plain };
-        spans.push(Span::styled(run, style));
-    }
-    spans
+    field_spans(cells, plain, selected_style(th.text, th), block)
 }
 
 /// The always-live search row every fuzzy overlay shares: a dim placeholder
@@ -4827,7 +4893,7 @@ mod tests {
         }
         let full = text(&quick, launcher_view::BOX_SIZE.0 as usize);
         assert_eq!(
-            full, "Enter launch · ^J newline · ⇧Tab preset · Esc cancel",
+            full, "Enter launch · ^J newline · ⇧Tab preset · ^V paste image · Esc cancel",
             "no ⌘ from this terminal, so no kitty ⇧Enter either: ^J"
         );
         for chord in ["^P", "^T", "^/", "^Y", "^N", "Tab agent"] {
@@ -4855,6 +4921,45 @@ mod tests {
         let line = search_line(&TextInput::with_text("ab"), "type to filter…", area, th);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "ab ");
+    }
+
+    /// A field's SELECTION draws on the theme's selection background in
+    /// both renderers — the one-line field's spans and the multi-row box's
+    /// rows, a selected line break as a lit cell at its row's end — and
+    /// the caret's block keeps its own colour.
+    #[test]
+    fn a_selection_draws_on_the_selection_background() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let th = Theme::default();
+        let lit = |spans: &[Span]| -> String {
+            spans
+                .iter()
+                .filter(|s| s.style.bg == Some(th.sel_bg))
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        let shift_left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
+
+        let mut one = TextInput::with_text("fix the bug");
+        for _ in 0..3 {
+            one.handle_key(&shift_left);
+        }
+        let spans = input_spans(&one, 40, th.accent, th);
+        assert_eq!(lit(&spans), "ug", "`b` is the caret's, at the moving end");
+        let caret = spans.iter().find(|s| s.content.as_ref() == "b").unwrap();
+        assert_eq!(caret.style.bg, Some(th.accent));
+
+        let mut many = TextInput::multiline_with_text("one\n\ntwo");
+        many.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER));
+        many.handle_key(&shift_left);
+        let (lines, _) = multiline_input_lines(&many, 20, th.accent, th);
+        let rows: Vec<String> = lines.iter().map(|l| lit(&l.spans)).collect();
+        assert_eq!(rows, vec!["one ", " ", "tw"], "the breaks lit too");
+        let caret = lines[2].spans.last().unwrap();
+        assert_eq!(
+            (caret.content.as_ref(), caret.style.bg),
+            ("o", Some(th.accent))
+        );
     }
 
     /// The sweep must recolor cells without ever changing what they spell.

@@ -24,7 +24,9 @@
 //! A box closed without launching does not take what was typed with it:
 //! Esc, a click outside and the HARDWIRED UNLOCK park it as a
 //! [`QuickDraft`] (`App::quick_draft`), and the next box opened takes it
-//! back ([`open_box`]).
+//! back ([`open_box`]). Nor does a window closed with the box up: the text
+//! is the SAVED DRAFT on disk as it is typed (`saved_draft`), and a fresh
+//! box after a restart opens on it.
 
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Focus, Overlay, PromptDialog, PromptKind};
@@ -255,7 +257,10 @@ pub(crate) fn draft_of_return(back: &QuickReturn) -> Option<QuickDraft> {
 /// coming back to the harness or AGENT PRESET picked in it, while a box
 /// aimed somewhere else keeps the aim and spec it was opened with. Either
 /// way the slot is emptied: the draft is in this box now, and clearing it
-/// here and pressing Esc is how it is thrown away.
+/// here and pressing Esc is how it is thrown away. With the slot empty —
+/// after a restart, a window closed on the box — the text comes back from
+/// the SAVED DRAFT on disk instead (`saved_draft::restore`), caret at its
+/// end; either way the box says `draft restored`.
 pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
     let (launch, restored) = match app.quick_draft.take() {
         // What the box stands on is where it is opened now, never where
@@ -268,11 +273,19 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
             Some(draft.input),
         ),
         Some(draft) => (launch, Some(draft.input)),
-        None => (launch, None),
+        None => (launch, crate::saved_draft::restore(app)),
     };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
+    put_restored(app, restored);
+}
+
+/// Put a restored draft's field into the box [`open_box`] or
+/// [`open_picked_box`] just opened, marked so its explanation line says
+/// so.
+fn put_restored(app: &mut App, restored: Option<TextInput>) {
     if let (Some(input), Some(Overlay::Prompt(prompt))) = (restored, &mut app.overlay) {
         prompt.input = input;
+        prompt.draft_restored = true;
     }
 }
 
@@ -281,13 +294,15 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
 /// DRAFT the last abandoned box left hands back its text alone. The
 /// harness was chosen a moment ago, on purpose, so no parked spec
 /// overrides it the way [`open_box`]'s same-aim rule would; the slot is
-/// emptied all the same, the text being in this box now.
+/// emptied all the same, the text being in this box now. An empty slot
+/// falls back to the SAVED DRAFT, as [`open_box`]'s does.
 pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
-    let restored = app.quick_draft.take().map(|draft| draft.input);
+    let restored = match app.quick_draft.take() {
+        Some(draft) => Some(draft.input),
+        None => crate::saved_draft::restore(app),
+    };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
-    if let (Some(input), Some(Overlay::Prompt(prompt))) = (restored, &mut app.overlay) {
-        prompt.input = input;
-    }
+    put_restored(app, restored);
 }
 
 /// What the box calls the harness it launches: its id — `claude`, a

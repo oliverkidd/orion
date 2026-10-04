@@ -1389,28 +1389,37 @@ fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
 }
 
 /// A multi-row field drawn in place: its rows at `width`, at most `max`
-/// of them — the window round the caret — the caret a `▌` where it is.
+/// of them — the window round the caret — the caret a `▌` where it is,
+/// and its SELECTION on the selection background every field draws one on
+/// (`ui::field_spans`).
 fn field_rows(input: &TextInput, width: u16, max: usize, th: Theme) -> Vec<Line<'static>> {
+    use crate::ui::FieldCell;
     let text: Vec<char> = input.as_str().chars().collect();
     let rows = input.rows(usize::from(width.max(1)));
     let caret_row = input.caret_row(&rows);
     let caret = input.cursor_chars();
+    let selection = input.selection_chars();
     let first = (caret_row + 1).saturating_sub(max);
+    let plain = Style::default().fg(th.accent);
+    let selected = crate::ui::selected_style(th.accent, th);
     rows.iter()
         .enumerate()
         .skip(first)
         .take(max)
         .map(|(i, &(start, end))| {
-            let mut row: String = text[start..end].iter().collect();
+            // The `▌` stands between two characters rather than on one, so
+            // every char here is text or selected, never the caret's cell.
+            let mut cells: Vec<(char, FieldCell)> = (start..end)
+                .filter(|at| text[*at] != '\n')
+                .map(|at| (text[at], FieldCell::at(at, usize::MAX, selection)))
+                .collect();
             if i == caret_row {
-                let at = caret.saturating_sub(start).min(row.chars().count());
-                let byte = row.char_indices().nth(at).map_or(row.len(), |(b, _)| b);
-                row.insert(byte, '▌');
+                let at = caret.saturating_sub(start).min(cells.len());
+                cells.insert(at, ('▌', FieldCell::Plain));
             }
-            Line::from(Span::styled(
-                format!("   {}", row.trim_end_matches('\n')),
-                Style::default().fg(th.accent),
-            ))
+            let mut spans = vec![Span::styled("   ", plain)];
+            spans.extend(crate::ui::field_spans(cells, plain, selected, plain));
+            Line::from(spans)
         })
         .collect()
 }
