@@ -54,11 +54,7 @@ const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 /// leaves off.
 fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
-    std::fs::write(
-        data_dir.join("config.local.json"),
-        r#"{"onboarded": true}"#,
-    )
-    .unwrap();
+    std::fs::write(data_dir.join("config.local.json"), r#"{"onboarded": true}"#).unwrap();
     std::fs::write(
         data_dir.join("config.json"),
         format!(

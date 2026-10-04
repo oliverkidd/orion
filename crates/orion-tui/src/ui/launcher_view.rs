@@ -3482,8 +3482,7 @@ mod tests {
 
     fn a_launch() -> QuickLaunch {
         let cfg = crate::config::Config::default();
-        let target =
-            crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+        let target = crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
         QuickLaunch::of_kind(
             target,
             orion_core::AgentKind::Claude,

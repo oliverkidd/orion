@@ -47,7 +47,8 @@ pub const NEVER_RELEASED: &[&str] = &[
 ];
 
 /// First and last line of the block orion owns.
-const BEGIN: &str = "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
+const BEGIN: &str =
+    "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
 const END: &str = "# <<< orion keybinds <<<";
 
 /// `chord` in Ghostty's trigger spelling — `super+shift+p`, `super+/`,
@@ -324,7 +325,10 @@ pub fn ensure_for(cfg: &crate::config::Config) -> Option<String> {
             path.display()
         )),
         Ok(false) => None,
-        Err(e) => Some(format!("couldn't update Ghostty's config {}: {e}", path.display())),
+        Err(e) => Some(format!(
+            "couldn't update Ghostty's config {}: {e}",
+            path.display()
+        )),
     }
 }
 

@@ -574,7 +574,11 @@ mod tests {
         std::fs::create_dir_all(&linked).unwrap();
         std::fs::create_dir_all(&admin).unwrap();
         std::fs::write(admin.join("commondir"), "../..\n").unwrap();
-        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
 
         exclude_managed_files(&linked).unwrap();
         exclude_managed_files(&main).unwrap();
