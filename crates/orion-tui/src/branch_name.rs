@@ -27,7 +27,10 @@ pub fn slugify(input: &str) -> String {
 /// hyphenated words, capped so a long title stays a usable ref. A name
 /// already in `taken` gets a `-2`, `-3`, … suffix.
 pub fn issue_name(number: u64, title: &str, taken: &[String]) -> String {
-    unused(&prefixed(&format!("issue-{number}"), &title_slug(title)), taken)
+    unused(
+        &prefixed(&format!("issue-{number}"), &title_slug(title)),
+        taken,
+    )
 }
 
 /// A branch for LINEAR issues fixed together in one fresh worktree:

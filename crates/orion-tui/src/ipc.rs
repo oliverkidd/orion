@@ -328,7 +328,9 @@ pub async fn spawn_sibling_for_current_agent(task: &str, kind: Option<AgentKind>
     let agent_id = current_agent_id("spawn")?;
     let task = task.trim();
     if task.is_empty() {
-        bail!("the task is empty — `orion spawn \"<task>\"` needs the work the new session starts on");
+        bail!(
+            "the task is empty — `orion spawn \"<task>\"` needs the work the new session starts on"
+        );
     }
     let sock = paths::socket_path();
     let Ok(stream) = try_connect(&sock).await else {
