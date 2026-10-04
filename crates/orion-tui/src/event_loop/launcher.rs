@@ -11350,14 +11350,21 @@ mod tests {
             assert!(text.contains("mode plan"), "{text}");
 
             key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
-            assert_eq!(launch(&app).0.mode, orion_core::AgentMode::Edit, "round again");
+            assert_eq!(
+                launch(&app).0.mode,
+                orion_core::AgentMode::Edit,
+                "round again"
+            );
             key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
 
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(
                 out.iter().any(|r| matches!(
                     r,
-                    ClientRequest::CreateAgent { mode: orion_core::AgentMode::Plan, .. }
+                    ClientRequest::CreateAgent {
+                        mode: orion_core::AgentMode::Plan,
+                        ..
+                    }
                 )),
                 "{out:?}"
             );

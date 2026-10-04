@@ -19374,7 +19374,12 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             // "reviewer": claude · opus · high, the first preset.
-            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
@@ -32105,7 +32110,12 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
 
-            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                 panic!("^X should open the presets, got {:?}", app.overlay);
             };
@@ -32200,7 +32210,12 @@ diff --git a/src/c.rs b/src/c.rs
                 KeyModifiers::CONTROL,
                 &mut out,
             );
-            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Prompt(_))),
@@ -32226,7 +32241,12 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("typed text keeps the box, got {:?}", app.overlay);
@@ -32242,7 +32262,12 @@ diff --git a/src/c.rs b/src/c.rs
                 KeyModifiers::CONTROL,
                 &mut out,
             );
-            press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "launched: {:?}", app.overlay);
             assert!(wrapped(&out), "{out:?}");
@@ -32269,7 +32294,12 @@ diff --git a/src/c.rs b/src/c.rs
                     &mut out,
                 );
                 assert!(paste_into_overlay(&mut app, "Fix auth"));
-                press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL, &mut out);
+                press(
+                    &mut app,
+                    KeyCode::Char('x'),
+                    KeyModifiers::CONTROL,
+                    &mut out,
+                );
                 let Some(Overlay::AgentPresets(view)) = &app.overlay else {
                     panic!("an empty picker, got {:?}", app.overlay);
                 };

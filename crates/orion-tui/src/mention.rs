@@ -307,9 +307,15 @@ pub fn draw(f: &mut Frame, prompt: &PromptDialog, editor: Rect, view: TextView, 
     let at_char = mention
         .token
         .as_ref()
-        .map_or(input.cursor_chars(), |(at, _)| input.as_str()[..*at].chars().count());
+        .map_or(input.cursor_chars(), |(at, _)| {
+            input.as_str()[..*at].chars().count()
+        });
     let col = rows.get(caret_row).map_or(0, |(start, _)| {
-        let from = if at_char >= *start { at_char } else { input.cursor_chars() };
+        let from = if at_char >= *start {
+            at_char
+        } else {
+            input.cursor_chars()
+        };
         from.saturating_sub(*start)
     }) as u16;
 

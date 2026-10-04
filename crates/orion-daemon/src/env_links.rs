@@ -110,7 +110,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-q"]);
-        std::fs::write(root.join(".gitignore"), ".env*\n!.env.example\nnode_modules/\n").unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            ".env*\n!.env.example\nnode_modules/\n",
+        )
+        .unwrap();
         std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
         std::fs::write(root.join(".env.example"), "SECRET=\n").unwrap();
         std::fs::create_dir_all(root.join("apps/web")).unwrap();
@@ -120,7 +124,15 @@ mod tests {
         git(root, &["add", ".gitignore", ".env.example"]);
         git(
             root,
-            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "init",
+            ],
         );
         dir
     }
@@ -136,10 +148,16 @@ mod tests {
             vec![PathBuf::from(".env"), PathBuf::from("apps/web/.env.local")]
         );
         let root_env = worktree.path().join(".env");
-        assert_eq!(std::fs::read_link(&root_env).unwrap(), repo.path().join(".env"));
+        assert_eq!(
+            std::fs::read_link(&root_env).unwrap(),
+            repo.path().join(".env")
+        );
         assert_eq!(std::fs::read_to_string(root_env).unwrap(), "SECRET=1\n");
         assert!(worktree.path().join("apps/web/.env.local").is_file());
-        assert!(!worktree.path().join(".env.example").exists(), "tracked: git's to check out");
+        assert!(
+            !worktree.path().join(".env.example").exists(),
+            "tracked: git's to check out"
+        );
         assert!(!worktree.path().join("node_modules").exists());
     }
 
@@ -154,7 +172,10 @@ mod tests {
             std::fs::read_to_string(worktree.path().join(".env")).unwrap(),
             "MINE=1\n"
         );
-        assert!(link(repo.path(), worktree.path()).await.unwrap().is_empty(), "idempotent");
+        assert!(
+            link(repo.path(), worktree.path()).await.unwrap().is_empty(),
+            "idempotent"
+        );
     }
 
     #[tokio::test]

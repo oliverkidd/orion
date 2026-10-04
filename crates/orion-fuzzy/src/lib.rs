@@ -350,11 +350,7 @@ mod tests {
     fn space_separated_terms_match_independently() {
         // The reported case: one subsequence pass wants a literal space
         // between "ori" and "#10", which the PR row does not have.
-        let m = fuzzy_match(
-            "ori #10",
-            "orion/#10 Credit Codex and Cursor in the README",
-        )
-        .unwrap();
+        let m = fuzzy_match("ori #10", "orion/#10 Credit Codex and Cursor in the README").unwrap();
         assert_eq!(m.positions, vec![0, 1, 2, 6, 7, 8]);
     }
 

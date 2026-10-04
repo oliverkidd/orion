@@ -5076,11 +5076,7 @@ mod tests {
                 200,
             )
         };
-        assert!(
-            border(&launch).contains("^X preset"),
-            "{}",
-            border(&launch)
-        );
+        assert!(border(&launch).contains("^X preset"), "{}", border(&launch));
         launch.preset = Some(a_preset("reviewer"));
         let head = header(&app, &launch, BOX_SIZE.0 - 4);
         assert_eq!(
