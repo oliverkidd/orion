@@ -458,7 +458,7 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
     add_project(&mut tui, &second, "cwd-second");
     tui.wait_for_working_directory(&second);
 
-    tui.send(b"q");
+    tui.send(&[0x03]); // ^C: quit has no bare key
     tui.wait_for_text("Quit orion");
     tui.send(ENTER);
     tui.wait_for_working_directory(&tui._repos.path().canonicalize().unwrap());
