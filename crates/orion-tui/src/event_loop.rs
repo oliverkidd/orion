@@ -34,6 +34,7 @@ mod focus_walk;
 mod host_terminal;
 mod launcher;
 mod menus;
+mod notifier_app;
 mod optimistic;
 mod pacing;
 mod placeholder;
@@ -775,14 +776,25 @@ async fn main_loop(
             let _ = backend.flush();
         }
 
-        // A turn reached FINISHED: ring the DONE SOUND. The bell goes out
+        // A turn reached FINISHED: ring the DONE SOUND and, while the
+        // terminal window is in the background, name each finished session
+        // in a desktop notification (never over ssh). The bell goes out
         // through the same terminal as the OSC writes above, so over ssh it
         // rings the terminal the user is sitting at. CONFIG.JSON is read
-        // fresh, like every other setting.
+        // fresh, like every other setting; `off` is silence for both.
+        let done = std::mem::take(&mut app.pending_done);
         if std::mem::take(&mut app.pending_ding) {
             if let Some(sound) = crate::config::Config::load().done_sound() {
                 alerts::play_sound(terminal.backend_mut(), sound);
+                if !done.is_empty() && !app.window_focused && !app.is_remote {
+                    alerts::notify_desktop(&done, alerts::Edge::Done);
+                }
             }
+        }
+
+        // The settings overlay stepped a sound row: play the new choice.
+        if let Some(sound) = app.pending_sound_preview.take() {
+            alerts::play_sound(terminal.backend_mut(), sound);
         }
 
         // One or more turns stopped to ask the user: ring the FEEDBACK
@@ -795,7 +807,7 @@ async fn main_loop(
             if let Some(sound) = crate::config::Config::load().feedback_sound() {
                 alerts::play_sound(terminal.backend_mut(), sound);
                 if !app.window_focused && !app.is_remote {
-                    alerts::notify_desktop(&alerts);
+                    alerts::notify_desktop(&alerts, alerts::Edge::Feedback);
                 }
             }
         }
@@ -7595,6 +7607,13 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         return;
     }
     apply_config(app, &cfg);
+    // Stepping a sound row plays the sound it landed on, so the choice is
+    // made by ear; `off` stays silent.
+    app.pending_sound_preview = match crate::config::setting_at(tab, index).map(|spec| spec.kind) {
+        Some(crate::config::SettingKind::DoneSound) => cfg.done_sound(),
+        Some(crate::config::SettingKind::FeedbackSound) => cfg.feedback_sound(),
+        _ => None,
+    };
     let ghostty_row = crate::config::setting_at(tab, index).is_some_and(|spec| {
         matches!(
             spec.kind,
@@ -11659,6 +11678,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // Every cursor stays on the row it was on.
             let before = selection_snapshot(app);
             let mut went_red = false;
+            let mut went_done = false;
             if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id == agent) {
                 // The RUNNING / NEEDS FEEDBACK → FINISHED edge — the one
                 // that raises UNSEEN — rings the DONE SOUND, whether or not
@@ -11671,6 +11691,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                     )
                 {
                     app.pending_ding = true;
+                    went_done = true;
                 }
                 // The edge *into* NEEDS FEEDBACK is the FEEDBACK SOUND's;
                 // a re-stamp of a row already red is not.
@@ -11706,6 +11727,13 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             if went_red && !under_hands {
                 if let Some(alert) = alerts::alert_for(&app.tree, &agent) {
                     app.pending_feedback.push(alert);
+                }
+            }
+            // A finish is named in a desktop notification only while the
+            // window is in the background; the drain checks that.
+            if went_done {
+                if let Some(alert) = alerts::alert_for(&app.tree, &agent) {
+                    app.pending_done.push(alert);
                 }
             }
             // Nothing left any list, so this only re-seats the cursors.
@@ -12764,6 +12792,15 @@ mod tests {
             "leaving red is the done sound's edge"
         );
         assert!(app.pending_ding);
+        assert_eq!(
+            app.pending_done,
+            vec![FeedbackAlert {
+                session: "agent-2".into(),
+                place: "demo · main".into(),
+                limit: None,
+            }],
+            "a finish queues its own notification"
+        );
 
         // Two sessions stopping in one frame: two names for the
         // notification; the drain plays the sound once for both.

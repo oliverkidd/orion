@@ -1,9 +1,10 @@
 //! The two ways orion reaches a user who is not looking at it: the DONE
 //! SOUND and FEEDBACK SOUND (`Config::done_sound` / `Config::feedback_sound`,
-//! played here), and the desktop notification a session that stops to ask
-//! posts while the terminal window is in the background. `event_loop.rs`
+//! played here), and the desktop notification a session that finishes or
+//! stops to ask posts while the terminal window is in the background. `event_loop.rs`
 //! decides *when* — the status edges, the per-frame drain of
-//! `App::pending_ding` and `App::pending_feedback`, the focus and ssh
+//! `App::pending_ding`, `App::pending_done` and `App::pending_feedback`,
+//! the settings overlay's `App::pending_sound_preview`, the focus and ssh
 //! gates — this module only does the reaching, and fails soft: an `afplay`
 //! that won't start falls back to the bell, a notifier that is missing or
 //! exits non-zero is a debug line in tui.log.
@@ -55,45 +56,102 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId) -> Option<FeedbackAlert> {
     })
 }
 
-/// Post one desktop notification per alert — `osascript` on macOS,
-/// `notify-send` elsewhere — detached, reaped on a helper thread. A
-/// notifier that is missing or exits non-zero is logged at debug and
-/// otherwise ignored: the sound already rang, and a box with no desktop is
-/// not an error.
-pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
-    for alert in alerts {
-        let (program, args) = notifier_command(alert, cfg!(target_os = "macos"));
-        match Command::new(program)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                std::thread::spawn(move || match child.wait() {
-                    Ok(status) if !status.success() => {
-                        tracing::debug!(program, %status, "desktop notification not posted");
-                    }
-                    Err(err) => tracing::debug!(program, %err, "desktop notification not reaped"),
-                    Ok(_) => {}
-                });
+/// Which status edge a desktop notification is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Edge {
+    /// The turn finished (the DONE SOUND's edge).
+    Done,
+    /// The turn stopped to ask the user (the FEEDBACK SOUND's).
+    Feedback,
+}
+
+/// Post one desktop notification per alert, detached, on a helper thread
+/// that also reaps it. On macOS that is the NOTIFIER APP — orion's name and
+/// logo, a click brings the terminal back (`notifier_app`) — or
+/// `osascript` when it can't be built; elsewhere `notify-send`. A notifier
+/// that is missing or exits non-zero is logged at debug and otherwise
+/// ignored: the sound already rang, and a box with no desktop is not an
+/// error.
+pub(super) fn notify_desktop(alerts: &[FeedbackAlert], edge: Edge) {
+    let alerts = alerts.to_vec();
+    std::thread::spawn(move || {
+        let macos = cfg!(target_os = "macos");
+        let app = if macos {
+            super::notifier_app::executable()
+        } else {
+            None
+        };
+        let activate = app.and_then(|_| super::notifier_app::terminal_bundle_id());
+        for alert in &alerts {
+            let (program, args) = match app {
+                Some(exe) => (
+                    exe.to_string_lossy().into_owned(),
+                    notifier_app_args(alert, edge, activate.as_deref()),
+                ),
+                None => {
+                    let (program, args) = notifier_command(alert, edge, macos);
+                    (program.to_string(), args)
+                }
+            };
+            match Command::new(&program)
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                Ok(status) if !status.success() => {
+                    tracing::debug!(program, %status, "desktop notification not posted");
+                }
+                Err(err) => tracing::debug!(program, %err, "desktop notification not posted"),
+                Ok(_) => {}
             }
-            Err(err) => tracing::debug!(program, %err, "desktop notification not posted"),
         }
+    });
+}
+
+/// The notification's headline: *`<session>` finished*, *`<session>` needs
+/// feedback*, or *`<session>`: limit reached* for one stopped on a usage
+/// limit.
+fn summary(alert: &FeedbackAlert, edge: Edge) -> String {
+    match (edge, alert.limit) {
+        (Edge::Feedback, Some(limit)) => format!("{}: {limit}", alert.session),
+        (Edge::Feedback, None) => format!("{} needs feedback", alert.session),
+        (Edge::Done, _) => format!("{} finished", alert.session),
     }
 }
 
-/// The notifier to run for `alert`, as a program and its argv — never a
+/// `terminal-notifier` argv for the NOTIFIER APP: *orion* / the summary /
+/// `<project> · <branch>`, grouped per session so a newer notification
+/// for one replaces its last, and `-activate`-ing the terminal on click.
+/// It reads the message from stdin when `-message` is empty, so a
+/// placeless alert carries the summary as its message instead.
+fn notifier_app_args(alert: &FeedbackAlert, edge: Edge, activate: Option<&str>) -> Vec<String> {
+    let summary = summary(alert, edge);
+    let mut args: Vec<String> = vec!["-title".into(), "orion".into()];
+    if alert.place.is_empty() {
+        args.extend(["-message".into(), summary]);
+    } else {
+        args.extend([
+            "-subtitle".into(),
+            summary,
+            "-message".into(),
+            alert.place.clone(),
+        ]);
+    }
+    args.extend(["-group".into(), format!("orion:{}", alert.session)]);
+    if let Some(id) = activate {
+        args.extend(["-activate".into(), id.into()]);
+    }
+    args
+}
+
+/// The fallback notifier for `alert`, as a program and its argv — never a
 /// shell line, so the only quoting is AppleScript's own. macOS shows
-/// *orion* / *`<session>` needs feedback* / *`<project> · <branch>`* —
-/// *`<session>`: limit reached* for one stopped on a usage limit;
-/// `notify-send` gets the same as app name, summary and body.
-fn notifier_command(alert: &FeedbackAlert, macos: bool) -> (&'static str, Vec<String>) {
-    let summary = match alert.limit {
-        Some(limit) => format!("{}: {limit}", alert.session),
-        None => format!("{} needs feedback", alert.session),
-    };
+/// *orion* / the summary / *`<project> · <branch>`*; `notify-send` gets
+/// the same as app name, summary and body.
+fn notifier_command(alert: &FeedbackAlert, edge: Edge, macos: bool) -> (&'static str, Vec<String>) {
+    let summary = summary(alert, edge);
     if macos {
         let mut script = format!(
             "display notification {} with title \"orion\" subtitle {}",
@@ -165,7 +223,8 @@ mod tests {
     /// gets `notify-send` with the same three under its own names.
     #[test]
     fn notifier_command_names_the_session_and_its_place() {
-        let (program, args) = notifier_command(&alert("Fix Login", "demo · main"), true);
+        let (program, args) =
+            notifier_command(&alert("Fix Login", "demo · main"), Edge::Feedback, true);
         assert_eq!(program, "osascript");
         assert_eq!(
             args,
@@ -175,13 +234,14 @@ mod tests {
             ]
         );
 
-        let (_, args) = notifier_command(&alert("agent-2", ""), true);
+        let (_, args) = notifier_command(&alert("agent-2", ""), Edge::Feedback, true);
         assert_eq!(
             args[1],
             r#"display notification "agent-2 needs feedback" with title "orion""#
         );
 
-        let (program, args) = notifier_command(&alert("Fix Login", "demo · main"), false);
+        let (program, args) =
+            notifier_command(&alert("Fix Login", "demo · main"), Edge::Feedback, false);
         assert_eq!(program, "notify-send");
         assert_eq!(
             args,
@@ -197,8 +257,49 @@ mod tests {
             limit: Some("limit reached"),
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&limited, false);
+        let (_, args) = notifier_command(&limited, Edge::Feedback, false);
         assert_eq!(args[1], "Fix Login: limit reached");
+    }
+
+    /// The NOTIFIER APP gets orion as the title, what happened as the
+    /// subtitle and the place as the message, grouped per session and
+    /// bringing the terminal back on click; with no place the summary is
+    /// the message (an empty `-message` would read stdin).
+    #[test]
+    fn notifier_app_args_name_the_edge_and_bring_the_terminal_back() {
+        let args = notifier_app_args(
+            &alert("Fix Login", "demo · main"),
+            Edge::Done,
+            Some("com.mitchellh.ghostty"),
+        );
+        assert_eq!(
+            args,
+            [
+                "-title",
+                "orion",
+                "-subtitle",
+                "Fix Login finished",
+                "-message",
+                "demo · main",
+                "-group",
+                "orion:Fix Login",
+                "-activate",
+                "com.mitchellh.ghostty",
+            ]
+        );
+
+        let args = notifier_app_args(&alert("agent-2", ""), Edge::Feedback, None);
+        assert_eq!(
+            args,
+            [
+                "-title",
+                "orion",
+                "-message",
+                "agent-2 needs feedback",
+                "-group",
+                "orion:agent-2",
+            ]
+        );
     }
 
     /// The bell path writes exactly one BEL through the backend; `off` is

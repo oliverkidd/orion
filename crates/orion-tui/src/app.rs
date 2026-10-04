@@ -3320,8 +3320,8 @@ pub struct CloudPreview {
 /// coalesce those while still beating the steady beat by a wide margin.
 pub const OPEN_PRS_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// One session that stopped to ask the user, as the desktop notification
-/// names it: the row's name and where it runs.
+/// One session that stopped to ask the user — or finished — as the desktop
+/// notification names it: the row's name and where it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedbackAlert {
     /// The session row's name.
@@ -3833,6 +3833,15 @@ pub struct App {
     /// pane the user is locked into typing at, window focused, is never
     /// queued — that prompt is already in front of them.
     pub pending_feedback: Vec<FeedbackAlert>,
+    /// Sessions that reached FINISHED since the last frame, one entry
+    /// each: alongside `pending_ding`'s sound, the main loop posts a
+    /// desktop notification per entry while the terminal window is in the
+    /// background, and clears it either way.
+    pub pending_done: Vec<FeedbackAlert>,
+    /// A sound the settings overlay just stepped `done_sound` or
+    /// `feedback_sound` onto: the main loop plays it once, so picking one
+    /// is hearing it.
+    pub pending_sound_preview: Option<crate::config::Sound>,
     /// Whether the terminal window has focus, from the focus reports
     /// (mode 1004) `setup_terminal` asks for. True until the terminal says
     /// otherwise, so one that never reports (tmux without `focus-events`)
@@ -4235,6 +4244,8 @@ impl App {
             pending_clipboard: None,
             pending_ding: false,
             pending_feedback: Vec::new(),
+            pending_done: Vec::new(),
+            pending_sound_preview: None,
             window_focused: true,
             body_area: Rect::default(),
             hostname: orion_core::host::hostname(),

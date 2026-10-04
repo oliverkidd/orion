@@ -735,13 +735,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::DoneSound,
                 label: "Done sound",
-                hint: "Ding when a turn finishes: off, the terminal bell, or a macOS system sound",
+                hint: "Ding, and notify an unfocused window, when a turn finishes (←/→ plays each; off silences both)",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::FeedbackSound,
                 label: "Feedback sound",
-                hint: "Ring, and notify an unfocused window, when a turn stops to ask you (off silences both)",
+                hint: "Ring, and notify an unfocused window, when a turn stops to ask you (←/→ plays each; off silences both)",
                 group: "",
             },
             SettingSpec {
