@@ -3082,7 +3082,7 @@ mod tests {
         });
     }
 
-    /// A digit opens the PROJECT TAB it counts to from the left — the
+    /// ⌘ and a digit opens the PROJECT TAB it counts to from the left — the
     /// click on that tab, through the same [`open_tab`] — and one past the
     /// last tab says so rather than doing nothing. `w` means nothing on
     /// the grid: there is no level above it to walk to.
@@ -3090,17 +3090,17 @@ mod tests {
     fn the_digits_open_the_project_tabs() {
         with_default_config(|| {
             let mut by_key = two_tabs();
-            key(&mut by_key, KeyCode::Char('1'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('1'), KeyModifiers::SUPER);
             let mut by_click = two_tabs();
             let (x, y) = crumb_cell(&by_click, HitTarget::LauncherTab(ProjectId("p2".into())));
             mouse(&mut by_click, MouseEventKind::Down(MouseButton::Left), x, y);
             assert_eq!(tab_state(&by_key), tab_state(&by_click));
             assert_eq!(tab_state(&by_key).0.as_deref(), Some("web"));
 
-            key(&mut by_key, KeyCode::Char('2'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('2'), KeyModifiers::SUPER);
             assert_eq!(tab_state(&by_key).0.as_deref(), Some("demo"));
 
-            key(&mut by_key, KeyCode::Char('9'), KeyModifiers::NONE);
+            key(&mut by_key, KeyCode::Char('9'), KeyModifiers::SUPER);
             assert_eq!(tab_state(&by_key).0.as_deref(), Some("demo"));
             assert_eq!(by_key.flash, None, "no tab 9 opens nothing");
 
@@ -6458,8 +6458,9 @@ mod tests {
             assert_eq!(selected(&app).as_deref(), Some("a1"), "by `[` / `]`");
             assert_eq!(pane(&app), Some(SessionRef::Agent(AgentId("a1".into()))));
 
-            keys(&mut app, &[KeyCode::Char('1'), KeyCode::Char('2')]);
-            assert_eq!(selected(&app).as_deref(), Some("a1"), "by the digits");
+            key(&mut app, KeyCode::Char('1'), KeyModifiers::SUPER);
+            key(&mut app, KeyCode::Char('2'), KeyModifiers::SUPER);
+            assert_eq!(selected(&app).as_deref(), Some("a1"), "by ⌘ and the digits");
 
             keys(&mut app, &[KeyCode::Char('[')]);
             draw(&mut app);

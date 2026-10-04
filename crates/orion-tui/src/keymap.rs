@@ -209,10 +209,10 @@ pub struct ActionSpec {
     pub defaults: &'static [&'static str],
 }
 
-/// One positional PROJECT TAB shortcut: the bare digit. `⌘N` is what a
-/// browser user reaches for, but Ghostty keeps ⌘1–⌘9 for its own tabs and
-/// Terminal.app never sends ⌘ at all; digits are otherwise unbound on the
-/// grid.
+/// One positional PROJECT TAB shortcut: `⌘N`, as in a browser. A ⌘ chord
+/// reaches orion from inside a locked agent pane too, so a tab is one
+/// press away wherever the keys are; orion's Ghostty block unbinds
+/// Ghostty's own ⌘1–⌘9.
 macro_rules! project_tab_slot {
     ($n:literal, $id:literal, $label:literal, $digit:literal) => {
         ActionSpec {
@@ -328,15 +328,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         defaults: &["["],
     },
-    project_tab_slot!(1, "project_tab_1", "Project tab 1", "1"),
-    project_tab_slot!(2, "project_tab_2", "Project tab 2", "2"),
-    project_tab_slot!(3, "project_tab_3", "Project tab 3", "3"),
-    project_tab_slot!(4, "project_tab_4", "Project tab 4", "4"),
-    project_tab_slot!(5, "project_tab_5", "Project tab 5", "5"),
-    project_tab_slot!(6, "project_tab_6", "Project tab 6", "6"),
-    project_tab_slot!(7, "project_tab_7", "Project tab 7", "7"),
-    project_tab_slot!(8, "project_tab_8", "Project tab 8", "8"),
-    project_tab_slot!(9, "project_tab_9", "Project tab 9", "9"),
+    project_tab_slot!(1, "project_tab_1", "Project tab 1", "cmd+1"),
+    project_tab_slot!(2, "project_tab_2", "Project tab 2", "cmd+2"),
+    project_tab_slot!(3, "project_tab_3", "Project tab 3", "cmd+3"),
+    project_tab_slot!(4, "project_tab_4", "Project tab 4", "cmd+4"),
+    project_tab_slot!(5, "project_tab_5", "Project tab 5", "cmd+5"),
+    project_tab_slot!(6, "project_tab_6", "Project tab 6", "cmd+6"),
+    project_tab_slot!(7, "project_tab_7", "Project tab 7", "cmd+7"),
+    project_tab_slot!(8, "project_tab_8", "Project tab 8", "cmd+8"),
+    project_tab_slot!(9, "project_tab_9", "Project tab 9", "cmd+9"),
     ActionSpec {
         action: Action::CloseProjectTab,
         id: "close_project_tab",
@@ -1913,7 +1913,7 @@ mod tests {
         assert_eq!(spell(shown_side(&help, false)), "⌘K", "⌘ alone still shows");
         for n in 1..=9u8 {
             let action = Action::SelectProjectTab(n);
-            assert_eq!(spell(shown_side(map.chords(action), true)), n.to_string());
+            assert_eq!(spell(shown_side(map.chords(action), true)), format!("⌘{n}"));
         }
     }
 
@@ -1991,14 +1991,14 @@ mod tests {
 
     #[test]
     fn cmd_chords_are_reported_by_who_keeps_them() {
-        for kept in ["cmd+c", "cmd+w", "cmd+1", "cmd+q"] {
+        for kept in ["cmd+c", "cmd+w", "cmd+t", "cmd+q"] {
             let (reach, why) = host_warning(&KeyChord::parse(kept).unwrap());
             assert_eq!(reach, Reach::Blocked, "{kept} is Ghostty's for good");
             assert!(why.unwrap().contains('⌘'));
         }
         // Every other chord Ghostty binds is one the block can release —
         // a rebind onto ⌘] included.
-        for freed in ["cmd+shift+p", "cmd+n", "cmd+,", "cmd+k", "cmd+]"] {
+        for freed in ["cmd+shift+p", "cmd+n", "cmd+,", "cmd+k", "cmd+]", "cmd+1"] {
             let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
             assert_eq!(reach, Reach::Risky, "{freed}");
             assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
@@ -2063,6 +2063,11 @@ mod tests {
         let map = Keymap::default();
         for (i, spec) in ACTIONS.iter().enumerate() {
             let chords = map.chords_at(i);
+            // The tab slots are ⌘N alone by choice: digits stay free for
+            // typing, and `[` / `]` walk the tabs in any terminal.
+            if matches!(spec.action, Action::SelectProjectTab(_)) {
+                continue;
+            }
             assert!(
                 chords.is_empty() || chords.iter().any(|c| host_warning(c).0.is_fine()),
                 "{} has no chord a stock terminal delivers",
