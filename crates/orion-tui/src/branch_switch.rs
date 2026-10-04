@@ -1372,6 +1372,7 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             }
             app.worktree_changes.remove(&worktree);
             app.worktree_lines.remove(&worktree);
+            app.worktree_ahead.remove(&worktree);
             app.pull_requests.remove(&worktree);
             app.pr_recheck.remove(&worktree);
             if view_for(app, &worktree).is_some() {
@@ -1381,7 +1382,9 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             // changes went (a stash, a commit) or what git complained of
             // is news.
             if let Some(note) = note {
-                app.flash = Some(format!("⌂ root is on {branch} · {note}"));
+                app.flash = Some(crate::flash::Flash::done(format!(
+                    "⌂ root is on {branch} · {note}"
+                )));
             }
         }
         Outcome::Dirty { files, keys } if showing => {
@@ -1402,10 +1405,10 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             }
         }
         Outcome::Dirty { files, .. } => {
-            app.flash = Some(format!(
+            app.flash = Some(crate::flash::Flash::failed(format!(
                 "not switched: {from} has {} — c to choose what happens to them",
                 changes_text(files.len())
-            ));
+            )));
         }
         Outcome::Failed(error) if showing => {
             if let Some(view) = view_for(app, &worktree) {
@@ -1437,7 +1440,9 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             }
         }
         Outcome::Failed(error) | Outcome::Stopped(error) => {
-            app.flash = Some(format!("switch branch failed: {error}"))
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "switch branch failed: {error}"
+            )))
         }
     }
 }

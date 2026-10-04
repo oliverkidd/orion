@@ -328,10 +328,10 @@ pub fn inside_ghostty() -> bool {
 /// the **Outside terminal** — make sure the block for the config's keymap
 /// (its `keybindings` over the defaults) is in Ghostty's config
 /// (`ORION_GHOSTTY_CONFIG` names another file, or `off` none). The flash
-/// to show when the file changed or could not be written; None when there
-/// was nothing to do. Unit tests never get past the first check: they must
-/// not write the machine's real config.
-pub fn ensure_for(cfg: &crate::config::Config) -> Option<String> {
+/// to show when the file changed — Ghostty has to reload it — or could
+/// not be written; None when there was nothing to do. Unit tests never get
+/// past the first check: they must not write the machine's real config.
+pub fn ensure_for(cfg: &crate::config::Config) -> Option<crate::flash::Flash> {
     if cfg!(test)
         || !cfg.ghostty_keybinds
         || !cfg!(target_os = "macos")
@@ -355,15 +355,15 @@ pub fn ensure_for(cfg: &crate::config::Config) -> Option<String> {
         }
     };
     match ensure(&path, &cfg.keymap()) {
-        Ok(true) => Some(format!(
+        Ok(true) => Some(crate::flash::Flash::setup(format!(
             "updated orion's keybinds in {} — reload Ghostty's config (⌘⇧,) to use ⌘ chords",
             path.display()
-        )),
+        ))),
         Ok(false) => None,
-        Err(e) => Some(format!(
+        Err(e) => Some(crate::flash::Flash::failed(format!(
             "couldn't update Ghostty's config {}: {e}",
             path.display()
-        )),
+        ))),
     }
 }
 

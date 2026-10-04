@@ -118,7 +118,7 @@ pub(crate) fn enabled_harnesses_or_flash(app: &mut App, cfg: &Config) -> Option<
         .map(|(kind, custom)| HarnessRow { kind, custom })
         .collect();
     if rows.is_empty() {
-        app.flash = Some(NO_HARNESS_FLASH.into());
+        app.flash = Some(crate::flash::Flash::setup(NO_HARNESS_FLASH));
         return None;
     }
     Some(rows)

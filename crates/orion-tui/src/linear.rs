@@ -506,14 +506,14 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 }
                 Err(err) => {
                     app.linear_failed.insert(project);
-                    app.flash = Some(err);
+                    app.flash = Some(crate::flash::Flash::failed(err));
                 }
             }
             app.dirty = true;
         }
         LinearAnswer::Attach { result } => {
             if let Err(err) = result {
-                app.flash = Some(err);
+                app.flash = Some(crate::flash::Flash::failed(err));
             }
         }
         LinearAnswer::Status {
@@ -534,7 +534,10 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                     issue.status = refused.status;
                     issue.status_type = refused.status_type;
                 }
-                app.flash = Some(format!("couldn't move {identifier}: {}", refused.why));
+                app.flash = Some(crate::flash::Flash::failed(format!(
+                    "couldn't move {identifier}: {}",
+                    refused.why
+                )));
             }
             app.dirty = true;
         }
@@ -666,7 +669,6 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
 /// state it is in. An issue whose team's states were not read says so.
 fn open_status_pick(app: &mut App) {
     let Some(issue) = selected_issue(app).cloned() else {
-        app.flash = Some("no issue selected".into());
         return;
     };
     let Some(Overlay::Linear(view)) = &app.overlay else {
@@ -679,11 +681,11 @@ fn open_status_pick(app: &mut App) {
         .cloned()
         .unwrap_or_default();
     if states.is_empty() {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::failed(format!(
             "Linear didn't say which states {} can move to — {} asks again",
             issue.identifier,
             keys::REFRESH.label()
-        ));
+        )));
         return;
     }
     let selected = states

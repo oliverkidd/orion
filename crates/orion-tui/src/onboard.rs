@@ -1567,7 +1567,7 @@ fn cycle_setting(app: &mut App, kind: SettingKind) {
         if let (Some(note), Some(Overlay::Onboard(view))) =
             (crate::ghostty_config::ensure_for(&cfg), &mut app.overlay)
         {
-            view.note = Some(note);
+            view.note = Some(note.text);
         }
         crate::keymap::set_ghostty_unbound(
             cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,

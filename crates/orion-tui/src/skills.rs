@@ -1171,7 +1171,9 @@ fn open_new_prompt(app: &mut App) {
         return;
     };
     if view.places.user_skills().is_none() {
-        app.flash = Some("no skills folder — neither CLAUDE_CONFIG_DIR nor HOME is set".into());
+        app.flash = Some(crate::flash::Flash::setup(
+            "no skills folder — neither CLAUDE_CONFIG_DIR nor HOME is set",
+        ));
         return;
     }
     let view = Box::new(view.clone());
@@ -1206,10 +1208,14 @@ pub(crate) fn create(app: &mut App, mut view: SkillsView, typed: &str) {
     let home = view.places.home.clone();
     if let Err(e) = make_skill(&dir, &name) {
         app.flash = Some(match e.kind() {
-            std::io::ErrorKind::AlreadyExists => {
-                format!("{} is there already", tilde(&dir, home.as_deref()))
-            }
-            _ => format!("couldn't make {}: {e}", tilde(&dir, home.as_deref())),
+            std::io::ErrorKind::AlreadyExists => crate::flash::Flash::note(format!(
+                "{} is there already",
+                tilde(&dir, home.as_deref())
+            )),
+            _ => crate::flash::Flash::failed(format!(
+                "couldn't make {}: {e}",
+                tilde(&dir, home.as_deref())
+            )),
         });
         view.focus = std::fs::canonicalize(&dir).ok();
         reopen(app, view);
@@ -1240,10 +1246,10 @@ fn confirm_trash(app: &mut App) {
         return;
     };
     if skill.source.read_only() {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::note(format!(
             "{} comes with its plugin — /plugin in Claude Code removes the plugin",
             skill.name
-        ));
+        )));
         return;
     }
     // A skill folder that is itself a link (into a repo of skills, say) is
@@ -1282,7 +1288,9 @@ pub(crate) fn trash(app: &mut App, view: SkillsView, dir: PathBuf, name: String)
         Some(trash) => move_to_trash(&dir, trash).err().map(|e| e.to_string()),
     };
     if let Some(why) = failed {
-        app.flash = Some(format!("couldn't move {name} to the Trash: {why}"));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't move {name} to the Trash: {why}"
+        )));
     }
     reopen(app, view);
 }

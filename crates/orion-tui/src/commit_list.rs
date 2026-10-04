@@ -255,6 +255,48 @@ pub fn resolve_base(root: &Path, base_setting: &str) -> Option<String> {
     .or_else(|| root_branch(root))
 }
 
+/// How many commits HEAD has that the base it is measured against
+/// ([`resolve_base`]) does not, and how many the base has that HEAD does
+/// not: a band's `⇡4 ⇣1`. The root's base is origin's copy of its own
+/// branch, so there the two are what is unpushed and what is unpulled as
+/// of the last fetch. One `git rev-list` over both sides; None when git
+/// cannot say — no base to measure against, or no commit yet.
+pub fn ahead_behind(root: &Path, base_setting: &str) -> Option<(usize, usize)> {
+    let base = resolve_base_cached(root, base_setting)?;
+    let range = format!("HEAD...{base}");
+    let line = git_line(root, &["rev-list", "--left-right", "--count", &range])?;
+    let mut counts = line.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind))) => Some((ahead, behind)),
+        _ => None,
+    }
+}
+
+/// How long [`ahead_behind`] trusts a base it resolved: the setting and
+/// `origin/HEAD` it comes from rarely change, and resolving takes up to four
+/// git processes on a poll that runs every couple of seconds.
+const BASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`resolve_base`] for `root` and `base_setting`, kept for [`BASE_TTL`].
+fn resolve_base_cached(root: &Path, base_setting: &str) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    type Resolved = HashMap<(std::path::PathBuf, String), (Instant, Option<String>)>;
+    static BASES: OnceLock<Mutex<Resolved>> = OnceLock::new();
+    let bases = BASES.get_or_init(Default::default);
+    let key = (root.to_path_buf(), base_setting.to_string());
+    if let Ok(known) = bases.lock() {
+        if let Some((_, base)) = known.get(&key).filter(|(at, _)| at.elapsed() < BASE_TTL) {
+            return base.clone();
+        }
+    }
+    let base = resolve_base(root, base_setting);
+    if let Ok(mut known) = bases.lock() {
+        known.insert(key, (Instant::now(), base.clone()));
+    }
+    base
+}
+
 /// The ref a branch named `name` is read from: origin's copy when origin
 /// has one — `origin/<name>` — else the local branch. A leading `origin/`
 /// means the same as the bare name. None for no name, for `HEAD` (always
@@ -1202,6 +1244,24 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A branch's commits ahead of and behind its base: `feat` two commits
+    /// on, and `main` — origin's copy, as a fetch leaves it — one on since
+    /// `feat` was cut. Level with it, both are 0.
+    #[test]
+    fn ahead_behind_counts_both_sides_of_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = branch_repo(&dir);
+        assert_eq!(ahead_behind(&repo, ""), Some((0, 0)));
+        commit(&repo, "a.txt", "a\n", "feat: a");
+        commit(&repo, "b.txt", "b\n", "feat: b");
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, "m.txt", "m\n", "main: m");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "feat"]);
+        assert_eq!(ahead_behind(&repo, ""), Some((2, 1)));
+        assert_eq!(ahead_behind(&repo, "origin/main"), Some((2, 1)));
     }
 
     /// A repo on `main` with one commit, `origin/HEAD` pointing at it — the

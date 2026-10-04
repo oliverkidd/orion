@@ -165,10 +165,10 @@ fn announce_kept(app: &mut App, launch: &QuickLaunch) {
         Some(pr) => Some(pr.head.clone()),
         None => crate::quick_prompt::target_branch(app, launch),
     };
-    app.flash = Some(match branch {
+    app.flash = Some(crate::flash::Flash::done(match branch {
         Some(branch) => format!("started a session in {branch}"),
         None => "started a session".into(),
-    });
+    }));
 }
 
 /// The only trace a BACKGROUND LAUNCH leaves on screen: the footer names
@@ -180,7 +180,9 @@ fn announce_background(app: &mut App, target: &QuickTarget) {
     else {
         return;
     };
-    app.flash = Some(format!("started a session in {name}"));
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "started a session in {name}"
+    )));
 }
 
 /// The Ack for that `CreateWorktree`: `worktree` exists now, launch there.

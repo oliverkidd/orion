@@ -957,11 +957,10 @@ pub(super) fn continue_on(app: &mut App) {
     }
     let targets = cfg.continue_targets(&agent);
     if targets.is_empty() {
-        app.flash = Some(
+        app.flash = Some(crate::flash::Flash::setup(
             "no other Claude account to continue on — add one in Settings → Agents → \
-             Claude accounts"
-                .into(),
-        );
+             Claude accounts",
+        ));
         return;
     }
     // Going to an account signed in as this one's email gains nothing:
@@ -970,11 +969,10 @@ pub(super) fn continue_on(app: &mut App) {
         .iter()
         .any(|(_, label)| label.ends_with(crate::config::SAME_ACCOUNT))
     {
-        app.flash = Some(
-            "⚠ an account marked \"same account\" is signed in as this session's email — \
-             one limit; sign it in as the other in Settings → Agents → Claude accounts"
-                .into(),
-        );
+        app.flash = Some(crate::flash::Flash::setup(
+            "an account marked \"same account\" is signed in as this session's email — \
+             one limit; sign it in as the other in Settings → Agents → Claude accounts",
+        ));
     }
     app.overlay = Some(Overlay::Menu(ContextMenu {
         title: Some(format!("Continue {} on", agent.name)),
@@ -1924,6 +1922,34 @@ pub(super) fn click_band(app: &mut App, index: usize, out: &mut Vec<ClientReques
     ) {
         toggle_band_expand(app, out);
     }
+}
+
+/// A click on the FOOTER's breadcrumb (`HitTarget::FooterCrumb`): back
+/// down onto the grid — out of HOME, a full screen or the pane — at the
+/// part clicked: the project's whole grid with no card aimed at, as the
+/// first Esc leaves it, the checkout's band, or the session's card.
+pub(super) fn click_crumb(
+    app: &mut App,
+    part: crate::app::CrumbPart,
+    out: &mut Vec<ClientRequest>,
+) {
+    if app.home {
+        super::leave_home(app);
+    }
+    if !app.launcher_active() {
+        return;
+    }
+    super::leave_terminal_lock(app);
+    match part {
+        crate::app::CrumbPart::Project => clear_aim(app),
+        crate::app::CrumbPart::Worktree => {
+            if let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) {
+                select_band(app, worktree, out);
+            }
+        }
+        crate::app::CrumbPart::Session => take_aim(app),
+    }
+    app.dirty = true;
 }
 
 /// A click on the MORE HINT under a band's row (`HitTarget::LauncherBandMore`):
@@ -4038,13 +4064,7 @@ mod tests {
                 "{:?}",
                 app.overlay
             );
-            assert!(
-                app.flash
-                    .as_deref()
-                    .is_some_and(|f| f.contains("no agent or terminal")),
-                "{:?}",
-                app.flash
-            );
+            assert_eq!(app.flash, None);
 
             let mut app = two_sessions();
             draw(&mut app);
@@ -4557,6 +4577,54 @@ mod tests {
                 "{}",
                 footer_text(&app)
             );
+        });
+    }
+
+    /// The footer's BREADCRUMB names the selection in the grid's own marks
+    /// — the project, the checkout behind its SCOPE MARK, the session
+    /// behind its STATUS MARK — and each part is a link back to the grid:
+    /// from a full-screen session a click on the checkout lands on its
+    /// band with the keys on the grid, and one on the project lets the
+    /// aim go, the whole project's grid in view.
+    #[test]
+    fn the_footer_crumb_speaks_the_grids_marks_and_links_back() {
+        use crate::app::CrumbPart;
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw(&mut app);
+            to_feat(&mut app);
+            let screen = buffer_text(&draw(&mut app));
+            let footer = screen.lines().last().unwrap_or_default().to_string();
+            let plate = concat!(" v", env!("CARGO_PKG_VERSION"), "  ·  demo ⎇ feat ");
+            assert!(footer.contains(plate), "{footer}");
+
+            full_screen(&mut app);
+            assert!(app.collapsed);
+            draw(&mut app);
+            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Worktree));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(!app.collapsed && !app.term_locked);
+            assert_eq!(app.focus, Focus::Sessions);
+            assert_eq!(
+                app.selected_worktree().map(|w| w.branch.clone()).as_deref(),
+                Some("feat")
+            );
+
+            draw(&mut app);
+            assert!(!app.launcher_unaimed);
+            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Project));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(app.launcher_unaimed, "the aim let go");
+
+            // From HOME too: the crumb is drawn over the splash, and a
+            // click on it comes back down onto the grid.
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+            assert!(app.home);
+            draw(&mut app);
+            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Session));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            assert!(!app.home && app.launcher_active());
+            assert!(!app.launcher_unaimed, "aimed at the card again");
         });
     }
 
@@ -5577,7 +5645,7 @@ mod tests {
             keys(&mut app, &[KeyCode::Esc, KeyCode::Down]);
             let text = buffer_text(&draw(&mut app));
             assert!(
-                text.contains("polish-nav  ↳ feat"),
+                text.contains("polish-nav  ⎇ feat"),
                 "the pane names the cursor's card and its checkout: {text}"
             );
             assert_eq!(
@@ -5734,7 +5802,7 @@ mod tests {
                 ["demo"],
                 "the grid, not the panels: {text}"
             );
-            assert!(text.contains("1 session"), "inside feat: {text}");
+            assert!(text.contains("⎇ feat"), "inside feat: {text}");
         });
     }
 
@@ -9228,22 +9296,22 @@ mod tests {
             assert_eq!(tabs_drawn(&app), ["demo"], "the header's tabs: {text}");
             assert!(text.contains("2 sessions"), "{text}");
             assert!(text.contains("polish-nav"), "{text}");
-            // Each band names the checkout its cards run in, in the SCOPE
-            // COLOR's own glyph: `↳` for a worktree of its own, `⌂` for
-            // the project's root branch — and not the project, which the
-            // whole grid is scoped to and the header already names. The
-            // cards under it say what runs there.
-            assert!(text.contains("↳ feat"), "{text}");
+            // Each band names the checkout its cards run in by its SCOPE
+            // MARK: `⎇` for a worktree of its own, `⌂` for the project's
+            // root branch — and not the project, which the whole grid is
+            // scoped to and the header already names. The cards under it
+            // say what runs there.
+            assert!(text.contains("⎇ feat"), "{text}");
             assert!(text.contains("claude"), "{text}");
             assert!(
-                !text.contains("demo ▸ ↳") && !text.contains("demo ▸ ⌂"),
+                !text.contains("demo ▸ ⎇") && !text.contains("demo ▸ ⌂"),
                 "the project is the grid's scope, not a line on every card: {text}"
             );
             assert!(
                 !text.contains("tidy-css"),
                 "the project beside it is a level up, not in this grid: {text}"
             );
-            assert!(text.contains("#42 Polish the nav"), "{text}");
+            assert!(text.contains("↗ #42 ready"), "{text}");
             assert!(text.contains("⌂ main"), "{text}");
         });
     }
@@ -9455,7 +9523,7 @@ mod tests {
     }
 
     /// The pull request on a band's rule is a link: a click on its
-    /// `↗ #42 title` opens it in the browser exactly as `⇧V` does — the
+    /// `↗ #42 ready` opens it in the browser exactly as `⇧V` does — the
     /// same URL, marked read the same way — and the target is only as
     /// wide as its text: the rest of the rule is the band's.
     #[test]
@@ -9477,7 +9545,7 @@ mod tests {
             assert_eq!(line.y, rule.y, "on the band's rule");
             assert_eq!(
                 line.width as usize,
-                "↗ #42 Polish the nav ready".chars().count(),
+                "↗ #42 ready".chars().count(),
                 "the link is its text, not the rule's width"
             );
             assert_eq!(
@@ -9583,8 +9651,8 @@ mod tests {
         });
     }
 
-    /// The pointer resting on a band's pull request underlines its
-    /// `#42 title` — nothing about a rule says part of it is a link — and
+    /// The pointer resting on a band's pull request underlines its `#42` —
+    /// nothing about a rule says part of it is a link — and
     /// only while it is there: off the link, the underline goes with it.
     #[test]
     fn the_pointer_marks_the_bands_pull_request() {
@@ -9603,7 +9671,7 @@ mod tests {
 
             mouse(&mut app, MouseEventKind::Moved, line.x + 2, line.y);
             assert_eq!(app.hover_crumb, Some(HitTarget::LauncherBandPr(worktree)));
-            assert_eq!(underlined(&draw(&mut app)), "#42 Polish the nav");
+            assert_eq!(underlined(&draw(&mut app)), "#42");
 
             mouse(&mut app, MouseEventKind::Moved, line.x, line.y + 2);
             assert_eq!(app.hover_crumb, None, "the card under the rule is no link");

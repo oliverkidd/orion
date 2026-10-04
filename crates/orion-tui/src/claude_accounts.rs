@@ -660,7 +660,7 @@ pub fn run(app: &mut App, command: AuthCommand) -> bool {
                 true
             }
             Err(msg) => {
-                app.flash = Some(msg);
+                app.flash = Some(crate::flash::Flash::failed(msg));
                 false
             }
         }

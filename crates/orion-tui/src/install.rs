@@ -376,7 +376,7 @@ pub fn run(app: &mut App, plan: &Plan) -> bool {
                 true
             }
             Err(msg) => {
-                app.flash = Some(msg);
+                app.flash = Some(crate::flash::Flash::failed(msg));
                 false
             }
         }
@@ -442,7 +442,11 @@ pub fn closed(app: &mut App, program: &str) {
     match &mut app.overlay {
         Some(crate::app::Overlay::Onboard(view)) => view.note = Some(note),
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
-        _ if !installed => app.flash = Some(note),
+        // The footer leads with its own `✕`, so not the outcome's `✗`.
+        _ if !installed => {
+            let words = note.trim_start_matches("✗ ").to_string();
+            app.flash = Some(crate::flash::Flash::failed(words));
+        }
         _ => {}
     }
     app.dirty = true;

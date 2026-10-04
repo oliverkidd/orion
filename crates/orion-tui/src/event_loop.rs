@@ -658,9 +658,10 @@ async fn main_loop(
             }
             answer = git_rx.recv() => {
                 // Never None: `git_tx` lives as long as the loop.
-                if let Some((worktree, files, lines)) = answer {
+                if let Some((worktree, files, lines, ahead)) = answer {
                     let count = files.as_ref().map(Vec::len);
                     note_worktree_lines(&mut app, &worktree, lines);
+                    note_worktree_ahead(&mut app, &worktree, ahead);
                     keep_changed_files(&mut app, &worktree, files);
                     land_git_changes(&mut app, worktree, count);
                     // The selection moved on while this one was being read:
@@ -672,8 +673,9 @@ async fn main_loop(
             }
             answer = sweep_git_rx.recv() => {
                 // Never None: `sweep_git_tx` lives as long as the loop.
-                if let Some((worktree, count, lines)) = answer {
+                if let Some((worktree, count, lines, ahead)) = answer {
                     note_worktree_lines(&mut app, &worktree, lines);
+                    note_worktree_ahead(&mut app, &worktree, ahead);
                     land_swept_changes(&mut app, worktree, count);
                 }
             }
@@ -774,7 +776,9 @@ async fn main_loop(
         // has the backtrace.
         if take_worker_panic() {
             repaint(terminal)?;
-            app.flash = Some("a background task crashed — logged to tui.log".into());
+            app.flash = Some(crate::flash::Flash::failed(
+                "a background task crashed — logged to tui.log",
+            ));
             app.dirty = true;
         }
 
@@ -911,27 +915,49 @@ fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSende
     app.git_changes_inflight = Some(id.clone());
     let git_tx = git_tx.clone();
     tokio::task::spawn_blocking(move || {
-        let files = crate::git_diff::changed_files(&path).ok();
-        let lines = line_changes_of(&path, files.as_deref());
-        let _ = git_tx.send((id, files, lines));
+        let (files, lines, ahead) = read_checkout(&path);
+        let _ = git_tx.send((id, files, lines, ahead));
     });
 }
 
-/// What the badge's `git status` found in a checkout, and the lines behind
-/// it; None when git could not say.
+/// What the badge's `git status` found in a checkout, the lines behind it
+/// and its commits ahead of and behind its base; None when git could not
+/// say.
 type ChangedFiles = (
     WorktreeId,
     Option<Vec<crate::git_diff::DiffFile>>,
     Option<crate::git_diff::LineChanges>,
+    Option<(usize, usize)>,
 );
 
-/// The sweep's answer for one checkout: its changed-file count and its
-/// line counts.
+/// The sweep's answer for one checkout: its changed-file count, its line
+/// counts and its commits ahead and behind.
 type SweptChanges = (
     WorktreeId,
     Option<usize>,
     Option<crate::git_diff::LineChanges>,
+    Option<(usize, usize)>,
 );
+
+/// What [`read_checkout`] found: the changed files, the lines behind them,
+/// and the commits ahead of and behind the base.
+type CheckoutRead = (
+    Option<Vec<crate::git_diff::DiffFile>>,
+    Option<crate::git_diff::LineChanges>,
+    Option<(usize, usize)>,
+);
+
+/// One read of a checkout for the badge and its band's rule: its changed
+/// files, the lines behind them, and its commits ahead of and behind the
+/// base it is measured against — the `worktree_base_branch` setting's,
+/// read fresh like every other (`commit_list::ahead_behind`). Blocking:
+/// run off the loop.
+fn read_checkout(path: &std::path::Path) -> CheckoutRead {
+    let files = crate::git_diff::changed_files(path).ok();
+    let lines = line_changes_of(path, files.as_deref());
+    let base = crate::config::Config::load().worktree_base_branch;
+    (files, lines, crate::commit_list::ahead_behind(path, &base))
+}
 
 /// The line counts behind `files` when the `git status` read them; a
 /// second git process, so only then.
@@ -956,6 +982,20 @@ fn note_worktree_lines(
         None => app.worktree_lines.remove(worktree),
     };
     if before != lines {
+        app.dirty = true;
+    }
+}
+
+/// Record how far a read found `worktree` from its base, for its band's
+/// rule; None (unreadable) or level with it drops what was there. A change
+/// redraws.
+fn note_worktree_ahead(app: &mut App, worktree: &WorktreeId, ahead: Option<(usize, usize)>) {
+    let ahead = ahead.filter(|&(a, b)| a > 0 || b > 0);
+    let before = match ahead {
+        Some(ab) => app.worktree_ahead.insert(worktree.clone(), ab),
+        None => app.worktree_ahead.remove(worktree),
+    };
+    if before != ahead {
         app.dirty = true;
     }
 }
@@ -1019,24 +1059,24 @@ fn sweep_git_changes(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<Swep
     app.worktree_changes_inflight = Some(id.clone());
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
-        let files = crate::git_diff::changed_files(&path).ok();
-        let lines = line_changes_of(&path, files.as_deref());
-        let _ = tx.send((id, files.map(|f| f.len()), lines));
+        let (files, lines, ahead) = read_checkout(&path);
+        let _ = tx.send((id, files.map(|f| f.len()), lines, ahead));
     });
 }
 
-/// The checkout the cards' sweep spends this tick on: of the unselected
-/// checkouts the grid has a card for, the one read least recently — never
-/// read at all first, so a card that just appeared gets its count on the
-/// next tick. Nothing off the grid: the collapsed view draws no cards.
+/// The checkout the bands' sweep spends this tick on: of the unselected
+/// checkouts the grid has a band for — an EMPTY BAND too, whose rule
+/// prints the same counts — the one read least recently — never read at
+/// all first, so a band that just appeared gets its counts on the next
+/// tick. Nothing off the grid: the collapsed view draws no bands.
 fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
     if !app.launcher_grid() {
         return None;
     }
     let selected = app.selected_worktree().map(|w| &w.id);
-    let held: std::collections::HashSet<WorktreeId> = crate::launcher::rows(app)
+    let held: std::collections::HashSet<WorktreeId> = crate::launcher::bands(app)
         .into_iter()
-        .map(|row| row.agent.worktree_id)
+        .map(|band| band.worktree)
         .collect();
     app.tree
         .worktrees
@@ -1751,7 +1791,10 @@ fn post_pr_comment(
     let refused = busy || dir.is_none() || missing.is_some() || app.pr_comment_tx.is_none();
     if refused {
         if let Some(dir) = missing.filter(|_| !busy) {
-            app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "repo path missing on disk: {}",
+                dir.display()
+            )));
         }
         reopen_prompt_with(
             app,
@@ -1815,7 +1858,9 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
             }
         }
         Err(why) => {
-            app.flash = Some(format!("couldn't post the comment on #{number}: {why}"));
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't post the comment on #{number}: {why}"
+            )));
             let back = match &app.overlay {
                 None => Some(None),
                 Some(Overlay::PullRequests(view)) => Some(Some(Box::new(view.clone()))),
@@ -1943,10 +1988,19 @@ fn open_github_pr_review(app: &mut App, review: PrReview) {
         PrReviewAt::Commit(sha) => {
             if !open_pr_commit(app, &title, &sha) {
                 request_pr_commit_diff(app, number, &url, &sha, "");
-                let short: String = sha.chars().take(7).collect();
-                app.flash = Some(format!(
-                    "{short} isn't in this repo yet — fetching it from GitHub…"
-                ));
+                // Only a fetch still out says why it is fetching: a cached
+                // diff opened at once, and a refusal said its own.
+                let opened = matches!(app.overlay, Some(Overlay::Diff(_)));
+                let refused = app
+                    .flash
+                    .as_ref()
+                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Failed);
+                if !opened && !refused {
+                    let short: String = sha.chars().take(7).collect();
+                    app.flash = Some(crate::flash::Flash::working(format!(
+                        "{short} isn't in this repo yet — fetching it from GitHub…"
+                    )));
+                }
             }
         }
     }
@@ -2097,7 +2151,10 @@ fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: O
         return;
     };
     if !dir.is_dir() {
-        app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
         return;
     }
     let Some(prdiff_tx) = app.pr_diff_tx.clone() else {
@@ -2108,7 +2165,9 @@ fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: O
     } else {
         // Nothing else on screen marks the `gh pr diff` under way, and it
         // takes seconds: the footer is the only sign Enter was heard.
-        app.flash = Some(format!("fetching the diff for #{number}…"));
+        app.flash = Some(crate::flash::Flash::working(format!(
+            "fetching the diff for #{number}…"
+        )));
     }
     app.pr_diff_inflight = Some(number);
     app.dirty = true;
@@ -2144,7 +2203,10 @@ pub(crate) fn request_pr_commit_diff(
         return;
     };
     if !dir.is_dir() {
-        app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
         return;
     }
     let Some(prdiff_tx) = app.pr_diff_tx.clone() else {
@@ -2158,7 +2220,9 @@ pub(crate) fn request_pr_commit_diff(
     if open_cached_pr_diff(app, number, &url, &title, None) {
         app.pr_diff_refreshing.insert(url.clone());
     } else {
-        app.flash = Some(format!("fetching the diff of {short}…"));
+        app.flash = Some(crate::flash::Flash::working(format!(
+            "fetching the diff of {short}…"
+        )));
     }
     app.pr_diff_inflight = Some(number);
     app.dirty = true;
@@ -2206,6 +2270,15 @@ fn land_pr_diff(app: &mut App, answer: PrDiffAnswer) {
     } = answer;
     if let Some(diff) = &diff {
         crate::pr_cache::remember_diff(app, &url, diff);
+    }
+    // The wait is over, whichever way it went: the spinner that said so
+    // goes, and anything worth saying about the answer is said below.
+    if app
+        .flash
+        .as_ref()
+        .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
+    {
+        app.flash = None;
     }
     if !app.pr_diff_refreshing.remove(&url) {
         open_pr_diff_view(app, number, &url, title, diff, file.as_deref());
@@ -2298,14 +2371,16 @@ fn open_pr_diff_view(
         app.pr_diff_inflight = None;
     }
     let Some(diff) = diff else {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::failed(format!(
             "couldn't read the diff for #{number} — is `gh` set up?"
-        ));
+        )));
         return;
     };
     let chunks = crate::pull_request::split_unified_diff(&diff);
     if chunks.is_empty() {
-        app.flash = Some(format!("#{number} changes no files"));
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "#{number} changes no files"
+        )));
         return;
     }
     let files = pr_diff_files(&chunks);
@@ -3184,12 +3259,18 @@ fn paste_into_follow_up(app: &mut App, text: &str) -> bool {
 /// agent types back as a space. Anything but a drop comes back as it came,
 /// as does everything when no `dir` is installed (the unit tests). A copy
 /// that failed says so in `flash` and leaves its path as dropped.
-fn staged_drop(dir: Option<&std::path::Path>, text: &str, flash: &mut Option<String>) -> String {
+fn staged_drop(
+    dir: Option<&std::path::Path>,
+    text: &str,
+    flash: &mut Option<crate::flash::Flash>,
+) -> String {
     let Some(staged) = dir.and_then(|dir| crate::dropped_files::stage(text, dir)) else {
         return text.to_string();
     };
     if let Some((name, err)) = staged.failed.first() {
-        *flash = Some(format!("couldn't keep a copy of {name}: {err}"));
+        *flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't keep a copy of {name}: {err}"
+        )));
     }
     staged.text
 }
@@ -3204,12 +3285,14 @@ fn staged_drop(dir: Option<&std::path::Path>, text: &str, flash: &mut Option<Str
 /// that install none) is no paste.
 fn paste_clipboard_image(app: &mut App) {
     let Some(dir) = app.attachments_dir.clone() else {
-        app.flash = Some("no attachments folder to keep a pasted image in".into());
+        app.flash = Some(crate::flash::Flash::failed(
+            "no attachments folder to keep a pasted image in",
+        ));
         return;
     };
     match app.view_jobs.clone() {
         Some(jobs) => {
-            app.flash = Some("reading the clipboard…".into());
+            app.flash = Some(crate::flash::Flash::working("reading the clipboard…"));
             jobs.run(move || {
                 Some(crate::view_jobs::Answer::ClipboardImage(
                     crate::clipboard_image::paste_into(&dir),
@@ -3231,11 +3314,15 @@ pub(crate) fn land_clipboard_image(app: &mut App, pasted: crate::clipboard_image
     let path = match pasted {
         Pasted::Saved(path) => path,
         Pasted::NoImage => {
-            app.flash = Some("no image on the clipboard to paste".into());
+            app.flash = Some(crate::flash::Flash::note(
+                "no image on the clipboard to paste",
+            ));
             return;
         }
         Pasted::Failed(why) => {
-            app.flash = Some(format!("couldn't paste the image: {why}"));
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't paste the image: {why}"
+            )));
             return;
         }
     };
@@ -3255,7 +3342,10 @@ pub(crate) fn land_clipboard_image(app: &mut App, pasted: crate::clipboard_image
             return;
         }
     }
-    app.flash = Some(format!("image kept at {}", path.display()));
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "image kept at {}",
+        path.display()
+    )));
 }
 
 /// One key while the composer is open and the SESSIONS PANEL has focus.
@@ -4186,10 +4276,6 @@ pub(crate) fn cycle_mode(app: &mut App) {
     let cfg = crate::config::Config::load();
     let modes = back.launch.modes(&cfg);
     if modes.len() < 2 {
-        app.flash = Some(format!(
-            "{} has no plan or ask mode",
-            crate::agent_picker::harness_label(back.launch.kind, back.launch.custom.as_deref())
-        ));
         return;
     }
     let at = modes
@@ -4297,7 +4383,7 @@ fn cycle_default_effort(app: &mut App) {
     let _ = cfg.try_save();
     // No box is up to show the default it stepped: the footer is the only
     // place the new effort is seen.
-    app.flash = Some(format!("effort: {next}"));
+    app.flash = Some(crate::flash::Flash::done(format!("effort: {next}")));
     app.dirty = true;
 }
 
@@ -4784,7 +4870,7 @@ fn open_repo_in_browser(app: &mut App) {
         Some(jobs) => jobs.run(move || failed().map(crate::view_jobs::Answer::Flash)),
         None => {
             if let Some(why) = failed() {
-                app.flash = Some(why);
+                app.flash = Some(crate::flash::Flash::failed(why));
             }
         }
     }
@@ -4846,14 +4932,14 @@ fn open_outside_terminal_with(app: &mut App, outside: Option<OutsideApp>) {
     match context_dir(app) {
         Some(Ok(dir)) => {
             if !open_in_app(&outside.bundle, &dir) {
-                app.flash = Some(format!(
+                app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't open a {} in {}",
                     outside.opens,
                     dir.display()
-                ));
+                )));
             }
         }
-        Some(Err(why)) => app.flash = Some(why),
+        Some(Err(why)) => app.flash = Some(crate::flash::Flash::failed(why)),
         None => {}
     }
 }
@@ -4878,16 +4964,16 @@ fn context_dir(app: &App) -> Option<Result<std::path::PathBuf, String>> {
 /// remote machine's screen, so it says so instead; a failure says why.
 fn open_checkout_outside(app: &mut App) {
     if app.is_remote {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::note(format!(
             "{} would open on the remote machine — nothing opened",
             crate::outside_editor::hint_name()
-        ));
+        )));
         return;
     }
     let dir = match context_dir(app) {
         Some(Ok(dir)) => dir,
         Some(Err(why)) => {
-            app.flash = Some(why);
+            app.flash = Some(crate::flash::Flash::failed(why));
             return;
         }
         None => return,
@@ -4909,7 +4995,7 @@ fn hand_off(app: &mut App, open: impl FnOnce() -> Result<(), String> + Send + 's
         Some(jobs) => jobs.run(move || open().err().map(crate::view_jobs::Answer::Flash)),
         None => {
             if let Err(why) = open() {
-                app.flash = Some(why);
+                app.flash = Some(crate::flash::Flash::failed(why));
             }
         }
     }
@@ -5080,12 +5166,14 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
     let command = match open_command_for(&worktree.path, &main) {
         Ok(command) => command,
         Err(msg) => {
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             return;
         }
     };
     if let Err(e) = spawn_open_command(&command, &worktree.path) {
-        app.flash = Some(format!("couldn't run {command}: {e}"));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't run {command}: {e}"
+        )));
     }
 }
 
@@ -5150,7 +5238,10 @@ fn selected_checkout(app: &mut App) -> Option<(std::path::PathBuf, String)> {
         .selected_worktree()
         .map(|w| (w.path.clone(), w.branch.clone()))?;
     if !path.is_dir() {
-        app.flash = Some(format!("worktree path missing on disk: {}", path.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "worktree path missing on disk: {}",
+            path.display()
+        )));
         return None;
     }
     Some((path, branch))
@@ -5163,7 +5254,7 @@ fn load_worktree_files(app: &mut App, path: &std::path::Path) -> Option<(Vec<Str
     let files = match crate::git_diff::list_files(path) {
         Ok(files) => files,
         Err(msg) => {
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             return None;
         }
     };
@@ -5202,7 +5293,7 @@ fn open_diff_view(app: &mut App) {
         // No loop to land an answer on (unit tests): read inline.
         match crate::git_diff::read_opening(&path, &base) {
             Ok(listing) => show_diff_listing(app, path, branch, listing),
-            Err(msg) => app.flash = Some(msg),
+            Err(msg) => app.flash = Some(crate::flash::Flash::failed(msg)),
         }
         return;
     };
@@ -5384,10 +5475,10 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         Answer::Skills { ticket, skills } => crate::skills::land(app, ticket, skills),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
-            app.flash = Some(flash);
+            app.flash = Some(crate::flash::Flash::done(flash));
         }
         Answer::ClipboardImage(pasted) => land_clipboard_image(app, pasted),
-        Answer::Flash(message) => app.flash = Some(message),
+        Answer::Flash(message) => app.flash = Some(crate::flash::Flash::failed(message)),
         Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
             Some(Overlay::Diff(view)) => crate::git_diff::diff_slow(view, ticket),
@@ -5422,7 +5513,7 @@ fn land_worktree_files(app: &mut App, ticket: u64, result: Result<Vec<String>, S
         }
         Err(msg) => {
             app.overlay = None;
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             return;
         }
     };
@@ -5475,7 +5566,7 @@ fn land_diff_listing(
         Ok(_) => app.overlay = None,
         Err(msg) => {
             app.overlay = None;
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
         }
     }
 }
@@ -5581,7 +5672,7 @@ pub(crate) fn spawn_editor_modal(
             true
         }
         Err(msg) => {
-            app.flash = Some(msg);
+            app.flash = Some(crate::flash::Flash::failed(msg));
             false
         }
     }
@@ -5598,9 +5689,9 @@ fn note_editor_fallback(app: &mut App, spawned: &str) {
     if app.editor_fallback_noted.as_deref() == Some(missing.as_str()) {
         return;
     }
-    app.flash = Some(format!(
+    app.flash = Some(crate::flash::Flash::setup(format!(
         "{missing} isn't installed — opened {spawned} instead (Settings → File editor)"
-    ));
+    )));
     app.editor_fallback_noted = Some(missing);
 }
 
@@ -5688,7 +5779,9 @@ fn open_file_link(app: &mut App, path: &str, line: Option<u64>) {
         return;
     };
     let Some(file) = resolve_file_link(&root, path) else {
-        app.flash = Some(format!("file not found: {path}"));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "file not found: {path}"
+        )));
         return;
     };
     let editor = crate::config::Config::load().editor_command();
@@ -5848,10 +5941,10 @@ fn open_editor_file_outside(app: &mut App) {
     };
     let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line);
     if app.is_remote {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::note(format!(
             "{} would open on the remote machine — the file stays here",
             crate::outside_editor::hint_name()
-        ));
+        )));
         return;
     }
     open_in_outside_app(app, &root, &file, line);
@@ -6101,7 +6194,7 @@ fn closes_pane(app: &App, key: &KeyEvent) -> bool {
 /// are left on the way: `handle_key`'s ⌘ chord path). The confirm is the
 /// very one `Backspace` asks on the card, the worktree question folded in
 /// on a linked worktree's last card. Only a session: an EMPTY BAND, a
-/// link row or a pane reading a pull request says so and closes nothing.
+/// link row or a pane reading a pull request closes nothing.
 fn close_pane(app: &mut App) {
     let on_cards = matches!(app.focus, Focus::Sessions | Focus::Terminal);
     let aimed = !(app.launcher_grid() && app.launcher_unaimed);
@@ -6115,12 +6208,9 @@ fn close_pane(app: &mut App) {
         Some(SessionRow::Terminal(t)) => {
             app.overlay = Some(Overlay::Confirm(confirm_close_terminal_in(app, &t)));
         }
-        _ => app.flash = Some(NOTHING_TO_CLOSE.into()),
+        _ => {}
     }
 }
-
-/// What `⌘W` says with no agent or terminal in front of it.
-const NOTHING_TO_CLOSE: &str = "no agent or terminal here to close";
 
 /// The confirm before an agent is deleted — from the `d` key and the row
 /// menu alike, so the two never drift apart in wording.
@@ -7924,7 +8014,9 @@ fn save_config(app: &mut App, cfg: &crate::config::Config) -> bool {
     match cfg.save() {
         Ok(()) => true,
         Err(err) => {
-            app.flash = Some(format!("couldn't save settings: {err}"));
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't save settings: {err}"
+            )));
             false
         }
     }
@@ -8039,7 +8131,7 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         if let (Some(note), Some(view)) =
             (crate::ghostty_config::ensure_for(&cfg), settings_mut(app))
         {
-            view.info(note);
+            view.info(note.text);
         }
         crate::keymap::set_ghostty_unbound(
             cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
@@ -8087,7 +8179,11 @@ fn reset_settings(app: &mut App) {
                 view.info("every setting is back to its default");
             }
         }
-        Err(err) => app.flash = Some(format!("couldn't reset settings: {err}")),
+        Err(err) => {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't reset settings: {err}"
+            )))
+        }
     }
 }
 
@@ -8466,6 +8562,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             PromptKind::IssueComment { .. } => (None, "comment"),
             // And an empty follow-up: the turn is simply not sent.
             PromptKind::FollowUp { .. } => (None, "follow-up"),
+            // A typed setting over several lines (the Linear task
+            // template): empty is its default, as on every typed row.
+            PromptKind::SettingText { .. } => (None, "text"),
             _ => (Some("Claude Cloud needs a task"), "Claude Cloud task"),
         };
         let error = if let Some(needs) = needs.filter(|_| value.is_empty()) {
@@ -8497,7 +8596,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             None
         };
         if let Some(error) = error {
-            app.flash = Some(error);
+            app.flash = Some(crate::flash::Flash::failed(error));
             app.overlay = Some(Overlay::Prompt(prompt));
             return;
         }
@@ -8787,7 +8886,9 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             if index < presets.len() {
                 presets.remove(index);
                 if let Err(err) = crate::agent_presets::save(&presets) {
-                    app.flash = Some(format!("could not save agent presets: {err}"));
+                    app.flash = Some(crate::flash::Flash::failed(format!(
+                        "could not save agent presets: {err}"
+                    )));
                 }
             }
             crate::preset_overlays::reopen_presets_list(
@@ -9944,7 +10045,7 @@ pub(crate) fn open_link(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) 
     if open_url(url) {
         mark_pr_seen(app, url, out);
     } else {
-        app.flash = Some(format!("couldn't open {url}"));
+        app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
     }
 }
 
@@ -10822,7 +10923,7 @@ pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
     // Unit tests exercise the copy flows; don't clobber the developer's real
     // clipboard, and don't depend on their terminal or their $SSH_TTY.
     if cfg!(test) {
-        app.flash = Some(label.to_string());
+        app.flash = Some(crate::flash::Flash::done(label));
         return;
     }
     let via_terminal = format!("{label} (via terminal)");
@@ -10831,7 +10932,7 @@ pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
     // all but never fails here, so the flash says so now, and the rare
     // failure falls back to the terminal's OSC 52 when it is known.
     if let (false, Some(jobs)) = (app.is_remote, app.view_jobs.clone()) {
-        app.flash = Some(label.to_string());
+        app.flash = Some(crate::flash::Flash::done(label));
         let text = text.to_string();
         jobs.run(move || {
             (!copy_to_clipboard(&text)).then(|| crate::view_jobs::Answer::ClipboardViaTerminal {
@@ -10842,11 +10943,11 @@ pub(crate) fn copy_and_flash(app: &mut App, text: &str, label: &str) {
         return;
     }
     if !app.is_remote && copy_to_clipboard(text) {
-        app.flash = Some(label.to_string());
+        app.flash = Some(crate::flash::Flash::done(label));
         return;
     }
     app.pending_clipboard = Some(base64_encode(text.as_bytes()));
-    app.flash = Some(via_terminal);
+    app.flash = Some(crate::flash::Flash::done(via_terminal));
 }
 
 /// Base64 (RFC 4648, padded) for OSC 52 payloads.
@@ -11078,6 +11179,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherWelcomePrompt
                 | HitTarget::FooterUsage
                 | HitTarget::FooterHome
+                | HitTarget::FooterCrumb(_)
         )
     });
     // The ISSUES and PULL REQUESTS MODALS' `↗ open in browser` button is
@@ -11677,7 +11779,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     .map(|link| link.url.clone())
                 {
                     if !open_url(&url) {
-                        app.flash = Some(format!("open failed: {url}"));
+                        app.flash =
+                            Some(crate::flash::Flash::failed(format!("open failed: {url}")));
                     }
                     app.dirty = true;
                     return;
@@ -11791,6 +11894,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The footer's nameplate: HOME, through the `toggle_home`
                 // its key runs — and from HOME, back down to the grid.
                 Some(HitTarget::FooterHome) => toggle_home(app),
+                // A part of the footer's breadcrumb: down onto the grid with
+                // the cursor on it.
+                Some(HitTarget::FooterCrumb(part)) => launcher::click_crumb(app, part, out),
                 // The CLOSE BUTTON at the strip's right end: the pane
                 // folds away through the one `toggle_pane` `^~` runs. It
                 // is only drawn on a pane that is showing, so the toggle
@@ -12103,7 +12209,7 @@ fn connection_lost(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
     // Nothing is left to carry what the rollbacks queued.
     out.clear();
-    app.flash = Some(CONNECTION_LOST.into());
+    app.flash = Some(crate::flash::Flash::failed(CONNECTION_LOST));
     app.dirty = true;
 }
 
@@ -12206,7 +12312,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                     // remote host.
                     if let Some(payload) = term.take_clipboard() {
                         app.pending_clipboard = Some(payload);
-                        app.flash = Some("copied (via terminal)".into());
+                        app.flash = Some(crate::flash::Flash::done("copied (via terminal)"));
                     }
                     app.dirty = true;
                 }
@@ -12335,7 +12441,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                     }
                 }
                 (Some(PendingIntent::ReopenPromptOnError { note, .. }), _) => {
-                    app.flash = Some(note);
+                    app.flash = Some(crate::flash::Flash::failed(note));
                 }
                 (Some(PendingIntent::SelectCreatedProject), Some(EntityId::Project(id))) => {
                     // Its upsert usually lands just before this Ack; if not,
@@ -12614,7 +12720,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 }) => placeholder::discard_agent(app, &stand_in, out),
                 _ => {}
             }
-            app.flash = Some(message);
+            app.flash = Some(crate::flash::Flash::failed(message));
             app.dirty = true;
         }
         _ => {}
@@ -12721,7 +12827,24 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
                 }
             }
         }
-        Entity::Worktree(w) => upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id),
+        Entity::Worktree(w) => {
+            // A checkout switched to another branch outside orion: what
+            // `gh pr view` found was the old branch's pull request, and the
+            // commits ahead and behind were the old branch's too. Both go,
+            // and the lookup is due at once, so the band never wears the
+            // last branch's pull request into the new one.
+            let switched = app
+                .tree
+                .worktrees
+                .iter()
+                .any(|x| x.id == w.id && x.branch != w.branch);
+            if switched {
+                app.pull_requests.remove(&w.id);
+                app.pr_recheck.remove(&w.id);
+                app.worktree_ahead.remove(&w.id);
+            }
+            upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id)
+        }
         Entity::Agent(a) => {
             // A row the daemon re-homed (`orion worktree`, a hook cwd in
             // another checkout) takes the cursor with it when it was the
@@ -13631,7 +13754,7 @@ mod tests {
         let mut out = Vec::new();
 
         let mut app = locked_pane_app();
-        app.flash = Some("copied".into());
+        app.flash = Some(crate::flash::Flash::done("copied"));
         handle_terminal_event(
             &mut app,
             key(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -14240,8 +14363,8 @@ mod tests {
         app.flash = None;
         open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(
-            app.flash,
-            Some(format!("path missing on disk: {}", gone.display()))
+            app.flash.as_deref(),
+            Some(format!("path missing on disk: {}", gone.display()).as_str())
         );
     }
 
@@ -18232,7 +18355,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// is not.
     #[test]
     fn footer_shows_the_orion_version_but_never_truncates_a_flash() {
-        let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
+        let stamp = concat!(" v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
@@ -18241,7 +18364,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
 
         // A flash short enough to share the bar keeps the nameplate.
-        app.flash = Some("saved".into());
+        app.flash = Some(crate::flash::Flash::done("saved"));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
@@ -18249,7 +18372,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         // One that isn't takes the whole left edge instead.
         let long = "the pull request link can't be deleted from here, close it on github";
-        app.flash = Some(long.into());
+        app.flash = Some(crate::flash::Flash::failed(long));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(
@@ -18263,7 +18386,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// one.
     #[test]
     fn footer_flags_a_newer_release_beside_the_nameplate() {
-        let stamp = concat!("orion v", env!("CARGO_PKG_VERSION"));
+        let stamp = concat!(" v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
         seed_tree(&mut app);
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
@@ -18279,7 +18402,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         // A flash that would be clipped drops the whole plate, indicator too.
         let long = "the pull request link can't be deleted from here, close it on github";
-        app.flash = Some(long.into());
+        app.flash = Some(crate::flash::Flash::failed(long));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(
@@ -18327,9 +18450,97 @@ diff --git a/src/c.rs b/src/c.rs
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(
-            text.contains("1 agent · 1 term · 1.0 GB"),
+            text.contains("1 agent · 1.0 GB"),
             "footer readout rendered:\n{text}"
         );
+    }
+
+    /// A FLASH reads its kind at a glance: a failure in the needs-you
+    /// crimson behind `✕`, a setting to change in the working gold behind
+    /// `⚠`, a result in the done green behind `✓`, a wait behind the gold
+    /// WORKING SPINNER over muted words, and a heads-up muted behind `·`.
+    #[test]
+    fn a_flash_wears_its_kinds_mark_and_color() {
+        use crate::flash::Flash;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let th = app.theme;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut look = |flash: Flash| -> (char, ratatui::style::Color, ratatui::style::Color) {
+            let words: Vec<char> = flash.text.chars().collect();
+            app.flash = Some(flash);
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let buf = terminal.backend().buffer();
+            let y = buf.area.height - 1;
+            let cells: Vec<_> = (0..buf.area.width).map(|x| buf[(x, y)].clone()).collect();
+            let text: Vec<char> = cells
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            let at = text
+                .windows(words.len())
+                .position(|w| w == words.as_slice())
+                .unwrap_or_else(|| panic!("{:?}", text.iter().collect::<String>()));
+            (text[at - 2], cells[at - 2].fg, cells[at].fg)
+        };
+        assert_eq!(look(Flash::failed("couldn't post")), ('✕', th.err, th.err));
+        assert_eq!(look(Flash::setup("set an editor")), ('⚠', th.warn, th.warn));
+        assert_eq!(look(Flash::done("copied")), ('✓', th.ok, th.ok));
+        assert_eq!(
+            look(Flash::note("already there")),
+            ('·', th.muted, th.muted)
+        );
+        let (spinner, mark, words) = look(Flash::working("fetching the diff…"));
+        assert!(
+            crate::app::SPINNER.contains(&spinner.to_string().as_str()),
+            "{spinner}"
+        );
+        assert_eq!((mark, words), (th.warn, th.muted));
+    }
+
+    /// A checkout switched to another branch outside orion drops the pull
+    /// request and the commits ahead and behind read for the old branch,
+    /// and its lookup is due at once, so the band never wears the last
+    /// branch's pull request into the new one. A re-stamp of the same
+    /// branch keeps them.
+    #[test]
+    fn a_branch_switch_outside_orion_drops_the_old_branchs_pull_request() {
+        use orion_core::{Entity, ProjectId, Worktree};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let later = std::time::Duration::from_secs(300);
+        app.pull_requests.insert(w1.clone(), None);
+        app.pr_recheck
+            .insert(w1.clone(), (std::time::Instant::now() + later, later));
+        app.worktree_ahead.insert(w1.clone(), (2, 0));
+        let upsert = |app: &mut App, branch: &str| {
+            hse(
+                app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Worktree(Worktree {
+                        id: WorktreeId("w1".into()),
+                        project_id: ProjectId("p1".into()),
+                        path: "/tmp/demo".into(),
+                        branch: branch.into(),
+                        is_main: true,
+                        sort_order: 0,
+                    }),
+                },
+            )
+        };
+        upsert(&mut app, "main");
+        assert!(
+            app.pull_requests.contains_key(&w1),
+            "the same branch keeps it"
+        );
+        assert!(!app.pr_lookup_due(&w1));
+        assert_eq!(app.worktree_ahead_behind(&w1), (2, 0));
+
+        upsert(&mut app, "feat/other");
+        assert!(!app.pull_requests.contains_key(&w1));
+        assert!(app.pr_lookup_due(&w1), "asked again at once");
+        assert_eq!(app.worktree_ahead_behind(&w1), (0, 0));
     }
 
     /// INPUT PARITY: the footer's readout is a button. Its target is the
@@ -18373,7 +18584,7 @@ diff --git a/src/c.rs b/src/c.rs
         let word: String = line[rect.x as usize..(rect.x + rect.width) as usize]
             .iter()
             .collect();
-        assert_eq!(word, "1 agent · 0 terms · 1.0 GB", "the words, no padding");
+        assert_eq!(word, "1 agent · 1.0 GB", "the words, no padding");
         assert_eq!(rect.y, 29, "on the bar's own row");
         assert_eq!(row(&terminal, true), "", "at rest, nothing is underlined");
 
@@ -20473,7 +20684,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             let mut out = Vec::new();
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            let flash = app.flash.clone().unwrap_or_default();
+            let flash = app.flash.as_deref().unwrap_or_default().to_string();
             assert!(
                 flash.contains("no open command")
                     && flash.contains("Settings")
@@ -24167,8 +24378,8 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.git_changes_stale(), "the failed read is still cached");
     }
 
-    /// A band's rule prints its checkout's changed-file count right behind
-    /// the branch, from whichever read landed there last; a clean checkout,
+    /// A band's rule prints its checkout's changed-file count at its right
+    /// end, `*2`, from whichever read landed there last; a clean checkout,
     /// and a count read in some other checkout, print nothing — and the
     /// footer no longer carries it at all.
     #[test]
@@ -24176,39 +24387,38 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let rule = |terminal: &Terminal<TestBackend>| -> String {
+            buffer_text(terminal)
+                .lines()
+                .find(|l| l.contains("⌂ main ─"))
+                .unwrap_or_default()
+                .to_string()
+        };
 
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(
-            !buffer_text(&terminal).contains("⌂ main +"),
+            !rule(&terminal).contains('*'),
             "no count before one is read"
         );
 
         land_git_changes(&mut app, WorktreeId("w1".into()), Some(2));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(rule(&terminal).contains(" *2 ──"), "{}", rule(&terminal));
         let text = buffer_text(&terminal);
-        assert!(text.contains("⌂ main +2 files"), "card:\n{text}");
         let footer = text.lines().last().unwrap_or_default();
-        assert!(!footer.contains("+2 file"), "footer: {footer}");
-
-        land_git_changes(&mut app, WorktreeId("w1".into()), Some(1));
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("⌂ main +1 file "), "singular:\n{text}");
+        assert!(!footer.contains("*2"), "footer: {footer}");
 
         land_git_changes(&mut app, WorktreeId("w1".into()), Some(0));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(
-            !buffer_text(&terminal).contains("⌂ main +"),
+            !rule(&terminal).contains('*'),
             "a clean checkout stays quiet"
         );
 
-        // Another checkout's count stays on that checkout's cards.
+        // Another checkout's count stays on that checkout's band.
         land_swept_changes(&mut app, WorktreeId("w2".into()), Some(5));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(
-            !buffer_text(&terminal).contains("+5 file"),
-            "no card of w1 wears w2's count"
-        );
+        assert!(!rule(&terminal).contains("*5"), "{}", rule(&terminal));
     }
 
     /// The cards' sweep reads the grid's other checkouts, never the
@@ -26707,6 +26917,26 @@ diff --git a/src/c.rs b/src/c.rs
                 "Fix {ids}\n{issues}"
             );
             assert_eq!(settings_view(&app).selected, row, "back on the row");
+
+            // Emptied, the box goes back to the default — never the cloud
+            // box's "needs a task", which only a cloud launch says.
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
+                panic!("expected the template's box, got {:?}", app.overlay);
+            };
+            prompt.input.set_text("");
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(app.overlay, Some(Overlay::Settings(_))),
+                "{:?} / {:?}",
+                app.overlay,
+                app.flash
+            );
+            assert!(app.flash.is_none(), "{:?}", app.flash);
+            assert_eq!(
+                crate::config::Config::load().linear_template(),
+                crate::config::DEFAULT_LINEAR_TEMPLATE
+            );
         });
     }
 
@@ -36524,7 +36754,10 @@ diff --git a/src/c.rs b/src/c.rs
             "  ↓  - Move down",
             "the row above the bar, at the far left"
         );
-        assert!(rows[29].contains("orion v"), "the bar itself is untouched");
+        assert!(
+            rows[29].contains(concat!(" v", env!("CARGO_PKG_VERSION"))),
+            "the bar itself is untouched"
+        );
         let cell = &terminal.backend().buffer()[(2, 28)];
         assert_eq!(cell.symbol(), "↓");
         assert_eq!(cell.bg, app.theme.sel_bg, "the key sits in a keycap");

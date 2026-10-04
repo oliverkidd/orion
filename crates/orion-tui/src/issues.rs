@@ -1015,10 +1015,10 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                 app.issue_detail_failed.remove(&issue.url);
                 schedule_detail(app);
             } else {
-                app.flash = Some(format!(
+                app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't post the comment on #{} — is gh logged in?",
                     issue.number
-                ));
+                )));
                 // The box comes back with the text for a retry — unless
                 // something else has been opened over the modal meanwhile,
                 // which the flash must not interrupt.
@@ -1077,7 +1077,9 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                     }
                 }
                 if !told {
-                    app.flash = Some(format!("couldn't update issue #{number}: {why}"));
+                    app.flash = Some(crate::flash::Flash::failed(format!(
+                        "couldn't update issue #{number}: {why}"
+                    )));
                 }
             }
         },
@@ -1123,10 +1125,10 @@ fn bring_box_back(app: &mut App, view: IssuesView, issue: IssueRef, text: String
 pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, text: String) {
     let dir = view.dir.clone();
     if !dir.is_dir() {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::failed(format!(
             "couldn't post the comment on #{}: the checkout isn't on disk",
             issue.number
-        ));
+        )));
         bring_box_back(app, view, issue, text);
         return;
     }

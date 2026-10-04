@@ -413,14 +413,20 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   setting on, deleting a worktree's last card never asks about the worktree: the band stays,
   empty, until its own `Backspace` — unless **Delete emptied worktree** is on, which still deletes the
   worktree with its last card. Each band is a
-  titled rule over one row of cards: the rule names the checkout by its glyph (`↳ feat`,
-  `⌂ main` for the root — the project is the grid's own scope, named once in the header; the root's
-  branch is bright, a worktree's muted), with that checkout's uncommitted changes right behind the
-  branch, muted (`↳ feat +3 files`, just `+3` on a narrow rule, nothing when it is clean; the lines
-  behind it follow in the diff's sage and rose, `+3 files +120 -45`), then its pull request —
-  `↗ #42 Polish the nav  ready`, muted, in the colors the PR rows wear (crimson for conflicts or
-  failing checks, purple once merged, faint for a draft or a closed one), a link while the pointer rests on it — and, at its right end, how many
-  sessions and terminals are under it and how many cards the row had no room for (`▸ 2 more`).
+  titled rule over one row of cards: the rule names the checkout by its SCOPE MARK (`⎇ feat`,
+  `⌂ main` for the root, the purple `●` once its pull request has merged — the project is the
+  grid's own scope, named once in the header; the root's branch is bright, a worktree's muted), and
+  after the branch, dim, the folder it is checked out in when the branch's name doesn't spell it
+  (`⎇ feat/ui-redesign in pawy`). Its right end holds columns that are as wide on every band, so
+  they line up down the grid and nothing shifts when one band's count changes: the pull request —
+  `↗ #42 ready`, muted, in the colors the PR rows wear (crimson `conflicts` or `failing`, purple
+  once merged, faint for a draft or a closed one), a link while the pointer rests on it — then the
+  checkout's git counts, each right-aligned in its own column: uncommitted files `*3` in the diff's
+  sand, lines `+120 −45` in its sage and rose, and commits ahead of and behind the base it was cut
+  from, `⇡4 ⇣1`, muted (the root's base is origin's copy of its branch, so there they are what is
+  unpushed and unpulled). A band with nothing to say in a column leaves it blank; a narrow rule
+  drops the folder, then the pull request's column, then the counts', before the branch shortens.
+  How many cards the row had no room for sits just ahead of them (`▸ 2 more`).
   The band the keys are on opens on `❯` where the rest open on `──`, and the FOOTER says what
   Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every card
   of it wrapped into rows under the rule.
@@ -499,7 +505,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   it back) or Settings → Appearance → **Session pane** (`session_pane`, which the button writes; a
   window too narrow for it beside a column of cards lays it along the bottom until there is
   room) — and reads whichever card the cursor is on — on a collapsed band, its remembered
-  card: `● polish-nav  ↳ feat` on its header, the card's name and its checkout, and that session
+  card: `● polish-nav  ⎇ feat  ↗ #42` on its header, the card's name, its checkout and its pull
+  request, and that session
   live under it, swapping as you walk the
   grid, so stepping across the bands reads each checkout's progress in turn. A terminal's chip
   puts its shell there the same way. It is the selected session, so

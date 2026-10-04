@@ -9,10 +9,11 @@ its key, and `Enter` runs it.
 
 ## How the screen is laid out
 
-- **The FOOTER is the status bar.** Always, left to right: which orion this is (`orion v1.0.0` —
-  a click on it goes HOME), where you are (`project ▸ branch ▸ session`, then `· archived`,
-  `· full screen` or `· home` when you are somewhere other than the grid of live sessions), and at
-  the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
+- **The FOOTER is the status bar.** Always, left to right: which orion this is (`v1.0.0` — a
+  click on it goes HOME), where you are in the grid's own marks (`demo ⎇ feat ◐ fix-login`: the
+  project, the checkout behind its SCOPE MARK, the session behind its STATUS MARK — each a link
+  back to it on the grid), then `· archived`, `· full screen` or `· home` when you are somewhere
+  other than the grid of live sessions, and at the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
   then only about what the grid or the pane has under its cursor: on an empty band
   `⌘N new agent · t terminal · ⌫ delete worktree`, beside a pull request the pane can read
   `→ focus PR`. Wherever you are not on the grid, the first hint is the way back to it.
@@ -84,7 +85,7 @@ reload (`⌘⇧,`).
 | Toggle pane | `⌘J` | `^J` | fold the pane beside the cards away or bring it back; `⌘J` works from inside the pane, `^J` from the cards only (in the pane it is the agent's newline) |
 | Full-screen session | `^F` | | give the session in the pane the whole screen, or bring it back down |
 | Settings | `⌘,` | `s` | the SETTINGS OVERLAY |
-| Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `orion vX.Y.Z` does the same |
+| Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `vX.Y.Z` does the same |
 | Quit | `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
 
 ## The grid
@@ -499,12 +500,13 @@ The FOOTER carries the rest, left to right:
 
 | Readout | What it is telling you |
 |---|---|
-| `orion vX.Y.Z` at the far left | which orion this is — the string `orion --version` prints. A button: a click goes HOME, and from HOME back to the grid |
+| `vX.Y.Z` at the far left | which orion this is — the version `orion --version` prints. A button: a click goes HOME, and from HOME back to the grid |
 | `⇡ v0.22.0` after it, in the warning color | a newer orion is published on GitHub — run `orion upgrade`. `ORION_UPDATE_CHECK_SECS=0` turns the check off |
 | `✗ disconnected` | this client has lost the DAEMON. A healthy connection says nothing |
 | key hints | what the keys do where you are, built from your live keymap — a rebind shows up here, and an unbound action drops out. None while a modal is up: its keys are on its own border |
-| `demo ▸ feat ▸ fix-login  · archived` after it | where you are: the project, the checkout and the card under the cursor, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions |
-| `2 agents · 1 term · 3 warm · 412 MB` at the right edge | live counts and orion's whole memory footprint, re-read every 5 seconds; a click opens the memory modal |
+| `demo ⎇ feat ◐ fix-login  · archived` after it | where you are, in the marks the grid draws it with: the project, the checkout behind its SCOPE MARK (`⌂` the root, `⎇` a worktree), and the card under the cursor behind its STATUS MARK, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions. Each part is a link: a click goes back down onto the grid there — the project's whole grid, the checkout's band, the session's card |
+| a message in place of the hints | a FLASH, until the next key, led by what kind it is: `✕` a failure in crimson, `⚠` a setting to change in gold, `✓` a result nothing else shows in green, the gold spinner over muted words for a wait, `·` a heads-up in muted |
+| `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint, re-read every 5 seconds; a click opens the memory modal, which breaks it down by session, terminal and spare |
 | `↓ - Move down` on the row above the bar | the KEY COMBO DISPLAY: the key you just pressed and what it did, for anyone watching a screen share. Keys typed into a LOCKED PANE never show |
 
 ## Mouse

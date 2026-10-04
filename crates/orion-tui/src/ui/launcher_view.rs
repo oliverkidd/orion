@@ -752,7 +752,7 @@ fn hidden_mark(hidden: Hidden, th: Theme) -> Vec<Span<'static>> {
     )]
 }
 
-fn plural(n: usize) -> &'static str {
+pub(super) fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
     } else {
@@ -817,6 +817,8 @@ fn draw_bands(
     // does. Pushed after every card, rule and arrow so they keep their
     // own targets under `hit_at`'s first-match scan.
     let mut band_areas = Vec::with_capacity(bands.len());
+    let facts: Vec<RuleFacts> = bands.iter().map(|b| rule_facts(app, b, th)).collect();
+    let cols = RuleColumns::of(&facts);
     for (index, band) in bands.iter().enumerate() {
         let pb = &panel.bands[index];
         let whole = Rect {
@@ -858,6 +860,7 @@ fn draw_bands(
                 app,
                 placed.rect,
                 band,
+                &facts[index],
                 BandRule {
                     index,
                     on,
@@ -866,6 +869,7 @@ fn draw_bands(
                         Some(strip) => strip.hidden(),
                         None => pb.content.as_ref().map_or(0, |c| c.more),
                     },
+                    cols,
                 },
             );
             app.hits.extend(hits);
@@ -1715,19 +1719,173 @@ struct BandRule {
     lit: bool,
     /// Cards its row had no room for — always 0 once the band is open.
     more: usize,
+    /// The widths the right-hand columns take on every rule of the grid.
+    cols: RuleColumns,
 }
 
-/// A BAND's rule: the checkout — `⌂ main` or `↳ feat` in the SCOPE
-/// COLOR, its uncommitted changes behind it in the heads-up color, its
-/// pull request in the PR rows' own colors — a rule to the right end,
-/// and there how many cards are under it (`2 sessions · 1 terminal`), or
-/// off its edges (`▸ 2 more`). On the band the cursor is on the
-/// branch is bold — this is what says which checkout the pane reads,
-/// since no card under it wears the cursor — and for as long as the keys
-/// are on it the rule wears the accent and opens on the CURSOR MARK `❯`
-/// instead of `──`; gray and unmarked like the rest once the keys are up
-/// on the PROJECT TABS or down in the pane. What Tab does to it is the
-/// FOOTER's to say.
+/// How many git counts a rule's right end has a column for: uncommitted
+/// files, lines added, lines removed, commits ahead, commits behind.
+const GIT_COLUMNS: usize = 5;
+
+/// The letters of a branch a rule keeps before anything at its right end
+/// gives way.
+const MIN_BRANCH_CELLS: usize = 8;
+
+/// The gap between the parts of a rule's right end: `▸ N more`, the pull
+/// request, the counts.
+const COLUMN_GAP: usize = 2;
+
+/// What a band's rule says at its right end ([`rule_facts`]): its pull
+/// request, `↗ #57 ready`, and its checkout's git counts, `*3 +60 −28 ⇡4
+/// ⇣1`, each in its own column.
+struct RuleFacts {
+    pr: Vec<Span<'static>>,
+    git: [Option<Span<'static>>; GIT_COLUMNS],
+}
+
+/// The width of each right-hand column on the grid's rules: as wide as
+/// the widest band's, so the pull requests and the counts line up down the
+/// grid, and a count turning up on one band moves nothing on any other.
+/// A column no band has anything in takes no room at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RuleColumns {
+    pr: usize,
+    git: [usize; GIT_COLUMNS],
+}
+
+impl RuleColumns {
+    fn of<'a>(facts: impl IntoIterator<Item = &'a RuleFacts>) -> Self {
+        let mut cols = Self::default();
+        for f in facts {
+            cols.pr = cols.pr.max(spans_width(&f.pr));
+            for (w, count) in cols.git.iter_mut().zip(&f.git) {
+                *w = (*w).max(count.as_ref().map_or(0, Span::width));
+            }
+        }
+        cols
+    }
+
+    fn git_width(&self) -> usize {
+        let shown = self.git.iter().filter(|w| **w > 0);
+        shown.clone().sum::<usize>() + shown.count().saturating_sub(1)
+    }
+
+    /// The cells the columns take, with the two-cell gap between the pull
+    /// request and the counts when both are there.
+    fn width(&self) -> usize {
+        let git = self.git_width();
+        let gap = if self.pr > 0 && git > 0 {
+            COLUMN_GAP
+        } else {
+            0
+        };
+        self.pr + gap + git
+    }
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+/// The cells a rule's right end takes around a block `block` wide: ` `
+/// before it and ` ──` after it — none with nothing there, where the rule
+/// runs on unbroken.
+fn rule_tail_width(block: usize) -> usize {
+    if block > 0 {
+        1 + block + 3
+    } else {
+        0
+    }
+}
+
+/// `band`'s [`RuleFacts`]. The pull request in the PR rows' own colors
+/// (`pr_row::look`) — its number and the state word, `ready`, `draft`,
+/// `merged`, or the trouble (`conflicts`, `failing`) in the needs-you
+/// crimson — and the counts as facts rather than statuses: the files in
+/// the diff's modified sand, the lines in its pastels, the commits muted.
+fn rule_facts(app: &App, band: &crate::launcher::Band, th: Theme) -> RuleFacts {
+    let pr = band.pr.as_ref().map_or_else(Vec::new, |pr| {
+        let look = crate::pr_row::look(pr.standing, pr.trouble, th);
+        let badge = (format!(" {}", pr.badge()), look.badge);
+        crate::pr_row::spans(look, &format!("#{}", pr.number), usize::MAX, Some(badge))
+    });
+    let files = app.worktree_changes(&band.worktree).filter(|n| *n > 0);
+    let lines = files.and(app.worktree_lines(&band.worktree));
+    let (ahead, behind) = app.worktree_ahead_behind(&band.worktree);
+    let count = |n: u64, sign: &str, color: Color| {
+        (n > 0).then(|| Span::styled(format!("{sign}{n}"), Style::default().fg(color)))
+    };
+    RuleFacts {
+        pr,
+        git: [
+            files.and_then(|n| count(n as u64, "*", th.modified)),
+            lines.and_then(|l| count(l.added, "+", th.added)),
+            lines.and_then(|l| count(l.removed, "−", th.removed)),
+            count(ahead as u64, "⇡", th.muted),
+            count(behind as u64, "⇣", th.muted),
+        ],
+    }
+}
+
+/// A checkout's SCOPE MARK, the one glyph ahead of its branch wherever
+/// the grid names it — a band's rule, the FOOTER's breadcrumb: `⌂` the
+/// root, `⎇` a worktree, and the merged purple `●` once its pull request
+/// has landed. Two cells each, so the branches start in one column.
+pub(super) fn scope_mark(
+    app: &App,
+    worktree: &orion_core::WorktreeId,
+    is_main: bool,
+) -> Span<'static> {
+    let th = app.theme;
+    if app.worktree_wears_merge(worktree) {
+        Span::styled("● ", Style::default().fg(th.merged))
+    } else if is_main {
+        Span::styled("⌂ ", Style::default().fg(th.muted))
+    } else {
+        Span::styled("⎇ ", Style::default().fg(th.dim))
+    }
+}
+
+/// The checkout's folder, when it is not just its branch spelt as a
+/// folder name (`/` as `-`): `feat/ui-redesign` checked out in `pawy`.
+/// Never for the root, whose folder is the project's.
+fn folder_if_differs(app: &App, band: &crate::launcher::Band) -> Option<String> {
+    if band.is_main {
+        return None;
+    }
+    let path = &app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| w.id == band.worktree)?
+        .path;
+    let dir = path.file_name()?.to_string_lossy().into_owned();
+    (dir != band.branch.replace('/', "-")).then_some(dir)
+}
+
+/// A BAND's rule: the checkout on the left — its SCOPE MARK, the branch
+/// and, after it, the folder when that says something the branch does not
+/// (`feat/ui-redesign in pawy`) — then the rule, and at the right end the
+/// pull request and the git counts in columns as wide on every band
+/// ([`RuleColumns`]), so the eye reads them down the grid and nothing
+/// shifts when one band's count changes. Cards hanging off the band's
+/// edges are counted just ahead of them (`▸ 2 more`).
+///
+/// On the band the cursor is on the branch is bold — this is what says
+/// which checkout the pane reads, since no card under it wears the
+/// cursor — and for as long as the keys are on it the rule wears the
+/// accent and opens on the CURSOR MARK `❯` instead of `──`; gray and
+/// unmarked like the rest once the keys are up on the PROJECT TABS or
+/// down in the pane. What Tab does to it is the FOOTER's to say.
+///
+/// A checkout whose pull request has landed is the MERGED BAND: the merged
+/// `●` for its mark and the branch in purple, so the one to delete stands
+/// out from across the room. Its branch sweeps once, for the few seconds
+/// after orion sees the merge land, then holds still.
+///
+/// A rule too narrow for all of it lets the folder go first, then the
+/// pull request's column, then the counts', then `▸ N more`, before the
+/// branch shortens past eight letters.
 /// Returns the rule's hits: the pull request ahead of the rule itself,
 /// so a click on `#42` opens it and one anywhere else lands on the band.
 fn draw_band_rule(
@@ -1735,92 +1893,40 @@ fn draw_band_rule(
     app: &App,
     r: Rect,
     band: &crate::launcher::Band,
+    facts: &RuleFacts,
     rule: BandRule,
 ) -> Vec<(Rect, HitTarget)> {
     let th = app.theme;
     let width = usize::from(r.width);
-    let BandRule { on, lit, more, .. } = rule;
+    let BandRule {
+        on,
+        lit,
+        more,
+        mut cols,
+        ..
+    } = rule;
     let edge = if lit { th.accent } else { th.edge };
     let dash = |n: usize| Span::styled("─".repeat(n), Style::default().fg(edge));
 
-    // The right end first, since the left gives way to it.
-    let right = {
-        let mut words = format!("{} session{}", band.sessions(), plural(band.sessions()));
-        if band.terminals() > 0 {
-            words.push_str(&format!(
-                " · {} terminal{}",
-                band.terminals(),
-                plural(band.terminals())
-            ));
-        }
-        let mut spans = vec![Span::styled(words, Style::default().fg(th.dim))];
-        if more > 0 {
-            spans.push(Span::styled(
-                format!("  ▸ {more} more"),
-                Style::default().fg(th.muted),
-            ));
-        }
-        // What Tab does on the band under the cursor — expand it, fold it
-        // back — is the FOOTER's to say (`ui::footer`): a rule is a
-        // divider, and a key spelled on one band of many read as clutter.
-        spans
-    };
-    let right_w: usize = right.iter().map(|s| s.width()).sum();
-
-    // The checkout: `⌂` for the root, `↳` for a worktree — the glyph
-    // says which, so neither needs a color of its own — never yielding,
-    // the branch truncating around it. The root's branch is bright, being
-    // the branch itself; a worktree's muted, unless the cursor is on it.
-    //
-    // A checkout whose pull request has landed is the MERGED BAND: a
-    // purple dot ahead of it and the checkout in purple, so the one to
-    // delete stands out from across the room. Its branch sweeps once, for
-    // the few seconds after orion sees the merge land, then holds still —
-    // nothing about a landed checkout is live.
     let merged = app.worktree_wears_merge(&band.worktree);
-    let glyph = if band.is_main { "⌂ " } else { "↳ " };
-    let (glyph_color, branch_color) = if merged {
-        (th.merged, th.merged)
+    let branch_color = if merged {
+        th.merged
     } else if band.is_main || on {
-        (th.muted, th.text)
+        th.text
     } else {
-        (th.muted, th.muted)
+        th.muted
     };
     let mut branch_style = Style::default().fg(branch_color);
     if on {
         branch_style = branch_style.add_modifier(Modifier::BOLD);
     }
-    let merged_dot = if merged { "● " } else { "" };
     let ramp = (app.animations && app.merge_sweeping(&band.worktree)).then_some(th.merged_sweep);
-    // `── ` before, ` ` after the words, ` ` before the right end and
-    // ` ──` after it: what the words have to fit between.
-    let room = width.saturating_sub(3 + right_w + 5);
-    let changes = app
-        .worktree_changes(&band.worktree)
-        .filter(|n| *n > 0)
-        .map(|n| {
-            change_labels(
-                n,
-                app.worktree_lines(&band.worktree),
-                band.branch.chars().count(),
-                room.saturating_sub(glyph.chars().count() + merged_dot.chars().count()),
-            )
-        });
-    let taken = changes.as_ref().map_or(0, |(files, lines)| {
-        files.chars().count()
-            + lines.as_ref().map_or(0, |(added, removed)| {
-                added.chars().count() + removed.chars().count()
-            })
-    });
-    let branch = truncate(
-        &band.branch,
-        room.saturating_sub(glyph.chars().count() + merged_dot.chars().count() + taken),
-    );
+
     // The rule's left end: `──` like every other band's, or the CURSOR
     // MARK `❯` on the one the keys are on — the mark a prompt puts before
     // the line that takes the keys, so a rule that looks like a divider
-    // reads as a row something can be done to. Two cells either way, so
-    // the checkouts stay in one column down the grid.
+    // reads as a row something can be done to. Two cells either way, then
+    // the two-cell SCOPE MARK, so the branches start in one column.
     let lead = if lit {
         Span::styled(
             "❯ ",
@@ -1829,75 +1935,123 @@ fn draw_band_rule(
     } else {
         dash(2)
     };
-    let mut left = vec![lead, Span::raw(" ")];
-    if merged {
-        left.push(Span::styled(merged_dot, Style::default().fg(th.merged)));
+    let lead_w = 2 + 1 + 2;
+    let mut more_label = (more > 0).then(|| format!("▸ {more} more"));
+    // What the right end takes: the `▸ N more` and the columns, with the
+    // tail around them; and the words need ` ` and two dashes after them.
+    let right_w = |cols: &RuleColumns, more: Option<&String>| {
+        let gap = if cols.width() > 0 { COLUMN_GAP } else { 0 };
+        let more_w = more.map_or(0, |m| m.chars().count() + gap);
+        1 + 2 + rule_tail_width(more_w + cols.width())
+    };
+    let keep = band.branch.chars().count().min(MIN_BRANCH_CELLS);
+    let crowded =
+        |cols: &RuleColumns, more: Option<&String>| lead_w + keep + right_w(cols, more) > width;
+    if crowded(&cols, more_label.as_ref()) {
+        cols.pr = 0;
     }
-    left.push(Span::styled(glyph, Style::default().fg(glyph_color)));
+    if crowded(&cols, more_label.as_ref()) {
+        cols.git = [0; GIT_COLUMNS];
+    }
+    if crowded(&cols, more_label.as_ref()) {
+        more_label = None;
+    }
+    let room = width
+        .saturating_sub(lead_w + right_w(&cols, more_label.as_ref()))
+        .max(1);
+    let branch = truncate(&band.branch, room);
+    let folder = folder_if_differs(app, band)
+        .map(|dir| format!(" in {dir}"))
+        .filter(|f| branch.chars().count() + f.chars().count() <= room);
+
+    let mut left = vec![
+        lead,
+        Span::raw(" "),
+        scope_mark(app, &band.worktree, band.is_main),
+    ];
     left.extend(status_name_spans(
         branch,
         branch_style,
         ramp,
         app.sweep_phase(),
     ));
-    // The checkout's uncommitted changes: a fact, not a status, so the
-    // file count is muted and the lines take the diff's own pastels.
-    if let Some((files, lines)) = changes {
-        left.push(Span::styled(files, Style::default().fg(th.muted)));
-        if let Some((added, removed)) = lines {
-            left.push(Span::styled(added, Style::default().fg(th.added)));
-            left.push(Span::styled(removed, Style::default().fg(th.removed)));
+    if let Some(folder) = folder {
+        left.push(Span::styled(folder, Style::default().fg(th.dim)));
+    }
+
+    // The right end: what hangs off the band's edges, then the columns.
+    let mut right = Vec::new();
+    let gap = || Span::raw(" ".repeat(COLUMN_GAP));
+    if let Some(more) = more_label {
+        right.push(Span::styled(more, Style::default().fg(th.muted)));
+        if cols.width() > 0 {
+            right.push(gap());
         }
     }
     let mut hits = Vec::new();
-    let used: usize = left.iter().map(|s| s.width()).sum();
-    // Its pull request, after the checkout, in the PR rows' own colors —
-    // as much of the title as the rule has room for, and none of it on a
-    // rule too short to say the number.
-    if let Some(pr) = &band.pr {
-        let spare = room.saturating_sub(used + 2 - 3);
-        if spare >= 6 {
-            let look = crate::pr_row::look(pr.standing, pr.trouble, th);
-            let label = crate::pull_request::numbered_label(pr.number, &pr.title);
-            let mut spans = crate::pr_row::spans(
-                look,
-                &label,
-                spare,
-                Some((format!(" {}", pr.badge()), look.badge)),
-            );
+    let mut pr_at = None;
+    if cols.pr > 0 {
+        let mut pr = facts.pr.clone();
+        if !pr.is_empty() {
+            pr_at = Some((spans_width(&right), spans_width(&pr)));
             let hovered = app.hover_crumb == Some(HitTarget::LauncherBandPr(band.worktree.clone()));
-            if hovered {
-                if let Some(label) = spans.get_mut(1) {
-                    label.style = label.style.add_modifier(Modifier::UNDERLINED);
-                }
+            if let Some(label) = pr.get_mut(1).filter(|_| hovered) {
+                label.style = label.style.add_modifier(Modifier::UNDERLINED);
             }
-            let pr_w: usize = spans.iter().map(|s| s.width()).sum();
-            left.push(Span::raw("  "));
-            let x = r.x + u16::try_from(used + 2).unwrap_or(u16::MAX);
+        }
+        let pad = cols.pr.saturating_sub(spans_width(&pr));
+        right.extend(pr);
+        right.push(Span::raw(" ".repeat(pad)));
+        if cols.git_width() > 0 {
+            right.push(gap());
+        }
+    }
+    let mut first = true;
+    for (w, count) in cols.git.iter().zip(&facts.git) {
+        if *w == 0 {
+            continue;
+        }
+        if !first {
+            right.push(Span::raw(" "));
+        }
+        first = false;
+        let count_w = count.as_ref().map_or(0, Span::width);
+        right.push(Span::raw(" ".repeat(w.saturating_sub(count_w))));
+        if let Some(count) = count {
+            right.push(count.clone());
+        }
+    }
+
+    let left_w = spans_width(&left);
+    let block_w = spans_width(&right);
+    let fill = width
+        .saturating_sub(left_w + 1 + rule_tail_width(block_w))
+        .max(2);
+    let mut spans = left;
+    spans.push(Span::raw(" "));
+    spans.push(dash(fill));
+    let block_x = left_w + 1 + fill + 1;
+    if block_w > 0 {
+        spans.push(Span::raw(" "));
+        spans.extend(right);
+        spans.push(Span::raw(" "));
+        spans.push(dash(2));
+    }
+    Paragraph::new(Line::from(spans)).render(r, buf);
+    if let Some((at, pr_w)) = pr_at {
+        let x = r.x + u16::try_from(block_x + at).unwrap_or(u16::MAX);
+        if x < r.right() {
             hits.push((
                 Rect {
                     x,
-                    width: u16::try_from(pr_w)
-                        .unwrap_or(u16::MAX)
-                        .min(r.width.saturating_sub(x - r.x)),
+                    width: u16::try_from(pr_w).unwrap_or(u16::MAX).min(r.right() - x),
                     height: 1,
                     ..r
                 },
                 HitTarget::LauncherBandPr(band.worktree.clone()),
             ));
-            left.extend(spans);
         }
     }
-    let used: usize = left.iter().map(|s| s.width()).sum();
-    let fill = width.saturating_sub(used + 1 + 1 + right_w + 1 + 2);
-    let mut spans = left;
-    spans.push(Span::raw(" "));
-    spans.push(dash(fill));
-    spans.push(Span::raw(" "));
-    spans.extend(right);
-    spans.push(Span::raw(" "));
-    spans.push(dash(2));
-    Paragraph::new(Line::from(spans)).render(r, buf);
     hits.push((r, HitTarget::LauncherBand(rule.index)));
     hits
 }
@@ -1905,7 +2059,7 @@ fn draw_band_rule(
 /// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
 /// RUN TERMINAL, `❯` for a plain shell, muted while its PTY lives and
 /// faint once it has exited.
-fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'static> {
+pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'static> {
     let glyph = if t.run_command.is_some() {
         "▶ "
     } else {
@@ -2501,6 +2655,14 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     }
 }
 
+/// A session's STATUS MARK as its card draws it, and its name's style on
+/// the card the cursor is on ([`session_look`]): what the FOOTER's
+/// breadcrumb names the selected session with, so the two agree.
+pub(super) fn session_crumb(app: &App, a: &orion_core::Agent) -> (Span<'static>, Style) {
+    let look = session_look(app, a, true, app.theme);
+    (look.dot, look.name_style)
+}
+
 /// Which card wears the cursor: the one the cursor is on, or none at all
 /// once the aim has been let go of (`event_loop::launcher::clear_aim` —
 /// a click on the air between the cards, or the first Esc). The grid
@@ -2626,37 +2788,6 @@ fn limit_lines(
 /// needs it: only a CUSTOM harness's label comes out of the file — an
 /// account's email is the last read's — so a grid of built-ins never
 /// opens it at all.
-/// What a card's branch row says about its checkout's uncommitted changes,
-/// beside a branch `branch` characters long in `room`: the file count —
-/// ` +3 files`, or ` +3` — and, with `lines` counted, the lines behind it,
-/// ` +120` and ` -45`. The word yields first, then the lines, and only then
-/// does the branch give up a letter.
-fn change_labels(
-    files: usize,
-    lines: Option<crate::git_diff::LineChanges>,
-    branch: usize,
-    room: usize,
-) -> (String, Option<(String, String)>) {
-    let long = format!(" +{files} file{}", if files == 1 { "" } else { "s" });
-    let short = format!(" +{files}");
-    let width = |s: &str| s.chars().count();
-    if let Some(l) = lines {
-        let (added, removed) = (format!(" +{}", l.added), format!(" -{}", l.removed));
-        let tail = width(&added) + width(&removed);
-        for count in [&long, &short] {
-            if branch + width(count) + tail <= room {
-                return (count.clone(), Some((added, removed)));
-            }
-        }
-    }
-    let count = if branch + width(&long) <= room {
-        long
-    } else {
-        short
-    };
-    (count, None)
-}
-
 fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
     if a.cloud_session_id.is_some() {
         return "cloud".into();
@@ -3001,27 +3132,41 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
         }
     }
     // The checkout everything in the pane belongs to, as the band's rule
-    // names it — `⌂` on the project's root branch, `↳` on a checkout of
-    // its own — so the pane and the grid say the same thing the same way.
+    // names it — its SCOPE MARK and branch, and its pull request's number —
+    // so the pane and the grid say the same thing the same way.
     let checkout = at
         .and_then(|at| bands.get(at.band))
-        .map(|b| (b.is_main, b.branch.clone()))
+        .map(|b| {
+            (
+                b.worktree.clone(),
+                b.is_main,
+                b.branch.clone(),
+                b.pr.as_ref().map(|pr| pr.number),
+            )
+        })
         .or_else(|| {
             app.selected_worktree()
-                .map(|w| (w.is_main, w.branch.clone()))
+                .map(|w| (w.id.clone(), w.is_main, w.branch.clone(), None))
         });
-    if let Some((is_main, branch)) = checkout {
-        let glyph = if is_main { "⌂ " } else { "↳ " };
+    if let Some((worktree, is_main, branch, pr)) = checkout {
         if !tabs.is_empty() {
             tabs.push(PaneTab::plain(vec![Span::raw("  ")]));
         }
-        tabs.push(PaneTab::plain(vec![
-            Span::styled(glyph, Style::default().fg(th.muted)),
+        let mut spans = vec![
+            scope_mark(app, &worktree, is_main),
             Span::styled(
                 truncate(&branch, (room / 4).max(8)),
                 Style::default().fg(th.muted),
             ),
-        ]));
+        ];
+        if let Some(number) = pr {
+            spans.push(Span::styled("  ↗ ", Style::default().fg(th.muted)));
+            spans.push(Span::styled(
+                format!("#{number}"),
+                Style::default().fg(th.muted),
+            ));
+        }
+        tabs.push(PaneTab::plain(spans));
     }
     tabs
 }
@@ -3125,14 +3270,22 @@ pub(super) fn crumb_frame(f: &mut Frame, app: &mut App, area: Rect) -> Rect {
                     Style::default().fg(th.dim),
                 ));
             }
+            // Where it runs, as the footer's breadcrumb names it: the
+            // project, then the checkout behind its SCOPE MARK.
+            let is_main = app
+                .tree
+                .worktrees
+                .iter()
+                .any(|w| w.id == a.worktree_id && w.is_main);
             right.push(Span::styled(" · ", Style::default().fg(th.dim)));
             right.push(Span::styled(
-                format!(
-                    "{} / {}",
-                    truncate(&row.project, 20),
-                    truncate(&row.branch, 24)
-                ),
-                Style::default().fg(th.dim),
+                format!("{} ", truncate(&row.project, 20)),
+                Style::default().fg(th.muted),
+            ));
+            right.push(scope_mark(app, &a.worktree_id, is_main));
+            right.push(Span::styled(
+                truncate(&row.branch, 24),
+                Style::default().fg(th.muted),
             ));
             f.render_widget(
                 Paragraph::new(Line::from(right)).alignment(ratatui::layout::Alignment::Right),
@@ -5302,6 +5455,7 @@ mod tests {
                 on: false,
                 lit: false,
                 more: 0,
+                cols: RuleColumns::default(),
             },
         )
     }
@@ -5314,11 +5468,16 @@ mod tests {
         rule: BandRule,
     ) -> ratatui::buffer::Buffer {
         let area = Rect::new(0, 0, width, 1);
+        let facts = rule_facts(app, band, app.theme);
+        let rule = BandRule {
+            cols: RuleColumns::of([&facts]),
+            ..rule
+        };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
         terminal
             .draw(|f| {
-                draw_band_rule(f.buffer_mut(), app, area, band, rule);
+                draw_band_rule(f.buffer_mut(), app, area, band, &facts, rule);
             })
             .unwrap();
         terminal.backend().buffer().clone()
@@ -5340,50 +5499,166 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect()
     }
-
-    /// A band's rule names its checkout by its glyph — `⌂` root, `↳`
-    /// worktree — in muted, with no color of its own: the glyph sorts the
-    /// two scopes, so neither spends a hue the statuses need. The root's
-    /// branch is bright, being the branch itself; a worktree's muted.
+    /// A band's rule names its checkout by its SCOPE MARK — `⌂` the root
+    /// in muted, `⎇` a worktree in dim — with no color of its own: the mark
+    /// sorts the two scopes, so neither spends a hue the statuses need. The
+    /// root's branch is bright, being the branch itself; a worktree's
+    /// muted. The cards under it say how many run there, so the rule does
+    /// not count them.
     #[test]
-    fn a_band_names_its_checkout_by_glyph() {
+    fn a_band_names_its_checkout_by_its_scope_mark() {
         let app = App::new();
         let th = app.theme;
         let root = rule_row(&app, &a_band(true, "main"), 44);
         let worktree = rule_row(&app, &a_band(false, "feat-x"), 44);
         assert_eq!(painted(&root, 0, th.muted).trim(), "⌂");
         assert_eq!(painted(&root, 0, th.text), "main");
-        assert_eq!(painted(&worktree, 0, th.muted).trim(), "↳ feat-x");
-        // The cards under it say what runs in the checkout, not where.
+        assert_eq!(painted(&worktree, 0, th.dim).trim(), "⎇");
+        assert_eq!(painted(&worktree, 0, th.muted), "feat-x");
         let text = row_string(&worktree, 0);
-        assert!(text.contains("1 session"), "{text:?}");
+        assert!(text.starts_with("── ⎇ feat-x ─"), "{text:?}");
+        assert!(!text.contains("session"), "{text:?}");
     }
 
-    /// The checkout's changed-file count rides right behind the branch on
-    /// its band's rule, muted — a fact, not the working gold — and on a
-    /// rule too narrow for the word it keeps the number and drops `files`
-    /// before the branch gives up more.
+    /// A worktree checked out in a folder its branch's name doesn't spell
+    /// says so after the branch, dim — `feat/ui in pawy` — so the branches
+    /// still start in one column; one whose folder is just its branch (`/`
+    /// as `-`) says nothing more.
     #[test]
-    fn a_band_counts_its_checkouts_changes_behind_the_branch() {
+    fn a_band_names_its_folder_when_the_branch_does_not() {
+        use orion_core::{ProjectId, Worktree, WorktreeId};
+        let mut app = App::new();
+        let th = app.theme;
+        app.tree.worktrees.push(Worktree {
+            id: WorktreeId("w1".into()),
+            project_id: ProjectId("p1".into()),
+            path: "/repo/pawy".into(),
+            branch: "feat/ui".into(),
+            is_main: false,
+            sort_order: 0,
+        });
+        let band = a_band(false, "feat/ui");
+        let buf = rule_row(&app, &band, 60);
+        let text = row_string(&buf, 0);
+        assert!(text.starts_with("── ⎇ feat/ui in pawy ─"), "{text:?}");
+        assert!(painted(&buf, 0, th.dim).contains(" in pawy"));
+
+        app.tree.worktrees[0].path = "/repo/feat-ui".into();
+        let text = row_string(&rule_row(&app, &band, 60), 0);
+        assert!(!text.contains(" in "), "{text:?}");
+    }
+
+    /// The checkout's git counts sit at the rule's right end, each in its
+    /// own color — the files in the diff's modified sand, the lines in its
+    /// pastels, the commits ahead and behind muted, never the working gold
+    /// — and a rule too narrow for them lets them go before a short branch
+    /// gives up a letter.
+    #[test]
+    fn a_band_counts_its_checkouts_changes_at_its_right_end() {
         use orion_core::WorktreeId;
         let mut app = App::new();
         let th = app.theme;
-        app.worktree_changes.insert(
-            WorktreeId("w1".into()),
-            (Some(3), std::time::Instant::now()),
+        let w1 = WorktreeId("w1".into());
+        app.worktree_changes
+            .insert(w1.clone(), (Some(3), std::time::Instant::now()));
+        app.worktree_lines.insert(
+            w1.clone(),
+            crate::git_diff::LineChanges {
+                added: 120,
+                removed: 45,
+            },
         );
+        app.worktree_ahead.insert(w1, (4, 1));
         let band = a_band(false, "feat-x");
 
-        let buf = rule_row(&app, &band, 44);
+        let buf = rule_row(&app, &band, 60);
         let text = row_string(&buf, 0);
-        assert!(text.contains("↳ feat-x +3 files"), "{text:?}");
-        assert!(painted(&buf, 0, th.muted).ends_with("+3 files"));
+        assert!(text.ends_with(" *3 +120 −45 ⇡4 ⇣1 ──"), "{text:?}");
+        assert_eq!(painted(&buf, 0, th.modified), "*3");
+        assert_eq!(painted(&buf, 0, th.added), "+120");
+        assert_eq!(painted(&buf, 0, th.removed), "−45");
         assert_eq!(painted(&buf, 0, th.warn), "", "never the working gold");
 
         let buf = rule_row(&app, &band, 24);
         let text = row_string(&buf, 0);
-        assert!(text.contains(" +3"), "narrow: {text:?}");
-        assert!(!text.contains("files"), "narrow: {text:?}");
+        assert!(text.starts_with("── ⎇ feat-x ─"), "narrow: {text:?}");
+        assert!(!text.contains('*'), "the counts go first: {text:?}");
+    }
+
+    /// Every rule on the grid gives its pull request and its counts the
+    /// same columns ([`RuleColumns`]): a band with no pull request, or a
+    /// count the others have and it lacks, leaves those cells blank — so
+    /// the numbers line up down the grid, right-aligned, and the rule's
+    /// dashes end at the same column on every band.
+    #[test]
+    fn the_rules_line_their_columns_up_down_the_grid() {
+        use orion_core::WorktreeId;
+        let mut app = App::new();
+        let th = app.theme;
+        let now = std::time::Instant::now();
+        let mut root = a_band(true, "main");
+        root.worktree = WorktreeId("w0".into());
+        let mut feat = a_band(false, "feat/auth-tokens");
+        feat.pr = Some(crate::launcher::RowPr {
+            number: 57,
+            title: "Move the token store".into(),
+            url: String::new(),
+            standing: crate::pull_request::Standing::Open,
+            trouble: None,
+        });
+        app.worktree_changes
+            .insert(WorktreeId("w0".into()), (Some(12), now));
+        app.worktree_ahead.insert(WorktreeId("w0".into()), (0, 5));
+        app.worktree_changes
+            .insert(WorktreeId("w1".into()), (Some(3), now));
+        app.worktree_lines.insert(
+            WorktreeId("w1".into()),
+            crate::git_diff::LineChanges {
+                added: 60,
+                removed: 28,
+            },
+        );
+        let facts = [rule_facts(&app, &root, th), rule_facts(&app, &feat, th)];
+        let cols = RuleColumns::of(&facts);
+        let draw = |band: &crate::launcher::Band, facts: &RuleFacts| -> Vec<char> {
+            let area = Rect::new(0, 0, 80, 1);
+            let mut buf = Buffer::empty(area);
+            let rule = BandRule {
+                index: 0,
+                on: false,
+                lit: false,
+                more: 0,
+                cols,
+            };
+            draw_band_rule(&mut buf, &app, area, band, facts, rule);
+            row_string(&buf, 0).chars().collect()
+        };
+        let root_row = draw(&root, &facts[0]);
+        let feat_row = draw(&feat, &facts[1]);
+        let at = |row: &[char], needle: &str| -> usize {
+            let n: Vec<char> = needle.chars().collect();
+            row.windows(n.len())
+                .position(|w| w == n.as_slice())
+                .unwrap()
+        };
+        let text = |row: &[char]| row.iter().collect::<String>();
+        assert!(
+            text(&feat_row).contains("↗ #57 ready"),
+            "{}",
+            text(&feat_row)
+        );
+        assert!(!text(&root_row).contains('↗'), "{}", text(&root_row));
+        // The file counts end in the same column, right-aligned.
+        assert_eq!(at(&root_row, "*12") + 3, at(&feat_row, "*3") + 2);
+        // The pull request's column is blank on the root, not closed up.
+        let pr_at = at(&feat_row, "↗");
+        assert_eq!(root_row[pr_at], ' ', "{}", text(&root_row));
+        // The dashes stop at the same column on both.
+        let dashes_end = |row: &[char]| {
+            let start = at(row, "──");
+            start + row[start..].iter().take_while(|c| **c == '─').count()
+        };
+        assert_eq!(dashes_end(&root_row), dashes_end(&feat_row));
     }
 
     /// The band the keys are on says so: its rule opens on the CURSOR
@@ -5406,12 +5681,13 @@ mod tests {
             on: true,
             lit: true,
             more,
+            cols: RuleColumns::default(),
         };
 
         let buf = rule_row_as(&app, &band, 96, lit(6));
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
-        assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
+        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
         // The mark in the accent, the checkout as on any band.
         let accent = painted(&buf, 0, th.accent);
@@ -5429,11 +5705,12 @@ mod tests {
                 on: true,
                 lit: false,
                 more: 6,
+                cols: RuleColumns::default(),
             },
         );
         let text = row_string(&buf, 0);
         assert!(text.starts_with("── ⌂ main"), "keys elsewhere: {text:?}");
-        assert!(text.contains("8 sessions  ▸ 6 more ──"), "{text:?}");
+        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert_eq!(painted(&buf, 0, th.accent), "", "{text:?}");
     }
 
@@ -5450,12 +5727,13 @@ mod tests {
             on: true,
             lit: true,
             more: 2,
+            cols: RuleColumns::default(),
         };
 
         let buf = rule_row_as(&app, &band, 40, rule);
         let text = row_string(&buf, 0);
-        assert!(text.starts_with("❯  ↳ feat-x"), "{text:?}");
-        assert!(text.contains("3 sessions  ▸ 2 more ──"), "{text:?}");
+        assert!(text.starts_with("❯  ⎇ feat-x"), "{text:?}");
+        assert!(text.ends_with(" ▸ 2 more ──"), "{text:?}");
     }
 
     /// A card's frame carries its status — red asking, blue done unread,
@@ -5737,49 +6015,6 @@ mod tests {
             draw(&app, false).cell((20, 2)).unwrap().bg,
             dim_toward_black(th.err, TINT_PEAK * 0.6)
         );
-    }
-
-    /// CARD LINE COUNTS: the lines behind the file count always follow it
-    /// on the band's rule in the diff's own pastels — `+3 files +120 -45` —
-    /// and yield after the word and before the branch as the rule narrows.
-    #[test]
-    fn card_line_counts_follow_the_file_count_in_green_and_red() {
-        use orion_core::WorktreeId;
-        let mut app = App::new();
-        let th = app.theme;
-        app.worktree_changes.insert(
-            WorktreeId("w1".into()),
-            (Some(3), std::time::Instant::now()),
-        );
-        app.worktree_lines.insert(
-            WorktreeId("w1".into()),
-            crate::git_diff::LineChanges {
-                added: 120,
-                removed: 45,
-            },
-        );
-        let band = a_band(false, "feat-x");
-        let rule = |app: &App, width: u16| {
-            let buf = rule_row(app, &band, width);
-            (
-                row_string(&buf, 0),
-                painted(&buf, 0, th.added),
-                painted(&buf, 0, th.removed),
-            )
-        };
-
-        let (text, added, removed) = rule(&app, 60);
-        assert!(text.contains("↳ feat-x +3 files +120 -45"), "{text:?}");
-        assert_eq!(added.trim(), "+120");
-        assert_eq!(removed.trim(), "-45");
-
-        let (text, added, _) = rule(&app, 37);
-        assert!(text.contains("↳ feat-x +3 +120 -45"), "{text:?}");
-        assert_eq!(added.trim(), "+120");
-
-        let (text, added, _) = rule(&app, 24);
-        assert!(text.contains(" +3"), "narrowest: {text:?}");
-        assert_eq!(added.trim(), "", "the lines go before the branch does");
     }
 
     /// An ARCHIVED card is the live card put away rather than the live card

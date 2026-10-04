@@ -36,6 +36,12 @@ pub fn spin_step(phase: usize) -> usize {
     phase / SPIN_FRAMES_PER_STEP
 }
 
+/// The WORKING SPINNER's glyph at `spin` ([`App::spin_phase`]); its first
+/// frame, held still, with animations off.
+pub fn spinner_frame(spin: Option<usize>) -> &'static str {
+    SPINNER[spin.unwrap_or(0) % SPINNER.len()]
+}
+
 /// How many recently shown sessions keep their screen ([`App::term_cache`]):
 /// enough for a rotation through the sessions of a couple of worktrees.
 /// What bounds the memory is [`TERM_CACHE_CELLS`], not this.
@@ -74,6 +80,18 @@ pub enum Focus {
     Worktrees,
     Sessions,
     Terminal,
+}
+
+/// The three parts of the FOOTER's breadcrumb, each a link back to where
+/// it is on the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrumbPart {
+    /// The project: its grid, no card aimed at.
+    Project,
+    /// The checkout: the cursor on its BAND.
+    Worktree,
+    /// The session: the cursor on its card.
+    Session,
 }
 
 /// What a screen cell maps to; rebuilt on every draw for hit-testing.
@@ -180,12 +198,16 @@ pub enum HitTarget {
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
     LauncherWelcomePrompt,
-    /// The footer's right-edge readout (`2 agents · 1 term · 412 MB`): a
+    /// The footer's right-edge readout (`2 agents · 412 MB`): a
     /// click opens the memory modal — the one `⇧M` opens.
     FooterUsage,
-    /// The footer's nameplate at the far left (`orion v1.0.0`): a click
-    /// goes HOME, or back from it — what `⌘G` does.
+    /// The footer's nameplate at the far left (`v1.0.0`): a click goes
+    /// HOME, or back from it — what `⌘G` does.
     FooterHome,
+    /// A part of the footer's breadcrumb: a click goes back down onto the
+    /// grid with the cursor on that part
+    /// (`event_loop::launcher::click_crumb`).
+    FooterCrumb(CrumbPart),
     /// The `↗ open in browser` BUTTON on the ISSUES and PULL REQUESTS
     /// MODALS' reading pane, pinned right on its top border: a click opens
     /// the row under the cursor in the browser, through the very function
@@ -3722,7 +3744,8 @@ pub struct App {
     /// Set with `should_quit` by **Restart orion**: after teardown the
     /// binary stops the daemon and execs itself afresh (`crate::restart`).
     pub restart: bool,
-    pub flash: Option<String>,
+    /// The FOOTER's one line in place of its key hints, until the next key.
+    pub flash: Option<crate::flash::Flash>,
     /// The newest release published on GitHub (`0.22.0`) when it is newer
     /// than this build — the footer's `⇡ v0.22.0` beside the version
     /// nameplate. `None` until the update check finds one; a check that
@@ -4135,9 +4158,13 @@ pub struct App {
     /// The checkout the sweep is reading right now; its answer clears it.
     pub worktree_changes_inflight: Option<WorktreeId>,
     /// The lines added and removed in each checkout, read beside its
-    /// changed-file count: what its cards print after `+3 files`. Only a
+    /// changed-file count: what its band's rule prints after `*3`. Only a
     /// checkout with changed lines has an entry.
     pub worktree_lines: HashMap<WorktreeId, crate::git_diff::LineChanges>,
+    /// How far each checkout's HEAD is from the base it was cut from, read
+    /// beside its changed files: commits ahead, commits behind — a band's
+    /// `⇡4 ⇣1`. Only a checkout that is either has an entry.
+    pub worktree_ahead: HashMap<WorktreeId, (usize, usize)>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -4513,6 +4540,7 @@ impl App {
             worktree_changes: HashMap::new(),
             worktree_changes_inflight: None,
             worktree_lines: HashMap::new(),
+            worktree_ahead: HashMap::new(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
             attention_walk: None,
@@ -4822,9 +4850,9 @@ impl App {
     /// somewhere — its own row, a tab, the jump list — unless the panels
     /// are hidden (collapsed, editor modal, splash) or animations are
     /// switched off. A merged checkout only shows while its project is
-    /// selected, so only those keep the clock running. The one-shots run
-    /// out on the clock, so an idle app with everything read repaints
-    /// nothing.
+    /// selected, so only those keep the clock running; a FLASH saying what
+    /// it waits on turns the footer's spinner. The one-shots run out on the
+    /// clock, so an idle app with everything read repaints nothing.
     pub fn status_anim_active(&self) -> bool {
         let now = now_ms();
         self.animations
@@ -4836,7 +4864,11 @@ impl App {
             }) || self
                 .visible_worktrees()
                 .iter()
-                .any(|w| self.merge_sweeping(&w.id)))
+                .any(|w| self.merge_sweeping(&w.id))
+                || self
+                    .flash
+                    .as_ref()
+                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Working))
     }
 
     /// Whether `agent`'s dot is the turning WORKING SPINNER: a session
@@ -5282,6 +5314,12 @@ impl App {
     /// has been read there, or when nothing changed by the line.
     pub fn worktree_lines(&self, id: &WorktreeId) -> Option<crate::git_diff::LineChanges> {
         self.worktree_lines.get(id).copied()
+    }
+
+    /// A checkout's last-read commits ahead of and behind its base; none
+    /// either way until one has been read there.
+    pub fn worktree_ahead_behind(&self, id: &WorktreeId) -> (usize, usize) {
+        self.worktree_ahead.get(id).copied().unwrap_or_default()
     }
 
     /// Does the cache describe a different worktree than the selection?

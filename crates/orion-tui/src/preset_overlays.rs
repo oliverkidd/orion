@@ -813,7 +813,9 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
         }
     };
     if let Err(err) = crate::agent_presets::save(&presets) {
-        app.flash = Some(format!("could not save agent presets: {err}"));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "could not save agent presets: {err}"
+        )));
     }
     reopen_presets_list(app, editor.worktree, editor.quick, index);
 }
@@ -853,13 +855,13 @@ pub(crate) fn open_agent_preset_task(
         return;
     };
     if !crate::config::Config::load().preset_harness_usable(&preset) {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::setup(format!(
             "{} is turned off in Settings → Agents",
             preset
                 .custom_harness
                 .as_deref()
                 .unwrap_or(preset.kind.as_str())
-        ));
+        )));
         return;
     }
     let skip = preset.skip_task;
@@ -909,13 +911,13 @@ fn apply_preset_to_quick_prompt(
     };
     let cfg = crate::config::Config::load();
     if !cfg.preset_harness_usable(&preset) {
-        app.flash = Some(format!(
+        app.flash = Some(crate::flash::Flash::setup(format!(
             "{} is turned off in Settings → Agents",
             preset
                 .custom_harness
                 .as_deref()
                 .unwrap_or(preset.kind.as_str())
-        ));
+        )));
         return;
     }
     let launch_now = preset.skip_task && back.text.trim().is_empty();

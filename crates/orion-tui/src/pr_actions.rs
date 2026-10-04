@@ -350,7 +350,10 @@ pub(crate) fn open_create(app: &mut App) {
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
     if !dir.is_dir() {
-        app.flash = Some(format!("repo path missing on disk: {}", dir.display()));
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
         return;
     }
     let from = default_head(app, &project);
@@ -801,7 +804,6 @@ pub(crate) fn open_merge(app: &mut App) {
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
     let Some(pr) = crate::pr_modal::selected_pr(app) else {
-        app.flash = Some("no pull request selected".into());
         return;
     };
     let config = crate::config::Config::load();
@@ -1160,7 +1162,7 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
                     close_form(app);
                 }
                 crate::pr_modal::request_list(app, &project);
-                app.flash = Some(said);
+                app.flash = Some(crate::flash::Flash::done(said));
             }
             Err(why) => refused(app, ticket, why, "merge"),
         },
@@ -1232,11 +1234,11 @@ fn land_created(app: &mut App, project: &ProjectId, ticket: u64, url: String) {
         }
     }
     crate::pr_modal::request_list(app, project);
-    app.flash = Some(if url.is_empty() {
+    app.flash = Some(crate::flash::Flash::done(if url.is_empty() {
         "opened the pull request".into()
     } else {
         format!("opened {url}")
-    });
+    }));
 }
 
 /// A create or merge refused (`what` it was trying to do): the form that
@@ -1244,7 +1246,11 @@ fn land_created(app: &mut App, project: &ProjectId, ticket: u64, url: String) {
 fn refused(app: &mut App, ticket: u64, why: String, what: &str) {
     match form_for(app, ticket) {
         Some(form) => form.refused(why),
-        None => app.flash = Some(format!("couldn't {what}: {why}")),
+        None => {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't {what}: {why}"
+            )))
+        }
     }
 }
 

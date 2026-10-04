@@ -3650,7 +3650,7 @@ pub(crate) fn status_dot(
     spin: Option<usize>,
     th: Theme,
 ) -> Span<'static> {
-    let spinner = || crate::app::SPINNER[spin.unwrap_or(0) % crate::app::SPINNER.len()];
+    let spinner = || crate::app::spinner_frame(spin);
     let glyph = match status {
         Some(AgentStatus::Running) | None => spinner(),
         Some(AgentStatus::Terminated) => "✕",

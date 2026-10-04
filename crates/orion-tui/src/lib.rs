@@ -18,6 +18,7 @@ pub mod dropped_files;
 pub mod editor;
 pub mod event_loop;
 pub mod file_tabs;
+pub mod flash;
 pub mod fuzzy;
 pub mod ghostty_config;
 pub mod git_diff;

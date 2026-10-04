@@ -1,16 +1,21 @@
 //! The FOOTER: the bar along the bottom of every screen.
 //!
-//! Left to right it is always the STATUS — which orion this is (a button:
-//! a click goes HOME), `· archived`, `· full screen` or `· home` when you
-//! are somewhere other than the grid, and at the right edge the live
-//! counts. Between the two
-//! go KEY HINTS, and only while no modal is up ([`hints`]): a modal's keys
-//! are on its own bottom border (`crate::hints::modal_block`), so the
-//! footer never repeats or contradicts them. With nothing up, the hints
-//! are about what the grid or the pane has under its cursor — and
+//! Left to right it is always the STATUS — which orion this is, `v1.0.0`
+//! (a button: a click goes HOME), the BREADCRUMB in the grid's own marks
+//! (`orbit-api ⎇ feat/auth-tokens ◐ Token store`, each part a link back
+//! to it), `· archived`, `· full screen` or `· home` when you are somewhere
+//! other than the grid, and at the right edge the live counts. Between
+//! the two go KEY HINTS, and only while no modal is up ([`hints`]): a
+//! modal's keys are on its own bottom border (`crate::hints::modal_block`),
+//! so the footer never repeats or contradicts them. With nothing up, the
+//! hints are about what the grid or the pane has under its cursor — and
 //! wherever that is not the grid, the first of them is the way back to it.
+//! A FLASH takes the hints' place until the next key, in its kind's mark
+//! and color ([`flash_spans`]).
 
 use super::{truncate, App, ConnState, Focus, HitTarget};
+use crate::app::{CrumbPart, SessionRow};
+use crate::flash::{Flash, FlashKind};
 use crate::hints::{act, acts, Hint};
 use crate::keymap::Action;
 use crate::launcher::pane_keys;
@@ -64,64 +69,107 @@ fn draw_key_combo(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
-/// Where the view is, when it is not the grid of live sessions —
-/// `archived`, `full screen`, `home`: the word that says what Esc climbs
-/// out of. The bar used to lead with the selection's `project ▸ branch ▸
-/// session` too, but the grid's tabs, band rule and the pane's header
-/// already say all three, and the crumb ate the room the KEY HINTS need.
-fn place_tag(app: &App) -> Vec<Span<'static>> {
-    let th = app.theme;
-    let seg = |name: &str, active: bool| {
-        Span::styled(
-            truncate(name, 20),
-            if active {
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(th.muted)
-            },
-        )
-    };
-    let sep = || Span::styled(" ▸ ", Style::default().fg(th.dim));
+/// One part of the BREADCRUMB: its spans, and the part of the grid a
+/// click on it goes back to — none for the words between.
+struct CrumbSeg {
+    part: Option<CrumbPart>,
+    spans: Vec<Span<'static>>,
+}
 
-    let mut spans = Vec::new();
+/// The BREADCRUMB: where the selection is, in the marks the grid draws it
+/// with — the project, the checkout behind its SCOPE MARK (`⌂` the root,
+/// `⎇` a worktree, the merged `●`), and the session behind its STATUS MARK
+/// in its card's own colors — so the bar and the grid read as one:
+/// `orbit-api ⎇ feat/auth-tokens ◐ Token store on sqlite`. Each of the
+/// three is a link back to it on the grid ([`CrumbPart`]). Then, when the
+/// view is not the grid of live sessions, the word that says what Esc
+/// climbs out of: `· archived`, `· full screen`, `· home`.
+fn crumb(app: &App) -> Vec<CrumbSeg> {
+    let th = app.theme;
+    let mut segs = Vec::new();
     if app.splash_showing() && !app.home {
-        return spans;
+        return segs;
     }
     let Some(project) = app.selected_project() else {
-        return spans;
+        return segs;
     };
-    spans.push(seg(&project.name, app.focus == Focus::Projects));
+    let gap = || CrumbSeg {
+        part: None,
+        spans: vec![Span::raw(" ")],
+    };
+    segs.push(CrumbSeg {
+        part: Some(CrumbPart::Project),
+        spans: vec![Span::styled(
+            truncate(&project.name, 20),
+            Style::default().fg(th.muted),
+        )],
+    });
     if let Some(worktree) = app.selected_worktree() {
-        spans.push(sep());
-        spans.push(seg(&worktree.branch, app.focus == Focus::Worktrees));
+        segs.push(gap());
+        segs.push(CrumbSeg {
+            part: Some(CrumbPart::Worktree),
+            spans: vec![
+                super::launcher_view::scope_mark(app, &worktree.id, worktree.is_main),
+                Span::styled(truncate(&worktree.branch, 24), Style::default().fg(th.text)),
+            ],
+        });
         if let Some(session) = app.selected_session_row() {
-            spans.push(sep());
-            // A link's crumb is its display label, not the raw URL — the
-            // crumb has 20 cells and "https://" would eat eight of them —
-            // and a pull request's just its number: its title is on the
-            // band's rule, and the bar's room is the hints'.
-            let name = match session.as_link() {
-                Some(link) => match link.pull_request() {
-                    Some(pr) => format!("#{}", pr.number),
-                    None => link.label(),
-                },
-                None => session.name().to_string(),
+            // A link's crumb is its pull request's number, or its display
+            // label — never the raw URL, which would eat the bar.
+            let (mark, name, style) = match &session {
+                SessionRow::Agent(a) => {
+                    let (mark, style) = super::launcher_view::session_crumb(app, a);
+                    (mark, a.name.clone(), style)
+                }
+                SessionRow::Terminal(t) => (
+                    super::launcher_view::terminal_mark(t, th),
+                    t.name.clone(),
+                    Style::default().fg(th.text),
+                ),
+                SessionRow::Link(link) => (
+                    Span::styled("↗ ", Style::default().fg(th.muted)),
+                    match link.pull_request() {
+                        Some(pr) => format!("#{}", pr.number),
+                        None => link.label(),
+                    },
+                    Style::default().fg(th.text),
+                ),
             };
-            spans.push(seg(
-                &name,
-                matches!(app.focus, Focus::Sessions | Focus::Terminal),
-            ));
+            segs.push(gap());
+            segs.push(CrumbSeg {
+                part: Some(CrumbPart::Session),
+                spans: vec![mark, Span::styled(truncate(&name, 24), style)],
+            });
         }
     }
-    // Where the view is, when it is not the grid of live sessions: the
-    // word that says what Esc climbs out of.
     if let Some(place) = place(app) {
-        spans.push(Span::styled(
-            format!("  · {place}"),
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        ));
+        segs.push(CrumbSeg {
+            part: None,
+            spans: vec![Span::styled(
+                format!("  · {place}"),
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+            )],
+        });
     }
-    spans
+    segs
+}
+
+/// A FLASH as the bar draws it: its kind's mark, then the line, in the
+/// mark and colors `crate::flash` lists for each kind.
+fn flash_spans(app: &App, flash: &Flash) -> Vec<Span<'static>> {
+    let th = app.theme;
+    let spinner = crate::app::spinner_frame(app.spin_phase());
+    let (mark, mark_color, text_color) = match flash.kind {
+        FlashKind::Failed => ("✕", th.err, th.err),
+        FlashKind::Setup => ("⚠", th.warn, th.warn),
+        FlashKind::Done => ("✓", th.ok, th.ok),
+        FlashKind::Working => (spinner, th.warn, th.muted),
+        FlashKind::Note => ("·", th.muted, th.muted),
+    };
+    vec![
+        Span::styled(format!("{mark} "), Style::default().fg(mark_color)),
+        Span::styled(flash.text.clone(), Style::default().fg(text_color)),
+    ]
 }
 
 /// The view the screen is on, when it is not the grid of live sessions.
@@ -445,7 +493,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         status.push(Span::styled("✗ disconnected", Style::default().fg(th.err)));
         status.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
-    let crumbs = place_tag(app);
+    let crumbs = crumb(app);
     // Right edge: live session/process counts and orion's total memory
     // footprint, fed by the footer metrics poll. The hints clip before the
     // readout does.
@@ -465,14 +513,21 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // release rides it as `⇡ v0.22.0`, in the heads-up color. A clipped
     // *flash* loses the end of a sentence, so the nameplate steps aside
     // for one that would not otherwise fit.
-    let plate = format!("orion v{}", env!("CARGO_PKG_VERSION"));
+    let plate = format!("v{}", env!("CARGO_PKG_VERSION"));
     let update = app.update_available.as_ref().map(|v| format!(" ⇡ v{v}"));
     let plate_w = plate.chars().count()
         + update.as_ref().map_or(0, |u| u.chars().count())
         + "  ·  ".chars().count();
     let status_w: usize = status.iter().map(|s| s.width()).sum::<usize>()
-        + crumbs.iter().map(|s| s.width()).sum::<usize>();
-    let flash_w = app.flash.as_ref().map_or(0, |f| f.chars().count() + 4);
+        + crumbs
+            .iter()
+            .flat_map(|seg| &seg.spans)
+            .map(|s| s.width())
+            .sum::<usize>();
+    // The flash, behind the four cells the crumb leaves before it.
+    let flash_w = app.flash.as_ref().map_or(0, |f| {
+        flash_spans(app, f).iter().map(|s| s.width()).sum::<usize>() + 4
+    });
     let show_plate = app.flash.is_none() || status_w + flash_w + plate_w <= left.width as usize;
     let mut spans = status;
     if show_plate {
@@ -504,17 +559,39 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
     if !crumbs.is_empty() {
-        spans.extend(crumbs);
-        // No changed-file count here: it rides each card's branch, where
-        // it reads as that checkout's (`launcher_view::draw_card`).
+        let mut x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
+        for seg in crumbs {
+            let width: u16 = seg.spans.iter().map(|s| s.width() as u16).sum();
+            let mut seg_spans = seg.spans;
+            if let Some(part) = seg.part {
+                let target = HitTarget::FooterCrumb(part);
+                // Under the pointer the words underline — the mark stays
+                // as it is — the way every other button on the bar lifts.
+                if app.hover_crumb.as_ref() == Some(&target) {
+                    if let Some(words) = seg_spans.last_mut() {
+                        words.style = words.style.add_modifier(Modifier::UNDERLINED);
+                    }
+                }
+                if x < left.right() {
+                    app.hits.push((
+                        Rect {
+                            x,
+                            width: width.min(left.right() - x),
+                            ..left
+                        },
+                        target,
+                    ));
+                }
+            }
+            spans.extend(seg_spans);
+            x += width;
+        }
         spans.push(Span::raw("    "));
     }
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let room = usize::from(left.width).saturating_sub(used + 1);
     match &app.flash {
-        // A flash is news, not a status: plain text, so it never reads as
-        // the working gold beside a spinner.
-        Some(flash) => spans.push(Span::styled(flash.clone(), Style::default().fg(th.text))),
+        Some(flash) => spans.extend(flash_spans(app, flash)),
         None => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }
     f.render_widget(Paragraph::new(Line::from(spans)), left);
@@ -555,33 +632,24 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The footer's right-edge readout: live sessions, their process count,
-/// and orion's total memory footprint (TUI + daemon + every session's
-/// process subtree). None until the first metrics reply arrives.
+/// The footer's right-edge readout: the agents running and orion's total
+/// memory footprint (TUI + daemon + every session's process subtree), `8
+/// agents · 44 MB`. Terminals and the prewarm pool's spares count toward
+/// the memory but not the agents — the memory modal it opens breaks it
+/// all down. None until the first metrics reply arrives.
 fn footer_usage(app: &App) -> Option<String> {
     let m = app.last_metrics.as_ref()?;
-    // Prewarm-pool spares are agent CLIs but not agents anyone opened;
-    // they get their own count so the agent figure matches the sidebar.
-    let spares = m.sessions.iter().filter(|s| s.prewarm.is_some()).count();
     let agents = m
         .sessions
         .iter()
         .filter(|s| matches!(s.session, orion_core::SessionRef::Agent(_)) && s.prewarm.is_none())
         .count();
-    let terms = m.sessions.len() - agents - spares;
     let total = m.daemon_rss_bytes
         + app.client_rss_bytes
         + m.sessions.iter().map(|s| s.rss_bytes).sum::<u64>();
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let warm = if spares > 0 {
-        format!(" · {spares} warm")
-    } else {
-        String::new()
-    };
     Some(format!(
-        "{agents} agent{} · {terms} term{}{warm} · {}",
-        plural(agents),
-        plural(terms),
+        "{agents} agent{} · {}",
+        super::launcher_view::plural(agents),
         super::fmt_mem(total)
     ))
 }
