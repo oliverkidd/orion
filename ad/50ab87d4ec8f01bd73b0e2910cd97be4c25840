@@ -1,0 +1,97 @@
+scripts/shot/fixtures/pr-39.stats.json
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-28
+crates/orion-core/src/codec.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 39-57,71-132,169-251
+scripts/shot/scenes/pr-window-create.setup.sh
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-7
+docs/keys.md
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 179,183-187,248-249,346-348,375,379-386
+scripts/shot/scenes/pr-window-create.keys
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-16
+crates/orion/tests/e2e_pty.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 2595-2630
+scripts/shot/scenes/pr-window-merge.keys
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-8
+crates/orion-core/src/protocol.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 12-23
+crates/orion-tui/src/pr_modal.rs
+  s_bf0bfc305b0126::t_62a8fa478986d8 1431-1432
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 3-18,23-36,43-46,63,87-108,156-161,183-184,313,322,471-473,477,521-525,628-649,652-655,661-662,666,671-676,681-687,702-704,710-711,714-715,718,728-735,742-745,772,778,784-785,796,819-820,822-830,836-839,846-847,851-855,857-860,862-890,895-896,898-899,903,1017-1021,1066,1071-1089,1097,1112-1113,1401-1403,1405,1434-1471,1473-1506,1509-1512,1514-1515,1517-1580,1582-1600,1811,1841-1844,1891-1895,1899
+scripts/shot/bin/gh
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 6-8,83-87
+crates/orion-daemon/src/server.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 8-11,66-95
+crates/orion-tui/src/ui.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1598,2592,2888-2890,2893,2899-2905,2909,2912,4484-4606
+  s_bf0bfc305b0126::t_01992e61f58d42 4607
+crates/orion-tui/src/config.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 84-102,514-519,650-655,875-918,1459-1481,1831-1836,2073-2099,3127-3136,3288-3308,4747-4792
+  s_bf0bfc305b0126::t_49f4545ce195cc 4793
+scripts/shot/scenes/pr-window-nested-diff.keys
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-13
+scripts/shot/scenes/pr-window-page.keys
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-10
+crates/orion/tests/e2e_tui.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 55,60-63,87-96,107,734-735,738-739,817-818,859-860
+crates/orion-tui/src/pull_request.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 654-669,679,683,685,790-794,918,928-937,1067-1071,1073-1133,1135-1148,1153,1168,1227,1367-1386,1388-1389,1392-1393,1396-1397,1400-1401,1403-1404,1407,1409,1413-1415,1421-1427,1501-1531
+  s_bf0bfc305b0126::t_fbd33ef6a46cee 1532
+crates/orion-tui/src/event_loop/placeholder.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 582-583,585,977-1006
+  s_bf0bfc305b0126::t_268b8325b845b6 1007-1009
+crates/orion-tui/src/commit_list.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 196-200,203,205,216-243,248-249,258-274,289-291,295-296,299-303,320-329,611-634,953-957,1093-1097,1134-1136,1144,1148,1248-1272
+  s_bf0bfc305b0126::t_899478d823b7e9 1273
+scripts/shot/scenes/settings-review.keys
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-4
+crates/orion-tui/src/overlay_close.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 85-91
+ARCHITECTURE.md
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 32-34
+crates/orion-tui/src/event_loop.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 348-352,489,502-504,628-631,639,720-724,852-856,858-866,868,1680,1880-1895,1899-1910,1912-1939,1955-2067,2083,2326,2658-2660,5216-5217,5253-5255,5465-5467,5472,5483-5501,7295-7297,8064-8066,12081-12109,16582-16585,16726-16728,16757-16762,16764,24499-24542,24784-24900,27386-27396
+crates/orion-tui/src/ipc.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 5,206-217
+crates/orion-tui/src/issues.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 65,77-78,2023-2024,2030-2038,2046,2052-2061
+crates/orion-tui/src/linear.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 4-8,64-87,187-188,209,223-226,229,232-234,240-249,261-269,496,499-500,519-523,525,536,539-540,618-622,624,638-644,649,658,665-771,782-785,813,1227-1232,1255-1286,1318-1324,1328-1336,1341-1350,1354-1434,1447-1451,1555,1593-1597,1821,1825-1897
+  s_bf0bfc305b0126::t_bf4d525e197535 524,526-535,537
+  s_bf0bfc305b0126::t_0ef963a1ebe36e 538,1898
+docs/configuration.md
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 98-103
+crates/orion-tui/src/lib.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 45
+scripts/shot/fixtures/pr-42.stats.json
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-44
+crates/orion-tui/src/pr_actions.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-1997
+crates/orion-tui/src/pr_preview.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 782-783,785-789,859-881,1397-1399,1406,1572-1579
+crates/orion-tui/src/ui/diff_view.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 165-168,172-182,288,294-296,355,361,380,574-580,582-583
+scripts/shot/fixtures/repo.json
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1
+crates/orion-tui/src/app.rs
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1306-1321,1334-1335,1339,1343,1459-1462,4028-4030,4032-4036,4251-4254,4487-4488,4540
+scripts/shot/scenes/pr-window-create-pick.keys
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-12
+scripts/shot/scenes/pr-window-create-pick.setup.sh
+  s_bf0bfc305b0126::t_caa0ff7c8acc83 1-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ad50ab87d4ec8f01bd73b0e2910cd97be4c25840",
+  "prompts": {},
+  "sessions": {
+    "s_bf0bfc305b0126": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fe852ff6-ce7e-42b8-ab25-42329073dedd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
