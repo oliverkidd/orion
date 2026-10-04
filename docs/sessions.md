@@ -244,11 +244,14 @@ A second Claude account is one more Claude Code config dir with a login of its o
 account** under **Claude accounts** on the settings overlay's Agents tab (or **Claude accounts** in
 the COMMAND PALETTE, or the step first-run onboarding has right after Agents) makes the dir, offers to
 share your setup with it — `CLAUDE.md`, settings, skills, agents, commands, plugins, as links — and
-`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account is named
-after the email it is signed in as, `Claude (you@example.com)`, and on a machine with more than one
-a card says which its session runs on by that email (`you@example.com opus high`) where it would
-say `claude`. See [Configuration](configuration.md#claude-accounts) for the `claude_accounts` entry
-behind it, signing in and out, and removing one.
+`Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account goes by the
+name you gave it and the email it is signed in as, `Work (you@example.com)` — `Claude
+(you@example.com)` until it has a name — and `r` on its row renames it, the default account too,
+without moving its sessions or its dir. On a machine with more than one a card says which its
+session runs on by that name, else that email (`Work opus high`), where it would say `claude`. A
+removed account's dir stays, listed under **Saved on this machine** with who it is signed in as, to
+add back or move to the Trash. See [Configuration](configuration.md#claude-accounts) for the
+`claude_accounts` entry behind it, signing in and out, renaming and removing one.
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the
 browser sign-in approves whichever account the browser is signed in to, so it is easy to end up

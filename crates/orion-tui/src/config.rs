@@ -395,6 +395,11 @@ pub enum TabBody {
 /// head and the per-harness sections ([`Config::account_rows`]).
 pub const ACCOUNTS_GROUP: &str = "Claude accounts";
 
+/// The Agents tab's section right under it: SAVED ON THIS MACHINE, the
+/// Claude config dirs no account runs in ([`AccountRow::OnDisk`]). Shown
+/// only while there is one.
+pub const MACHINE_GROUP: &str = "Saved on this machine";
+
 /// What **Continue on** says after an account signed in as the session's
 /// own email ([`Config::continue_targets`]).
 pub const SAME_ACCOUNT: &str = " · same account";
@@ -505,6 +510,10 @@ pub enum AccountRow {
     Account(String),
     /// **Add account**: a new config dir and its entry.
     Add,
+    /// SAVED ON THIS MACHINE: a `~/.claude-*` Claude Code config dir no
+    /// account runs in ([`crate::claude_accounts::on_disk`]) — Enter adds
+    /// it back, `⌫` moves it to the Trash.
+    OnDisk(std::path::PathBuf),
 }
 
 impl HarnessField {
@@ -1091,12 +1100,20 @@ pub fn settings_rows(tab: usize) -> Vec<SettingsRow> {
             let cfg = Config::load();
             let head = AGENTS_HEAD.iter().map(|s| s.group.to_string());
             let accounts = cfg.account_rows();
-            let section = accounts.iter().map(|_| ACCOUNTS_GROUP.to_string());
+            let section = accounts.iter().map(|row| match row {
+                AccountRow::OnDisk(_) => MACHINE_GROUP.to_string(),
+                _ => ACCOUNTS_GROUP.to_string(),
+            });
             let rows = cfg.agent_rows();
             let groups = rows.iter().map(|(id, _)| cfg.section_title(id));
             let mut out = grouped(head.chain(section).chain(groups), SettingsRow::Setting);
-            // The same-account warning, under the accounts it is about.
-            let last = SettingsRow::Setting(AGENTS_HEAD.len() + accounts.len() - 1);
+            // The same-account warning, under the accounts it is about:
+            // after **Add account**, above anything saved on this machine.
+            let add = accounts
+                .iter()
+                .position(|row| *row == AccountRow::Add)
+                .unwrap_or(accounts.len() - 1);
+            let last = SettingsRow::Setting(AGENTS_HEAD.len() + add);
             if let Some(at) = out.iter().position(|row| *row == last) {
                 let notes = cfg.account_notes().into_iter().map(SettingsRow::Note);
                 out.splice(at + 1..at + 1, notes);
@@ -2328,8 +2345,22 @@ impl Config {
 
     /// The CLAUDE ACCOUNTS section's rows, below the Agents head: every
     /// Claude account in registry order — the default one, built-in
-    /// Claude, first; on or off — then **Add account**.
+    /// Claude, first; on or off — then **Add account**, then SAVED ON THIS
+    /// MACHINE: each config dir the last refresh found that no account
+    /// runs in.
     pub fn account_rows(&self) -> Vec<AccountRow> {
+        let mut rows = self.registered_account_rows();
+        rows.extend(
+            crate::claude_accounts::on_disk(self)
+                .into_iter()
+                .map(AccountRow::OnDisk),
+        );
+        rows
+    }
+
+    /// [`Config::account_rows`] without SAVED ON THIS MACHINE: the
+    /// accounts and **Add account** — the onboarding wizard's page.
+    pub fn registered_account_rows(&self) -> Vec<AccountRow> {
         let mut rows: Vec<AccountRow> = self
             .raw_harness_registry()
             .into_iter()
@@ -2365,10 +2396,11 @@ impl Config {
     /// What a CLAUDE ACCOUNTS row says beside its name: on or off, its
     /// config dir, and who it is signed in as — or which account it
     /// shares its email with. The **Add account** row says where a new
-    /// one would go.
+    /// one would go; a dir SAVED ON THIS MACHINE who it is signed in as.
     pub fn account_value(&self, row: &AccountRow) -> String {
         match row {
             AccountRow::Add => self.next_account_dir(),
+            AccountRow::OnDisk(dir) => format!("not in orion · {}", dir_sign_in(dir)),
             AccountRow::Account(id) => match self.account_status(id) {
                 Some((enabled, dir, state)) => format!("{} · {dir} · {state}", on_off(enabled)),
                 None => "n/a".into(),
@@ -2383,6 +2415,7 @@ impl Config {
     pub fn account_parts(&self, row: &AccountRow) -> (String, String) {
         match row {
             AccountRow::Add => (self.next_account_dir(), String::new()),
+            AccountRow::OnDisk(dir) => (crate::claude_accounts::tilde(dir), dir_sign_in(dir)),
             AccountRow::Account(id) => match self.account_status(id) {
                 Some((_, dir, state)) => (dir, state),
                 None => ("n/a".into(), String::new()),
@@ -2434,6 +2467,13 @@ impl Config {
                 return format!(
                     "A new config dir with its own login; then asks whether to share {from}'s \
                      CLAUDE.md, settings, skills…"
+                );
+            }
+            AccountRow::OnDisk(dir) => {
+                return format!(
+                    "{}: a Claude Code config dir no account runs in, its login and \
+                     transcripts still in it — add it back under a name, or trash it",
+                    crate::claude_accounts::tilde(dir)
                 );
             }
             AccountRow::Account(id) => id,
@@ -3288,6 +3328,17 @@ fn on_off(v: bool) -> &'static str {
         "on"
     } else {
         "off"
+    }
+}
+
+/// Who a dir SAVED ON THIS MACHINE is signed in as, as its row says it:
+/// `signed in as a@b.co`, `not signed in`, or `checking…` before the
+/// first read lands — never a read here.
+fn dir_sign_in(dir: &std::path::Path) -> String {
+    match crate::claude_accounts::dir_state(dir) {
+        Some(crate::claude_accounts::SignIn::As(email)) => format!("signed in as {email}"),
+        Some(crate::claude_accounts::SignIn::Out) => "not signed in".into(),
+        None => "checking…".into(),
     }
 }
 
@@ -6037,6 +6088,7 @@ mod tests {
                             (Some(spec), _) => spec.label.to_string(),
                             (None, Some(AccountRow::Account(id))) => id,
                             (None, Some(AccountRow::Add)) => "Add account".to_string(),
+                            (None, Some(AccountRow::OnDisk(dir))) => dir.display().to_string(),
                             (None, None) => cfg
                                 .agent_row(i)
                                 .map(|(_, field)| field.label().to_string())
