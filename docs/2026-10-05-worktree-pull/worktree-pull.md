@@ -310,15 +310,20 @@ Added after pull, in the same module, sharing its one-sync-per-checkout guard
   - The upstream is the base branch (`commit_list::resolve_base_cached` with the
     `worktree_base_branch` setting) and the push isn't confirmed → `ConfirmPush`. That arms
     `Shared::armed` and flashes "`⇧P` again to push". A second push request on that checkout within
-    30 s runs with `confirmed: true`. It isn't a dialog, because the answer lands seconds after the
+    30 s runs with `confirmed: Some(head)`. `head` is the commit the push was held at, so it goes only
+    while HEAD is still there, pushing exactly that commit; otherwise it holds again. It isn't a dialog, because the answer lands seconds after the
     key: a dialog would open over whatever was opened since, or catch a `y` typed into a pane.
   - Otherwise `git push <remote> refs/heads/<b>:<merge>` → `Pushed`.
 - **Errors:** a refused push reports the line that explains it, a pre-push hook's last word or the
-  `! [rejected]` row, via `branch_switch::remote_error`.
+  `! [rejected]` row, via `git_proc::remote_error`.
 - **Budget:** `pr_actions::PUSH_TIMEOUT` (300 s), because hooks can run test suites.
 - **After it lands:** `pr_refresh_requested = true`, the same re-read as a pull, and the flash
   counts any uncommitted files that weren't pushed.
 - **Footer:** shows `pull` / `push` only on the root band, where `⇡⇣` mean unpulled / unpushed.
+
+The git-process helpers (`read`, `run`, `detached`, `remote_git`, `git_error`, `remote_error`,
+`head_branch`, `FETCH_TIMEOUT`, `PUSH_TIMEOUT`) live in `crates/orion-tui/src/git_proc.rs`, shared by
+the branch switcher, `git_sync` and the PR form.
 
 ## Follow-ups (not in this change)
 

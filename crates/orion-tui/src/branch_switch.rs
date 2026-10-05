@@ -23,10 +23,9 @@
 //! the switch by a sync tick.
 //!
 //! Git that writes (the switch, a stash, a commit) and git that talks to a
-//! remote run in a session of their own with stdin closed. The TUI owns a
-//! terminal, and an `ssh` asking for a passphrase or a host key would
-//! otherwise open `/dev/tty` and paint over the frame; detached, it fails
-//! instead. (A pinentry that opens `$GPG_TTY` by path is beyond its reach.)
+//! remote run DETACHED, through `crate::git_proc`: in a session of their
+//! own with stdin closed, so an `ssh` prompt fails rather than painting
+//! over the frame.
 //!
 //! Agents run git in the same repository while a switch runs, so nothing
 //! here trusts a position or a moment: a stash entry is found by commit and
@@ -37,7 +36,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -51,7 +49,8 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{clamp_selection, window_start, App, Focus, Overlay};
-use crate::git_diff::{git_command, DiffFile};
+use crate::git_diff::DiffFile;
+use crate::git_proc::{head_branch, read, remote_git, run, FETCH_TIMEOUT};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
@@ -62,13 +61,6 @@ use crate::ui::{
 /// Outer (width, height) of the modal: the find-file modal's footprint,
 /// wider for the commit subjects.
 const SIZE: (u16, u16) = (92, 24);
-/// How long a background fetch may run. Generous — a fetch writes packs,
-/// and one cut short starts over on the next open — but bounded, since a
-/// stalled remote would otherwise hold it forever.
-pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
-/// Between the SIGTERM that lets git remove its lock and temporary pack
-/// files and the SIGKILL for a fetch that lingers.
-const FETCH_GRACE: Duration = Duration::from_secs(2);
 /// The least time between two background fetches of one checkout, so
 /// opening and closing the modal never hammers a remote.
 const FETCH_GAP: Duration = Duration::from_secs(60);
@@ -78,12 +70,6 @@ const REF_FORMAT: &str = "--format=%(refname)%00%(symref)%00%(HEAD)%00%(worktree
 /// Paths per `git hash-object` / `git checkout` call, well inside any
 /// argument-length limit.
 const PATH_CHUNK: usize = 200;
-
-extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-const SIGTERM: i32 = 15;
-const SIGKILL: i32 = 9;
 
 // ---- width ----
 
@@ -216,69 +202,6 @@ pub fn parse_refs(out: &str) -> Vec<Branch> {
     local
 }
 
-/// git's complaint as one line: the first `error:` or `fatal:` it printed,
-/// without the prefix, else the first thing it said at all.
-pub(crate) fn git_error(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let line = lines
-        .iter()
-        .find(|l| l.starts_with("error: ") || l.starts_with("fatal: "))
-        .or(lines.first())
-        .copied()
-        .unwrap_or("git failed");
-    line.strip_prefix("error: ")
-        .or_else(|| line.strip_prefix("fatal: "))
-        .unwrap_or(line)
-        .to_string()
-}
-
-/// Read-only `git -C root <args>`: stdout, or git's one-line complaint.
-pub(crate) fn read(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git_command(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(git_error(&String::from_utf8_lossy(&out.stderr)))
-    }
-}
-
-/// `git -C root <args>` in a session of its own with stdin closed, for the
-/// calls that write or reach a remote — see the module docs for why none
-/// of them may find the TUI's terminal.
-fn detached(root: &Path, args: &[&str]) -> Command {
-    use std::os::unix::process::CommandExt;
-    let mut cmd = git_command(root);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0");
-    // SAFETY: setsid is async-signal-safe and touches nothing but the child.
-    unsafe {
-        cmd.pre_exec(crate::ipc::own_session);
-    }
-    cmd
-}
-
-/// [`detached`], run to completion: stdout on success, git's one-line
-/// complaint otherwise.
-pub(crate) fn run(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = detached(root, args)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(git_error(&String::from_utf8_lossy(&out.stderr)))
-    }
-}
-
 /// Every branch the root checkout could switch to, as [`parse_refs`] orders
 /// them. `Err` is a one-line message for the modal.
 pub fn list_branches(root: &Path) -> Result<Vec<Branch>, String> {
@@ -297,99 +220,6 @@ pub fn list_branches(root: &Path) -> Result<Vec<Branch>, String> {
 /// thread). True when it finished.
 pub fn fetch(root: &Path, quit: &AtomicBool) -> bool {
     remote_git(root, &["fetch", "--all", "--quiet"], FETCH_TIMEOUT, quit).is_ok()
-}
-
-/// `git -C root <args>` for a call that reaches a remote — a fetch, a push
-/// — stopped past `budget` or once `quit` is raised, as [`fetch`] is:
-/// `Err` is git's one-line complaint ([`remote_error`]), or why it was
-/// stopped.
-pub(crate) fn remote_git(
-    root: &Path,
-    args: &[&str],
-    budget: Duration,
-    quit: &AtomicBool,
-) -> Result<(), String> {
-    use std::io::Read;
-    let mut child = detached(root, args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    // Drained on a thread of its own, so a remote that says a lot can't
-    // fill the pipe and stall git while this loop only polls.
-    let (said_tx, said_rx) = std::sync::mpsc::channel();
-    if let Some(mut pipe) = child.stderr.take() {
-        std::thread::spawn(move || {
-            let mut said = String::new();
-            let _ = pipe.read_to_string(&mut said);
-            let _ = said_tx.send(said);
-        });
-    }
-    let deadline = Instant::now() + budget;
-    let ended = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status.success()),
-            Ok(None) if quit.load(Ordering::Relaxed) => break Err("cancelled"),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Ok(None) => break Err("timed out"),
-            Err(_) => break Err("failed"),
-        }
-    };
-    if ended.is_err() {
-        stop(&mut child);
-    }
-    // Bounded: anything git left behind holding the pipe open (an `ssh`
-    // master gone to the background) must not hold the answer.
-    let said = said_rx
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap_or_default();
-    match ended {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(remote_error(&said)),
-        Err(why) => Err(format!("{} {why}", args.first().copied().unwrap_or("git"))),
-    }
-}
-
-/// [`git_error`], but a refused push says why rather than only that it
-/// was: git ends one with `failed to push some refs`, after the line that
-/// matters — a pre-push hook's own last word, or the `! [rejected]` row.
-fn remote_error(stderr: &str) -> String {
-    let line = git_error(stderr);
-    if !line.starts_with("failed to push") {
-        return line;
-    }
-    let why = stderr
-        .lines()
-        .map(str::trim)
-        .take_while(|l| !l.starts_with("error: "))
-        .filter(|l| !l.is_empty() && !l.starts_with("To ") && !l.starts_with("hint:"))
-        .last();
-    match why {
-        Some(why) => format!(
-            "rejected: {}",
-            why.split_whitespace().collect::<Vec<_>>().join(" ")
-        ),
-        None => line,
-    }
-}
-
-/// End a fetch and the `ssh` it may have started, which share its session
-/// and so its process group: SIGTERM first, so git cleans up its lock and
-/// temporary pack files, and SIGKILL only for one that lingers.
-fn stop(child: &mut std::process::Child) {
-    let group = -(child.id() as i32);
-    // SAFETY: plain syscalls on a process group this process started and
-    // has not yet reaped the leader of, so the id cannot have been reused.
-    unsafe { kill(group, SIGTERM) };
-    let grace = Instant::now() + FETCH_GRACE;
-    while Instant::now() < grace {
-        if let Ok(Some(_)) = child.try_wait() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    unsafe { kill(group, SIGKILL) };
-    let _ = child.wait();
 }
 
 /// An untracked directory that is a git repository of its own — a clone or
@@ -461,14 +291,6 @@ fn in_progress(root: &Path) -> Option<&'static str> {
         .zip(MARKS)
         .find(|(path, _)| root.join(path).exists())
         .map(|(_, (_, what))| what)
-}
-
-/// The branch HEAD is on; None when it is detached.
-pub(crate) fn head_branch(root: &Path) -> Option<String> {
-    read(root, &["symbolic-ref", "-q", "--short", "HEAD"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// The stash stack, top first, as (commit, subject).
@@ -2434,25 +2256,6 @@ mod tests {
     }
 
     #[test]
-    fn git_errors_read_as_the_error_line_without_its_prefix() {
-        assert_eq!(
-            git_error("error: pathspec 'x' did not match\nhint: whatever\n"),
-            "pathspec 'x' did not match"
-        );
-        assert_eq!(
-            git_error("\nfatal: not a git repository\n"),
-            "not a git repository"
-        );
-        assert_eq!(
-            git_error("Switched to branch 'feature'\nfatal: hook said no\n"),
-            "hook said no",
-            "the error, not the chatter before it"
-        );
-        assert_eq!(git_error("something odd\n"), "something odd");
-        assert_eq!(git_error(""), "git failed");
-    }
-
-    #[test]
     fn cells_count_wide_characters_twice_and_fit_cuts_by_them() {
         assert_eq!(cells("ab"), 2);
         assert_eq!(cells("修复"), 4);
@@ -2887,7 +2690,7 @@ mod tests {
         // Whatever the fetch was doing, a raised flag ends the wait at once.
         let started = Instant::now();
         let _ = fetch(&repo, &AtomicBool::new(true));
-        assert!(started.elapsed() < FETCH_GRACE + Duration::from_secs(1));
+        assert!(started.elapsed() < crate::git_proc::STOP_GRACE + Duration::from_secs(1));
     }
 
     // ---- the modal ----

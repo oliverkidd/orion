@@ -24551,6 +24551,7 @@ diff --git a/src/c.rs b/src/c.rs
                     outcome: Outcome::ConfirmPush {
                         upstream: "origin/main".into(),
                         ahead: 2,
+                        head: "abc123".into(),
                     },
                 },
             )
@@ -24567,7 +24568,10 @@ diff --git a/src/c.rs b/src/c.rs
         shift_p(&mut app, &mut out);
         assert_eq!(
             app.git_sync.inflight.get(&root),
-            Some(&Op::Push { confirmed: true })
+            Some(&Op::Push {
+                confirmed: Some("abc123".into())
+            }),
+            "the second press sends the commit it was held at"
         );
 
         // Anything else in between lets the held push go.
@@ -24585,7 +24589,9 @@ diff --git a/src/c.rs b/src/c.rs
             &mut app,
             Answer {
                 worktree: root.clone(),
-                op: Op::Push { confirmed: true },
+                op: Op::Push {
+                    confirmed: Some("abc123".into()),
+                },
                 outcome: Outcome::Pushed {
                     upstream: "origin/main".into(),
                     commits: 2,

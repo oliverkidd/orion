@@ -25,8 +25,8 @@
 //! refs, so that brings `⇣` current on every band of it), and a push
 //! publishes it to origin under its own name, tracking it from then on.
 //!
-//! The git runs off the loop, detached like the BRANCH SWITCHER's (whose
-//! helpers it borrows), one PULL or PUSH per checkout at a time; the answer
+//! The git runs off the loop, detached (`crate::git_proc`), one PULL or
+//! PUSH per checkout at a time; the answer
 //! lands on `App::git_sync.tx` as a FLASH, and the project's checkouts are
 //! read again at once so the band rules catch up.
 
@@ -39,38 +39,39 @@ use std::time::{Duration, Instant};
 use orion_core::{Worktree, WorktreeId};
 
 use crate::app::{App, ConfirmDialog, Focus, Overlay, PendingAction};
-use crate::branch_switch::{head_branch, read, remote_git, run, FETCH_TIMEOUT};
 use crate::bundle::plural;
 use crate::flash::Flash;
+use crate::git_proc::{head_branch, read, remote_git, run, FETCH_TIMEOUT, PUSH_TIMEOUT};
 use crate::keymap::Action;
-use crate::pr_actions::PUSH_TIMEOUT;
 
 /// How long a push held back from the base branch waits for the second
 /// `⇧P` that sends it.
 const ARM_WINDOW: Duration = Duration::from_secs(30);
 
 /// Which way a checkout is being synced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     Pull,
-    /// `confirmed` once the push onto the base branch has been asked about.
+    /// `confirmed` with the commit a push onto the base branch was held
+    /// at, once it has been asked about: it goes only while HEAD is still
+    /// there, and sends exactly that commit.
     Push {
-        confirmed: bool,
+        confirmed: Option<String>,
     },
 }
 
 impl Op {
     /// A push not yet asked about.
-    pub const PUSH: Op = Op::Push { confirmed: false };
+    pub const PUSH: Op = Op::Push { confirmed: None };
 
-    fn verb(self) -> &'static str {
+    fn verb(&self) -> &'static str {
         match self {
             Op::Pull => "pull",
             Op::Push { .. } => "push",
         }
     }
 
-    fn doing(self) -> &'static str {
+    fn doing(&self) -> &'static str {
         match self {
             Op::Pull => "pulling",
             Op::Push { .. } => "pushing",
@@ -94,8 +95,13 @@ pub enum Outcome {
     Published { upstream: String },
     /// Push: nothing the upstream lacks; `behind` commits to pull.
     NothingToPush { upstream: String, behind: usize },
-    /// Push: `upstream` is the base branch, so it waits for a second `⇧P`.
-    ConfirmPush { upstream: String, ahead: usize },
+    /// Push: `upstream` is the base branch, so it waits for a second `⇧P`
+    /// — held at `head`, the commit that press will send.
+    ConfirmPush {
+        upstream: String,
+        ahead: usize,
+        head: String,
+    },
     /// Both sides moved: left as it was.
     Diverged {
         upstream: String,
@@ -104,6 +110,15 @@ pub enum Outcome {
     },
     /// git's one-line complaint, the checkout and its upstream untouched.
     Failed(String),
+}
+
+/// A push held back from the base branch, waiting for its second press.
+#[derive(Debug, Clone)]
+pub struct Armed {
+    pub worktree: WorktreeId,
+    pub at: Instant,
+    /// The commit it was held at.
+    pub head: String,
 }
 
 /// What the event loop hands back to [`land`].
@@ -127,7 +142,7 @@ pub struct Shared {
     /// next PUSH within [`ARM_WINDOW`] goes ahead. Asked by a second press
     /// rather than a dialog, which would open seconds after the key — over
     /// whatever was opened since, or under keys meant for a pane.
-    pub armed: Option<(WorktreeId, Instant)>,
+    pub armed: Option<Armed>,
     /// Raised when the TUI goes away, so a fetch or a push still running
     /// is stopped rather than holding the runtime's shutdown for its whole
     /// budget.
@@ -213,17 +228,22 @@ fn fetch_tip(root: &Path, t: &Tracking, quit: &AtomicBool) -> Result<String, Str
     read(root, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"]).map(|sha| sha.trim().to_string())
 }
 
-/// Fetch what `t` tracks and count HEAD against it: the tip to move onto,
-/// and the commits each side has that the other lacks.
-fn measure(root: &Path, t: &Tracking, quit: &AtomicBool) -> Result<(String, usize, usize), String> {
+/// Fetch what `t` tracks and count `from` against it: the tip to move
+/// onto, and the commits each side has that the other lacks.
+fn measure(
+    root: &Path,
+    t: &Tracking,
+    from: &str,
+    quit: &AtomicBool,
+) -> Result<(String, usize, usize), String> {
     let tip = fetch_tip(root, t, quit)?;
-    let (ahead, behind) = ahead_behind(root, &tip)?;
+    let (ahead, behind) = ahead_behind(root, from, &tip)?;
     Ok((tip, ahead, behind))
 }
 
-/// Commits HEAD has that `tip` lacks, and the other way round.
-fn ahead_behind(root: &Path, tip: &str) -> Result<(usize, usize), String> {
-    let range = format!("HEAD...{tip}");
+/// Commits `from` has that `tip` lacks, and the other way round.
+fn ahead_behind(root: &Path, from: &str, tip: &str) -> Result<(usize, usize), String> {
+    let range = format!("{from}...{tip}");
     let counts = read(root, &["rev-list", "--left-right", "--count", &range])?;
     let mut nums = counts.split_whitespace().map(str::parse::<usize>);
     match (nums.next(), nums.next()) {
@@ -243,7 +263,7 @@ pub fn pull(root: &Path, quit: &AtomicBool) -> Outcome {
             Err(e) => Outcome::Failed(e),
         };
     };
-    let (tip, ahead, behind) = match measure(root, &t, quit) {
+    let (tip, ahead, behind) = match measure(root, &t, "HEAD", quit) {
         Ok(measured) => measured,
         Err(e) => return Outcome::Failed(e),
     };
@@ -268,9 +288,16 @@ pub fn pull(root: &Path, quit: &AtomicBool) -> Outcome {
 }
 
 /// The whole PUSH of the checkout at `root`. `base_setting` is the
-/// `worktree_base_branch` SETTING, which names the branch a push asks
-/// about unless `confirmed`. Blocking: run off the loop.
-pub fn push(root: &Path, base_setting: &str, confirmed: bool, quit: &AtomicBool) -> Outcome {
+/// `worktree_base_branch` SETTING, naming the branch a push is held back
+/// from until confirmed: `confirmed` is the commit the held push was shown
+/// at, and it goes only while HEAD is still that commit. Blocking: run off
+/// the loop.
+pub fn push(
+    root: &Path,
+    base_setting: &str,
+    confirmed: Option<&str>,
+    quit: &AtomicBool,
+) -> Outcome {
     let Some(branch) = head_branch(root) else {
         return Outcome::Failed("HEAD is detached: no branch to push".into());
     };
@@ -300,7 +327,12 @@ pub fn push(root: &Path, base_setting: &str, confirmed: bool, quit: &AtomicBool)
             t.branch, t.name
         ));
     }
-    let (_, ahead, behind) = match measure(root, &t, quit) {
+    // One read of HEAD, so what is counted, asked about and sent onto the
+    // base branch is one commit, whatever an agent commits meanwhile.
+    let Some(head) = crate::git_diff::head_oid(root) else {
+        return Outcome::Failed("HEAD has no commit to push".into());
+    };
+    let (_, ahead, behind) = match measure(root, &t, &head, quit) {
         Ok(measured) => measured,
         Err(e) => return Outcome::Failed(e),
     };
@@ -315,12 +347,23 @@ pub fn push(root: &Path, base_setting: &str, confirmed: bool, quit: &AtomicBool)
             behind,
         };
     }
-    if !confirmed
-        && crate::commit_list::resolve_base_cached(root, base_setting).as_ref() == Some(&upstream)
-    {
-        return Outcome::ConfirmPush { upstream, ahead };
+    let mut from = refspec;
+    if crate::commit_list::resolve_base_cached(root, base_setting).as_ref() == Some(&upstream) {
+        // Asked about another commit — or not at all: hold it here.
+        if confirmed != Some(head.as_str()) {
+            return Outcome::ConfirmPush {
+                upstream,
+                ahead,
+                head,
+            };
+        }
+        // Exactly the commit asked about. A raw commit needs a full ref to
+        // land on; a pre-push hook sees it as its local ref, not the branch.
+        if t.merge.starts_with("refs/") {
+            from = head;
+        }
     }
-    let send = format!("{refspec}:{}", t.merge);
+    let send = format!("{from}:{}", t.merge);
     let args = ["push", "--quiet", t.remote.as_str(), send.as_str()];
     match remote_git(root, &args, PUSH_TIMEOUT, quit) {
         Ok(()) => Outcome::Pushed {
@@ -358,7 +401,8 @@ pub(crate) fn request(app: &mut App, worktree: WorktreeId, op: Op) {
         .git_sync
         .armed
         .take()
-        .is_some_and(|(id, at)| id == worktree && at.elapsed() < ARM_WINDOW);
+        .filter(|a| a.worktree == worktree && a.at.elapsed() < ARM_WINDOW)
+        .map(|a| a.head);
     let Some(name) = refused(app, &worktree) else {
         return;
     };
@@ -380,7 +424,7 @@ pub(crate) fn request(app: &mut App, worktree: WorktreeId, op: Op) {
             }));
             return;
         }
-        Op::Push { .. } if armed => Op::Push { confirmed: true },
+        Op::Push { .. } => Op::Push { confirmed: armed },
         op => op,
     };
     start(app, worktree, op);
@@ -421,7 +465,7 @@ pub(crate) fn start(app: &mut App, worktree: WorktreeId, op: Op) {
     else {
         return;
     };
-    app.git_sync.inflight.insert(worktree.clone(), op);
+    app.git_sync.inflight.insert(worktree.clone(), op.clone());
     app.flash = Some(Flash::working(format!("{} {name}…", op.doing())));
     app.dirty = true;
     let Some(tx) = app.git_sync.tx.clone() else {
@@ -431,9 +475,9 @@ pub(crate) fn start(app: &mut App, worktree: WorktreeId, op: Op) {
     tokio::task::spawn_blocking(move || {
         let outcome = match op {
             Op::Pull => pull(&root, &quit),
-            Op::Push { confirmed } => {
+            Op::Push { ref confirmed } => {
                 let base = crate::config::Config::load().worktree_base_branch;
-                push(&root, &base, confirmed, &quit)
+                push(&root, &base, confirmed.as_deref(), &quit)
             }
         };
         let _ = tx.send(Answer {
@@ -459,10 +503,14 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
         return;
     };
     let project = w.project_id.clone();
-    let mut flash = flash_for(&label(w), op, &outcome);
+    let mut flash = flash_for(&label(w), &op, &outcome);
     match &outcome {
-        Outcome::ConfirmPush { .. } => {
-            app.git_sync.armed = Some((worktree.clone(), Instant::now()));
+        Outcome::ConfirmPush { head, .. } => {
+            app.git_sync.armed = Some(Armed {
+                worktree: worktree.clone(),
+                at: Instant::now(),
+                head: head.clone(),
+            });
             let again = crate::hints::act(&app.keymap, Action::PushWorktree, "push")
                 .map_or_else(|| "Push".to_string(), |h| h.key.to_string());
             flash.text.push_str(&format!(" · {again} again to push"));
@@ -504,7 +552,7 @@ fn commits(n: usize) -> String {
 }
 
 /// The FLASH for how `op` on `name` ended.
-fn flash_for(name: &str, op: Op, outcome: &Outcome) -> Flash {
+fn flash_for(name: &str, op: &Op, outcome: &Outcome) -> Flash {
     match outcome {
         Outcome::Pulled { upstream, commits: n } => {
             Flash::done(format!("{name} pulled {} from {upstream}", commits(*n)))
@@ -537,10 +585,21 @@ fn flash_for(name: &str, op: Op, outcome: &Outcome) -> Flash {
             };
             Flash::note(format!("{name} has nothing to push to {upstream}{pull}"))
         }
-        Outcome::ConfirmPush { upstream, ahead } => Flash::note(format!(
-            "{name} would push {} straight to {upstream}",
-            commits(*ahead)
-        )),
+        Outcome::ConfirmPush {
+            upstream, ahead, ..
+        } => {
+            // Held a second time: HEAD moved between the question and the
+            // press, so the press asked about something else.
+            let moved = if matches!(op, Op::Push { confirmed: Some(_) }) {
+                "moved since you were asked: it would now "
+            } else {
+                "would "
+            };
+            Flash::note(format!(
+                "{name} {moved}push {} straight to {upstream}",
+                commits(*ahead)
+            ))
+        }
         Outcome::Diverged {
             upstream,
             ahead,
@@ -834,7 +893,7 @@ mod tests {
         commit(&r.local, "c.txt", "one\n");
         commit(&r.local, "c.txt", "two\n");
         assert_eq!(
-            push(&r.local, "", false, &quit()),
+            push(&r.local, "", None, &quit()),
             Outcome::Pushed {
                 upstream: "origin/feat".into(),
                 commits: 2
@@ -855,7 +914,7 @@ mod tests {
         );
         commit(&r.local, "c.txt", "mine\n");
         assert_eq!(
-            push(&r.local, "", false, &quit()),
+            push(&r.local, "", None, &quit()),
             Outcome::Published {
                 upstream: "origin/feat".into()
             }
@@ -874,17 +933,19 @@ mod tests {
     fn the_base_branch_asks_before_it_is_pushed_to() {
         let r = repos();
         commit(&r.local, "c.txt", "mine\n");
+        let head = git(&r.local, &["rev-parse", "HEAD"]);
         let before = origin_tip(&r, "main");
         assert_eq!(
-            push(&r.local, "main", false, &quit()),
+            push(&r.local, "main", None, &quit()),
             Outcome::ConfirmPush {
                 upstream: "origin/main".into(),
-                ahead: 1
+                ahead: 1,
+                head: head.clone(),
             }
         );
         assert_eq!(origin_tip(&r, "main"), before, "asking pushes nothing");
         assert_eq!(
-            push(&r.local, "main", true, &quit()),
+            push(&r.local, "main", Some(&head), &quit()),
             Outcome::Pushed {
                 upstream: "origin/main".into(),
                 commits: 1
@@ -896,12 +957,32 @@ mod tests {
         );
     }
 
+    /// A commit landing between the question and the press is asked about
+    /// afresh, never sent on the strength of the first answer.
+    #[test]
+    fn a_held_push_whose_head_moved_asks_again() {
+        let r = repos();
+        commit(&r.local, "c.txt", "asked about\n");
+        let asked = git(&r.local, &["rev-parse", "HEAD"]);
+        commit(&r.local, "c.txt", "an agent's, since\n");
+        let before = origin_tip(&r, "main");
+        assert_eq!(
+            push(&r.local, "main", Some(&asked), &quit()),
+            Outcome::ConfirmPush {
+                upstream: "origin/main".into(),
+                ahead: 2,
+                head: git(&r.local, &["rev-parse", "HEAD"]),
+            }
+        );
+        assert_eq!(origin_tip(&r, "main"), before);
+    }
+
     #[test]
     fn nothing_new_is_nothing_to_push_and_says_whats_to_pull() {
         let r = repos();
         on_tracked_feature(&r);
         assert_eq!(
-            push(&r.local, "", false, &quit()),
+            push(&r.local, "", None, &quit()),
             Outcome::NothingToPush {
                 upstream: "origin/feat".into(),
                 behind: 0
@@ -912,7 +993,7 @@ mod tests {
         commit(&r.other, "d.txt", "theirs\n");
         git(&r.other, &["push", "-q", "origin", "feat"]);
         assert_eq!(
-            push(&r.local, "", false, &quit()),
+            push(&r.local, "", None, &quit()),
             Outcome::NothingToPush {
                 upstream: "origin/feat".into(),
                 behind: 1
@@ -925,9 +1006,10 @@ mod tests {
         let r = repos();
         upstream_moves(&r, 1);
         commit(&r.local, "c.txt", "mine\n");
+        let head = git(&r.local, &["rev-parse", "HEAD"]);
         let before = origin_tip(&r, "main");
         assert_eq!(
-            push(&r.local, "", true, &quit()),
+            push(&r.local, "", Some(&head), &quit()),
             Outcome::Diverged {
                 upstream: "origin/main".into(),
                 ahead: 1,
@@ -942,7 +1024,7 @@ mod tests {
         let r = repos();
         git(&r.local, &["switch", "-q", "--detach", "HEAD"]);
         assert_eq!(
-            push(&r.local, "", false, &quit()),
+            push(&r.local, "", None, &quit()),
             Outcome::Failed("HEAD is detached: no branch to push".into())
         );
     }
@@ -961,7 +1043,7 @@ mod tests {
             &["update-ref", "refs/pull/7/head", "refs/heads/main"],
         );
         git(&r.local, &["fetch", "-q", "origin", "refs/pull/7/head"]);
-        match push(&r.local, "", false, &quit()) {
+        match push(&r.local, "", None, &quit()) {
             Outcome::Failed(e) => assert!(e.contains("fork"), "{e}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -978,7 +1060,7 @@ mod tests {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let before = origin_tip(&r, "feat");
         assert_eq!(
-            push(&r.local, "", false, &quit()),
+            push(&r.local, "", None, &quit()),
             Outcome::Failed("rejected: tests failed".into())
         );
         assert_eq!(origin_tip(&r, "feat"), before);
@@ -989,11 +1071,9 @@ mod tests {
     #[test]
     fn each_outcome_reads_as_its_flash() {
         let up = || "origin/feat".to_string();
-        let pull = Op::Pull;
-        let push = Op::PUSH;
         let cases = [
             (
-                pull,
+                Op::Pull,
                 Outcome::Pulled {
                     upstream: up(),
                     commits: 1,
@@ -1002,7 +1082,7 @@ mod tests {
                 "⎇ feat pulled 1 commit from origin/feat",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::Pulled {
                     upstream: up(),
                     commits: 3,
@@ -1011,7 +1091,7 @@ mod tests {
                 "⎇ feat pulled 3 commits from origin/feat",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::UpToDate {
                     upstream: up(),
                     ahead: 0,
@@ -1020,7 +1100,7 @@ mod tests {
                 "⎇ feat is up to date with origin/feat",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::UpToDate {
                     upstream: up(),
                     ahead: 2,
@@ -1029,7 +1109,7 @@ mod tests {
                 "⎇ feat is up to date with origin/feat · ⇡2 to push",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::Diverged {
                     upstream: up(),
                     ahead: 2,
@@ -1039,25 +1119,25 @@ mod tests {
                 "⎇ feat and origin/feat have both moved (⇡2 ⇣3): rebase or merge it in a terminal",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::NoUpstream { fetched: true },
                 FlashKind::Note,
                 "fetched origin · ⎇ feat tracks no remote branch yet",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::NoUpstream { fetched: false },
                 FlashKind::Note,
                 "⎇ feat tracks no remote branch, and there is no origin",
             ),
             (
-                pull,
+                Op::Pull,
                 Outcome::Failed("fetch timed out".into()),
                 FlashKind::Failed,
                 "pull ⎇ feat: fetch timed out",
             ),
             (
-                push,
+                Op::PUSH,
                 Outcome::Pushed {
                     upstream: up(),
                     commits: 2,
@@ -1066,13 +1146,13 @@ mod tests {
                 "⎇ feat pushed 2 commits to origin/feat",
             ),
             (
-                push,
+                Op::PUSH,
                 Outcome::Published { upstream: up() },
                 FlashKind::Done,
                 "⎇ feat published to origin/feat",
             ),
             (
-                push,
+                Op::PUSH,
                 Outcome::NothingToPush {
                     upstream: up(),
                     behind: 0,
@@ -1081,7 +1161,7 @@ mod tests {
                 "⎇ feat has nothing to push to origin/feat",
             ),
             (
-                push,
+                Op::PUSH,
                 Outcome::NothingToPush {
                     upstream: up(),
                     behind: 4,
@@ -1090,23 +1170,36 @@ mod tests {
                 "⎇ feat has nothing to push to origin/feat · ⇣4 to pull",
             ),
             (
-                push,
+                Op::PUSH,
                 Outcome::ConfirmPush {
                     upstream: up(),
                     ahead: 1,
+                    head: "abc".into(),
                 },
                 FlashKind::Note,
                 "⎇ feat would push 1 commit straight to origin/feat",
             ),
             (
-                push,
+                Op::Push {
+                    confirmed: Some("abc".into()),
+                },
+                Outcome::ConfirmPush {
+                    upstream: up(),
+                    ahead: 2,
+                    head: "def".into(),
+                },
+                FlashKind::Note,
+                "⎇ feat moved since you were asked: it would now push 2 commits straight to origin/feat",
+            ),
+            (
+                Op::PUSH,
                 Outcome::Failed("rejected: tests failed".into()),
                 FlashKind::Failed,
                 "push ⎇ feat: rejected: tests failed",
             ),
         ];
         for (op, outcome, kind, text) in cases {
-            let flash = flash_for("⎇ feat", op, &outcome);
+            let flash = flash_for("⎇ feat", &op, &outcome);
             assert_eq!(
                 (flash.kind, flash.text.as_str()),
                 (kind, text),

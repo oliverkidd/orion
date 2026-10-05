@@ -49,6 +49,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, Overlay};
+use crate::git_proc::PUSH_TIMEOUT;
 use crate::hints::Hint;
 use crate::pr_modal::PullRequestsView;
 use crate::pull_request::{run_piped, Checks, OpenPr, PrDetail};
@@ -59,9 +60,6 @@ use crate::ui::{
     render_row, row_rect, truncate,
 };
 
-/// How long a push may run: a pre-push hook can run a test suite, and
-/// the person who pressed Enter is watching the form say so.
-pub(crate) const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// Everything else the forms send is one request — `gh pr create`, `gh pr
 /// merge`, the branch's delete — or one question git answers locally.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -1248,19 +1246,11 @@ fn gh(dir: &Path, args: &[&str]) -> tokio::process::Command {
     cmd
 }
 
-/// `git <args>` in `dir` the way every TUI-side git runs
-/// (`git_diff::git_command`), for [`run_piped`] — and, as the BRANCH
-/// SWITCHER runs the git that reaches a remote, in a session of its own
-/// with no terminal to prompt on: a push whose ssh wants a passphrase
-/// fails rather than draw over the frame.
+/// `git <args>` in `dir`, DETACHED (`git_proc::detached`), for
+/// [`run_piped`]: a push whose ssh wants a passphrase fails rather than
+/// draw over the frame.
 fn git(dir: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::from(crate::git_diff::git_command(dir));
-    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
-    // SAFETY: setsid is async-signal-safe and touches nothing but the child.
-    unsafe {
-        cmd.pre_exec(crate::ipc::own_session);
-    }
-    cmd
+    tokio::process::Command::from(crate::git_proc::detached(dir, args))
 }
 
 // ---- answers ----

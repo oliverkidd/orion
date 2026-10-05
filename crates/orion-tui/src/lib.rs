@@ -22,6 +22,7 @@ pub mod flash;
 pub mod fuzzy;
 pub mod ghostty_config;
 pub mod git_diff;
+pub(crate) mod git_proc;
 pub mod git_sync;
 pub mod grep_search;
 pub mod hints;

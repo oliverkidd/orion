@@ -144,7 +144,8 @@
   brings `⇣` current on every band of the project. `⇧P` is the same the other way: fetch, then `git push
   <remote> refs/heads/<b>:<merge>` to exactly what `branch.<b>.remote` / `.merge` name — so
   `push.default` can't change it — only when the branch is simply ahead, never a force, and held for a
-  second `⇧P` when that upstream is the base branch. A branch that tracks nothing is published to origin with
+  second `⇧P` when that upstream is the base branch — which sends exactly the commit it was held at,
+  holding again if HEAD has moved. A branch that tracks nothing is published to origin with
   `--set-upstream`; a fork's pull request checkout, on its read-only `refs/pull/N/head`, pulls but is
   never pushed.
 - **A worktree's outside resources are yours to hook — WORKTREE HOOKS.** `git config
