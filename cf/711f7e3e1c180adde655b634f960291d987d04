@@ -1,0 +1,20 @@
+.cursor/plans/if-i-wanted-to-dapper-harp.md
+  s_d94f11a0e19970::t_1595f25322db0a 2-3,5-6,11-12
+  s_d94f11a0e19970::t_2c76b66116db97 1,4,7-10,13-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cf711f7e3e1c180adde655b634f960291d987d04",
+  "prompts": {},
+  "sessions": {
+    "s_d94f11a0e19970": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e3ac539-dbb8-40a0-96ad-c4b91f9c9770",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
