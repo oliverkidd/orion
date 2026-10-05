@@ -17,6 +17,7 @@
 //! Shift lets it go: ←/→ land on its near edge and stop there, every other
 //! motion sets out from that edge. Typing, a paste and a line break
 //! replace it; ⌫, Delete and the word and line deletes remove just it.
+//! ⌘C copies it and ⌘X cuts it, to the system clipboard ([`take_copied`]).
 //! Every renderer draws it on the theme's selection background
 //! (`ui::field_spans`).
 //!
@@ -44,8 +45,24 @@
 //! run it last, after their own bindings have had first refusal.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::cell::RefCell;
 use std::fmt;
 use std::ops::Deref;
+
+thread_local! {
+    /// What the last ⌘C or ⌘X in any field copied, until the event loop
+    /// takes it for the clipboard ([`take_copied`]). A field has no route
+    /// to the clipboard of its own — locally a process, over ssh an OSC 52
+    /// request the main loop writes — and there are thirty-odd of them, so
+    /// each hands its text here rather than through every caller.
+    static COPIED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The text the last ⌘C / ⌘X in a field copied, once: the event loop puts
+/// it on the clipboard after every key.
+pub fn take_copied() -> Option<String> {
+    COPIED.with(|c| c.borrow_mut().take())
+}
 
 /// What one key press did to the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,6 +515,21 @@ impl TextInput {
                 self.select_all();
                 Edit::Moved
             }
+            // ⌘C copies the SELECTION and keeps it; ⌘X cuts it. With
+            // nothing selected both stay the caller's — a finder's ⌘C
+            // copies the path under its cursor.
+            KeyCode::Char(c @ ('c' | 'C' | 'x' | 'X'))
+                if cmd && !ctrl && !alt && self.selection().is_some() =>
+            {
+                let text = self.selected().map(str::to_string);
+                COPIED.with(|copied| *copied.borrow_mut() = text);
+                if c.eq_ignore_ascii_case(&'x') {
+                    self.delete_selection();
+                    Edit::Changed
+                } else {
+                    Edit::Moved
+                }
+            }
 
             // ---- motion ----
             // Line-wise keys work on the line under the caret — the whole
@@ -899,6 +931,10 @@ pub mod keys {
     /// for ⌘←. Ghostty keeps ⌘A for its own select-all until the GHOSTTY
     /// KEYBINDS block releases it (`ghostty_config::EDITOR_CHORDS`).
     pub const SELECT_ALL: Key = Key::new(&["cmd+a"], "select all");
+    /// ⌘C / ⌘X on the SELECTION. Ghostty answers ⌘C itself only while
+    /// its own (mouse) selection exists — the GHOSTTY KEYBINDS block makes
+    /// its copy `performable` — and releases ⌘X outright.
+    pub const COPY_CUT: Key = Key::new(&["cmd+c", "cmd+x"], "copy / cut").show(2);
     pub const ALL: &[Key] = &[
         WORD,
         LINE_ENDS,
@@ -908,6 +944,7 @@ pub mod keys {
         SELECT_WORD,
         SELECT_LINE,
         SELECT_ALL,
+        COPY_CUT,
     ];
 }
 
@@ -925,8 +962,8 @@ mod tests {
     use super::*;
 
     /// Every chord Help names for the line editor is one it answers:
-    /// pressed mid-word in a one-line field, each moves the caret, selects
-    /// or deletes.
+    /// pressed mid-word in a one-line field, each moves the caret, selects,
+    /// deletes or — over a selection — copies.
     #[test]
     fn every_key_help_names_is_the_editors() {
         for key in keys::ALL {
@@ -936,6 +973,9 @@ mod tests {
                 input.set_text("one two three");
                 input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
                 input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+                if key.chords == keys::COPY_CUT.chords {
+                    input.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+                }
                 let state = |input: &TextInput| {
                     (
                         input.as_str().to_string(),
@@ -945,12 +985,46 @@ mod tests {
                 };
                 let before = state(&input);
                 let edit = input.handle_key(&KeyEvent::new(chord.code, chord.mods));
+                let copied = take_copied().is_some();
                 assert!(
-                    edit.consumed() && before != state(&input),
+                    edit.consumed() && (before != state(&input) || copied),
                     "{chord} did nothing"
                 );
             }
         }
+    }
+
+    /// ⌘C copies the SELECTION and keeps it; ⌘X cuts it, the caret where
+    /// it began. With nothing selected both are the caller's, nothing
+    /// copied.
+    #[test]
+    fn cmd_c_copies_and_cmd_x_cuts_the_selection() {
+        let cmd = KeyModifiers::SUPER;
+        let mut input = typed("keep this cut");
+        assert_eq!(press(&mut input, KeyCode::Char('c'), cmd), Edit::Ignored);
+        assert_eq!(press(&mut input, KeyCode::Char('x'), cmd), Edit::Ignored);
+        assert_eq!(take_copied(), None);
+
+        for _ in 0.."cut".len() {
+            press(&mut input, KeyCode::Left, KeyModifiers::SHIFT);
+        }
+        assert_eq!(press(&mut input, KeyCode::Char('c'), cmd), Edit::Moved);
+        assert_eq!(take_copied().as_deref(), Some("cut"));
+        assert_eq!(take_copied(), None, "taken once");
+        assert_eq!(input.selected(), Some("cut"), "a copy keeps the selection");
+
+        assert_eq!(press(&mut input, KeyCode::Char('x'), cmd), Edit::Changed);
+        assert_eq!(take_copied().as_deref(), Some("cut"));
+        assert_eq!(input.as_str(), "keep this ");
+        assert_eq!(input.cursor_chars(), "keep this ".len());
+        assert_eq!(input.selected(), None);
+
+        // ⌘A then ⌘X empties a multi-row box, its line breaks and all.
+        let mut many = TextInput::multiline_with_text("one\ntwo");
+        press(&mut many, KeyCode::Char('a'), cmd);
+        press(&mut many, KeyCode::Char('x'), cmd);
+        assert_eq!(take_copied().as_deref(), Some("one\ntwo"));
+        assert!(many.as_str().is_empty());
     }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {

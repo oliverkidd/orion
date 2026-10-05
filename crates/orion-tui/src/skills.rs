@@ -1057,7 +1057,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         _ if keys::TRASH.matches(&key) => confirm_trash(app),
         _ if keys::REFRESH.matches(&key) => list(app),
         _ if keys::IN_CURSOR.matches(&key) => open_outside(app),
-        _ if keys::COPY_PATH.matches(&key) => copy_path(app),
+        _ if crate::hints::copies_path(&key, &view.query) => copy_path(app),
         _ => {
             if view.query.handle_key(&key).changed() {
                 query_changed(app);

@@ -1,7 +1,10 @@
 //! The LINEAR VIEW (`⌘L`): open Linear issues assigned to you, picked
 //! together so one agent fixes them in one worktree and opens one pull
 //! request. From the PULL REQUESTS MODAL the same list attaches a pull
-//! request to the issues you mark (`attachmentLinkGitHubPR`). `Ctrl+s` on
+//! request to the issues you mark (`attachmentLinkGitHubPR`) — and the
+//! other way round, `⌘U` here flips to that modal as a PR PICK, Enter on
+//! a pull request attaching it to the issues marked here. Both ends run
+//! the one ATTACH ([`attach_issues`]). `Ctrl+s` on
 //! an issue lists its team's workflow states in the reading pane's place
 //! ([`StatusPick`]) — read with the issues, so the list is up at once —
 //! and Enter moves the issue to one (`issueUpdate`), the row saying so
@@ -104,13 +107,19 @@ pub struct LinearBatch {
     pub task: String,
 }
 
+/// `ENG-12, ENG-15`: `issues` by identifier, as every title and message
+/// names a set of them.
+pub fn ids_of(issues: &[LinearIssue]) -> String {
+    issues
+        .iter()
+        .map(|i| i.identifier.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl LinearBatch {
     pub fn ids(&self) -> String {
-        self.issues
-            .iter()
-            .map(|i| i.identifier.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+        ids_of(&self.issues)
     }
 
     pub fn title(&self) -> String {
@@ -131,11 +140,7 @@ impl LinearBatch {
 
 /// What `{issues}` / `{ids}` / `{first_id}` expand to in the task template.
 pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
-    let ids = issues
-        .iter()
-        .map(|i| i.identifier.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let ids = ids_of(issues);
     let first = issues.first().map(|i| i.identifier.as_str()).unwrap_or("");
     let body = issues
         .iter()
@@ -248,8 +253,16 @@ pub enum LinearAnswer {
         state: LinearState,
         result: Result<(), StatusRefused>,
     },
-    Attach {
-        result: Result<(), String>,
+    /// LINEAR AUTO-ATTACH linked a pull request to one issue — silent
+    /// unless Linear refused.
+    Attach { result: Result<(), String> },
+    /// THE ATTACH the user asked for, from either end ([`attach_issues`]):
+    /// the pull request, the identifiers Linear linked it to, and the
+    /// first it refused, with why.
+    Attached {
+        pr_number: u64,
+        attached: Vec<String>,
+        refused: Option<(String, String)>,
     },
     /// **Test connection**: who the key in `dir` belongs to.
     Viewer {
@@ -516,6 +529,24 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 app.flash = Some(crate::flash::Flash::failed(err));
             }
         }
+        // The wait the footer spun for is over: it says what Linear took,
+        // or the first issue it would not take and why.
+        LinearAnswer::Attached {
+            pr_number,
+            attached,
+            refused,
+        } => {
+            app.flash = Some(match refused {
+                Some((identifier, why)) => crate::flash::Flash::failed(format!(
+                    "couldn't attach PR #{pr_number} to {identifier}: {why}"
+                )),
+                None => crate::flash::Flash::done(format!(
+                    "attached PR #{pr_number} to {}",
+                    attached.join(", ")
+                )),
+            });
+            app.dirty = true;
+        }
         LinearAnswer::Status {
             project,
             issue_id,
@@ -608,6 +639,56 @@ fn spawn_attach(app: &mut App, dir: PathBuf, issue_id: String, pr_url: String) {
     });
 }
 
+/// THE ATTACH: the pull request `#pr_number` at `pr_url` linked to each
+/// of `issues` through `attachmentLinkGitHubPR`, one after another off the
+/// loop, with the project checkout `dir`'s key. Both ends of the pairing
+/// run it — Enter in the LINEAR VIEW opened from a pull request
+/// ([`LinearMode::Attach`]) and Enter in the PR PICK opened from here
+/// (`pr_modal::PrPick`) — so the two can never attach differently. The
+/// footer spins while Linear is asked and says how it went once it has
+/// answered ([`LinearAnswer::Attached`]); Linear keeps one attachment per
+/// pull request, so asking twice links once.
+pub(crate) fn attach_issues(
+    app: &mut App,
+    dir: PathBuf,
+    pr_url: String,
+    pr_number: u64,
+    issues: &[LinearIssue],
+) {
+    if issues.is_empty() {
+        return;
+    }
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    let targets: Vec<(String, String)> = issues
+        .iter()
+        .map(|i| (i.id.clone(), i.identifier.clone()))
+        .collect();
+    app.flash = Some(crate::flash::Flash::working(format!(
+        "attaching PR #{pr_number} to {}…",
+        ids_of(issues)
+    )));
+    app.dirty = true;
+    tokio::spawn(async move {
+        let mut attached = Vec::new();
+        let mut refused = None;
+        for (id, identifier) in targets {
+            match attach_pr(&dir, &id, &pr_url).await {
+                Ok(()) => attached.push(identifier),
+                Err(why) => {
+                    refused.get_or_insert((identifier, why));
+                }
+            }
+        }
+        let _ = tx.send(LinearAnswer::Attached {
+            pr_number,
+            attached,
+            refused,
+        });
+    });
+}
+
 /// The LINEAR VIEW's own keys: one table [`handle_key`] matches and
 /// [`hints`] spells.
 pub(crate) mod keys {
@@ -620,11 +701,17 @@ pub(crate) mod keys {
     pub const REFRESH: Key = Key::new(&["ctrl+r", "cmd+r"], "refresh");
     /// The issue's workflow state.
     pub const STATUS: Key = Key::new(&["ctrl+s"], "status");
+    /// The PR PICK: the marked issues attached to a pull request picked
+    /// in the PULL REQUESTS MODAL. That modal's own hotkey (`⌘U`, `^V`
+    /// its twin), as the modal's way here is this one's (`⌘L`).
+    pub const ATTACH: Key = Key::new(&["cmd+u", "ctrl+v"], "attach to PR");
     /// The status picker's own.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const SET: Key = Key::new(&["enter"], "set status");
     #[cfg(test)]
-    pub const ALL: &[Key] = &[MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PICK, SET];
+    pub const ALL: &[Key] = &[
+        MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, PICK, SET,
+    ];
 }
 
 /// The keys along the modal's bottom edge, for browsing or for picking
@@ -649,6 +736,7 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         LinearMode::Browse => vec![
             keys::MARK.hint(),
             keys::CONFIRM.hint().kept(),
+            keys::ATTACH.hint(),
             keys::STATUS.hint(),
             keys::PRESET.hint(),
             keys::BROWSER.hint(),
@@ -813,6 +901,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::STATUS.matches(&key) => open_status_pick(app),
+        _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
         _ => {
             if view.query.handle_key(&key).changed() {
                 query_changed(app);
@@ -972,14 +1061,39 @@ fn confirm(app: &mut App) {
     };
     match &view.mode {
         LinearMode::Browse => open_prompt(app, issues),
-        LinearMode::Attach { pr_url, .. } => {
-            let url = pr_url.clone();
-            let dir = view.dir.clone();
-            for issue in issues {
-                spawn_attach(app, dir.clone(), issue.id, url.clone());
-            }
+        LinearMode::Attach {
+            pr_url, pr_number, ..
+        } => {
+            let (url, number, dir) = (pr_url.clone(), *pr_number, view.dir.clone());
+            attach_issues(app, dir, url, number, &issues);
         }
     }
+}
+
+/// `⌘U` (`^V`) while browsing: the PULL REQUESTS MODAL as a PR PICK for
+/// the issues `Enter` would launch on — the marked set, else the one
+/// under the cursor. The view rides along whole, marks, filter and cursor
+/// and all: Enter on a pull request there attaches it ([`attach_issues`])
+/// and comes back here, Esc comes back with nothing sent. Picking for a
+/// pull request this view was itself opened from has nowhere to go.
+fn open_pr_pick(app: &mut App) {
+    if !matches!(&app.overlay, Some(Overlay::Linear(v)) if v.mode == LinearMode::Browse) {
+        return;
+    }
+    let issues = picked(app);
+    if issues.is_empty() {
+        return;
+    }
+    let Some(Overlay::Linear(view)) = app.overlay.take() else {
+        return;
+    };
+    crate::pr_modal::open_pick(
+        app,
+        crate::pr_modal::PrPick {
+            issues,
+            back: Box::new(view),
+        },
+    );
 }
 
 fn open_prompt(app: &mut App, issues: Vec<LinearIssue>) {
@@ -1462,7 +1576,7 @@ async fn graphql(
     // not at all.
     #[cfg(test)]
     {
-        let _ = variables;
+        GRAPHQL_SENT.lock().unwrap().push(variables);
         let stub = *GRAPHQL_STUB.lock().unwrap();
         match stub {
             Some(stub) => stub(key, query),
@@ -1482,11 +1596,25 @@ type GraphqlStub = fn(&str, &str) -> Result<serde_json::Value, String>;
 #[cfg(test)]
 static GRAPHQL_STUB: std::sync::Mutex<Option<GraphqlStub>> = std::sync::Mutex::new(None);
 
+/// The variables of every request [`graphql`] was asked to send under
+/// test, in order — what a test reads to see which issue and which pull
+/// request an ATTACH named.
+#[cfg(test)]
+static GRAPHQL_SENT: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+
+/// What [`graphql`] has been asked to send since this test's
+/// [`with_graphql_stub`] began.
+#[cfg(test)]
+pub(crate) fn graphql_sent() -> Vec<serde_json::Value> {
+    GRAPHQL_SENT.lock().unwrap().clone()
+}
+
 /// Run `f` with Linear's GraphQL answered by `stub`, one test at a time.
 #[cfg(test)]
 pub(crate) fn with_graphql_stub<T>(stub: GraphqlStub, f: impl FnOnce() -> T) -> T {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    GRAPHQL_SENT.lock().unwrap().clear();
     *GRAPHQL_STUB.lock().unwrap() = Some(stub);
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     *GRAPHQL_STUB.lock().unwrap() = None;
@@ -1963,6 +2091,287 @@ mod tests {
     }
 
     const FAKE_KEY: &str = "lin_api_test_never_shown";
+
+    // ---- the ATTACH, from either end ----
+
+    fn open_pr(number: u64, title: &str) -> crate::pull_request::OpenPr {
+        crate::pull_request::OpenPr {
+            number,
+            title: title.into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            is_draft: false,
+            health: Default::default(),
+            head: format!("branch-{number}"),
+        }
+    }
+
+    fn press(app: &mut App, key: KeyEvent) {
+        crate::event_loop::handle_overlay_key(app, key, &mut Vec::new());
+    }
+
+    fn plain(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// `demo` with a key in its `.env`, three issues assigned (ENG-1..3)
+    /// and two pull requests open (#42, then #41), both lists landed just
+    /// now, and an answer channel for Linear's.
+    fn paired() -> (
+        App,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+    ) {
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, dir) = app_on(&[(".env", &line)]);
+        let project = ProjectId("p1".into());
+        app.linear.insert(
+            project.clone(),
+            LinearList {
+                list: vec![
+                    issue("1", "ENG-1", "Login"),
+                    issue("2", "ENG-2", "Logout"),
+                    issue("3", "ENG-3", "Signup"),
+                ],
+                states: HashMap::new(),
+            },
+        );
+        let now = std::time::Instant::now();
+        app.open_prs.insert(
+            project,
+            crate::app::OpenPrs {
+                list: vec![open_pr(42, "Fix login"), open_pr(41, "Spike")],
+                at: now,
+                due: now + std::time::Duration::from_secs(60),
+                step: std::time::Duration::from_secs(60),
+            },
+        );
+        // A list "in flight" is not asked for again: opening the view
+        // stays on the loop, with no runtime under it.
+        app.linear_inflight.insert(ProjectId("p1".into()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        (app, dir, rx)
+    }
+
+    /// The LINEAR VIEW browsing `demo`, ENG-1 and ENG-3 marked.
+    fn browse_marked(app: &mut App) {
+        open(app);
+        press(app, plain(KeyCode::Char(' ')));
+        press(app, plain(KeyCode::Down));
+        press(app, plain(KeyCode::Down));
+        press(app, plain(KeyCode::Char(' ')));
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("the LINEAR VIEW, got {:?}", app.overlay);
+        };
+        assert_eq!(view.marked, BTreeSet::from(["1".into(), "3".into()]));
+    }
+
+    /// Press `attach` with Linear answered `attachmentLinkGitHubPR`, and
+    /// land what it says: the variables each request named, in order.
+    fn attach_through(
+        app: &mut App,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+        attach: impl FnOnce(&mut App),
+    ) -> Vec<serde_json::Value> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        with_graphql_stub(
+            |key, query| {
+                assert_eq!(key, FAKE_KEY, "the project's key");
+                assert!(query.contains("attachmentLinkGitHubPR"), "{query}");
+                Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}}))
+            },
+            || {
+                rt.block_on(async {
+                    attach(app);
+                    assert_eq!(
+                        app.flash.as_ref().map(|f| f.kind),
+                        Some(crate::flash::FlashKind::Working),
+                        "the footer spins while Linear is asked"
+                    );
+                    let answer = rx.recv().await.expect("an answer");
+                    land_answer(app, answer);
+                });
+                graphql_sent()
+            },
+        )
+    }
+
+    fn attached(issue_id: &str, number: u64) -> serde_json::Value {
+        serde_json::json!({
+            "issueId": issue_id,
+            "url": format!("https://github.com/o/r/pull/{number}"),
+        })
+    }
+
+    /// The LINEAR VIEW's `⌘U` (`^V` its twin) flips to the PULL REQUESTS
+    /// MODAL as a PR PICK for the issues it marked — titled for them,
+    /// `Enter` named for the attach — and `Enter` on a pull request there
+    /// links it to each through `attachmentLinkGitHubPR`, the footer saying
+    /// so, and comes back to the LINEAR VIEW with the marks spent.
+    #[test]
+    fn cmd_u_attaches_the_marked_issues_to_a_picked_pull_request() {
+        for flip in [
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        ] {
+            let (mut app, _dir, mut rx) = paired();
+            browse_marked(&mut app);
+            let Some(Overlay::Linear(view)) = &app.overlay else {
+                unreachable!();
+            };
+            assert!(hints(view).iter().any(|h| h.does == "attach to PR"));
+            press(&mut app, flip);
+            let Some(Overlay::PullRequests(prs)) = &app.overlay else {
+                panic!("the PR PICK, got {:?}", app.overlay);
+            };
+            let pick = prs.pick.as_ref().expect("a PR PICK");
+            assert_eq!(pick.ids(), "ENG-1, ENG-3");
+            let shown = crate::pr_modal::hints(prs);
+            crate::hints::assert_hints_from(&shown, crate::pr_modal::keys::ALL);
+            assert_eq!(shown[0].does, "attach to this PR");
+            assert!(shown.iter().all(|h| h.does != "Linear"), "no ⌘L onward");
+            assert_eq!(shown.last().map(|h| h.does.as_str()), Some("back"));
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+            term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            let screen: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(
+                screen.contains("Pull requests → ENG-1, ENG-3 — demo"),
+                "{screen}"
+            );
+
+            press(&mut app, plain(KeyCode::Down));
+            let sent = attach_through(&mut app, &mut rx, |app| press(app, plain(KeyCode::Enter)));
+            assert_eq!(sent, [attached("1", 41), attached("3", 41)]);
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("attached PR #41 to ENG-1, ENG-3")
+            );
+            let Some(Overlay::Linear(view)) = &app.overlay else {
+                panic!("back on the LINEAR VIEW, got {:?}", app.overlay);
+            };
+            assert_eq!(view.mode, LinearMode::Browse);
+            assert!(view.marked.is_empty(), "the batch is spent");
+            assert_eq!(view.selected, 2, "the cursor where it was");
+        }
+    }
+
+    /// Esc backs out of the PR PICK one step at a time — off the page,
+    /// then a typed filter — and lands on the LINEAR VIEW as it was,
+    /// marks and all, with nothing sent; `⌘L` there goes nowhere.
+    #[test]
+    fn esc_backs_out_of_the_pr_pick_with_the_marks_kept() {
+        let (mut app, _dir, mut rx) = paired();
+        browse_marked(&mut app);
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::SUPER),
+        );
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::SUPER),
+        );
+        assert!(
+            matches!(&app.overlay, Some(Overlay::PullRequests(v)) if v.pick.is_some()),
+            "⌘L stays in the PR PICK: {:?}",
+            app.overlay
+        );
+        press(&mut app, plain(KeyCode::Tab));
+        press(&mut app, plain(KeyCode::Esc));
+        press(&mut app, plain(KeyCode::Char('x')));
+        press(&mut app, plain(KeyCode::Esc));
+        assert!(
+            matches!(&app.overlay, Some(Overlay::PullRequests(v)) if v.query.is_empty()),
+            "the first Escs step off the page and clear: {:?}",
+            app.overlay
+        );
+        press(&mut app, plain(KeyCode::Esc));
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("back on the LINEAR VIEW, got {:?}", app.overlay);
+        };
+        assert_eq!(view.mode, LinearMode::Browse);
+        assert_eq!(view.marked, BTreeSet::from(["1".into(), "3".into()]));
+        assert_eq!(view.selected, 2);
+        assert!(app.flash.is_none());
+        assert!(rx.try_recv().is_err(), "nothing asked of Linear");
+    }
+
+    /// Both ends run the one ATTACH: `⌘L` from a pull request, the same
+    /// issues marked and `Enter`, sends Linear exactly what the PR PICK
+    /// does and the footer says the same — and its Esc goes back to the
+    /// pull request. A LINEAR VIEW opened from a pull request has no
+    /// `⌘U` of its own.
+    #[test]
+    fn both_ends_attach_the_same_way() {
+        let (mut app, _dir, mut rx) = paired();
+        crate::pr_modal::open(&mut app);
+        press(&mut app, plain(KeyCode::Down));
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::SUPER),
+        );
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("the LINEAR VIEW, got {:?}", app.overlay);
+        };
+        assert!(matches!(
+            view.mode,
+            LinearMode::Attach { pr_number: 41, .. }
+        ));
+        press(&mut app, plain(KeyCode::Char(' ')));
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Char(' ')));
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::SUPER),
+        );
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Linear(_))),
+            "no PR PICK from a pull request's own"
+        );
+        let sent = attach_through(&mut app, &mut rx, |app| press(app, plain(KeyCode::Enter)));
+        assert_eq!(sent, [attached("1", 41), attached("3", 41)]);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("attached PR #41 to ENG-1, ENG-3")
+        );
+        press(&mut app, plain(KeyCode::Esc));
+        let Some(Overlay::PullRequests(prs)) = &app.overlay else {
+            panic!("back on the pull request, got {:?}", app.overlay);
+        };
+        assert_eq!(prs.selected, 1);
+        assert!(prs.pick.is_none());
+    }
+
+    /// A refusal names the first issue Linear would not take, and why.
+    #[test]
+    fn a_refused_attach_says_which_issue_and_why() {
+        let mut app = App::new();
+        land_answer(
+            &mut app,
+            LinearAnswer::Attached {
+                pr_number: 41,
+                attached: vec!["ENG-1".into()],
+                refused: Some(("ENG-3".into(), "Entity not found".into())),
+            },
+        );
+        assert_eq!(
+            app.flash.as_ref().map(|f| (f.kind, f.text.as_str())),
+            Some((
+                crate::flash::FlashKind::Failed,
+                "couldn't attach PR #41 to ENG-3: Entity not found"
+            ))
+        );
+    }
 
     /// Where the key was found, never what it is: `.env.local` before
     /// `.env`, then orion's environment — and no key says so.

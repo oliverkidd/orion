@@ -18,7 +18,10 @@
 //! already saying the right thing is not rewritten — so the file only
 //! changes the first time, when a rebind adds or drops a ⌘ chord, or when
 //! a newer orion ships a different keymap. Ghostty reads its config at
-//! launch and on its own reload (⌘⇧,), so a change asks for one of those.
+//! launch and on its own reload (⌘⇧,); orion asks the Ghostty it runs
+//! inside for that reload itself when it changes the block, and only
+//! falls back on asking the user when it cannot — and reloads one that
+//! was launched before the block's last write ([`reload_ghostty`]).
 
 use crate::keymap::{KeyChord, Keymap};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -26,7 +29,8 @@ use std::path::{Path, PathBuf};
 
 /// The Ghostty chords orion never releases, in Ghostty's spelling, even
 /// with an action rebound onto one: copy, paste, quit, new tab and the
-/// window keys stay Ghostty's. The tab digits (⌘1–⌘9) go to orion's
+/// window keys stay Ghostty's — copy only while Ghostty has a selection to
+/// copy ([`PERFORMABLE`]). The tab digits (⌘1–⌘9) go to orion's
 /// PROJECT TABS. Plain ⌘W is not among them: a stray one used to close the
 /// whole orion window, so orion takes it (`Action::ClosePane`) and ⌘⇧W
 /// stays the way to close the window.
@@ -107,11 +111,13 @@ pub fn trigger(chord: &KeyChord) -> Option<String> {
 /// Ghostty's split up and down; ⌥⌘←/⌥⌘→ stay its split left and right —
 /// ⌘L the line, ⌘⇧L every match, ⌘/ comment, ⌘⇧P the palette. ⌘←/⌘→
 /// are not here: Ghostty types `^A`/`^E` for them, which the editor reads
-/// as the line's ends, and which a shell outside orion still needs. Copy
-/// and paste stay Ghostty's.
+/// as the line's ends, and which a shell outside orion still needs. Paste
+/// stays Ghostty's; copy reaches orion when Ghostty has nothing selected
+/// ([`PERFORMABLE`]).
 ///
-/// Every typed field (`text_input`) takes two of them as well: ⌘A selects
-/// the field's whole text and ⇧⌘↑/⇧⌘↓ select to its ends. Its other
+/// Every typed field (`text_input`) takes three of them as well: ⌘A
+/// selects the field's whole text, ⌘X cuts the selection, and ⇧⌘↑/⇧⌘↓
+/// select to its ends. Its other
 /// selection chords need nothing here — Ghostty binds no ⇧⌘←/⇧⌘→ or
 /// ⌥⇧←/⌥⇧→, and its ⇧-arrow, ⇧Home/⇧End and ⇧PgUp/⇧PgDn binds are
 /// `performable` (they adjust a terminal selection only when one exists),
@@ -156,6 +162,15 @@ pub const EDITOR_CHORDS: &[&str] = &[
 /// anyway — some action answers to it — and the rest of the keymap's ⌘
 /// chords are plain `unbind`s.
 pub const SENT_AS_KITTY: &[(&str, &str)] = &[("super+.", "csi:46;9u")];
+
+/// Ghostty actions the block keeps but marks `performable:` — taken by
+/// Ghostty only when they can act, otherwise handed to orion as the key.
+/// ⌘C copies Ghostty's own (mouse) selection when there is one; with
+/// none — the case in orion, which draws its selections itself — it
+/// arrives as ⌘C, and a text field copies its SELECTION, the editor its
+/// own, and the session pane its drag selection. Bound as Ghostty binds
+/// it by default (`ghostty +list-keybinds --default`).
+pub const PERFORMABLE: &[(&str, &str)] = &[("super+c", "copy_to_clipboard:mixed")];
 
 /// What the block binds `trigger` to: its [`SENT_AS_KITTY`] bytes, or
 /// `unbind` — handed to the program inside as Ghostty encodes it.
@@ -215,12 +230,16 @@ fn keymap_unbinds(keymap: &Keymap) -> Vec<String> {
 
 /// The block as written for `keymap`: the markers around one
 /// `keybind = <trigger>=<action>` per [`unbinds`] entry — `unbind`, or
-/// the bytes [`SENT_AS_KITTY`] sends for a chord macOS steals.
+/// the bytes [`SENT_AS_KITTY`] sends for a chord macOS steals — and the
+/// [`PERFORMABLE`] binds after them.
 pub fn block(keymap: &Keymap) -> String {
     let mut out = String::from(BEGIN);
     out.push('\n');
     for trigger in unbinds(keymap) {
         out.push_str(&format!("keybind = {trigger}={}\n", action(&trigger)));
+    }
+    for (trigger, action) in PERFORMABLE {
+        out.push_str(&format!("keybind = performable:{trigger}={action}\n"));
     }
     out.push_str(END);
     out.push('\n');
@@ -322,6 +341,154 @@ pub fn inside_ghostty() -> bool {
     std::env::var("TERM_PROGRAM").is_ok_and(|v| v.eq_ignore_ascii_case("ghostty"))
 }
 
+/// The first Ghostty that reloads its config on `SIGUSR2`. An older one
+/// takes the signal's default action and quits, so it is never sent one.
+const RELOADS_ON_SIGUSR2: (u32, u32) = (1, 2);
+
+/// Whether `version` — `TERM_PROGRAM_VERSION` as Ghostty sets it, `1.3.1`
+/// or `1.2.0-dev+abc` — is a Ghostty that reloads on `SIGUSR2`.
+fn reloads_on_sigusr2(version: &str) -> bool {
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let (Some(Ok(major)), Some(Ok(minor))) = (
+        parts.next().map(str::parse::<u32>),
+        parts.next().map(str::parse::<u32>),
+    ) else {
+        return false;
+    };
+    (major, minor) >= RELOADS_ON_SIGUSR2
+}
+
+/// The Ghostty process `pid` runs under, read off `table` — `ps -axo
+/// pid=,ppid=,etime=,comm=` output: the nearest ancestor whose command is
+/// Ghostty's own binary (`…/Ghostty.app/Contents/MacOS/ghostty`), with
+/// the seconds it has been running. None when the chain ends without one,
+/// or loops.
+fn ghostty_ancestor(table: &str, pid: u32) -> Option<(u32, u64)> {
+    let rows: std::collections::HashMap<u32, (u32, &str, &str)> = table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (pid, ppid, etime) = (fields.next()?, fields.next()?, fields.next()?);
+            // The command is the rest of the line: an app path may hold spaces.
+            let comm = line.split_once(etime)?.1.trim();
+            Some((pid.parse().ok()?, (ppid.parse().ok()?, etime, comm)))
+        })
+        .collect();
+    let mut at = rows.get(&pid)?.0;
+    for _ in 0..rows.len() {
+        let (ppid, etime, comm) = rows.get(&at)?;
+        if Path::new(comm)
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("ghostty"))
+        {
+            return Some((at, elapsed_secs(etime)?));
+        }
+        at = *ppid;
+    }
+    None
+}
+
+/// The Ghostty orion runs inside, when it is one that can be asked to
+/// reload, and how long it has been running: None outside Ghostty, on a
+/// Ghostty too old to take the signal ([`RELOADS_ON_SIGUSR2`]), or when
+/// its process is not found.
+fn reloadable_ghostty() -> Option<(u32, u64)> {
+    if !inside_ghostty() {
+        return None;
+    }
+    let version = std::env::var("TERM_PROGRAM_VERSION").unwrap_or_default();
+    if !reloads_on_sigusr2(&version) {
+        return None;
+    }
+    let ps = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,etime=,comm="])
+        .output()
+        .ok()?;
+    ghostty_ancestor(&String::from_utf8_lossy(&ps.stdout), std::process::id())
+}
+
+/// Seconds in `etime` — `ps -o etime=`'s `[[dd-]hh:]mm:ss`.
+fn elapsed_secs(etime: &str) -> Option<u64> {
+    let etime = etime.trim();
+    let (days, clock) = match etime.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, etime),
+    };
+    let mut secs = 0;
+    for part in clock.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86_400 + secs)
+}
+
+/// Whether a Ghostty `running` seconds started before `path` was last
+/// written — so the config it holds is older than the file. One second of
+/// slack for `ps`'s whole-second clock.
+fn started_before_write(running: u64, path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|written_ago| running > written_ago.as_secs() + 1)
+}
+
+/// Ask Ghostty `pid` to reload its config — what ⌘⇧, does — with
+/// `SIGUSR2`. True when the signal went.
+fn reload(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-USR2", &pid.to_string()])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The Ghostty and config write a reload was last sent for — `<pid>
+/// <mtime secs>` in the runtime dir — so a Ghostty launched before the
+/// write is reloaded once, not by every orion started in it after.
+fn reloaded_marker() -> PathBuf {
+    orion_core::paths::runtime_dir().join("ghostty-reloaded")
+}
+
+/// What [`reloaded_marker`] holds for Ghostty `pid` and the file at `path`
+/// as it stands now; None when the file's time cannot be read.
+fn reload_stamp(pid: u32, path: &Path) -> Option<String> {
+    let written = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let secs = written
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(format!("{pid} {secs}"))
+}
+
+/// Bring the Ghostty orion runs inside up to date with the block in
+/// `path`: orion just rewrote it (`changed`), or Ghostty was launched
+/// before its last write and has not been reloaded for it since. Until it
+/// reloads the old block stands — ⌘1 is still Ghostty's tab key and ⌘.
+/// still macOS's Cancel, which reaches orion as a bare Escape and closes
+/// the new-agent box. True when Ghostty was asked to reload.
+fn reload_ghostty(path: &Path, changed: bool) -> bool {
+    let Some((pid, running)) = reloadable_ghostty() else {
+        return false;
+    };
+    let stamp = reload_stamp(pid, path);
+    let marker = reloaded_marker();
+    let done_already = stamp.is_some()
+        && std::fs::read_to_string(&marker)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            == stamp.as_deref();
+    if !changed && (done_already || !started_before_write(running, path)) {
+        return false;
+    }
+    if !reload(pid) {
+        return false;
+    }
+    if let Some(stamp) = stamp {
+        let _ = std::fs::write(&marker, stamp);
+    }
+    true
+}
+
 /// The startup pass, and the one after every change to the keymap or the
 /// Ghostty settings: with the `ghostty_keybinds` SETTING on, on a local
 /// Mac, and Ghostty in the picture — orion running inside it, or it being
@@ -354,22 +521,80 @@ pub fn ensure_for(cfg: &crate::config::Config) -> Option<crate::flash::Flash> {
             config_path(&home, xdg.as_deref())
         }
     };
-    match ensure(&path, &cfg.keymap()) {
-        Ok(true) => Some(crate::flash::Flash::setup(format!(
+    let changed = match ensure(&path, &cfg.keymap()) {
+        Ok(changed) => changed,
+        Err(e) => {
+            return Some(crate::flash::Flash::failed(format!(
+                "couldn't update Ghostty's config {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    let reloaded = reload_ghostty(&path, changed);
+    match (changed, reloaded) {
+        (true, true) => Some(crate::flash::Flash::done(format!(
+            "updated orion's keybinds in {} and reloaded Ghostty",
+            path.display()
+        ))),
+        (true, false) => Some(crate::flash::Flash::setup(format!(
             "updated orion's keybinds in {} — reload Ghostty's config (⌘⇧,) to use ⌘ chords",
             path.display()
         ))),
-        Ok(false) => None,
-        Err(e) => Some(crate::flash::Flash::failed(format!(
-            "couldn't update Ghostty's config {}: {e}",
-            path.display()
-        ))),
+        (false, true) => Some(crate::flash::Flash::done(
+            "reloaded Ghostty's config so orion's ⌘ keys reach it",
+        )),
+        (false, false) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// orion finds the Ghostty it runs under through the shell and
+    /// `login` between them, by the binary's name whatever the app path
+    /// holds, and finds none under another terminal or in a looping table.
+    #[test]
+    fn the_ghostty_ancestor_is_found_up_the_chain() {
+        let table = "    1     0 2-01:00:00 /sbin/launchd
+ 1588     1    12:34 /Applications/Ghostty.app/Contents/MacOS/ghostty
+ 1591  1588    12:30 /usr/bin/login
+ 1593  1591    12:30 -/bin/zsh
+ 2355  1593    00:07 orion
+  900     1    01:00 /Applications/Other Term.app/Contents/MacOS/Other Term
+  901   900    01:00 -/bin/zsh
+  902   901    00:30 orion
+  7     8    00:01 a
+  8     7    00:01 b
+  9     8    00:01 orion
+";
+        assert_eq!(ghostty_ancestor(table, 2355), Some((1588, 754)));
+        assert_eq!(ghostty_ancestor(table, 902), None);
+        assert_eq!(ghostty_ancestor(table, 9), None);
+        assert_eq!(ghostty_ancestor(table, 4242), None);
+    }
+
+    /// `ps`'s elapsed time reads in every width it prints.
+    #[test]
+    fn elapsed_times_read_in_every_width() {
+        assert_eq!(elapsed_secs("   00:07\n"), Some(7));
+        assert_eq!(elapsed_secs("12:34"), Some(754));
+        assert_eq!(elapsed_secs("01:02:03"), Some(3723));
+        assert_eq!(elapsed_secs("2-01:02:03"), Some(2 * 86_400 + 3723));
+        assert_eq!(elapsed_secs(""), None);
+    }
+
+    /// Only a Ghostty from 1.2 on is sent `SIGUSR2`: an older one would
+    /// quit on it, and an unreadable version is taken as older.
+    #[test]
+    fn only_a_ghostty_that_reloads_on_sigusr2_is_signalled() {
+        for v in ["1.2.0", "1.3.1", "1.2.0-dev+abc", "2.0.0"] {
+            assert!(reloads_on_sigusr2(v), "{v}");
+        }
+        for v in ["1.1.3", "1.0.0", "0.9", "", "tip", "1"] {
+            assert!(!reloads_on_sigusr2(v), "{v}");
+        }
+    }
 
     /// The editor's ⌘ shortcuts are released with an empty keymap too,
     /// once each, and none of Ghostty's own copy, paste or close keys.
@@ -500,7 +725,14 @@ mod tests {
         );
         let block = block(&keymap);
         assert!(block.starts_with(&format!("{BEGIN}\nkeybind = super+k=unbind\n")));
-        assert!(block.ends_with(&format!("keybind = super+shift+l=unbind\n{END}\n")));
+        assert!(block.ends_with(&format!(
+            "keybind = super+shift+l=unbind\n\
+             keybind = performable:super+c=copy_to_clipboard:mixed\n{END}\n"
+        )));
+        assert!(
+            !block.contains("super+c=unbind"),
+            "⌘C stays Ghostty's copy while it has a selection"
+        );
         assert!(
             !block.contains("ctrl+"),
             "a ^ twin is never Ghostty's to give"

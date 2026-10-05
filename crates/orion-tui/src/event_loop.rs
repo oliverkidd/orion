@@ -228,6 +228,12 @@ const HARDWIRED_UNLOCK: crate::keymap::KeyChord = crate::keymap::KeyChord {
     mods: KeyModifiers::CONTROL,
 };
 
+/// ⌘C over the session pane: its drag selection to the clipboard.
+const PANE_COPY: crate::keymap::KeyChord = crate::keymap::KeyChord {
+    code: KeyCode::Char('c'),
+    mods: KeyModifiers::SUPER,
+};
+
 /// Repaint cadence for the first-run splash animation — the only thing
 /// that marks the app dirty while it idles on an empty tree.
 const SPLASH_FRAME: Duration = crate::splash::FRAME;
@@ -3006,6 +3012,10 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
             let typing = typing_into_pane(app);
             app.flash = None;
             handle_key(app, key, out);
+            // ⌘C / ⌘X in whichever text field had the keys.
+            if let Some(text) = crate::text_input::take_copied() {
+                copy_text_and_flash(app, &text);
+            }
             // A key that only went to the PTY changed nothing here: what
             // it does shows up as the PTY's answer, a couple of
             // milliseconds on. Painting an identical frame for it first
@@ -3715,6 +3725,13 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
                 dispatch_action(app, action, None, &chord, out);
                 return;
             }
+        }
+        // ⌘C — Ghostty's only while a selection of its own exists — copies
+        // the pane's drag selection, and never goes down the PTY: an agent
+        // reading the kitty protocol would take it for a key.
+        if chord == PANE_COPY {
+            copy_selection(app);
+            return;
         }
         // `⇧Esc` is the agent's Esc — the plain key leaves the pane — so
         // what goes down the PTY is a bare Esc, never the shifted one a
@@ -7500,8 +7517,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 KeyCode::Enter => open_selected_file(app),
                 // ⌘C (Ctrl+y without ⌘) copies the selected path (relative
                 // to the worktree root) to the clipboard — ready to paste
-                // into an agent.
-                _ if crate::hints::COPY_PATH.matches(&key) => {
+                // into an agent. A selection in the query is the query's.
+                _ if crate::hints::copies_path(&key, &finder.query) => {
                     if let Some(path) = finder.selected_path().map(str::to_string) {
                         app.overlay = None;
                         let label = format!("copied {path}");
@@ -7529,8 +7546,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // Enter opens the hit in the editor modal, which closes this
                 // overlay unless `close_finder_on_open` is off.
                 _ if ui::finder_keys::OPEN.matches(&key) => open_selected_hit_in_editor(app),
-                // ⌘C (^Y) copies the hit's path, as Go to file's does.
-                _ if crate::hints::COPY_PATH.matches(&key) => {
+                // ⌘C (^Y) copies the hit's path, as Go to file's does —
+                // unless the query holds a selection to copy.
+                _ if crate::hints::copies_path(&key, &view.query) => {
                     if let Some(path) = view.hits.get(view.selected).map(|h| h.path.clone()) {
                         app.overlay = None;
                         let label = format!("copied {path}");
@@ -7583,8 +7601,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 // ⌘C (Ctrl+y without ⌘) copies the selected path (relative
                 // to the worktree root) to the clipboard — ready to paste
-                // into an agent.
-                _ if crate::hints::COPY_PATH.matches(&key) => {
+                // into an agent. A selection in the query is the query's.
+                _ if crate::hints::copies_path(&key, &view.filter) => {
                     if let Some(path) = view.selected_node().map(|n| n.path.clone()) {
                         app.overlay = None;
                         let label = format!("copied {path}");
@@ -10740,9 +10758,14 @@ fn finish_selection(app: &mut App) {
 /// Copy the current selection's text to the clipboard, flashing the result.
 fn copy_selection(app: &mut App) {
     if let Some(text) = selection_text(app) {
-        let label = format!("copied {} chars", text.chars().count());
-        copy_and_flash(app, &text, &label);
+        copy_text_and_flash(app, &text);
     }
+}
+
+/// Copy a run of selected text, the flash counting its characters.
+fn copy_text_and_flash(app: &mut App, text: &str) {
+    let label = format!("copied {} chars", text.chars().count());
+    copy_and_flash(app, text, &label);
 }
 
 /// A drag report landed at `pointer` (host cells): the selection's head

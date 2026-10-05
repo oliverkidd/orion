@@ -1364,7 +1364,7 @@ fn draw_drawer(
     for row in drawer {
         cols = (
             cols.0.max(row.agent.name.chars().count()),
-            cols.1.max(runs_on_line(&row.agent, cfg).chars().count()),
+            cols.1.max(list_runs_line(&row.agent, cfg).chars().count()),
         );
     }
     let cols = (cols.0.min(LIST_NAME_MAX), cols.1.min(LIST_RUNS_MAX));
@@ -1448,7 +1448,7 @@ fn draw_list_band(
         let (name, runs) = match &band.cards[i] {
             crate::launcher::Card::Session(row) => (
                 row.agent.name.chars().count(),
-                runs_on_line(&row.agent, cfg).chars().count(),
+                list_runs_line(&row.agent, cfg).chars().count(),
             ),
             crate::launcher::Card::Terminal(t) => (
                 t.name.chars().count(),
@@ -1563,7 +1563,7 @@ fn draw_list_row(
                 name: a.name.clone(),
                 name_style: look.name_style,
                 ramp: look.ramp,
-                runs: runs_on_line(a, cfg),
+                runs: list_runs_line(a, cfg),
                 runs_style: Style::default().fg(quiet_or(th.dim)),
                 text_mark,
                 text,
@@ -2820,6 +2820,42 @@ fn runs_on_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
         out.push_str(effort);
     }
     out
+}
+
+/// What a LIST row says a session runs on: the model and the effort —
+/// `opus high`, `gpt-5.5 xhigh` — which is what tells one row from the
+/// next. A CLAUDE ACCOUNT's name or email is the card's to show, never the
+/// row's: on a line that narrow it pushed the model and effort out of
+/// sight. A session with no model named says its harness in the model's
+/// place (`claude high`), a Claude account's as plain `claude`; a cloud
+/// row names the sandbox in place of the model, as [`harness_line`] does.
+fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
+    let mut out = match a.model.as_deref().filter(|m| !m.is_empty()) {
+        _ if a.cloud_session_id.is_some() => "cloud".into(),
+        Some(model) => model.to_string(),
+        None if is_claude_account(a, cfg) => orion_core::AgentKind::Claude.as_str().into(),
+        None => harness_line(a, cfg),
+    };
+    if let Some(effort) = a.effort.as_deref().filter(|e| !e.is_empty()) {
+        out.push(' ');
+        out.push_str(effort);
+    }
+    out
+}
+
+/// Whether `a` runs on a CLAUDE ACCOUNT rather than a harness of its own:
+/// one with a short name, or a custom harness entry that is an account.
+fn is_claude_account(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> bool {
+    if crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref()).is_some() {
+        return true;
+    }
+    match (a.kind, a.custom_harness.as_deref()) {
+        (orion_core::AgentKind::Custom, Some(id)) => cfg
+            .get_or_insert_with(crate::config::Config::load)
+            .effective_harness_by_id(id)
+            .is_claude_account(),
+        _ => false,
+    }
 }
 
 /// Smallest GRID the welcome turns a orion in: under it the sky would be
@@ -4697,6 +4733,56 @@ mod tests {
         assert_eq!(runs_on_line(&a, &mut None), "claude opus high");
         a.cloud_session_id = Some("c1".into());
         assert_eq!(runs_on_line(&a, &mut None), "cloud high");
+    }
+
+    /// A LIST row says the model and effort a session runs on and never
+    /// the CLAUDE ACCOUNT it runs as — the card keeps the account — and
+    /// with no model named says the harness, an account's as `claude`.
+    #[test]
+    fn a_list_row_names_the_model_and_effort_not_the_account() {
+        let home = tempfile::tempdir().unwrap();
+        let two = home.path().join(".claude-2");
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            two.join(".claude.json"),
+            serde_json::json!({"oauthAccount": {"emailAddress": "b@b.co", "accountUuid": "u"}})
+                .to_string(),
+        )
+        .unwrap();
+        let config = home.path().join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let places = crate::claude_accounts::Places {
+            home: Some(home.path().to_path_buf()),
+            default_dir: Some(home.path().join(".claude")),
+            default_record: Some(orion_core::claude_account::Record {
+                file: home.path().join(".claude.json"),
+                legacy: home.path().join(".claude/.config.json"),
+            }),
+        };
+        crate::claude_accounts::with_places(places, || {
+            crate::config::with_config_path(config, || {
+                crate::claude_accounts::refresh_now();
+                let mut a = a_tree().tree.agents[0].clone();
+                a.kind = orion_core::AgentKind::Custom;
+                a.custom_harness = Some("claude-2".into());
+                a.model = Some("opus".into());
+                a.effort = Some("high".into());
+                assert!(runs_on_line(&a, &mut None).contains("b@b.co"));
+                assert_eq!(list_runs_line(&a, &mut None), "opus high");
+                a.model = None;
+                assert_eq!(list_runs_line(&a, &mut None), "claude high");
+                a.cloud_session_id = Some("c1".into());
+                a.model = Some("opus".into());
+                assert_eq!(list_runs_line(&a, &mut None), "cloud high");
+            })
+        });
     }
 
     /// Every row of `body` as drawn with the view on it.

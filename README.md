@@ -44,8 +44,8 @@ orion replaces the reading with a grid and a color. Every session is a card — 
 | **A task box, not a picker** | `⌘N` opens the quick prompt: type the task, `Enter`, and an agent is working on it. |
 | **Real git worktrees** | `⌘N` in the box flips the launch onto a fresh `git worktree`. Ignored `.env*` files from the main checkout are symlinked in by default. Delete asks before losing uncommitted work. |
 | **Pull requests, in tabs** | The pull request beside the cards — or under the cursor in `v` — reads like Cursor's page: `Description · Changes 11 · Commits 4 · ✗ Checks 44/45 · ✓ Reviews`. `Enter` on a file or a commit opens its diff, on a check its log. |
-| **Linear, assigned to you** | `⌘L` lists issues assigned to you. Space marks, Enter starts one agent on the set and asks for a single PR, attached to the issues once it opens. Settings → Linear has every option — the link (on), the account, the task template — and tests the project's `LINEAR_API_KEY`, read from its `.env.local` or `.env`. |
-| **Ghostty by default** | Settings picks Ghostty or Terminal.app. Stolen Command chords are unbound in Ghostty's config so they reach orion — reload with `⌘⇧,` after the first launch. |
+| **Linear, assigned to you** | `⌘L` lists issues assigned to you. Space marks, Enter starts one agent on the set and asks for a single PR, attached to the issues once it opens; `⌘U` attaches the set to an open PR you pick instead. Settings → Linear has every option — the link (on), the account, the task template — and tests the project's `LINEAR_API_KEY`, read from its `.env.local` or `.env`. |
+| **Ghostty by default** | Settings picks Ghostty or Terminal.app. Stolen Command chords are unbound in Ghostty's config so they reach orion, and Ghostty is reloaded to pick them up. |
 | **Diff, find, grep, browse** | `⌘E` the diff, wrapped and numbered in the file's colours — the uncommitted changes, everything the branch added (merges of `main` left out), or the commits you tick, together or one at a time — `⌘P` the file finder, `⌘⇧F` grep, `⌘B` the tree. Markdown opens as its rendered page; `Enter` edits any file in micro, Microsoft Edit or fresh — VS Code's keys, wrapped lines, the mouse (Settings → File editor) — and `⌘O` opens it in Cursor, VS Code, Sublime Text or Zed (Settings → Open in app). |
 | **Your skills, browsable** | `⌘S` lists every agent skill on the machine — yours, the project's, Cursor's and Codex's, installed plugins' — searchable by name and description, each read in place. `Enter` edits one, `^A` starts a new one, `^D` moves one to the Trash. |
 | **It follows you** | `orion ssh <host>` opens orion there. `orion tunnel <host>` puts that machine's TUI in a browser tab. |
@@ -130,7 +130,7 @@ The first launch opens a short setup, a step at a time: which agents to turn on 
 
 **4. Linear (optional).** Put `LINEAR_API_KEY=lin_api_…` in the project's `.env` or `.env.local`. `⌘L` lists issues assigned to the key's owner. Settings → Linear → **Test connection** says whose it is, and **Linear account** takes your email if the key is shared. Space marks, Enter launches one agent for the set.
 
-Reload Ghostty's config (`⌘⇧,`) after the first launch so Command chords reach orion.
+orion reloads Ghostty's config itself after writing its keybinds (Ghostty 1.2+); on an older Ghostty, reload it (`⌘⇧,`) after the first launch so Command chords reach orion.
 
 ## Documentation
 

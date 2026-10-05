@@ -30,6 +30,14 @@
 //! and `Ctrl+x` merges this one (`pr_actions`, both forms in the reading
 //! pane's place).
 //!
+//! `⌘L` flips to the LINEAR VIEW to attach the pull request under the
+//! cursor to the issues marked there. The way back is the PR PICK
+//! ([`PrPick`]): the LINEAR VIEW's `⌘U` opens this modal carrying the
+//! issues it marked, and here `Enter` on the list attaches the pull
+//! request to them — the very ATTACH the other way runs
+//! (`linear::attach_issues`) — and goes back to the LINEAR VIEW, while
+//! Esc goes back to it as it was, marks and all.
+//!
 //! The DIFF VIEWER opened from here is a level inside the modal: it takes
 //! the modal's frame, its title says which pull request it is reading,
 //! and Esc comes back to the modal on the same row and tab
@@ -106,6 +114,27 @@ impl PrFocus {
     }
 }
 
+/// The PR PICK: the modal opened from the LINEAR VIEW's `⌘U` to choose
+/// the pull request its marked issues are attached to — the mirror of the
+/// LINEAR VIEW in `LinearMode::Attach`, which the modal's own `⌘L` opens
+/// to choose the issues for a pull request. `Enter` on the list attaches
+/// rather than prompting an agent, and `⌘L` has nowhere further to go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrPick {
+    /// The issues the chosen pull request is attached to.
+    pub issues: Vec<crate::linear::LinearIssue>,
+    /// The LINEAR VIEW it came from, as it was — marks, filter and cursor:
+    /// where Esc and the attach both land.
+    pub back: Box<crate::linear::LinearView>,
+}
+
+impl PrPick {
+    /// `ENG-12, ENG-15`: the issues, by identifier, for the title.
+    pub fn ids(&self) -> String {
+        crate::linear::ids_of(&self.issues)
+    }
+}
+
 /// The modal's own state. The rows live on the [`App`] (`open_prs`, keyed
 /// by project), where the panels read them too; this holds only the
 /// cursor, the reading pane's scroll, and the rects the mouse hit-tests.
@@ -159,6 +188,10 @@ pub struct PullRequestsView {
     /// merge of the one under the cursor (`pr_actions`). While it is up
     /// every key is its own.
     pub form: Option<Box<crate::pr_actions::PrForm>>,
+    /// The PR PICK, while the modal was opened from the LINEAR VIEW to
+    /// choose a pull request for its marked issues; None opened on its
+    /// own.
+    pub pick: Option<PrPick>,
 }
 
 impl PullRequestsView {
@@ -182,6 +215,7 @@ impl PullRequestsView {
             last_row_click: None,
             focus: PrFocus::List,
             form: None,
+            pick: None,
         }
     }
 
@@ -211,12 +245,31 @@ pub(crate) fn open(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
         return;
     };
-    let mut view = PullRequestsView::new(
-        project.id.clone(),
-        project.name.clone(),
-        project.repo_path.clone(),
+    show(
+        app,
+        PullRequestsView::new(project.id, project.name, project.repo_path),
     );
-    let list = rows(app, &project.id);
+}
+
+/// The LINEAR VIEW's `⌘U`: the modal for the LINEAR VIEW's project, as a
+/// PR PICK for the issues it marked. It opens as the hotkey's does — on
+/// the Worktrees cursor's pull request, a stale list asked for again.
+pub(crate) fn open_pick(app: &mut App, pick: PrPick) {
+    let mut view = PullRequestsView::new(
+        pick.back.project.clone(),
+        pick.back.project_name.clone(),
+        pick.back.dir.clone(),
+    );
+    view.pick = Some(pick);
+    show(app, view);
+}
+
+/// Put `view` up on the pull request the Worktrees cursor rests on, when
+/// it rests on one of the project's — the row the user was already
+/// reading — else the first.
+fn show(app: &mut App, mut view: PullRequestsView) {
+    let project = view.project.clone();
+    let list = rows(app, &project);
     let start = app
         .selected_worktree_pr()
         .and_then(|pr| list.iter().position(|row| row.url == pr.url))
@@ -226,19 +279,61 @@ pub(crate) fn open(app: &mut App) {
     app.overlay = Some(Overlay::PullRequests(view));
     // A list the beat landed moments ago is the answer; an older one
     // paints now while a fresh copy lands underneath.
-    if !is_fresh(app, &project.id) {
-        request_list(app, &project.id);
+    if !is_fresh(app, &project) {
+        request_list(app, &project);
     }
     schedule_detail(app);
     app.dirty = true;
 }
 
+/// Esc out of the PR PICK: the LINEAR VIEW back as it was, marks and
+/// all, with nothing attached — `linear::close`'s way back, the other way.
+fn back_to_linear(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = app.overlay.take() else {
+        return;
+    };
+    rearm_pane_detail(app);
+    if let Some(pick) = view.pick {
+        crate::linear::reopen(app, *pick.back);
+    }
+}
+
+/// `Enter` on the PR PICK's list: the pull request under the cursor
+/// attached to the issues the LINEAR VIEW marked, through the very ATTACH
+/// that view runs for a pull request (`linear::attach_issues`) — the
+/// footer spins, then says what Linear took. The LINEAR VIEW comes back
+/// with its marks spent, the batch done, as a launch spends them; the
+/// filter and the cursor are where they were.
+fn attach_to_selected(app: &mut App) {
+    let Some(pr) = selected_pr(app) else {
+        return;
+    };
+    let Some(Overlay::PullRequests(view)) = app.overlay.take() else {
+        return;
+    };
+    let Some(pick) = view.pick else {
+        app.overlay = Some(Overlay::PullRequests(view));
+        return;
+    };
+    rearm_pane_detail(app);
+    crate::linear::attach_issues(app, view.dir, pr.url, pr.number, &pick.issues);
+    let mut back = *pick.back;
+    back.marked.clear();
+    crate::linear::reopen(app, back);
+}
+
 /// Close the modal. The pane behind reads the Worktrees cursor's pull
-/// request again, and the modal's cursor may have taken over the fetch it
-/// was waiting on — so that one is armed again, without touching the
-/// pane's scroll.
+/// request again ([`rearm_pane_detail`]).
 fn close(app: &mut App) {
     app.overlay = None;
+    rearm_pane_detail(app);
+}
+
+/// The modal is gone — closed, or handed back to the LINEAR VIEW — and
+/// the pane behind reads the Worktrees cursor's pull request again. The
+/// modal's cursor may have taken over the fetch it was waiting on, so that
+/// one is armed again, without touching the pane's scroll.
+fn rearm_pane_detail(app: &mut App) {
     let pending = app.previewed_pr().and_then(|pr| {
         let dir = app.selected_project()?.repo_path.clone();
         pending_for(app, pr.url, pr.number, dir)
@@ -667,6 +762,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // Two-stage escape, like every fuzzy overlay: a typed filter is
         // cleared before the second Esc closes the modal.
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
+        // The PR PICK's last Esc is the LINEAR VIEW's, not the panels'.
+        KeyCode::Esc if view.pick.is_some() => back_to_linear(app),
         KeyCode::Esc => close(app),
         // Tab / ⇧Tab (a shifted Tab under the kitty protocol too): the
         // keys to the other panel.
@@ -702,6 +799,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // Enter: the page's row with the keys there, else an agent on the
         // pull request.
         _ if on_page && keys::ACT.matches(&key) => act(app, out),
+        // The PR PICK's Enter attaches the issues it carries instead.
+        _ if view.pick.is_some() && keys::ATTACH.matches(&key) => attach_to_selected(app),
         _ if keys::PROMPT.matches(&key) => open_prompt_for_selected(app),
         _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
         _ if keys::DIFF.matches(&key) => diff(app, out),
@@ -709,6 +808,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::NEW.matches(&key) => crate::pr_actions::open_create(app),
         _ if keys::MERGE.matches(&key) => crate::pr_actions::open_merge(app),
+        // A PR PICK already came from the LINEAR VIEW: `⌘L` there would
+        // stack the two views on each other, so it does nothing.
+        _ if keys::LINEAR.matches(&key) && view.pick.is_some() => {}
         _ if keys::LINEAR.matches(&key) => crate::linear::open_attach(app),
         // Everything else feeds the always-live fuzzy filter, which edits
         // like a terminal line (see text_input) — and typing hands the
@@ -839,12 +941,15 @@ pub(crate) mod keys {
     pub const MERGE: Key = Key::new(&["ctrl+x"], "merge");
     /// Linear issues to attach the pull request to.
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
+    /// Enter on the PR PICK's list: the pull request attached to the
+    /// issues the LINEAR VIEW marked.
+    pub const ATTACH: Key = Key::new(&["enter"], "attach to this PR");
     pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
     pub const ROWS: Key = crate::pr_preview::keys::MODAL_ROWS;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, LINEAR, TABS, ROWS,
+        MERGE, LINEAR, ATTACH, TABS, ROWS,
     ];
 }
 
@@ -852,7 +957,8 @@ pub(crate) mod keys {
 /// `^G` and `^O` named for what they reach on the tab showing, and Enter
 /// on the page for what it does there. A form up in the reading pane's
 /// place says its own (`pr_actions::hints`). Esc steps back off the page,
-/// then clears a typed filter, then closes.
+/// then clears a typed filter, then closes — or, in a PR PICK, goes back
+/// to the LINEAR VIEW, whose issues `Enter` attaches the row to.
 pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     if let Some(form) = &view.form {
@@ -883,11 +989,15 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "list"),
         ];
     }
-    let mut hints = vec![
-        keys::PROMPT.hint().kept(),
-        keys::PANEL.hint().kept(),
-        keys::TABS.hint(),
-    ];
+    // The PR PICK's Enter attaches, its `⌘L` has nowhere to go, and its
+    // last Esc goes back to the LINEAR VIEW.
+    let picking = view.pick.is_some();
+    let enter = if picking {
+        keys::ATTACH.hint()
+    } else {
+        keys::PROMPT.hint()
+    };
+    let mut hints = vec![enter.kept(), keys::PANEL.hint().kept(), keys::TABS.hint()];
     if tab.lists() {
         hints.push(keys::ROWS.hint());
     }
@@ -898,17 +1008,18 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
         diff,
         browser,
         keys::READ.hint(),
-        keys::LINEAR.hint(),
-        keys::REFRESH.hint(),
-        Hint::new(
-            "Esc",
-            if view.query.is_empty() {
-                "close"
-            } else {
-                "clear"
-            },
-        ),
     ]);
+    if !picking {
+        hints.push(keys::LINEAR.hint());
+    }
+    let esc = if !view.query.is_empty() {
+        "clear"
+    } else if picking {
+        "back"
+    } else {
+        "close"
+    };
+    hints.extend([keys::REFRESH.hint(), Hint::new("Esc", esc)]);
     hints
 }
 
@@ -1008,8 +1119,14 @@ pub(crate) fn draw(
     } else {
         rows.len().to_string()
     };
+    // A PR PICK names the issues it attaches to, as the LINEAR VIEW
+    // opened from a pull request names the pull request (`Linear → PR #42`).
+    let head = match &view.pick {
+        Some(pick) => format!("Pull requests → {}", pick.ids()),
+        None => "Pull requests".to_string(),
+    };
     let title = format!(
-        "Pull requests — {} ({}{})",
+        "{head} — {} ({}{})",
         view.project_name,
         count,
         if inflight { ", refreshing…" } else { "" }

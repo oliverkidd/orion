@@ -151,13 +151,17 @@ releases **every ⌘ chord its keymap answers to** — derived from the keymap i
 rebinds in `keybindings` included, so a chord orion uses can never be swallowed by Ghostty. A rebind
 in Settings → Hotkeys rewrites the block at once: the new ⌘ chord is released and the one it replaced
 goes back to Ghostty. A few chords are never taken whatever the keymap says: `⌘C`, `⌘V`, `⌘Q`, `⌘W`,
-`⌘T`, `⌘⇧T`, `⌘Enter` and the tab and window keys (`⌘1`–`⌘9`, `⌘⇧W`, …) stay Ghostty's. The
+`⌘T`, `⌘⇧T`, `⌘Enter` and the tab and window keys (`⌘1`–`⌘9`, `⌘⇧W`, …) stay Ghostty's. `⌘C` is
+Ghostty's only while it has a selection of its own (a ⇧-drag): the block binds it
+`performable:super+c=copy_to_clipboard:mixed`, so with nothing selected in Ghostty it reaches orion,
+where a typed field copies its selection, the editor its own and a session pane its drag selection. The
 BUILT-IN EDITOR's chords are released whatever the keymap says ([Keys](keys.md#the-built-in-editor)):
 `⌘Z`, `⌘⇧Z`, `⌘D`, `⌘A`, `⌘X`, and the Mac editing chords — `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓`, which
 were Ghostty's jump to prompt, `⌥⌘↑`/`⌥⌘↓`, which were its split up and down (`⌥⌘←`/`⌥⌘→` stay its
 split left and right), and `⌘⇧L`. `⌘←`/`⌘→` are not taken: Ghostty types `^A`/`^E` for them, which a
-shell outside orion still needs and the editor reads as the line's ends. Every typed field takes two
-of them too: `⌘A` selects its text and `⇧⌘↑`/`⇧⌘↓` select to its ends ([Keys](keys.md#typed-fields)).
+shell outside orion still needs and the editor reads as the line's ends. Every typed field takes three
+of them too: `⌘A` selects its text, `⌘X` cuts the selection and `⇧⌘↑`/`⇧⌘↓` select to its ends
+([Keys](keys.md#typed-fields)).
 Its other selection chords need no line — Ghostty binds no `⇧⌘←`/`⇧⌘→` or `⌥⇧←`/`⌥⇧→`, and its
 `⇧←`/`⇧→`/`⇧↑`/`⇧↓`, `⇧Home`/`⇧End` binds only act on a selection made in Ghostty itself, so they
 reach orion as they are. With the default keymap the block reads:
@@ -212,7 +216,8 @@ non-empty one of `~/Library/Application Support/com.mitchellh.ghostty/config.gho
 `$XDG_CONFIG_HOME/ghostty/config.ghostty` and `…/config` (`~/.config` when `XDG_CONFIG_HOME` is
 unset), else the first. Everything outside the block is yours and is never touched, and a block that
 already says the right thing is not rewritten. Ghostty reads its config at launch and on its own
-reload (`⌘⇧,`); the footer says when one is needed. `ORION_GHOSTTY_CONFIG` names another file, or
+reload (`⌘⇧,`); when orion changes the block from inside Ghostty 1.2 or later it sends that Ghostty
+`SIGUSR2`, which reloads it, and otherwise the footer says a reload is needed. `ORION_GHOSTTY_CONFIG` names another file, or
 `off` to never write one. Turning the setting off stops orion writing; the block already there stays
 until you delete it.
 

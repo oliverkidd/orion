@@ -260,6 +260,12 @@ impl Key {
 /// Copy the path of the file or skill under the cursor: `⌘C` where the
 /// terminal sends ⌘, `^Y` everywhere.
 pub const COPY_PATH: Key = Key::new(&["cmd+c", "ctrl+y"], "copy path");
+
+/// Whether `key` is a finder's [`COPY_PATH`]: not while its `query` holds
+/// a SELECTION, which ⌘C copies instead (`text_input`).
+pub fn copies_path(key: &KeyEvent, query: &crate::text_input::TextInput) -> bool {
+    COPY_PATH.matches(key) && query.selected().is_none()
+}
 /// Hand the file or folder under the cursor to Cursor.
 pub const IN_CURSOR: Key = Key::new(&["cmd+o", "ctrl+o"], "open in app");
 
@@ -605,6 +611,15 @@ mod tests {
             crate::linear::LinearMode::Browse,
         );
         assert_hints_from(&crate::linear::hints(&browse), crate::linear::keys::ALL);
+        let mut picking = prs.clone();
+        picking.pick = Some(crate::pr_modal::PrPick {
+            issues: Vec::new(),
+            back: Box::new(browse),
+        });
+        assert_hints_from(
+            &crate::pr_modal::hints(&picking),
+            crate::pr_modal::keys::ALL,
+        );
         let attach = crate::linear::LinearView::new(
             project(),
             "p".into(),
