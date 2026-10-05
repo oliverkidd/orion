@@ -1,0 +1,50 @@
+docs/keys.md
+  s_fad6db6bd6e89f::t_22eaafb548afb1 119
+crates/orion-tui/src/pr_actions.rs
+  s_fad6db6bd6e89f::t_178df76dffa4ea 1249-1251
+  s_fad6db6bd6e89f::t_8b6f525943bfe4 1253
+  s_fad6db6bd6e89f::t_f4c0d81aba12d7 52
+crates/orion-tui/src/branch_switch.rs
+  s_fad6db6bd6e89f::t_6af029871e6a22 2693
+  s_fad6db6bd6e89f::t_5eb692607fc549 26-28
+  s_fad6db6bd6e89f::t_6b187dbf85a946 52
+  s_fad6db6bd6e89f::t_38b5fc0128c594 53
+docs/2026-10-05-worktree-pull/worktree-pull.md
+  s_fad6db6bd6e89f::t_22eaafb548afb1 313-314,318,324-326
+  s_fad6db6bd6e89f::t_c4fa5c01ad5ea1 327
+docs/how-it-works.md
+  s_fad6db6bd6e89f::t_22eaafb548afb1 147-148
+crates/orion-tui/src/git_proc.rs
+  s_fad6db6bd6e89f::t_f4c0d81aba12d7 204-242
+  s_fad6db6bd6e89f::t_8b6f525943bfe4 4-5,29-35,48,147,199
+  s_fad6db6bd6e89f::t_bcf391515c65a7 1-3,6-26,36-47,49-67,71-91,99-146,148-154,156-185,187-193,195-198,200-203
+  s_fad6db6bd6e89f::t_6af029871e6a22 27-28,68-70,92-98,186,194
+  s_fad6db6bd6e89f::t_178df76dffa4ea 155
+crates/orion-tui/src/lib.rs
+  s_fad6db6bd6e89f::t_8b6f525943bfe4 25
+crates/orion-tui/src/event_loop.rs
+  s_fad6db6bd6e89f::t_8a5c96ad0f760e 24554,24571-24574,24592-24594
+crates/orion-tui/src/git_sync.rs
+  s_fad6db6bd6e89f::t_5eb692607fc549 28-29
+  s_fad6db6bd6e89f::t_02eff2cab8aba5 52,55-57,59,65,67,74,98-104,115-123,145,295-300,350-359,366,404-405,468,478,480,506,508-513,555,588-593,595,597-598,600-602,896,917,936,939,942-943,948,960-979,985,996,1027,1046,1063,1177,1183-1191,1202
+  s_fad6db6bd6e89f::t_8b6f525943bfe4 231-238,240,244-246,266,291-294,330-335,360-364,427,594,596,599,1009,1012,1192
+  s_fad6db6bd6e89f::t_6b187dbf85a946 44
+  s_fad6db6bd6e89f::t_6af029871e6a22 1076,1085,1094,1103,1112,1122,1128,1134,1140,1149,1155,1164,1173,1195
+  s_fad6db6bd6e89f::t_6ea76785cc5d1b 1193-1194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2ec09f0d21fcdb357f8a3f220a318e4f45bcc225",
+  "prompts": {},
+  "sessions": {
+    "s_fad6db6bd6e89f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5c1c4d97-5b61-499f-9b72-ed73106e2e7a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
