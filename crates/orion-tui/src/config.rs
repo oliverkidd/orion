@@ -3141,12 +3141,20 @@ impl Config {
             }
             SettingKind::RememberHarness => on_off(self.remember_harness).into(),
             SettingKind::HideUninstalledHarnesses => on_off(self.hide_uninstalled_harnesses).into(),
-            // Another CLAUDE ACCOUNT reads as the name it goes by.
+            // A CLAUDE ACCOUNT — the default one too — reads as the name
+            // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
                 (AgentKind::Custom, Some(id)) => self
                     .effective_harness_by_id(&id)
                     .display_label()
                     .to_string(),
+                (AgentKind::Claude, None)
+                    if AgentKind::parse(&self.quick_prompt_kind) == Some(AgentKind::Claude) =>
+                {
+                    self.effective_harness_by_id(AgentKind::Claude.as_str())
+                        .display_label()
+                        .to_string()
+                }
                 _ => self.quick_prompt_kind.clone(),
             },
             SettingKind::QuickPromptFocus => on_off(self.quick_prompt_focus).into(),

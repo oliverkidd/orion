@@ -8288,13 +8288,44 @@ fn confirm_remove_account(app: &mut App, index: usize) {
     let entry = cfg.effective_harness_by_id(&id);
     let dir = crate::claude_accounts::dir_of(&entry)
         .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
+    // Name what it strands, and where those sessions can go instead.
+    let names: Vec<String> = crate::claude_accounts::sessions_on(&app.tree.agents, &id)
+        .iter()
+        .map(|a| a.name.clone())
+        .collect();
+    let email = crate::claude_accounts::email_of(&entry);
+    let same = cfg.harness_registry().into_iter().find(|other| {
+        other.id != id
+            && email.is_some()
+            && crate::claude_accounts::email_of(other)
+                .is_some_and(|e| Some(e.to_lowercase()) == email.as_ref().map(|m| m.to_lowercase()))
+    });
+    let how = crate::hints::act(
+        &app.keymap,
+        crate::keymap::Action::ContinueOn,
+        "continue on",
+    )
+    .map_or_else(
+        || "Continue on (right-click a session)".to_string(),
+        |h| format!("Continue on ({})", h.key),
+    );
+    let stranded = crate::claude_accounts::stranded_note(
+        &names,
+        &how,
+        same.as_ref().map(|s| s.display_label()),
+    );
+    let sessions = if stranded.is_empty() {
+        "Its sessions stop resuming until it is added back.".to_string()
+    } else {
+        stranded
+    };
     app.remember_settings_row(crate::config::agents_tab(), index);
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Remove account".into(),
         message: format!(
-            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. \
-             {dir} — its login,\nsettings and transcripts — stays on disk, listed under Saved \
-             on this machine\nto add back or trash later, unless it goes to the Trash now.",
+            "Remove {} ({id}) from orion?\n{sessions}\n{dir} — its login, settings and \
+             transcripts — stays on disk, listed under Saved on this machine\nto add back or \
+             trash later, unless it goes to the Trash now.",
             entry.display_label()
         ),
         action: PendingAction::RemoveClaudeAccount { id },
@@ -8364,6 +8395,22 @@ fn add_claude_account(app: &mut App, new: crate::claude_accounts::NewAccount, sh
 /// Remove account `id` — its config dir to the Trash when `trash` says
 /// so — and land back on the section.
 fn remove_claude_account(app: &mut App, id: &str, trash: bool) {
+    // The Trash would take the transcripts of the sessions still on it.
+    let left = crate::claude_accounts::sessions_on(&app.tree.agents, id).len();
+    if trash && left > 0 {
+        open_claude_accounts(app, Some(id));
+        let sessions = match left {
+            1 => "1 session still runs".to_string(),
+            n => format!("{n} sessions still run"),
+        };
+        return settings_note(
+            app,
+            Err(format!(
+                "kept {id}: {sessions} on it, transcripts in its dir — \
+                 continue them on another account first, or remove it without the Trash"
+            )),
+        );
+    }
     let result = crate::claude_accounts::remove(id, trash);
     open_claude_accounts(app, None);
     crate::claude_accounts::request_refresh(app, true);
