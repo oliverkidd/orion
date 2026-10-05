@@ -1838,6 +1838,7 @@ pub fn target_for(app: &App, project: &ProjectId, new_worktree: bool) -> QuickTa
         None => QuickTarget::NewWorktree {
             project: project.clone(),
             branch: crate::branch_name::random_name(&app.project_branches(project)),
+            existing: false,
         },
     }
 }
@@ -1917,7 +1918,11 @@ pub fn fresh_worktree(
         (None, Some(linear)) => linear.branch(&taken),
         (None, None) => crate::branch_name::random_name(&taken),
     };
-    QuickTarget::NewWorktree { project, branch }
+    QuickTarget::NewWorktree {
+        project,
+        branch,
+        existing: false,
+    }
 }
 
 /// Where `launch` lands with its NEW WORKTREE toggle flipped: a fresh

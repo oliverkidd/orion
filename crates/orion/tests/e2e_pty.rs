@@ -485,6 +485,7 @@ async fn full_crud_attach_and_restart_persistence() {
             project: project_id.clone(),
             branch: "feature-x".into(),
             base: None,
+            existing: false,
         },
     )
     .await
@@ -1196,6 +1197,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
             project: main_worktree.project_id.clone(),
             branch: "feat".into(),
             base: None,
+            existing: false,
         },
     )
     .await

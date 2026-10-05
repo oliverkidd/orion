@@ -1083,6 +1083,24 @@ pub(crate) fn open_for(app: &mut App, worktree: &WorktreeId) {
     app.dirty = true;
 }
 
+/// Bring `worktree`'s branch listing up to date without opening the
+/// modal — the QUICK PROMPT's WORKTREE PICKER lists the root's branches
+/// from [`Shared::lists`]: a fresh listing off the loop, and a background
+/// fetch when the last is a minute old, which lists again when it lands.
+pub(crate) fn warm(app: &mut App, worktree: &WorktreeId) {
+    let Some(root) = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| &w.id == worktree)
+        .map(|w| w.path.clone())
+    else {
+        return;
+    };
+    request_list(app, worktree.clone(), root.clone());
+    request_fetch(app, worktree.clone(), root, false);
+}
+
 /// List the branches and count the changes, off the loop (inline in the
 /// unit tests). One request per checkout at a time; asking again while one
 /// runs lists once more when it lands. A checkout that isn't on disk is
@@ -1191,10 +1209,17 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
         }
         Answer::Fetched { worktree, ok } => {
             app.branch_switch.fetching.remove(&worktree);
-            let root = view_for(app, &worktree).map(|view| {
+            if let Some(view) = view_for(app, &worktree) {
                 view.fetch_failed = !ok;
-                view.root.clone()
-            });
+            }
+            // Listed again whoever asked for the fetch — the modal, or the
+            // WORKTREE PICKER (`warm`), which has no view to hold the root.
+            let root = app
+                .tree
+                .worktrees
+                .iter()
+                .find(|w| w.id == worktree)
+                .map(|w| w.path.clone());
             if let (true, Some(root)) = (ok, root) {
                 request_list(app, worktree, root);
             }

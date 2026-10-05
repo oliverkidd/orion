@@ -3470,7 +3470,13 @@ fn header_fields(
             if launch.is_new_worktree() {
                 HeaderField {
                     label_style: bold(th.ok),
-                    ..field(BoxField::Worktree, "new worktree", branch, bold(th.ok), key)
+                    ..field(
+                        BoxField::Worktree,
+                        launch.new_worktree_label(),
+                        branch,
+                        bold(th.ok),
+                        key,
+                    )
                 }
             } else {
                 field(BoxField::Worktree, "worktree", branch, bold(th.text), key)
@@ -5428,6 +5434,7 @@ mod tests {
         launch.target = crate::quick_prompt::QuickTarget::NewWorktree {
             project: orion_core::ProjectId("p".into()),
             branch: "yellow-fox-jumps".into(),
+            existing: false,
         };
         let head = header(&app, &launch, 200);
         let rows = rows_of(&head);

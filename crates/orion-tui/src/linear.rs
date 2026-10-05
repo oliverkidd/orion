@@ -1135,6 +1135,7 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
         .unwrap_or_else(|| QuickTarget::NewWorktree {
             project,
             branch: batch.branch(&taken),
+            existing: false,
         });
     Some(QuickLaunch::from_config(target, &cfg).with_linear(Some(batch)))
 }

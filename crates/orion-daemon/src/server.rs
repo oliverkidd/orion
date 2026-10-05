@@ -309,6 +309,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     project,
                     branch,
                     base,
+                    existing,
                 } => {
                     // A create fetches `origin` and then runs the WORKTREE
                     // HOOK, each bounded by a 30 s timeout; off the request
@@ -321,7 +322,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             &out_tx,
                             req_id,
                             daemon
-                                .create_worktree(&project, &branch, base.as_deref())
+                                .create_worktree(&project, &branch, base.as_deref(), existing)
                                 .await
                                 .map(Some),
                         )

@@ -764,6 +764,7 @@ impl Daemon {
         project_id: &ProjectId,
         branch: &str,
         base: Option<&str>,
+        existing: bool,
     ) -> Result<EntityId> {
         if branch.trim().is_empty() {
             bail!("branch name is empty");
@@ -773,6 +774,29 @@ impl Daemon {
             .store
             .get_project(project_id)?
             .context("project not found")?;
+        // A branch that already exists — the WORKTREE PICKER's branch rows,
+        // a teammate's work — is checked out rather than cut: its own
+        // commits, its own upstream (`git::add_branch_worktree`). One
+        // checkout per branch, as git keeps it, so a project's row already
+        // on it is the answer.
+        if existing {
+            let local = git::local_branch_name(branch.trim());
+            let (_, worktrees, _, _) = self.store.load_tree()?;
+            if let Some(w) = worktrees
+                .into_iter()
+                .find(|w| &w.project_id == project_id && w.branch == local)
+            {
+                return Ok(EntityId::Worktree(w.id));
+            }
+            let (path, local) = git::add_branch_worktree(&project.repo_path, branch).await?;
+            let worktree = self.register_worktree(project_id, path, &local)?;
+            self.link_env_files(&project.repo_path, &worktree.path)
+                .await;
+            self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
+                .await;
+            drop(ops);
+            return Ok(EntityId::Worktree(worktree.id));
+        }
         // A base the caller named (`orion worktree --base`) is resolved
         // against the fetched origin — `main` means `origin/main`, never
         // this checkout's local branch; every other new WORKTREE — `n` in
@@ -1653,7 +1677,7 @@ impl Daemon {
             Some(w) => w,
             None => {
                 let created = self
-                    .create_worktree(&current.project_id, branch, base)
+                    .create_worktree(&current.project_id, branch, base, false)
                     .await?;
                 let EntityId::Worktree(new_id) = created else {
                     bail!("worktree creation returned a non-worktree entity");
@@ -6513,7 +6537,7 @@ mod tests {
         let mut events = daemon.events.subscribe();
 
         let created = daemon
-            .create_worktree(&project.id, "feat", None)
+            .create_worktree(&project.id, "feat", None, false)
             .await
             .unwrap();
         let EntityId::Worktree(id) = created else {
@@ -6548,7 +6572,7 @@ mod tests {
         let project = project_at(&daemon, &repo);
 
         let created = daemon
-            .create_worktree(&project.id, "feat", None)
+            .create_worktree(&project.id, "feat", None, false)
             .await
             .unwrap();
         let EntityId::Worktree(id) = created else {
@@ -6558,6 +6582,42 @@ mod tests {
         let linked = worktree.path.join(".env");
         assert_eq!(std::fs::read_link(&linked).unwrap(), repo.join(".env"));
         assert_eq!(std::fs::read_to_string(linked).unwrap(), "TOKEN=1\n");
+    }
+
+    /// An existing branch is checked out under its local name, and asking
+    /// for it again — either spelling — is the row already on it, not a
+    /// second checkout git would refuse.
+    #[tokio::test]
+    async fn create_worktree_of_an_existing_branch_reuses_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = init_repo(&root);
+        git_in(&repo, &["branch", "teammate"]);
+        let daemon = test_daemon();
+        let project = project_at(&daemon, &repo);
+
+        let created = daemon
+            .create_worktree(&project.id, "teammate", None, true)
+            .await
+            .unwrap();
+        let EntityId::Worktree(id) = &created else {
+            panic!("a worktree id: {created:?}");
+        };
+        let worktree = daemon.store.get_worktree(id).unwrap().unwrap();
+        assert_eq!(worktree.branch, "teammate");
+        assert_eq!(worktree.path, root.join("repo-worktrees").join("teammate"));
+
+        let again = daemon
+            .create_worktree(&project.id, "origin/teammate", None, true)
+            .await
+            .unwrap();
+        assert_eq!(again, created);
+
+        let err = daemon
+            .create_worktree(&project.id, "nowhere", None, true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no branch nowhere"), "{err}");
     }
 
     /// The delete hook runs after the checkout is gone and the row is
@@ -6663,7 +6723,7 @@ mod tests {
         // Let the delete get into its hook, then ask for the same path back.
         tokio::time::sleep(Duration::from_millis(150)).await;
         daemon
-            .create_worktree(&project.id, "feat", None)
+            .create_worktree(&project.id, "feat", None, false)
             .await
             .unwrap();
         deleting.await.unwrap().unwrap();

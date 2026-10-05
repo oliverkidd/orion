@@ -39,6 +39,7 @@ fn filtered_menu(title: &str, items: Vec<MenuItem>) -> Overlay {
         filter: Some(MenuFilter {
             query: String::new(),
             all: items.clone(),
+            limit: None,
         }),
         items,
         at: None,

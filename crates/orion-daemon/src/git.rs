@@ -221,9 +221,14 @@ pub async fn add_worktree(repo: &Path, branch: &str, base: Option<&str>) -> Resu
 /// new work, not a copy of main, and a branch tracking `origin/main`
 /// aims its first `git push` at main (`push.default=simple` refuses it,
 /// `upstream` sends it). Falls back to HEAD when there is no `origin` or
-/// the fetch fails (offline).
+/// the fetch fails (offline). A name origin already has as a branch — and
+/// nothing local does — is that branch checked out, tracking it
+/// (`remote_only_branch`), never a fresh one cut over it.
 pub async fn add_worktree_off_default(repo: &Path, branch: &str) -> Result<PathBuf> {
     let base = default_base(repo).await;
+    if let Some(remote) = remote_only_branch(repo, branch).await {
+        return add_worktree_inner(repo, branch, Some(&remote), true).await;
+    }
     add_worktree_inner(repo, branch, base.as_deref(), false).await
 }
 
@@ -258,12 +263,17 @@ pub async fn add_worktree_off_ref(repo: &Path, branch: &str, base: &str) -> Resu
 /// every project, so a repo with no branch of that name at all does not
 /// fail the `n`: it falls back to the fetched `origin/HEAD` exactly as if
 /// the setting were empty, and the daemon log says which repo ignored it.
+/// A name origin already has is checked out, as `add_worktree_off_default`
+/// does.
 pub async fn add_worktree_off_configured(
     repo: &Path,
     branch: &str,
     configured: &str,
 ) -> Result<PathBuf> {
     let fetched = fetch_origin_if_any(repo).await;
+    if let Some(remote) = remote_only_branch(repo, branch).await {
+        return add_worktree_inner(repo, branch, Some(&remote), true).await;
+    }
     if let Some(remote) = origin_branch(repo, configured).await {
         return add_worktree_inner(repo, branch, Some(&remote), false).await;
     }
@@ -555,6 +565,64 @@ async fn track_pr_ref(repo: &Path, branch: &str, pr_ref: &str) {
             return;
         }
     }
+}
+
+/// The local branch name a picked branch lands on: `origin/feat-x` →
+/// `feat-x`, anything else as named.
+pub fn local_branch_name(name: &str) -> &str {
+    name.strip_prefix("origin/").unwrap_or(name)
+}
+
+/// Check a branch that already exists — a teammate's, local or only on
+/// `origin` — out into a new worktree in the WORKTREE DIR layout, as the
+/// WORKTREE PICKER's branch rows ask. `name` is `feat-x` or
+/// `origin/feat-x`; the checkout is on the local branch `feat-x` either
+/// way, which is what the path and the returned name say.
+///
+/// `origin` is fetched first, so a branch pushed a minute ago is found. A
+/// local branch is checked out as it is and fast-forwarded to origin's copy
+/// when it is only behind (a branch with commits of its own stays where it
+/// is, as `add_pr_worktree` leaves a kept one); a branch only origin has
+/// becomes a local one tracking it, so a pull or push in the checkout talks
+/// to the teammate's branch. A name neither has is an error — never a new
+/// branch cut under it.
+pub async fn add_branch_worktree(repo: &Path, name: &str) -> Result<(PathBuf, String)> {
+    let local = local_branch_name(name.trim());
+    if local.is_empty() {
+        bail!("branch name is empty");
+    }
+    fetch_origin_if_any(repo).await;
+    let remote = origin_branch(repo, local).await;
+    let path = if local_branch(repo, local).await {
+        let path = add_worktree(repo, local, None).await?;
+        if let Some(remote) = remote.as_deref() {
+            if let Err(error) = git(&path, &["merge", "--ff-only", "--quiet", remote]).await {
+                tracing::info!(
+                    branch = local,
+                    error = %error,
+                    "an existing branch was not fast-forwarded to origin's copy"
+                );
+            }
+        }
+        path
+    } else if let Some(remote) = remote {
+        add_worktree_inner(repo, local, Some(&remote), true).await?
+    } else {
+        bail!("no branch {local} here or on origin");
+    };
+    Ok((path, local.to_string()))
+}
+
+/// `origin/<branch>` when `branch` is someone's work rather than a new
+/// name: origin has it and no local branch shadows it. A new worktree
+/// named after it must check that branch out — cutting a fresh branch of
+/// the same name off main would hide every commit on it. Asked after the
+/// fetch, so a branch just pushed counts.
+async fn remote_only_branch(repo: &Path, branch: &str) -> Option<String> {
+    if local_branch(repo, branch).await {
+        return None;
+    }
+    origin_branch(repo, branch).await
 }
 
 /// One git config value for `repo`, resolved the way git resolves it —
@@ -875,6 +943,127 @@ mod tests {
         git(repo, &["push", "origin", "feat-x"]).await.unwrap();
         git(repo, &["branch", "-D", "feat-x"]).await.unwrap();
         origin
+    }
+
+    /// A teammate pushes a commit to `branch` on origin; nothing of it is
+    /// left locally but the remote-tracking ref. Returns the pushed tip.
+    async fn push_teammate_commit(repo: &Path, branch: &str) -> String {
+        git(repo, &["checkout", "-q", "-b", "teammate", "main"])
+            .await
+            .unwrap();
+        git(repo, &["commit", "--allow-empty", "-m", "teammate work"])
+            .await
+            .unwrap();
+        let refspec = format!("teammate:{branch}");
+        git(repo, &["push", "-q", "origin", &refspec])
+            .await
+            .unwrap();
+        let tip = git(repo, &["rev-parse", "HEAD"]).await.unwrap();
+        git(repo, &["checkout", "-q", "main"]).await.unwrap();
+        git(repo, &["branch", "-D", "teammate"]).await.unwrap();
+        tip.trim().to_string()
+    }
+
+    async fn upstream_of(wt: &Path, branch: &str) -> String {
+        let at = format!("{branch}@{{upstream}}");
+        git(wt, &["rev-parse", "--abbrev-ref", &at])
+            .await
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    async fn head_of(wt: &Path) -> String {
+        git(wt, &["rev-parse", "HEAD"])
+            .await
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// A branch only origin has — a teammate's — comes up as a local
+    /// branch of that name on their commits, tracking theirs, however the
+    /// picker spelled it.
+    #[tokio::test]
+    async fn add_branch_worktree_checks_out_a_branch_only_origin_has() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo).await;
+        add_bare_origin(&repo, tmp.path()).await;
+        let tip = push_teammate_commit(&repo, "feat-x").await;
+
+        let (wt, local) = add_branch_worktree(&repo, "origin/feat-x").await.unwrap();
+        assert_eq!(local, "feat-x");
+        assert_eq!(wt, worktree_dir(&repo, "feat-x"));
+        assert_eq!(head_of(&wt).await, tip);
+        assert_eq!(upstream_of(&wt, "feat-x").await, "origin/feat-x");
+    }
+
+    /// A local branch is checked out as it is: brought up to origin's
+    /// copy when it is only behind, left alone when it has commits of its
+    /// own.
+    #[tokio::test]
+    async fn add_branch_worktree_fast_forwards_only_a_branch_that_is_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo).await;
+        add_bare_origin(&repo, tmp.path()).await;
+        git(&repo, &["branch", "behind", "main"]).await.unwrap();
+        git(&repo, &["branch", "ahead", "main"]).await.unwrap();
+        let behind_tip = push_teammate_commit(&repo, "behind").await;
+        push_teammate_commit(&repo, "ahead").await;
+        git(&repo, &["checkout", "-q", "ahead"]).await.unwrap();
+        git(&repo, &["commit", "--allow-empty", "-m", "mine"])
+            .await
+            .unwrap();
+        let mine = head_of(&repo).await;
+        git(&repo, &["checkout", "-q", "main"]).await.unwrap();
+
+        let (wt, _) = add_branch_worktree(&repo, "behind").await.unwrap();
+        assert_eq!(head_of(&wt).await, behind_tip, "fast-forwarded");
+        let (wt, _) = add_branch_worktree(&repo, "ahead").await.unwrap();
+        assert_eq!(head_of(&wt).await, mine, "its own commit kept");
+    }
+
+    /// A name neither the checkout nor origin has is refused — never cut
+    /// as a new branch — and leaves nothing on disk.
+    #[tokio::test]
+    async fn add_branch_worktree_refuses_a_branch_nobody_has() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo).await;
+        add_bare_origin(&repo, tmp.path()).await;
+
+        let err = add_branch_worktree(&repo, "nowhere").await.unwrap_err();
+        assert!(err.to_string().contains("no branch nowhere"), "{err}");
+        assert!(!worktree_dir(&repo, "nowhere").exists());
+        assert!(!local_branch(&repo, "nowhere").await);
+    }
+
+    /// A new worktree named after a branch only origin has is that branch,
+    /// not a fresh one of the same name cut off main that hides the
+    /// teammate's commits.
+    #[tokio::test]
+    async fn a_new_worktree_named_after_a_remote_branch_checks_it_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo).await;
+        add_bare_origin(&repo, tmp.path()).await;
+        let tip = push_teammate_commit(&repo, "feat-x").await;
+
+        let wt = add_worktree_off_default(&repo, "feat-x").await.unwrap();
+        assert_eq!(head_of(&wt).await, tip);
+        assert_eq!(upstream_of(&wt, "feat-x").await, "origin/feat-x");
+
+        // A name origin lacks is still new work off main, tracking nothing.
+        let wt = add_worktree_off_default(&repo, "fresh").await.unwrap();
+        let main = git(&repo, &["rev-parse", "origin/main"]).await.unwrap();
+        assert_eq!(head_of(&wt).await, main.trim());
+        assert!(config_get(&repo, "branch.fresh.merge").await.is_none());
     }
 
     /// A same-repo PR: the branch comes from `origin` and the new checkout
