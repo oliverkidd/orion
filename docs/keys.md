@@ -72,7 +72,7 @@ reload (`⌘⇧,`), which orion asks the Ghostty it runs in for whenever it chan
 | New agent | `⌘N` | `^N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
 | Select model | `⌘/` | `^/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | `^Y` | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Agents tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
-| Select worktree | `⌘.` | `^T` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree** |
+| Select worktree | `⌘.` | `^T` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree**, or any branch with no checkout yet — a teammate's included |
 | Jump to… | `⌘K` | `^K` | fuzzy jump across every project, worktree, session and open pull request (below); its last row opens a folder as a project |
 | Go to file | `⌘P` | `^P` | the FILE FINDER for the selected worktree |
 | Find in files | `⌘⇧F` | `^⇧F`, `⇧F` | `git grep` into the same modal (`^⇧F` needs the kitty protocol, so `⇧F` is bound for every other terminal) |
@@ -465,7 +465,7 @@ sends is the dim line along the bottom of the frame.
 | `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
 | `⌘U` (`^X`) | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
-| `⌘.` (`^T`) | the WORKTREE PICKER: **+ new worktree** first, then every checkout of the project |
+| `⌘.` (`^T`) | the WORKTREE PICKER: **+ new worktree** first, then every checkout of the project, then every branch with no checkout yet (`⎇`) — local ones, then origin's — narrowed as you type; picking one launches in a new worktree on that branch |
 | `⌘/` (`^/`) | the harness's model list |
 | `⌘Y` (`^Y`) | step the effort, the header showing the step at once — `⇧⌘/` too, where macOS lets it through |
 | `@` | list the checkout's files under the caret, narrowed by what follows the `@`: `↑`/`↓` move, `Tab` or `Enter` writes `@path/to/file` in, `Esc` puts the list away for that `@` |
@@ -479,6 +479,16 @@ A new worktree's branch is your sentence slugified (`fix login redirect` → `fi
 or a random `<adj>-<noun>-<verb>` when empty, started at the freshly fetched `origin/HEAD` — or
 the **Worktree base branch** setting. The project's ignored `.env` files are linked into it from
 the main checkout (**Link .env files**, Settings → General).
+
+A `⎇` row checks out a branch that already exists instead — someone else's work, or yours from
+before. The header reads `checkout <branch>`. `Enter` fetches origin first, so a branch pushed a
+minute ago is found. A local branch is checked out as it is, fast-forwarded to origin's copy when it
+is only behind. A branch only origin has becomes a local branch tracking it, so `p` and `⇧P` talk to
+it. The list comes from the BRANCH SWITCHER's last listing of the project's root. Opening the picker
+lists the branches again and, at most once a minute, fetches every remote in the background. Each
+answer that lands while the picker is up rebuilds it, keeping what you typed. Only the first dozen
+branches show at once; type to reach the rest. A **New worktree** you type the exact name of a
+branch only origin has into is that branch, too, never a fresh one cut over it.
 
 ## Menus and lists
 

@@ -44,7 +44,15 @@ pub enum QuickTarget {
     /// Enter cuts `branch` off the PROJECT's fetched default base first
     /// (`ClientRequest::CreateWorktree`), and the launch follows into the
     /// checkout the DAEMON made once its Ack lands.
-    NewWorktree { project: ProjectId, branch: String },
+    ///
+    /// `existing` is a branch that is already there — a WORKTREE PICKER
+    /// branch row, local or only on `origin` — checked out as it is
+    /// rather than cut fresh (`CreateWorktree::existing`).
+    NewWorktree {
+        project: ProjectId,
+        branch: String,
+        existing: bool,
+    },
 }
 
 /// Everything one QUICK PROMPT will launch with. Resolved from the config
@@ -553,7 +561,7 @@ impl QuickLaunch {
             head.push(preset.name.clone());
         }
         if let QuickTarget::NewWorktree { branch, .. } = &self.target {
-            head.push(format!("new worktree {branch}"));
+            head.push(format!("{} {branch}", self.new_worktree_label()));
         }
         format!("{} ({})", head.join(" · "), opts.join(" · "))
     }
@@ -618,6 +626,16 @@ impl QuickLaunch {
     pub fn is_new_worktree(&self) -> bool {
         matches!(self.target, QuickTarget::NewWorktree { .. })
     }
+
+    /// What the header calls the fresh worktree this launch makes: a
+    /// `checkout` of a branch that already exists, or a `new worktree` cut
+    /// for the launch.
+    pub fn new_worktree_label(&self) -> &'static str {
+        match self.target {
+            QuickTarget::NewWorktree { existing: true, .. } => "checkout",
+            _ => "new worktree",
+        }
+    }
 }
 
 /// The hotkey: open the task box for the selected WORKTREE. Unlike the
@@ -658,7 +676,14 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
             return;
         };
         let branch = crate::branch_name::random_name(&app.project_branches(&project));
-        open_for(app, QuickTarget::NewWorktree { project, branch });
+        open_for(
+            app,
+            QuickTarget::NewWorktree {
+                project,
+                branch,
+                existing: false,
+            },
+        );
         return;
     }
     let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) else {
@@ -861,6 +886,7 @@ mod tests {
         QuickTarget::NewWorktree {
             project: ProjectId::from("p-1".to_string()),
             branch: branch.into(),
+            existing: false,
         }
     }
 

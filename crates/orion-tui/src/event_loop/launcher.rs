@@ -1768,6 +1768,7 @@ pub(super) fn open_project_menu(app: &mut App) {
         filter: Some(MenuFilter {
             query: String::new(),
             all: items.clone(),
+            limit: None,
         }),
         items,
         at,
@@ -2578,18 +2579,87 @@ pub(super) fn open_effort_picker(app: &mut App, back: QuickReturn) {
 /// named, the one already minted when the box is aimed at one — then the
 /// project's checkouts, the ROOT WORKTREE first and the rest most recently
 /// worked in first, as the WORKTREES PANEL lists them. Never a stand-in git
-/// is still cutting, nor a root the project hides. The row the box is
-/// aimed at wears the ✓ and starts highlighted; letters narrow the list.
+/// is still cutting, nor a root the project hides. Then every branch with
+/// no checkout — local ones, then origin's — each a fresh worktree that
+/// checks that branch out ([`branch_rows`]). The row the box is aimed at
+/// wears the ✓ and starts highlighted; letters narrow the list.
 ///
 /// Every row carries the box back, so Esc and a click outside hand it
 /// back as it was (`menu_quick_return`), and a pick hands it back aimed
 /// at the row ([`pick_launch_worktree`]). A PR SESSION has nothing to
 /// pick: the DAEMON runs it in the pull request's own checkout.
+///
+/// The branches come from the BRANCH SWITCHER's cache of the project's
+/// root, painted at once; opening asks git for a fresh listing and a
+/// background fetch (at most once a minute), and each answer that lands
+/// while the picker is up rebuilds it ([`refresh_worktree_picker`]).
 pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
-    use std::cmp::Reverse;
     if back.launch.pr.is_some() {
         return;
     }
+    let Some(project) = view::project_of(app, &back.launch.target) else {
+        return;
+    };
+    if let Some(root) = app.root_worktree(&project) {
+        crate::branch_switch::warm(app, &root);
+    }
+    show_worktree_picker(app, back, None);
+}
+
+/// What a rebuilt WORKTREE PICKER keeps of the one it replaces: the typed
+/// query, the highlighted row's label, and the fresh worktree's minted
+/// branch, so a listing landing never renames the `+ new worktree` row.
+struct PickerKeep {
+    query: String,
+    hovered: Option<String>,
+    fresh: Option<QuickTarget>,
+}
+
+/// A BRANCH SWITCHER listing landed: an open WORKTREE PICKER takes the
+/// fresh branches in place — what is typed still typed, the highlighted
+/// row still highlighted when it is still there.
+pub(crate) fn refresh_worktree_picker(app: &mut App) {
+    let Some(Overlay::Menu(menu)) = &app.overlay else {
+        return;
+    };
+    if !menu.is_launch_worktree_picker() {
+        return;
+    }
+    let Some(back) = menu.items.iter().find_map(|i| match &i.action {
+        MenuAction::PickLaunchWorktree { back, .. } => Some((**back).clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let keep = PickerKeep {
+        query: menu.filter_query().to_string(),
+        hovered: menu.items.get(menu.hover).map(|i| i.label.clone()),
+        fresh: menu
+            .filter
+            .iter()
+            .flat_map(|f| &f.all)
+            .find_map(|i| match &i.action {
+                MenuAction::PickLaunchWorktree {
+                    target:
+                        target @ QuickTarget::NewWorktree {
+                            existing: false, ..
+                        },
+                    ..
+                } => Some(target.clone()),
+                _ => None,
+            }),
+    };
+    show_worktree_picker(app, back, Some(keep));
+}
+
+/// How many rows the WORKTREE PICKER shows past its checkouts: the menu
+/// does not scroll, so the rest of a long branch list is found by typing.
+const PICKER_BRANCH_ROWS: usize = 12;
+
+/// Put the WORKTREE PICKER up for `back`, keeping what `keep` says of
+/// the one it replaces.
+fn show_worktree_picker(app: &mut App, back: QuickReturn, keep: Option<PickerKeep>) {
+    use std::cmp::Reverse;
     let Some(project) = view::project_of(app, &back.launch.target) else {
         return;
     };
@@ -2609,7 +2679,6 @@ pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
         )
     });
 
-    let tick = |on: bool| if on { " ✓" } else { "" };
     let row = |label: String, target: QuickTarget| {
         MenuItem::new(
             label,
@@ -2619,9 +2688,18 @@ pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
             },
         )
     };
-    let fresh = match &back.launch.target {
-        QuickTarget::NewWorktree { .. } => back.launch.target.clone(),
-        QuickTarget::Worktree(_) => view::fresh_worktree(app, project.clone(), &back.launch),
+    let fresh = match (
+        &back.launch.target,
+        keep.as_ref().and_then(|k| k.fresh.clone()),
+    ) {
+        (
+            QuickTarget::NewWorktree {
+                existing: false, ..
+            },
+            _,
+        ) => back.launch.target.clone(),
+        (_, Some(kept)) => kept,
+        _ => view::fresh_worktree(app, project.clone(), &back.launch),
     };
     let QuickTarget::NewWorktree { branch, .. } = &fresh else {
         unreachable!("fresh_worktree mints a new worktree")
@@ -2629,11 +2707,11 @@ pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
     let mut items = vec![row(
         format!(
             "+ new worktree  {branch}{}",
-            tick(back.launch.is_new_worktree())
+            tick(back.launch.target == fresh)
         ),
         fresh.clone(),
     )];
-    for w in checkouts {
+    for w in &checkouts {
         let aimed = back.launch.target == QuickTarget::Worktree(w.id.clone());
         let root = if w.is_main { "  (root)" } else { "" };
         items.push(row(
@@ -2641,22 +2719,79 @@ pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
             QuickTarget::Worktree(w.id.clone()),
         ));
     }
-    let hover = items
-        .iter()
-        .position(|i| i.label.ends_with(" ✓"))
-        .unwrap_or(0);
-    app.overlay = Some(Overlay::Menu(crate::app::ContextMenu {
+    let fixed = items.len();
+    for (label, target) in branch_rows(app, &project, &back.launch.target) {
+        items.push(row(label, target));
+    }
+    let mut menu = crate::app::ContextMenu {
         title: Some("Worktree".into()),
-        items: items.clone(),
+        items: Vec::new(),
         at: None,
-        hover,
+        hover: 0,
         area: ratatui::layout::Rect::default(),
         parent: None,
         filter: Some(crate::app::MenuFilter {
             query: String::new(),
             all: items,
+            limit: Some(fixed + PICKER_BRANCH_ROWS),
         }),
-    }));
+    };
+    let (query, hovered) = keep.map_or_default(|k| (k.query, k.hovered));
+    // A query the new rows no longer match falls back to the full list.
+    if !menu.set_filter(&query) {
+        menu.set_filter("");
+    }
+    if let Some(at) = hovered.and_then(|label| menu.items.iter().position(|i| i.label == label)) {
+        menu.hover = at;
+    }
+    app.overlay = Some(Overlay::Menu(menu));
+}
+
+/// The ✓ on the row the box is aimed at.
+fn tick(on: bool) -> &'static str {
+    if on {
+        " ✓"
+    } else {
+        ""
+    }
+}
+
+/// The WORKTREE PICKER's branch rows: every branch of `project` with no
+/// checkout yet — local branches, then the ones only `origin` has, newest
+/// commit first, as the BRANCH SWITCHER lists them — each a fresh worktree
+/// that checks that branch out (`QuickTarget::NewWorktree { existing }`).
+/// A branch a checkout is on is already listed as that checkout, so it is
+/// left out, and so is a branch on a remote other than `origin`, which the
+/// DAEMON fetches nothing from.
+fn branch_rows(app: &App, project: &ProjectId, aimed: &QuickTarget) -> Vec<(String, QuickTarget)> {
+    let Some(branches) = app
+        .root_worktree(project)
+        .and_then(|root| app.branch_switch.lists.get(&root))
+    else {
+        return Vec::new();
+    };
+    let held: std::collections::HashSet<&str> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == project)
+        .map(|w| w.branch.as_str())
+        .collect();
+    branches
+        .iter()
+        .filter(|b| !b.current && b.checked_out_at.is_none())
+        .filter(|b| !b.remote || b.name.starts_with("origin/"))
+        .filter(|b| !held.contains(b.local_name()))
+        .map(|b| {
+            let target = QuickTarget::NewWorktree {
+                project: project.clone(),
+                branch: b.local_name().to_string(),
+                existing: true,
+            };
+            let label = format!("⎇ {}{}", b.name, tick(*aimed == target));
+            (label, target)
+        })
+        .collect()
 }
 
 /// A row of the WORKTREE PICKER: the box back, aimed at `target`, with the

@@ -503,6 +503,10 @@ pub struct ContextMenu {
 pub struct MenuFilter {
     pub query: String,
     pub all: Vec<MenuItem>,
+    /// The most rows shown at once, for a list that can run to hundreds —
+    /// the WORKTREE PICKER's branches. The menu does not scroll, so the
+    /// rows past it are reached by typing. None shows every match.
+    pub limit: Option<usize>,
 }
 
 impl ContextMenu {
@@ -519,7 +523,11 @@ impl ContextMenu {
         if ranked.is_empty() {
             return false;
         }
-        let items: Vec<MenuItem> = ranked.iter().map(|(i, _)| filter.all[*i].clone()).collect();
+        let items: Vec<MenuItem> = ranked
+            .iter()
+            .take(filter.limit.unwrap_or(usize::MAX))
+            .map(|(i, _)| filter.all[*i].clone())
+            .collect();
         self.hover = if query.trim().is_empty() {
             items
                 .iter()

@@ -1046,6 +1046,7 @@ pub(crate) fn toggle_new_worktree(app: &mut App) {
                 QuickTarget::NewWorktree {
                     project: w.project_id.clone(),
                     branch: crate::branch_name::random_name(&taken),
+                    existing: false,
                 }
             }),
     };

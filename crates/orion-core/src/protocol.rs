@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 46;
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -95,6 +95,11 @@ pub enum ClientRequest {
         project: ProjectId,
         branch: String,
         base: Option<String>,
+        /// Check `branch` out as it already exists — local, or only on
+        /// `origin` (`origin/feat` or `feat`) — instead of cutting a new
+        /// branch of that name; `base` is ignored. A row already on the
+        /// branch is the answer.
+        existing: bool,
     },
     DeleteWorktree {
         req_id: u64,

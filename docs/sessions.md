@@ -329,7 +329,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   starts over there and nothing on screen moves — no tab is added, none is lit. The header lights
   the project when the box is aimed away, and the footer names it once Enter lands.
   `⌘.` drops the WORKTREE PICKER down from the branch the box names — **+ new worktree** first,
-  then every checkout the project has, the one the box is aimed at ticked — and picks where this
+  then every checkout the project has, the one the box is aimed at ticked, then every branch with
+  no checkout yet, local and on origin (`⎇`, a teammate's branch among them: picking one runs the
+  launch in a new worktree that checks that branch out) — and picks where this
   one launch runs, never switching a checkout's branch; a fresh worktree is that first row, the
   box's own toggle for it gone. `⌘/` opens the harness's model list straight away (`→` on a model
   reaches its efforts), `⌘Y` steps the effort in place — `default`, then the harness's list, round

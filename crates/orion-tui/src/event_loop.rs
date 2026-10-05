@@ -764,7 +764,11 @@ async fn main_loop(
             }
             answer = branch_rx.recv() => {
                 if let Some(answer) = answer {
+                    let listed = matches!(answer, crate::branch_switch::Answer::Listed { .. });
                     crate::branch_switch::land_answer(&mut app, answer);
+                    if listed {
+                        launcher::refresh_worktree_picker(&mut app);
+                    }
                 }
             }
             answer = sync_rx.recv() => {
@@ -6957,6 +6961,7 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
     let filter = Some(MenuFilter {
         query: String::new(),
         all: items.clone(),
+        limit: None,
     });
     Some(ContextMenu {
         title: Some(title),
@@ -8971,6 +8976,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     project,
                     branch,
                     base: None,
+                    existing: false,
                 },
             );
         }
@@ -34057,7 +34063,11 @@ diff --git a/src/c.rs b/src/c.rs
             let branch = match &app.overlay {
                 Some(Overlay::Prompt(prompt)) => match &prompt.kind {
                     PromptKind::QuickPrompt(launch) => match &launch.target {
-                        QuickTarget::NewWorktree { project, branch } => {
+                        QuickTarget::NewWorktree {
+                            project,
+                            branch,
+                            existing: false,
+                        } => {
                             assert_eq!(project, &ProjectId("p1".into()));
                             assert_eq!(
                                 prompt.title,
@@ -34113,6 +34123,7 @@ diff --git a/src/c.rs b/src/c.rs
                     project,
                     branch: b,
                     base: None,
+                    existing: false,
                 }] if project == &ProjectId("p1".into()) && b == &branch => *req_id,
                 other => panic!("one base-less CreateWorktree first: {other:?}"),
             };
@@ -35013,6 +35024,138 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
+    /// The WORKTREE PICKER lists every branch with no checkout under the
+    /// checkouts — a branch a checkout is on, and one on a remote other
+    /// than origin, left out — letters narrow to one, and picking it aims
+    /// the box at a checkout of that branch: Enter sends a
+    /// `CreateWorktree` that checks it out (`existing`), under its local
+    /// name.
+    #[test]
+    fn the_worktree_picker_checks_out_an_existing_branch() {
+        use crate::branch_switch::Branch;
+        use crate::quick_prompt::QuickTarget;
+        use orion_core::ProjectId;
+        with_config_json(r#"{"follow_new_session": true}"#, || {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            seed_feat_worktree(&mut app, "w2", "feat");
+            app.focus = Focus::Sessions;
+            let root = app.root_worktree(&ProjectId("p1".into())).unwrap();
+            let branch = |name: &str, remote: bool| Branch {
+                name: name.into(),
+                remote,
+                current: name == "main",
+                checked_out_at: None,
+                committed: 0,
+                subject: String::new(),
+            };
+            app.branch_switch.lists.insert(
+                root,
+                vec![
+                    branch("main", false),
+                    branch("feat", false),
+                    branch("their-fix", false),
+                    branch("origin/alice/billing", true),
+                    branch("upstream/elsewhere", true),
+                ],
+            );
+
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(paste_into_overlay(&mut app, "Review it"));
+            press(
+                &mut app,
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            let labels = |app: &App| match &app.overlay {
+                Some(Overlay::Menu(menu)) => menu
+                    .items
+                    .iter()
+                    .map(|i| i.label.clone())
+                    .collect::<Vec<_>>(),
+                other => panic!("expected the worktree picker, got {other:?}"),
+            };
+            let rows = labels(&app);
+            let branch_rows: Vec<&str> = rows
+                .iter()
+                .filter(|l| l.starts_with('⎇'))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                branch_rows,
+                ["⎇ their-fix", "⎇ origin/alice/billing"],
+                "{rows:?}"
+            );
+            assert!(
+                rows.iter().position(|l| l.starts_with("feat"))
+                    < rows.iter().position(|l| l.starts_with('⎇')),
+                "branches come after the checkouts: {rows:?}"
+            );
+
+            for c in "billing".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
+            assert_eq!(labels(&app)[0], "⎇ origin/alice/billing");
+
+            // A fresh listing landing (the background fetch) rebuilds the
+            // rows under what is typed, the highlighted row kept.
+            let root = app.root_worktree(&ProjectId("p1".into())).unwrap();
+            if let Some(list) = app.branch_switch.lists.get_mut(&root) {
+                list.push(branch("origin/bob/billing-fix", true));
+            }
+            launcher::refresh_worktree_picker(&mut app);
+            let rows = labels(&app);
+            assert!(
+                rows.contains(&"⎇ origin/bob/billing-fix".to_string()),
+                "{rows:?}"
+            );
+            match &app.overlay {
+                Some(Overlay::Menu(menu)) => {
+                    assert_eq!(menu.filter_query(), "billing");
+                    assert_eq!(menu.items[menu.hover].label, "⎇ origin/alice/billing");
+                }
+                other => panic!("{other:?}"),
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let (target, title) = match &app.overlay {
+                Some(Overlay::Prompt(prompt)) => match &prompt.kind {
+                    PromptKind::QuickPrompt(launch) => {
+                        (launch.target.clone(), prompt.title.clone())
+                    }
+                    other => panic!("expected the quick prompt, got {other:?}"),
+                },
+                other => panic!("expected the box, got {other:?}"),
+            };
+            assert_eq!(
+                target,
+                QuickTarget::NewWorktree {
+                    project: ProjectId("p1".into()),
+                    branch: "alice/billing".into(),
+                    existing: true,
+                }
+            );
+            assert_eq!(title, "Quick prompt · checkout alice/billing (claude)");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            match out.as_slice() {
+                [ClientRequest::CreateWorktree {
+                    branch,
+                    base: None,
+                    existing: true,
+                    ..
+                }] => assert_eq!(branch, "alice/billing"),
+                other => panic!("one checkout of the branch first: {other:?}"),
+            }
+        });
+    }
+
     /// The WORKTREE PICKER flips where the launch lands — the selected
     /// checkout or a fresh worktree, its first row — from whichever panel
     /// `p` was pressed in, keeping the text, and Enter then takes the
@@ -35055,7 +35198,11 @@ diff --git a/src/c.rs b/src/c.rs
             pick_fresh_worktree(&mut app, &mut out);
             let (target, title, text) = state(&app);
             let branch = match target {
-                QuickTarget::NewWorktree { project, branch } => {
+                QuickTarget::NewWorktree {
+                    project,
+                    branch,
+                    existing: false,
+                } => {
                     assert_eq!(project, ProjectId("p1".into()));
                     branch
                 }
@@ -35125,6 +35272,7 @@ diff --git a/src/c.rs b/src/c.rs
                     project,
                     branch: b,
                     base: None,
+                    existing: false,
                 }] if project == &ProjectId("p1".into()) && b == &branch => *req_id,
                 other => panic!("one base-less CreateWorktree first: {other:?}"),
             };

@@ -84,7 +84,11 @@ pub(super) fn submit(
             };
             create_agent(app, draft, out)
         }
-        QuickTarget::NewWorktree { project, branch } => {
+        QuickTarget::NewWorktree {
+            project,
+            branch,
+            existing,
+        } => {
             // Its tab now, if it has none, as `create_agent` does for a
             // launch into a checkout that exists: the create it rides
             // goes out seconds from now and does not count again.
@@ -108,7 +112,8 @@ pub(super) fn submit(
 
             // `base: None` is the DAEMON's `worktree_base_branch` SETTING,
             // else its fetched `origin/HEAD` (`git::add_worktree_off_default`)
-            // — never this checkout's HEAD.
+            // — never this checkout's HEAD. An `existing` branch (a WORKTREE
+            // PICKER branch row) is checked out as it is instead.
             send_with_follow(
                 app,
                 out,
@@ -124,6 +129,7 @@ pub(super) fn submit(
                     project,
                     branch,
                     base: None,
+                    existing,
                 },
             );
         }
