@@ -61,7 +61,7 @@ use crate::ui::{
 
 /// How long a push may run: a pre-push hook can run a test suite, and
 /// the person who pressed Enter is watching the form say so.
-const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// Everything else the forms send is one request — `gh pr create`, `gh pr
 /// merge`, the branch's delete — or one question git answers locally.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);

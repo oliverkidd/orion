@@ -431,8 +431,10 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   checkout's git counts, each right-aligned in its own column: uncommitted files `*3` in the diff's
   sand, lines `+120 −45` in its sage and rose, and commits ahead of and behind the base it was cut
   from, `⇡4 ⇣1`, muted (the root's base is origin's copy of its branch, so there they are what is
-  unpushed and unpulled). A band with nothing to say in a column leaves it blank; a narrow rule
-  drops the folder, then the pull request's column, then the counts', before the branch shortens.
+  unpushed and unpulled). They count against what the last fetch left — orion fetches on no timer:
+  `p` fetches and pulls the band's checkout, and `⇧P` pushes it ([Keys](keys.md#the-grid)). A band
+  with nothing to say in a column leaves it blank; a narrow rule drops the folder, then the pull
+  request's column, then the counts', before the branch shortens.
   How many cards the row had no room for sits just ahead of them (`▸ 2 more`).
   The band the keys are on opens on `❯` where the rest open on `──`, and the FOOTER says what
   Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every card

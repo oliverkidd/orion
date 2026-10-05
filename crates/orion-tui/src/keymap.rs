@@ -106,6 +106,12 @@ pub enum Action {
     /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
     /// another branch, asking what to do with uncommitted changes.
     SwitchBranch,
+    /// `p`: PULL the selected checkout — fetch, then fast-forward onto its
+    /// upstream, never a merge or a rebase (`crate::git_sync`).
+    PullWorktree,
+    /// `⇧P`: PUSH the selected checkout's branch — fast-forward its
+    /// upstream, or publish a branch that tracks nothing; never a force.
+    PushWorktree,
     /// `Shift+Enter` / `Shift+O` / `Alt+Enter`, on the grid: fire the
     /// selected worktree's OPEN COMMAND — the project's **Open command**
     /// setting, else its `.orion.json` `open` (`open http://localhost:3000`,
@@ -491,6 +497,24 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["c"],
+    },
+    ActionSpec {
+        action: Action::PullWorktree,
+        id: "pull_worktree",
+        label: "Pull from remote",
+        hint: "Fetch and fast-forward the selected checkout onto the branch it tracks; never merges, rebases or touches uncommitted work",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &["p"],
+    },
+    ActionSpec {
+        action: Action::PushWorktree,
+        id: "push_worktree",
+        label: "Push to remote",
+        hint: "Push the selected checkout's new commits to the branch it tracks, or publish a branch that tracks nothing to origin; never forces, and asks before pushing straight to the base branch",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &["shift+p"],
     },
     ActionSpec {
         action: Action::OpenWorktree,
@@ -2038,6 +2062,17 @@ mod tests {
             map.lookup(Scope::Global, &KeyChord::parse("ctrl+c").unwrap()),
             Some(Action::Quit)
         );
+    }
+
+    /// `p` PULLs the selected checkout: a bare letter, since a
+    /// fast-forward loses nothing.
+    /// `⇧P` PUSHes it: a modified chord, since a push is seen by others.
+    #[test]
+    fn p_pulls_and_shift_p_pushes() {
+        let map = Keymap::default();
+        let at = |spec: &str| map.lookup(Scope::Global, &KeyChord::parse(spec).unwrap());
+        assert_eq!(at("p"), Some(Action::PullWorktree));
+        assert_eq!(at("shift+p"), Some(Action::PushWorktree));
     }
 
     /// A stray letter must not quit, close a tab, or archive or unarchive a

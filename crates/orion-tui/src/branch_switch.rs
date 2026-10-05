@@ -65,7 +65,7 @@ const SIZE: (u16, u16) = (92, 24);
 /// How long a background fetch may run. Generous — a fetch writes packs,
 /// and one cut short starts over on the next open — but bounded, since a
 /// stalled remote would otherwise hold it forever.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// Between the SIGTERM that lets git remove its lock and temporary pack
 /// files and the SIGKILL for a fetch that lingers.
 const FETCH_GRACE: Duration = Duration::from_secs(2);
@@ -218,7 +218,7 @@ pub fn parse_refs(out: &str) -> Vec<Branch> {
 
 /// git's complaint as one line: the first `error:` or `fatal:` it printed,
 /// without the prefix, else the first thing it said at all.
-fn git_error(stderr: &str) -> String {
+pub(crate) fn git_error(stderr: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
@@ -237,7 +237,7 @@ fn git_error(stderr: &str) -> String {
 }
 
 /// Read-only `git -C root <args>`: stdout, or git's one-line complaint.
-fn read(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn read(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = git_command(root)
         .args(args)
         .stdin(Stdio::null())
@@ -268,7 +268,7 @@ fn detached(root: &Path, args: &[&str]) -> Command {
 
 /// [`detached`], run to completion: stdout on success, git's one-line
 /// complaint otherwise.
-fn run(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = detached(root, args)
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
@@ -296,25 +296,80 @@ pub fn list_branches(root: &Path) -> Result<Vec<Branch>, String> {
 /// raised (the TUI is leaving, and the runtime's shutdown waits on this
 /// thread). True when it finished.
 pub fn fetch(root: &Path, quit: &AtomicBool) -> bool {
-    let Ok(mut child) = detached(root, &["fetch", "--all", "--quiet"])
+    remote_git(root, &["fetch", "--all", "--quiet"], FETCH_TIMEOUT, quit).is_ok()
+}
+
+/// `git -C root <args>` for a call that reaches a remote — a fetch, a push
+/// — stopped past `budget` or once `quit` is raised, as [`fetch`] is:
+/// `Err` is git's one-line complaint ([`remote_error`]), or why it was
+/// stopped.
+pub(crate) fn remote_git(
+    root: &Path,
+    args: &[&str],
+    budget: Duration,
+    quit: &AtomicBool,
+) -> Result<(), String> {
+    use std::io::Read;
+    let mut child = detached(root, args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-    else {
-        return false;
-    };
-    let deadline = Instant::now() + FETCH_TIMEOUT;
-    loop {
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    // Drained on a thread of its own, so a remote that says a lot can't
+    // fill the pipe and stall git while this loop only polls.
+    let (said_tx, said_rx) = std::sync::mpsc::channel();
+    if let Some(mut pipe) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut said = String::new();
+            let _ = pipe.read_to_string(&mut said);
+            let _ = said_tx.send(said);
+        });
+    }
+    let deadline = Instant::now() + budget;
+    let ended = loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline && !quit.load(Ordering::Relaxed) => {
-                std::thread::sleep(Duration::from_millis(50))
-            }
-            _ => {
-                stop(&mut child);
-                return false;
-            }
+            Ok(Some(status)) => break Ok(status.success()),
+            Ok(None) if quit.load(Ordering::Relaxed) => break Err("cancelled"),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => break Err("timed out"),
+            Err(_) => break Err("failed"),
         }
+    };
+    if ended.is_err() {
+        stop(&mut child);
+    }
+    // Bounded: anything git left behind holding the pipe open (an `ssh`
+    // master gone to the background) must not hold the answer.
+    let said = said_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_default();
+    match ended {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(remote_error(&said)),
+        Err(why) => Err(format!("{} {why}", args.first().copied().unwrap_or("git"))),
+    }
+}
+
+/// [`git_error`], but a refused push says why rather than only that it
+/// was: git ends one with `failed to push some refs`, after the line that
+/// matters — a pre-push hook's own last word, or the `! [rejected]` row.
+fn remote_error(stderr: &str) -> String {
+    let line = git_error(stderr);
+    if !line.starts_with("failed to push") {
+        return line;
+    }
+    let why = stderr
+        .lines()
+        .map(str::trim)
+        .take_while(|l| !l.starts_with("error: "))
+        .filter(|l| !l.is_empty() && !l.starts_with("To ") && !l.starts_with("hint:"))
+        .last();
+    match why {
+        Some(why) => format!(
+            "rejected: {}",
+            why.split_whitespace().collect::<Vec<_>>().join(" ")
+        ),
+        None => line,
     }
 }
 
@@ -409,7 +464,7 @@ fn in_progress(root: &Path) -> Option<&'static str> {
 }
 
 /// The branch HEAD is on; None when it is detached.
-fn head_branch(root: &Path) -> Option<String> {
+pub(crate) fn head_branch(root: &Path) -> Option<String> {
     read(root, &["symbolic-ref", "-q", "--short", "HEAD"])
         .ok()
         .map(|s| s.trim().to_string())

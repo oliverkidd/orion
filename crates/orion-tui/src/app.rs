@@ -361,6 +361,10 @@ pub enum MenuAction {
     DeleteWorktree(WorktreeId),
     /// The ROOT WORKTREE row's menu: open the BRANCH SWITCHER on it.
     SwitchBranch(WorktreeId),
+    /// A band's **Pull**: fetch and fast-forward its checkout (`p`).
+    PullWorktree(WorktreeId),
+    /// A band's **Push**: send its branch's new commits up (`⇧P`).
+    PushWorktree(WorktreeId),
     /// Start the worktree's RUN COMMAND, or stop it while it runs (`r`).
     ToggleRun(WorktreeId),
     /// Fire the worktree's OPEN COMMAND (`Shift+Enter`).
@@ -698,6 +702,8 @@ pub enum PendingAction {
     DeleteAgent(AgentId),
     CloseTerminal(TerminalId),
     DeleteWorktree(WorktreeId),
+    /// `p` on a checkout an agent is working in: pull it anyway.
+    PullWorktree(WorktreeId),
     /// A row delete that empties a linked worktree — the last card of the
     /// band going — with the checkout's fate decided in the same dialog:
     /// `Enter`/`y` runs `first` (the row's own delete) and then deletes
@@ -785,10 +791,13 @@ pub enum PendingAction {
 
 impl PendingAction {
     /// Whether the dialog asks about losing something — the red frame
-    /// every confirm wears but **Add account**'s question, which loses
-    /// nothing either way.
+    /// every confirm wears but **Add account**'s question and a PULL's,
+    /// which lose nothing either way.
     pub fn destructive(&self) -> bool {
-        !matches!(self, PendingAction::AddClaudeAccount(_))
+        !matches!(
+            self,
+            PendingAction::AddClaudeAccount(_) | PendingAction::PullWorktree(_)
+        )
     }
 
     /// Whether the dialog stands in for the settings overlay, which every
@@ -4388,6 +4397,9 @@ pub struct App {
     /// The BRANCH SWITCHER's answer channel, listing cache and fetch
     /// throttle — what outlives the modal.
     pub branch_switch: crate::branch_switch::Shared,
+    /// The PULLs and PUSHes running, and where their answers go
+    /// (`crate::git_sync`).
+    pub git_sync: crate::git_sync::Shared,
     /// Latest daemon metrics reading (daemon + per-session process trees),
     /// for the footer's memory/session readout. Refreshed on a slow poll;
     /// the metrics modal shares the same replies at a faster cadence.
@@ -4615,6 +4627,7 @@ impl App {
             changed_files: None,
             deleting: std::collections::HashSet::new(),
             branch_switch: Default::default(),
+            git_sync: Default::default(),
             last_metrics: None,
             client_rss_bytes: 0,
             splash_epoch: std::time::Instant::now(),

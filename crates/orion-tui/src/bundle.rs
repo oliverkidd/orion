@@ -212,7 +212,7 @@ impl Report {
     }
 }
 
-fn plural(n: usize, noun: &str) -> String {
+pub(crate) fn plural(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 

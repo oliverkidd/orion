@@ -132,6 +132,21 @@
   instead of painting over the screen, and the TUI renames the root row the moment git says yes. The
   WORKTREE SYNC above then sees the moved `.git/HEAD` and confirms the branch from the DAEMON's side.
   Linked worktrees don't switch: each is named after the branch it was cut for.
+- **A checkout keeps step with its remote on `p` and `⇧P` — a PULL and a PUSH.** orion fetches when it
+  cuts a worktree, when the BRANCH SWITCHER opens, and on `p` or `⇧P`, never on a timer, so a band
+  rule's `⇡⇣` count against
+  whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
+  checkout — the TUI's git, detached like the switcher's — rather than `git pull`, so `pull.rebase` /
+  `pull.ff` can't change what it does: a branch only ever moves forward onto its upstream, and one that
+  has diverged, or has uncommitted changes git would overwrite, is left alone with the reason in the
+  FLASH. A branch that tracks nothing (linked worktrees are cut `--no-track` until the New-PR form
+  pushes them) fetches origin alone; worktrees share their remote-tracking refs, so that one fetch
+  brings `⇣` current on every band of the project. `⇧P` is the same the other way: fetch, then `git push
+  <remote> refs/heads/<b>:<merge>` to exactly what `branch.<b>.remote` / `.merge` name — so
+  `push.default` can't change it — only when the branch is simply ahead, never a force, and held for a
+  second `⇧P` when that upstream is the base branch. A branch that tracks nothing is published to origin with
+  `--set-upstream`; a fork's pull request checkout, on its read-only `refs/pull/N/head`, pulls but is
+  never pushed.
 - **A worktree's outside resources are yours to hook — WORKTREE HOOKS.** `git config
   orion.worktreeCreateHook` / `orion.worktreeDeleteHook` name an executable the DAEMON runs after it
   creates or removes a checkout, from the main repository, with the repo path and the worktree path as

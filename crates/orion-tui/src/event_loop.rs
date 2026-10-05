@@ -375,6 +375,9 @@ async fn main_loop(
     let (branch_tx, mut branch_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::branch_switch::Answer>();
     app.branch_switch.tx = Some(branch_tx);
+    // A PULL's or a PUSH's git lands here.
+    let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<crate::git_sync::Answer>();
+    app.git_sync.tx = Some(sync_tx);
     // BACKGROUND READS for the worktree views: the git and the disk behind
     // `g`, `f`, `F` and `b` run on the blocking pool and land here.
     let (views_tx, mut views_rx) =
@@ -764,6 +767,11 @@ async fn main_loop(
                     crate::branch_switch::land_answer(&mut app, answer);
                 }
             }
+            answer = sync_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::git_sync::land(&mut app, answer);
+                }
+            }
             answer = views_rx.recv() => {
                 // Never None: `app.view_jobs` keeps a sender alive.
                 if let Some(answer) = answer {
@@ -1105,6 +1113,28 @@ fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
         .filter(|w| held.contains(&w.id) && Some(&w.id) != selected)
         .min_by_key(|w| app.worktree_changes.get(&w.id).map(|(_, at)| *at))
         .map(|w| (w.id.clone(), w.path.clone()))
+}
+
+/// What a PULL or a PUSH moved, read again soon: the selected checkout's
+/// own read on the next frame, and `ids` put ahead of every other in the
+/// sweep's queue — stamped just older than the oldest read there is,
+/// since [`changes_sweep_target`] takes the oldest first — with their
+/// counts kept on screen meanwhile.
+pub(crate) fn reread_checkouts(app: &mut App, ids: &std::collections::HashSet<WorktreeId>) {
+    if app.selected_worktree().is_some_and(|w| ids.contains(&w.id)) {
+        app.git_changes = None;
+    }
+    let Some(oldest) = app.worktree_changes.values().map(|(_, at)| *at).min() else {
+        return;
+    };
+    let first = oldest
+        .checked_sub(Duration::from_millis(1))
+        .unwrap_or(oldest);
+    for (id, (_, at)) in app.worktree_changes.iter_mut() {
+        if ids.contains(id) {
+            *at = first;
+        }
+    }
 }
 
 /// Land the sweep's count: it frees the slot and feeds the cards only —
@@ -3969,6 +3999,16 @@ fn dispatch_action(
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
+        Action::PullWorktree => {
+            if let Some(id) = crate::git_sync::target(app) {
+                crate::git_sync::request(app, id, crate::git_sync::Op::Pull);
+            }
+        }
+        Action::PushWorktree => {
+            if let Some(id) = crate::git_sync::target(app) {
+                crate::git_sync::request(app, id, crate::git_sync::Op::PUSH);
+            }
+        }
         Action::FocusRight => match app.focus {
             Focus::Sessions => {
                 if double_tapped(app, action, armed, chord, "enter pane") {
@@ -6638,6 +6678,14 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         "Open",
         MenuAction::OpenWorktree(w.id.clone()),
     ));
+    items.push(MenuItem::new(
+        "Pull",
+        MenuAction::PullWorktree(w.id.clone()),
+    ));
+    items.push(MenuItem::new(
+        "Push",
+        MenuAction::PushWorktree(w.id.clone()),
+    ));
     items.extend(links);
     if w.is_main {
         items.push(MenuItem::new(
@@ -6867,6 +6915,8 @@ fn worktree_menu_items(app: &App, w: &orion_core::Worktree) -> Vec<MenuItem> {
         MenuItem::new("New terminal", MenuAction::NewTerminal(w.id.clone())),
         MenuItem::new(run, MenuAction::ToggleRun(w.id.clone())),
         MenuItem::new("Open", MenuAction::OpenWorktree(w.id.clone())),
+        MenuItem::new("Pull", MenuAction::PullWorktree(w.id.clone())),
+        MenuItem::new("Push", MenuAction::PushWorktree(w.id.clone())),
     ];
     // The ROOT WORKTREE moves between branches; a linked worktree, named
     // for its branch, is deleted instead.
@@ -8987,6 +9037,9 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             send(app, out, |req_id| ClientRequest::DeleteLink { req_id, id });
         }
         PendingAction::DeleteWorktree(id) => delete_worktree_and_settle(app, id, out),
+        PendingAction::PullWorktree(id) => {
+            crate::git_sync::start(app, id, crate::git_sync::Op::Pull)
+        }
         PendingAction::ThenDeleteWorktree {
             first, worktree, ..
         } => {
@@ -9444,6 +9497,12 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::DeleteWorktree(id) => activate::delete_worktree(app, &id),
         MenuAction::SwitchBranch(id) => crate::branch_switch::open_for(app, &id),
+        MenuAction::PullWorktree(id) => {
+            crate::git_sync::request(app, id, crate::git_sync::Op::Pull)
+        }
+        MenuAction::PushWorktree(id) => {
+            crate::git_sync::request(app, id, crate::git_sync::Op::PUSH)
+        }
         MenuAction::AddProject => open_prompt(app, PromptKind::AddProject),
         MenuAction::RenameProject(id) => open_prompt(app, PromptKind::RenameProject { id }),
         MenuAction::OpenProject(id) => launcher::open_project(app, &id, out),
@@ -24300,6 +24359,244 @@ diff --git a/src/c.rs b/src/c.rs
         }
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert_eq!(branch_switch_target(&app), Some(WorktreeId("w1".into())));
+    }
+
+    /// `p` PULLs the checkout under the cursor — a linked worktree as well
+    /// as the root — at once on an idle one: in flight, saying so, and a
+    /// second `p` meanwhile starts nothing.
+    #[test]
+    fn p_pulls_the_selected_checkout_and_never_twice_at_once() {
+        let mut app = App::new();
+        let mut out = Vec::new();
+        seed_tree(&mut app);
+        seed_linked_worktree(&mut app);
+        app.focus = Focus::Worktrees;
+        app.sel_worktree = 1;
+        let linked = app.selected_worktree().unwrap().id.clone();
+        assert!(!app.selected_worktree().unwrap().is_main);
+
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+        assert!(
+            app.overlay.is_none(),
+            "an idle checkout pulls without asking"
+        );
+        assert!(app.git_sync.inflight.contains_key(&linked));
+        let flash = app.flash.clone().expect("a working flash");
+        assert_eq!(flash.kind, crate::flash::FlashKind::Working);
+        assert_eq!(flash.text, "pulling ⎇ feature…");
+
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+        assert_eq!(app.flash.as_deref(), Some("already pulling ⎇ feature"));
+        assert_eq!(app.git_sync.inflight.len(), 1);
+    }
+
+    /// An agent working in the checkout: `p` asks first, and only the
+    /// confirm's yes pulls.
+    #[test]
+    fn p_asks_first_while_an_agent_works_in_the_checkout() {
+        let mut app = App::new();
+        let mut out = Vec::new();
+        seed_tree(&mut app);
+        app.tree
+            .agents
+            .iter_mut()
+            .find(|a| a.id.0 == "a1")
+            .unwrap()
+            .status = orion_core::AgentStatus::Running;
+        app.focus = Focus::Worktrees;
+        app.sel_worktree = 0;
+        let root = WorktreeId("w1".into());
+
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+        match &app.overlay {
+            Some(Overlay::Confirm(c)) => {
+                assert_eq!(c.action, PendingAction::PullWorktree(root.clone()));
+                assert!(c.message.contains("⌂ main"), "{}", c.message);
+            }
+            other => panic!("no confirm: {other:?}"),
+        }
+        assert!(app.git_sync.inflight.is_empty());
+
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+        assert!(app.overlay.is_none());
+        assert!(app.git_sync.inflight.contains_key(&root));
+    }
+
+    /// A pull landing frees its checkout, says how it went, and has the
+    /// project's checkouts read again at once.
+    #[test]
+    fn a_landed_pull_flashes_and_rereads_the_projects_checkouts() {
+        let mut app = App::new();
+        let mut out = Vec::new();
+        seed_tree(&mut app);
+        seed_linked_worktree(&mut app);
+        app.focus = Focus::Worktrees;
+        app.sel_worktree = 0;
+        let root = WorktreeId("w1".into());
+        let linked = WorktreeId("w2".into());
+        let old = std::time::Instant::now();
+        let new = old + Duration::from_secs(5);
+        app.worktree_changes.insert(linked.clone(), (Some(1), new));
+        app.worktree_changes
+            .insert(WorktreeId("elsewhere".into()), (None, old));
+        app.git_changes = Some((root.clone(), Some(0)));
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+
+        crate::git_sync::land(
+            &mut app,
+            crate::git_sync::Answer {
+                worktree: root.clone(),
+                op: crate::git_sync::Op::Pull,
+                outcome: crate::git_sync::Outcome::Pulled {
+                    upstream: "origin/main".into(),
+                    commits: 2,
+                },
+            },
+        );
+        assert!(app.git_sync.inflight.is_empty());
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("⌂ main pulled 2 commits from origin/main")
+        );
+        assert!(app.git_changes_stale(), "the pulled checkout is read again");
+        let (count, at) = app.worktree_changes[&linked];
+        assert_eq!(count, Some(1), "its sibling's count stays on screen");
+        assert!(at < old, "and it goes to the front of the sweep");
+    }
+
+    /// Every band's menu offers **Pull** and **Push**, the root's and a
+    /// linked one's, each starting its own sync.
+    #[test]
+    fn every_worktree_rows_menu_offers_pull_and_push() {
+        use crate::git_sync::Op;
+        for (label, op) in [("Pull", Op::Pull), ("Push", Op::PUSH)] {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            seed_linked_worktree(&mut app);
+            app.focus = Focus::Worktrees;
+            for (row, id) in [(0, "w1"), (1, "w2")] {
+                app.overlay = None;
+                app.sel_worktree = row;
+                open_row_menu(&mut app);
+                let at = match &app.overlay {
+                    Some(Overlay::Menu(menu)) => menu
+                        .items
+                        .iter()
+                        .position(|i| i.label == label)
+                        .unwrap_or_else(|| panic!("the row offers {label}")),
+                    other => panic!("no menu: {other:?}"),
+                };
+                if let Some(Overlay::Menu(menu)) = &mut app.overlay {
+                    menu.hover = at;
+                }
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert_eq!(
+                    app.git_sync.inflight.get(&WorktreeId(id.into())),
+                    Some(&op),
+                    "{label} {id}"
+                );
+            }
+        }
+    }
+
+    /// `⇧P` PUSHes the checkout under the cursor without asking — a push
+    /// moves no files — and a `p` meanwhile waits its turn.
+    #[test]
+    fn shift_p_pushes_the_selected_checkout_and_p_waits_for_it() {
+        use crate::git_sync::Op;
+        let mut app = App::new();
+        let mut out = Vec::new();
+        seed_tree(&mut app);
+        seed_linked_worktree(&mut app);
+        app.tree
+            .agents
+            .iter_mut()
+            .for_each(|a| a.status = orion_core::AgentStatus::Running);
+        app.focus = Focus::Worktrees;
+        app.sel_worktree = 1;
+        let linked = WorktreeId("w2".into());
+
+        press(&mut app, KeyCode::Char('P'), KeyModifiers::SHIFT, &mut out);
+        assert!(app.overlay.is_none(), "a push never asks up front");
+        assert_eq!(app.git_sync.inflight.get(&linked), Some(&Op::PUSH));
+        assert_eq!(app.flash.as_deref(), Some("pushing ⎇ feature…"));
+
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+        assert_eq!(app.flash.as_deref(), Some("already pushing ⎇ feature"));
+    }
+
+    /// A push that would land straight on the base branch comes back held,
+    /// asking for a second `⇧P` rather than opening a dialog seconds after
+    /// the key; that press pushes, confirmed. A landed push asks the pull
+    /// request lookups to run again and says what it left uncommitted.
+    #[test]
+    fn a_push_onto_the_base_waits_for_a_second_press() {
+        use crate::git_sync::{Answer, Op, Outcome};
+        let mut app = App::new();
+        let mut out = Vec::new();
+        seed_tree(&mut app);
+        app.focus = Focus::Worktrees;
+        app.sel_worktree = 0;
+        let root = WorktreeId("w1".into());
+        let shift_p = |app: &mut App, out: &mut Vec<ClientRequest>| {
+            press(app, KeyCode::Char('P'), KeyModifiers::SHIFT, out)
+        };
+        let held = |app: &mut App| {
+            crate::git_sync::land(
+                app,
+                Answer {
+                    worktree: WorktreeId("w1".into()),
+                    op: Op::PUSH,
+                    outcome: Outcome::ConfirmPush {
+                        upstream: "origin/main".into(),
+                        ahead: 2,
+                    },
+                },
+            )
+        };
+        shift_p(&mut app, &mut out);
+        held(&mut app);
+        assert!(app.overlay.is_none(), "no dialog lands under the keys");
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("⌂ main would push 2 commits straight to origin/main · ⇧P again to push")
+        );
+        assert!(app.git_sync.inflight.is_empty());
+
+        shift_p(&mut app, &mut out);
+        assert_eq!(
+            app.git_sync.inflight.get(&root),
+            Some(&Op::Push { confirmed: true })
+        );
+
+        // Anything else in between lets the held push go.
+        app.git_sync.inflight.clear();
+        held(&mut app);
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
+        app.git_sync.inflight.clear();
+        shift_p(&mut app, &mut out);
+        assert_eq!(app.git_sync.inflight.get(&root), Some(&Op::PUSH));
+
+        app.pr_refresh_requested = false;
+        app.worktree_changes
+            .insert(root.clone(), (Some(3), std::time::Instant::now()));
+        crate::git_sync::land(
+            &mut app,
+            Answer {
+                worktree: root.clone(),
+                op: Op::Push { confirmed: true },
+                outcome: Outcome::Pushed {
+                    upstream: "origin/main".into(),
+                    commits: 2,
+                },
+            },
+        );
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("⌂ main pushed 2 commits to origin/main · 3 uncommitted files not pushed")
+        );
+        assert!(app.pr_refresh_requested);
     }
 
     /// Through the real key path — the KEYMAP's `c`, a query typed into the

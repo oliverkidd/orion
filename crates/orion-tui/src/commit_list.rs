@@ -278,7 +278,7 @@ pub fn ahead_behind(root: &Path, base_setting: &str) -> Option<(usize, usize)> {
 const BASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// [`resolve_base`] for `root` and `base_setting`, kept for [`BASE_TTL`].
-fn resolve_base_cached(root: &Path, base_setting: &str) -> Option<String> {
+pub(crate) fn resolve_base_cached(root: &Path, base_setting: &str) -> Option<String> {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
     type Resolved = HashMap<(std::path::PathBuf, String), (Instant, Option<String>)>;

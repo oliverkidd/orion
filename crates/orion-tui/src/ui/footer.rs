@@ -324,6 +324,19 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
     if card.is_some() && !bands[band_at].is_main {
         list.push(act(km, Action::DeleteWorktree, "delete worktree"));
     }
+    // The root's `⇡⇣` count against origin's copy of its own branch — what
+    // is unpushed and unpulled — so there `p` and `⇧P` are what brings
+    // them down. A linked worktree's count against the base it was cut
+    // from, which neither moves.
+    if bands[band_at].is_main {
+        let (ahead, behind) = app.worktree_ahead_behind(&bands[band_at].worktree);
+        if behind > 0 {
+            list.push(act(km, Action::PullWorktree, "pull"));
+        }
+        if ahead > 0 {
+            list.push(act(km, Action::PushWorktree, "push"));
+        }
+    }
     // Tab opens the band in place, or folds it back — the verb the rule
     // under the cursor used to spell at its right end.
     if !app.launcher_all_open && !bands[band_at].cards.is_empty() {
