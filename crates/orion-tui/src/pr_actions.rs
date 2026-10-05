@@ -711,10 +711,16 @@ pub enum MergeRow {
     Method,
     DeleteBranch,
     Auto,
+    Bypass,
 }
 
 impl MergeRow {
-    const ORDER: [MergeRow; 3] = [MergeRow::Method, MergeRow::DeleteBranch, MergeRow::Auto];
+    const ORDER: [MergeRow; 4] = [
+        MergeRow::Method,
+        MergeRow::DeleteBranch,
+        MergeRow::Auto,
+        MergeRow::Bypass,
+    ];
 
     fn step(self, down: bool) -> Self {
         let at = Self::ORDER.iter().position(|r| *r == self).unwrap_or(0);
@@ -760,6 +766,10 @@ pub struct MergeForm {
     /// `--auto`: GitHub merges once the checks and reviews it requires
     /// are in.
     pub auto: bool,
+    /// `--admin`: merge now past the branch's rules — a required review
+    /// included — as only an admin on its bypass list can. Never with
+    /// `auto`.
+    pub bypass: bool,
     pub row: MergeRow,
     /// What GitHub said that stands in the way, one line each.
     pub warnings: Vec<String>,
@@ -833,6 +843,7 @@ pub(crate) fn open_merge(app: &mut App) {
         delete_default: config.pr_delete_branch,
         auto_delete: false,
         auto: false,
+        bypass: false,
         row: MergeRow::Method,
         warnings: Vec::new(),
         ticket: crate::view_jobs::ticket(),
@@ -956,14 +967,14 @@ fn submit_merge(app: &mut App) {
         form.ticket,
         form.number,
     );
-    let (method, auto) = (form.method, form.auto);
+    let (method, auto, bypass) = (form.method, form.auto, form.bypass);
     // A repo that deletes merged branches does it itself.
     let delete = (form.delete_branch && !form.auto_delete)
         .then(|| form.branch.clone())
         .flatten();
     let base = form.base.clone();
     tokio::spawn(async move {
-        let result = merge(&dir, number, method, auto, delete.as_deref())
+        let result = merge(&dir, number, method, auto, bypass, delete.as_deref())
             .await
             .map(|deleted| merged_message(number, &base, method, auto, deleted));
         let _ = tx.send(Answer::Merged {
@@ -981,12 +992,15 @@ async fn merge(
     number: u64,
     method: MergeMethod,
     auto: bool,
+    bypass: bool,
     branch: Option<&str>,
 ) -> Result<bool, String> {
     let number = number.to_string();
     let mut args = vec!["pr", "merge", number.as_str(), method.flag()];
     if auto {
         args.push("--auto");
+    } else if bypass {
+        args.push("--admin");
     }
     run_piped(gh(dir, &args), "", REQUEST_TIMEOUT).await?;
     // Auto-merge lands later, on GitHub, with nothing here to delete the
@@ -1794,7 +1808,14 @@ fn change_merge_row(form: &mut MergeForm, forward: bool) {
             form.delete_branch = !form.delete_branch;
         }
         MergeRow::DeleteBranch => {}
-        MergeRow::Auto => form.auto = !form.auto,
+        MergeRow::Auto => {
+            form.auto = !form.auto;
+            form.bypass &= !form.auto;
+        }
+        MergeRow::Bypass => {
+            form.bypass = !form.bypass;
+            form.auto &= !form.bypass;
+        }
     }
 }
 
@@ -2185,6 +2206,21 @@ fn draw_merge(f: &mut Frame, area: Rect, form: &MergeForm, focused: bool, th: Th
             ),
         ],
     ));
+    lines.push((
+        Some(MergeRow::Bypass),
+        vec![
+            form_label("Bypass", on(MergeRow::Bypass), th),
+            Span::styled(check(form.bypass), text),
+            Span::styled(
+                if form.bypass {
+                    "  merge past the branch's rules, a required review included (admins)"
+                } else {
+                    "  keep to the branch's rules"
+                },
+                dim,
+            ),
+        ],
+    ));
     if !form.warnings.is_empty() {
         lines.push((None, Vec::new()));
         for warning in &form.warnings {
@@ -2359,6 +2395,43 @@ mod tests {
         assert_eq!(parse_merge_options("nope"), None);
         assert_eq!(MergeMethod::parse("REBASE"), MergeMethod::Rebase);
         assert_eq!(MergeMethod::parse("whatever"), MergeMethod::Squash);
+    }
+
+    #[test]
+    fn bypass_and_auto_turn_each_other_off() {
+        let mut form = MergeForm {
+            project: ProjectId("p".into()),
+            dir: PathBuf::new(),
+            number: 1,
+            url: String::new(),
+            title: String::new(),
+            base: String::new(),
+            branch: None,
+            head: String::new(),
+            pending: false,
+            method: MergeMethod::Squash,
+            allowed: MergeMethod::ALL.to_vec(),
+            delete_branch: false,
+            delete_default: false,
+            auto_delete: false,
+            auto: false,
+            bypass: false,
+            row: MergeRow::Auto,
+            warnings: Vec::new(),
+            ticket: 0,
+            saving: None,
+            notice: None,
+            rows: Vec::new(),
+        };
+        change_merge_row(&mut form, true);
+        assert!(form.auto && !form.bypass);
+        form.row = form.row.step(true);
+        assert_eq!(form.row, MergeRow::Bypass, "the last row");
+        change_merge_row(&mut form, true);
+        assert!(form.bypass && !form.auto, "bypass clears auto");
+        form.row = MergeRow::Auto;
+        change_merge_row(&mut form, true);
+        assert!(form.auto && !form.bypass, "auto clears bypass");
     }
 
     #[test]
