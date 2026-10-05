@@ -114,6 +114,12 @@ fn main() -> Result<()> {
                     orion_tui::Exit::Restart => {
                         log_fatal(orion_tui::restart(), &orion_core::paths::tui_log_path())
                     }
+                    // **Upgrade orion**: install, then restart the daemon
+                    // and the TUI onto the new binary.
+                    orion_tui::Exit::Upgrade => {
+                        upgrade::install_only()?;
+                        orion_tui::restart()
+                    }
                     orion_tui::Exit::Quit => Ok(()),
                 }
             }

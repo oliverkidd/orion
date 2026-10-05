@@ -1552,6 +1552,31 @@ pub(super) fn click_tab(app: &mut App, id: &ProjectId, out: &mut Vec<ClientReque
     }
 }
 
+/// The pointer moved with a PROJECT TAB held down
+/// ([`App::launcher_tab_drag`]): over another tab — or its `×` — the held
+/// one takes that tab's place, the tabs between sliding over, as a
+/// browser's tab strip does. The tab it last traded with is skipped until
+/// the pointer leaves it: the hit rects are the last draw's, and a
+/// second report over the same cells would trade them straight back.
+pub(super) fn drag_tab(app: &mut App, column: u16, row: u16) {
+    let Some((moving, last)) = app.launcher_tab_drag.clone() else {
+        return;
+    };
+    let onto = match app.hit_at(column, row) {
+        Some(HitTarget::LauncherTab(id) | HitTarget::LauncherTabClose(id)) => Some(id),
+        _ => None,
+    };
+    let Some(onto) = onto.filter(|id| id != &moving) else {
+        app.launcher_tab_drag = Some((moving, None));
+        return;
+    };
+    if last.as_ref() == Some(&onto) {
+        return;
+    }
+    app.move_project_tab(&moving, &onto);
+    app.launcher_tab_drag = Some((moving, Some(onto)));
+}
+
 /// `x` with the PROJECT TABS holding the keys — and the answered confirm
 /// of `d`, `Delete` or `Backspace` there ([`confirm_close_cursor_tab`]):
 /// close the tab the header's cursor is on, through the same
@@ -1614,7 +1639,7 @@ fn close_active_tab(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 /// Drop project `id`'s tab from the header — the `×` on it, or `x` on the
 /// one the grid is on. Nothing about the project changes: its sessions
-/// run on, and the `+` dropdown opens it again, back at the far left.
+/// run on, and the `+` dropdown opens it again, back at the right end.
 ///
 /// Closing the tab the grid is on moves the grid to the tab that slides
 /// into its place — the one to its right, else the one to its left.
@@ -1668,7 +1693,7 @@ fn close_every_project(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// the ones wanting a human first, then the most recently worked in —
 /// the one in front of you ticked, each with how many sessions it holds.
 /// Enter on a row opens that project's sessions ([`open_project`]) and,
-/// if it had none, a tab for it at the far left. The last row opens a
+/// if it had none, a tab for it at the right end. The last row opens a
 /// folder that is not a project yet — the same prompt `o` opens — so the
 /// `+` is the one place to reach for any project, known or not.
 ///
@@ -5862,9 +5887,9 @@ mod tests {
             assert_eq!(
                 head,
                 vec![
-                    HitTarget::LauncherTabAdd,
                     HitTarget::LauncherTab(demo.clone()),
                     HitTarget::LauncherTabClose(demo),
+                    HitTarget::LauncherTabAdd,
                 ],
                 "{head:?}"
             );
@@ -5895,7 +5920,7 @@ mod tests {
     /// project under it — the one in front of you ticked and under the
     /// cursor, a row for opening a folder last — and the list hangs off
     /// the `+` rather than in the middle of the screen. Picking a row
-    /// re-aims the grid and gives the project a tab at the far left.
+    /// re-aims the grid and gives the project a tab at the right end.
     #[test]
     fn the_plus_drops_the_projects_under_it() {
         with_default_config(|| {
@@ -5936,8 +5961,8 @@ mod tests {
             draw(&mut app);
             assert_eq!(
                 tabs_drawn(&app),
-                ["web", "demo"],
-                "the project just opened leads the tabs"
+                ["demo", "web"],
+                "the project just opened goes on the end of the tabs"
             );
         });
     }
@@ -6140,7 +6165,7 @@ mod tests {
             assert!(app.launcher_unaimed, "no card to aim at, so the pane folds");
             assert!(app.flash.is_none());
             let text = buffer_text(&draw(&mut app));
-            assert_eq!(tabs_drawn(&app), ["docs", "demo"], "{text}");
+            assert_eq!(tabs_drawn(&app), ["demo", "docs"], "{text}");
             assert!(
                 text.contains("press  ^N  to start an agent"),
                 "the grid says what starts one: {text}"
@@ -6612,8 +6637,8 @@ mod tests {
 
     /// A `/` jump into another project ADDS its tab: the header keeps
     /// every project already open, so the jump reads as one more tab at
-    /// the far left — never as the first tab changing its name. A click on
-    /// the tab left behind goes back and moves no tab, and `[` steps
+    /// the right end — never as the first tab changing its name. A click
+    /// on the tab left behind goes back and moves no tab, and `]` steps
     /// back across them.
     #[test]
     fn a_jump_into_another_project_adds_a_tab() {
@@ -6628,7 +6653,7 @@ mod tests {
                 Some("web".into())
             );
             draw(&mut app);
-            assert_eq!(tabs_drawn(&app), ["web", "demo"]);
+            assert_eq!(tabs_drawn(&app), ["demo", "web"]);
 
             let (x, y) = crumb_cell(&app, HitTarget::LauncherTab(ProjectId("p1".into())));
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
@@ -6637,9 +6662,9 @@ mod tests {
                 Some("demo".into())
             );
             draw(&mut app);
-            assert_eq!(tabs_drawn(&app), ["web", "demo"], "no tab moved");
+            assert_eq!(tabs_drawn(&app), ["demo", "web"], "no tab moved");
 
-            key(&mut app, KeyCode::Char('['), KeyModifiers::NONE);
+            key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
             assert_eq!(
                 app.selected_project().map(|p| p.name.clone()),
                 Some("web".into())
@@ -6739,9 +6764,32 @@ mod tests {
         )
     }
 
+    /// A PROJECT TAB held down and dragged over another takes its place,
+    /// and rests where it is let go. The rects are the last draw's, so a
+    /// second report over the tab it just traded with must not trade them
+    /// straight back.
+    #[test]
+    fn a_dragged_tab_takes_the_place_it_is_dragged_to() {
+        with_default_config(|| {
+            let mut app = two_tabs();
+            assert_eq!(tab_state(&app).2, ["p2", "p1"]);
+            let (x, y) = crumb_cell(&app, HitTarget::LauncherTab(ProjectId("p2".into())));
+            let (to, _) = crumb_cell(&app, HitTarget::LauncherTab(ProjectId("p1".into())));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), to, y);
+            assert_eq!(tab_state(&app).2, ["p1", "p2"], "web moved right");
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), to, y);
+            assert_eq!(tab_state(&app).2, ["p1", "p2"], "no trade back");
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), to, y);
+            assert!(app.launcher_tab_drag.is_none(), "let go");
+            draw(&mut app);
+            assert_eq!(tabs_drawn(&app), ["demo", "web"]);
+        });
+    }
+
     /// Click on a PROJECT TAB and the key that walks onto it end in the
     /// same state — one [`open_tab`] — and `[` / `]` stop at either end.
-    /// A switch moves no tab: only working in a project does.
+    /// A switch moves no tab: only dragging one does.
     #[test]
     fn a_click_on_a_tab_is_the_key_that_walks_to_it() {
         with_default_config(|| {
@@ -6789,11 +6837,11 @@ mod tests {
         });
     }
 
-    /// The PROJECT TABS read from the project last worked in: a session
-    /// launched from the box takes its project's tab to the far left, and
-    /// the grid, the lit tab and a later switch stay as they were.
+    /// The PROJECT TABS hold the order the user keeps them in: a session
+    /// launched from the box moves no tab, in the project on screen or
+    /// another, and neither does a switch.
     #[test]
-    fn a_launch_brings_its_project_tab_to_the_far_left() {
+    fn a_launch_moves_no_project_tab() {
         with_default_config(|| {
             let mut app = two_tabs();
             assert_eq!(tab_state(&app).2, ["p2", "p1"], "demo is on the right");
@@ -6806,7 +6854,7 @@ mod tests {
                     .any(|r| matches!(r, ClientRequest::CreateAgent { .. })),
                 "the launch went out: {out:?}"
             );
-            assert_eq!(tab_state(&app).2, ["p1", "p2"], "demo leads now");
+            assert_eq!(tab_state(&app).2, ["p2", "p1"], "demo stayed put");
             assert_eq!(
                 app.selected_project().map(|p| p.name.as_str()),
                 Some("demo"),
@@ -6816,12 +6864,12 @@ mod tests {
                 .iter()
                 .map(|t| t.active)
                 .collect();
-            assert_eq!(lit, [true, false], "the lit tab went with it");
+            assert_eq!(lit, [false, true], "the lit tab is still demo's");
 
-            // Looking at web moves nothing; launching there does.
-            key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
+            // Looking at web moves nothing, and nor does launching there.
+            key(&mut app, KeyCode::Char('['), KeyModifiers::NONE);
             assert_eq!(tab_state(&app).0.as_deref(), Some("web"));
-            assert_eq!(tab_state(&app).2, ["p1", "p2"], "a switch only looks");
+            assert_eq!(tab_state(&app).2, ["p2", "p1"], "a switch only looks");
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(&mut app, "fix the css");
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -6884,10 +6932,10 @@ mod tests {
     }
 
     /// A BACKGROUND LAUNCH — the box re-aimed with `^P` at a project with
-    /// no tab — is work in that project: it gets a tab at the far left,
+    /// no tab — is work in that project: it gets a tab at the right end,
     /// while the grid goes on showing the project in front of the user.
     #[test]
-    fn a_background_launch_puts_its_project_at_the_far_left() {
+    fn a_background_launch_gives_its_project_a_tab_at_the_end() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
@@ -6900,22 +6948,22 @@ mod tests {
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-            assert_eq!(tab_state(&app).2, ["p2", "p1"], "web leads");
+            assert_eq!(tab_state(&app).2, ["p1", "p2"], "web goes on the end");
             assert_eq!(
                 app.selected_project().map(|p| p.name.as_str()),
                 Some("demo"),
                 "the grid never left demo"
             );
             draw(&mut app);
-            assert_eq!(tab_state(&app).2, ["p2", "p1"], "the draw keeps it");
+            assert_eq!(tab_state(&app).2, ["p1", "p2"], "the draw keeps it");
         });
     }
 
-    /// Typing at a session in the PANE is work in its project too — a key
-    /// and a paste alike bring the tab to the far left, so the project
-    /// just typed in is never stuck at the right-hand end.
+    /// Typing at a session in the PANE moves no PROJECT TAB — a key and
+    /// a paste alike — so the header never reshuffles under the user as
+    /// they work.
     #[test]
-    fn typing_at_a_session_brings_its_project_tab_to_the_far_left() {
+    fn typing_at_a_session_moves_no_project_tab() {
         with_default_config(|| {
             for paste in [false, true] {
                 let mut app = two_tabs();
@@ -6946,7 +6994,7 @@ mod tests {
                     ),
                     "paste {paste}: it reached polish-nav: {out:?}"
                 );
-                assert_eq!(tab_state(&app).2, ["p1", "p2"], "paste {paste}");
+                assert_eq!(tab_state(&app).2, ["p2", "p1"], "paste {paste}");
             }
         });
     }

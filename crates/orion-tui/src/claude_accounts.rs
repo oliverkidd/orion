@@ -393,13 +393,17 @@ pub fn name_of(entry: &HarnessDescriptor) -> Option<String> {
 /// The name a Claude account goes by wherever it is listed: its label —
 /// its name, `Claude` when it has none of its own — with who it is
 /// signed in as, `Work (a@b.co)` or `Work (not signed in)`; the label
-/// alone until the first read lands.
+/// alone until the first read lands. A name that already holds the email
+/// — typed as the label it was shown — is not given it twice.
 pub fn label(base: &str, record: &Record) -> String {
     let base = match base.trim() {
         "" => DEFAULT_NAME,
         base => base,
     };
     match state_of(record) {
+        Some(SignIn::As(email)) if base.to_lowercase().contains(&email.to_lowercase()) => {
+            base.to_string()
+        }
         Some(SignIn::As(email)) => format!("{base} ({email})"),
         Some(SignIn::Out) => format!("{base} (not signed in)"),
         None => base.to_string(),
@@ -419,6 +423,46 @@ pub fn short_name(kind: AgentKind, custom: Option<&str>) -> Option<String> {
         _ => kind.as_str(),
     };
     store::short(|short| short.get(id).cloned())
+}
+
+/// The sessions that run on extra account `id`, archived ones too: what
+/// a removal strands. Each stops resuming until the account is back, and
+/// its transcript lives in the account's dir, so a Trash would take it.
+pub fn sessions_on<'a>(agents: &'a [orion_core::Agent], id: &str) -> Vec<&'a orion_core::Agent> {
+    agents
+        .iter()
+        .filter(|a| {
+            a.kind == AgentKind::Custom && a.custom_harness.as_deref().map(str::trim) == Some(id)
+        })
+        .collect()
+}
+
+/// What the remove dialog says of the sessions [`sessions_on`] finds:
+/// how many, the first few by name, and that **Continue on** (`how`)
+/// carries each to another account first — to `same`, one signed in as
+/// the same email, when there is one: same login, nothing lost. Empty
+/// when nothing runs on it.
+pub fn stranded_note(names: &[String], how: &str, same: Option<&str>) -> String {
+    const SHOWN: usize = 3;
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut listed: Vec<String> = names.iter().take(SHOWN).cloned().collect();
+    if names.len() > SHOWN {
+        listed.push(format!("{} more", names.len() - SHOWN));
+    }
+    let count = match names.len() {
+        1 => "1 session runs".to_string(),
+        n => format!("{n} sessions run"),
+    };
+    let to = same.map_or_else(
+        || "another account".to_string(),
+        |label| format!("{label} — the same login"),
+    );
+    format!(
+        "{count} on it — {} — and stop resuming once it goes.\n{how} moves each to {to} first.",
+        and_list(&listed)
+    )
 }
 
 /// The email `entry` is signed in as, when it is a Claude account and the
@@ -1274,6 +1318,20 @@ mod tests {
         });
     }
 
+    /// A name typed as the label it was shown — email and all — is not
+    /// given the email a second time; any other name is.
+    #[test]
+    fn a_name_holding_the_email_is_not_doubled() {
+        let m = Machine::new("{}");
+        m.sign(".claude.json", Some("a@b.co"));
+        m.run(|| {
+            refresh_now();
+            let record = record_of(&Config::load().raw_harness_registry()[0]).unwrap();
+            assert_eq!(label("Claude (A@b.co)", &record), "Claude (A@b.co)");
+            assert_eq!(label("Personal", &record), "Personal (a@b.co)");
+        });
+    }
+
     /// A hand-written harness whose env pins a dir is an account too: its
     /// own label stays and gains the email. A wrapper that exports the
     /// variable itself is not — nothing says which login it runs.
@@ -1599,6 +1657,43 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
         }
     }
 
+    /// A removal strands the sessions on that account alone — archived
+    /// ones too — and the dialog names them and where they can go.
+    #[test]
+    fn removing_an_account_names_the_sessions_it_strands() {
+        let named = |name: &str, kind, custom| orion_core::Agent {
+            name: name.into(),
+            ..agent(kind, custom)
+        };
+        let agents = vec![
+            named("one", AgentKind::Custom, Some("claude-2")),
+            orion_core::Agent {
+                archived: true,
+                ..named("two", AgentKind::Custom, Some("claude-2"))
+            },
+            named("default", AgentKind::Claude, None),
+            named("other", AgentKind::Custom, Some("claude-3")),
+        ];
+        let on: Vec<&str> = sessions_on(&agents, "claude-2")
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(on, ["one", "two"]);
+        assert!(sessions_on(&agents, "claude-4").is_empty());
+
+        assert_eq!(stranded_note(&[], "Continue on (⇧C)", None), "");
+        let names: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).to_vec();
+        let note = stranded_note(&names, "Continue on (⇧C)", Some("Personal (a@b.co)"));
+        assert!(
+            note.starts_with("5 sessions run on it — a, b, c and 2 more"),
+            "{note}"
+        );
+        assert!(note.contains("Continue on (⇧C) moves each to Personal (a@b.co) — the same login"));
+        let one = stranded_note(&names[..1], "Continue on (⇧C)", None);
+        assert!(one.starts_with("1 session runs on it — a —"), "{one}");
+        assert!(one.contains("to another account first"), "{one}");
+    }
+
     /// **Continue on** names the other account by its email, and says so
     /// when that email is the session's own: same login, same limit.
     #[test]
@@ -1696,6 +1791,17 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(
                 cfg.quick_prompt_choices()[..3],
                 ["claude", "claude-2", "codex"]
+            );
+            // The default account reads as its name and email too, not
+            // the bare `claude` it is stored as.
+            assert_eq!(
+                cfg.value_label(crate::config::SettingKind::QuickPromptKind),
+                "Claude (a@b.co)"
+            );
+            assert!(rename("claude", "Personal").is_ok());
+            assert_eq!(
+                Config::load().value_label(crate::config::SettingKind::QuickPromptKind),
+                "Personal (a@b.co)"
             );
             let (tab, row) =
                 crate::config::locate(crate::config::SettingKind::QuickPromptKind).unwrap();

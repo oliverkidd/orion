@@ -17,7 +17,7 @@
 //! the row as it was: an Error puts it back (and flashes why, like every
 //! other refusal), an Ack drops it.
 
-use super::{handle_server_event, send_with};
+use super::{handle_server_event, reconcile_selection_inner, selection_snapshot, send_with};
 use crate::app::{App, PendingIntent, Undo};
 use orion_core::{AgentId, ClientRequest, Entity, EntityId, ProjectId, ServerEvent, TerminalId};
 
@@ -230,6 +230,10 @@ pub(super) fn settled(app: &mut App, undo: Undo) {
 
 /// The DAEMON refused: the row goes back to what — and where — it was.
 pub(super) fn undo(app: &mut App, undo: Undo, out: &mut Vec<ClientRequest>) {
+    // Where the user is, by id, before the row goes back: the reinsert
+    // re-sorts the lists under row-index cursors ahead of the upsert's
+    // own snapshot, which would record wherever that left them.
+    let before = selection_snapshot(app);
     let entity = match undo {
         Undo::Restore(entity) => *entity,
         Undo::Reinsert { index, entity } => {
@@ -251,6 +255,7 @@ pub(super) fn undo(app: &mut App, undo: Undo, out: &mut Vec<ClientRequest>) {
         }
     };
     handle_server_event(app, ServerEvent::EntityUpserted { entity }, out);
+    reconcile_selection_inner(app, before, out);
 }
 
 #[cfg(test)]

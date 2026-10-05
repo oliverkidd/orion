@@ -255,6 +255,9 @@ pub enum Exit {
     /// **Restart orion**: stop the daemon, then exec this binary afresh
     /// (`crate::restart`).
     Restart,
+    /// **Upgrade orion**: install the newer release, then restart the
+    /// daemon and this binary on it (`crate::restart`).
+    Upgrade,
 }
 
 pub async fn run_app() -> Result<Exit> {
@@ -902,7 +905,9 @@ async fn main_loop(
                     json: ui_state_json(&app),
                 })
                 .await;
-            return Ok(if app.restart {
+            return Ok(if app.upgrade {
+                Exit::Upgrade
+            } else if app.restart {
                 Exit::Restart
             } else {
                 app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
@@ -3512,16 +3517,16 @@ fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientReques
 }
 
 /// A key, a paste or a turn is going down `session`'s PTY: that is work in
-/// its project, whose PROJECT TAB comes to the far left
-/// ([`App::bring_tab_forward`]). Runs on every keystroke typed at an agent,
-/// so the project already at the front costs a lookup and no allocation.
+/// its project, which gets a PROJECT TAB if it has none
+/// ([`App::ensure_project_tab`]). Runs on every keystroke typed at an
+/// agent, so a project already open costs a lookup and no allocation.
 fn typed_into(app: &mut App, session: &SessionRef) {
     if let Some(project) = app
         .project_of_session(session)
-        .filter(|p| app.launcher_tabs.first() != Some(*p))
+        .filter(|p| !app.launcher_tabs.contains(p))
         .cloned()
     {
-        app.bring_tab_forward(&project);
+        app.ensure_project_tab(&project);
     }
 }
 
@@ -3529,7 +3534,7 @@ fn typed_into(app: &mut App, session: &SessionRef) {
 /// project: [`typed_into`]'s work, by the checkout.
 fn worked_in(app: &mut App, worktree: &WorktreeId) {
     if let Some(project) = project_of_worktree(app, worktree) {
-        app.bring_tab_forward(&project);
+        app.ensure_project_tab(&project);
     }
 }
 
@@ -3916,6 +3921,7 @@ fn dispatch_action(
     match action {
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
         Action::Restart => app.overlay = Some(Overlay::Confirm(confirm_restart())),
+        Action::Upgrade => open_upgrade(app),
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
@@ -4794,6 +4800,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::PrevAttention
             | Action::Quit
             | Action::Restart
+            | Action::Upgrade
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
@@ -6282,6 +6289,35 @@ fn confirm_quit() -> ConfirmDialog {
 /// quits, the DAEMON is stopped with every session in it, and the binary
 /// starts again from scratch (`crate::restart`). The message says what is
 /// lost — a running turn, a terminal's shell — and what is not.
+/// **Upgrade orion**: the confirm when a newer release is out, a flash
+/// saying this one is current when not.
+pub(super) fn open_upgrade(app: &mut App) {
+    match app.update_available.clone() {
+        Some(v) => app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v))),
+        None => {
+            app.flash = Some(crate::flash::Flash::note(format!(
+                "orion v{} is the latest release",
+                env!("CARGO_PKG_VERSION")
+            )))
+        }
+    }
+}
+
+fn confirm_upgrade(version: &str) -> ConfirmDialog {
+    ConfirmDialog {
+        title: "Upgrade orion".into(),
+        // Sized to the longest line, never wrapped: keep each under 52.
+        message: format!(
+            "Install v{version} and restart orion on it?\n\
+             The daemon restarts too: agents pick their\n\
+             conversation back up; terminals start a\n\
+             new shell."
+        ),
+        action: PendingAction::Upgrade,
+        area: ratatui::layout::Rect::default(),
+    }
+}
+
 fn confirm_restart() -> ConfirmDialog {
     ConfirmDialog {
         title: "Restart orion".into(),
@@ -8303,13 +8339,44 @@ fn confirm_remove_account(app: &mut App, index: usize) {
     let entry = cfg.effective_harness_by_id(&id);
     let dir = crate::claude_accounts::dir_of(&entry)
         .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
+    // Name what it strands, and where those sessions can go instead.
+    let names: Vec<String> = crate::claude_accounts::sessions_on(&app.tree.agents, &id)
+        .iter()
+        .map(|a| a.name.clone())
+        .collect();
+    let email = crate::claude_accounts::email_of(&entry);
+    let same = cfg.harness_registry().into_iter().find(|other| {
+        other.id != id
+            && email.is_some()
+            && crate::claude_accounts::email_of(other)
+                .is_some_and(|e| Some(e.to_lowercase()) == email.as_ref().map(|m| m.to_lowercase()))
+    });
+    let how = crate::hints::act(
+        &app.keymap,
+        crate::keymap::Action::ContinueOn,
+        "continue on",
+    )
+    .map_or_else(
+        || "Continue on (right-click a session)".to_string(),
+        |h| format!("Continue on ({})", h.key),
+    );
+    let stranded = crate::claude_accounts::stranded_note(
+        &names,
+        &how,
+        same.as_ref().map(|s| s.display_label()),
+    );
+    let sessions = if stranded.is_empty() {
+        "Its sessions stop resuming until it is added back.".to_string()
+    } else {
+        stranded
+    };
     app.remember_settings_row(crate::config::agents_tab(), index);
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Remove account".into(),
         message: format!(
-            "Remove {} ({id}) from orion?\nIts sessions stop resuming until it is added back. \
-             {dir} — its login,\nsettings and transcripts — stays on disk, listed under Saved \
-             on this machine\nto add back or trash later, unless it goes to the Trash now.",
+            "Remove {} ({id}) from orion?\n{sessions}\n{dir} — its login, settings and \
+             transcripts — stays on disk, listed under Saved on this machine\nto add back or \
+             trash later, unless it goes to the Trash now.",
             entry.display_label()
         ),
         action: PendingAction::RemoveClaudeAccount { id },
@@ -8379,6 +8446,22 @@ fn add_claude_account(app: &mut App, new: crate::claude_accounts::NewAccount, sh
 /// Remove account `id` — its config dir to the Trash when `trash` says
 /// so — and land back on the section.
 fn remove_claude_account(app: &mut App, id: &str, trash: bool) {
+    // The Trash would take the transcripts of the sessions still on it.
+    let left = crate::claude_accounts::sessions_on(&app.tree.agents, id).len();
+    if trash && left > 0 {
+        open_claude_accounts(app, Some(id));
+        let sessions = match left {
+            1 => "1 session still runs".to_string(),
+            n => format!("{n} sessions still run"),
+        };
+        return settings_note(
+            app,
+            Err(format!(
+                "kept {id}: {sessions} on it, transcripts in its dir — \
+                 continue them on another account first, or remove it without the Trash"
+            )),
+        );
+    }
     let result = crate::claude_accounts::remove(id, trash);
     open_claude_accounts(app, None);
     crate::claude_accounts::request_refresh(app, true);
@@ -8696,7 +8779,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             // panel never waits on the DAEMON's fetch and `git worktree
             // add`. An Error takes it down and hands this box back.
             let focus = app.focus;
-            app.bring_tab_forward(&project);
+            app.ensure_project_tab(&project);
             let placeholder =
                 placeholder::stage_worktree(app, project.clone(), branch.clone(), out);
             send_with(
@@ -8947,6 +9030,10 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
         PendingAction::Quit => app.should_quit = true,
         PendingAction::Restart => {
             app.restart = true;
+            app.should_quit = true;
+        }
+        PendingAction::Upgrade => {
+            app.upgrade = true;
             app.should_quit = true;
         }
     }
@@ -10369,8 +10456,8 @@ fn project_of_worktree(app: &App, worktree: &WorktreeId) -> Option<ProjectId> {
 }
 
 fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequest>) {
-    // Every launch is work in its project, whose tab goes to the far left
-    // — a BACKGROUND LAUNCH's too, though nothing else it does moves. Not
+    // Every launch is work in its project, which gets a tab if it has
+    // none — a BACKGROUND LAUNCH's too, though nothing else it does. Not
     // a create that already carries its stand-in row: that is the second
     // half of a launch counted when its Enter was pressed, and the user
     // may have gone on to work somewhere else while the checkout was cut.
@@ -11217,6 +11304,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherWelcomePrompt
                 | HitTarget::FooterUsage
                 | HitTarget::FooterHome
+                | HitTarget::FooterUpgrade
                 | HitTarget::FooterCrumb(_)
         )
     });
@@ -11917,8 +12005,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // the `+` after them drops the PROJECT DROPDOWN — every
                 // project, narrowed by whatever you type, and a row that
                 // opens a folder — whose pick opens a tab; the MORE CHIP
-                // drops the tabs the row had no room for.
-                Some(HitTarget::LauncherTab(id)) => launcher::click_tab(app, &id, out),
+                // drops the tabs the row had no room for. A tab held
+                // down and dragged along the header moves it there
+                // (`launcher::drag_tab`).
+                Some(HitTarget::LauncherTab(id)) => {
+                    app.launcher_tab_drag = Some((id.clone(), None));
+                    launcher::click_tab(app, &id, out);
+                }
                 Some(HitTarget::LauncherTabClose(id)) => launcher::close_tab(app, &id, out),
                 Some(HitTarget::LauncherTabAdd) => launcher::open_project_menu(app),
                 Some(HitTarget::LauncherTabMore) => launcher::open_more_tabs_menu(app),
@@ -11936,6 +12029,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The footer's nameplate: HOME, through the `toggle_home`
                 // its key runs — and from HOME, back down to the grid.
                 Some(HitTarget::FooterHome) => toggle_home(app),
+                // The `⇡ v…` beside it, and HOME's upgrade line.
+                Some(HitTarget::FooterUpgrade) => open_upgrade(app),
                 // A part of the footer's breadcrumb: down onto the grid with
                 // the cursor on it.
                 Some(HitTarget::FooterCrumb(part)) => launcher::click_crumb(app, part, out),
@@ -12043,7 +12138,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             app.dirty = true;
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(grab) = app.launcher_pane_drag {
+            if app.launcher_tab_drag.is_some() {
+                launcher::drag_tab(app, mouse.column, mouse.row);
+            } else if let Some(grab) = app.launcher_pane_drag {
                 let at = app.launcher_pane_side().along(mouse.column, mouse.row);
                 app.set_launcher_pane(at + grab);
                 // A press that became a drag is not the first half of a
@@ -12072,6 +12169,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            // A PROJECT TAB being dragged rests where it was let go.
+            app.launcher_tab_drag = None;
             // The pane edge lets go here.
             let pane_ended = app.launcher_pane_drag.take().is_some();
             if pane_ended {
@@ -12646,7 +12745,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // the optimistic removal back, then ask about forcing it.
             app.left_behind.remove(&req_id);
             if let Some(PendingIntent::DeleteWorktree(rollback)) = app.pending.remove(&req_id) {
-                restore_worktree_rows(app, rollback);
+                restore_worktree_rows(app, rollback, out);
             }
             ask_to_force_delete(app, id, files);
             app.dirty = true;
@@ -12660,7 +12759,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
-                    restore_worktree_rows(app, rollback)
+                    restore_worktree_rows(app, rollback, out)
                 }
                 // A rename, an archive or a delete shown on the keypress
                 // and then refused: the row goes back to what it was.
@@ -12998,7 +13097,12 @@ fn remove_worktree_rows(app: &mut App, id: &WorktreeId) -> Option<WorktreeRollba
 
 /// Rollback of `remove_worktree_rows`: reinsert the rows at (or near) their
 /// old positions. Skips anything the daemon re-upserted in the meantime.
-fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback) {
+fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback, out: &mut Vec<ClientRequest>) {
+    // The rows coming back re-sort the projects and checkouts, and the
+    // cursors are row indices: held by id across the insert, or the grid
+    // under a confirm — and under the Esc that answers it — is another
+    // project's.
+    let before = selection_snapshot(app);
     let WorktreeRollback {
         index,
         worktree,
@@ -13014,7 +13118,7 @@ fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback) {
             app.tree.agents.insert(at, a);
         }
     }
-    clamp_selections(app);
+    reconcile_selection_inner(app, before, out);
     app.dirty = true;
 }
 
@@ -37097,6 +37201,89 @@ diff --git a/src/c.rs b/src/c.rs
                 )),
                 "{out:?}"
             );
+        });
+    }
+
+    /// The rows a refused worktree delete puts back re-sort the projects
+    /// under the cursor, which is a row index: it is held on its project
+    /// by id, so the force question — and the Esc that answers it — sit
+    /// over the project the delete came from, not the one that took its
+    /// row while the checkout was gone.
+    #[test]
+    fn a_refused_worktree_delete_keeps_the_cursor_on_its_project() {
+        use orion_core::{AgentStatus, Entity, Project, ProjectId, Worktree};
+        with_default_config(|| {
+            let mut app = App::new();
+            seed_emptiable_tree(&mut app);
+            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Project(Project {
+                        id: ProjectId("p2".into()),
+                        name: "web".into(),
+                        repo_path: "/tmp/web".into(),
+                        sort_order: 1,
+                    }),
+                },
+            );
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Worktree(Worktree {
+                        id: WorktreeId("w9".into()),
+                        project_id: ProjectId("p2".into()),
+                        path: "/tmp/web".into(),
+                        branch: "main".into(),
+                        is_main: true,
+                        sort_order: 0,
+                    }),
+                },
+            );
+            upsert_agent(&mut app, "b1", "w9", "web-agent", false);
+            // An archived session still dates its checkout, and goes and
+            // comes back with it.
+            upsert_agent(&mut app, "a3", "w2", "agent-3", true);
+            // demo's newest work is in the checkout being deleted; web's
+            // falls between that and demo's root.
+            for (id, at) in [("a1", 10), ("a2", 20), ("a3", 300), ("b1", 200)] {
+                let a = app.tree.agents.iter_mut().find(|a| a.id.0 == id).unwrap();
+                a.status = AgentStatus::Finished;
+                a.status_changed_at = at;
+            }
+            let demo = |app: &App| app.selected_project().map(|p| p.name.clone());
+            app.sel_project = app
+                .project_rows()
+                .iter()
+                .position(|&i| app.tree.projects[i].id.0 == "p1")
+                .unwrap();
+
+            menu_delete(&mut app, "a2");
+            let mut out = Vec::new();
+            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+            let req_id = out
+                .iter()
+                .find_map(|r| match r {
+                    ClientRequest::DeleteWorktree { req_id, id, .. } if id.0 == "w2" => {
+                        Some(*req_id)
+                    }
+                    _ => None,
+                })
+                .expect("a worktree delete");
+            assert_eq!(demo(&app).as_deref(), Some("demo"), "web leads, demo kept");
+
+            handle_server_event(
+                &mut app,
+                ServerEvent::WorktreeHasChanges {
+                    req_id,
+                    id: WorktreeId("w2".into()),
+                    files: 3,
+                },
+                &mut out,
+            );
+            assert_eq!(demo(&app).as_deref(), Some("demo"), "demo leads again");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(demo(&app).as_deref(), Some("demo"), "Esc stays in demo");
         });
     }
 

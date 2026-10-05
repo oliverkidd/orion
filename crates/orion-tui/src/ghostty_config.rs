@@ -719,6 +719,7 @@ mod tests {
                 "super+g",
                 "super+,",
                 "super+shift+r",
+                "super+shift+g",
                 "super+shift+p",
                 "super+o",
             ]

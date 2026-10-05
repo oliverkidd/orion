@@ -79,7 +79,7 @@ impl RowPr {
 /// The list is the SELECTED PROJECT's alone — the one whose PROJECT TAB is
 /// lit in the header. Every jump moves `sel_project` with it, so the
 /// cursor only ever rests on a session the list holds, and the tabs (or
-/// the `+` in front of them) are the way to the projects beside it.
+/// the `+` after them) are the way to the projects beside it.
 pub fn rows(app: &App) -> Vec<LauncherRow> {
     let scope = app.selected_project().map(|p| p.id.clone());
     // The ARCHIVED VIEW (`⇧A`) is the grid, swapped: the same cards for
@@ -1759,13 +1759,12 @@ pub struct ProjectTab {
 }
 
 /// The PROJECT TABS across the LAUNCHER VIEW's header: every project
-/// opened since it was last closed ([`App::launcher_tabs`]), the one last
-/// worked in at the far left. Opening a project that has no tab yet puts
-/// one there ([`App::settle_project_tabs`]), and so does working in one —
-/// a session launched, a turn sent, a key typed at a session
-/// ([`App::bring_tab_forward`]). Switching between tabs only looks and
-/// moves none of them, so `[` / `]` and the header's cursor walk a row
-/// that holds still under them.
+/// opened since it was last closed ([`App::launcher_tabs`]), in the order
+/// the user keeps them. Opening a project that has no tab yet puts one at
+/// the right end ([`App::settle_project_tabs`]), and so does working in
+/// one ([`App::ensure_project_tab`]). Nothing else moves a tab but a drag
+/// along the header, so `[` / `]`, `⌘N` and the header's cursor walk a
+/// row that holds still under them.
 ///
 /// A project gone from the tree drops out here, before the settle next
 /// prunes it.
@@ -2649,7 +2648,7 @@ mod tests {
     }
 
     /// The tabs are the projects opened on the grid, the newest opened at
-    /// the far left. Coming back to one already open moves nothing, and a
+    /// the right end. Coming back to one already open moves nothing, and a
     /// project gone from the tree takes its tab with it.
     #[test]
     fn a_project_gets_a_tab_when_it_is_opened() {
@@ -2661,7 +2660,7 @@ mod tests {
 
         app.sel_project = web_row(&app);
         app.settle_project_tabs();
-        assert_eq!(ids(&app), ["web", "api"], "the newest opened leads");
+        assert_eq!(ids(&app), ["api", "web"], "the newest opened goes last");
 
         // Back to `api`: it is already open, so nothing moves — only which
         // tab is lit.
@@ -2672,11 +2671,18 @@ mod tests {
             .expect("api has a row");
         app.settle_project_tabs();
         let tabs = project_tabs(&app);
-        assert_eq!(ids(&app), ["web", "api"]);
+        assert_eq!(ids(&app), ["api", "web"]);
         assert_eq!(
             tabs.iter().map(|t| t.active).collect::<Vec<_>>(),
-            [false, true]
+            [true, false]
         );
+
+        // Work in `web` — a key typed at one of its sessions — leaves
+        // the order alone too; only a drag moves a tab.
+        app.ensure_project_tab(&ProjectId("p2".into()));
+        assert_eq!(ids(&app), ["api", "web"]);
+        assert!(app.move_project_tab(&ProjectId("p2".into()), &ProjectId("p1".into())));
+        assert_eq!(ids(&app), ["web", "api"], "dragged to the front");
 
         // Removed from the tree, `web` is removed from the header.
         app.tree.projects.retain(|p| p.id.0 != "p2");

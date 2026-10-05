@@ -85,10 +85,10 @@ pub(super) fn submit(
             create_agent(app, draft, out)
         }
         QuickTarget::NewWorktree { project, branch } => {
-            // Its tab to the far left now, as `create_agent` does for a
+            // Its tab now, if it has none, as `create_agent` does for a
             // launch into a checkout that exists: the create it rides
             // goes out seconds from now and does not count again.
-            app.bring_tab_forward(&project);
+            app.ensure_project_tab(&project);
             // The rows first, so the panels never wait on git.
             // The composed task the create will carry (`draft`), asked
             // here so the row goes up the way it will come back: working.

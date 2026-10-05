@@ -551,10 +551,23 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         ));
         spans.push(Span::styled(plate, style));
         if let Some(update) = update {
-            spans.push(Span::styled(
-                update,
-                Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
+            // A button too: **Upgrade orion**, shimmering green so a new
+            // release is hard to miss.
+            let x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
+            let width = update.chars().count() as u16;
+            app.hits.push((
+                Rect {
+                    x,
+                    width: width.min(left.right().saturating_sub(x)),
+                    ..left
+                },
+                HitTarget::FooterUpgrade,
             ));
+            let mut base = Style::default().add_modifier(Modifier::BOLD);
+            if app.hover_crumb == Some(HitTarget::FooterUpgrade) {
+                base = base.add_modifier(Modifier::UNDERLINED);
+            }
+            spans.extend(upgrade_spans(app, &update, base));
         }
         spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
@@ -652,4 +665,20 @@ fn footer_usage(app: &App) -> Option<String> {
         super::launcher_view::plural(agents),
         super::fmt_mem(total)
     ))
+}
+
+/// The green ramp a waiting upgrade shimmers on: the theme's `ok` at rest.
+pub(crate) fn upgrade_ramp(th: crate::theme::Theme) -> [ratatui::style::Color; 3] {
+    use ratatui::style::Color;
+    [th.ok, Color::Indexed(114), Color::Indexed(157)]
+}
+
+/// `text` in the upgrade green, sweeping while animations are on.
+pub(crate) fn upgrade_spans(app: &App, text: &str, base: Style) -> Vec<Span<'static>> {
+    let ramp = upgrade_ramp(app.theme);
+    if app.animations {
+        crate::ui::sweep_spans(text, base, ramp, app.sweep_phase())
+    } else {
+        vec![Span::styled(text.to_string(), base.fg(ramp[0]))]
+    }
 }
