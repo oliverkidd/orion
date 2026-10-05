@@ -489,6 +489,8 @@ pub enum SettingKind {
     SessionIdleTimeout,
     PrewarmAgents,
     PrewarmSessions,
+    UsageClaude,
+    UsageCursor,
     DoneSound,
     FeedbackSound,
     PresetText,
@@ -653,6 +655,7 @@ impl SettingKind {
             | SettingKind::PrMergeMethod
             | SettingKind::PrDeleteBranch
             | SettingKind::PrDraft => (2026, 10, 4),
+            SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
         }
     }
 
@@ -771,6 +774,18 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::PrewarmSessions,
                 label: "Prewarm dead sessions",
                 hint: "Boot a worktree's dead sessions while the cursor rests on it, so attaching is instant",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::UsageClaude,
+                label: "Claude usage",
+                hint: "{usage} reads each Claude account's session and weekly limits every 15 minutes with its Claude Code login",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::UsageCursor,
+                label: "Cursor usage",
+                hint: "{usage} reads the cursor-agent login's monthly allowance every 15 minutes",
                 group: "",
             },
             SettingSpec {
@@ -1340,6 +1355,11 @@ pub struct Config {
     /// rests on it, so attaching lands on a booted screen. Daemon-owned and
     /// TUI-written, same as above.
     pub prewarm_sessions: bool,
+    /// ACCOUNT USAGE (`usage`) reads each Claude account's limits with its
+    /// own Claude Code login. Off: no Claude rows, and nothing is asked.
+    pub usage_claude: bool,
+    /// ACCOUNT USAGE reads the `cursor-agent` login's monthly allowance.
+    pub usage_cursor: bool,
     /// What rings when a turn reaches FINISHED with nobody watching it:
     /// "off", "bell" (terminal BEL) or the name of a macOS system sound
     /// (`Glass` by default, `Ping`, …; see [`SOUNDS`]). Resolved by
@@ -1812,6 +1832,8 @@ impl Default for Config {
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             prewarm_agents: true,
             prewarm_sessions: true,
+            usage_claude: true,
+            usage_cursor: true,
             done_sound: "Glass".into(),
             feedback_sound: "Sosumi".into(),
             preset_text: PresetText::DEFAULT.as_str().into(),
@@ -3109,6 +3131,8 @@ impl Config {
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
             SettingKind::PrewarmAgents => on_off(self.prewarm_agents).into(),
             SettingKind::PrewarmSessions => on_off(self.prewarm_sessions).into(),
+            SettingKind::UsageClaude => on_off(self.usage_claude).into(),
+            SettingKind::UsageCursor => on_off(self.usage_cursor).into(),
             SettingKind::DoneSound => self.done_sound.clone(),
             SettingKind::FeedbackSound => self.feedback_sound.clone(),
             SettingKind::PresetText => self.preset_text().as_str().into(),
@@ -3233,6 +3257,8 @@ impl Config {
             SettingKind::PrewarmSessions => {
                 self.prewarm_sessions = !self.prewarm_sessions;
             }
+            SettingKind::UsageClaude => self.usage_claude = !self.usage_claude,
+            SettingKind::UsageCursor => self.usage_cursor = !self.usage_cursor,
             SettingKind::DoneSound => {
                 self.done_sound = cycle_choice(&self.done_sound, SOUNDS, step).into();
             }

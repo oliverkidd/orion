@@ -113,6 +113,8 @@ pub enum Answer {
         ticket: u64,
         skills: Vec<crate::skills::Skill>,
     },
+    /// One ACCOUNT USAGE ask, back from its provider.
+    Usage(crate::usage::Answer),
     /// [`STALE_GRACE`] is up on `ticket`.
     Slow { ticket: u64 },
     /// The system clipboard could not be written off the loop: hand the

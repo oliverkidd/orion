@@ -43,6 +43,9 @@ pub const EDITOR: &str = "ORION_EDITOR";
 /// (the footer's `⇡ vX.Y.Z` update indicator); `0` turns it off, as the
 /// e2e tests do so their footers never depend on what GitHub has published.
 pub const UPDATE_CHECK_SECS: &str = "ORION_UPDATE_CHECK_SECS";
+/// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
+/// run never reads the machine's logins or calls out with them.
+pub const USAGE: &str = "ORION_USAGE";
 /// A Ghostty config file the TUI keeps its GHOSTTY KEYBINDS block in
 /// instead of the one Ghostty reads, or `off` for none — as the e2e tests
 /// set it, so a run never touches the real one.
