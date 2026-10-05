@@ -47,9 +47,9 @@ pub(crate) mod diff_keys {
     /// The COMMIT LIST: tick the cursor's row, or untick it.
     pub const TICK: Key = Key::new(&["space"], "tick");
     /// The COMMIT LIST: every commit ticked, or none.
-    pub const ALL: Key = Key::new(&["ctrl+a"], "all");
+    pub const ALL: Key = Key::new(&["cmd+a", "ctrl+a"], "all");
     /// The ticked commits TOGETHER or ONE AT A TIME.
-    pub const MODE: Key = Key::new(&["ctrl+g"], "one at a time");
+    pub const MODE: Key = Key::new(&["cmd+g", "ctrl+g"], "one at a time");
     /// Older / newer: the cursor's commit, or the step through the ticked.
     pub const STEP: Key = Key::new(&["shift+left", "shift+right"], "commit").show(2);
     /// The next panel, or the one before.
@@ -63,8 +63,9 @@ pub(crate) mod diff_keys {
     pub const BACK: Key = Key::new(&["left"], "files");
     /// The diff's scroll from anywhere else.
     pub const SCROLL: Key = Key::new(&["shift+up", "shift+down"], "scroll").show(2);
-    pub const REVIEWED: Key = Key::new(&["ctrl+r"], "reviewed");
-    pub const TREE: Key = Key::new(&["ctrl+t"], "tree");
+    pub const REVIEWED: Key = Key::new(&["cmd+r", "ctrl+r"], "reviewed");
+    /// The grid's file tree chord (`Action::TreeBrowser`).
+    pub const TREE: Key = Key::new(&["cmd+b", "ctrl+b"], "tree");
     pub const FOLD: Key = Key::new(&["left", "right"], "fold").show(2);
 
     /// Every key of the table, for the tests that hold the hints to it.

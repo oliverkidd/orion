@@ -881,7 +881,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::DiffTreeView,
                 label: "Files as a tree",
-                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^T flips one open viewer)",
+                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^B flips one open viewer)",
                 group: "Changes",
             },
             SettingSpec {
@@ -911,7 +911,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::PrDraft,
                 label: "New PRs as drafts",
-                hint: "A new pull request (^T in the pull requests modal) opens with its Draft box ticked",
+                hint: "A new pull request (^N in the pull requests modal) opens with its Draft box ticked",
                 group: "Pull requests",
             },
         ]),

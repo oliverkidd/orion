@@ -23,12 +23,16 @@
 //! first, the cursor on the best — a letter typed on the page hands the
 //! keys back to the list first — and Esc clears it before a second Esc
 //! closes (Esc on the page goes back to the list). So the verbs are
-//! chords: `Ctrl+c` or `Ctrl+y` leaves a comment (the COMMENT BOX the
+//! chords: `⌘Y` leaves a comment (the COMMENT BOX the
 //! group row's `y` opens, which comes back to the modal on its row),
-//! `Ctrl+g` reads the diff, `Ctrl+o` opens the pull request in the
-//! browser, `Ctrl+r` asks GitHub again, `Ctrl+t` opens a new pull request
-//! and `Ctrl+x` merges this one (`pr_actions`, both forms in the reading
-//! pane's place).
+//! `⌘E` reads the diff, `⌘O` opens the pull request in the
+//! browser, `⌘R` asks GitHub again, `⌘N` opens a new pull request,
+//! `⌘X` merges this one and `⌘W` closes it (`pr_actions`, each
+//! form in the reading pane's place), and `⌘D` marks a draft ready for
+//! review or a ready one a draft again. Each verb is one ⌘ chord — the
+//! grid's letter where the grid does the same thing (`⌘E` changes, `⌘R`
+//! refresh, `⌘O` open outside, `⌘N` new, `⌘W` close) — with its `^` twin
+//! for a terminal that sends no ⌘.
 //!
 //! `⌘L` flips to the LINEAR VIEW to attach the pull request under the
 //! cursor to the issues marked there. The way back is the PR PICK
@@ -422,6 +426,11 @@ pub(crate) fn selected_pr(app: &App) -> Option<OpenPr> {
     cursor_index(view, list).and_then(|i| list.get(i).cloned())
 }
 
+/// Whether the modal is what is up.
+pub(crate) fn is_up(app: &App) -> bool {
+    matches!(&app.overlay, Some(Overlay::PullRequests(_)))
+}
+
 /// The URL of the pull request under the cursor, for the browser.
 fn selected_url(app: &App) -> Option<String> {
     selected_pr(app).map(|pr| pr.url)
@@ -575,7 +584,7 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     true
 }
 
-/// `Ctrl+r`: ask for the list again now, and the selected pull request's body
+/// `⌘R`: ask for the list again now, and the selected pull request's body
 /// over the cached copy. The rows stay until the answer lands, the title
 /// saying `refreshing…` meanwhile.
 fn refresh(app: &mut App) {
@@ -625,7 +634,7 @@ fn open_prompt_for_selected(app: &mut App) {
     }
 }
 
-/// `Ctrl+c`: the COMMENT BOX for the pull request under the cursor, carrying the
+/// `⌘Y`: the COMMENT BOX for the pull request under the cursor, carrying the
 /// modal so Enter and Esc come back to it on the row. A draft a refused
 /// post left for this pull request fills the box.
 fn open_comment_for_selected(app: &mut App) {
@@ -649,7 +658,7 @@ fn open_comment_for_selected(app: &mut App) {
     );
 }
 
-/// `Ctrl+o`, and a click on the reading pane's `↗ open in browser` button
+/// `⌘O`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the pull request under the cursor in the
 /// browser, through the very `event_loop::open_link` a card's `⇧V` and
 /// `⇧I` run — the footer says when it could not — and the pull request is
@@ -664,8 +673,8 @@ pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 // ---- keys and mouse ----
 
-/// The row under the reading side's cursor, acted on — `^G` on a file or
-/// a commit, `^O` on a check (`pr_preview::run_act`). False with nothing
+/// The row under the reading side's cursor, acted on — `⌘E` on a file or
+/// a commit, `⌘O` on a check (`pr_preview::run_act`). False with nothing
 /// to act on there: a tab of prose, or a body still on its way.
 fn act_on_row(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
@@ -686,7 +695,7 @@ fn act_on_row(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
     true
 }
 
-/// `^G`: the diff of what the reading side has under its cursor — the
+/// `⌘E`: the diff of what the reading side has under its cursor — the
 /// file on Changes, the commit on Commits — else the whole pull request's.
 fn diff(app: &mut App, out: &mut Vec<ClientRequest>) {
     let on = match &app.overlay {
@@ -701,7 +710,7 @@ fn diff(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// `^O`: the check under the cursor on Checks, else the pull request.
+/// `⌘O`: the check under the cursor on Checks, else the pull request.
 fn browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     let on = match &app.overlay {
         Some(Overlay::PullRequests(view)) => view.tabs.tab,
@@ -751,11 +760,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let plain = key.modifiers.is_empty();
     let on_page = view.focus == PrFocus::Page;
-    let half = (view.view_height / 2).max(1) as i32;
     let max = view.max_scroll();
     match key.code {
         KeyCode::Esc if on_page => view.focus = PrFocus::List,
@@ -777,21 +784,15 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
         // ↑/↓ walk a listing's rows or scroll prose with the keys on the
         // page, and ⇧↑/⇧↓ do from the list; on the list ↑/↓ walk the rows
-        // the filter leaves, Ctrl+n/p mirroring them.
+        // the filter leaves.
         KeyCode::Down if shift || on_page => {
             view.tabs.navigate(Nav::Line(1), &mut view.scroll, max)
         }
         KeyCode::Up if shift || on_page => view.tabs.navigate(Nav::Line(-1), &mut view.scroll, max),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
-        KeyCode::Char('n') if ctrl => step(app, 1),
-        KeyCode::Char('p') if ctrl => step(app, -1),
-        // The reading side scrolls on the DIFF VIEWER's keys — a listing
-        // walks its rows by the page. Ctrl+u is the line editor's
-        // kill-to-start while something is typed; only with an empty
-        // filter does it scroll.
-        KeyCode::Char('d') if ctrl => view.scroll_by(half),
-        KeyCode::Char('u') if ctrl && view.query.is_empty() => view.scroll_by(-half),
+        // The reading side scrolls by the page — a listing walks its rows
+        // by the page.
         KeyCode::PageDown => view.tabs.navigate(Nav::Page(1), &mut view.scroll, max),
         KeyCode::PageUp => view.tabs.navigate(Nav::Page(-1), &mut view.scroll, max),
         KeyCode::Home => view.tabs.navigate(Nav::Top, &mut view.scroll, max),
@@ -807,7 +808,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::BROWSER.matches(&key) => browser(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::NEW.matches(&key) => crate::pr_actions::open_create(app),
-        _ if keys::MERGE.matches(&key) => crate::pr_actions::open_merge(app),
+        // ⌘X cuts a SELECTION in the filter before it merges.
+        _ if keys::MERGE.matches(&key) && view.query.selected().is_none() => {
+            crate::pr_actions::open_merge(app)
+        }
+        _ if keys::CLOSE.matches(&key) => crate::pr_actions::open_close(app),
+        _ if keys::READY.matches(&key) => crate::pr_actions::toggle_draft(app),
         // A PR PICK already came from the LINEAR VIEW: `⌘L` there would
         // stack the two views on each other, so it does nothing.
         _ if keys::LINEAR.matches(&key) && view.pick.is_some() => {}
@@ -829,7 +835,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
 /// rows the filter leaves and scrolls the reading side over it, a click on
 /// a row selects it and hands the list the keys (a launch is `Enter`, not
 /// a click — the row is something to read first), a double-click on a row
-/// opens that pull request in the browser — the very open `Ctrl+o` and
+/// opens that pull request in the browser — the very open `⌘O` and
 /// the `↗ open in browser` button run — a click on the page hands it the
 /// keys, on a tab shows it, on a file, a commit or a check is Enter on
 /// it, and a click outside closes (`overlay_close`); everything else is
@@ -868,7 +874,7 @@ pub(crate) fn handle_mouse(
         MouseEventKind::ScrollUp => step(app, -1),
         MouseEventKind::ScrollDown => step(app, 1),
         // The `↗ open in browser` button, before the rows: the very open
-        // `Ctrl+o` runs.
+        // `⌘O` runs.
         MouseEventKind::Down(MouseButton::Left) if on_button => open_in_browser(app, out),
         MouseEventKind::Down(MouseButton::Left) if on_tab.is_some() => {
             view.focus = PrFocus::Page;
@@ -931,14 +937,21 @@ pub(crate) mod keys {
     pub const PAGE_ROWS: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const ACT: Key = Key::new(&["enter"], "open");
     pub const COMMENT: Key = crate::issues::keys::COMMENT;
-    pub const DIFF: Key = Key::new(&["ctrl+g"], "diff");
+    /// The grid's changes chord (`Action::GitDiff`), for the pull
+    /// request's.
+    pub const DIFF: Key = Key::new(&["cmd+e", "ctrl+e"], "diff");
     pub const BROWSER: Key = crate::issues::keys::BROWSER;
     pub const REFRESH: Key = crate::issues::keys::REFRESH;
     pub const READ: Key = crate::issues::keys::READ;
     /// A new pull request, from a branch of the project's.
-    pub const NEW: Key = Key::new(&["ctrl+t"], "new PR");
+    pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new PR");
     /// Merge the pull request under the cursor.
-    pub const MERGE: Key = Key::new(&["ctrl+x"], "merge");
+    pub const MERGE: Key = Key::new(&["cmd+x", "ctrl+x"], "merge");
+    /// Close the pull request under the cursor without merging it.
+    /// ⌘W, the close every modal's remove verb shares — it asks first.
+    pub const CLOSE: Key = Key::new(&["cmd+w", "ctrl+w"], "close PR");
+    /// Mark it ready for review, or a draft again.
+    pub const READY: Key = Key::new(&["cmd+d", "ctrl+d"], "ready/draft");
     /// Linear issues to attach the pull request to.
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
     /// Enter on the PR PICK's list: the pull request attached to the
@@ -949,12 +962,12 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, LINEAR, ATTACH, TABS, ROWS,
+        MERGE, CLOSE, READY, LINEAR, ATTACH, TABS, ROWS,
     ];
 }
 
 /// The keys along the modal's bottom edge, for the panel that has them —
-/// `^G` and `^O` named for what they reach on the tab showing, and Enter
+/// `⌘E` and `⌘O` named for what they reach on the tab showing, and Enter
 /// on the page for what it does there. A form up in the reading pane's
 /// place says its own (`pr_actions::hints`). Esc steps back off the page,
 /// then clears a typed filter, then closes — or, in a PR PICK, goes back
@@ -983,6 +996,8 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
             keys::BACK.hint(),
             keys::COMMENT.hint(),
             keys::MERGE.hint(),
+            keys::CLOSE.hint(),
+            keys::READY.hint(),
             diff,
             browser,
             keys::READ.hint(),
@@ -1004,6 +1019,8 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     hints.extend([
         keys::NEW.hint(),
         keys::MERGE.hint(),
+        keys::CLOSE.hint(),
+        keys::READY.hint(),
         keys::COMMENT.hint(),
         diff,
         browser,
@@ -1319,6 +1336,10 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    fn cmd(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SUPER)
+    }
+
     fn shifted(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
     }
@@ -1440,7 +1461,7 @@ mod tests {
         assert_eq!(pending_url(&app), Some(url.as_str()));
     }
 
-    /// ↑/↓ (and Ctrl+n/p) walk the rows, each arming its own fetch; only
+    /// ↑/↓ walk the rows, each arming its own fetch; only
     /// Esc closes — the hotkey and `q` type into the filter, as every
     /// letter does — and a typed filter takes the first Esc.
     #[test]
@@ -1456,10 +1477,6 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
         assert_eq!(view(&app).selected, 1, "clamped at the last row");
         handle_key(&mut app, key(KeyCode::Up), &mut Vec::new());
-        assert_eq!(view(&app).selected, 0);
-        handle_key(&mut app, ctrl('n'), &mut Vec::new());
-        assert_eq!(view(&app).selected, 1);
-        handle_key(&mut app, ctrl('p'), &mut Vec::new());
         assert_eq!(view(&app).selected, 0);
         for letter in ['q', 'v'] {
             handle_key(&mut app, key(KeyCode::Char(letter)), &mut Vec::new());
@@ -1623,9 +1640,9 @@ mod tests {
         assert!(app.overlay.is_none());
     }
 
-    /// `Ctrl+t` opens the new pull request form in the reading pane's
+    /// `⌘N` opens the new pull request form in the reading pane's
     /// place, from the branch the Worktrees cursor's checkout is on, and
-    /// `Ctrl+x` the merge of the row under the cursor; Esc puts the page
+    /// `⌘X` the merge of the row under the cursor; Esc puts the page
     /// back either way, and the form has every key meanwhile.
     #[test]
     fn the_forms_open_in_the_pages_place() {
@@ -1649,7 +1666,7 @@ mod tests {
                 .expect("the feature checkout has a row");
             open(&mut app);
             let mut out = Vec::new();
-            handle_key(&mut app, ctrl('t'), &mut out);
+            handle_key(&mut app, ctrl('n'), &mut out);
             let Some(form) = &view(&app).form else {
                 panic!("no form");
             };
@@ -1718,8 +1735,117 @@ mod tests {
         });
     }
 
-    /// `Ctrl+c` opens the COMMENT BOX on the row, carrying the modal; Esc puts
-    /// the modal back on the same pull request.
+    /// `⌘W` opens the close form on the row: the caret in its comment,
+    /// the branch kept until it is known to be ours and ticked. A close
+    /// that lands puts the page back and says so; a refused one says why
+    /// on the form.
+    #[test]
+    fn cmd_w_closes_the_row_through_its_form() {
+        use crate::pr_actions::{Answer, CloseRow, PrForm};
+        pinned(|| {
+            let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+            open(&mut app);
+            let mut out = Vec::new();
+            handle_key(&mut app, ctrl('w'), &mut out);
+            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
+                panic!("no close form");
+            };
+            assert_eq!(close.number, 42);
+            assert_eq!(close.row, CloseRow::Comment);
+            for c in "dup".chars() {
+                handle_key(&mut app, key(KeyCode::Char(c)), &mut out);
+            }
+            assert!(view(&app).query.is_empty(), "the form took the letters");
+            // Space on the box does nothing while the branch is unknown.
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert_eq!(close.comment.as_str(), "dup");
+            assert_eq!(close.row, CloseRow::DeleteBranch);
+            assert!(!close.delete_branch);
+            let shot = screen(&mut app, 140, 34);
+            assert!(shot.contains("Close #42"), "{shot}");
+            assert!(shot.contains("closes without merging"), "{shot}");
+            assert!(shot.contains("known once its details are in"), "{shot}");
+            assert!(shot.contains("Enter close PR"), "{shot}");
+
+            // The body lands: the branch is ours, and Space ticks it.
+            let url = "https://github.com/o/r/pull/42".to_string();
+            let mut d = detail(42, "Fix login");
+            d.head = "branch-42".into();
+            app.pr_detail.insert(url.clone(), d);
+            crate::pr_actions::detail_landed(&mut app, &url);
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert_eq!(close.branch.as_deref(), Some("branch-42"));
+            assert!(close.delete_branch);
+            let ticket = close.ticket;
+            let shot = screen(&mut app, 140, 34);
+            assert!(shot.contains("branch-42 → main"), "{shot}");
+            assert!(shot.contains("branch-42 on GitHub, once closed"), "{shot}");
+
+            crate::pr_actions::land_answer(
+                &mut app,
+                Answer::Closed {
+                    project: project.clone(),
+                    ticket,
+                    result: Err("not allowed".into()),
+                },
+            );
+            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
+                panic!("a refused close keeps the form");
+            };
+            assert_eq!(close.notice.as_deref(), Some("not allowed"));
+            assert_eq!(close.comment.as_str(), "dup", "nothing typed is lost");
+
+            crate::pr_actions::land_answer(
+                &mut app,
+                Answer::Closed {
+                    project,
+                    ticket,
+                    result: Ok("closed #42, branch deleted".into()),
+                },
+            );
+            assert!(view(&app).form.is_none());
+            assert!(app.pr_refresh_requested, "the list is asked for again");
+            let flash = format!("{:?}", app.flash);
+            assert!(flash.contains("closed #42, branch deleted"), "{flash}");
+        });
+    }
+
+    /// A draft flipped lands in the footer and has the pull request read
+    /// again, so the page and the badge follow.
+    #[test]
+    fn a_flipped_draft_is_read_again() {
+        use crate::pr_actions::Answer;
+        let (mut app, project) = app_with(vec![pr(42, "Fix login", true)], true);
+        open(&mut app);
+        let url = "https://github.com/o/r/pull/42".to_string();
+        app.pr_detail.insert(url.clone(), detail(42, "Fix login"));
+        app.pending_pr_detail = None;
+        crate::pr_actions::land_answer(
+            &mut app,
+            Answer::Readied {
+                project,
+                url: url.clone(),
+                number: 42,
+                ready: true,
+                result: Ok(()),
+            },
+        );
+        assert!(app.pr_detail_stale.contains(&url));
+        assert_eq!(pending_url(&app), Some(url.as_str()));
+        assert!(app.pr_refresh_requested);
+        let flash = format!("{:?}", app.flash);
+        assert!(flash.contains("#42 is ready for review"), "{flash}");
+    }
+
+    /// `⌘Y` (`^Y` with no ⌘) opens the COMMENT BOX on the row, carrying the
+    /// modal; Esc puts the modal back on the same pull request.
     #[test]
     fn c_opens_the_comment_box_and_esc_comes_back_to_the_row() {
         pinned(|| {
@@ -1729,9 +1855,9 @@ mod tests {
             );
             open(&mut app);
             handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
-            handle_key(&mut app, ctrl('c'), &mut Vec::new());
+            handle_key(&mut app, ctrl('y'), &mut Vec::new());
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Ctrl+c: expected the comment box, got {:?}", app.overlay);
+                panic!("Ctrl+y: expected the comment box, got {:?}", app.overlay);
             };
             assert!(prompt.is_multiline());
             assert_eq!(prompt.title, "Comment on #41 Spike");
@@ -1747,10 +1873,10 @@ mod tests {
         });
     }
 
-    /// `Ctrl+y` is `Ctrl+c`: the grid's `y` (reply) as a chord, onto the
-    /// same COMMENT BOX for the same row.
+    /// `⌘Y` is `^Y`: the grid's `y` (reply) as a chord, onto the same
+    /// COMMENT BOX for the same row.
     #[test]
-    fn ctrl_y_opens_the_comment_box_as_ctrl_c_does() {
+    fn cmd_y_opens_the_comment_box_as_ctrl_y_does() {
         pinned(|| {
             let (mut app, _) = app_with(
                 vec![pr(42, "Fix login", false), pr(41, "Spike", true)],
@@ -1758,9 +1884,9 @@ mod tests {
             );
             open(&mut app);
             handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
-            handle_key(&mut app, ctrl('y'), &mut Vec::new());
+            handle_key(&mut app, cmd('y'), &mut Vec::new());
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Ctrl+y: expected the comment box, got {:?}", app.overlay);
+                panic!("⌘Y: expected the comment box, got {:?}", app.overlay);
             };
             let PromptKind::PrComment { number, back, .. } = &prompt.kind else {
                 panic!("{:?}", prompt.kind);
@@ -1896,8 +2022,8 @@ mod tests {
 
     /// The reading side is the PULL REQUEST PAGE: its tabs over the body,
     /// walked with ⇧←/⇧→ round either end — ↑/↓ still the list's — a
-    /// listing's rows with ⇧↑/⇧↓; `^G` diffs the file or the commit under
-    /// the cursor and `^O` opens the check, and the border names each by
+    /// listing's rows with ⇧↑/⇧↓; `⌘E` diffs the file or the commit under
+    /// the cursor and `⌘O` opens the check, and the border names each by
     /// what it reaches there, from the modal's own table. A click on a tab
     /// shows it and a click on a row acts on it. Moving to another pull
     /// request rewinds the rows and keeps the tab.
@@ -1962,13 +2088,13 @@ mod tests {
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
         handle_key(&mut app, shifted(KeyCode::Down), &mut out);
         assert_eq!(view(&app).tabs.row(), 1);
-        handle_key(&mut app, ctrl('g'), &mut out);
+        handle_key(&mut app, ctrl('e'), &mut out);
         assert_eq!(
             app.pr_diff_at,
             Some((url.clone(), "src/auth.rs".to_string()))
         );
 
-        // ^O on Checks: the check, not the pull request.
+        // ⌘O on Checks: the check, not the pull request.
         handle_key(&mut app, shifted(KeyCode::Right), &mut out);
         handle_key(&mut app, shifted(KeyCode::Right), &mut out);
         assert_eq!(view(&app).tabs.tab, PrTab::Checks);
@@ -2075,7 +2201,7 @@ mod tests {
         assert!(answered.contains("no open pull requests"), "{answered}");
     }
 
-    /// `Ctrl+o` and a click on the reading pane's `↗ open in browser` button run
+    /// `⌘O` and a click on the reading pane's `↗ open in browser` button run
     /// one open: the footer names where the browser went either way (INPUT
     /// PARITY), and the modal stays up. The button is drawn pinned right on
     /// the pane's top border, its rect written back for the click; the
@@ -2206,7 +2332,7 @@ mod tests {
     /// A filter nothing matches empties the list and says so — nothing
     /// under the cursor, no body asked for — and the row is back the
     /// moment the filter widens. Ctrl+u kills the typed filter, as in any
-    /// line editor, and scrolls the pane only once there is none.
+    /// line editor, and never scrolls the pane.
     #[test]
     fn a_filter_nothing_matches_says_so_and_leaves_the_cursor_put() {
         let (mut app, _) = app_with(
@@ -2248,7 +2374,11 @@ mod tests {
             "the row found keeps the cursor"
         );
         handle_key(&mut app, ctrl('u'), &mut Vec::new());
-        assert_eq!(view(&app).scroll, 0, "with nothing typed, it scrolls");
+        assert_eq!(
+            view(&app).scroll,
+            3,
+            "with nothing typed, it still does not scroll — PgUp does"
+        );
     }
 
     /// A click on a row while a filter is typed picks that row — the row
@@ -2286,7 +2416,7 @@ mod tests {
     }
 
     /// A double-click on a row opens that pull request in the browser —
-    /// the same open as `Ctrl+o` and the button (INPUT PARITY) — and the
+    /// the same open as `⌘O` and the button (INPUT PARITY) — and the
     /// modal stays up on the row. A single click only selects, and two
     /// clicks on different rows are two single clicks.
     #[test]
@@ -2386,9 +2516,11 @@ mod tests {
         );
     }
 
-    /// The verbs the letters used to be are chords now: Ctrl+r asks
-    /// GitHub again and Ctrl+g asks for the diff, while the plain letters
-    /// go to the filter.
+    /// The verbs the letters used to be are chords now: ⌘R asks GitHub
+    /// again and ⌘E — the grid's changes chord — asks for the diff, each
+    /// on its `^` twin where the terminal sends no ⌘, while the plain
+    /// letters go to the filter. ⌘X cuts a selection in the filter rather
+    /// than merge.
     #[test]
     fn the_verb_chords_run_and_the_plain_letters_type() {
         let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
@@ -2398,19 +2530,35 @@ mod tests {
         assert!(app.pr_refresh_requested);
         assert!(app.open_prs_lookup_due(&project));
         app.flash = None;
-        handle_key(&mut app, ctrl('g'), &mut Vec::new());
-        assert!(
-            app.flash
-                .as_deref()
-                .is_some_and(|f| f.starts_with("repo path missing on disk")),
-            "Ctrl+g reaches the diff fetch: {:?}",
-            app.flash
-        );
+        for chord in [ctrl('e'), cmd('e')] {
+            app.flash = None;
+            handle_key(&mut app, chord, &mut Vec::new());
+            assert!(
+                app.flash
+                    .as_deref()
+                    .is_some_and(|f| f.starts_with("repo path missing on disk")),
+                "{chord:?} reaches the diff fetch: {:?}",
+                app.flash
+            );
+        }
         for letter in "rgoc".chars() {
             handle_key(&mut app, key(KeyCode::Char(letter)), &mut Vec::new());
         }
         assert_eq!(view(&app).query.as_str(), "rgoc");
         assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
+        // ⌘A selects the filter's text and ⌘X cuts it — no merge form.
+        handle_key(&mut app, cmd('a'), &mut Vec::new());
+        handle_key(&mut app, cmd('x'), &mut Vec::new());
+        assert_eq!(view(&app).query.as_str(), "", "⌘X cut the selection");
+        assert!(view(&app).form.is_none(), "and did not merge");
+        handle_key(&mut app, cmd('x'), &mut Vec::new());
+        assert!(
+            matches!(
+                view(&app).form.as_deref(),
+                Some(crate::pr_actions::PrForm::Merge(_))
+            ),
+            "with nothing selected, ⌘X merges"
+        );
     }
 
     /// No button on a frame too narrow to hold it clear of the title, and

@@ -1780,7 +1780,7 @@ pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const SWITCH: Key = Key::new(&["enter"], "switch");
-    pub const FETCH: Key = Key::new(&["ctrl+r"], "fetch");
+    pub const FETCH: Key = Key::new(&["cmd+r", "ctrl+r"], "fetch");
     pub const COMMIT: Key = Key::new(&["enter"], "commit & switch");
     #[cfg(test)]
     pub const ALL: &[Key] = &[SWITCH, FETCH, COMMIT];

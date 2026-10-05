@@ -3026,7 +3026,7 @@ fn wrapped_clamp_count(
 /// The finders' own keys — the jump list (`⌘K`), Go to file, Find in
 /// files and the tree browser: one table their key arms
 /// (`event_loop::handle_overlay_key`) match and their bottom borders
-/// spell. Typing is the query's; ↑/↓ (or `^N`/`^P`) walk the matches.
+/// spell. Typing is the query's; ↑/↓ walk the matches.
 pub(crate) mod finder_keys {
     use crate::hints::Key;
 
@@ -3034,13 +3034,13 @@ pub(crate) mod finder_keys {
     /// The jump list: the row opened (attached, for a session) whatever
     /// Enter is set to do, or only focused.
     pub const ATTACH: Key = Key::new(&["ctrl+o"], "open");
-    pub const FOCUS_ROW: Key = Key::new(&["ctrl+f"], "focus row");
+    pub const FOCUS_ROW: Key = Key::new(&["cmd+f", "ctrl+f"], "focus row");
     /// The tree: fold a directory, or open it.
     pub const FOLD: Key = Key::new(&["left", "right"], "fold").show(2);
     /// A preview's scroll.
     pub const SCROLL: Key = Key::new(&["shift+up", "shift+down"], "scroll").show(2);
     /// A markdown preview between its rendered page and its source.
-    pub const SOURCE: Key = Key::new(&["ctrl+r"], "source");
+    pub const SOURCE: Key = Key::new(&["cmd+r", "ctrl+r"], "source");
 
     #[cfg(test)]
     #[test]

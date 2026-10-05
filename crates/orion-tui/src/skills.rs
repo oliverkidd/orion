@@ -998,9 +998,10 @@ pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const EDIT: Key = Key::new(&["enter"], "edit");
-    pub const NEW: Key = Key::new(&["ctrl+a"], "new");
-    pub const TRASH: Key = Key::new(&["ctrl+d"], "trash");
-    pub const REFRESH: Key = Key::new(&["ctrl+r", "cmd+r"], "refresh");
+    pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new");
+    /// Every modal's remove verb: it asks first.
+    pub const TRASH: Key = Key::new(&["cmd+w", "ctrl+w"], "trash");
+    pub const REFRESH: Key = crate::issues::keys::REFRESH;
     /// `⌘O` is caught before the browser sees it (`overlay_file`); `^O`
     /// is its twin for a terminal that never sends ⌘.
     pub const IN_CURSOR: Key = crate::hints::IN_CURSOR;
@@ -1035,7 +1036,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     let Some(Overlay::Skills(view)) = &mut app.overlay else {
         return;
     };
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let page = view.view_height.max(1) as i32;
     match key.code {
@@ -1046,8 +1046,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Up if shift => view.scroll_by(-1),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
-        KeyCode::Char('n') if ctrl => step(app, 1),
-        KeyCode::Char('p') if ctrl => step(app, -1),
         KeyCode::PageDown => view.scroll_by(page),
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
@@ -1966,7 +1964,7 @@ license: MIT # the usual\n\
         write_skill(&skills, "old", &front("old", "Goes"));
         at_home(places, |app| {
             type_text(app, "old");
-            press(app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+            press(app, KeyCode::Char('w'), KeyModifiers::CONTROL);
             let Some(Overlay::Confirm(confirm)) = &app.overlay else {
                 panic!("expected the confirm, got {:?}", app.overlay);
             };
@@ -1997,7 +1995,7 @@ license: MIT # the usual\n\
         std::os::unix::fs::symlink(&source, home.path().join(".cursor/skills/shared")).unwrap();
         at_home(places, |app| {
             type_text(app, "shared");
-            press(app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+            press(app, KeyCode::Char('w'), KeyModifiers::CONTROL);
             let Some(Overlay::Confirm(confirm)) = &app.overlay else {
                 panic!("expected the confirm, got {:?}", app.overlay);
             };
@@ -2028,7 +2026,7 @@ license: MIT # the usual\n\
             &front("old", "x"),
         );
         at_home(places, |app| {
-            press(app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+            press(app, KeyCode::Char('w'), KeyModifiers::CONTROL);
             assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
             press(app, KeyCode::Esc, KeyModifiers::NONE);
             assert_eq!(names(&browser(app).skills), [("old", Source::User)]);
@@ -2053,7 +2051,7 @@ license: MIT # the usual\n\
         }]);
         let mut app = App::new();
         app.overlay = Some(Overlay::Skills(view));
-        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert!(
             matches!(app.overlay, Some(Overlay::Skills(_))),
             "no confirm"
@@ -2068,7 +2066,7 @@ license: MIT # the usual\n\
     fn a_new_skill_from_the_prompt_lands_under_the_cursor() {
         let (home, places) = linked_home();
         at_home(places, |app| {
-            press(app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+            press(app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert!(
                 matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(p.kind, PromptKind::NewSkill { .. })),
                 "{:?}",
@@ -2077,7 +2075,7 @@ license: MIT # the usual\n\
             press(app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(browser(app).skills.is_empty());
 
-            press(app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+            press(app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             type_text(app, "Release notes");
             press(app, KeyCode::Enter, KeyModifiers::NONE);
             let made = home.path().join(".cursor/skills/release-notes/SKILL.md");
