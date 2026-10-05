@@ -4,7 +4,7 @@
 //! request to the issues you mark (`attachmentLinkGitHubPR`) — and the
 //! other way round, `⌘U` here flips to that modal as a PR PICK, Enter on
 //! a pull request attaching it to the issues marked here. Both ends run
-//! the one ATTACH ([`attach_issues`]). `Ctrl+s` on
+//! the one ATTACH ([`attach_issues`]). `⌘S` on
 //! an issue lists its team's workflow states in the reading pane's place
 //! ([`StatusPick`]) — read with the issues, so the list is up at once —
 //! and Enter moves the issue to one (`issueUpdate`), the row saying so
@@ -80,7 +80,7 @@ pub struct LinearState {
     pub kind: String,
 }
 
-/// `Ctrl+s`: the issue under the cursor, and the states it can move to,
+/// `⌘S`: the issue under the cursor, and the states it can move to,
 /// in the reading pane's place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusPick {
@@ -697,10 +697,10 @@ pub(crate) mod keys {
     pub const MARK: Key = Key::new(&["space"], "mark");
     pub const CONFIRM: Key = Key::new(&["enter"], "agent on marked");
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
-    pub const BROWSER: Key = Key::new(&["ctrl+o", "cmd+o"], "browser");
-    pub const REFRESH: Key = Key::new(&["ctrl+r", "cmd+r"], "refresh");
+    pub const BROWSER: Key = crate::issues::keys::BROWSER;
+    pub const REFRESH: Key = crate::issues::keys::REFRESH;
     /// The issue's workflow state.
-    pub const STATUS: Key = Key::new(&["ctrl+s"], "status");
+    pub const STATUS: Key = Key::new(&["cmd+s", "ctrl+s"], "status");
     /// The PR PICK: the marked issues attached to a pull request picked
     /// in the PULL REQUESTS MODAL. That modal's own hotkey (`⌘U`, `^V`
     /// its twin), as the modal's way here is this one's (`⌘L`).
@@ -753,7 +753,7 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     }
 }
 
-/// `Ctrl+s`: the status picker for the issue under the cursor, on the
+/// `⌘S`: the status picker for the issue under the cursor, on the
 /// state it is in. An issue whose team's states were not read says so.
 fn open_status_pick(app: &mut App) {
     let Some(issue) = selected_issue(app).cloned() else {
@@ -876,9 +876,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let half = (view.view_height / 2).max(1) as i32;
     let page = view.view_height.max(1) as i32;
     match key.code {
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
@@ -887,10 +885,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Up if shift => view.scroll_by(-1),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
-        KeyCode::Char('n') if ctrl => step(app, 1),
-        KeyCode::Char('p') if ctrl => step(app, -1),
-        KeyCode::Char('d') if ctrl => view.scroll_by(half),
-        KeyCode::Char('u') if ctrl && view.query.is_empty() => view.scroll_by(-half),
         KeyCode::PageDown => view.scroll_by(page),
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
@@ -1432,7 +1426,7 @@ fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>
 // ---- Linear HTTP (key never on argv) ----
 
 /// What each listed issue is read with: the row, the reading pane, and
-/// its team's workflow states for `Ctrl+s` — the same fields whoever's
+/// its team's workflow states for `⌘S` — the same fields whoever's
 /// issues are asked for.
 const ISSUE_FIELDS: &str = "id identifier title url description state { name type } \
     team { id states { nodes { id name type position } } }";
@@ -1952,7 +1946,7 @@ mod tests {
         }
     }
 
-    /// The teams' states ride the issue list, in Linear's order; `Ctrl+s`
+    /// The teams' states ride the issue list, in Linear's order; `⌘S`
     /// lists them on the issue's own state, Enter moves the issue there —
     /// the row says so before Linear answers, and a refusal puts it back.
     #[test]

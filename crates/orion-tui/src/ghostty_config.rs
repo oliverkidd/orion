@@ -142,6 +142,55 @@ pub const EDITOR_CHORDS: &[&str] = &[
     "super+shift+p",
 ];
 
+/// The modals' own ⌘ verbs — the keys a modal's table matches while it
+/// is up, which no registry action answers to, so [`keymap_unbinds`]
+/// never sees them: each modal's verb shares its letter with the grid's
+/// action for the same thing (⌘E changes, ⌘R refresh, ⌘O open outside,
+/// ⌘N new, ⌘W close), and the few with no grid twin (⌘I edit, ⌘D
+/// ready/draft, ⌘X merge) still have to reach orion. Released whatever
+/// the keymap says, as [`EDITOR_CHORDS`] are.
+const MODAL_KEYS: &[crate::hints::Key] = &[
+    crate::pr_modal::keys::DIFF,
+    crate::pr_modal::keys::NEW,
+    crate::pr_modal::keys::MERGE,
+    crate::pr_modal::keys::CLOSE,
+    crate::pr_modal::keys::READY,
+    crate::pr_modal::keys::LINEAR,
+    crate::issues::keys::EDIT,
+    crate::issues::keys::COMMENT,
+    crate::issues::keys::BROWSER,
+    crate::issues::keys::REFRESH,
+    crate::linear::keys::STATUS,
+    crate::linear::keys::ATTACH,
+    crate::skills::keys::NEW,
+    crate::skills::keys::TRASH,
+    crate::preset_overlays::keys::DELETE,
+    crate::ui::diff_keys::ALL,
+    crate::ui::diff_keys::MODE,
+    crate::ui::diff_keys::REVIEWED,
+    crate::ui::diff_keys::TREE,
+    crate::ui::finder_keys::FOCUS_ROW,
+    crate::ui::finder_keys::SOURCE,
+    crate::branch_switch::keys::FETCH,
+    crate::hints::COPY_PATH,
+    crate::hints::IN_CURSOR,
+];
+
+/// [`MODAL_KEYS`]' ⌘ chords that Ghostty would otherwise keep.
+fn modal_unbinds() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for key in MODAL_KEYS {
+        for chord in key.chords() {
+            if let Some(t) = trigger(&chord).filter(|_| releases(&chord)) {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The ⌘ chords macOS turns into something else before the terminal can
 /// encode them, each with the bytes the block makes Ghostty send in its
 /// place. Unbinding one is not enough: the press still goes through
@@ -193,9 +242,14 @@ pub fn releases(chord: &KeyChord) -> bool {
 /// `super+digit_0`), since Ghostty binds the tab digits both ways.
 pub fn unbinds(keymap: &Keymap) -> Vec<String> {
     let mut out = keymap_unbinds(keymap);
-    for chord in EDITOR_CHORDS {
+    let modal = modal_unbinds();
+    for chord in EDITOR_CHORDS
+        .iter()
+        .copied()
+        .chain(modal.iter().map(String::as_str))
+    {
         if !out.iter().any(|t| t == chord) {
-            out.push((*chord).to_string());
+            out.push(chord.to_string());
         }
     }
     out
@@ -728,6 +782,7 @@ mod tests {
         assert!(block.starts_with(&format!("{BEGIN}\nkeybind = super+k=unbind\n")));
         assert!(block.ends_with(&format!(
             "keybind = super+shift+l=unbind\n\
+             keybind = super+i=unbind\n\
              keybind = performable:super+c=copy_to_clipboard:mixed\n{END}\n"
         )));
         assert!(
@@ -741,8 +796,8 @@ mod tests {
         assert!(block.contains("\nkeybind = super+.=csi:46;9u\n"), "{block}");
         assert!(!block.contains("super+.=unbind"));
         assert!(
-            !block.contains("super+i="),
-            "⌘I is no key of orion's: Ghostty keeps it"
+            !block.contains("super+m="),
+            "⌘M is no key of orion's: Ghostty keeps it"
         );
     }
 
@@ -793,6 +848,43 @@ mod tests {
                 match trigger(chord) {
                     Some(t) => assert!(released.contains(&t), "{t} not released"),
                     None => assert!(!chord.mods.contains(KeyModifiers::SUPER)),
+                }
+            }
+        }
+    }
+
+    /// Every ⌘ chord a modal's table answers to reaches orion: the block
+    /// releases it — or it is one Ghostty never gives up (copy), which
+    /// then arrives only when Ghostty has nothing to do with it.
+    #[test]
+    fn every_modal_cmd_chord_is_released() {
+        let released = unbinds(&Keymap::default());
+        let tables: &[&[crate::hints::Key]] = &[
+            crate::pr_modal::keys::ALL,
+            crate::pr_actions::keys::ALL,
+            crate::issues::keys::ALL,
+            crate::linear::keys::ALL,
+            crate::skills::keys::ALL,
+            crate::preset_overlays::keys::ALL,
+            crate::ui::diff_keys::ALL_KEYS,
+            crate::branch_switch::keys::ALL,
+            &[
+                crate::ui::finder_keys::ATTACH,
+                crate::ui::finder_keys::FOCUS_ROW,
+                crate::ui::finder_keys::SOURCE,
+            ],
+        ];
+        for table in tables {
+            for key in *table {
+                for chord in key.chords() {
+                    let Some(t) = trigger(&chord) else {
+                        continue;
+                    };
+                    assert!(
+                        released.contains(&t) || NEVER_RELEASED.contains(&t.as_str()),
+                        "{t} ({}) is not released",
+                        key.does
+                    );
                 }
             }
         }

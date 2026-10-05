@@ -963,8 +963,6 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         _ if keys::WORKTREE.matches(&key) && view.has_worktree_row() => toggle_new_worktree(app),
         KeyCode::Down => view.step(1),
         KeyCode::Up => view.step(-1),
-        KeyCode::Char('n') if ctrl => view.step(1),
-        KeyCode::Char('p') if ctrl => view.step(-1),
         KeyCode::Char('u') if ctrl => view.filter.clear(),
         // The manage verbs answer in a picker exactly as in the manager:
         // wherever the list shows, its presets can be added, edited and
@@ -984,7 +982,6 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
                 open_agent_preset_editor(app, worktree, quick, Some(index));
             }
         }
-        // `Delete` too: it types nothing, so it can stay a verb.
         _ if keys::DELETE.matches(&key) => {
             let view = view.clone();
             open_delete_preset_confirm(app, &view);
@@ -1185,9 +1182,10 @@ pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const LAUNCH: Key = Key::new(&["enter"], "launch");
-    pub const NEW: Key = Key::new(&["ctrl+a"], "new");
-    pub const EDIT: Key = Key::new(&["ctrl+e"], "edit");
-    pub const DELETE: Key = Key::new(&["ctrl+d", "delete"], "delete");
+    pub const NEW: Key = crate::skills::keys::NEW;
+    pub const EDIT: Key = crate::issues::keys::EDIT;
+    /// Every modal's remove verb: it asks first.
+    pub const DELETE: Key = Key::new(&["cmd+w", "ctrl+w"], "delete");
     /// The NEW WORKTREE toggle under the rows.
     pub const WORKTREE: Key = Key::new(&["tab"], "new worktree");
     /// The editor: the next field, a choice row's value, save.
