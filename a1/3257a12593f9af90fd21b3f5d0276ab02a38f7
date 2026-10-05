@@ -1,0 +1,56 @@
+crates/orion/src/upgrade.rs
+  s_92f3736316f14d::t_1af90bce5964bf 37-44
+crates/orion/src/main.rs
+  s_92f3736316f14d::t_1af90bce5964bf 117-122
+crates/orion-tui/src/app.rs
+  s_92f3736316f14d::t_1af90bce5964bf 162,207-208,373,780-782,3753-3754,3896-3901,3907,3916-3921,4471,4498,4710-4716,4741,4748-4755,4761,4765-4785,4914-4915
+crates/orion-tui/src/claude_accounts.rs
+  s_92f3736316f14d::t_1af90bce5964bf 396-397,404-406,428-467,1321-1334,1660-1696,1795-1805
+crates/orion-tui/src/keymap.rs
+  s_92f3736316f14d::t_1af90bce5964bf 195-197,831-839
+  s_92f3736316f14d::t_8ced9813fec965 840
+crates/orion-tui/src/launcher.rs
+  s_92f3736316f14d::t_1af90bce5964bf 82,1762-1767,2651,2663,2674,2677,2680-2685
+  s_92f3736316f14d::t_170dfcc9b55737 2686
+crates/orion-tui/src/ghostty_config.rs
+  s_92f3736316f14d::t_1af90bce5964bf 722
+crates/orion-tui/src/lib.rs
+  s_92f3736316f14d::t_1af90bce5964bf 114-121
+crates/orion-tui/src/event_loop/focus_walk.rs
+  s_92f3736316f14d::t_1af90bce5964bf 138
+crates/orion-tui/src/event_loop/launcher.rs
+  s_92f3736316f14d::t_1af90bce5964bf 1555-1579,1642,1696,5892,5923,5964-5965,6168,6640-6641,6656,6665,6667,6767-6789,6792,6840-6842,6844,6857,6867,6869-6870,6872,6935,6938,6951,6958,6962-6964,6966,6997
+crates/orion-tui/src/event_loop.rs
+  s_92f3736316f14d::t_1af90bce5964bf 258-260,908-910,3520-3522,3526,3529,3537,3924,4803,6292-6320,8342-8372,8377-8379,8449-8464,8782,9035-9038,10459-10460,11307,12008-12014,12032-12033,12141-12143,12172-12173,12748,12762,13100-13105,13121,37207-37286,37288
+  s_92f3736316f14d::t_86a08c7ae97e9b 37287,37289
+crates/orion-tui/src/config.rs
+  s_92f3736316f14d::t_1af90bce5964bf 3168-3169,3175-3181
+crates/orion-tui/src/event_loop/quick_launch.rs
+  s_92f3736316f14d::t_1af90bce5964bf 88,91
+crates/orion-tui/src/splash.rs
+  s_92f3736316f14d::t_1af90bce5964bf 342-353,435-451
+crates/orion-tui/src/ui/launcher_view.rs
+  s_92f3736316f14d::t_1af90bce5964bf 313-329,5039,5048,5101,5125,5133,5370
+crates/orion-tui/src/ui.rs
+  s_92f3736316f14d::t_1af90bce5964bf 3569-3574
+crates/orion-tui/src/event_loop/optimistic.rs
+  s_92f3736316f14d::t_1af90bce5964bf 20,233-236,258
+crates/orion-tui/src/ui/footer.rs
+  s_92f3736316f14d::t_1af90bce5964bf 554-564,566-570,669-684
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a13257a12593f9af90fd21b3f5d0276ab02a38f7",
+  "prompts": {},
+  "sessions": {
+    "s_92f3736316f14d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90c5496d-55b4-4f42-a9dc-117cac830f10",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
