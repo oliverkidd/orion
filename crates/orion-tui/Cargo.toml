@@ -19,6 +19,7 @@ vt100 = { workspace = true }
 portable-pty = { workspace = true }
 futures = "0.3"
 base64 = "0.22"
+sha2 = "0.10"
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
 

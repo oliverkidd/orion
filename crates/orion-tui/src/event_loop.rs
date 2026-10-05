@@ -380,6 +380,10 @@ async fn main_loop(
     let (views_tx, mut views_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::view_jobs::Answer>();
     app.view_jobs = Some(crate::view_jobs::Jobs::new(views_tx));
+    // ACCOUNT USAGE paints from the last run's readings while the next
+    // asks are out.
+    app.usage =
+        crate::usage::Usage::load(orion_core::paths::data_dir().join(crate::usage::CACHE_FILE));
     // A newer orion published on GitHub, probed off the loop at start and
     // then on a slow beat (`update_check::interval`; the e2e tests turn it
     // off). Only a newer version ever arrives, so the footer's indicator,
@@ -474,6 +478,12 @@ async fn main_loop(
                 // beat of its own: a `/login` typed in a session's pane
                 // renames its account here.
                 crate::claude_accounts::request_refresh(&mut app, false);
+                // ACCOUNT USAGE, which spaces itself to one ask per
+                // account every 15 minutes.
+                crate::usage::request(&mut app, false);
+                if let Some((path, readings)) = crate::usage::take_flush(&mut app) {
+                    tokio::task::spawn_blocking(move || crate::usage::write_cache(&path, &readings));
+                }
                 // Whatever the answers above changed since the last tick
                 // goes to disk, off the loop; the next launch paints from it.
                 if let Some((cache, store, live)) = crate::pr_cache::take_flush(&mut app) {
@@ -3570,6 +3580,7 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Tree(_)
         | Overlay::FileTabs(_)
         | Overlay::Metrics(_)
+        | Overlay::Usage(_)
         | Overlay::Skills(_)
         | Overlay::ProjectPicker(_) => true,
         Overlay::Onboard(view) => !view.asking(),
@@ -3917,6 +3928,7 @@ fn dispatch_action(
         Action::Settings => open_settings(app),
         Action::ClaudeAccounts => open_claude_accounts(app, None),
         Action::Metrics => open_metrics(app, out),
+        Action::Usage => crate::usage::open(app),
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
         // the first column. Landing on the pane takes the input lock:
@@ -4794,6 +4806,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Settings
             | Action::ClaudeAccounts
             | Action::Metrics
+            | Action::Usage
             | Action::Hosts
             | Action::AgentPresets
             | Action::Skills
@@ -5498,6 +5511,7 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             _ => {}
         },
         Answer::Skills { ticket, skills } => crate::skills::land(app, ticket, skills),
+        Answer::Usage(answer) => crate::usage::land(app, answer),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
             app.flash = Some(crate::flash::Flash::done(flash));
@@ -7090,6 +7104,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
+        Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
@@ -11712,6 +11727,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Issues(_))) {
         crate::issues::handle_mouse(app, mouse, mouse_pos, out);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Usage(_))) {
+        crate::usage::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
@@ -28341,6 +28360,121 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.overlay.is_none());
     }
 
+    // ---- `⇧U` account usage modal ----
+
+    fn usage_account(
+        id: &str,
+        provider: crate::usage::Provider,
+        label: &str,
+    ) -> crate::usage::Account {
+        crate::usage::Account {
+            id: id.into(),
+            provider,
+            label: label.into(),
+            email: None,
+            signed_out: false,
+            keychain_dir: None,
+            dir: None,
+            also: Vec::new(),
+        }
+    }
+
+    /// `⇧U` opens the grid; each account's cells say what is left, `-`
+    /// where the provider has no cap that wide; a narrow screen drops DAY;
+    /// `⇧U` again closes it.
+    #[test]
+    fn usage_modal_draws_the_grid_and_closes_on_its_key() {
+        use crate::usage::{Cell, Provider, Reading, Row};
+        let mut app = App::new();
+        let mut out = Vec::new();
+        let chord = crate::keymap::KeyChord::parse("shift+u").unwrap();
+        assert_eq!(
+            app.keymap.lookup(crate::keymap::Scope::Global, &chord),
+            Some(crate::keymap::Action::Usage)
+        );
+        out.extend(crate::event_loop::run_action(
+            &mut app,
+            crate::keymap::Action::Usage,
+        ));
+        assert!(matches!(app.overlay, Some(Overlay::Usage(_))));
+
+        let now = orion_core::clock::now_secs() as i64;
+        app.usage.accounts = vec![
+            usage_account("claude", Provider::Claude, "Claude (me@home.co)"),
+            usage_account("claude-2", Provider::Claude, "Work (me@work.co)"),
+            usage_account("cursor", Provider::Cursor, "Cursor"),
+        ];
+        let mut claude = Row::default();
+        claude.cells[0] = Some(Cell {
+            used_pct: 38.0,
+            resets_at: Some(now + 2 * 3600 + 14 * 60 + 30),
+        });
+        claude.cells[2] = Some(Cell {
+            used_pct: 59.0,
+            resets_at: Some(now + 3 * 86_400 + 4 * 3600 + 30),
+        });
+        app.usage.readings.insert(
+            "claude".into(),
+            Reading {
+                plan: Some("max".into()),
+                main: claude,
+                sub: Vec::new(),
+                extra: None,
+                fetched_at: now,
+            },
+        );
+        let mut cursor = Row::default();
+        cursor.cells[3] = Some(Cell {
+            used_pct: 27.0,
+            resets_at: Some(now + 19 * 86_400 + 30),
+        });
+        app.usage.readings.insert(
+            "cursor".into(),
+            Reading {
+                plan: Some("pro".into()),
+                main: cursor,
+                sub: Vec::new(),
+                extra: None,
+                fetched_at: now,
+            },
+        );
+        app.usage
+            .problems
+            .insert("claude-2".into(), crate::usage::Problem::SignedOut);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Account usage"), "title:\n{text}");
+        assert!(
+            text.contains("SESSION (5h)") && text.contains("DAY"),
+            "columns:\n{text}"
+        );
+        assert!(text.contains("62% · 2h14m"), "session left:\n{text}");
+        assert!(text.contains("41% · 3d4h"), "week left:\n{text}");
+        assert!(text.contains("73% · 19d"), "cursor month:\n{text}");
+        assert!(
+            text.contains("not signed in · Enter signs in"),
+            "signed out:\n{text}"
+        );
+
+        let mut narrow = Terminal::new(TestBackend::new(84, 30)).unwrap();
+        narrow.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&narrow);
+        assert!(
+            text.contains("WEEK") && !text.contains(" DAY "),
+            "DAY dropped:\n{text}"
+        );
+
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+        let Some(Overlay::Usage(view)) = &app.overlay else {
+            panic!("usage closed");
+        };
+        assert_eq!(view.selected, 1);
+        press(&mut app, KeyCode::Char('U'), KeyModifiers::SHIFT, &mut out);
+        assert!(app.overlay.is_none());
+    }
+
     /// Prewarm-pool spares have no agent row; without the home the daemon
     /// reports they'd render as "(unknown agent)". They group under one
     /// header as a small tree, named by kind/model and placed by worktree,
@@ -36382,6 +36516,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Tree(_) => "Tree",
             Overlay::FileTabs(_) => "FileTabs",
             Overlay::Metrics(_) => "Metrics",
+            Overlay::Usage(_) => "Usage",
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",

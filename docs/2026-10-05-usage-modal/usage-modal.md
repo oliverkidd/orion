@@ -49,9 +49,10 @@ window's granularity shows `-` in that cell.
   - `seven_day_opus` and `seven_day_sonnet` → WEEK in the sub-rows
   - Ignore any other `seven_day_*` key that has a non-null value, but log it at `debug`.
 - **Polling:** the endpoint returns persistent 429s when it is polled every 30–60s
-  (anthropics/claude-code#30930). **Never poll it in the background.** Fetch only when the modal
-  opens and the cache is older than 5 minutes, or when the user presses `r` (debounced to 60s per
-  account). On a 429, keep the last snapshot and mark it `rate-limited · fetched 14m ago`.
+  (anthropics/claude-code#30930), so orion refreshes on a slow beat: **every 15 minutes** in the
+  background, plus when the modal opens and the last reading is older than that, plus `r`
+  (debounced to 60s per account). On a 429, keep the last snapshot and mark it
+  `rate-limited · fetched 14m ago`.
 - **Token location:** the OAuth blob is `{"claudeAiOauth": {"accessToken", "refreshToken",
   "expiresAt" (epoch ms), "subscriptionType", "rateLimitTier", ...}}`.
   - On macOS it is a generic-password Keychain item:
@@ -194,7 +195,8 @@ Write these functions:
 
 - Store `{ "<key>": { "fetched_at": <epoch s>, "usage": <AccountUsage minus state> } }`. Load it
   when the modal opens so the grid paints immediately, then fetch whatever is older than
-  `FRESH = 5 min`.
+  `POLL = 15 min`. The event loop also calls `usage::request(app, false)` on a 15-minute beat
+  whether or not the modal is open, so the grid is warm when it opens.
 - The file holds percentages and reset times only. Never write tokens, emails or cookies to it;
   labels are recomputed from live config.
 

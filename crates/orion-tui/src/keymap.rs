@@ -185,6 +185,9 @@ pub enum Action {
     /// Claude Code login is, signing one in or out, adding another.
     ClaudeAccounts,
     Metrics,
+    /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
+    /// account, window by window.
+    Usage,
     Help,
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
@@ -795,6 +798,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],
+    },
+    ActionSpec {
+        action: Action::Usage,
+        id: "usage",
+        label: "Account usage",
+        hint: "How much is left on each Claude and Cursor account — session, day, week and month — read every 15 minutes",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["shift+u"],
     },
     ActionSpec {
         action: Action::Help,

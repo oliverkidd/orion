@@ -2253,6 +2253,8 @@ pub enum Overlay {
     /// `orion open <file>…` from a session: the FILE TABS.
     FileTabs(crate::file_tabs::FileTabsView),
     Metrics(MetricsView),
+    /// `⇧U`: ACCOUNT USAGE — how much is left on each linked account.
+    Usage(crate::usage::UsageView),
     Hosts(HostsView),
     /// `e` in the SESSIONS PANEL: the AGENT PRESETS list.
     AgentPresets(crate::preset_overlays::AgentPresetsView),
@@ -4151,6 +4153,9 @@ pub struct App {
     /// When the accounts were last asked to be read, so the slow beat
     /// spaces its reads out.
     pub accounts_polled: Option<std::time::Instant>,
+    /// ACCOUNT USAGE: every linked account's last reading, kept here so
+    /// the modal opens on it and the slow beat keeps it warm.
+    pub usage: crate::usage::Usage,
     /// Changed-file count of the selected worktree's checkout (staged +
     /// unstaged + untracked), the worktree panel's bottom badge. Keyed by
     /// worktree so a selection change can't show another checkout's count;
@@ -4551,6 +4556,7 @@ impl App {
             vim_generation: 0,
             accounts_tx: None,
             accounts_polled: None,
+            usage: crate::usage::Usage::default(),
             git_changes: None,
             git_changes_inflight: None,
             worktree_changes: HashMap::new(),
