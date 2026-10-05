@@ -13,7 +13,7 @@ use crate::pull_request::Lookup;
 use crate::text_input::TextInput;
 use crate::tree_browser::TreeBrowser;
 use crate::vim_term::{VimEvent, VimTerm};
-use crate::{ipc, keys, ui};
+use crate::{doc_select, ipc, keys, ui};
 use anyhow::Result;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -6124,6 +6124,15 @@ fn handle_page_key(app: &mut App, key: KeyEvent) {
     let Some(page) = &mut app.page else {
         return;
     };
+    // `⌘C` / `^y` copy the DOC SELECTION when there is one, the path when
+    // not; any other key lets the selection go.
+    if crate::markdown_view::is_copy(&key) {
+        if let Some(text) = page.selected_text() {
+            copy_text_and_flash(app, &text);
+            return;
+        }
+    }
+    page.select.clear();
     let asked = page.key(&key);
     let (root, file, line, editor) = (
         page.root.clone(),
@@ -7771,12 +7780,23 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Tree(view) => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            // ⌘C over a DOC SELECTION copies it; any other key lets it go.
+            let copy_selection = crate::hints::COPY_PATH
+                .matches(&key)
+                .then(|| view.selected_text())
+                .flatten();
+            if copy_selection.is_none() {
+                view.select.clear();
+            }
             let half = (view.view_height / 2).max(1) as i32;
             let page = view.view_height.max(1) as i32;
             match key.code {
                 // Esc closes the modal, filter and all (`closes_on_esc`).
                 // The preview scrolls on the diff-modal keys: ⇧↑/↓ lines,
                 // Ctrl+d/u half pages, PageUp/Down, Home/End.
+                _ if copy_selection.is_some() => {
+                    copy_text_and_flash(app, copy_selection.as_deref().unwrap_or_default())
+                }
                 KeyCode::Char('d') if ctrl => view.scroll_by(half),
                 // Ctrl+u is the line editor's kill-to-start while something
                 // is typed; only with an empty filter does it scroll.
@@ -11025,7 +11045,7 @@ fn copy_selection(app: &mut App) {
 }
 
 /// Copy a run of selected text, the flash counting its characters.
-fn copy_text_and_flash(app: &mut App, text: &str) {
+pub(crate) fn copy_text_and_flash(app: &mut App, text: &str) {
     let label = format!("copied {} chars", text.chars().count());
     copy_and_flash(app, text, &label);
 }
@@ -11557,7 +11577,21 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             MouseEventKind::Down(MouseButton::Left) if !page.frame.contains(mouse_pos) => {
                 app.page = None;
             }
-            _ => return,
+            // The left button over the text is the DOC SELECTION's.
+            _ => {
+                let Some(doc) = &page.rendered else {
+                    return;
+                };
+                match page.select.mouse(&mouse, page.area, page.scroll, doc) {
+                    doc_select::Outcome::Ignored => {
+                        if !matches!(mouse.kind, MouseEventKind::Down(_)) {
+                            return;
+                        }
+                    }
+                    doc_select::Outcome::Moved { scroll } => page.scroll_by(scroll),
+                    doc_select::Outcome::Copy(text) => copy_text_and_flash(app, &text),
+                }
+            }
         }
         app.dirty = true;
         return;
@@ -11897,6 +11931,28 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     // (folding/unfolding directories), a drag on the tree/preview border
     // resizes the tree panel; everything else inside the box is swallowed.
     if let Some(Overlay::Tree(view)) = &mut app.overlay {
+        // The left button over the rendered page is the DOC SELECTION's.
+        let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+        if view.files_drag.is_none() && view.renders_markdown() && !editing {
+            if let Some(doc) = &view.rendered {
+                match view
+                    .select
+                    .mouse(&mouse, view.preview_area, view.scroll, doc)
+                {
+                    doc_select::Outcome::Ignored => {}
+                    doc_select::Outcome::Moved { scroll } => {
+                        view.scroll_by(scroll);
+                        app.dirty = true;
+                        return;
+                    }
+                    doc_select::Outcome::Copy(text) => {
+                        copy_text_and_flash(app, &text);
+                        app.dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 view.scroll_by(-MODAL_WHEEL_LINES);
@@ -29537,6 +29593,116 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.page.is_some(), "a click on the page leaves it up");
         click(&mut app, 0, 0, &mut out);
         assert!(app.page.is_none(), "a click outside closes it");
+    }
+
+    /// A drag over the page's text selects and copies it, a double-click
+    /// takes a word, the wheel keeps the selection and a key lets it go —
+    /// with `⌘C` copying it while it is there.
+    #[test]
+    fn a_drag_over_the_page_copies_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = String::from("# Title\n\nhello world from orion\n\n");
+        text.push_str(&(0..60).map(|i| format!("line {i}\n\n")).collect::<String>());
+        std::fs::write(dir.path().join("a.md"), text).unwrap();
+        let mut app = App::new();
+        app.page = Some(crate::markdown_view::MarkdownPage::open(
+            dir.path().into(),
+            "a.md".into(),
+            1,
+            "/bin/sh".into(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let page = app.page.as_ref().unwrap();
+        let area = page.area;
+        let row = page
+            .rendered
+            .as_ref()
+            .unwrap()
+            .lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("hello")))
+            .expect("the paragraph") as u16;
+        let y = area.y + row;
+        let mut out = Vec::new();
+        let left = MouseButton::Left;
+        handle_mouse(
+            &mut app,
+            mev(MouseEventKind::Down(left), area.x, y),
+            &mut out,
+        );
+        handle_mouse(
+            &mut app,
+            mev(MouseEventKind::Drag(left), area.x + 10, y),
+            &mut out,
+        );
+        handle_mouse(
+            &mut app,
+            mev(MouseEventKind::Up(left), area.x + 10, y),
+            &mut out,
+        );
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done("copied 11 chars")),
+            "hello world"
+        );
+        assert!(app.page.as_ref().unwrap().select.is_active());
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let reversed = terminal.backend().buffer()[(area.x + 3, y)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED);
+        assert!(reversed, "the selection is drawn");
+
+        handle_mouse(
+            &mut app,
+            mev(MouseEventKind::ScrollDown, area.x, y),
+            &mut out,
+        );
+        assert!(
+            app.page.as_ref().unwrap().select.is_active(),
+            "the wheel keeps it"
+        );
+
+        app.flash = None;
+        press(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done("copied 11 chars"))
+        );
+        press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, &mut out);
+        assert!(
+            !app.page.as_ref().unwrap().select.is_active(),
+            "a key lets it go"
+        );
+        app.flash = None;
+        press(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done("copied a.md")),
+            "with nothing selected, the path"
+        );
+
+        app.page.as_mut().unwrap().scroll = 0;
+        app.flash = None;
+        click(&mut app, area.x + 7, y, &mut out);
+        click(&mut app, area.x + 7, y, &mut out);
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done("copied 5 chars")),
+            "the double-click's word"
+        );
+        click(&mut app, 0, 0, &mut out);
+        assert!(app.page.is_none(), "a click outside still closes it");
     }
 
     /// An editor modal on a shell, posing as `quits_itself` micro or not.

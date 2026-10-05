@@ -351,11 +351,18 @@ MARKDOWN PAGE: the file rendered, full width and wrapped, in a modal of its own.
 | `↑`/`↓`, `PgUp`/`PgDn`, `Space`, `Home`/`End`, the wheel | scroll |
 | `Enter`, `e` | edit it in the BUILT-IN EDITOR, at the line it was opened on (a find-in-files hit's); quitting the editor lands back on the page, re-read |
 | `⌘O` (`^o`) | open it in the **Open in app** editor |
-| `⌘C` (`^y`) | copy its path |
+| drag | select text and copy it on release; past the top or bottom edge the page scrolls under the pointer |
+| double-click | select and copy the word under the pointer |
+| `⌘C` (`^y`) | copy the selection, or its path when nothing is selected |
 | `Esc`, `q`, a click outside it | close it |
 
+A selection stays highlighted until the next click or key, and the wheel keeps it. A copied
+paragraph reads as the sentence it is: rows the page only wrapped for width are joined back up
+with a space, and their indent or quote bar is left out.
+
 The FILE TABS and the skills browser show a markdown file's page in their own preview already, so
-their `Enter` edits it.
+their `Enter` edits it. The FILE TABS' and the file tree's rendered previews select the same way:
+drag or double-click, and `⌘C` copies the selection.
 
 ### The diff viewer
 

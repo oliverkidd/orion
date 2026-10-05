@@ -13,6 +13,7 @@ pub mod config;
 pub mod cursor_catalogue;
 pub mod diff_doc;
 pub mod diff_tree;
+pub mod doc_select;
 pub mod doctor;
 pub mod dropped_files;
 pub mod editor;

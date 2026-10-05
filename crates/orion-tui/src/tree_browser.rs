@@ -144,6 +144,8 @@ pub struct TreeBrowser {
     /// The page flowed for the last drawn width, written back during draw
     /// (see [`Rendered`]).
     pub rendered: Option<Rendered>,
+    /// The DOC SELECTION a drag over the rendered page makes.
+    pub select: crate::doc_select::DocSelect,
     /// Top visible preview line.
     pub scroll: u16,
     /// Inner height of the preview pane, written back during draw (the
@@ -235,6 +237,7 @@ impl TreeBrowser {
             markdown: false,
             pretty: true,
             rendered: None,
+            select: crate::doc_select::DocSelect::default(),
             scroll: 0,
             view_height: 0,
             list_area: Rect::default(),
@@ -448,6 +451,7 @@ impl TreeBrowser {
         self.preview_is_file = preview.is_file;
         self.markdown = preview.markdown;
         self.rendered = None;
+        self.select.clear();
         self.preview_line_count = preview.lines.len();
         self.preview_lines = preview.lines;
         self.preview = preview.text;
@@ -476,10 +480,16 @@ impl TreeBrowser {
         self.markdown && self.pretty
     }
 
+    /// The text the DOC SELECTION covers on the rendered page, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        self.select.text(self.rendered.as_ref()?)
+    }
+
     /// Ctrl+r: the other view of a markdown file (the FILE TABS' `m`).
     pub fn toggle_pretty(&mut self) {
         self.pretty = !self.pretty;
         self.rendered = None;
+        self.select.clear();
         if !self.pretty {
             self.preview_line_count = self.preview_lines.len();
         }

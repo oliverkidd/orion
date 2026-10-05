@@ -3,7 +3,9 @@
 //! page, full width and wrapped, in a modal over everything else. `Enter`
 //! (or `e`) edits it in the BUILT-IN EDITOR, which comes up over the page
 //! and hands it back, re-read, when it quits; `⌘O` opens it in the OPEN IN
-//! APP editor.
+//! APP editor. A drag over the text selects it and copies it on release,
+//! a double-click takes a word, and `⌘C` copies the selection when there
+//! is one (`doc_select`).
 //!
 //! Through 0.42 a markdown file opened as the MARKDOWN SPLIT instead: the
 //! editor on the left and the page on the right, both at half width. A
@@ -16,6 +18,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
+use crate::doc_select::DocSelect;
 use crate::markdown::Rendered;
 
 /// Rows a wheel notch scrolls the page — the FILE TABS' pace.
@@ -52,6 +55,8 @@ pub struct MarkdownPage {
     pub frame: Rect,
     /// The source line to bring into view once the page is first flowed.
     seek: Option<u64>,
+    /// The DOC SELECTION a drag over the text makes.
+    pub select: DocSelect,
 }
 
 /// What a key on the page asks of the event loop, beyond the scrolling the
@@ -86,6 +91,7 @@ impl MarkdownPage {
             area: Rect::default(),
             frame: Rect::default(),
             seek: (line > 1).then_some(line),
+            select: DocSelect::default(),
         };
         page.reload();
         page
@@ -101,6 +107,7 @@ impl MarkdownPage {
         self.modified = self.modified_now();
         self.text = std::fs::read_to_string(&self.path).unwrap_or_default();
         self.rendered = None;
+        self.select.clear();
     }
 
     /// Re-read the file when it changed on disk since the last read — what
@@ -146,8 +153,7 @@ impl MarkdownPage {
         match key.code {
             KeyCode::Enter | KeyCode::Char('e') if !ctrl && !cmd => return PageKey::Edit,
             KeyCode::Char('o') if ctrl || cmd => return PageKey::Outside,
-            KeyCode::Char('c') if cmd => return PageKey::CopyPath,
-            KeyCode::Char('y') if ctrl => return PageKey::CopyPath,
+            _ if is_copy(key) => return PageKey::CopyPath,
             KeyCode::Esc | KeyCode::Char('q') if !ctrl => return PageKey::Close,
             KeyCode::Down | KeyCode::Char('j') => self.scroll_by(1),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_by(-1),
@@ -162,11 +168,21 @@ impl MarkdownPage {
         PageKey::Done
     }
 
+    /// The text the DOC SELECTION covers, when there is one.
+    pub fn selected_text(&self) -> Option<String> {
+        self.select.text(self.rendered.as_ref()?)
+    }
+
     /// Where the page reads: `12/40`, the first row shown of all of them.
     pub fn position(&self) -> Option<String> {
         let lines = self.rendered.as_ref()?.lines.len();
         (lines > self.area.height as usize).then(|| format!("{}/{lines}", self.scroll + 1))
     }
+}
+
+/// `⌘C` / `^y`: the page's copy — the DOC SELECTION, else the path.
+pub fn is_copy(key: &KeyEvent) -> bool {
+    crate::hints::COPY_PATH.matches(key)
 }
 
 /// The rendered row that shows source line `line` (1-based) of `text`: the

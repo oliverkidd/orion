@@ -89,6 +89,8 @@ pub struct FileTabsView {
     pub waiting: Option<u64>,
     /// Stops the read in flight when the tab changes again.
     pub cancel: crate::view_jobs::Cancel,
+    /// The DOC SELECTION a drag over the rendered page makes.
+    pub select: crate::doc_select::DocSelect,
 }
 
 impl FileTabsView {
@@ -128,6 +130,7 @@ impl FileTabsView {
             jobs,
             waiting: None,
             cancel: crate::view_jobs::Cancel::default(),
+            select: crate::doc_select::DocSelect::default(),
         };
         view.load_preview();
         view
@@ -182,6 +185,7 @@ impl FileTabsView {
         self.preview_is_file = preview.is_file;
         self.markdown = preview.markdown;
         self.rendered = None;
+        self.select.clear();
         self.preview_line_count = preview.lines.len();
         self.preview_lines = preview.lines;
         self.preview_text = preview.text;
@@ -209,12 +213,18 @@ impl FileTabsView {
         self.markdown && self.pretty
     }
 
+    /// The text the DOC SELECTION covers on the rendered page, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        self.select.text(self.rendered.as_ref()?)
+    }
+
     /// `m`: the other view of a markdown file. The scroll stays put and the
     /// draw re-clamps it against the new line count — a source line and a
     /// rendered row have no mapping to do better with.
     pub fn toggle_pretty(&mut self) {
         self.pretty = !self.pretty;
         self.rendered = None;
+        self.select.clear();
         if !self.pretty {
             self.preview_line_count = self.preview_lines.len();
         }
@@ -359,6 +369,19 @@ enum Cmd {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::FileTabs(view)) = &mut app.overlay else {
+        return;
+    };
+    // `⌘C` / `^y` copy the DOC SELECTION; any other key lets it go.
+    if crate::markdown_view::is_copy(&key) {
+        if let Some(text) = view.selected_text() {
+            crate::event_loop::copy_text_and_flash(app, &text);
+        }
+        return;
+    }
+    if view.select.selection.take().is_some() {
+        app.dirty = true;
+    }
     let Some(Overlay::FileTabs(view)) = &app.overlay else {
         return;
     };
@@ -438,6 +461,32 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
     let Some(Overlay::FileTabs(view)) = &mut app.overlay else {
         return;
     };
+    // The left button over the rendered page is the DOC SELECTION's (a
+    // press there still takes the cursor into the preview, below).
+    let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+    if let Some(doc) = view
+        .rendered
+        .as_ref()
+        .filter(|_| view.renders_markdown() && !editing)
+    {
+        use crate::doc_select::Outcome;
+        match view.select.mouse(&mouse, view.body_area, view.scroll, doc) {
+            Outcome::Ignored => {}
+            Outcome::Moved { scroll } => {
+                view.scroll_by(scroll);
+                if !matches!(mouse.kind, MouseEventKind::Down(_)) {
+                    app.dirty = true;
+                    return;
+                }
+            }
+            Outcome::Copy(text) => {
+                view.on_tabs = false;
+                crate::event_loop::copy_text_and_flash(app, &text);
+                app.dirty = true;
+                return;
+            }
+        }
+    }
     // The mouse only names commands — the keys' own (`run`).
     let cmds: Vec<Cmd> = match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -675,6 +724,57 @@ mod tests {
         );
         key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE);
         assert!(view_in(&app).renders_markdown());
+    }
+
+    /// A drag over the rendered page copies its text, and `⌘C` copies it
+    /// again; in the source (`m`) the mouse selects nothing.
+    #[test]
+    fn a_drag_over_the_rendered_page_copies_and_the_source_does_not() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "a.md", "hello world from orion\n");
+        let mut app = App::new();
+        app.overlay = Some(Overlay::FileTabs(FileTabsView::new(
+            dir.path().to_path_buf(),
+            "vi".into(),
+            vec![a],
+        )));
+        let draw = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        };
+        draw(&mut app);
+        let body = view_in(&app).body_area;
+        let left = MouseButton::Left;
+        let drag = |app: &mut App| {
+            for (kind, x) in [
+                (MouseEventKind::Down(left), body.x + 6),
+                (MouseEventKind::Drag(left), body.x + 10),
+                (MouseEventKind::Up(left), body.x + 10),
+            ] {
+                let mouse = MouseEvent {
+                    kind,
+                    column: x,
+                    row: body.y,
+                    modifiers: KeyModifiers::NONE,
+                };
+                handle_mouse(app, mouse, Position::new(x, body.y));
+            }
+        };
+        drag(&mut app);
+        assert_eq!(app.flash, Some(crate::flash::Flash::done("copied 5 chars")));
+        assert!(!view_in(&app).on_tabs, "the press took the preview");
+        app.flash = None;
+        key(&mut app, KeyCode::Char('c'), KeyModifiers::SUPER);
+        assert_eq!(app.flash, Some(crate::flash::Flash::done("copied 5 chars")));
+
+        key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(view_in(&app).select.selection.is_none(), "m lets it go");
+        draw(&mut app);
+        app.flash = None;
+        drag(&mut app);
+        assert_eq!(app.flash, None, "the source selects nothing");
     }
 
     /// The modal draws a markdown tab as the rendered page — a bullet, a

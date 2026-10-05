@@ -408,6 +408,13 @@ fn draw_page(f: &mut Frame, app: &mut App) {
     };
     page.frame = area;
     page.area = text;
+    if page
+        .rendered
+        .as_ref()
+        .is_some_and(|r| r.width != text.width)
+    {
+        page.select.clear(); // its rows are about to flow differently
+    }
     page.rendered = Some(crate::markdown::Rendered::for_width(
         page.rendered.take(),
         &page.text,
@@ -432,6 +439,9 @@ fn draw_page(f: &mut Frame, app: &mut App) {
         .cloned()
         .collect();
     f.render_widget(Paragraph::new(rows), text);
+    if let Some(sel) = page.select.selection {
+        sel.paint(f.buffer_mut(), text, page.scroll);
+    }
 }
 
 /// The MARKDOWN PAGE's keys (`markdown_view::MarkdownPage::key`).
@@ -2676,6 +2686,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     ),
                 };
                 f.render_widget(Paragraph::new(lines), body);
+                if let (Some(_), Some(sel)) = (&rendered, view.select.selection) {
+                    sel.paint(f.buffer_mut(), body, scroll);
+                }
             }
 
             // Write-back (draw works on a clone): hit rects for the mouse,
@@ -2690,6 +2703,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 v.scroll = scroll;
                 v.preview_line_count = clamp_count;
                 if rendered.is_some() {
+                    // A reflow moved the rows the selection points at.
+                    if rendered.as_ref().map(|r| r.width) != v.rendered.as_ref().map(|r| r.width) {
+                        v.select.clear();
+                    }
                     v.rendered = rendered;
                 }
             }
@@ -2846,6 +2863,9 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                     ),
                 };
                 f.render_widget(Paragraph::new(lines), preview_inner);
+                if let (Some(_), Some(sel)) = (&rendered, view.select.selection) {
+                    sel.paint(f.buffer_mut(), preview_inner, scroll);
+                }
             }
             // The browser's keys along its bottom edge, under both frames
             // and clear of the preview's scroll position. While the editor
@@ -2880,6 +2900,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 v.scroll = scroll;
                 v.preview_line_count = clamp_count;
                 if rendered.is_some() {
+                    // A reflow moved the rows the selection points at.
+                    if rendered.as_ref().map(|r| r.width) != v.rendered.as_ref().map(|r| r.width) {
+                        v.select.clear();
+                    }
                     v.rendered = rendered;
                 }
                 v.list_area = list_inner;

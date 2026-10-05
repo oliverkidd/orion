@@ -71,6 +71,17 @@ pub fn render(
     base: Style,
     th: Theme,
 ) -> Vec<Line<'static>> {
+    render_with_wraps(text, width, breaks, base, th).0
+}
+
+/// [`render`], with each line's [`Wrap`] beside it.
+pub fn render_with_wraps(
+    text: &str,
+    width: usize,
+    breaks: Breaks,
+    base: Style,
+    th: Theme,
+) -> (Vec<Line<'static>>, Vec<Wrap>) {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -92,6 +103,18 @@ pub fn render(
 pub struct Rendered {
     pub width: u16,
     pub lines: Vec<Line<'static>>,
+    /// One per line: how a copy of it joins the line above.
+    pub wraps: Vec<Wrap>,
+}
+
+/// How a rendered line relates to the one above it, for copying: a SOFT
+/// WRAP carries on the same paragraph after a width break, so a copy
+/// joins it to the line above with a space and leaves out its first
+/// `lead` columns — the hanging indent or quote bar it is drawn behind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Wrap {
+    pub continues: bool,
+    pub lead: u16,
 }
 
 impl Rendered {
@@ -105,10 +128,15 @@ impl Rendered {
     ) -> Rendered {
         match cached {
             Some(r) if r.width == width => r,
-            _ => Rendered {
-                width,
-                lines: render(text, width as usize, breaks, Style::default(), th),
-            },
+            _ => {
+                let (lines, wraps) =
+                    render_with_wraps(text, width as usize, breaks, Style::default(), th);
+                Rendered {
+                    width,
+                    lines,
+                    wraps,
+                }
+            }
         }
     }
 }
@@ -187,6 +215,9 @@ struct Renderer {
     breaks: Breaks,
     width: usize,
     out: Vec<Line<'static>>,
+    /// SOFT WRAPS: the rows of `out` that carry on the row above after a
+    /// width break, with the gutter columns in front of their text.
+    soft: Vec<(usize, u16)>,
     /// Left gutter, innermost last.
     gutter: Vec<Gutter>,
     /// A list item's marker, drawn in place of its indent on the next
@@ -224,6 +255,7 @@ impl Renderer {
             breaks,
             width: width.max(1),
             out: Vec::new(),
+            soft: Vec::new(),
             gutter: Vec::new(),
             marker: None,
             inline: Vec::new(),
@@ -244,7 +276,7 @@ impl Renderer {
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> (Vec<Line<'static>>, Vec<Wrap>) {
         self.flush_inline();
         while self
             .out
@@ -253,7 +285,16 @@ impl Renderer {
         {
             self.out.pop();
         }
-        self.out
+        let mut wraps = vec![Wrap::default(); self.out.len()];
+        for (row, lead) in self.soft {
+            if let Some(w) = wraps.get_mut(row) {
+                *w = Wrap {
+                    continues: true,
+                    lead,
+                };
+            }
+        }
+        (self.out, wraps)
     }
 
     // ---- styles ----
@@ -428,9 +469,13 @@ impl Renderer {
         if atoms.is_empty() {
             return 0;
         }
-        let rows = flow(&atoms, self.avail(), self.base);
-        let widest = rows.iter().map(|(_, w)| *w).max().unwrap_or(0);
-        for (row, _) in rows {
+        let rows = flow_marked(&atoms, self.avail(), self.base);
+        let widest = rows.iter().map(|((_, w), _)| *w).max().unwrap_or(0);
+        for ((row, _), wrapped) in rows {
+            if wrapped {
+                let lead = self.gutter_width().min(u16::MAX as usize) as u16;
+                self.soft.push((self.out.len(), lead));
+            }
             self.emit(row);
         }
         widest
@@ -913,14 +958,26 @@ pub(crate) fn chunk_runs(runs: &[(String, Style)], width: usize) -> Vec<Vec<Span
 /// it); any other gap is `base`. A forced break ends a row even when the
 /// row is empty.
 fn flow(atoms: &[Atom], avail: usize, base: Style) -> Vec<Row> {
+    flow_marked(atoms, avail, base)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// [`flow`], each row saying whether it only started because the one
+/// before ran out of width — a SOFT WRAP, which a copy joins back up.
+fn flow_marked(atoms: &[Atom], avail: usize, base: Style) -> Vec<(Row, bool)> {
     let avail = avail.max(1);
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<(Row, bool)> = Vec::new();
     let mut line: Vec<Span<'static>> = Vec::new();
     let mut cur = 0usize;
+    // Whether the row being built continues the one before it.
+    let mut wrapped = false;
     let mut i = 0;
     while i < atoms.len() {
         if atoms[i].kind == Kind::Break {
-            rows.push((std::mem::take(&mut line), cur));
+            rows.push(((std::mem::take(&mut line), cur), wrapped));
+            wrapped = false;
             cur = 0;
             i += 1;
             continue;
@@ -932,7 +989,8 @@ fn flow(atoms: &[Atom], avail: usize, base: Style) -> Vec<Row> {
         let word = &atoms[i..j];
         let w: usize = word.iter().map(|a| a.text.width()).sum();
         if cur > 0 && cur + 1 + w > avail {
-            rows.push((std::mem::take(&mut line), cur));
+            rows.push(((std::mem::take(&mut line), cur), wrapped));
+            wrapped = true;
             cur = 0;
         }
         if cur > 0 {
@@ -949,7 +1007,8 @@ fn flow(atoms: &[Atom], avail: usize, base: Style) -> Vec<Row> {
                 for ch in a.text.chars() {
                     let cw = ch.width().unwrap_or(0);
                     if cur > 0 && cur + cw > avail {
-                        rows.push((std::mem::take(&mut line), cur));
+                        rows.push(((std::mem::take(&mut line), cur), wrapped));
+                        wrapped = true;
                         cur = 0;
                     }
                     push_char(&mut line, ch, a.style);
@@ -965,7 +1024,7 @@ fn flow(atoms: &[Atom], avail: usize, base: Style) -> Vec<Row> {
         i = j;
     }
     if !line.is_empty() {
-        rows.push((line, cur));
+        rows.push(((line, cur), wrapped));
     }
     rows
 }
@@ -1186,6 +1245,32 @@ mod tests {
         assert_eq!(minor.style.fg, None, "H4+ is bold but not accent");
         assert!(minor.style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(span_with(&out, "━").style.fg, Some(th().edge));
+    }
+
+    /// A row a width break started is a SOFT WRAP, with the gutter it is
+    /// drawn behind as its lead; a copy of the whole paragraph is the
+    /// sentence again.
+    #[test]
+    fn soft_wraps_are_marked_with_their_lead_and_copy_as_one_line() {
+        let text = "- one two three four five six seven
+- next";
+        let (rows, wraps) = render_with_wraps(text, 16, Breaks::Reflow, Style::default(), th());
+        assert_eq!(rows.len(), wraps.len());
+        assert!(!wraps[0].continues, "an item starts fresh");
+        assert!(wraps[1].continues, "{:?}", plain(&rows));
+        assert_eq!(wraps[1].lead, 2, "the bullet's hanging indent");
+        let last = rows.len() - 1;
+        assert!(!wraps[last].continues, "the next item starts fresh");
+        let all = crate::doc_select::DocSelection {
+            anchor: (0, 0),
+            head: (u16::MAX, last),
+            dragging: false,
+            active: true,
+        };
+        assert_eq!(
+            all.text(&rows, &wraps).as_deref(),
+            Some("• one two three four five six seven\n• next")
+        );
     }
 
     #[test]
