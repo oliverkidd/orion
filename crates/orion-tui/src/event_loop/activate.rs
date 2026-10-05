@@ -330,11 +330,11 @@ pub(super) fn unarchive(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>
 }
 
 /// Ask before a checkout is deleted from disk — `d` on its row, **Delete
-/// worktree** in its CONTEXT MENU. One gate and one wording for both: the
-/// ROOT WORKTREE is never deleted, a stand-in git is still cutting has
-/// nothing on disk yet, and the confirm says how many live sessions go
-/// down with the checkout. The menu used to build a confirm of its own,
-/// which left that warning out.
+/// worktree** in its CONTEXT MENU or on its key (`⌘⌫`). One gate and one
+/// wording for all: the ROOT WORKTREE is never deleted, a stand-in git is
+/// still cutting has nothing on disk yet, and the confirm says how many
+/// live sessions go down with the checkout, and names them. The menu used
+/// to build a confirm of its own, which left that warning out.
 pub(super) fn delete_worktree(app: &mut App, id: &WorktreeId) {
     let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == id) else {
         return;
@@ -342,24 +342,33 @@ pub(super) fn delete_worktree(app: &mut App, id: &WorktreeId) {
     if w.is_main || app.is_placeholder_worktree(id) {
         return;
     }
-    let live_here = app
+    // The live sessions that go down with it, named under the question.
+    let doomed: Vec<String> = app
         .tree
         .agents
         .iter()
         .filter(|a| &a.worktree_id == id && !a.archived)
-        .count()
-        + app
-            .tree
-            .terminals
-            .iter()
-            .filter(|t| &t.worktree_id == id)
-            .count();
+        .map(|a| a.name.clone())
+        .chain(
+            app.tree
+                .terminals
+                .iter()
+                .filter(|t| &t.worktree_id == id)
+                .map(|t| t.name.clone()),
+        )
+        .collect();
+    let mut message = format!(
+        "Delete worktree '{}' from disk? {} session(s) will be killed.",
+        w.branch,
+        doomed.len()
+    );
+    if !doomed.is_empty() {
+        message.push('\n');
+        message.push_str(&super::bulk_confirm_listing(&doomed));
+    }
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Delete worktree".into(),
-        message: format!(
-            "Delete worktree '{}' from disk? {live_here} session(s) will be killed.",
-            w.branch
-        ),
+        message,
         action: PendingAction::DeleteWorktree(id.clone()),
         area: ratatui::layout::Rect::default(),
     }));

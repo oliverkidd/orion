@@ -319,6 +319,11 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
             }
         }
     }
+    // On a card of a linked checkout, the whole worktree in one go —
+    // `⌫` on an empty band already names it.
+    if card.is_some() && !bands[band_at].is_main {
+        list.push(act(km, Action::DeleteWorktree, "delete worktree"));
+    }
     // Tab opens the band in place, or folds it back — the verb the rule
     // under the cursor used to spell at its right end.
     if !app.launcher_all_open && !bands[band_at].cards.is_empty() {

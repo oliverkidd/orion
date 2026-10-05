@@ -758,6 +758,7 @@ mod tests {
                 "super+l",
                 "super+shift+a",
                 "super+shift+u",
+                "super+backspace",
                 "super+w",
                 "super+n",
                 "super+/",

@@ -712,15 +712,16 @@ pub enum PendingAction {
         worktree: WorktreeId,
         offered: bool,
     },
-    /// Shift+D: every deletable worktree of the selected project.
+    /// **Delete all sessions** in the worktrees panel: every deletable
+    /// worktree of the selected project.
     DeleteAllWorktrees(Vec<WorktreeId>),
     /// The daemon answered a worktree delete with `WorktreeHasChanges`:
     /// these checkouts hold uncommitted or untracked files, and only a
     /// forced delete removes them — losing those files, never the commits
     /// on their branches.
     ForceDeleteWorktrees(Vec<WorktreeId>),
-    /// Shift+D: every session row the panel currently shows — agents and
-    /// terminals both.
+    /// **Delete all sessions**: every session row the panel currently
+    /// shows — agents and terminals both.
     DeleteAllSessions {
         agents: Vec<AgentId>,
         terminals: Vec<TerminalId>,

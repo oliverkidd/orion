@@ -132,6 +132,10 @@ pub enum Action {
     /// worktree or a project tab: over a modal the chord does nothing.
     ClosePane,
     DeleteAll,
+    /// `⌘⌫` (`⇧D` its twin): delete the worktree of the band under the
+    /// cursor from disk — every agent and terminal in it with it — behind
+    /// one confirm that lists them. Never the main checkout.
+    DeleteWorktree,
     /// The AGENT PRESETS list: saved launch definitions for the checkout
     /// under the cursor.
     AgentPresets,
@@ -572,6 +576,17 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["backspace"],
+    },
+    ActionSpec {
+        action: Action::DeleteWorktree,
+        id: "delete_worktree",
+        label: "Delete worktree",
+        hint: "Delete the worktree under the cursor from disk, with every agent and terminal in it, behind one confirmation that lists them. The main checkout is never deleted",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        // ⌘⌫ beside ⌫'s delete-one; `⇧D` is its twin for a terminal that
+        // never sends ⌘. In a LOCKED PANE ⌘⌫ stays the agent's kill-line.
+        defaults: &["cmd+backspace", "shift+d"],
     },
     ActionSpec {
         action: Action::ClosePane,
@@ -1718,6 +1733,26 @@ mod tests {
 
     fn ev(code: KeyCode, mods: KeyModifiers) -> KeyChord {
         KeyChord::from_event(&KeyEvent::new(code, mods))
+    }
+
+    /// `⌘⌫` deletes the worktree, and `⇧D` — what a terminal without ⌘
+    /// sends — is its twin; plain `⌫` stays the delete of one row.
+    #[test]
+    fn cmd_backspace_and_shift_d_delete_the_worktree() {
+        let map = Keymap::default();
+        let at = |code, mods| map.lookup(Scope::Global, &ev(code, mods));
+        assert_eq!(
+            at(KeyCode::Backspace, KeyModifiers::SUPER),
+            Some(Action::DeleteWorktree)
+        );
+        assert_eq!(
+            at(KeyCode::Char('D'), KeyModifiers::SHIFT),
+            Some(Action::DeleteWorktree)
+        );
+        assert_eq!(
+            at(KeyCode::Backspace, KeyModifiers::NONE),
+            Some(Action::Delete)
+        );
     }
 
     #[test]

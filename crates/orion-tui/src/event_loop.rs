@@ -3129,6 +3129,13 @@ fn folds_launcher_pane(app: &App, chord: &crate::keymap::KeyChord) -> bool {
             .contains(chord)
 }
 
+/// Is `chord` ⌘⌫ — clear to the line's start, typed text in every Mac
+/// field — which a LOCKED PANE forwards to the agent even when the
+/// Hotkeys tab binds it (**Delete worktree** does by default).
+fn kills_the_line(chord: &crate::keymap::KeyChord) -> bool {
+    chord.code == KeyCode::Backspace && chord.mods.contains(KeyModifiers::SUPER)
+}
+
 /// Is `chord` the full-screen toggle's (`^F`, whatever the Hotkeys tab
 /// binds to it) in a form a LOCKED PANE lets through rather than forwards
 /// — a chord with a command modifier, never one that types a character.
@@ -3730,8 +3737,9 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         // too — ⌘K, ⌘P, ⌘E, ⌘⇧P — as if the keys were the cards': no one
         // types a ⌘ chord as text, so the agent loses nothing. The lock
         // goes first, so what opens lands back on the card, not in the
-        // agent.
-        if chord.mods.contains(KeyModifiers::SUPER) {
+        // agent. ⌘⌫ is the one exception: it is the agent's kill-line, the
+        // way every Mac text field clears to the line's start.
+        if chord.mods.contains(KeyModifiers::SUPER) && !kills_the_line(&chord) {
             if let Some(action) = app.keymap.lookup(crate::keymap::Scope::Global, &chord) {
                 crate::key_combo::note(
                     app,
@@ -3753,8 +3761,12 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         // `⇧Esc` is the agent's Esc — the plain key leaves the pane — so
         // what goes down the PTY is a bare Esc, never the shifted one a
         // kitty-protocol agent would read as something else.
+        // ⌘⌫ goes down as `^U`, the kill-line Ghostty typed for it before
+        // its block released the chord: a legacy PTY has no spelling of ⌘.
         let key = if crate::launcher::pane_keys::AGENT_ESC.matches(&key) {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else if kills_the_line(&chord) {
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)
         } else {
             key
         };
@@ -4159,6 +4171,8 @@ fn dispatch_action(
         // Delete EVERY row of the focused panel (behind a confirm that
         // lists the casualties).
         Action::DeleteAll => open_delete_all_confirm(app),
+        // The band's whole worktree, every session in it with it.
+        Action::DeleteWorktree => open_delete_worktree_confirm(app),
         // Space on a session card: expand it into its FOLLOW-UP COMPOSER,
         // or fold it back up. Sessions only — the other panels have no
         // card to expand, and Space stays unbound there.
@@ -6218,6 +6232,23 @@ fn open_delete_confirm(app: &mut App) {
     }
 }
 
+/// **Delete worktree** (`⌘⌫`): the checkout of the band under the grid's
+/// cursor — or the panels' worktree in context — deleted from disk with
+/// every agent and terminal in it, behind the worktree's own confirm,
+/// which lists them. The main checkout is never deleted: a note says so.
+fn open_delete_worktree_confirm(app: &mut App) {
+    let Some(id) = launcher::band_worktree(app).or_else(|| worktree_in_context(app)) else {
+        return;
+    };
+    if app.tree.worktrees.iter().any(|w| w.id == id && w.is_main) {
+        app.flash = Some(crate::flash::Flash::note(
+            "The main checkout can't be deleted",
+        ));
+        return;
+    }
+    activate::delete_worktree(app, &id);
+}
+
 /// Whether `key` is a ⌘ chord bound to **Close agent or terminal** — the
 /// one the modal guard in [`handle_key`] swallows. Only a ⌘ chord: one
 /// rebound onto a bare key keeps that key a modal's own.
@@ -6386,7 +6417,7 @@ fn delete_link(app: &mut App, row: &LinkRow) {
 const BULK_CONFIRM_MAX_LISTED: usize = 8;
 
 /// The itemized body of a bulk-delete confirm: one bullet per doomed row.
-fn bulk_confirm_listing(names: &[String]) -> String {
+pub(super) fn bulk_confirm_listing(names: &[String]) -> String {
     let mut lines: Vec<String> = names
         .iter()
         .take(BULK_CONFIRM_MAX_LISTED)
@@ -6401,9 +6432,10 @@ fn bulk_confirm_listing(names: &[String]) -> String {
     lines.join("\n")
 }
 
-/// Shift+D: confirm deleting EVERY row of the focused panel — all worktrees
-/// of the selected project, or all sessions the panel shows. The dialog
-/// itemizes the casualties so the blast radius is unmistakable.
+/// **Delete all sessions**: confirm deleting EVERY row of the focused
+/// panel — all worktrees of the selected project, or all sessions the
+/// panel shows. The dialog itemizes the casualties so the blast radius is
+/// unmistakable.
 fn open_delete_all_confirm(app: &mut App) {
     match app.focus {
         Focus::Worktrees => {
@@ -13873,6 +13905,25 @@ mod tests {
         app.settle_project_tabs();
         app.dirty = false;
         app
+    }
+
+    /// `⌘⌫` in a LOCKED PANE is the agent's kill-line, not **Delete
+    /// worktree**: it goes down the PTY and opens nothing.
+    #[test]
+    fn cmd_backspace_in_a_locked_pane_goes_to_the_agent() {
+        let mut app = locked_pane_app();
+        let mut out = Vec::new();
+        handle_terminal_event(
+            &mut app,
+            key(KeyCode::Backspace, KeyModifiers::SUPER),
+            &mut out,
+        );
+        assert!(app.overlay.is_none(), "{:?}", app.overlay);
+        assert!(app.term_locked, "the keys stay in the pane");
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::Input { data, .. }] if data == b"\x15"),
+            "the key went to the PTY as ^U: {out:?}"
+        );
     }
 
     /// TYPING ECHO: a key that only goes to the PTY leaves the screen as it
