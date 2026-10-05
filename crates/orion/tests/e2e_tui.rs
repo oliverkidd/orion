@@ -34,8 +34,8 @@ const CTRL_E: &[u8] = &[0x05];
 const CTRL_N: &[u8] = &[0x0e];
 const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
-const CTRL_D: &[u8] = &[0x04];
 const CTRL_A: &[u8] = &[0x01];
+const CTRL_W: &[u8] = &[0x17];
 const CTRL_G: &[u8] = &[0x07];
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 const SPACE: &[u8] = b" ";
@@ -978,7 +978,7 @@ fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
 /// skills and the checkout's — the user's folder reached through a
 /// symlink, as `~/.claude/skills` → `~/.cursor/skills` is on a Mac set up
 /// for both, and listed once — typing narrows them by description, the
-/// page reads the one under the cursor, `^d` moves one to that home's
+/// page reads the one under the cursor, `^w` moves one to that home's
 /// Trash behind a confirm, and Esc closes the browser.
 #[test]
 fn tui_skills_browser_lists_filters_reads_and_trashes() {
@@ -1029,10 +1029,10 @@ fn tui_skills_browser_lists_filters_reads_and_trashes() {
     tui.wait_for_text("Group the merged pull requests by label.");
     tui.wait_for_gone("deploy");
 
-    // ---- ^d asks, naming the folder; yes moves it to the Trash ----
+    // ---- ^w asks, naming the folder; yes moves it to the Trash ----
     tui.send(CTRL_U);
     tui.wait_for_text("Skills — skills-proj (3)");
-    tui.send(CTRL_D);
+    tui.send(CTRL_W);
     tui.wait_for_text("Move the skill 'release-notes' to the Trash?");
     tui.send(ENTER);
     tui.wait_for_text("Skills — skills-proj (2)");

@@ -707,7 +707,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Skills,
         id: "skills",
         label: "Skills",
-        hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^D moves it to the Trash",
+        hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^W moves it to the Trash",
         group: "FILES",
         scope: Scope::Global,
         defaults: &["cmd+s", "ctrl+s"],

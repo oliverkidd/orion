@@ -10,7 +10,7 @@
 //! rest — so the agent knows which
 //! issue the session is for before it reads the first word of the task.
 //!
-//! `Ctrl+c` (or `Ctrl+y`, the grid's reply key as a chord) leaves a
+//! `⌘Y` (the grid's reply key as a chord) leaves a
 //! comment on the issue instead: a multi-row box (the task
 //! prompts' shape) whose Enter posts the text as you with
 //! `gh issue comment`, off the loop, and puts the modal back on its row —
@@ -18,7 +18,7 @@
 //! again once it has landed. A post `gh` refused brings the box back with
 //! the text, so nothing typed is lost.
 //!
-//! `Ctrl+e` edits the issue itself, in place: the reading pane becomes a form
+//! `⌘I` edits the issue itself, in place: the reading pane becomes a form
 //! on its title and description ([`IssueEditor`]), and Enter sends both
 //! as one `gh issue edit` off the loop. The form holds until GitHub
 //! answers, so a refusal shows `gh`'s reason over text that is still
@@ -29,8 +29,8 @@
 //! DIFF VIEWER's and the FILE FINDER's are: every letter typed narrows
 //! the rows to the fuzzy matches of `#15 title` (`fuzzy::rank`), best
 //! first, the cursor on the best, and Esc clears it before a second Esc
-//! closes. So the verbs are chords — `Ctrl+e`, `Ctrl+c`, `Ctrl+o`,
-//! `Ctrl+r` — and the PULL REQUESTS MODAL's filter is this one.
+//! closes. So the verbs are chords — `⌘I`, `⌘Y`, `⌘O`,
+//! `⌘R` — and the PULL REQUESTS MODAL's filter is this one.
 //!
 //! Like the pull requests, the issues are the TUI's own business: one
 //! `gh issue list` per project — asked in the background once the cursor
@@ -295,7 +295,7 @@ pub struct IssuesView {
     /// the follow-window's anchor, and what a click's row math counts
     /// from.
     pub cursor_row: usize,
-    /// `Ctrl+e`: the reading pane turned into the editor for the row under the
+    /// `⌘I`: the reading pane turned into the editor for the row under the
     /// cursor, until Enter has saved or Esc has dropped it. Boxed: the
     /// view rides a `Comment` answer, and two text fields would make that
     /// variant several times the others' size.
@@ -363,7 +363,7 @@ pub struct IssueText {
     pub body: String,
 }
 
-/// `Ctrl+e` in the modal: the reading pane as a form for the issue under the
+/// `⌘I` in the modal: the reading pane as a form for the issue under the
 /// cursor — the title on one line, the description in a box under it —
 /// that `Enter` sends to GitHub as one `gh issue edit`. It lives on the
 /// [`IssuesView`] rather than as an overlay of its own: the list stays up
@@ -783,7 +783,7 @@ pub(crate) fn refresh_selected(app: &mut App) {
 
 /// `Shift+R` on the grid, reload from GitHub: ask for the selected
 /// project's open issues now, past the beat and a miss already
-/// remembered — the modal's `Ctrl+r` for the list, from outside it.
+/// remembered — the modal's `⌘R` for the list, from outside it.
 pub(crate) fn reload_selected(app: &mut App) {
     let Some((project, dir)) = app
         .selected_project()
@@ -1089,7 +1089,7 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
 
 // ---- commenting ----
 
-/// `Ctrl+c`: the comment box for the issue under the cursor. The box replaces
+/// `⌘Y`: the comment box for the issue under the cursor. The box replaces
 /// the modal; Enter posts and comes back to it, Esc just comes back.
 fn open_comment_for_selected(app: &mut App) {
     let Some(Overlay::Issues(view)) = &app.overlay else {
@@ -1149,7 +1149,7 @@ pub(crate) fn post_comment(app: &mut App, view: IssuesView, issue: IssueRef, tex
     });
 }
 
-/// `Ctrl+r` in the modal: ask for the list again now, and the selected issue's
+/// `⌘R` in the modal: ask for the list again now, and the selected issue's
 /// comments over the cached copy. The rows stay until the answer lands, the
 /// title saying `refreshing…` meanwhile.
 fn refresh(app: &mut App) {
@@ -1276,7 +1276,7 @@ fn clear_query(app: &mut App) {
 
 // ---- editing ----
 
-/// `Ctrl+e`: turn the reading pane into the editor for the issue under the
+/// `⌘I`: turn the reading pane into the editor for the issue under the
 /// cursor, prefilled from the row. A list with no rows has nothing to
 /// edit.
 fn open_editor(app: &mut App) {
@@ -1419,11 +1419,15 @@ pub(crate) mod keys {
 
     pub const PROMPT: Key = Key::new(&["enter"], "prompt an agent");
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
-    pub const EDIT: Key = Key::new(&["ctrl+e"], "edit");
-    /// `^Y` is the grid's `y` (reply) as a chord.
-    pub const COMMENT: Key = Key::new(&["ctrl+c", "ctrl+y"], "comment");
-    pub const BROWSER: Key = Key::new(&["ctrl+o"], "browser");
-    pub const REFRESH: Key = Key::new(&["ctrl+r"], "refresh");
+    /// ⌘I: E is the changes' everywhere. `^E` is the twin a terminal
+    /// with no ⌘ gets — `^I` is Tab there.
+    pub const EDIT: Key = Key::new(&["cmd+i", "ctrl+e"], "edit");
+    /// The grid's `y` (reply) as a chord.
+    pub const COMMENT: Key = Key::new(&["cmd+y", "ctrl+y"], "comment");
+    /// The grid's open-outside chord (`Action::OpenOutside`).
+    pub const BROWSER: Key = Key::new(&["cmd+o", "ctrl+o"], "browser");
+    /// The grid's refresh chord (`Action::RefreshPullRequests`).
+    pub const REFRESH: Key = Key::new(&["cmd+r", "ctrl+r"], "refresh");
     /// The reading pane, a page at a time.
     pub const READ: Key = Key::new(&["pgup", "pgdn"], "read").show(2);
     /// The editor: the next field, and saving the two to GitHub.
@@ -1538,7 +1542,7 @@ pub(crate) fn open_preset_for_row(app: &mut App) {
     }
 }
 
-/// `Ctrl+o`, and a click on the reading pane's `↗ open in browser` button
+/// `⌘O`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the issue under the cursor in the
 /// browser, through the very `event_loop::open_link` a card's `⇧V` and
 /// `⇧I` run — the footer says when it could not.
@@ -1564,9 +1568,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let Some(Overlay::Issues(view)) = &mut app.overlay else {
         return;
     };
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let half = (view.view_height / 2).max(1) as i32;
     let page = view.view_height.max(1) as i32;
     match key.code {
         // Two-stage escape, like every fuzzy overlay: a typed filter is
@@ -1574,18 +1576,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
         KeyCode::Esc => app.overlay = None,
         // Shift+↑/↓ scroll the pane a line; ↑/↓ walk the rows the filter
-        // leaves, Ctrl+n/p mirroring them.
+        // leaves.
         KeyCode::Down if shift => view.scroll_by(1),
         KeyCode::Up if shift => view.scroll_by(-1),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
-        KeyCode::Char('n') if ctrl => step(app, 1),
-        KeyCode::Char('p') if ctrl => step(app, -1),
-        // The reading pane scrolls on the DIFF VIEWER's keys. Ctrl+u is
-        // the line editor's kill-to-start while something is typed; only
-        // with an empty filter does it scroll.
-        KeyCode::Char('d') if ctrl => view.scroll_by(half),
-        KeyCode::Char('u') if ctrl && view.query.is_empty() => view.scroll_by(-half),
         KeyCode::PageDown => view.scroll_by(page),
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
@@ -1650,7 +1645,7 @@ pub(crate) fn handle_mouse(
         MouseEventKind::ScrollUp => step(app, -1),
         MouseEventKind::ScrollDown => step(app, 1),
         // The `↗ open in browser` button, before the rows: the very open
-        // `Ctrl+o` runs.
+        // `⌘O` runs.
         MouseEventKind::Down(MouseButton::Left) if on_button => open_in_browser(app, out),
         MouseEventKind::Down(MouseButton::Left) => {
             let list = view.list_area;
@@ -2270,7 +2265,7 @@ mod tests {
         assert!(!idle.contains("posting"), "{idle}");
     }
 
-    /// `Ctrl+c` opens the comment box for the issue under the cursor, carrying
+    /// `⌘Y` opens the comment box for the issue under the cursor, carrying
     /// the modal so Esc and Enter can put it back on the row; with no rows
     /// it says so and stays.
     #[test]
@@ -2282,7 +2277,7 @@ mod tests {
             "demo".into(),
             "/tmp/demo".into(),
         )));
-        let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let c = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
         handle_key(&mut app, c, &mut Vec::new());
         assert!(
             matches!(&app.overlay, Some(Overlay::Issues(_))),
@@ -2752,7 +2747,7 @@ mod tests {
         }
     }
 
-    /// `Ctrl+e` turns the pane into a form prefilled from the row, caret on
+    /// `⌘I` turns the pane into a form prefilled from the row, caret on
     /// the title; Esc puts the pane back with the draft dropped and the
     /// modal still up. An empty list has nothing to edit.
     #[test]
@@ -3154,7 +3149,7 @@ mod tests {
     /// press first — to the fuzzy matches, best first, the cursor on the
     /// best with its comments asked for as any move's are, the count
     /// reading `matches/all`; the modal's own hotkey types too. ↑/↓ walk
-    /// the matches alone and Ctrl+e edits the one found. The first Esc
+    /// the matches alone and ⌘I edits the one found. The first Esc
     /// clears the filter, the cursor staying on the row it found, and the
     /// second closes.
     #[test]
@@ -3216,7 +3211,7 @@ mod tests {
             Some(second),
             "and stops at the last one"
         );
-        // The verbs act on the row found: Ctrl+e edits it.
+        // The verbs act on the row found: ⌘I edits it.
         handle_key(
             &mut app,
             key(KeyCode::Char('e'), KeyModifiers::CONTROL),
@@ -3259,7 +3254,7 @@ mod tests {
     /// A filter nothing matches empties the list and says so — nothing
     /// under the cursor, no comments asked for — and the row is back the
     /// moment the filter widens. Ctrl+u kills the typed filter, as in any
-    /// line editor, and scrolls the pane only once there is none.
+    /// line editor, and never scrolls the pane.
     #[test]
     fn a_filter_nothing_matches_says_so_and_leaves_the_cursor_put() {
         let (mut app, _) = modal_with(vec![
@@ -3317,8 +3312,8 @@ mod tests {
         );
         assert_eq!(
             issues_view(&app).scroll,
-            0,
-            "with nothing typed, it scrolls"
+            3,
+            "with nothing typed, it still does not scroll — PgUp does"
         );
     }
 
@@ -3400,7 +3395,7 @@ mod tests {
         );
     }
 
-    /// The verbs the letters used to be are chords now: Ctrl+r asks
+    /// The verbs the letters used to be are chords now: ⌘R asks
     /// GitHub again — the selected issue's conversation with the list —
     /// while the plain letters go to the filter.
     #[test]
@@ -3450,20 +3445,16 @@ mod tests {
         reload_selected(&mut App::new());
     }
 
-    /// `Ctrl+y` comments as `Ctrl+c` does: the grid's reply key, as a
-    /// chord because the letters are the filter's.
+    /// `⌘Y` comments — `^Y` where the terminal sends no ⌘: the grid's
+    /// reply key, as a chord because the letters are the filter's.
     #[test]
-    fn ctrl_y_opens_the_comment_box_as_ctrl_c_does() {
-        for letter in ['c', 'y'] {
+    fn cmd_y_opens_the_comment_box_as_ctrl_y_does() {
+        for mods in [KeyModifiers::SUPER, KeyModifiers::CONTROL] {
             let (mut app, _) = modal_with(vec![issue(15, "Fix login redirect")]);
-            handle_key(
-                &mut app,
-                key(KeyCode::Char(letter), KeyModifiers::CONTROL),
-                &mut Vec::new(),
-            );
+            handle_key(&mut app, key(KeyCode::Char('y'), mods), &mut Vec::new());
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!(
-                    "^{letter} should open the comment box, got {:?}",
+                    "{mods:?}+y should open the comment box, got {:?}",
                     app.overlay
                 );
             };
@@ -3509,7 +3500,7 @@ mod tests {
         assert!(screen(&mut app, 100, 30).contains("the issue needs a title"));
     }
 
-    /// `Ctrl+o` and a click on the reading pane's `↗ open in browser` button run
+    /// `⌘O` and a click on the reading pane's `↗ open in browser` button run
     /// one open: the footer names where the browser went either way (INPUT
     /// PARITY), and the modal stays up. The button sits pinned right on the
     /// pane's top border with its rect written back for the click, the
@@ -3561,7 +3552,7 @@ mod tests {
             "the modal stays up"
         );
 
-        // `Ctrl+e`: the editor has the pane, and the button goes with it.
+        // `⌘I`: the editor has the pane, and the button goes with it.
         handle_key(
             &mut app,
             key(KeyCode::Char('e'), KeyModifiers::CONTROL),

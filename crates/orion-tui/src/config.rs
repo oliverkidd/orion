@@ -12,6 +12,7 @@
 //! portable file.
 
 use crate::agent_presets::PresetText;
+use orion_core::compose::{WorktreeContainers, WORKTREE_CONTAINERS};
 use orion_core::harness::{CustomHarness, HarnessDescriptor};
 use orion_core::AgentKind;
 use serde::{Deserialize, Serialize};
@@ -472,6 +473,7 @@ pub enum SettingKind {
     PaletteEnterAttaches,
     WorktreeBaseBranch,
     LinkEnvFiles,
+    WorktreeContainers,
     OutsideTerminal,
     GhosttyKeybinds,
     Editor,
@@ -656,6 +658,7 @@ impl SettingKind {
             | SettingKind::PrDeleteBranch
             | SettingKind::PrDraft => (2026, 10, 4),
             SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
+            SettingKind::WorktreeContainers => (2026, 10, 5),
         }
     }
 
@@ -715,6 +718,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::LinkEnvFiles,
                 label: "Link .env files",
                 hint: "New and adopted worktrees get the main checkout's ignored .env files as symlinks (existing files are kept)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::WorktreeContainers,
+                label: "Worktree containers",
+                hint: "What deleting a worktree does to the docker compose projects started in it: stop them, remove them, or remove them with their volumes (data included)",
                 group: "",
             },
             SettingSpec {
@@ -896,7 +905,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::DiffTreeView,
                 label: "Files as a tree",
-                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^T flips one open viewer)",
+                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^B flips one open viewer)",
                 group: "Changes",
             },
             SettingSpec {
@@ -926,7 +935,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::PrDraft,
                 label: "New PRs as drafts",
-                hint: "A new pull request (^T in the pull requests modal) opens with its Draft box ticked",
+                hint: "A new pull request (^N in the pull requests modal) opens with its Draft box ticked",
                 group: "Pull requests",
             },
         ]),
@@ -1276,6 +1285,11 @@ pub struct Config {
     /// Owned by the daemon (`env_links`); the TUI writes it so the
     /// settings overlay can toggle it.
     pub link_env_files: bool,
+    /// WORKTREE CONTAINERS: what deleting a worktree does to the docker
+    /// compose projects started in it — `off` (the default), `stop`,
+    /// `remove`, or `remove+volumes`. Owned by the daemon (`containers`);
+    /// the TUI writes it so the settings overlay can cycle it.
+    pub worktree_containers: String,
     /// The app ⇧T opens a terminal in, outside orion: `ghostty` (the
     /// default) or `terminal` (macOS's Terminal.app), which is also the
     /// fallback when Ghostty.app isn't installed. See
@@ -1819,6 +1833,7 @@ impl Default for Config {
             git_init_on_create: true,
             worktree_base_branch: String::new(),
             link_env_files: true,
+            worktree_containers: WorktreeContainers::Off.as_str().into(),
             outside_terminal: OutsideTerminal::default().as_str().into(),
             ghostty_keybinds: true,
             editor: crate::editor::DEFAULT_EDITOR.into(),
@@ -3108,6 +3123,9 @@ impl Config {
                 name => name.to_string(),
             },
             SettingKind::LinkEnvFiles => on_off(self.link_env_files).into(),
+            SettingKind::WorktreeContainers => WorktreeContainers::parse(&self.worktree_containers)
+                .as_str()
+                .into(),
             SettingKind::OutsideTerminal => self.outside_terminal().as_str().into(),
             SettingKind::GhosttyKeybinds => on_off(self.ghostty_keybinds).into(),
             SettingKind::Editor => editor_label(&self.editor, &self.editor_resolved()),
@@ -3232,6 +3250,13 @@ impl Config {
             }
             SettingKind::LinkEnvFiles => {
                 self.link_env_files = !self.link_env_files;
+            }
+            SettingKind::WorktreeContainers => {
+                // From the resolved side, so a hand edit off the list
+                // steps on from `off`, which it reads as.
+                let current = WorktreeContainers::parse(&self.worktree_containers);
+                self.worktree_containers =
+                    cycle_choice(current.as_str(), WORKTREE_CONTAINERS, step).into();
             }
             SettingKind::OutsideTerminal => {
                 self.outside_terminal =
@@ -5522,6 +5547,41 @@ mod tests {
     /// cycling the three sides and persisted under `preset_text`; a hand
     /// edit off the list reads as the default, and `both` as the long
     /// label.
+    /// **Worktree containers** sits under **Link .env files** on the
+    /// General tab, starts `off`, cycles the four policies and saves the
+    /// word the daemon reads; a hand edit off the list reads, and steps
+    /// on, as `off`.
+    #[test]
+    fn worktree_containers_is_off_by_default_and_cycles_the_policies() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.value_label(SettingKind::WorktreeContainers), "off");
+        let (tab, row) = locate(SettingKind::WorktreeContainers).unwrap();
+        assert_eq!(SETTINGS_TABS[tab].title, "General");
+        assert_eq!(
+            locate(SettingKind::LinkEnvFiles),
+            Some((tab, row - 1)),
+            "after the .env links"
+        );
+        let mut seen = Vec::new();
+        for _ in 0..WORKTREE_CONTAINERS.len() {
+            cfg.cycle(tab, row, 1);
+            seen.push(cfg.value_label(SettingKind::WorktreeContainers));
+        }
+        assert_eq!(seen, ["stop", "remove", "remove+volumes", "off"], "wraps");
+        cfg.cycle(tab, row, -1);
+        assert_eq!(cfg.worktree_containers, "remove+volumes", "← steps back");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        assert_eq!(load_from(&path).worktree_containers, "remove+volumes");
+
+        let mut cfg: Config = serde_json::from_str(r#"{"worktree_containers": "nuke"}"#).unwrap();
+        assert_eq!(cfg.value_label(SettingKind::WorktreeContainers), "off");
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.worktree_containers, "stop");
+    }
+
     #[test]
     fn preset_text_is_prefix_by_default_on_the_sessions_tab_and_cycles_the_sides() {
         let mut cfg = Config::default();

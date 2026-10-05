@@ -3595,9 +3595,10 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let key = crate::keymap::untangle_cmd_period(key);
     // `⌘W` closes the agent or terminal in the pane, never a modal: over
     // the editor, a markdown page or any overlay it does nothing at all,
-    // rather than reach the editor as its `^W` or a list as a `w`.
+    // rather than reach the editor as its `^W` or a list as a `w` — except
+    // a modal whose remove verb it is (`modal_takes_cmd_w`).
     let modal_up = app.vim.is_some() || app.page.is_some() || app.overlay.is_some();
-    if modal_up && closes_pane(app, &key) {
+    if modal_up && closes_pane(app, &key) && !modal_takes_cmd_w(app) {
         return;
     }
     // The editor modal sits above every overlay: all keys forward to it —
@@ -6220,6 +6221,18 @@ fn open_delete_confirm(app: &mut App) {
 /// Whether `key` is a ⌘ chord bound to **Close agent or terminal** — the
 /// one the modal guard in [`handle_key`] swallows. Only a ⌘ chord: one
 /// rebound onto a bare key keeps that key a modal's own.
+/// The modals whose remove verb is `⌘W` — the PULL REQUESTS MODAL's close,
+/// the SKILLS BROWSER's trash, the AGENT PRESETS list's delete, each behind
+/// its own confirm — up with nothing over them: `⌘W` is theirs.
+fn modal_takes_cmd_w(app: &App) -> bool {
+    app.vim.is_none()
+        && app.page.is_none()
+        && matches!(
+            app.overlay,
+            Some(Overlay::PullRequests(_) | Overlay::Skills(_) | Overlay::AgentPresets(_))
+        )
+}
+
 fn closes_pane(app: &App, key: &KeyEvent) -> bool {
     let chord = crate::keymap::KeyChord::from_event(key);
     chord.mods.contains(KeyModifiers::SUPER)
@@ -7427,11 +7440,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             let on = |f: DiffFocus| focus == f;
             match key.code {
                 // Esc closes the modal, filter and all (`closes_on_esc`).
-                // Ctrl+r toggles the reviewed ✓ on the selected file —
+                // ⌘R toggles the reviewed ✓ on the selected file —
                 // orion-side bookkeeping only, no git state is touched.
                 // Reviewed files sink to the bottom; marking advances to the
                 // next file and unmarking to the next still-marked file, so
-                // held Ctrl+r sweeps either way (see
+                // held ⌘R sweeps either way (see
                 // `DiffView::toggle_reviewed`). Only the uncommitted
                 // changes' marks are stored: anything else's live as long
                 // as the modal (`DiffView::scope_marks`), and a pull request
@@ -7448,7 +7461,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         }
                     }
                 }
-                // Ctrl+t flips the file list between flat paths and the
+                // ⌘B flips the file list between flat paths and the
                 // directory tree (`diff_tree`), the cursor staying on its
                 // file — this viewer's alone: the **Files as a tree**
                 // SETTING is how the next one opens.
@@ -7526,14 +7539,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
         }
         Overlay::Palette(palette) => {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 // Esc closes the palette, query and all (`closes_on_esc`).
-                // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
+                // j/k stay typeable in the query.
                 KeyCode::Down => palette.select(palette.selected as i64 + 1),
                 KeyCode::Up => palette.select(palette.selected as i64 - 1),
-                KeyCode::Char('n') if ctrl => palette.select(palette.selected as i64 + 1),
-                KeyCode::Char('p') if ctrl => palette.select(palette.selected as i64 - 1),
                 // Enter picks per the config setting; Ctrl+O always opens
                 // (attach + terminal focus; the browser, for a pull
                 // request), Ctrl+F only focuses the row.
@@ -7554,14 +7564,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
         }
         Overlay::Files(finder) => {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 // Esc closes the finder, query and all (`closes_on_esc`).
-                // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
+                // j/k stay typeable in the query.
                 KeyCode::Down => finder.select(finder.selected as i64 + 1),
                 KeyCode::Up => finder.select(finder.selected as i64 - 1),
-                KeyCode::Char('n') if ctrl => finder.select(finder.selected as i64 + 1),
-                KeyCode::Char('p') if ctrl => finder.select(finder.selected as i64 - 1),
                 // Enter opens the selected file in the editor modal, which
                 // closes the finder unless `close_finder_on_open` is off —
                 // a markdown file beside its rendered page.
@@ -7586,14 +7593,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
         }
         Overlay::Grep(view) => {
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 // Esc closes the overlay, query and all (`closes_on_esc`).
-                // j/k stay typeable in the query; Ctrl+n/p mirror ↑/↓.
+                // j/k stay typeable in the query.
                 KeyCode::Down => view.select(view.selected as i64 + 1),
                 KeyCode::Up => view.select(view.selected as i64 - 1),
-                KeyCode::Char('n') if ctrl => view.select(view.selected as i64 + 1),
-                KeyCode::Char('p') if ctrl => view.select(view.selected as i64 - 1),
                 // Enter opens the hit in the editor modal, which closes this
                 // overlay unless `close_finder_on_open` is off.
                 _ if ui::finder_keys::OPEN.matches(&key) => open_selected_hit_in_editor(app),
@@ -7637,8 +7641,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // j/k stay typeable in the filter; Ctrl+n/p mirror ↑/↓.
                 KeyCode::Down => view.select(view.selected as i64 + 1),
                 KeyCode::Up => view.select(view.selected as i64 - 1),
-                KeyCode::Char('n') if ctrl => view.select(view.selected as i64 + 1),
-                KeyCode::Char('p') if ctrl => view.select(view.selected as i64 - 1),
                 KeyCode::Right => view.expand_selected(),
                 KeyCode::Left => view.collapse_selected(),
                 // Enter folds/unfolds a directory; on a file it opens the
@@ -15288,6 +15290,50 @@ mod tests {
     /// The open pull requests take the rows *after* the checkouts, which is
     /// what lets every "index into visible_worktrees()" in the app stay
     /// correct: a cursor on a PR row simply has no selected worktree.
+    /// The PULL REQUESTS MODAL's verbs are ⌘ chords, each with its `^`
+    /// twin, and every one reaches the modal through the top of the key
+    /// path — `⌘W` included, which over any other modal does nothing:
+    /// ⌘N opens a new pull request, ⌘X the merge, ⌘W the close.
+    #[test]
+    fn the_pr_modals_cmd_verbs_reach_it_from_the_top() {
+        use crate::pr_actions::PrForm;
+        let form = |app: &App| match &app.overlay {
+            Some(Overlay::PullRequests(view)) => view.form.as_deref().cloned(),
+            other => panic!("expected the pull requests modal, got {other:?}"),
+        };
+        let repo = tempfile::tempdir().unwrap();
+        with_default_config(|| {
+            for mods in [KeyModifiers::SUPER, KeyModifiers::CONTROL] {
+                let mut app = App::new();
+                seed_tree(&mut app);
+                app.tree.projects[0].repo_path = repo.path().to_path_buf();
+                seed_open_prs(&mut app, &[(7, "Attach links")]);
+                let mut out = Vec::new();
+                crate::pr_modal::open(&mut app);
+                for (letter, want) in [('n', "new"), ('x', "merge"), ('w', "close")] {
+                    press(&mut app, KeyCode::Char(letter), mods, &mut out);
+                    let up = form(&app);
+                    let matched = matches!(
+                        (&up, want),
+                        (Some(PrForm::Create(_)), "new")
+                            | (Some(PrForm::Merge(_)), "merge")
+                            | (Some(PrForm::Close(_)), "close")
+                    );
+                    assert!(matched, "{mods:?}+{letter}: expected {want}, got {up:?}");
+                    press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                    assert!(form(&app).is_none(), "Esc puts the page back");
+                }
+            }
+        });
+        // Over a modal that has no use for it, ⌘W still does nothing.
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        app.overlay = Some(Overlay::Help(Default::default()));
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
+        assert!(matches!(&app.overlay, Some(Overlay::Help(_))));
+    }
+
     #[test]
     fn open_prs_take_the_rows_below_the_worktrees() {
         let mut app = App::new();
@@ -16830,7 +16876,7 @@ diff --git a/docs/keys.md b/docs/keys.md
     /// ways; a directory's row reads as the list of what changed under it,
     /// and leaving the tree from one lands on that directory's first file.
     #[test]
-    fn ctrl_t_flips_the_pr_diff_file_list_between_flat_and_tree() {
+    fn ctrl_b_flips_the_pr_diff_file_list_between_flat_and_tree() {
         let mut app = pr_diff_app(false);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
@@ -16840,7 +16886,7 @@ diff --git a/docs/keys.md b/docs/keys.md
             view.scroll = 3;
         }
 
-        ctrl(&mut app, 't', &mut out);
+        ctrl(&mut app, 'b', &mut out);
         assert_eq!(
             diff_tree_rows(&app),
             ["crates/tui/src", "a.rs", "*b.rs", "docs", "keys.md"],
@@ -16857,7 +16903,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("▾ crates/tui/src"), "{text}");
-        assert!(text.contains("^T flat list"), "{text}");
+        assert!(text.contains("^B flat list"), "{text}");
         assert!(text.contains("←→ fold"), "{text}");
 
         // Up onto the directory's row: the pane lists what is under it.
@@ -16889,7 +16935,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         assert_eq!(diff_view(&app).selected_dir(), Some("docs"));
-        ctrl(&mut app, 't', &mut out);
+        ctrl(&mut app, 'b', &mut out);
         let view = diff_view(&app);
         assert!(view.tree.is_none());
         assert_eq!(view.selected_file().unwrap().path, "docs/keys.md");
@@ -31279,7 +31325,7 @@ diff --git a/src/c.rs b/src/c.rs
             // a: a new preset, saved, the cursor on it.
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -31313,7 +31359,7 @@ diff --git a/src/c.rs b/src/c.rs
             // Esc backs out of the editor unsaved, to the picker too.
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -31326,7 +31372,7 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('d'),
+                KeyCode::Char('w'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -31339,7 +31385,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(pr_picker(&app).0.len(), 3);
             press(
                 &mut app,
-                KeyCode::Char('d'),
+                KeyCode::Char('w'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -31603,7 +31649,7 @@ diff --git a/src/c.rs b/src/c.rs
         // Esc: back, nothing posted.
         press(
             &mut app,
-            KeyCode::Char('c'),
+            KeyCode::Char('y'),
             KeyModifiers::CONTROL,
             &mut out,
         );
@@ -31615,7 +31661,7 @@ diff --git a/src/c.rs b/src/c.rs
         // An empty Enter: the same.
         press(
             &mut app,
-            KeyCode::Char('c'),
+            KeyCode::Char('y'),
             KeyModifiers::CONTROL,
             &mut out,
         );
@@ -31627,7 +31673,7 @@ diff --git a/src/c.rs b/src/c.rs
         // the box comes back with the text, newline and all.
         press(
             &mut app,
-            KeyCode::Char('c'),
+            KeyCode::Char('y'),
             KeyModifiers::CONTROL,
             &mut out,
         );
@@ -32108,7 +32154,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_presets(&mut app, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -32235,7 +32281,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_presets(&mut app, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -32518,7 +32564,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_presets(&mut app, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('d'),
+                KeyCode::Char('w'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -32540,7 +32586,7 @@ diff --git a/src/c.rs b/src/c.rs
             }
             press(
                 &mut app,
-                KeyCode::Char('d'),
+                KeyCode::Char('w'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -33744,7 +33790,7 @@ diff --git a/src/c.rs b/src/c.rs
             // its text waiting behind it.
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -33924,11 +33970,11 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
                 terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                 let text = buffer_text(&terminal);
-                assert!(text.contains("no presets yet — ^A creates one"), "{text}");
+                assert!(text.contains("no presets yet — ^N creates one"), "{text}");
 
                 press(
                     &mut app,
-                    KeyCode::Char('a'),
+                    KeyCode::Char('n'),
                     KeyModifiers::CONTROL,
                     &mut out,
                 );
@@ -34334,7 +34380,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_presets(&mut app, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -34525,7 +34571,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_presets(&mut app, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('a'),
+                KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -34709,33 +34755,33 @@ diff --git a/src/c.rs b/src/c.rs
                 crate::keymap::Action::AgentPresets,
             ));
 
-            // The delete keys ask first, and backing out of the confirm
+            // The delete key asks first, and backing out of the confirm
             // lands in the PR picker again.
-            for (key, mods) in [
-                (KeyCode::Char('d'), KeyModifiers::CONTROL),
-                (KeyCode::Delete, KeyModifiers::NONE),
-            ] {
-                press(&mut app, key, mods, &mut out);
-                assert!(
-                    matches!(
-                        &app.overlay,
-                        Some(Overlay::Confirm(c))
-                            if matches!(&c.action, PendingAction::DeleteAgentPreset { quick: Some(_), .. })
-                    ),
-                    "{key:?} asks before deleting: {:?}",
-                    app.overlay
-                );
-                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-                assert!(
-                    matches!(
-                        &app.overlay,
-                        Some(Overlay::AgentPresets(view))
-                            if view.quick.as_ref().is_some_and(|back| back.launch.pr.is_some())
-                    ),
-                    "{key:?}'s confirm backs out to the PR picker: {:?}",
-                    app.overlay
-                );
-            }
+            press(
+                &mut app,
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(
+                matches!(
+                    &app.overlay,
+                    Some(Overlay::Confirm(c))
+                        if matches!(&c.action, PendingAction::DeleteAgentPreset { quick: Some(_), .. })
+                ),
+                "^W asks before deleting: {:?}",
+                app.overlay
+            );
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(
+                    &app.overlay,
+                    Some(Overlay::AgentPresets(view))
+                        if view.quick.as_ref().is_some_and(|back| back.launch.pr.is_some())
+                ),
+                "^W's confirm backs out to the PR picker: {:?}",
+                app.overlay
+            );
 
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -34846,9 +34892,9 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
                 terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                 let text = buffer_text(&terminal);
-                assert!(text.contains("no presets yet — ^A creates one"), "{text}");
+                assert!(text.contains("no presets yet — ^N creates one"), "{text}");
                 // Enter and Ctrl+e on nothing do nothing: the hint names
-                // Ctrl+a.
+                // Ctrl+n.
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
                 assert_eq!(app.flash, None);
@@ -36620,7 +36666,7 @@ diff --git a/src/c.rs b/src/c.rs
                     app,
                     crate::keymap::Action::AgentPresets,
                 ));
-                press(app, KeyCode::Char('a'), KeyModifiers::CONTROL, &mut out);
+                press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
                 assert!(
                     matches!(app.overlay, Some(Overlay::AgentPresetEditor(_))),
                     "{:?}",
