@@ -69,7 +69,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `worktree_containers` | string | `"off"` | General | DAEMON-owned WORKTREE CONTAINERS (**Worktree containers**): what deleting a worktree does to the docker compose projects started in it — `off` leaves them, `stop` stops them, `remove` runs `docker compose down` (volumes kept), `remove+volumes` removes their volumes too. Matched by the directory compose recorded on each container, never by name; a value this build doesn't know is `off`. See [Worktree containers](#worktree-containers). |
 | `outside_terminal` | string | `"ghostty"` | General | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
 | `ghostty_keybinds` | bool | `true` | General | GHOSTTY KEYBINDS: keep a marked block in Ghostty's config that releases every ⌘ chord orion's keymap uses — your rebinds included — so none of them is swallowed by Ghostty. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
-| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); the outside terminal with its Ghostty keybinds; then what was chosen, and the keys to press next. `i` installs a missing CLI or editor ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
+| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); the outside terminal with its Ghostty keybinds; then what was chosen, and the keys to press next. `i` installs a missing CLI, editor or, on a Mac, Ghostty ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
 | `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal (or the MARKDOWN PAGE), so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
 | `ssh_sync_config` | bool | `true` | General | SETTINGS SYNC: `orion ssh` and `orion tunnel` send this machine's `config.json` and AGENT PRESETS along, and the remote orion merges them into its own settings before it starts — so a remote is set up the way this machine is on every connect, without reconfiguring it. Its `config.local.json` still wins there, and its projects, sessions and SSH HOSTS FILE stay its own. `--no-sync-config` leaves the settings behind for one connection. See [Backup, restore and other machines](#backup-restore-and-other-machines). |
 | `linear_auto_attach` | bool | `true` | Linear | **Link PRs to Linear**: a branch a `⌘L` launch cut is remembered, and when the project's open list first shows a pull request on it, orion attaches the pull request to each of its Linear issues through Linear's API (`attachmentLinkGitHubPR`). The link is orion's, so it holds when the branch name carries no issue ID — the case Linear's own GitHub integration misses — and Linear keeps one attachment per pull request, so an issue that is linked twice still shows it once. Off, nothing is remembered or attached. |
@@ -237,10 +237,14 @@ nothing about what is already there, and `--no-deps` (`curl … | sh -s -- --no-
 `ORION_NO_DEPS=1` skips the step.
 
 Inside orion, `i` on a row whose program isn't on PATH — first-run setup's Agents and Editor steps,
-Settings → General's **File editor**, a Claude account's row or a harness's **Enabled** row on the
-Agents tab — shows the command that installs it, and `Enter` runs it in the editor modal, the
-installer's own output on screen (`Ctrl+Q` stops it). When it exits the modal stays, its title
-saying whether the program is on PATH now, until `Enter`; the rows read PATH as they draw. An
+the Terminal step's terminal row on a Mac without Ghostty, Settings → General's **File editor**, a
+Claude account's row or a harness's **Enabled** row on the Agents tab — shows the command that
+installs it, and `Enter` runs it in the editor modal, the installer's own output on screen (`Ctrl+Q`
+stops it), the footer reading `installing …` meanwhile. When it exits the modal stays, its title and
+the footer saying whether the program is here now, until `Enter`; the footer and the page or tab
+under the modal then keep the result. Ghostty counts as here once its app is in `/Applications` or
+`~/Applications`, and installing it from setup makes it the outside terminal again. The rows read
+PATH as they draw. An
 installer that puts its program somewhere new and adds that to your shell profile leaves orion's
 own PATH as it was: start orion again from a new shell. Nothing is installed unasked, and `orion
 doctor` ([Commands](commands.md#checking-the-machine)) names the same commands without running
@@ -261,8 +265,10 @@ them.
 | Muse (`muse`) | `curl -fsSL https://dev.meta.ai/install.sh \| bash` | [dev.meta.ai](https://dev.meta.ai) |
 | Grok Build (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | [docs.x.ai](https://docs.x.ai/build/overview) |
 | OpenCode (`opencode`) | `curl -fsSL https://opencode.ai/install \| bash` | [opencode.ai/docs](https://opencode.ai/docs/) |
+| Ghostty (macOS) | `brew install --cask ghostty` | [ghostty.org/download](https://ghostty.org/download) |
 
-Without Homebrew an editor's row names its install page instead and runs nothing. vim has no
+Without Homebrew an editor's or Ghostty's row names its install page instead and runs nothing;
+in first-run setup `Enter` opens that page in the browser. vim has no
 installer here: macOS ships it, and it is the last fallback.
 
 ### Prewarming

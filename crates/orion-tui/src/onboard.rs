@@ -101,7 +101,7 @@ const TERMINAL_ROWS: &[SettingKind] = &[SettingKind::OutsideTerminal, SettingKin
 /// A Mac without Ghostty.app: ⇧T opens Terminal.app instead, the Terminal
 /// page offers `i` to install it, and says nothing of Ghostty's keys.
 fn ghostty_missing() -> bool {
-    cfg!(target_os = "macos") && crate::event_loop::ghostty_app().is_none()
+    cfg!(target_os = "macos") && !crate::install::installed(crate::install::GHOSTTY)
 }
 
 /// The settings rows a page mirrors, in order — the overlay's own specs,
@@ -258,6 +258,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 view.install = None;
                 crate::install::run(app, &plan);
             }
+            _ if keys::ENTER.matches(&key) => {
+                view.install = None;
+                view.note = Some(if crate::event_loop::open_url(plan.link) {
+                    format!("Opened {}'s install page in your browser", plan.program)
+                } else {
+                    format!("{}'s install page: {}", plan.program, plan.link)
+                });
+            }
             KeyCode::Esc => view.install = None,
             _ => {}
         }
@@ -320,9 +328,15 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
     }
     if let Some(plan) = &view.install {
         let mut hints = Vec::new();
-        if plan.runnable() {
-            hints.push(keys::ENTER.hint_as("run it here").kept());
-        }
+        hints.push(
+            keys::ENTER
+                .hint_as(if plan.runnable() {
+                    "run it here"
+                } else {
+                    "open the page"
+                })
+                .kept(),
+        );
         hints.push(back);
         return hints;
     }
@@ -1263,8 +1277,10 @@ fn install_question(body: &mut Body, plan: &Plan, th: Theme, width: u16) {
     } else {
         body.prose(
             &format!(
-                "Homebrew isn't installed, so Orion can't install {} itself. Its install page:",
-                plan.program
+                "Homebrew isn't installed, so Orion can't install {} itself. {} opens its install \
+                 page:",
+                plan.program,
+                keys::ENTER.label()
             ),
             width,
             text,
@@ -1661,6 +1677,11 @@ fn ask_install(app: &mut App) {
             Some(EditorRow::Editor(editor)) => Some(editor.to_string()),
             _ => None,
         },
+        // The outside terminal's row: Ghostty, the one Orion can install.
+        Page::Terminal if cfg!(target_os = "macos") => setting_rows(page)
+            .get(row)
+            .filter(|spec| spec.kind == SettingKind::OutsideTerminal)
+            .map(|_| crate::install::GHOSTTY.to_string()),
         _ => None,
     };
     let Some(program) = program else {
@@ -1670,7 +1691,7 @@ fn ask_install(app: &mut App) {
     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
         match plan {
             Some(plan) => view.install = Some(plan),
-            None if program_installed(&program) => {
+            None if crate::install::installed(&program) => {
                 view.note = Some(format!("{program} is already installed"));
             }
             None => view.note = Some(format!("Orion knows no installer for `{program}`")),
@@ -2402,8 +2423,8 @@ mod tests {
         });
     }
 
-    /// Without Homebrew, `i` on an editor names its install page and Enter
-    /// runs nothing.
+    /// Without Homebrew, `i` on an editor names its install page, and
+    /// Enter opens it in the browser — it runs nothing.
     #[test]
     fn without_homebrew_the_editor_page_points_at_the_page() {
         with_temp_config(|| {
@@ -2416,9 +2437,121 @@ mod tests {
                 assert!(words(&shot).contains("Homebrew isn't installed"), "{shot}");
                 assert!(shot.contains("github.com/sinelaw/fresh"), "{shot}");
                 assert!(!shot.contains("run it here"), "{shot}");
+                assert!(shot.contains("Enter open the page"), "{shot}");
                 press(&mut app, KeyCode::Enter);
                 assert!(crate::install::take_ran().is_empty());
-                assert!(view(&app).asking(), "Esc is the way back");
+                assert_eq!(
+                    crate::event_loop::take_opened(),
+                    ["https://github.com/sinelaw/fresh#installation"]
+                );
+                assert!(!view(&app).asking());
+                assert_eq!(
+                    view(&app).note.as_deref(),
+                    Some("Opened fresh's install page in your browser")
+                );
+            });
+        });
+    }
+
+    /// The Terminal page on a Mac without Ghostty: it starts on
+    /// Terminal.app, `i` on the terminal row asks to run the cask, Enter
+    /// runs it and says so in the footer, and its end lands in the footer
+    /// and on the page — a failure keeping Terminal.app, a success
+    /// switching to Ghostty and bringing its keybinds row back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn i_on_the_terminal_page_installs_ghostty_and_says_how_it_went() {
+        use crate::flash::FlashKind;
+        with_temp_config(|| {
+            let mut app = with_programs(&["brew"], || {
+                let mut app = App::new();
+                open(&mut app, &Config::load());
+                assert_eq!(
+                    Config::load().outside_terminal(),
+                    OutsideTerminal::Terminal,
+                    "starts on the terminal this Mac has"
+                );
+                to_page(&mut app, Page::Terminal);
+                let shot = draw_text(&mut app);
+                assert!(shot.contains("i install"), "{shot}");
+                assert!(!shot.contains("Ghostty keybinds"), "{shot}");
+
+                press(&mut app, KeyCode::Char('i'));
+                assert!(view(&app).asking(), "i asks before it runs");
+                let shot = draw_text(&mut app);
+                assert!(
+                    words(&shot).contains("Install ghostty? Enter runs this here"),
+                    "{shot}"
+                );
+                assert!(shot.contains("brew install --cask ghostty"), "{shot}");
+                press(&mut app, KeyCode::Enter);
+                assert_eq!(
+                    crate::install::take_ran()[0].args,
+                    ["install", "--cask", "ghostty"]
+                );
+                let flash = app.flash.clone().expect("the footer says it started");
+                assert_eq!(flash.kind, FlashKind::Working);
+                assert_eq!(
+                    flash.text,
+                    "installing ghostty — brew install --cask ghostty…"
+                );
+
+                // brew failed: Ghostty still isn't here.
+                crate::install::closed(&mut app, crate::install::GHOSTTY);
+                let flash = app.flash.clone().unwrap();
+                assert_eq!(flash.kind, FlashKind::Failed);
+                assert!(
+                    flash.text.starts_with("ghostty didn't install"),
+                    "{flash:?}"
+                );
+                assert!(view(&app)
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("✗ ghostty didn't install")));
+                assert_eq!(Config::load().outside_terminal(), OutsideTerminal::Terminal);
+                app
+            });
+
+            with_programs(&["brew", "ghostty"], || {
+                crate::install::closed(&mut app, crate::install::GHOSTTY);
+                let flash = app.flash.clone().unwrap();
+                assert_eq!(flash.kind, FlashKind::Done);
+                assert_eq!(flash.text, "ghostty is installed");
+                assert_eq!(view(&app).note.as_deref(), Some("✓ ghostty is installed"));
+                assert_eq!(Config::load().outside_terminal(), OutsideTerminal::Ghostty);
+                let shot = draw_text(&mut app);
+                assert!(shot.contains("Ghostty keybinds"), "{shot}");
+                assert!(!shot.contains("i install"), "{shot}");
+
+                press(&mut app, KeyCode::Char('i'));
+                assert!(!view(&app).asking());
+                assert_eq!(
+                    view(&app).note.as_deref(),
+                    Some("ghostty is already installed")
+                );
+            });
+        });
+    }
+
+    /// Without Homebrew, `i` on the Terminal page points at Ghostty's
+    /// download page, and Enter opens it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn without_homebrew_the_terminal_page_opens_ghosttys_page() {
+        with_temp_config(|| {
+            with_programs(&[], || {
+                let mut app = App::new();
+                open(&mut app, &Config::load());
+                to_page(&mut app, Page::Terminal);
+                press(&mut app, KeyCode::Char('i'));
+                let shot = draw_text(&mut app);
+                assert!(shot.contains("ghostty.org/download"), "{shot}");
+                press(&mut app, KeyCode::Enter);
+                assert!(crate::install::take_ran().is_empty());
+                assert_eq!(
+                    crate::event_loop::take_opened(),
+                    ["https://ghostty.org/download"]
+                );
             });
         });
     }

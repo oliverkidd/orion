@@ -1,9 +1,10 @@
-//! INSTALLS from inside orion: an editor the BUILT-IN EDITOR runs, or an
-//! agent's CLI, put on this machine by its own installer — Homebrew for an
-//! editor (`brew install micro`), the vendor's documented command for an
-//! agent (`curl -fsSL https://claude.ai/install.sh | bash`).
+//! INSTALLS from inside orion: an editor the BUILT-IN EDITOR runs, an
+//! agent's CLI, or Ghostty, put on this machine by its own installer —
+//! Homebrew for an editor (`brew install micro`) or Ghostty (`brew install
+//! --cask ghostty`), the vendor's documented command for an agent (`curl
+//! -fsSL https://claude.ai/install.sh | bash`).
 //!
-//! The onboarding wizard's Agents and Editor pages and the SETTINGS
+//! The onboarding wizard's Agents, Editor and Terminal pages and the SETTINGS
 //! OVERLAY's **File editor**, CLAUDE ACCOUNTS and harness rows share it:
 //! `i` on a program that isn't on PATH shows its [`Plan`] — the line it
 //! would run — and Enter runs that line in the editor modal's PTY, the
@@ -149,13 +150,25 @@ pub fn editor_plan(editor: &str, brew: Option<&Path>) -> Option<Plan> {
 /// Ghostty's download page, which documents the Homebrew cask too.
 const GHOSTTY_LINK: &str = "https://ghostty.org/download";
 
+/// The program [`ghostty_plan`] installs.
+pub const GHOSTTY: &str = "ghostty";
+
+/// Whether `program` is here: on PATH — or Ghostty's app in an
+/// Applications folder, which is what ⇧T opens, whatever PATH holds (a
+/// cask install leaves `ghostty` off a PATH without Homebrew's bin). A
+/// test goes by its PATH alone.
+pub fn installed(program: &str) -> bool {
+    crate::config::program_installed(program)
+        || (program == GHOSTTY && !cfg!(test) && crate::event_loop::ghostty_app().is_some())
+}
+
 /// How Ghostty, the outside terminal ⇧T opens, gets onto a Mac: `brew
 /// install --cask ghostty` with Homebrew at `brew`, else its download page.
 /// The cask puts `ghostty` on PATH as well as the app in /Applications.
 pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
     match brew {
         Some(brew) => Plan {
-            program: "ghostty".into(),
+            program: GHOSTTY.into(),
             line: "brew install --cask ghostty".into(),
             command: Some(Command {
                 program: brew.display().to_string(),
@@ -164,7 +177,7 @@ pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
             link: GHOSTTY_LINK,
         },
         None => Plan {
-            program: "ghostty".into(),
+            program: GHOSTTY.into(),
             line: String::new(),
             command: None,
             link: GHOSTTY_LINK,
@@ -374,9 +387,12 @@ pub fn run(app: &mut App, plan: &Plan) -> bool {
     let Some(command) = plan.command.clone() else {
         return false;
     };
+    app.flash = Some(crate::flash::Flash::working(format!(
+        "installing {} — {}…",
+        plan.program, plan.line
+    )));
     #[cfg(test)]
     {
-        let _ = &app;
         RAN.with(|ran| ran.borrow_mut().push(command));
         true
     }
@@ -430,6 +446,9 @@ pub fn take_ran() -> Vec<Command> {
 pub fn outcome(program: &str, installed: bool) -> String {
     if installed {
         format!("✓ {program} is installed")
+    } else if program == GHOSTTY {
+        // An app, not a CLI: missing means the install itself failed.
+        format!("✗ {program} didn't install — the installer's output said why; i tries again")
     } else {
         format!(
             "✗ {program} still isn't on orion's PATH — if its installer added it to your shell \
@@ -447,42 +466,51 @@ pub fn exited(app: &mut App) {
     let Some(program) = vim.install.clone() else {
         return;
     };
-    let installed = crate::config::program_installed(&program);
+    let installed = installed(&program);
     vim.finished = Some(installed);
     vim.title = format!(
         "{} — {}",
         vim.title,
-        if installed {
-            "installed"
-        } else {
-            "not on PATH"
+        match (installed, program.as_str()) {
+            (true, _) => "installed",
+            (false, GHOSTTY) => "failed",
+            (false, _) => "not on PATH",
         }
     );
+    app.flash = Some(outcome_flash(&program, installed, " — Enter closes"));
     app.dirty = true;
 }
 
-/// The install modal closed: say how it went where the user is looking —
-/// the onboarding page, the settings overlay, else (only when it is still
-/// not on PATH: the modal's title already said it went in) the footer —
-/// and let the editor fallback be noted afresh.
+/// [`outcome`] as a footer line, `then` after it. The footer leads with
+/// its own mark, so not the outcome's.
+fn outcome_flash(program: &str, installed: bool, then: &str) -> crate::flash::Flash {
+    let note = outcome(program, installed);
+    let words = format!("{}{then}", note.trim_start_matches(['✓', '✗', ' ']));
+    if installed {
+        crate::flash::Flash::done(words)
+    } else {
+        crate::flash::Flash::failed(words)
+    }
+}
+
+/// The install modal closed: say how it went in the footer, in place of
+/// the `installing…` [`run`] put there, and where the user is looking —
+/// the onboarding page, the settings overlay — and let the editor
+/// fallback be noted afresh.
 pub fn closed(app: &mut App, program: &str) {
-    let installed = crate::config::program_installed(program);
+    let installed = installed(program);
     let note = outcome(program, installed);
     app.editor_fallback_noted = None;
+    app.flash = Some(outcome_flash(program, installed, ""));
     match &mut app.overlay {
         Some(crate::app::Overlay::Onboard(view)) => {
             view.note = Some(note);
             // Ghostty in: it is the outside terminal again, as by default.
-            if program == "ghostty" && installed {
+            if program == GHOSTTY && installed {
                 crate::onboard::use_ghostty();
             }
         }
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
-        // The footer leads with its own `✕`, so not the outcome's `✗`.
-        _ if !installed => {
-            let words = note.trim_start_matches("✗ ").to_string();
-            app.flash = Some(crate::flash::Flash::failed(words));
-        }
         _ => {}
     }
     app.dirty = true;
@@ -498,8 +526,21 @@ mod tests {
         path
     }
 
-    /// Every editor the **File editor** row cycles through but vim has a
-    /// formula, under each spelling the row takes; the formula is what
+    /// An install's end, as the page and the footer say it: Ghostty is an
+    /// app, so missing after its installer means the install failed.
+    #[test]
+    fn an_install_says_how_it_went() {
+        assert_eq!(outcome("micro", true), "✓ micro is installed");
+        assert!(outcome("micro", false).contains("isn't on orion's PATH"));
+        assert!(outcome(GHOSTTY, false).starts_with("✗ ghostty didn't install"));
+        let done = outcome_flash("micro", true, " — Enter closes");
+        assert_eq!(done.kind, crate::flash::FlashKind::Done);
+        assert_eq!(done.text, "micro is installed — Enter closes");
+        let failed = outcome_flash(GHOSTTY, false, "");
+        assert_eq!(failed.kind, crate::flash::FlashKind::Failed);
+        assert!(failed.text.starts_with("ghostty didn't install"));
+    }
+
     /// Ghostty: the cask with Homebrew, its download page without.
     #[test]
     fn ghostty_installs_by_its_cask() {
@@ -515,6 +556,8 @@ mod tests {
         assert_eq!(page.link, "https://ghostty.org/download");
     }
 
+    /// Every editor the **File editor** row cycles through but vim has a
+    /// formula, under each spelling the row takes; the formula is what
     /// `brew install` runs, with the brew this machine has.
     #[test]
     fn each_editor_installs_by_its_formula() {
