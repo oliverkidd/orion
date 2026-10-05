@@ -280,21 +280,6 @@ fn head_tabs(app: &mut App, r: Rect) -> Vec<Span<'static>> {
     });
     app.launcher_tabs_more = fit.more.iter().map(|&i| tabs[i].id.clone()).collect();
 
-    // The `+` leads the row, on the side a project it opens lands on: a
-    // button after the last tab would read as appending one there.
-    let mut row: Vec<PaneTab> = Vec::new();
-    if add_w <= room {
-        let mut style = Style::default().fg(th.muted);
-        if hover.as_ref() == Some(&HitTarget::LauncherTabAdd) {
-            style = Style::default()
-                .fg(th.accent)
-                .add_modifier(Modifier::UNDERLINED);
-        }
-        row.push(PaneTab {
-            spans: vec![Span::raw(" "), Span::styled(add, style), Span::raw(" ")],
-            hit: Some(HitTarget::LauncherTabAdd),
-        });
-    }
     let mut tabs_row: Vec<PaneTab> = Vec::new();
     for (n, &i) in fit.shown.iter().enumerate() {
         if n > 0 {
@@ -325,10 +310,24 @@ fn head_tabs(app: &mut App, r: Rect) -> Vec<Span<'static>> {
             th,
         ));
     }
-    if !row.is_empty() && !tabs_row.is_empty() {
-        row.push(PaneTab::plain(vec![Span::raw(" ")]));
+    // The `+` follows the last tab (and the MORE CHIP), where a project
+    // it opens lands: a new tab goes on the right end.
+    let mut row = tabs_row;
+    if add_w <= room {
+        if !row.is_empty() {
+            row.push(PaneTab::plain(vec![Span::raw(" ")]));
+        }
+        let mut style = Style::default().fg(th.muted);
+        if hover.as_ref() == Some(&HitTarget::LauncherTabAdd) {
+            style = Style::default()
+                .fg(th.accent)
+                .add_modifier(Modifier::UNDERLINED);
+        }
+        row.push(PaneTab {
+            spans: vec![Span::raw(" "), Span::styled(add, style), Span::raw(" ")],
+            hit: Some(HitTarget::LauncherTabAdd),
+        });
     }
-    row.extend(tabs_row);
 
     let mut spans = Vec::new();
     let mut x = r.x;
@@ -5037,16 +5036,16 @@ mod tests {
         app.hits.clear();
         let spans = head_tabs(&mut app, r);
         let text = row_text(&spans);
-        assert_eq!(text, " +   web ×   api × ");
+        assert_eq!(text, " web ×   api ×   + ");
         let (web, api) = (ProjectId("p1".into()), ProjectId("p0".into()));
         assert_eq!(
             head_hits(&app),
             vec![
-                HitTarget::LauncherTabAdd,
                 HitTarget::LauncherTab(web.clone()),
                 HitTarget::LauncherTabClose(web),
                 HitTarget::LauncherTab(api.clone()),
                 HitTarget::LauncherTabClose(api.clone()),
+                HitTarget::LauncherTabAdd,
             ]
         );
         // Each tab's rect is its own name and never the `×` beside it.
@@ -5099,7 +5098,7 @@ mod tests {
         select(&mut app, "api");
         app.hits.clear();
         let spans = head_tabs(&mut app, r);
-        assert_eq!(row_text(&spans), " +   web ●1 ×   api ●1 ◐1 × ");
+        assert_eq!(row_text(&spans), " web ●1 ×   api ●1 ◐1 ×   + ");
         let dots: Vec<(String, Option<Color>)> = spans
             .iter()
             .filter(|s| s.content.contains(['●', '◐', '✕']))
@@ -5123,7 +5122,7 @@ mod tests {
         let mut app = a_tabbed_tree();
         app.launcher_tabs = vec![ProjectId("p0".into())];
         let spans = head_tabs(&mut app, r);
-        assert_eq!(row_text(&spans), " +   api × ");
+        assert_eq!(row_text(&spans), " api ×   + ");
         assert!(head_hits(&app)
             .iter()
             .any(|h| matches!(h, HitTarget::LauncherTabClose(_))));
@@ -5131,7 +5130,7 @@ mod tests {
         let mut app = a_tabbed_tree();
         app.hits.clear();
         let spans = head_tabs(&mut app, r);
-        assert_eq!(row_text(&spans), " +   web ×   api × ");
+        assert_eq!(row_text(&spans), " web ×   api ×   + ");
     }
 
     /// The tabs sweep in place: whatever the work under them is doing, the
@@ -5368,7 +5367,7 @@ mod tests {
         }
         app.hits.clear();
         let text = row_text(&head_tabs(&mut app, Rect::new(0, 0, 30, 1)));
-        assert_eq!(text, " +   website-frontend  api × ");
+        assert_eq!(text, " website-frontend  api ×   + ");
         assert!(!head_hits(&app).contains(&HitTarget::LauncherTabClose(web)));
         assert!(app.launcher_tabs_more.is_empty());
     }

@@ -3502,16 +3502,16 @@ fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientReques
 }
 
 /// A key, a paste or a turn is going down `session`'s PTY: that is work in
-/// its project, whose PROJECT TAB comes to the far left
-/// ([`App::bring_tab_forward`]). Runs on every keystroke typed at an agent,
-/// so the project already at the front costs a lookup and no allocation.
+/// its project, which gets a PROJECT TAB if it has none
+/// ([`App::ensure_project_tab`]). Runs on every keystroke typed at an
+/// agent, so a project already open costs a lookup and no allocation.
 fn typed_into(app: &mut App, session: &SessionRef) {
     if let Some(project) = app
         .project_of_session(session)
-        .filter(|p| app.launcher_tabs.first() != Some(*p))
+        .filter(|p| !app.launcher_tabs.contains(p))
         .cloned()
     {
-        app.bring_tab_forward(&project);
+        app.ensure_project_tab(&project);
     }
 }
 
@@ -3519,7 +3519,7 @@ fn typed_into(app: &mut App, session: &SessionRef) {
 /// project: [`typed_into`]'s work, by the checkout.
 fn worked_in(app: &mut App, worktree: &WorktreeId) {
     if let Some(project) = project_of_worktree(app, worktree) {
-        app.bring_tab_forward(&project);
+        app.ensure_project_tab(&project);
     }
 }
 
@@ -8681,7 +8681,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             // panel never waits on the DAEMON's fetch and `git worktree
             // add`. An Error takes it down and hands this box back.
             let focus = app.focus;
-            app.bring_tab_forward(&project);
+            app.ensure_project_tab(&project);
             let placeholder =
                 placeholder::stage_worktree(app, project.clone(), branch.clone(), out);
             send_with(
@@ -10354,8 +10354,8 @@ fn project_of_worktree(app: &App, worktree: &WorktreeId) -> Option<ProjectId> {
 }
 
 fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequest>) {
-    // Every launch is work in its project, whose tab goes to the far left
-    // — a BACKGROUND LAUNCH's too, though nothing else it does moves. Not
+    // Every launch is work in its project, which gets a tab if it has
+    // none — a BACKGROUND LAUNCH's too, though nothing else it does. Not
     // a create that already carries its stand-in row: that is the second
     // half of a launch counted when its Enter was pressed, and the user
     // may have gone on to work somewhere else while the checkout was cut.
@@ -11898,8 +11898,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // the `+` after them drops the PROJECT DROPDOWN — every
                 // project, narrowed by whatever you type, and a row that
                 // opens a folder — whose pick opens a tab; the MORE CHIP
-                // drops the tabs the row had no room for.
-                Some(HitTarget::LauncherTab(id)) => launcher::click_tab(app, &id, out),
+                // drops the tabs the row had no room for. A tab held
+                // down and dragged along the header moves it there
+                // (`launcher::drag_tab`).
+                Some(HitTarget::LauncherTab(id)) => {
+                    app.launcher_tab_drag = Some((id.clone(), None));
+                    launcher::click_tab(app, &id, out);
+                }
                 Some(HitTarget::LauncherTabClose(id)) => launcher::close_tab(app, &id, out),
                 Some(HitTarget::LauncherTabAdd) => launcher::open_project_menu(app),
                 Some(HitTarget::LauncherTabMore) => launcher::open_more_tabs_menu(app),
@@ -12024,7 +12029,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             app.dirty = true;
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(grab) = app.launcher_pane_drag {
+            if app.launcher_tab_drag.is_some() {
+                launcher::drag_tab(app, mouse.column, mouse.row);
+            } else if let Some(grab) = app.launcher_pane_drag {
                 let at = app.launcher_pane_side().along(mouse.column, mouse.row);
                 app.set_launcher_pane(at + grab);
                 // A press that became a drag is not the first half of a
@@ -12053,6 +12060,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            // A PROJECT TAB being dragged rests where it was let go.
+            app.launcher_tab_drag = None;
             // The pane edge lets go here.
             let pane_ended = app.launcher_pane_drag.take().is_some();
             if pane_ended {
@@ -12627,7 +12636,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // the optimistic removal back, then ask about forcing it.
             app.left_behind.remove(&req_id);
             if let Some(PendingIntent::DeleteWorktree(rollback)) = app.pending.remove(&req_id) {
-                restore_worktree_rows(app, rollback);
+                restore_worktree_rows(app, rollback, out);
             }
             ask_to_force_delete(app, id, files);
             app.dirty = true;
@@ -12641,7 +12650,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
-                    restore_worktree_rows(app, rollback)
+                    restore_worktree_rows(app, rollback, out)
                 }
                 // A rename, an archive or a delete shown on the keypress
                 // and then refused: the row goes back to what it was.
@@ -12979,7 +12988,12 @@ fn remove_worktree_rows(app: &mut App, id: &WorktreeId) -> Option<WorktreeRollba
 
 /// Rollback of `remove_worktree_rows`: reinsert the rows at (or near) their
 /// old positions. Skips anything the daemon re-upserted in the meantime.
-fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback) {
+fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback, out: &mut Vec<ClientRequest>) {
+    // The rows coming back re-sort the projects and checkouts, and the
+    // cursors are row indices: held by id across the insert, or the grid
+    // under a confirm — and under the Esc that answers it — is another
+    // project's.
+    let before = selection_snapshot(app);
     let WorktreeRollback {
         index,
         worktree,
@@ -12995,7 +13009,7 @@ fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback) {
             app.tree.agents.insert(at, a);
         }
     }
-    clamp_selections(app);
+    reconcile_selection_inner(app, before, out);
     app.dirty = true;
 }
 
@@ -36962,6 +36976,89 @@ diff --git a/src/c.rs b/src/c.rs
                 )),
                 "{out:?}"
             );
+        });
+    }
+
+    /// The rows a refused worktree delete puts back re-sort the projects
+    /// under the cursor, which is a row index: it is held on its project
+    /// by id, so the force question — and the Esc that answers it — sit
+    /// over the project the delete came from, not the one that took its
+    /// row while the checkout was gone.
+    #[test]
+    fn a_refused_worktree_delete_keeps_the_cursor_on_its_project() {
+        use orion_core::{AgentStatus, Entity, Project, ProjectId, Worktree};
+        with_default_config(|| {
+            let mut app = App::new();
+            seed_emptiable_tree(&mut app);
+            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Project(Project {
+                        id: ProjectId("p2".into()),
+                        name: "web".into(),
+                        repo_path: "/tmp/web".into(),
+                        sort_order: 1,
+                    }),
+                },
+            );
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Worktree(Worktree {
+                        id: WorktreeId("w9".into()),
+                        project_id: ProjectId("p2".into()),
+                        path: "/tmp/web".into(),
+                        branch: "main".into(),
+                        is_main: true,
+                        sort_order: 0,
+                    }),
+                },
+            );
+            upsert_agent(&mut app, "b1", "w9", "web-agent", false);
+            // An archived session still dates its checkout, and goes and
+            // comes back with it.
+            upsert_agent(&mut app, "a3", "w2", "agent-3", true);
+            // demo's newest work is in the checkout being deleted; web's
+            // falls between that and demo's root.
+            for (id, at) in [("a1", 10), ("a2", 20), ("a3", 300), ("b1", 200)] {
+                let a = app.tree.agents.iter_mut().find(|a| a.id.0 == id).unwrap();
+                a.status = AgentStatus::Finished;
+                a.status_changed_at = at;
+            }
+            let demo = |app: &App| app.selected_project().map(|p| p.name.clone());
+            app.sel_project = app
+                .project_rows()
+                .iter()
+                .position(|&i| app.tree.projects[i].id.0 == "p1")
+                .unwrap();
+
+            menu_delete(&mut app, "a2");
+            let mut out = Vec::new();
+            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+            let req_id = out
+                .iter()
+                .find_map(|r| match r {
+                    ClientRequest::DeleteWorktree { req_id, id, .. } if id.0 == "w2" => {
+                        Some(*req_id)
+                    }
+                    _ => None,
+                })
+                .expect("a worktree delete");
+            assert_eq!(demo(&app).as_deref(), Some("demo"), "web leads, demo kept");
+
+            handle_server_event(
+                &mut app,
+                ServerEvent::WorktreeHasChanges {
+                    req_id,
+                    id: WorktreeId("w2".into()),
+                    files: 3,
+                },
+                &mut out,
+            );
+            assert_eq!(demo(&app).as_deref(), Some("demo"), "demo leads again");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(demo(&app).as_deref(), Some("demo"), "Esc stays in demo");
         });
     }
 

@@ -159,7 +159,7 @@ pub enum HitTarget {
     /// tab's, so a click on the cross can never read as a click on the
     /// tab it closes.
     LauncherTabClose(ProjectId),
-    /// The `+` before the first tab: a click drops the PROJECT DROPDOWN
+    /// The `+` after the last tab: a click drops the PROJECT DROPDOWN
     /// under it — every project, the one in front of you ticked, narrowed
     /// by type-ahead, with a row for opening a folder that is not one yet
     /// — and the pick opens a tab.
@@ -368,7 +368,7 @@ pub enum MenuAction {
     /// Retitle a project's row. Display only — the folder keeps its name and
     /// stays visible under the new one.
     RenameProject(ProjectId),
-    /// PROJECT DROPDOWN row (the `+` in front of the LAUNCHER VIEW's
+    /// PROJECT DROPDOWN row (the `+` after the LAUNCHER VIEW's
     /// PROJECT TABS): open this project — its sessions, and a tab for it
     /// first, next to the `+`, if it had none.
     OpenProject(ProjectId),
@@ -3884,12 +3884,18 @@ pub struct App {
     /// mouse-down, so the edge tracks the pointer instead of jumping by
     /// one depending on which of the two grab rows was caught.
     pub launcher_pane_drag: Option<i32>,
+    /// A PROJECT TAB being dragged along the header to a new place
+    /// (`event_loop::launcher::drag_tab`): the tab pressed, and the tab
+    /// it last traded places with — held so a pointer still over that
+    /// one, before the next draw moves the hit rects, does not trade them
+    /// straight back.
+    pub launcher_tab_drag: Option<(ProjectId, Option<ProjectId>)>,
     /// That edge is under the mouse, or being dragged: its grip lights up.
     /// Only ever set in terminals that report plain mouse motion;
     /// elsewhere the grip rests until a drag takes hold.
     pub hover_launcher_pane: bool,
     /// The header button under the pointer, from the last mouse report:
-    /// a PROJECT TAB, its `×`, the `+` in front of them, a full-screen
+    /// a PROJECT TAB, its `×`, the `+` after them, a full-screen
     /// session's `‹ sessions`, or the footer's memory readout (the one
     /// button off the header). The header marks that one for as long as
     /// it is there, so a word reads as the button it is before anyone
@@ -3898,11 +3904,12 @@ pub struct App {
     /// header rests plain.
     pub hover_crumb: Option<HitTarget>,
     /// The LAUNCHER VIEW's PROJECT TABS: every project opened on the
-    /// SESSIONS level since its tab was last closed, the one last worked
-    /// in first — the far left of the header. Kept up by
-    /// [`App::settle_project_tabs`] and [`App::bring_tab_forward`], closed
-    /// one at a time by `event_loop::launcher::close_tab`, and remembered
-    /// across restarts.
+    /// SESSIONS level since its tab was last closed, in the order the
+    /// user keeps them — a new tab goes on at the right, and only a drag
+    /// along the header (`event_loop::launcher::drag_tab`) ever moves
+    /// one. Kept up by [`App::settle_project_tabs`] and
+    /// [`App::ensure_project_tab`], closed one at a time by
+    /// `event_loop::launcher::close_tab`, and remembered across restarts.
     pub launcher_tabs: Vec<ProjectId>,
     /// Every PROJECT TAB has been closed: orion is back on the SPLASH it
     /// opens on before there is any project, with the projects themselves
@@ -4475,6 +4482,7 @@ impl App {
             launcher_scroll_in: None,
             launcher_reveal: false,
             launcher_pane_drag: None,
+            launcher_tab_drag: None,
             hover_launcher_pane: false,
             hover_crumb: None,
             launcher_tabs: Vec::new(),
@@ -4685,12 +4693,13 @@ impl App {
     }
 
     /// Keep the PROJECT TABS true to the tree: a tab whose project is gone
-    /// goes, and the project the grid is on gets one at the far left if it
-    /// has none — however it got there, whether a tab, the `+` dropdown, a
-    /// `/` jump, a folder just opened or the restore at boot. A project
-    /// already open keeps its place: switching to a tab only looks, and
-    /// only working in it moves it ([`App::bring_tab_forward`]). Run by
-    /// the view's draw, as
+    /// goes, and the project the grid is on gets one at the right end if
+    /// it has none — however it got there, whether a tab, the `+`
+    /// dropdown, a `/` jump, a folder just opened or the restore at boot.
+    /// A project already open keeps its place: neither looking at a tab
+    /// nor working in it moves it, so `⌘N` and the tab under the pointer
+    /// mean the same project from one moment to the next. Run by the
+    /// view's draw, as
     /// [`App::settle_launcher_focus`] is, and by the tab keys before they
     /// read the list.
     pub fn settle_project_tabs(&mut self) {
@@ -4715,29 +4724,49 @@ impl App {
             return;
         };
         if !self.launcher_tabs.contains(&id) {
-            self.launcher_tabs.insert(0, id);
+            self.launcher_tabs.push(id);
             self.dirty = true;
         }
     }
 
     /// Something was just done in `project` — a session launched, a
     /// checkout cut, a turn sent, a key typed into one of its sessions —
-    /// so its PROJECT TAB goes to the far left, and the header reads from
-    /// the project last worked in to the one worked in longest ago. One
-    /// with no tab gets one there: a launch fired into a project from
-    /// another's grid is work in it too. The lit tab stays the lit tab;
-    /// only the order moves. Cheap enough for every keystroke typed at an
-    /// agent: a project already at the front is one comparison.
-    pub fn bring_tab_forward(&mut self, project: &ProjectId) {
-        if self.launcher_tabs.first() == Some(project)
+    /// so it has a PROJECT TAB: one with none gets one at the right end
+    /// (a launch fired into a project from another's grid is work in it
+    /// too). A tab already open stays exactly where it is; the header's
+    /// order is the user's ([`App::launcher_tabs`]). Cheap enough for
+    /// every keystroke typed at an agent: an open tab is one scan of a
+    /// short list.
+    pub fn ensure_project_tab(&mut self, project: &ProjectId) {
+        if self.launcher_tabs.contains(project)
             || !self.tree.projects.iter().any(|p| &p.id == project)
         {
             return;
         }
         self.reopen_projects();
-        self.launcher_tabs.retain(|id| id != project);
-        self.launcher_tabs.insert(0, project.clone());
+        self.launcher_tabs.push(project.clone());
         self.dirty = true;
+    }
+
+    /// Move the PROJECT TAB `moving` into the place `onto` holds, the
+    /// tabs between sliding over by one — a drag along the header
+    /// (`event_loop::launcher::drag_tab`). False, with nothing changed,
+    /// when either has no tab or they are the same one.
+    pub fn move_project_tab(&mut self, moving: &ProjectId, onto: &ProjectId) -> bool {
+        let tabs = &mut self.launcher_tabs;
+        let (Some(from), Some(to)) = (
+            tabs.iter().position(|id| id == moving),
+            tabs.iter().position(|id| id == onto),
+        ) else {
+            return false;
+        };
+        if from == to {
+            return false;
+        }
+        let id = tabs.remove(from);
+        tabs.insert(to, id);
+        self.dirty = true;
+        true
     }
 
     /// The project `session` runs in, None for a row this client has not
