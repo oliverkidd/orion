@@ -1392,6 +1392,10 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             "archive or bring back / show",
                         ),
                         (Act(&[Delete]), "delete (asks first)"),
+                        (
+                            Act(&[DeleteWorktree]),
+                            "delete the worktree + all its sessions",
+                        ),
                     ],
                 ),
                 (

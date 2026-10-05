@@ -371,6 +371,18 @@ pub(super) fn empty_band(app: &App) -> Option<WorktreeId> {
     band.cards.is_empty().then(|| band.worktree.clone())
 }
 
+/// The checkout of the band under the grid's cursor — on a card, a line
+/// of its archived drawer or the band itself — what **Delete worktree**
+/// (`⌘⌫`) takes down whole. None with the grid down.
+pub(super) fn band_worktree(app: &App) -> Option<WorktreeId> {
+    if !app.launcher_active() {
+        return None;
+    }
+    let bands = view::bands(app);
+    let band = &bands[view::band_cursor(app, &bands)?];
+    Some(band.worktree.clone())
+}
+
 /// The cursor onto `worktree`'s BAND: the checkout under the panels'
 /// cursor through the jump the `/` PALETTE takes for a worktree, its
 /// remembered card — the session it was last left on, else its first
@@ -4920,6 +4932,94 @@ mod tests {
                 "feat's band is gone with its last card"
             );
             draw_tall(&mut app);
+        });
+    }
+
+    /// **Delete worktree** (`⌘⌫`, `⇧D` its twin) on a CARD asks to delete
+    /// the card's whole checkout — the worktree's own confirm, naming the
+    /// sessions that go with it — and sends nothing before the answer.
+    #[test]
+    fn cmd_backspace_on_a_card_asks_to_delete_its_whole_worktree() {
+        with_default_config(|| {
+            for (code, mods) in [
+                (KeyCode::Backspace, KeyModifiers::SUPER),
+                (KeyCode::Char('D'), KeyModifiers::SHIFT),
+            ] {
+                let mut app = two_sessions();
+                draw_tall(&mut app);
+                to_feat(&mut app);
+                let sent = key(&mut app, code, mods);
+                match &app.overlay {
+                    Some(Overlay::Confirm(c)) => {
+                        assert_eq!(
+                            c.action,
+                            PendingAction::DeleteWorktree(WorktreeId("w2".into())),
+                            "{code:?}"
+                        );
+                        assert!(
+                            c.message.contains("1 session(s) will be killed")
+                                && c.message.contains("• polish-nav"),
+                            "{}",
+                            c.message
+                        );
+                    }
+                    other => panic!("{code:?}: expected the worktree's confirm, got {other:?}"),
+                }
+                assert!(sent.is_empty(), "asked first: {sent:?}");
+            }
+        });
+    }
+
+    /// Yes takes the checkout in one request — the daemon kills its
+    /// sessions on the way — and its band is gone at once.
+    #[test]
+    fn confirming_delete_worktree_sends_one_request_for_the_lot() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw_tall(&mut app);
+            to_feat(&mut app);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::SUPER);
+            let sent = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            let worktrees: Vec<&WorktreeId> = sent
+                .iter()
+                .filter_map(|r| match r {
+                    ClientRequest::DeleteWorktree { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(worktrees, [&WorktreeId("w2".into())], "{sent:?}");
+            assert!(
+                !sent
+                    .iter()
+                    .any(|r| matches!(r, ClientRequest::DeleteAgent { .. })),
+                "no card-by-card deletes: {sent:?}"
+            );
+            assert!(
+                !crate::launcher::bands(&app)
+                    .iter()
+                    .any(|b| b.worktree == WorktreeId("w2".into())),
+                "feat's band is gone"
+            );
+        });
+    }
+
+    /// The ROOT WORKTREE is never deleted: `⌘⌫` on its band only says so.
+    #[test]
+    fn cmd_backspace_on_the_main_checkout_only_says_no() {
+        with_default_config(|| {
+            let mut app = two_sessions();
+            draw_tall(&mut app);
+            app.flash = None;
+            let sent = key(&mut app, KeyCode::Backspace, KeyModifiers::SUPER);
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(sent.is_empty(), "{sent:?}");
+            assert!(
+                app.flash
+                    .as_ref()
+                    .is_some_and(|f| format!("{f:?}").contains("main checkout")),
+                "{:?}",
+                app.flash
+            );
         });
     }
 

@@ -414,7 +414,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   the footer's to say once the cursor is on it (`⌘N new agent · t terminal · ⌫ delete worktree`,
   and `→ focus PR` beside the pull request the pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
   that checkout, and `Backspace` (or **Delete worktree** in its right-click menu) deletes it behind the
-  worktree's own confirm; the root's band offers no delete, since the root is never deleted. With the
+  worktree's own confirm — and `⌘⌫` (`⇧D`) does the same from any card on a band, taking every
+  session in it down with the checkout behind one confirm that names them; the root's band offers
+  no delete, since the root is never deleted. With the
   setting on, deleting a worktree's last card never asks about the worktree: the band stays,
   empty, until its own `Backspace` — unless **Delete emptied worktree** is on, which still deletes the
   worktree with its last card. Each band is a
