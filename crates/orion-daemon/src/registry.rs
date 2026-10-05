@@ -912,7 +912,9 @@ impl Daemon {
         // back in the TUI. Still under the lock: a create of the same path
         // waits until the hook has released what it is about to claim,
         // and the hook's "still on disk" check sees the delete's result,
-        // not a recreate's.
+        // not a recreate's. WORKTREE CONTAINERS go first, on the same
+        // terms, so a hook that releases ports finds them already free.
+        self.release_containers(&worktree.path).await;
         self.run_worktree_hook(WorktreeHook::Delete, &project.repo_path, &worktree)
             .await;
         drop(ops);
@@ -949,6 +951,16 @@ impl Daemon {
                 "couldn't link .env files into {}: {e:#}",
                 worktree.display()
             )),
+        }
+    }
+
+    /// Stop or tear down the compose projects started in a just-deleted
+    /// checkout, as the `worktree_containers` SETTING says; whatever goes
+    /// wrong is a client warning.
+    async fn release_containers(&self, worktree: &Path) {
+        let policy = crate::config::Config::load().worktree_containers();
+        for warning in crate::containers::release(worktree, policy).await {
+            self.warn_clients(warning);
         }
     }
 

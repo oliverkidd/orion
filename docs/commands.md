@@ -92,7 +92,9 @@ orion doctor             # one line for each thing orion leans on, with the fix 
                           # and what really opens when it isn't installed, the Open in app editor,
                           # Ghostty and orion's keybind block in its config, the CLI of every
                           # agent turned on, and the LINEAR_API_KEY of the project you are
-                          # standing in — where it was found, never the key. It never installs
+                          # standing in — where it was found, never the key — and the docker
+                          # compose projects whose checkout is gone, each with the
+                          # `docker compose -p <project> down --volumes` that removes it. It never installs
                           # anything; the fix is the command to run (the same ones `i` runs from
                           # Settings and first-run setup). Exits non-zero only when something
                           # orion can't do without is missing: git, or any editor to open files in

@@ -2,8 +2,9 @@
 //! each — git, gh and its sign-in, the **File editor** and what really
 //! opens, the **Open in app** editor, Ghostty and orion's keybind block in
 //! its config, the CLI of every agent turned on, and the project's
-//! `LINEAR_API_KEY` (where it was found, never the key) — with the command
-//! that fixes whatever is missing. It never installs anything itself:
+//! `LINEAR_API_KEY` (where it was found, never the key), and the docker
+//! compose projects whose checkout is gone — with the command that fixes
+//! whatever is missing. It never installs anything itself:
 //! `install.sh` and the onboarding wizard do, with the same commands
 //! (`install`).
 //!
@@ -139,6 +140,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// its first line of output. None when it could not be started or ran
 /// past [`PROBE_TIMEOUT`].
 fn probe(m: &Machine, program: &Path, args: &[&str], cwd: &Path) -> Option<(bool, String)> {
+    let (ok, out) = probe_output(m, program, args, cwd)?;
+    let first = out.lines().map(str::trim).find(|l| !l.is_empty());
+    Some((ok, first.unwrap_or_default().to_string()))
+}
+
+/// [`probe`] with all of its output rather than the first line.
+fn probe_output(m: &Machine, program: &Path, args: &[&str], cwd: &Path) -> Option<(bool, String)> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut child = Command::new(program)
@@ -168,8 +176,7 @@ fn probe(m: &Machine, program: &Path, args: &[&str], cwd: &Path) -> Option<(bool
     if let Some(mut pipe) = child.stdout.take() {
         let _ = pipe.read_to_string(&mut out);
     }
-    let first = out.lines().map(str::trim).find(|l| !l.is_empty());
-    Some((status.success(), first.unwrap_or_default().to_string()))
+    Some((status.success(), out))
 }
 
 /// Every check, in the report's order.
@@ -178,6 +185,7 @@ pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
     out.extend(ghostty(cfg, m));
     out.extend(agents(cfg, m));
     out.push(linear(m));
+    out.push(containers(cfg, m));
     out
 }
 
@@ -460,6 +468,61 @@ fn linear(m: &Machine) -> Check {
     }
 }
 
+/// docker compose projects whose every container was started in a
+/// directory that is gone — a worktree deleted while **Worktree
+/// containers** was off, or outside orion — with the commands that tear
+/// them down. Never required: only checkouts that run compose have any.
+fn containers(cfg: &Config, m: &Machine) -> Check {
+    use orion_core::compose;
+    const NAME: &str = "Containers";
+    let policy = compose::WorktreeContainers::parse(&cfg.worktree_containers);
+    let setting = format!("Worktree containers: {}", policy.as_str());
+    let Some(docker) = m.find("docker") else {
+        return Check::new(NAME, Status::Skipped, "no docker CLI on PATH");
+    };
+    let listed = match probe_output(m, &docker, &compose::ps_args(), &m.cwd) {
+        Some((true, out)) => out,
+        _ => {
+            return Check::new(
+                NAME,
+                Status::Skipped,
+                "docker isn't answering — is OrbStack or Docker running?",
+            )
+        }
+    };
+    let orphans = compose::orphaned(&compose::parse_ps(&listed), Path::exists);
+    if orphans.is_empty() {
+        return Check::new(
+            NAME,
+            Status::Ok,
+            format!("no compose project outlives its checkout ({setting})"),
+        );
+    }
+    let names: Vec<&str> = orphans.iter().map(|(p, _)| p.as_str()).collect();
+    let fix = names
+        .iter()
+        .map(|p| format!("docker compose -p {p} down --volumes"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let hint = if policy == compose::WorktreeContainers::Off {
+        " — Settings → General → Worktree containers cleans up on delete"
+    } else {
+        ""
+    };
+    Check::new(
+        NAME,
+        Status::Missing,
+        format!(
+            "{} compose project{} outlive{} a deleted checkout: {}{hint}",
+            names.len(),
+            if names.len() == 1 { "" } else { "s" },
+            if names.len() == 1 { "s" } else { "" },
+            names.join(", ")
+        ),
+    )
+    .fix(fix)
+}
+
 /// The report as `orion doctor` prints it: a line a check, its fix under
 /// it, then a word on the whole.
 pub fn render(checks: &[Check]) -> String {
@@ -568,6 +631,55 @@ mod tests {
                 "harnesses": {{"grok": {{"enabled": false}}}}{extra}}}"#
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    /// Compose projects whose directory is gone are listed, with the
+    /// command that removes each; a live one is not, and no docker or a
+    /// docker that won't answer is nothing to check.
+    #[test]
+    fn containers_lists_compose_projects_whose_checkout_is_gone() {
+        let stubs = Stubs::new();
+        let live = stubs.dir.path().join("project");
+        stubs.program(
+            "docker",
+            &format!(
+                "printf 'gone-a\\t/nowhere/a\\ngone-a\\t/nowhere/a\\nlive\\t{}\\n\\t\\n'",
+                live.display()
+            ),
+        );
+        let check = containers(&Config::default(), &stubs.machine());
+        assert_eq!(check.status, Status::Missing, "{check:#?}");
+        assert!(
+            check
+                .detail
+                .starts_with("1 compose project outlives a deleted checkout: gone-a — Settings"),
+            "{}",
+            check.detail
+        );
+        assert_eq!(
+            check.fix.as_deref(),
+            Some("docker compose -p gone-a down --volumes")
+        );
+        assert!(!check.fails(), "never required");
+
+        let stubs = Stubs::new();
+        stubs.program("docker", "printf 'live\\t/\\n'");
+        let cfg: Config = serde_json::from_str(r#"{"worktree_containers": "remove"}"#).unwrap();
+        let check = containers(&cfg, &stubs.machine());
+        assert_eq!(check.status, Status::Ok);
+        assert!(
+            check.detail.ends_with("(Worktree containers: remove)"),
+            "{}",
+            check.detail
+        );
+
+        let stubs = Stubs::new();
+        stubs.program("docker", "exit 1");
+        assert_eq!(containers(&cfg, &stubs.machine()).status, Status::Skipped);
+        assert_eq!(
+            containers(&cfg, &Stubs::new().machine()).status,
+            Status::Skipped
+        );
     }
 
     fn named<'a>(checks: &'a [Check], name: &str) -> &'a Check {

@@ -25,7 +25,7 @@ into `config.json`:
 ```
 
 Both halves of orion read the two files. The TUI owns most keys; the DAEMON owns
-`worktree_base_branch`, `session_idle_timeout`, `prewarm_agents` and `prewarm_sessions`, reads
+`worktree_base_branch`, `worktree_containers`, `session_idle_timeout`, `prewarm_agents` and `prewarm_sessions`, reads
 `custom_harnesses`, `harnesses` and `claude_accounts` beside the TUI (spawn and resume go through
 them), and reads one key out of each `projects` entry, `run_command`. Each side
 deserializes only its own fields and ignores the rest, and both load
@@ -66,6 +66,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `editor` | string | `"fresh"` | General | **File editor**: the BUILT-IN EDITOR every file opens in — Go to file (`⌘P`), the TREE BROWSER (`⌘B`), find in files (`⌘⇧F`), ⌥click, a MARKDOWN PAGE's `Enter`. The overlay cycles the VS Code-style editors first — `fresh`, `micro`, `edit` (Microsoft Edit) — then `vim`, `nvim`, `hx`, `emacs`, its hint naming the ones installed; any command passes through verbatim, so a hand edit can name one the picker doesn't. Each is told the line its own way: micro `<file> +<line>`, Edit, fresh and Helix `<file>:<line>`, the rest `+<line> <file>`. micro, Edit and fresh quit on their own `Ctrl+Q` after asking to save; `Ctrl+\` force-closes any of them ([Keys](keys.md#the-built-in-editor)). Text wraps: `micro` runs off orion's own config dir (`<data dir>/micro`, never your `~/.config/micro`), made on first use with `Ctrl+D` bound to add the next match as another cursor, the keys the Mac editing chords become ([Keys](keys.md#the-built-in-editor)) and `softwrap`/`wordwrap` on — a binding or setting already in its `bindings.json`/`settings.json` is left as it is — and orion presses Edit's `Alt+Z` (its word wrap, which no setting turns on) once Edit has drawn; fresh, vim and emacs wrap by default. `fresh` runs off orion's own config file too (`fresh --config <data dir>/fresh/config.json --no-upgrade-check --no-restore`, never your `~/.config/fresh/config.json`): just the one file — no menu bar, tab bar, scrollbar, file explorer, workspace dock (its `orchestrator` plugin off) or restored session, no whitespace dots, `~` lines, edge fade or animation, no update checks — a status bar of the cursor, the cursor count and fresh's messages on the left and the language on the right, the `default` keymap, and fresh's `dark` theme (VS Code's Dark+ colours) on orion's own background (`use_terminal_bg`). fresh loads a theme file only from `~/.config/fresh/themes`, which orion never writes to, so a theme of orion's own palette isn't possible; set `theme` in that file to pick another built-in. As with micro, a key you set there — at any depth — is left as it is. A chosen editor that isn't installed is never swapped in silence: the first installed of `fresh`, `micro`, `edit` and `vim` opens instead, the footer says so the first time, and the row reads `nvim — not installed, opens fresh`; `i` on the row installs it ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)), and `install.sh` puts fresh on a machine that has none of fresh, micro and Edit. A `.md` file opens as its rendered MARKDOWN PAGE, `Enter` there editing it ([Keys](keys.md#the-markdown-page)). `ORION_EDITOR` overrides it for the process. |
 | `outside_editor` | string | `"auto"` | General | **Open in app**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, the skills browser, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode`, `sublime`, `zed`, or `default` (macOS `open`, whatever the system opens that kind of file with). `auto` is the first of Cursor, VS Code, Sublime Text and Zed installed, else the system default; the row shows which (`auto · Cursor`) and its hint lists the ones installed. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`, `Zed.app/Contents/MacOS/cli`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` and `zed` with `<file>:<line>`); `open -a` and the system default open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
 | `link_env_files` | bool | `true` | General | DAEMON-owned ENV LINKS (**Link .env files**): every new WORKTREE, one an agent moves into, and one made outside orion that the sync adopts gets the main checkout's git-ignored `.env*` files (`.env`, `.env.local`, `apps/web/.env.development`, …) as symlinks at the same paths, so each checkout runs against the clone's secrets and local settings. A tracked file (a committed `.env.example`) and anything under `node_modules` are left alone, and a path that already exists in the worktree is never replaced. Off links nothing new; links already made stay. |
+| `worktree_containers` | string | `"off"` | General | DAEMON-owned WORKTREE CONTAINERS (**Worktree containers**): what deleting a worktree does to the docker compose projects started in it — `off` leaves them, `stop` stops them, `remove` runs `docker compose down` (volumes kept), `remove+volumes` removes their volumes too. Matched by the directory compose recorded on each container, never by name; a value this build doesn't know is `off`. See [Worktree containers](#worktree-containers). |
 | `outside_terminal` | string | `"ghostty"` | General | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
 | `ghostty_keybinds` | bool | `true` | General | GHOSTTY KEYBINDS: keep a marked block in Ghostty's config that releases every ⌘ chord orion's keymap uses — your rebinds included — so none of them is swallowed by Ghostty. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
 | `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); the outside terminal with its Ghostty keybinds; then what was chosen, and the keys to press next. `i` installs a missing CLI or editor ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
@@ -485,7 +486,8 @@ next ATTACH or prewarm, and an agent RESUMES its conversation there.
   same file: color theme, animations, which side of the cards the session pane sits on
   (`session_pane`), whether each worktree is a row of cards or a compact list (`worktree_layout`), whether every worktree is open at once (`expand_all_worktrees`),
   editor, the branch new worktrees start from (`worktree_base_branch`: `auto` for origin's default
-  branch, or a name such as `master`, typed into a prompt that `Enter` opens on the row), which
+  branch, or a name such as `master`, typed into a prompt that `Enter` opens on the row), what
+  deleting a worktree does to its docker compose projects (`worktree_containers`), which
   agent CLIs the new-session menu offers (at least one stays on) and their default model
   and reasoning effort, the selected project's own settings on the **Project** tab (`projects`,
   keyed by repo path — its run and open commands), the idle timeout, whether a warm spare and a worktree's dead sessions are
@@ -631,6 +633,44 @@ has the command. See `projects` in [Every setting](#every-setting).
 Unlike the WORKTREE HOOKS below, which orion runs on its own and so never takes from a checkout,
 nothing in the PROJECT FILE runs until you press its key on that worktree — the same trust as typing the
 command into a shell there.
+
+## Worktree containers
+
+A checkout that runs `docker compose up` — a database, a cache, an object store per worktree —
+leaves that compose project behind when orion deletes the checkout: running, or stopped but holding
+its volumes. **Worktree containers** (Settings → General, `worktree_containers`) has the DAEMON deal
+with them as part of the delete:
+
+| Value | What a deleted worktree's compose projects get |
+|---|---|
+| `off` (default) | Nothing; they stay as they are. |
+| `stop` | `docker compose -p <project> stop`: nothing left running, everything kept. |
+| `remove` | `docker compose -p <project> down --remove-orphans`: containers and networks gone, named volumes kept. |
+| `remove+volumes` | The same with `--volumes`: the project's data goes too. |
+
+How a project is matched, and when it is left alone:
+
+- **By where it was started, never by name.** Compose stamps every container with the directory
+  `up` ran from (`com.docker.compose.project.working_dir`). A project goes when every one of its
+  containers was started in the deleted checkout or a directory under it — a nested checkout's
+  included. A project with containers started elsewhere too (two checkouts sharing a project name)
+  is left alone, with a warning naming it, since tearing it down would take the other checkout's
+  data with it. No compose file is needed: compose finds what to stop by its labels.
+- **Any docker engine.** It drives the `docker` CLI, so OrbStack, Docker Desktop and Colima all
+  work. The DAEMON looks for `docker` on its own `PATH`, then in `~/.orbstack/bin`, `/usr/local/bin`,
+  `/opt/homebrew/bin` and Docker Desktop's app bundle, since launchd's `PATH` names none of them. A
+  machine with no docker CLI has nothing to clean up.
+- **Only after a delete that succeeded, and before the delete hook.** It runs when the WORKTREE
+  HOOKS below would — after `git worktree remove` and the row drop, under the same lock, skipped
+  while the directory is still on disk — and ahead of `orion.worktreeDeleteHook`, so a hook that
+  releases ports finds them already free. Worktrees removed outside orion run nothing.
+- **It only reports.** Docker not answering, a compose command failing, or one running past 60 s
+  (`docker ps` gets 15 s) is a one-line warning in every client; the worktree stays deleted. What it
+  stopped or removed is logged in `daemon.log`.
+
+`orion doctor` lists the compose projects whose every container was started in a directory that is
+gone — a checkout deleted while this was `off`, or deleted outside orion — with the
+`docker compose -p <project> down --volumes` that removes each ([Commands](commands.md#checking-the-machine)).
 
 ## Worktree hooks
 
