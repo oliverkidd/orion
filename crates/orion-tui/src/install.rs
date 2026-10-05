@@ -146,6 +146,32 @@ pub fn editor_plan(editor: &str, brew: Option<&Path>) -> Option<Plan> {
     })
 }
 
+/// Ghostty's download page, which documents the Homebrew cask too.
+const GHOSTTY_LINK: &str = "https://ghostty.org/download";
+
+/// How Ghostty, the outside terminal ⇧T opens, gets onto a Mac: `brew
+/// install --cask ghostty` with Homebrew at `brew`, else its download page.
+/// The cask puts `ghostty` on PATH as well as the app in /Applications.
+pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
+    match brew {
+        Some(brew) => Plan {
+            program: "ghostty".into(),
+            line: "brew install --cask ghostty".into(),
+            command: Some(Command {
+                program: brew.display().to_string(),
+                args: vec!["install".into(), "--cask".into(), "ghostty".into()],
+            }),
+            link: GHOSTTY_LINK,
+        },
+        None => Plan {
+            program: "ghostty".into(),
+            line: String::new(),
+            command: None,
+            link: GHOSTTY_LINK,
+        },
+    }
+}
+
 /// The agent CLIs orion can install, by the program a harness runs: each
 /// one's install command, word for word from its maker's install page,
 /// and that page. Codex's goes by what this machine has ([`agent_plan`]).
@@ -304,6 +330,10 @@ impl Tools {
     pub fn agent_plan(&self, program: &str) -> Option<Plan> {
         agent_plan(program, self.brew.as_deref(), self.npm.as_deref())
     }
+
+    pub fn ghostty_plan(&self) -> Plan {
+        ghostty_plan(self.brew.as_deref())
+    }
 }
 
 /// The plan behind a SETTINGS OVERLAY row whose program isn't on PATH —
@@ -440,7 +470,13 @@ pub fn closed(app: &mut App, program: &str) {
     let note = outcome(program, installed);
     app.editor_fallback_noted = None;
     match &mut app.overlay {
-        Some(crate::app::Overlay::Onboard(view)) => view.note = Some(note),
+        Some(crate::app::Overlay::Onboard(view)) => {
+            view.note = Some(note);
+            // Ghostty in: it is the outside terminal again, as by default.
+            if program == "ghostty" && installed {
+                crate::onboard::use_ghostty();
+            }
+        }
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
         // The footer leads with its own `✕`, so not the outcome's `✗`.
         _ if !installed => {
@@ -464,6 +500,21 @@ mod tests {
 
     /// Every editor the **File editor** row cycles through but vim has a
     /// formula, under each spelling the row takes; the formula is what
+    /// Ghostty: the cask with Homebrew, its download page without.
+    #[test]
+    fn ghostty_installs_by_its_cask() {
+        let brew = Path::new("/opt/homebrew/bin/brew");
+        let plan = ghostty_plan(Some(brew));
+        assert_eq!(plan.line, "brew install --cask ghostty");
+        assert_eq!(
+            plan.command.unwrap().args,
+            vec!["install", "--cask", "ghostty"]
+        );
+        let page = ghostty_plan(None);
+        assert!(!page.runnable());
+        assert_eq!(page.link, "https://ghostty.org/download");
+    }
+
     /// `brew install` runs, with the brew this machine has.
     #[test]
     fn each_editor_installs_by_its_formula() {

@@ -94,8 +94,15 @@ fn pages(cfg: &Config) -> Vec<Page> {
 /// The Worktrees page's rows: Settings → General's, by kind.
 const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::WorktreeBaseBranch, SettingKind::LinkEnvFiles];
 
-/// The Terminal page's rows: Settings → General's, by kind.
+/// The Terminal page's rows: Settings → General's, by kind. The Ghostty
+/// keybinds row only while Ghostty is here ([`setting_rows`]).
 const TERMINAL_ROWS: &[SettingKind] = &[SettingKind::OutsideTerminal, SettingKind::GhosttyKeybinds];
+
+/// A Mac without Ghostty.app: ⇧T opens Terminal.app instead, the Terminal
+/// page offers `i` to install it, and says nothing of Ghostty's keys.
+fn ghostty_missing() -> bool {
+    cfg!(target_os = "macos") && crate::event_loop::ghostty_app().is_none()
+}
 
 /// The settings rows a page mirrors, in order — the overlay's own specs,
 /// so each row's label and explanation are its tab's word for word. The
@@ -109,6 +116,7 @@ fn setting_rows(page: Page) -> Vec<&'static SettingSpec> {
     };
     kinds
         .iter()
+        .filter(|kind| **kind != SettingKind::GhosttyKeybinds || !ghostty_missing())
         .filter_map(|kind| crate::config::spec_for(*kind))
         .collect()
 }
@@ -198,8 +206,20 @@ impl OnboardView {
 /// Open the wizard over the empty grid. Tests that construct an overlay
 /// themselves never call this — only `main_loop` does, after `Config::load`.
 pub fn open(app: &mut App, cfg: &Config) {
+    // Ghostty is the default outside terminal; without it, start on the
+    // one this Mac has. `i` on the row installs Ghostty and switches back.
+    if ghostty_missing() && cfg.outside_terminal() == OutsideTerminal::Ghostty {
+        persist(|cfg| cfg.outside_terminal = OutsideTerminal::Terminal.as_str().into());
+    }
     app.overlay = Some(Overlay::Onboard(OnboardView::new(cfg)));
     app.dirty = true;
+}
+
+/// Ghostty just installed from the Terminal page: make it the outside
+/// terminal again, its config block written as the row's own Enter does.
+pub fn use_ghostty() {
+    persist(|cfg| cfg.outside_terminal = OutsideTerminal::Ghostty.as_str().into());
+    crate::ghostty_config::ensure_for(&Config::load());
 }
 
 /// Leave the wizard and remember it was seen, so the next launch goes
@@ -376,6 +396,11 @@ fn row_install(cfg: &Config, page: Page, row: usize) -> Option<Plan> {
             EditorRow::Editor(editor) if !program_installed(editor) => tools.editor_plan(editor),
             _ => None,
         },
+        Page::Terminal => {
+            let kind = setting_rows(page).get(row)?.kind;
+            (kind == SettingKind::OutsideTerminal && ghostty_missing())
+                .then(|| tools.ghostty_plan())
+        }
         _ => None,
     }
 }
@@ -398,6 +423,25 @@ fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
             .map(|row| cfg.account_hint(row))
             .unwrap_or_default(),
         Page::Editor => editor_explanation(cfg, view.row, keymap),
+        Page::Terminal
+            if ghostty_missing()
+                && setting_rows(page).get(view.row).map(|spec| spec.kind)
+                    == Some(SettingKind::OutsideTerminal) =>
+        {
+            let plan = Tools::here().ghostty_plan();
+            if plan.runnable() {
+                format!(
+                    "Ghostty isn't installed, so terminals open in Terminal.app — {} installs it: {}",
+                    keys::INSTALL.label(),
+                    plan.line
+                )
+            } else {
+                format!(
+                    "Ghostty isn't installed, so terminals open in Terminal.app. Install it: {}",
+                    plan.link
+                )
+            }
+        }
         Page::Worktrees | Page::Linear | Page::Terminal => setting_rows(page)
             .get(view.row)
             .map(|spec| crate::hints::expand(spec.hint, keymap))
@@ -1073,6 +1117,15 @@ fn settings_page(
             );
             body.blank();
         }
+        Page::Terminal if ghostty_missing() => {
+            body.prose(
+                "Where a terminal opens outside Orion. Ghostty isn't on this Mac, so Terminal.app \
+                 opens until you install it.",
+                width,
+                dim,
+            );
+            body.blank();
+        }
         Page::Terminal => {
             body.prose(
                 "Where a terminal opens outside Orion. Ghostty keeps ⌘K, ⌘N, ⌘⇧P and more for \
@@ -1142,7 +1195,7 @@ fn settings_page(
                 dim,
             );
         }
-        Page::Terminal if cfg.ghostty_keybinds => {
+        Page::Terminal if cfg.ghostty_keybinds && !ghostty_missing() => {
             body.blank();
             body.prose(
                 "Reload Ghostty's config (⌘⇧,) after Orion's first launch so its ⌘ chords reach \
@@ -1310,7 +1363,7 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
         Chosen {
             what: "Terminal",
             value: match cfg.outside_terminal() {
-                OutsideTerminal::Ghostty if cfg.ghostty_keybinds => {
+                OutsideTerminal::Ghostty if cfg.ghostty_keybinds && !ghostty_missing() => {
                     format!("{} · ⌘ chords unbound in its config", terminal_name(cfg))
                 }
                 _ => terminal_name(cfg),
