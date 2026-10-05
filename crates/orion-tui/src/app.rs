@@ -1885,7 +1885,27 @@ pub struct FileFinder {
     /// [`FileFinder::set_files`]. None once the listing is in hand — and
     /// always, for a finder built with its files.
     pub listing: Option<u64>,
+    /// The checkout's RECENT FILES, newest first (`crate::recent_files`).
+    pub recents: Vec<String>,
+    /// Up to [`FINDER_RECENTS`] of `recents` still in `files`, by index,
+    /// newest first: found once per listing, not on every keystroke.
+    recent_files: Vec<usize>,
+    /// How many of `matches` lead as the `Recent` section: `recent_files`
+    /// while the query is empty, none once anything is typed.
+    pub recent: usize,
 }
+
+/// One drawn row of the FILE FINDER's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderRow {
+    /// A section's title: `Recent`, or `Files` over the rest.
+    Header(&'static str),
+    /// `matches[i]`.
+    Match(usize),
+}
+
+/// How many recent files the FILE FINDER leads with.
+pub const FINDER_RECENTS: usize = 3;
 
 impl FileFinder {
     pub fn new(root: PathBuf, branch: String, editor: String, files: Vec<String>) -> Self {
@@ -1900,9 +1920,43 @@ impl FileFinder {
             area: Rect::default(),
             list_area: Rect::default(),
             listing: None,
+            recents: Vec::new(),
+            recent_files: Vec::new(),
+            recent: 0,
         };
         finder.apply_filter();
         finder
+    }
+
+    /// Lead with `recents` — the checkout's RECENT FILES, newest first —
+    /// while the query is empty.
+    pub fn with_recents(mut self, recents: Vec<String>) -> Self {
+        self.recents = recents;
+        self.find_recent_files();
+        self.apply_filter();
+        self
+    }
+
+    /// Where `recents` sit in `files`: one pass over the listing.
+    fn find_recent_files(&mut self) {
+        let rank: HashMap<&str, usize> = self
+            .recents
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.as_str(), i))
+            .collect();
+        let mut found: Vec<(usize, usize)> = self
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(file, f)| rank.get(f.as_str()).map(|&r| (r, file)))
+            .collect();
+        found.sort_unstable();
+        self.recent_files = found
+            .into_iter()
+            .take(FINDER_RECENTS)
+            .map(|(_, file)| file)
+            .collect();
     }
 
     /// A finder up before its listing is: `f` opens this at once, and
@@ -1918,13 +1972,50 @@ impl FileFinder {
     pub fn set_files(&mut self, files: Vec<String>) {
         self.files = files;
         self.listing = None;
+        self.find_recent_files();
         self.apply_filter();
     }
 
     /// First visible row of the result list's stateless follow-window for a
     /// list of `height` rows.
     pub fn window_start(&self, height: usize) -> usize {
-        window_start(self.selected, height)
+        window_start(self.display_row(self.selected), height)
+    }
+
+    /// Whether the `Files` header shows: there is a `Recent` section and
+    /// something listed after it.
+    fn files_header(&self) -> bool {
+        self.recent > 0 && self.matches.len() > self.recent
+    }
+
+    /// The list's rows as drawn: the matches, and — while there is a
+    /// `Recent` section — a header over it and one over the rest.
+    pub fn row_count(&self) -> usize {
+        self.matches.len() + usize::from(self.recent > 0) + usize::from(self.files_header())
+    }
+
+    /// The drawn row of `matches[index]`.
+    pub fn display_row(&self, index: usize) -> usize {
+        match self.recent {
+            0 => index,
+            n if index < n => index + 1,
+            _ => index + 2,
+        }
+    }
+
+    /// What drawn row `row` is; None past the end.
+    pub fn row(&self, row: usize) -> Option<FinderRow> {
+        if row >= self.row_count() {
+            return None;
+        }
+        let n = self.recent;
+        Some(match row {
+            r if n == 0 => FinderRow::Match(r),
+            0 => FinderRow::Header("Recent"),
+            r if r <= n => FinderRow::Match(r - 1),
+            r if r == n + 1 => FinderRow::Header("Files"),
+            r => FinderRow::Match(r - 2),
+        })
     }
 
     /// Clamped absolute selection in the filtered list.
@@ -1941,11 +2032,30 @@ impl FileFinder {
 
     /// Recompute `matches` from `query` and reset the selection to the top
     /// row. Best matches first, listing order when the query is empty.
+    /// With the query empty the RECENT FILES still listed lead, newest
+    /// first, and the rest follow without them, so ⌘P then Enter reopens
+    /// the last file.
     pub fn apply_filter(&mut self) {
-        self.matches = crate::fuzzy::rank(&self.query, self.files.iter().map(String::as_str))
-            .into_iter()
-            .map(|(file, positions)| FinderMatch { file, positions })
-            .collect();
+        let mut matches: Vec<FinderMatch> =
+            crate::fuzzy::rank(&self.query, self.files.iter().map(String::as_str))
+                .into_iter()
+                .map(|(file, positions)| FinderMatch { file, positions })
+                .collect();
+        let recent: &[usize] = if self.query.as_str().trim().is_empty() {
+            &self.recent_files
+        } else {
+            &[]
+        };
+        if !recent.is_empty() {
+            matches.retain(|m| !recent.contains(&m.file));
+            let lead = recent.iter().map(|&file| FinderMatch {
+                file,
+                positions: Vec::new(),
+            });
+            matches.splice(0..0, lead);
+        }
+        self.recent = recent.len();
+        self.matches = matches;
         self.selected = 0;
     }
 }
@@ -4067,10 +4177,10 @@ pub struct App {
     /// presses anywhere along it within the window make the double.
     pub last_pane_edge_click: Option<(std::time::Instant, ())>,
     /// URLs detected on the visible screen during the last draw; hit-tested
-    /// on ⌥click and underlined by the renderer.
+    /// on a ⌘, ⌥ or ^click and underlined by the renderer.
     pub term_links: Vec<crate::links::TermLink>,
     /// File paths detected on the visible screen during the last draw;
-    /// ⌥click opens them in the editor modal.
+    /// a ⌘, ⌥ or ^click opens them in the editor modal.
     pub term_file_links: Vec<crate::links::FileLink>,
     /// File-list width of the diff modal, remembered across opens.
     pub diff_files_width: u16,

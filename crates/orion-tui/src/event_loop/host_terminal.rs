@@ -270,6 +270,34 @@ pub(super) fn watch_held_key(w: &mut impl Write, on: bool) -> std::io::Result<()
     w.flush()
 }
 
+/// Whether ⌘ is held down right now, asked of macOS rather than the host
+/// terminal: a mouse report has no bit for it, so a ⌘click reaches orion
+/// as a plain click. Read off the keyboard itself (the HID state), so a
+/// modifier a remapper or a KVM left posted can't make every click an
+/// open. False off macOS, in the tests, and in an SSH session, whose
+/// machine is not the one with the keyboard.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(super) fn command_held() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    }
+    /// `kCGEventSourceStateHIDSystemState`: the keys physically down.
+    const HID_SYSTEM_STATE: i32 = 1;
+    /// `kCGEventFlagMaskCommand`.
+    const COMMAND: u64 = 1 << 20;
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        return false;
+    }
+    // SAFETY: a read of the current modifier flags; no pointers cross.
+    unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) & COMMAND != 0 }
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+pub(super) fn command_held() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

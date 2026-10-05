@@ -1502,6 +1502,63 @@ fn note_open_prs_answer(
     // So does the PULL REQUESTS MODAL, whose cursor follows its pull
     // request across the new list.
     crate::pr_modal::list_changed(app);
+    if !failed {
+        stale_details_behind(
+            app,
+            previous_list.as_deref().unwrap_or_default(),
+            &project_id,
+        );
+    }
+}
+
+/// What a pull request's row says that its page says too: the draft, the
+/// title, the conflict and the checks' verdict. A change in any is news
+/// the page read before it has not caught up to.
+fn row_status(row: &crate::pull_request::OpenPr) -> (bool, &str, crate::pull_request::Health) {
+    (row.is_draft, row.title.as_str(), row.health)
+}
+
+/// The list answer moved a pull request's row on — its draft, title or
+/// health differ from the last answer's — so the page read before it is
+/// behind. Each such page is marked stale, read afresh on the next visit,
+/// and read again now, in place, when it is the one on screen: the PULL
+/// REQUESTS MODAL's row or the pane's, the reader's scroll kept. Measured
+/// list against list, never list against page: the row's checks are
+/// GitHub's own rollup and the page folds every check itself, so the two
+/// may never agree, and comparing them would re-read the page on every
+/// beat.
+fn stale_details_behind(
+    app: &mut App,
+    previous: &[crate::pull_request::OpenPr],
+    project: &ProjectId,
+) {
+    let Some(open) = app.open_prs.get(project) else {
+        return;
+    };
+    let behind: Vec<String> = open
+        .list
+        .iter()
+        .filter(|row| app.pr_detail.contains_key(&row.url))
+        .filter(|row| {
+            previous
+                .iter()
+                .find(|was| was.url == row.url)
+                .is_some_and(|was| row_status(was) != row_status(row))
+        })
+        .map(|row| row.url.clone())
+        .collect();
+    if behind.is_empty() {
+        return;
+    }
+    app.pr_detail_stale.extend(behind.iter().cloned());
+    if crate::pr_modal::is_up(app) {
+        crate::pr_modal::schedule_detail(app);
+    } else if app
+        .previewed_pr()
+        .is_some_and(|pr| behind.contains(&pr.url))
+    {
+        refetch_pr_detail(app);
+    }
 }
 
 /// Pull the lookup of every checkout whose *open* pull request is among
@@ -5457,18 +5514,21 @@ fn open_file_finder(app: &mut App) {
     };
     // The modal is up on this keypress, taking what is typed; the list
     // lands when `git ls-files` answers (`land_view_answer`).
+    let recents = crate::recent_files::load(&path);
     if let Some(jobs) = app.view_jobs.clone() {
         let editor = crate::config::Config::load().editor_command();
         let ticket = request_worktree_files(&jobs, &path);
-        app.overlay = Some(Overlay::Files(FileFinder::opening(
-            path, branch, editor, ticket,
-        )));
+        app.overlay = Some(Overlay::Files(
+            FileFinder::opening(path, branch, editor, ticket).with_recents(recents),
+        ));
         return;
     }
     let Some((files, editor)) = load_worktree_files(app, &path) else {
         return;
     };
-    app.overlay = Some(Overlay::Files(FileFinder::new(path, branch, editor, files)));
+    app.overlay = Some(Overlay::Files(
+        FileFinder::new(path, branch, editor, files).with_recents(recents),
+    ));
 }
 
 /// Ask for a checkout's file listing off the loop; the ticket is what the
@@ -5717,7 +5777,7 @@ pub(crate) fn open_file(
     line: u64,
     size: (u16, u16),
 ) -> bool {
-    if crate::markdown::is_markdown_path(file) {
+    let opened = if crate::markdown::is_markdown_path(file) {
         app.page = Some(crate::markdown_view::MarkdownPage::open(
             root.to_path_buf(),
             file.to_string(),
@@ -5725,9 +5785,15 @@ pub(crate) fn open_file(
             editor.to_string(),
         ));
         app.dirty = true;
-        return true;
+        true
+    } else {
+        spawn_editor_modal(app, editor, root, file, line, size)
+    };
+    // What the FILE FINDER's `Recent` section leads with next time.
+    if opened {
+        crate::recent_files::record(root, file);
     }
-    spawn_editor_modal(app, editor, root, file, line, size)
+    opened
 }
 
 /// Drop the finder overlay the editor was just launched from, when the
@@ -5839,6 +5905,7 @@ fn open_selected_tree_file_in_editor(app: &mut App) {
     };
     if spawn_editor_modal(app, &editor, &root, &path, 1, size) {
         embed_editor(app);
+        crate::recent_files::record(&root, &path);
     }
 }
 
@@ -11417,6 +11484,60 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     }
 }
 
+/// A link detected on the TERMINAL PANE: a URL, or a path at its line.
+enum PaneLink {
+    Url(String),
+    File(String, Option<u64>),
+}
+
+/// The link under a click on the TERMINAL PANE, from the last drawn
+/// frame's detections; None off the pane or off any link.
+fn link_under(app: &App, mouse: &MouseEvent) -> Option<PaneLink> {
+    if !matches!(
+        app.hit_at(mouse.column, mouse.row),
+        Some(HitTarget::TerminalPane)
+    ) {
+        return None;
+    }
+    let cell = pane_cell(app.term_area, mouse.column, mouse.row);
+    if let Some(link) = app.term_links.iter().find(|link| link.contains(cell)) {
+        return Some(PaneLink::Url(link.url.clone()));
+    }
+    app.term_file_links
+        .iter()
+        .find(|link| link.contains(cell))
+        .map(|link| PaneLink::File(link.path.clone(), link.line))
+}
+
+/// Open the link under a click held with ⌥ or ^ — or ⌘, for a path: a
+/// URL in the browser, a path in orion's own viewer ([`open_file_link`]:
+/// the editor modal, or the page for markdown). ⌘ never rides on a mouse
+/// report (SGR carries shift, ⌥ and ^ only), so it is asked of the OS, and
+/// only once there is a link to open. It opens paths alone: a host
+/// terminal opens a URL on its own ⌘click, and orion opening it too would
+/// open it twice. False when nothing opened, so the click goes on.
+fn open_link_under(app: &mut App, mouse: &MouseEvent) -> bool {
+    let Some(link) = link_under(app, mouse) else {
+        return false;
+    };
+    let held = mouse
+        .modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+    match link {
+        PaneLink::Url(url) if held => {
+            if !open_url(&url) {
+                app.flash = Some(crate::flash::Flash::failed(format!("open failed: {url}")));
+            }
+        }
+        PaneLink::File(path, line) if held || host_terminal::command_held() => {
+            open_file_link(app, &path, line)
+        }
+        _ => return false,
+    }
+    app.dirty = true;
+    true
+}
+
 fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) {
     let mouse_pos = ratatui::layout::Position::new(mouse.column, mouse.row);
     update_pointer(app, &mouse);
@@ -11721,8 +11842,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             MouseEventKind::Down(MouseButton::Left) => {
                 let list = finder.list_area;
                 let first = finder.window_start(list.height as usize);
+                // A section header is no row to open.
                 if let Some(index) =
-                    crate::list_hit::row_at(list, first, finder.matches.len(), mouse_pos)
+                    crate::list_hit::row_at(list, first, finder.row_count(), mouse_pos).and_then(
+                        |row| match finder.row(row) {
+                            Some(crate::app::FinderRow::Match(i)) => Some(i),
+                            _ => None,
+                        },
+                    )
                 {
                     finder.select(index as i64);
                     // Enter on that row — the FILE TABS reader for a
@@ -11984,42 +12111,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     };
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            // ⌥click on a detected URL opens it in the browser; the click is
-            // swallowed so it doesn't move focus or disturb the selection.
-            // (Cmd never reaches us — the SGR mouse protocol has no such
-            // bit — so Option is the "open link" modifier.)
-            if mouse.modifiers.contains(KeyModifiers::ALT)
-                && matches!(
-                    app.hit_at(mouse.column, mouse.row),
-                    Some(HitTarget::TerminalPane)
-                )
-            {
-                let cell = pane_cell(app.term_area, mouse.column, mouse.row);
-                if let Some(url) = app
-                    .term_links
-                    .iter()
-                    .find(|link| link.contains(cell))
-                    .map(|link| link.url.clone())
-                {
-                    if !open_url(&url) {
-                        app.flash =
-                            Some(crate::flash::Flash::failed(format!("open failed: {url}")));
-                    }
-                    app.dirty = true;
-                    return;
-                }
-                // Not a URL — a detected file path opens in the editor
-                // modal instead (claude/cursor/codex print `path:line`).
-                if let Some((path, line)) = app
-                    .term_file_links
-                    .iter()
-                    .find(|link| link.contains(cell))
-                    .map(|link| (link.path.clone(), link.line))
-                {
-                    open_file_link(app, &path, line);
-                    app.dirty = true;
-                    return;
-                }
+            // ⌥, ^ or ⌘ held on a detected URL or `path:line`: it opens,
+            // and the click is swallowed so it doesn't move focus or
+            // disturb the selection.
+            if open_link_under(app, &mouse) {
+                return;
             }
             // Any fresh click clears a stale selection highlight; a click on
             // the terminal pane below re-arms one. A button the program was
@@ -12383,6 +12479,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             }
         }
         MouseEventKind::Down(MouseButton::Right) => {
+            // macOS makes ^click a secondary click, and a host may report
+            // it as the right button: on a link it is still the open.
+            if cfg!(target_os = "macos")
+                && mouse.modifiers.contains(KeyModifiers::CONTROL)
+                && open_link_under(app, &mouse)
+            {
+                return;
+            }
             // The right button is two steps: the cursor moves onto the row
             // as a left click moves it (`select_clicked_row`), then the
             // row's own CONTEXT MENU opens, from the one builder
@@ -16296,6 +16400,95 @@ mod tests {
         adopt_pr_state(&mut app, &other);
         assert_eq!(branch_pr(&app).badge(), "merged");
         assert!(!app.dirty);
+    }
+
+    /// A list refresh that moves a pull request's status on — checks gone red
+    /// here — reads its page again: in place for the PULL REQUESTS MODAL's
+    /// row (its scroll kept), and on the next visit for a row off screen. A
+    /// list that did not move asks nothing, whatever its page says.
+    #[test]
+    fn a_list_refresh_ahead_of_its_page_reads_the_page_again() {
+        use crate::pull_request::{Checks, Health};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Attach links")]);
+        let pid = app.selected_project().expect("a project").id.clone();
+        app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
+        app.pr_detail.insert(pr_url(9), a_detail(9, "body", vec![]));
+        crate::pr_modal::open(&mut app);
+        if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
+            assert_eq!(view.selected_url.as_deref(), Some(pr_url(7).as_str()));
+            view.scroll = 5;
+        }
+        app.pending_pr_detail = None;
+        let rows = |red: &[u64]| {
+            [7, 9]
+                .map(|n| {
+                    let mut row = a_pr(n, "Attach links", false);
+                    if red.contains(&n) {
+                        row.health = Health {
+                            conflicts: false,
+                            checks: Checks::Failing,
+                        };
+                    }
+                    row
+                })
+                .to_vec()
+        };
+
+        note_open_prs_answer(&mut app, pid.clone(), Some(rows(&[])), &mut Vec::new());
+        assert!(app.pending_pr_detail.is_none(), "rows and pages agree");
+        assert!(app.pr_detail_stale.is_empty());
+
+        note_open_prs_answer(&mut app, pid.clone(), Some(rows(&[7, 9])), &mut Vec::new());
+        assert!(app.pr_detail_stale.contains(&pr_url(7)));
+        assert!(
+            app.pr_detail_stale.contains(&pr_url(9)),
+            "off screen: next visit"
+        );
+        assert_eq!(
+            app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
+            Some(pr_url(7).as_str()),
+            "the page on screen is read again"
+        );
+        match &app.overlay {
+            Some(Overlay::PullRequests(view)) => assert_eq!(view.scroll, 5, "in place"),
+            other => panic!("the modal stays: {other:?}"),
+        }
+        // The same answer again — the page (a fold of every check) still
+        // disagreeing with the row's rollup — asks nothing: only a row that
+        // moved is news.
+        app.pending_pr_detail = None;
+        app.pr_detail_stale.clear();
+        note_open_prs_answer(&mut app, pid, Some(rows(&[7, 9])), &mut Vec::new());
+        assert!(app.pending_pr_detail.is_none());
+        assert!(app.pr_detail_stale.is_empty());
+    }
+
+    /// The pane, too: a list refresh ahead of the page it is reading reads
+    /// it again at once, keeping the reader's place.
+    #[test]
+    fn a_list_refresh_ahead_of_the_panes_page_reads_it_again_in_place() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_open_prs(&mut app, &[(7, "Attach links")]);
+        let pid = app.selected_project().expect("a project").id.clone();
+        app.focus = Focus::Worktrees;
+        app.sel_worktree = 1;
+        app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
+        app.pending_pr_detail = None;
+        app.pr_preview_scroll = 4;
+
+        let ready = a_pr(7, "Attach links — ready", false);
+        note_open_prs_answer(&mut app, pid, Some(vec![ready]), &mut Vec::new());
+        assert!(
+            app.pending_pr_detail
+                .as_ref()
+                .is_some_and(|(p, _)| p.url == pr_url(7)),
+            "{:?}",
+            app.pending_pr_detail
+        );
+        assert_eq!(app.pr_preview_scroll, 4);
     }
 
     fn pr_url(number: u64) -> String {
@@ -22844,6 +23037,44 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.vim.is_none());
         assert_eq!(app.focus, Focus::Projects, "the click is swallowed");
         assert!(app.term_selection.is_none(), "no selection armed");
+    }
+
+    /// ^click opens a path as ⌥click does — and so does the right button
+    /// with ^ held, as macOS reports a ^click; ⌘ is asked of the OS
+    /// (`host_terminal::command_held`), off in the tests.
+    #[test]
+    fn ctrl_click_on_a_file_path_opens_it_as_alt_click_does() {
+        for button in [MouseButton::Left, MouseButton::Right] {
+            let mut app = App::new();
+            seed_tree(&mut app);
+            let mut out = Vec::new();
+            let sref = SessionRef::Agent(AgentId("a1".into()));
+            let mut term = AttachedTerm::new(sref, 80, 24);
+            term.parser.process(b"edited src/nope.rs:12 just now");
+            app.term = Some(term);
+            app.term_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+            app.hits.push((app.term_area, HitTarget::TerminalPane));
+            app.term_file_links =
+                crate::links::visible_file_links(app.term.as_ref().unwrap().parser.screen());
+            app.focus = Focus::Projects;
+            handle_mouse(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(button),
+                    column: 9,
+                    row: 0,
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                &mut out,
+            );
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("file not found: src/nope.rs"),
+                "{button:?}"
+            );
+            assert_eq!(app.focus, Focus::Projects, "the click is swallowed");
+            assert!(app.overlay.is_none(), "no context menu over it");
+        }
     }
 
     #[test]
@@ -29800,6 +30031,159 @@ diff --git a/src/c.rs b/src/c.rs
         let fin = finder(&app);
         assert!(fin.area.width > 0, "draw writes hit-test area");
         assert!(fin.list_area.height > 0, "draw writes list area");
+    }
+
+    /// The RECENT FILES lead an empty query under a `Recent` header — the
+    /// newest first, three at most, each listed once, one no longer in the
+    /// listing skipped — and go the moment anything is typed.
+    #[test]
+    fn recent_files_lead_an_empty_query_and_go_once_one_is_typed() {
+        let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+            .map(String::from)
+            .to_vec();
+        let recents = ["d.rs", "gone.rs", "b.rs", "a.rs", "e.rs"]
+            .map(String::from)
+            .to_vec();
+        let mut fin =
+            FileFinder::new("/r".into(), "main".into(), "vim".into(), files).with_recents(recents);
+        let shown = |fin: &FileFinder| {
+            fin.matches
+                .iter()
+                .map(|m| fin.files[m.file].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fin.recent, 3);
+        assert_eq!(shown(&fin), ["d.rs", "b.rs", "a.rs", "c.rs", "e.rs"]);
+        assert_eq!(
+            fin.selected_path(),
+            Some("d.rs"),
+            "⌘P, Enter: the last file"
+        );
+        // Rows as drawn: a header, the three, a header, the rest.
+        assert_eq!(fin.row_count(), 7);
+        use crate::app::FinderRow::{Header, Match};
+        let rows: Vec<_> = (0..8).map(|r| fin.row(r)).collect();
+        assert_eq!(
+            rows,
+            [
+                Some(Header("Recent")),
+                Some(Match(0)),
+                Some(Match(1)),
+                Some(Match(2)),
+                Some(Header("Files")),
+                Some(Match(3)),
+                Some(Match(4)),
+                None
+            ]
+        );
+        assert_eq!(fin.display_row(3), 5);
+
+        fin.query.insert_str("rs");
+        fin.apply_filter();
+        assert_eq!(fin.recent, 0, "typing hides the section");
+        assert_eq!(fin.row_count(), fin.matches.len());
+        assert_eq!(fin.row(0), Some(Match(0)));
+
+        // Every file a recent one: no `Files` header over nothing.
+        let only = FileFinder::new(
+            "/r".into(),
+            "main".into(),
+            "vim".into(),
+            vec!["a.rs".into()],
+        )
+        .with_recents(vec!["a.rs".into()]);
+        assert_eq!(only.row_count(), 2);
+        assert_eq!(only.row(1), Some(Match(0)));
+        assert_eq!(only.row(2), None);
+    }
+
+    /// Drawn: `Recent` over the recent files and `Files` over the rest, both
+    /// gone once a query is typed. A click on a header opens nothing; one
+    /// on a row below it selects that row's file.
+    #[test]
+    fn the_recent_section_is_drawn_and_its_headers_take_no_click() {
+        let mut app = App::new();
+        app.overlay = Some(Overlay::Files(
+            FileFinder::new(
+                "/nonexistent-orion-finder-test".into(),
+                "main".into(),
+                "vim".into(),
+                vec!["src/alpha.rs".into(), "src/beta.rs".into()],
+            )
+            .with_recents(vec!["src/beta.rs".into()]),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" Recent"), "{text}");
+        assert!(text.contains(" Files"), "{text}");
+        let beta = text.find("src/beta.rs").expect("beta drawn");
+        let alpha = text.find("src/alpha.rs").expect("alpha drawn");
+        assert!(beta < alpha, "the recent file leads:\n{text}");
+
+        let list = finder(&app).list_area;
+        let click = |row: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x + 2,
+            row: list.y + row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut out = Vec::new();
+        if let Some(Overlay::Files(f)) = &mut app.overlay {
+            f.selected = 1;
+        }
+        handle_mouse(&mut app, click(2), &mut out);
+        assert_eq!(finder(&app).selected, 1, "the `Files` header is no row");
+        handle_mouse(&mut app, click(1), &mut out);
+        assert_eq!(finder(&app).selected_path(), Some("src/beta.rs"));
+
+        if let Some(Overlay::Files(f)) = &mut app.overlay {
+            f.query.insert_str("a");
+            f.apply_filter();
+        }
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains(" Recent"), "{text}");
+    }
+
+    /// End to end: a file opened from Go to file is the first row the next
+    /// ⌘P shows, listed once.
+    #[test]
+    fn a_file_opened_from_the_finder_leads_it_next_time() {
+        with_config_json(r#"{"close_finder_on_open": true}"#, || {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = test_repo(&dir);
+            std::fs::write(repo.join("fresh.txt"), "hello\n").unwrap();
+            crate::recent_files::with_store_path(dir.path().join("recent.json"), || {
+                let mut app = App::new();
+                seed_repo_tree(&mut app, &repo);
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                app.vim_tx = Some(tx);
+                let mut out = Vec::new();
+                let ctrl_p = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                    press(app, KeyCode::Char('p'), KeyModifiers::CONTROL, out)
+                };
+
+                ctrl_p(&mut app, &mut out);
+                assert_eq!(finder(&app).recent, 0, "nothing opened yet");
+                for c in ['f', 'r'] {
+                    press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+                }
+                if let Some(Overlay::Files(f)) = &mut app.overlay {
+                    f.editor = "/bin/sh".into();
+                }
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(app.vim.is_some(), "opened");
+                app.vim = None;
+                app.overlay = None;
+
+                ctrl_p(&mut app, &mut out);
+                let fin = finder(&app);
+                assert_eq!(fin.recent, 1);
+                assert_eq!(fin.selected_path(), Some("fresh.txt"));
+                assert_eq!(fin.matches.len(), fin.files.len(), "listed once");
+            });
+        });
     }
 
     // ---- `b` tree browser ----

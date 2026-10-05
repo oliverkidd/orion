@@ -1410,7 +1410,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Act(&[PaneTabs]), "pane: session ↔ its terminals"),
                         (Lit("drag"), "select + copy (2×click: word)"),
                         (Lit("click / drag"), "the app that took the mouse"),
-                        (Lit("⌥click"), "open URL / file under cursor"),
+                        (Lit("⌘/⌥/^click"), "open URL / file under cursor"),
                         (Lit("⇧drag"), "select via your terminal"),
                         (Lit("right-click"), "card / tab menu: run, restart"),
                         (Lit("drag the pane edge"), "resize the pane"),
@@ -2359,10 +2359,23 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 empty_list_row(f, list_inner, NO_MATCHES, th);
             }
             let start = finder.window_start(list_inner.height as usize);
-            for (row, (i, m)) in finder.matches.iter().enumerate().skip(start).enumerate() {
+            for (row, shown_row) in (start..finder.row_count()).enumerate() {
                 let Some(row_area) = row_rect(list_inner, row) else {
                     break;
                 };
+                let i = match finder.row(shown_row) {
+                    Some(crate::app::FinderRow::Match(i)) => i,
+                    Some(crate::app::FinderRow::Header(title)) => {
+                        let header = Span::styled(
+                            format!(" {title}"),
+                            Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
+                        );
+                        f.render_widget(Paragraph::new(Line::from(header)), row_area);
+                        continue;
+                    }
+                    None => break,
+                };
+                let m = &finder.matches[i];
                 let path = &finder.files[m.file];
                 let budget = (list_inner.width as usize).saturating_sub(2);
                 let shown = truncate(path, budget);

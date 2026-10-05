@@ -245,7 +245,7 @@ With the pane reading a pull request — its [page](#the-pull-request-page) — 
 | View | Keys |
 |---|---|
 | **Changes** (`⌘E`) | The DIFF VIEWER: the branch's own commits over its changed files down the left, the selected file's diff on the right, wrapped — see [The diff viewer](#the-diff-viewer). `Esc` closes |
-| **Go to file** (`⌘P`) | Fuzzy finder over the worktree. `Enter` opens the file in the BUILT-IN EDITOR (below) — a markdown file as its MARKDOWN PAGE, to read — `⌘C` (or `^Y`) copies the path — ready to paste into an agent — and `⌘O` opens the file in the **Open in app** editor (Cursor, VS Code, Sublime Text, Zed) at its line |
+| **Go to file** (`⌘P`) | Fuzzy finder over the worktree. Until you type, a **Recent** section leads it: the last three files opened in that checkout — from here, find in files, the tree or a `⌘`-click in the pane — newest first, so `⌘P` `Enter` reopens the last one; typing hides it. `Enter` opens the file in the BUILT-IN EDITOR (below) — a markdown file as its MARKDOWN PAGE, to read — `⌘C` (or `^Y`) copies the path — ready to paste into an agent — and `⌘O` opens the file in the **Open in app** editor (Cursor, VS Code, Sublime Text, Zed) at its line |
 | **Find in files** (`⌘⇧F`) | `git grep` into the same modal; `Enter` opens the hit at its line — a markdown file's page with the hit in view — `⌘C`/`^Y` and `⌘O` as in Go to file |
 | **File tree** (`⌘B`) | Tree on the left, syntax-highlighted preview on the right, long lines wrapped (a markdown file as a rendered page; `⌘R` flips it to the source and back), and an always-live filter. `→` expands a directory and `←` collapses it; `Enter` folds a directory, and on a file edits it in the BUILT-IN EDITOR in the preview's place — a markdown file opens as its MARKDOWN PAGE over the tree. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll the preview. `⌘C`/`^Y` copies the selected path, `⌘O` opens it in the **Open in app** editor, and dragging the tree/preview border resizes the tree |
 | **Skills** (`⌘S`) | Every agent skill on the machine in one list, nothing picked for a launch — agents find their skills themselves. Yours (`~/.claude/skills`, or `$CLAUDE_CONFIG_DIR/skills`), the selected checkout's (its `.claude/skills`, `.cursor/skills`, `.codex/skills`, `.agents/skills`), `~/.cursor/skills`, `~/.codex/skills` (`$CODEX_HOME`) and `~/.agents/skills`, and installed Claude Code plugins' — each row badged `user`, `project`, `cursor`, `codex`, `agents` or `plugin`. A folder reached twice (`~/.claude/skills` a symlink to `~/.cursor/skills`) is listed once. Type to filter by name and description; `↑`/`↓` walk the matches, and the right pane reads the one under the cursor: its frontmatter on a line or two, the SKILL.md as a rendered page, its other files. `⇧↑`/`⇧↓`, `PgUp`/`PgDn`, `Home`/`End` scroll it. `Enter` (or a click on the row the cursor is on) edits the SKILL.md in the BUILT-IN EDITOR, `⌘O` opens the skill's folder in the **Open in app** editor, and `⌘C`/`^Y` copies the SKILL.md's path. `⌘N` names a new skill and opens `~/.claude/skills/<name>/SKILL.md`, written from a stub. `⌘W` moves the skill's folder — its symlinks resolved — to the Trash behind a confirm that names it: `~/.Trash` on macOS, the freedesktop.org Trash elsewhere, never a delete. A plugin's skills are read-only and refuse it. `⌘R` reads the folders again, as closing the editor does. `Esc` closes |
@@ -343,7 +343,7 @@ orion's background — never your `~/.config/fresh/config.json` ([Configuration]
 
 ### The markdown page
 
-A **markdown file** opened from Go to file, find in files, the tree or an ⌥click opens as its
+A **markdown file** opened from Go to file, find in files, the tree or a `⌘`-click opens as its
 MARKDOWN PAGE: the file rendered, full width and wrapped, in a modal of its own.
 
 | Key | Action |
@@ -557,10 +557,14 @@ row's context menu, and a click into the terminal pane is `Enter` on the pane.
 - **The pane's edge** drags to resize (a double-click snaps it to the middle); the `×` on the
   pane's header folds it, the button before it moves it between the right and the bottom, and `⤢`
   full-screens the session.
-- **Inside the pane**: double-click selects a word, `⌥`-click opens the URL or `file:line` under
-  the pointer, and `⇧`-drag selects through the terminal (as tmux does). orion's own drag-select
-  ends only when the button comes up; drag past the pane's top or bottom edge and the history
-  scrolls under the pointer, so a copy can run longer than the pane is tall.
+- **Inside the pane**: double-click selects a word, and `⌘`-click opens the `file:line` under the
+  pointer in orion's own editor modal at that line — or as its page, for markdown — as Go to file
+  opens it. `⌥`- or `^`-click opens that and a URL too, in the browser (a URL's `⌘`-click is left to
+  the host terminal, which opens it itself). `⌘` never rides on a mouse report, so orion asks macOS
+  whether it is held as the click lands; over `orion ssh` use `⌥` or `^`. `⇧`-drag selects
+  through the terminal (as tmux does). orion's own drag-select ends only when the button comes up;
+  drag past the pane's top or bottom edge and the history scrolls under the pointer, so a copy can
+  run longer than the pane is tall.
 - **The wheel** scrolls whatever the pointer is over. Over the grid it scrolls the bands without
   moving the cursor, so a trackpad never swaps the pane out from under the card you are reading.
 

@@ -444,7 +444,16 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
             ),
             from_lock(km, Action::ClosePane, "close"),
             Some(Hint::new("drag", drag)),
-            Some(Hint::new("⌥click", "open link")),
+            // ⌘ is read off the Mac's own keyboard, which a TUI on
+            // another machine has none of.
+            Some(Hint::new(
+                if cfg!(target_os = "macos") && !app.is_remote {
+                    "⌘click"
+                } else {
+                    "⌥click"
+                },
+                "open link",
+            )),
         ];
     }
     // Unlocked in the pane: reading it.
