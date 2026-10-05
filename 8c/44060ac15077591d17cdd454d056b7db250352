@@ -1,0 +1,45 @@
+crates/orion-tui/src/launcher.rs
+  s_ce9edecc9a907c::t_c4c526461233ed 82
+  s_ce9edecc9a907c::t_4dd5ce812b28cc 1762-1767,2651,2663,2674,2677,2680-2685
+  s_ce9edecc9a907c::t_bb976375b6dd4e 2686
+crates/orion-tui/src/ui/launcher_view.rs
+  s_ce9edecc9a907c::t_cbeb8d36dd88d5 5039,5048,5101,5125,5133,5370
+  s_ce9edecc9a907c::t_738223c5434424 313-329
+crates/orion-tui/src/event_loop.rs
+  s_ce9edecc9a907c::t_fa789076512f3e 37016-37018,37021
+  s_ce9edecc9a907c::t_e14b48b8258c55 3505-3507,3511,3514,3522
+  s_ce9edecc9a907c::t_99365201af35b8 12991-12993
+  s_ce9edecc9a907c::t_76e6dc3e89cb7c 10358,36982-36985,36987-37015,37019-37020,37022-37064
+  s_ce9edecc9a907c::t_1d8ca42610e5fd 36986
+  s_ce9edecc9a907c::t_c02565eb2cf0ec 8684,10357,11901-11907,12032-12034,12063-12064,12639,12653,12994-12996,13012
+crates/orion-tui/src/app.rs
+  s_ce9edecc9a907c::t_e2343d9f443f63 3887-3892,3907-3912,4485,4696-4702,4727,4734-4741,4747,4751-4769
+  s_ce9edecc9a907c::t_c4c526461233ed 162,371,3898
+  s_ce9edecc9a907c::t_4fbab8e6fbe11e 4770-4771
+crates/orion-tui/src/event_loop/quick_launch.rs
+  s_ce9edecc9a907c::t_4dd5ce812b28cc 88
+  s_ce9edecc9a907c::t_e14b48b8258c55 91
+crates/orion-tui/src/event_loop/launcher.rs
+  s_ce9edecc9a907c::t_cbeb8d36dd88d5 5892
+  s_ce9edecc9a907c::t_76a1207237e17e 1642,1696,5923
+  s_ce9edecc9a907c::t_387f1ff1e94e12 6640-6641,6656,6665,6667,6767-6789,6792,6840-6842,6844,6857,6867,6869-6870,6872,6935,6938,6951,6958,6962-6964,6966,6997
+  s_ce9edecc9a907c::t_f960abcccf0115 1555-1579,5964-5965,6168
+crates/orion-tui/src/event_loop/optimistic.rs
+  s_ce9edecc9a907c::t_99365201af35b8 20,233-236,258
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8c44060ac15077591d17cdd454d056b7db250352",
+  "prompts": {},
+  "sessions": {
+    "s_ce9edecc9a907c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c265891-1c9f-4497-b7c2-2cf7bac3a21b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
