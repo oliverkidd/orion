@@ -5,6 +5,7 @@
 //! logged and ignored rather than failing the operation that read it, and a
 //! value this build can't read costs only its own key.
 
+use orion_core::compose::WorktreeContainers;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,11 @@ pub struct Config {
     /// so each checkout runs against the clone's secrets. On by default; a
     /// file already in the worktree is never replaced (see `env_links`).
     pub link_env_files: bool,
+    /// WORKTREE CONTAINERS: what a deleted worktree's docker compose
+    /// projects get — `off` (the default), `stop`, `remove`, or
+    /// `remove+volumes`. Read through [`Config::worktree_containers`];
+    /// anything unknown is `off` (see `containers`).
+    pub worktree_containers: String,
     /// User-defined harnesses from the `custom_harnesses` key, shared with
     /// the TUI's picker. The daemon resolves programs, model flags and
     /// respawns from this list; entries that fail validation are refused
@@ -88,6 +94,7 @@ impl Default for Config {
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             worktree_base_branch: String::new(),
             link_env_files: true,
+            worktree_containers: WorktreeContainers::Off.as_str().into(),
             custom_harnesses: Vec::new(),
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
@@ -129,6 +136,12 @@ impl Config {
         let name = self.worktree_base_branch.trim();
         let name = name.strip_prefix("origin/").unwrap_or(name).trim();
         (!name.is_empty()).then_some(name)
+    }
+
+    /// The `worktree_containers` policy; a value this build doesn't know
+    /// is `off`.
+    pub fn worktree_containers(&self) -> WorktreeContainers {
+        WorktreeContainers::parse(&self.worktree_containers)
     }
 
     /// The RUN COMMAND set for the project checked out at `repo_path` in
@@ -318,6 +331,26 @@ mod tests {
         assert!(cfg.link_env_files);
         let cfg: Config = serde_json::from_str(r#"{"link_env_files": false}"#).unwrap();
         assert!(!cfg.link_env_files);
+    }
+
+    #[test]
+    fn worktree_containers_default_off_and_read_the_policy() {
+        assert_eq!(
+            Config::default().worktree_containers(),
+            WorktreeContainers::Off
+        );
+        let read = |v: &str| {
+            serde_json::from_str::<Config>(&format!(r#"{{"worktree_containers": "{v}"}}"#))
+                .unwrap()
+                .worktree_containers()
+        };
+        assert_eq!(read("remove+volumes"), WorktreeContainers::RemoveVolumes);
+        assert_eq!(read("stop"), WorktreeContainers::Stop);
+        assert_eq!(
+            read("nuke"),
+            WorktreeContainers::Off,
+            "unknown deletes nothing"
+        );
     }
 
     #[test]
