@@ -51,7 +51,30 @@ enum Page {
     Ready,
 }
 
+/// The SETUP VERSION: bumped by a release that adds a step, so a machine
+/// that went through an older setup is shown the new steps on its next
+/// launch ([`pending`]). Each page says which version brought it.
+pub const SETUP_VERSION: u32 = 2;
+
 impl Page {
+    /// The SETUP VERSION this page's offer arrived in. The Terminal page
+    /// predates 2, but installing Ghostty from it is what 2 added.
+    fn added(self) -> u32 {
+        match self {
+            Page::Terminal => 2,
+            _ => 1,
+        }
+    }
+
+    /// Whether a page new since the last setup has anything to offer this
+    /// machine: the Terminal page only while Ghostty is missing on a Mac.
+    fn offered(self) -> bool {
+        match self {
+            Page::Terminal => ghostty_missing(),
+            _ => true,
+        }
+    }
+
     /// Its name on the STEP STRIP.
     fn label(self) -> &'static str {
         match self {
@@ -91,10 +114,43 @@ fn pages(cfg: &Config) -> Vec<Page> {
     .collect()
 }
 
+/// The pages a run of setup walks: all of them from `since` 0, else only
+/// those a later SETUP VERSION added that have something to offer here,
+/// and Ready to finish on.
+fn view_pages(cfg: &Config, since: u32) -> Vec<Page> {
+    let all = pages(cfg);
+    if since == 0 {
+        return all;
+    }
+    all.into_iter()
+        .filter(|page| *page == Page::Ready || (page.added() > since && page.offered()))
+        .collect()
+}
+
+/// Whether setup should open at startup, and from which version: `Some(0)`
+/// for the whole wizard on a first run, `Some(v)` for the steps added since
+/// version `v`, `None` when there is nothing new. A newer setup with
+/// nothing to offer this machine is stamped seen here, quietly.
+pub fn pending(cfg: &Config) -> Option<u32> {
+    if !cfg.onboarded {
+        return Some(0);
+    }
+    // A config from before the version existed went through version 1.
+    let seen = cfg.setup_version.max(1);
+    if seen >= SETUP_VERSION {
+        return None;
+    }
+    if view_pages(cfg, seen).len() > 1 {
+        return Some(seen);
+    }
+    persist(|cfg| cfg.setup_version = SETUP_VERSION);
+    None
+}
+
 /// The Worktrees page's rows: Settings → General's, by kind.
 const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::WorktreeBaseBranch, SettingKind::LinkEnvFiles];
 
-/// The Terminal page's rows: Settings → General's, by kind. The Ghostty
+/// The Terminal page's rows: Settings → Tools's, by kind. The Ghostty
 /// keybinds row only while Ghostty is here ([`setting_rows`]).
 const TERMINAL_ROWS: &[SettingKind] = &[SettingKind::OutsideTerminal, SettingKind::GhosttyKeybinds];
 
@@ -155,6 +211,9 @@ pub struct OnboardView {
     pub account: AccountStep,
     /// The install `i` asked about: its command, which Enter runs.
     pub install: Option<Plan>,
+    /// The SETUP VERSION this run shows the steps after: 0 for the whole
+    /// wizard ([`view_pages`]).
+    pub since: u32,
     /// The page's last word: an account added, a name refused, how an
     /// install went.
     pub note: Option<String>,
@@ -187,6 +246,7 @@ impl OnboardView {
             account: AccountStep::Rows,
             install: None,
             note: None,
+            since: 0,
         }
     }
 
@@ -198,20 +258,23 @@ impl OnboardView {
 
     /// The page the wizard stands on.
     fn current(&self, cfg: &Config) -> Page {
-        let all = pages(cfg);
+        let all = view_pages(cfg, self.since);
         all[self.page.min(all.len() - 1)]
     }
 }
 
-/// Open the wizard over the empty grid. Tests that construct an overlay
-/// themselves never call this — only `main_loop` does, after `Config::load`.
-pub fn open(app: &mut App, cfg: &Config) {
+/// Open the wizard over whatever is up, showing the steps after SETUP
+/// VERSION `since` — 0 for all of them: at startup ([`pending`]), from
+/// the palette's **Run setup**, Settings' **Setup** row and `orion setup`.
+pub fn open(app: &mut App, cfg: &Config, since: u32) {
     // Ghostty is the default outside terminal; without it, start on the
     // one this Mac has. `i` on the row installs Ghostty and switches back.
     if ghostty_missing() && cfg.outside_terminal() == OutsideTerminal::Ghostty {
         persist(|cfg| cfg.outside_terminal = OutsideTerminal::Terminal.as_str().into());
     }
-    app.overlay = Some(Overlay::Onboard(OnboardView::new(cfg)));
+    let mut view = OnboardView::new(cfg);
+    view.since = since;
+    app.overlay = Some(Overlay::Onboard(view));
     app.dirty = true;
 }
 
@@ -227,7 +290,10 @@ pub fn use_ghostty() {
 pub fn dismiss(app: &mut App) {
     app.overlay = None;
     app.dirty = true;
-    persist(|cfg| cfg.onboarded = true);
+    persist(|cfg| {
+        cfg.onboarded = true;
+        cfg.setup_version = SETUP_VERSION;
+    });
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -574,14 +640,21 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &OnboardView, th: Theme) {
     let area = centered_rect(frame, width, height);
     f.render_widget(ratatui::widgets::Clear, area);
     let block = crate::hints::modal_block(
-        crate::ui::modal_block(" Orion setup ", th),
+        crate::ui::modal_block(
+            if view.since == 0 {
+                " Orion setup "
+            } else {
+                " New in Orion setup "
+            },
+            th,
+        ),
         &hints(&cfg, view),
         area.width,
         th,
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let all = pages(&cfg);
+    let all = view_pages(&cfg, view.since);
     let at = view.page.min(all.len() - 1);
     if inner.height > 0 {
         f.render_widget(
@@ -1503,8 +1576,8 @@ fn field_rows(input: &TextInput, width: u16, max: usize, th: Theme) -> Vec<Line<
 
 fn next(app: &mut App) {
     let cfg = Config::load();
-    let all = pages(&cfg);
     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
+        let all = view_pages(&cfg, view.since);
         if view.page + 1 >= all.len() {
             dismiss(app);
             return;
@@ -1518,8 +1591,8 @@ fn next(app: &mut App) {
 
 fn prev(app: &mut App) {
     let cfg = Config::load();
-    let all = pages(&cfg);
     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
+        let all = view_pages(&cfg, view.since);
         if view.page == 0 {
             return;
         }
@@ -1831,12 +1904,42 @@ mod tests {
         crate::config::with_search_path(path, f)
     }
 
+    /// A first run gets every step; a machine on this SETUP VERSION none;
+    /// one through an older setup only the steps added since — on a Mac
+    /// without Ghostty the Terminal page, and Ready to finish on.
+    #[test]
+    fn an_older_setup_opens_on_whats_new() {
+        with_temp_config(|| {
+            with_programs(&[], || {
+                assert_eq!(pending(&Config::load()), Some(0));
+                persist(|cfg| cfg.onboarded = true);
+                let cfg = Config::load();
+                if cfg!(target_os = "macos") {
+                    assert_eq!(pending(&cfg), Some(1));
+                    assert_eq!(view_pages(&cfg, 1), vec![Page::Terminal, Page::Ready]);
+                } else {
+                    // Nothing new to offer: stamped seen, quietly.
+                    assert_eq!(pending(&cfg), None);
+                    assert_eq!(Config::load().setup_version, SETUP_VERSION);
+                }
+                persist(|cfg| cfg.setup_version = SETUP_VERSION);
+                assert_eq!(pending(&Config::load()), None);
+            });
+            // Ghostty here: the new step has nothing to offer.
+            with_programs(&[crate::install::GHOSTTY], || {
+                persist(|cfg| cfg.setup_version = 1);
+                assert_eq!(pending(&Config::load()), None);
+                assert_eq!(Config::load().setup_version, SETUP_VERSION);
+            });
+        });
+    }
+
     #[test]
     fn dismiss_stamps_onboarded_and_closes() {
         with_temp_config(|| {
             let mut app = App::new();
             let cfg = Config::load();
-            open(&mut app, &cfg);
+            open(&mut app, &cfg, 0);
             assert!(matches!(app.overlay, Some(Overlay::Onboard(_))));
             dismiss(&mut app);
             assert!(app.overlay.is_none());
@@ -1848,7 +1951,7 @@ mod tests {
     fn enter_on_welcome_advances() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
             match &app.overlay {
                 Some(Overlay::Onboard(view)) => assert_eq!(view.page, 1),
@@ -1984,7 +2087,7 @@ mod tests {
     fn the_step_strip_names_every_step_once() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             to_page(&mut app, Page::Agents);
             let shot = draw_text(&mut app);
             assert!(
@@ -2008,7 +2111,7 @@ mod tests {
     fn the_worktrees_page_offers_its_settings_and_points_at_the_picker() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             to_page(&mut app, Page::Worktrees);
             let cfg = Config::load();
             assert_eq!(page_rows(Page::Worktrees, &cfg), 2);
@@ -2057,7 +2160,7 @@ mod tests {
     fn enter_on_an_account_signs_it_in() {
         with_temp_home(|_| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             press(&mut app, KeyCode::Enter);
             press(&mut app, KeyCode::Right);
             assert_eq!(view(&app).current(&Config::load()), Page::Accounts);
@@ -2087,7 +2190,7 @@ mod tests {
     fn add_account_on_the_wizard_names_and_shares() {
         with_temp_home(|root| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             press(&mut app, KeyCode::Enter);
             press(&mut app, KeyCode::Right);
             press(&mut app, KeyCode::Down);
@@ -2157,7 +2260,7 @@ mod tests {
             }
             crate::claude_accounts::refresh_now();
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             press(&mut app, KeyCode::Enter);
             press(&mut app, KeyCode::Right);
             let text = draw_text(&mut app);
@@ -2185,7 +2288,7 @@ mod tests {
     fn the_linear_page_mirrors_the_linear_tab() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             to_page(&mut app, Page::Linear);
             let shot = draw_text(&mut app);
             let mut at = 0;
@@ -2264,7 +2367,7 @@ mod tests {
     fn enter_on_an_agent_cycles_its_model() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
             let before = Config::load().claude_model.clone();
             handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
@@ -2286,7 +2389,7 @@ mod tests {
         with_temp_config(|| {
             with_programs(&["claude", "brew"], || {
                 let mut app = App::new();
-                open(&mut app, &Config::load());
+                open(&mut app, &Config::load(), 0);
                 to_page(&mut app, Page::Agents);
                 let shot = draw_text(&mut app);
                 let inner = words(&shot);
@@ -2356,7 +2459,7 @@ mod tests {
         with_temp_config(|| {
             with_programs(&["vim", "edit", "brew"], || {
                 let mut app = App::new();
-                open(&mut app, &Config::load());
+                open(&mut app, &Config::load(), 0);
                 to_page(&mut app, Page::Editor);
                 let shot = draw_at(&mut app, 150, 40);
                 let inner = words(&shot);
@@ -2413,7 +2516,7 @@ mod tests {
         with_temp_config(|| {
             persist(|cfg| cfg.editor = "hx".into());
             let mut app = App::new();
-            open(&mut app, &Config::load());
+            open(&mut app, &Config::load(), 0);
             to_page(&mut app, Page::Editor);
             assert_eq!(
                 editor_rows()[view(&app).row],
@@ -2430,7 +2533,7 @@ mod tests {
         with_temp_config(|| {
             with_programs(&["vim"], || {
                 let mut app = App::new();
-                open(&mut app, &Config::load());
+                open(&mut app, &Config::load(), 0);
                 to_page(&mut app, Page::Editor);
                 press(&mut app, KeyCode::Char('i'));
                 let shot = draw_text(&mut app);
@@ -2465,7 +2568,7 @@ mod tests {
         with_temp_config(|| {
             let mut app = with_programs(&["brew"], || {
                 let mut app = App::new();
-                open(&mut app, &Config::load());
+                open(&mut app, &Config::load(), 0);
                 assert_eq!(
                     Config::load().outside_terminal(),
                     OutsideTerminal::Terminal,
@@ -2541,7 +2644,7 @@ mod tests {
         with_temp_config(|| {
             with_programs(&[], || {
                 let mut app = App::new();
-                open(&mut app, &Config::load());
+                open(&mut app, &Config::load(), 0);
                 to_page(&mut app, Page::Terminal);
                 press(&mut app, KeyCode::Char('i'));
                 let shot = draw_text(&mut app);
@@ -2580,7 +2683,7 @@ mod tests {
                 assert!(chosen[3].value.starts_with(".env files linked"));
 
                 let mut app = App::new();
-                open(&mut app, &cfg);
+                open(&mut app, &cfg, 0);
                 to_page(&mut app, Page::Ready);
                 let shot = draw_text(&mut app);
                 let inner = words(&shot);
@@ -2616,7 +2719,7 @@ mod tests {
             with_programs(&["claude", "fresh", "brew"], || {
                 for (w, h) in [(150, 40), (90, 28)] {
                     let mut app = App::new();
-                    open(&mut app, &Config::load());
+                    open(&mut app, &Config::load(), 0);
                     let count = pages(&Config::load()).len();
                     for page in 0..count {
                         let shot = draw_at(&mut app, w, h);

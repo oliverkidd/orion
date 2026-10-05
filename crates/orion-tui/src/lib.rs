@@ -95,6 +95,14 @@ pub fn run_doctor(json: bool) -> bool {
     doctor::run(json)
 }
 
+/// `orion setup`: forget that setup was seen, so the TUI about to start
+/// opens every step of it again.
+pub fn reset_setup() {
+    let mut cfg = config::Config::load();
+    cfg.onboarded = false;
+    let _ = cfg.save();
+}
+
 pub use event_loop::Exit;
 
 /// Entry point for the TUI client. Terminal setup/teardown lives here so the

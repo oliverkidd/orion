@@ -128,23 +128,7 @@ fn editor_spec(editor: &str) -> Option<(&'static str, &'static str, &'static str
 /// no formula for (vim, which macOS ships, or a hand-typed command).
 pub fn editor_plan(editor: &str, brew: Option<&Path>) -> Option<Plan> {
     let (program, formula, link) = editor_spec(editor)?;
-    Some(match brew {
-        Some(brew) => Plan {
-            program: program.into(),
-            line: format!("brew install {formula}"),
-            command: Some(Command {
-                program: brew.display().to_string(),
-                args: vec!["install".into(), formula.into()],
-            }),
-            link,
-        },
-        None => Plan {
-            program: program.into(),
-            line: String::new(),
-            command: None,
-            link,
-        },
-    })
+    Some(brew_plan(program, formula, false, link, brew))
 }
 
 /// Ghostty's download page, which documents the Homebrew cask too.
@@ -158,31 +142,102 @@ pub const GHOSTTY: &str = "ghostty";
 /// cask install leaves `ghostty` off a PATH without Homebrew's bin). A
 /// test goes by its PATH alone.
 pub fn installed(program: &str) -> bool {
+    if let Some(app) = outside_app(program) {
+        return !cfg!(test)
+            && crate::outside_editor::find(app, &crate::outside_editor::Places::here()).is_some();
+    }
     crate::config::program_installed(program)
         || (program == GHOSTTY && !cfg!(test) && crate::event_loop::ghostty_app().is_some())
+}
+
+/// `brew install [--cask] <name>` with Homebrew at `brew`, else `link`
+/// alone, nothing run.
+fn brew_plan(
+    program: &str,
+    name: &str,
+    cask: bool,
+    link: &'static str,
+    brew: Option<&Path>,
+) -> Plan {
+    let Some(brew) = brew else {
+        return Plan {
+            program: program.into(),
+            line: String::new(),
+            command: None,
+            link,
+        };
+    };
+    let mut args = vec!["install".to_string()];
+    if cask {
+        args.push("--cask".into());
+    }
+    args.push(name.into());
+    Plan {
+        program: program.into(),
+        line: format!("brew {}", args.join(" ")),
+        command: Some(Command {
+            program: brew.display().to_string(),
+            args,
+        }),
+        link,
+    }
+}
+
+/// The command-line tools the Tools tab lists besides the editors: git,
+/// which orion can't work without, and gh, for pull requests and issues —
+/// each one's Homebrew formula and install page.
+pub const CLIS: &[(&str, &str, &str)] = &[
+    ("git", "git", "https://git-scm.com/downloads"),
+    ("gh", "gh", "https://cli.github.com"),
+];
+
+/// How `program`, one of [`CLIS`], gets onto this machine.
+pub fn cli_plan(program: &str, brew: Option<&Path>) -> Option<Plan> {
+    let (_, formula, link) = CLIS.iter().find(|(name, _, _)| *name == program)?;
+    Some(brew_plan(program, formula, false, link, brew))
+}
+
+/// The **Open in app** editors orion can install on a Mac: the word the
+/// setting stores, Homebrew's cask for it, and its download page.
+const APPS: &[(&str, &str, &str)] = &[
+    ("cursor", "cursor", "https://cursor.com/download"),
+    (
+        "vscode",
+        "visual-studio-code",
+        "https://code.visualstudio.com/download",
+    ),
+    (
+        "sublime",
+        "sublime-text",
+        "https://www.sublimetext.com/download",
+    ),
+    ("zed", "zed", "https://zed.dev/download"),
+];
+
+/// The **Open in app** app `program` names, when it names one of [`APPS`].
+fn outside_app(program: &str) -> Option<crate::outside_editor::App> {
+    APPS.iter().find(|(word, _, _)| *word == program)?;
+    match crate::outside_editor::Choice::parse(program) {
+        crate::outside_editor::Choice::App(app) => Some(app),
+        _ => None,
+    }
+}
+
+/// How the **Open in app** choice `word` gets onto a Mac: its cask. None
+/// for `auto`, `system`, or off macOS.
+pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let (word, cask, link) = APPS.iter().find(|(name, _, _)| *name == word)?;
+    Some(brew_plan(word, cask, true, link, brew))
 }
 
 /// How Ghostty, the outside terminal ⇧T opens, gets onto a Mac: `brew
 /// install --cask ghostty` with Homebrew at `brew`, else its download page.
 /// The cask puts `ghostty` on PATH as well as the app in /Applications.
 pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
-    match brew {
-        Some(brew) => Plan {
-            program: GHOSTTY.into(),
-            line: "brew install --cask ghostty".into(),
-            command: Some(Command {
-                program: brew.display().to_string(),
-                args: vec!["install".into(), "--cask".into(), "ghostty".into()],
-            }),
-            link: GHOSTTY_LINK,
-        },
-        None => Plan {
-            program: GHOSTTY.into(),
-            line: String::new(),
-            command: None,
-            link: GHOSTTY_LINK,
-        },
-    }
+    brew_plan(GHOSTTY, "ghostty", true, GHOSTTY_LINK, brew)
 }
 
 /// The agent CLIs orion can install, by the program a harness runs: each
@@ -344,6 +399,14 @@ impl Tools {
         agent_plan(program, self.brew.as_deref(), self.npm.as_deref())
     }
 
+    pub fn cli_plan(&self, program: &str) -> Option<Plan> {
+        cli_plan(program, self.brew.as_deref())
+    }
+
+    pub fn app_plan(&self, word: &str) -> Option<Plan> {
+        app_plan(word, self.brew.as_deref())
+    }
+
     pub fn ghostty_plan(&self) -> Plan {
         ghostty_plan(self.brew.as_deref())
     }
@@ -372,11 +435,19 @@ pub fn settings_row_plan(
             .flatten();
     }
     let spec = crate::config::setting_at(tab, index)?;
-    if spec.kind != SettingKind::Editor {
-        return None;
+    match spec.kind {
+        SettingKind::Editor => tools.editor_plan(&cfg.editor_resolved().missing?),
+        SettingKind::OutsideTerminal => {
+            (cfg!(target_os = "macos") && !installed(GHOSTTY)).then(|| tools.ghostty_plan())
+        }
+        SettingKind::OutsideEditor => {
+            let word = cfg.outside_editor.trim();
+            (!installed(word)).then(|| tools.app_plan(word)).flatten()
+        }
+        SettingKind::Git => (!installed("git")).then(|| tools.cli_plan("git")).flatten(),
+        SettingKind::Gh => (!installed("gh")).then(|| tools.cli_plan("gh")).flatten(),
+        _ => None,
     }
-    let missing = cfg.editor_resolved().missing?;
-    tools.editor_plan(&missing)
 }
 
 /// Run `plan` in the editor modal, over whatever overlay is up. False,
@@ -503,15 +574,13 @@ pub fn closed(app: &mut App, program: &str) {
     app.editor_fallback_noted = None;
     app.flash = Some(outcome_flash(program, installed, ""));
     match &mut app.overlay {
-        Some(crate::app::Overlay::Onboard(view)) => {
-            view.note = Some(note);
-            // Ghostty in: it is the outside terminal again, as by default.
-            if program == GHOSTTY && installed {
-                crate::onboard::use_ghostty();
-            }
-        }
+        Some(crate::app::Overlay::Onboard(view)) => view.note = Some(note),
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
         _ => {}
+    }
+    // Ghostty in: it is the outside terminal again, as by default.
+    if program == GHOSTTY && installed {
+        crate::onboard::use_ghostty();
     }
     app.dirty = true;
 }
@@ -554,6 +623,24 @@ mod tests {
         let page = ghostty_plan(None);
         assert!(!page.runnable());
         assert_eq!(page.link, "https://ghostty.org/download");
+    }
+
+    /// The Tools tab's command-line rows and Open in app apps install by
+    /// Homebrew, or name their page without it.
+    #[test]
+    fn tools_rows_install_by_homebrew() {
+        let brew = Path::new("/opt/homebrew/bin/brew");
+        assert_eq!(cli_plan("gh", Some(brew)).unwrap().line, "brew install gh");
+        assert_eq!(
+            cli_plan("git", None).unwrap().link,
+            "https://git-scm.com/downloads"
+        );
+        assert!(cli_plan("hg", Some(brew)).is_none());
+        if cfg!(target_os = "macos") {
+            let plan = app_plan("vscode", Some(brew)).unwrap();
+            assert_eq!(plan.line, "brew install --cask visual-studio-code");
+            assert!(app_plan("auto", Some(brew)).is_none());
+        }
     }
 
     /// Every editor the **File editor** row cycles through but vim has a

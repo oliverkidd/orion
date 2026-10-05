@@ -312,8 +312,8 @@ async fn main_loop(
     crate::keymap::set_ghostty_unbound(
         cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
     );
-    if !cfg.onboarded {
-        crate::onboard::open(&mut app, &cfg);
+    if let Some(since) = crate::onboard::pending(&cfg) {
+        crate::onboard::open(&mut app, &cfg, since);
     }
     let mut input = crossterm::event::EventStream::new();
     let mut out: Vec<ClientRequest> = Vec::new();
@@ -4025,6 +4025,7 @@ fn dispatch_action(
     match action {
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
         Action::Restart => app.overlay = Some(Overlay::Confirm(confirm_restart())),
+        Action::RunSetup => crate::onboard::open(app, &crate::config::Config::load(), 0),
         Action::Upgrade => open_upgrade(app),
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
@@ -8300,6 +8301,22 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         }
     }
     if let Some(spec) = crate::config::setting_at(tab, index) {
+        // The Tools tab's Setup row opens setup over the grid; its git and
+        // gh rows install on Enter as on `i`, there being nothing to cycle.
+        use crate::config::SettingKind;
+        match spec.kind {
+            SettingKind::RunSetup if delta == 0 => {
+                app.overlay = None;
+                crate::onboard::open(app, &crate::config::Config::load(), 0);
+                return;
+            }
+            SettingKind::Git | SettingKind::Gh if delta == 0 => {
+                ask_install(app, tab, index);
+                return;
+            }
+            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => return,
+            _ => {}
+        }
         // A LINEAR TAB status row: Enter asks Linear whose the selected
         // project's key is; there is nothing to cycle.
         if spec.kind.is_status() {
@@ -27388,7 +27405,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(terminal.backend().buffer()[(x, y)].fg, th.dim);
     }
 
-    /// Settings → General's **File editor** row, its editor missing: `i`
+    /// Settings → Tools's **File editor** row, its editor missing: `i`
     /// asks to run `brew install <formula>` (the question in the
     /// explanation's place, Enter the run on the border), Enter runs it in
     /// the modal, and Esc leaves it unrun. An agent's Enabled row offers
@@ -27887,6 +27904,8 @@ diff --git a/src/c.rs b/src/c.rs
             !text.contains("Idle session timeout"),
             "another tab's rows stay off screen:\n{text}"
         );
+        // Past Tools, Tab reaches Sessions.
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let sessions_text = buffer_text(&terminal);
@@ -28473,11 +28492,10 @@ diff --git a/src/c.rs b/src/c.rs
         crate::config::with_config_path(dir.path().join("config.json"), || {
             let mut app = App::new();
             let mut out = Vec::new();
-            // The Editor row, found by name: the General tab's rows above
+            // The Editor row, found by name: the Tools tab's rows above
             // it are free to change.
             let (tab, editor_row) =
                 crate::config::locate(crate::config::SettingKind::Editor).unwrap();
-            assert_eq!(tab, 0);
             open_settings_on(&mut app, tab, &mut out);
             assert!(!settings_view(&app).on_tabs);
             // In the list, → cycles the selected setting's value.
@@ -28486,7 +28504,7 @@ diff --git a/src/c.rs b/src/c.rs
             }
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             assert_eq!(crate::config::Config::load().editor, "micro");
-            assert_eq!(settings_view(&app).tab, 0, "→ did not move the tab");
+            assert_eq!(settings_view(&app).tab, tab, "→ did not move the tab");
 
             // ↑ off the top row steps onto the strip; now → is the tab.
             for _ in 0..=editor_row {
@@ -28494,7 +28512,7 @@ diff --git a/src/c.rs b/src/c.rs
             }
             assert!(settings_view(&app).on_tabs, "↑ off the top row parks here");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(settings_view(&app).tab, 1);
+            assert_eq!(settings_view(&app).tab, tab + 1);
             assert_eq!(
                 crate::config::Config::load().editor,
                 "micro",
@@ -30950,7 +30968,7 @@ diff --git a/src/c.rs b/src/c.rs
             let path = std::env::join_paths([bin.path()]).unwrap();
             crate::config::with_search_path(path, || {
                 let mut app = App::new();
-                crate::onboard::open(&mut app, &crate::config::Config::load());
+                crate::onboard::open(&mut app, &crate::config::Config::load(), 0);
                 let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
                 let dir = tempfile::tempdir().unwrap();
                 let mut vim = crate::vim_term::VimTerm::spawn_cmd(
@@ -37413,7 +37431,7 @@ diff --git a/src/c.rs b/src/c.rs
             (
                 "Onboard",
                 |app| {
-                    crate::onboard::open(app, &crate::config::Config::load());
+                    crate::onboard::open(app, &crate::config::Config::load(), 0);
                 },
                 None,
             ),

@@ -189,6 +189,16 @@ pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
     out
 }
 
+/// What a check's `fix:` says for an install: the line Settings → Tools
+/// and setup run on `i`, else the page to get it from.
+fn plan_fix(plan: crate::install::Plan) -> String {
+    if plan.line.is_empty() {
+        plan.link.into()
+    } else {
+        plan.line
+    }
+}
+
 fn git(m: &Machine) -> Check {
     let fix = if m.macos {
         "xcode-select --install"
@@ -220,10 +230,7 @@ fn git(m: &Machine) -> Check {
 /// signed in.
 fn gh(m: &Machine) -> Check {
     let Some(gh) = m.find("gh") else {
-        let fix = match m.tools().brew {
-            Some(_) => "brew install gh".to_string(),
-            None => "https://github.com/cli/cli#installation".to_string(),
-        };
+        let fix = m.tools().cli_plan("gh").map(plan_fix).unwrap_or_default();
         return Check::new(
             "gh",
             Status::Missing,
@@ -319,8 +326,12 @@ fn open_in_app(cfg: &Config, m: &Machine) -> Check {
                 _ => target.name.to_string(),
             },
         ),
-        Err(why) => Check::new("Open in app", Status::Missing, why)
-            .fix("set Open in app to auto in Settings → General, or install the app"),
+        Err(why) => Check::new("Open in app", Status::Missing, why).fix(
+            m.tools()
+                .app_plan(choice.as_str())
+                .map(plan_fix)
+                .unwrap_or_else(|| "set Open in app to auto in Settings → Tools".into()),
+        ),
     }
 }
 
@@ -340,7 +351,7 @@ fn ghostty(cfg: &Config, m: &Machine) -> Vec<Check> {
             Status::Missing,
             "not installed — the outside terminal opens in Terminal.app instead",
         )
-        .fix("https://ghostty.org/download"),
+        .fix(plan_fix(m.tools().ghostty_plan())),
         (None, false) => Check::new(
             "Ghostty",
             Status::Skipped,
@@ -353,7 +364,7 @@ fn ghostty(cfg: &Config, m: &Machine) -> Vec<Check> {
         Some(Check::new(
             "Ghostty keybinds",
             Status::Skipped,
-            "off in Settings → General — Ghostty's config is left alone",
+            "off in Settings → Tools — Ghostty's config is left alone",
         ))
     } else {
         let path = match m.ghostty_config.as_deref() {
@@ -745,7 +756,7 @@ mod tests {
         let stubs = Stubs::new();
         assert_eq!(
             gh(&stubs.machine()).fix.as_deref(),
-            Some("https://github.com/cli/cli#installation")
+            Some("https://cli.github.com")
         );
     }
 

@@ -1,5 +1,5 @@
 //! OPEN IN APP: the GUI editor `⌘O` hands a file to — and the OPEN MENU a
-//! checkout — outside orion. Settings → General **Open in app**
+//! checkout — outside orion. Settings → Tools **Open in app**
 //! (`outside_editor`) picks Cursor, VS Code, Sublime Text, Zed or the
 //! system default; `auto`, the default, is the first of the four that is
 //! installed, else the system default.

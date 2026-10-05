@@ -202,6 +202,8 @@ pub enum Action {
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
     Restart,
+    /// Open ORION SETUP again, every step.
+    RunSetup,
     /// `⌘⇧G`: install the newer published release the footer offers, then
     /// restart the daemon and this TUI on it.
     Upgrade,
@@ -857,6 +859,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &[],
     },
     ActionSpec {
+        action: Action::RunSetup,
+        id: "run_setup",
+        label: "Run setup",
+        hint: "Open Orion setup again, every step: agents and their CLIs, Claude accounts, editors, worktrees, Linear and the outside terminal, with i to install whatever is missing",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &[],
+    },
+    ActionSpec {
         action: Action::Restart,
         id: "restart",
         label: "Restart orion",
@@ -1440,7 +1451,7 @@ pub fn host_warning(chord: &KeyChord) -> (Reach, Option<&'static str>) {
         if ghostty_binds {
             return (
                 Reach::Risky,
-                Some("Ghostty gives this ⌘ chord to orion only with Settings → General → Ghostty keybinds on (then reload Ghostty, ⌘⇧,); Terminal.app never sends ⌘"),
+                Some("Ghostty gives this ⌘ chord to orion only with Settings → Tools → Ghostty keybinds on (then reload Ghostty, ⌘⇧,); Terminal.app never sends ⌘"),
             );
         }
         return (

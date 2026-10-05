@@ -3193,6 +3193,19 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
         ]
     } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
+    } else if let Some(
+        kind @ (crate::config::SettingKind::RunSetup
+        | crate::config::SettingKind::Git
+        | crate::config::SettingKind::Gh),
+    ) = crate::config::setting_at(view.tab, view.selected).map(|s| s.kind)
+    {
+        // The Tools tab's verbs: setup opens; a program row only installs,
+        // which the `i` hint below offers while it's missing.
+        if kind == crate::config::SettingKind::RunSetup {
+            vec![CHOOSE.hint_as("open setup").kept()]
+        } else {
+            Vec::new()
+        }
     } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_status())
     {
         vec![CHOOSE.hint_as("test the connection").kept()]

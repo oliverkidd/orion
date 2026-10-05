@@ -78,6 +78,10 @@ fn main() -> Result<()> {
             remote_port,
             sync_config: !no_sync_config,
         }),
+        Some(Command::Setup) => {
+            orion_tui::reset_setup();
+            run_tui()
+        }
         Some(Command::Doctor { json }) => {
             if !orion_tui::run_doctor(json) {
                 std::process::exit(1);
@@ -98,31 +102,7 @@ fn main() -> Result<()> {
         }
         None => match cli.dir {
             Some(dir) => orion_tui::run_add_project(dir),
-            None => {
-                init_tui_logging()?;
-                let exit = log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
-                match exit {
-                    // Hosts-picker handoff: the TUI quit and restored the
-                    // terminal so a fresh `orion ssh` can exec over us (the
-                    // local daemon and its sessions stay up).
-                    orion_tui::Exit::Ssh(entry) => {
-                        eprintln!("orion: connecting to {}…", entry.host);
-                        ssh::run_ssh(&entry.host, entry.path.as_deref(), true)
-                    }
-                    // **Restart orion**: the daemon goes, and a fresh
-                    // `orion` execs over us.
-                    orion_tui::Exit::Restart => {
-                        log_fatal(orion_tui::restart(), &orion_core::paths::tui_log_path())
-                    }
-                    // **Upgrade orion**: install, then restart the daemon
-                    // and the TUI onto the new binary.
-                    orion_tui::Exit::Upgrade => {
-                        upgrade::install_only()?;
-                        orion_tui::restart()
-                    }
-                    orion_tui::Exit::Quit => Ok(()),
-                }
-            }
+            None => run_tui(),
         },
     }
 }
@@ -180,4 +160,31 @@ fn init_tui_logging() -> Result<()> {
     orion_core::crashlog::install_panic_hook(log_path.clone());
     // stdout belongs to the UI — log to file only.
     init_file_logging(&log_path)
+}
+
+/// The TUI, and what its exit asks for next.
+fn run_tui() -> Result<()> {
+    init_tui_logging()?;
+    let exit = log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
+    match exit {
+        // Hosts-picker handoff: the TUI quit and restored the
+        // terminal so a fresh `orion ssh` can exec over us (the
+        // local daemon and its sessions stay up).
+        orion_tui::Exit::Ssh(entry) => {
+            eprintln!("orion: connecting to {}…", entry.host);
+            ssh::run_ssh(&entry.host, entry.path.as_deref(), true)
+        }
+        // **Restart orion**: the daemon goes, and a fresh
+        // `orion` execs over us.
+        orion_tui::Exit::Restart => {
+            log_fatal(orion_tui::restart(), &orion_core::paths::tui_log_path())
+        }
+        // **Upgrade orion**: install, then restart the daemon
+        // and the TUI onto the new binary.
+        orion_tui::Exit::Upgrade => {
+            upgrade::install_only()?;
+            orion_tui::restart()
+        }
+        orion_tui::Exit::Quit => Ok(()),
+    }
 }

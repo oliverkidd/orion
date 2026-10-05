@@ -30,7 +30,7 @@ pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1
 /// configs can name any command the list doesn't.
 pub const EDITORS: &[&str] = crate::editor::EDITORS;
 
-/// The **Outside terminal** choices (Settings → General), in the order the
+/// The **Outside terminal** choices (Settings → Tools), in the order the
 /// row cycles them: the [`OutsideTerminal`] apps by name, the default first.
 pub const OUTSIDE_TERMINALS: &[&str] = &[
     OutsideTerminal::Ghostty.as_str(),
@@ -480,6 +480,12 @@ pub enum SettingKind {
     OutsideEditor,
     CloseFinderOnOpen,
     SshSyncConfig,
+    /// The Tools tab's action row: Enter opens ORION SETUP, every step.
+    RunSetup,
+    /// The Tools tab's read-only git row: installed or not, `i` installs.
+    Git,
+    /// The Tools tab's read-only gh row: installed and signed in or not.
+    Gh,
     LinearAccount,
     LinearAutoAttach,
     LinearTaskTemplate,
@@ -651,6 +657,7 @@ impl SettingKind {
             | SettingKind::LinearKey
             | SettingKind::LinearTest
             | SettingKind::OutsideEditor => (2026, 10, 3),
+            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => (2026, 10, 5),
             SettingKind::DiffTreeView
             | SettingKind::DiffStart
             | SettingKind::DiffTicked
@@ -727,30 +734,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "",
             },
             SettingSpec {
-                kind: SettingKind::OutsideTerminal,
-                label: "Outside terminal",
-                hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::GhosttyKeybinds,
-                label: "Ghostty keybinds",
-                hint: "Keep a marked block in Ghostty's config releasing every ⌘ chord orion's keys use, rebinds included (written when Ghostty is in use)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::Editor,
-                label: "File editor",
-                hint: "Editor every file opens in — {find_file}, {grep}, {tree_browser} and ⌥click (ORION_EDITOR overrides)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::OutsideEditor,
-                label: "Open in app",
-                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text, Zed",
-                group: "",
-            },
-            SettingSpec {
                 kind: SettingKind::CloseFinderOnOpen,
                 label: "Finder closes on open",
                 hint: "Opening a file closes the file finder behind the editor, so quitting the editor lands on the grid",
@@ -761,6 +744,53 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 label: "Sync settings over ssh",
                 hint: "orion ssh / tunnel carry config.json and presets to the remote (config.local.json stays)",
                 group: "",
+            },
+        ]),
+    },
+    SettingsTab {
+        title: "Tools",
+        body: TabBody::Values(&[
+            SettingSpec {
+                kind: SettingKind::RunSetup,
+                label: "Setup",
+                hint: "Enter opens Orion setup again, every step: agents and their CLIs, Claude accounts, editors, worktrees, Linear and the outside terminal",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::OutsideTerminal,
+                label: "Outside terminal",
+                hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
+                group: "Terminal",
+            },
+            SettingSpec {
+                kind: SettingKind::GhosttyKeybinds,
+                label: "Ghostty keybinds",
+                hint: "Keep a marked block in Ghostty's config releasing every ⌘ chord orion's keys use, rebinds included (written when Ghostty is in use)",
+                group: "Terminal",
+            },
+            SettingSpec {
+                kind: SettingKind::Editor,
+                label: "File editor",
+                hint: "Editor every file opens in — {find_file}, {grep}, {tree_browser} and ⌥click (ORION_EDITOR overrides)",
+                group: "Editors",
+            },
+            SettingSpec {
+                kind: SettingKind::OutsideEditor,
+                label: "Open in app",
+                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text, Zed",
+                group: "Editors",
+            },
+            SettingSpec {
+                kind: SettingKind::Git,
+                label: "git",
+                hint: "Worktrees, diffs and every branch action run git; orion can't work without it",
+                group: "Command line",
+            },
+            SettingSpec {
+                kind: SettingKind::Gh,
+                label: "GitHub CLI",
+                hint: "gh lists pull requests and their checks, and opens, merges and reviews them; signed in with gh auth login",
+                group: "Command line",
             },
         ]),
     },
@@ -1352,6 +1382,12 @@ pub struct Config {
     /// shared `config.json` does not skip the wizard on a new machine.
     #[serde(default)]
     pub onboarded: bool,
+    /// The SETUP VERSION this machine last went through
+    /// (`onboard::SETUP_VERSION`): a release that adds a step bumps it, and
+    /// the next launch opens setup on the new steps only. 0 on a config
+    /// from before it existed. Local-only, like `onboarded`.
+    #[serde(default)]
+    pub setup_version: u32,
     /// How long an idle session in an unviewed worktree lives before the
     /// daemon reaps its PTY: "1m", "5m", "15m", "30m", "1h"; "off"
     /// disables. Owned by the daemon (which does the parsing and reaping);
@@ -1844,6 +1880,7 @@ impl Default for Config {
             linear_task_template: String::new(),
             linear_auto_attach: true,
             onboarded: false,
+            setup_version: 0,
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             prewarm_agents: true,
             prewarm_sessions: true,
@@ -1929,7 +1966,7 @@ const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_mark
 /// is stays on this one. The local file is created for a key set away
 /// from its default, and an unreadable one is never rewritten — the key
 /// goes unsaved instead.
-const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded"];
+const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded", "setup_version"];
 
 /// Production starts with every harness off, including grok (whose
 /// built-in default is on, so the map has to say otherwise) — a fresh
@@ -3126,8 +3163,19 @@ impl Config {
             SettingKind::WorktreeContainers => WorktreeContainers::parse(&self.worktree_containers)
                 .as_str()
                 .into(),
-            SettingKind::OutsideTerminal => self.outside_terminal().as_str().into(),
+            SettingKind::OutsideTerminal => {
+                let chosen = self.outside_terminal().as_str();
+                if cfg!(target_os = "macos") && !crate::install::installed(crate::install::GHOSTTY)
+                {
+                    format!("{chosen} · Ghostty install…")
+                } else {
+                    chosen.into()
+                }
+            }
             SettingKind::GhosttyKeybinds => on_off(self.ghostty_keybinds).into(),
+            SettingKind::RunSetup => "Enter opens it".into(),
+            SettingKind::Git => installed_label("git"),
+            SettingKind::Gh => installed_label("gh"),
             SettingKind::Editor => editor_label(&self.editor, &self.editor_resolved()),
             SettingKind::OutsideEditor => crate::outside_editor::value_label(
                 &self.outside_editor,
@@ -3244,7 +3292,11 @@ impl Config {
             | SettingKind::LinearAccount
             | SettingKind::LinearTaskTemplate => {}
             // Status, not a setting: nothing to cycle.
-            SettingKind::LinearKey | SettingKind::LinearTest => {}
+            SettingKind::LinearKey
+            | SettingKind::LinearTest
+            | SettingKind::RunSetup
+            | SettingKind::Git
+            | SettingKind::Gh => {}
             SettingKind::LinearAutoAttach => {
                 self.linear_auto_attach = !self.linear_auto_attach;
             }
@@ -3733,6 +3785,15 @@ pub fn project_tab() -> usize {
         .iter()
         .position(|t| matches!(t.body, TabBody::Project(_)))
         .expect("SETTINGS_TABS declares a Project tab")
+}
+
+/// A Tools tab program row's value: `installed`, or `install…` for `i`.
+fn installed_label(program: &str) -> String {
+    if crate::install::installed(program) {
+        "installed".into()
+    } else {
+        "install…".into()
+    }
 }
 
 #[cfg(test)]

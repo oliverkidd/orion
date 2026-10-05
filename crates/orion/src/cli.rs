@@ -280,6 +280,12 @@ pub(crate) enum Command {
         #[arg(long)]
         no_sync_config: bool,
     },
+    /// Open orion on its setup, every step.
+    ///
+    /// Agents, Claude accounts, editors, worktrees, Linear and the outside
+    /// terminal, with `i` to install what's missing. The palette's Run
+    /// setup and Settings → Tools → Setup open the same thing.
+    Setup,
     /// Check what orion needs on this machine.
     ///
     /// One line each for git, gh and its sign-in, the File editor and what

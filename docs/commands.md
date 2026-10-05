@@ -22,6 +22,7 @@ orion config <cmd>         back up, restore or locate this machine's settings
 orion browser              serve this TUI in a web browser via ttyd
 orion ssh <host>           open orion on a remote host over ssh
 orion tunnel <host>        open a remote host's orion in a tab here
+orion setup                open orion on its setup, every step
 orion doctor               check what orion needs on this machine
 orion upgrade              install the latest published orion
 ```
