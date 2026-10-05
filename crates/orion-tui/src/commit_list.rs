@@ -329,7 +329,7 @@ fn root_branch(root: &Path) -> Option<String> {
 }
 
 /// Whether `rev` — a full ref, a sha — names a commit this repo has.
-fn has_commit(root: &Path, rev: &str) -> bool {
+pub(crate) fn has_commit(root: &Path, rev: &str) -> bool {
     let spec = format!("{rev}^{{commit}}");
     git_line(root, &["rev-parse", "--verify", "--quiet", &spec]).is_some()
 }

@@ -185,6 +185,9 @@ pub struct CreateForm {
     pub filled_for: Option<(String, String)>,
     /// How many commits From has that Into does not, as of the last fill.
     pub ahead: Option<usize>,
+    /// Origin is being fetched: the branches and the count are as of the
+    /// last fetch until it lands, and read again then.
+    pub fetching: bool,
     /// This form's own ticket: an answer carrying another is for a form
     /// since closed.
     pub ticket: u64,
@@ -217,6 +220,7 @@ impl CreateForm {
             filled: (String::new(), String::new()),
             filled_for: None,
             ahead: None,
+            fetching: false,
             ticket: crate::view_jobs::ticket(),
             saving: None,
             notice: None,
@@ -373,17 +377,30 @@ pub(crate) fn open_create(app: &mut App) {
         form.field = CreateField::From;
     }
     let ticket = form.ticket;
+    let tx = app.pr_actions_tx.clone();
+    form.fetching = tx.is_some();
     put_form(app, PrForm::Create(form));
-    if let Some(tx) = app.pr_actions_tx.clone() {
+    if let Some(tx) = tx {
         let base_setting = config.worktree_base_branch.clone();
+        let quit = app.branch_switch.quit.clone();
+        // What the repo knows now, at once; then again once origin is
+        // fetched, so a branch moved on there — a `dev` merged from
+        // elsewhere — is counted as it is, not as this clone last saw it.
         tokio::task::spawn_blocking(move || {
-            let (heads, bases, base) = read_branches(&dir, &base_setting);
-            let _ = tx.send(Answer::Branches {
-                ticket,
-                heads,
-                bases,
-                base,
-            });
+            let send = |fetched: bool| {
+                let (heads, bases, base) = read_branches(&dir, &base_setting);
+                let _ = tx.send(Answer::Branches {
+                    ticket,
+                    heads,
+                    bases,
+                    base,
+                    fetched,
+                });
+            };
+            send(false);
+            let args = ["fetch", "--quiet", "origin"];
+            let _ = crate::git_proc::remote_git(&dir, &args, crate::git_proc::FETCH_TIMEOUT, &quit);
+            send(true);
         });
     }
     app.dirty = true;
@@ -450,11 +467,13 @@ fn request_fill(app: &mut App) {
 /// all — what the pull request would carry — and the newest
 /// [`FILL_SUBJECTS`] that are not merges, oldest first, for the fill: each
 /// its subject, and its body only when it is the one commit, whose whole
-/// message is the description. `into` is origin's when origin has it.
-/// None when git cannot say — a branch it does not know.
+/// message is the description. `into` is origin's when origin has it;
+/// `from` is whichever of the two copies the pull request would carry
+/// ([`head_ref`]). None when git cannot say — a branch it does not know.
 fn read_commits(dir: &Path, from: &str, into: &str) -> Option<Fill> {
     let base = crate::commit_list::branch_ref(dir, into).unwrap_or_else(|| into.to_string());
-    let range = format!("{base}..{from}");
+    let head = head_ref(dir, from).unwrap_or_else(|| from.to_string());
+    let range = format!("{base}..{head}");
     let count = crate::git_diff::run_git(dir, &["rev-list", "--count", &range]).ok()?;
     if !count.status.success() {
         return None;
@@ -483,6 +502,28 @@ fn read_commits(dir: &Path, from: &str, into: &str) -> Option<Fill> {
         ahead,
         commits: parse_commits(&String::from_utf8_lossy(&out.stdout)),
     })
+}
+
+/// The copy of `from` a pull request from it carries: origin's when the
+/// local branch is missing or has nothing origin's lacks — a `dev` left
+/// behind while origin's moved on is not what goes up — else the local
+/// branch, which the create pushes first. None when git knows neither.
+fn head_ref(dir: &Path, from: &str) -> Option<String> {
+    let local = format!("refs/heads/{from}");
+    let remote = format!("refs/remotes/origin/{from}");
+    let has = |rev: &str| crate::commit_list::has_commit(dir, rev);
+    match (has(&local), has(&remote)) {
+        (true, true) if contained(dir, &local, &remote) => Some(remote),
+        (true, _) => Some(local),
+        (false, true) => Some(remote),
+        (false, false) => None,
+    }
+}
+
+/// Whether every commit of `tip` is already in `into`.
+fn contained(dir: &Path, tip: &str, into: &str) -> bool {
+    crate::git_diff::run_git(dir, &["merge-base", "--is-ancestor", tip, into])
+        .is_ok_and(|out| out.status.success())
 }
 
 /// What a fill is made of ([`read_commits`]).
@@ -574,6 +615,8 @@ fn submit_create(app: &mut App) {
         Some("the pull request needs a title".into())
     } else if let Some(number) = already {
         Some(format!("#{number} is already open from {from}"))
+    } else if form.ahead == Some(0) && form.fetching {
+        Some("fetching origin to check — try again in a moment".into())
     } else if form.ahead == Some(0) {
         Some(format!("{from} has no commits that {into} doesn't"))
     } else {
@@ -607,7 +650,18 @@ async fn create(
     body: &str,
     draft: bool,
 ) -> Result<String, String> {
-    push_branch(dir, from).await?;
+    // Origin's copy already holding all of the local one, there is nothing
+    // to push — and a push of a branch behind it would be refused.
+    let carried = {
+        let (dir, from) = (dir.to_path_buf(), from.to_string());
+        tokio::task::spawn_blocking(move || head_ref(&dir, &from))
+            .await
+            .ok()
+            .flatten()
+    };
+    if !carried.is_some_and(|head| head.starts_with("refs/remotes/")) {
+        push_branch(dir, from).await?;
+    }
     let mut args = vec![
         "pr",
         "create",
@@ -1278,6 +1332,8 @@ pub enum Answer {
         heads: Vec<String>,
         bases: Vec<String>,
         base: Option<String>,
+        /// Read after origin was fetched (or the fetch gave up).
+        fetched: bool,
     },
     /// The commits between a pair of branches, for the fill.
     Fill {
@@ -1390,7 +1446,8 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             heads,
             bases,
             base,
-        } => land_branches(app, ticket, heads, bases, base),
+            fetched,
+        } => land_branches(app, ticket, heads, bases, base, fetched),
         Answer::Fill { ticket, pair, fill } => land_fill(app, ticket, pair, fill),
         Answer::Created {
             project,
@@ -1436,17 +1493,23 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
 
 /// The create form's branches are read: Into takes the project's base when
 /// nothing is typed there (and it is not From itself), the list under the
-/// caret opens on its field's branch, and the fill is asked for.
+/// caret opens on its field's branch, and the fill is asked for — again
+/// once origin is `fetched`, the pair's commits maybe moved.
 fn land_branches(
     app: &mut App,
     ticket: u64,
     heads: Vec<String>,
     bases: Vec<String>,
     base: Option<String>,
+    fetched: bool,
 ) {
     let Some(PrForm::Create(form)) = form_for(app, ticket) else {
         return;
     };
+    if fetched {
+        form.fetching = false;
+        form.filled_for = None;
+    }
     if form.into.trim().is_empty() {
         if let Some(base) = base.filter(|b| *b != form.from.trim()) {
             form.into.set_text(base);
@@ -2008,6 +2071,9 @@ fn draw_create(f: &mut Frame, area: Rect, form: &CreateForm, focused: bool, th: 
         };
         from.push(Span::styled(note, dim));
     }
+    if form.fetching {
+        from.push(Span::styled("  fetching origin…", dim));
+    }
     let into = line_of(
         CreateField::Into,
         "Into",
@@ -2366,6 +2432,46 @@ mod tests {
             body.ends_with("- c49\n- …"),
             "a capped list says so: {body}"
         );
+    }
+
+    /// `dev` left behind locally while origin's moved on — the shape a
+    /// branch merged into elsewhere leaves — is counted from origin's
+    /// copy; a local `dev` with commits origin lacks is counted as is.
+    #[test]
+    fn a_stale_local_from_counts_from_origin() {
+        let git = |repo: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}");
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "Tess"]);
+        git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(repo, &["branch", "dev"]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git(repo, &["checkout", "-q", "dev"]);
+        git(repo, &["commit", "-q", "--allow-empty", "-m", "on origin"]);
+        git(repo, &["update-ref", "refs/remotes/origin/dev", "dev"]);
+        git(repo, &["reset", "-q", "--hard", "main"]);
+
+        assert_eq!(
+            head_ref(repo, "dev").as_deref(),
+            Some("refs/remotes/origin/dev")
+        );
+        assert_eq!(read_commits(repo, "dev", "main").map(|f| f.ahead), Some(1));
+
+        git(repo, &["reset", "-q", "--hard", "origin/dev"]);
+        git(repo, &["commit", "-q", "--allow-empty", "-m", "local only"]);
+        assert_eq!(head_ref(repo, "dev").as_deref(), Some("refs/heads/dev"));
+        assert_eq!(read_commits(repo, "dev", "main").map(|f| f.ahead), Some(2));
+        assert_eq!(head_ref(repo, "nope"), None);
     }
 
     #[test]
