@@ -255,6 +255,9 @@ pub enum Exit {
     /// **Restart orion**: stop the daemon, then exec this binary afresh
     /// (`crate::restart`).
     Restart,
+    /// **Upgrade orion**: install the newer release, then restart the
+    /// daemon and this binary on it (`crate::restart`).
+    Upgrade,
 }
 
 pub async fn run_app() -> Result<Exit> {
@@ -892,7 +895,9 @@ async fn main_loop(
                     json: ui_state_json(&app),
                 })
                 .await;
-            return Ok(if app.restart {
+            return Ok(if app.upgrade {
+                Exit::Upgrade
+            } else if app.restart {
                 Exit::Restart
             } else {
                 app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
@@ -3905,6 +3910,7 @@ fn dispatch_action(
     match action {
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
         Action::Restart => app.overlay = Some(Overlay::Confirm(confirm_restart())),
+        Action::Upgrade => open_upgrade(app),
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
@@ -4782,6 +4788,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::PrevAttention
             | Action::Quit
             | Action::Restart
+            | Action::Upgrade
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
@@ -6268,6 +6275,35 @@ fn confirm_quit() -> ConfirmDialog {
 /// quits, the DAEMON is stopped with every session in it, and the binary
 /// starts again from scratch (`crate::restart`). The message says what is
 /// lost — a running turn, a terminal's shell — and what is not.
+/// **Upgrade orion**: the confirm when a newer release is out, a flash
+/// saying this one is current when not.
+pub(super) fn open_upgrade(app: &mut App) {
+    match app.update_available.clone() {
+        Some(v) => app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v))),
+        None => {
+            app.flash = Some(crate::flash::Flash::note(format!(
+                "orion v{} is the latest release",
+                env!("CARGO_PKG_VERSION")
+            )))
+        }
+    }
+}
+
+fn confirm_upgrade(version: &str) -> ConfirmDialog {
+    ConfirmDialog {
+        title: "Upgrade orion".into(),
+        // Sized to the longest line, never wrapped: keep each under 52.
+        message: format!(
+            "Install v{version} and restart orion on it?\n\
+             The daemon restarts too: agents pick their\n\
+             conversation back up; terminals start a\n\
+             new shell."
+        ),
+        action: PendingAction::Upgrade,
+        area: ratatui::layout::Rect::default(),
+    }
+}
+
 fn confirm_restart() -> ConfirmDialog {
     ConfirmDialog {
         title: "Restart orion".into(),
@@ -8981,6 +9017,10 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             app.restart = true;
             app.should_quit = true;
         }
+        PendingAction::Upgrade => {
+            app.upgrade = true;
+            app.should_quit = true;
+        }
     }
 }
 
@@ -11249,6 +11289,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherWelcomePrompt
                 | HitTarget::FooterUsage
                 | HitTarget::FooterHome
+                | HitTarget::FooterUpgrade
                 | HitTarget::FooterCrumb(_)
         )
     });
@@ -11969,6 +12010,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The footer's nameplate: HOME, through the `toggle_home`
                 // its key runs — and from HOME, back down to the grid.
                 Some(HitTarget::FooterHome) => toggle_home(app),
+                // The `⇡ v…` beside it, and HOME's upgrade line.
+                Some(HitTarget::FooterUpgrade) => open_upgrade(app),
                 // A part of the footer's breadcrumb: down onto the grid with
                 // the cursor on it.
                 Some(HitTarget::FooterCrumb(part)) => launcher::click_crumb(app, part, out),

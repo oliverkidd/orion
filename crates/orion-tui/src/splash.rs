@@ -339,6 +339,18 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
             ),
         ]));
     }
+    // A newer release, under the wordmark: what it is and the key that
+    // installs it — clickable, like the footer's `⇡ v…`.
+    let upgrade_row = app.update_available.clone().map(|v| {
+        let key = crate::hints::act(&app.keymap, crate::keymap::Action::Upgrade, "upgrade")
+            .map_or_else(String::new, |h| format!(" · {} to upgrade", h.key));
+        lines.push(Line::from(crate::ui::footer::upgrade_spans(
+            app,
+            &format!("⇡ v{v} available{key}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.len() - 1
+    });
     lines.push(Line::from(""));
     if area.width >= 47 {
         lines.push(Line::from(Span::styled(
@@ -420,6 +432,23 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
         HitTarget::PanelBg(Focus::Projects)
     };
     app.hits.push((area, hit));
+    // Ahead of HOME's own, so it wins under the pointer.
+    if let Some(row) = upgrade_row {
+        let y = text.y + row as u16;
+        if y < text.bottom() {
+            app.hits.insert(
+                0,
+                (
+                    Rect {
+                        y,
+                        height: 1,
+                        ..text
+                    },
+                    HitTarget::FooterUpgrade,
+                ),
+            );
+        }
+    }
 }
 
 /// The constellation and its starfield across `area`, `t` seconds into

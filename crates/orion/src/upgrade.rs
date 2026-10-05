@@ -34,6 +34,14 @@ pub fn run_upgrade(force: bool) -> Result<()> {
     Ok(())
 }
 
+/// **Upgrade orion** from inside the TUI: install only. The caller then
+/// restarts the daemon onto the new binary, so no handoff notes or
+/// restart offer here.
+pub fn install_only() -> Result<()> {
+    orion_daemon::lifecycle::ensure_runtime_dir()?;
+    upgrade_with(&install_url(), &orion_core::paths::runtime_dir(), false)
+}
+
 /// Swapping the binary on disk doesn't touch the running daemon — it keeps
 /// executing the old code. An idle daemon (no live PTYs) is shut down here so
 /// the next launch spawns the new binary; live sessions would die with the

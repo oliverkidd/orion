@@ -3565,7 +3565,12 @@ fn sweep_ramp(
 /// bold) crosses it with the mid shade trailing one cell behind. The band
 /// wraps on a period a few cells longer than the text so each pass reads as
 /// a wipe with a beat between; `phase` advances one cell per frame.
-fn sweep_spans(text: &str, base: Style, ramp: [Color; 3], phase: usize) -> Vec<Span<'static>> {
+pub(crate) fn sweep_spans(
+    text: &str,
+    base: Style,
+    ramp: [Color; 3],
+    phase: usize,
+) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
         return Vec::new();

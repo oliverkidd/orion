@@ -204,6 +204,8 @@ pub enum HitTarget {
     /// The footer's nameplate at the far left (`v1.0.0`): a click goes
     /// HOME, or back from it — what `⌘G` does.
     FooterHome,
+    /// The footer's `⇡ v…` and HOME's upgrade line: **Upgrade orion**.
+    FooterUpgrade,
     /// A part of the footer's breadcrumb: a click goes back down onto the
     /// grid with the cursor on that part
     /// (`event_loop::launcher::click_crumb`).
@@ -775,6 +777,9 @@ pub enum PendingAction {
     /// **Restart orion** (`⌘⇧R`): quit, stop the daemon and every session
     /// in it, and start the binary again (`App::restart`).
     Restart,
+    /// **Upgrade orion** (`⌘⇧G`): quit into `orion upgrade`, then
+    /// start the TUI again on the new binary (`App::upgrade`).
+    Upgrade,
 }
 
 impl PendingAction {
@@ -3743,6 +3748,8 @@ pub struct App {
     pub pending_ssh: Option<crate::hosts::HostEntry>,
     /// Set with `should_quit` by **Restart orion**: after teardown the
     /// binary stops the daemon and execs itself afresh (`crate::restart`).
+    /// **Upgrade orion** confirmed: quit into [`crate::Exit::Upgrade`].
+    pub upgrade: bool,
     pub restart: bool,
     /// The FOOTER's one line in place of its key hints, until the next key.
     pub flash: Option<crate::flash::Flash>,
@@ -4456,6 +4463,7 @@ impl App {
             should_quit: false,
             pending_ssh: None,
             restart: false,
+            upgrade: false,
             flash: None,
             update_available: None,
             edge_tap: None,
@@ -4897,7 +4905,8 @@ impl App {
                 || self
                     .flash
                     .as_ref()
-                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Working))
+                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
+                || self.update_available.is_some())
     }
 
     /// Whether `agent`'s dot is the turning WORKING SPINNER: a session

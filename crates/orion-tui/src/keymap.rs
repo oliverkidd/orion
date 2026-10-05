@@ -189,6 +189,9 @@ pub enum Action {
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
     Restart,
+    /// `⌘⇧G`: install the newer published release the footer offers, then
+    /// restart the daemon and this TUI on it.
+    Upgrade,
     /// `⌘/`: pick the model for a new agent — searchable, like Cursor.
     SelectModel,
     /// `⌘⇧/`: cycle the effort / reasoning variant of the current model.
@@ -812,6 +815,16 @@ pub const ACTIONS: &[ActionSpec] = &[
         // ⌘⇧R, HOME's key; `^X` the twin a terminal without ⌘ delivers.
         // Both behind the confirm: nothing here is one stray letter.
         defaults: &["cmd+shift+r", "ctrl+x"],
+    },
+    ActionSpec {
+        action: Action::Upgrade,
+        id: "upgrade",
+        label: "Upgrade orion",
+        hint: "Install the newer release the footer offers, then restart orion and its daemon on it, behind a confirmation. Agents pick their conversation back up; terminals start a new shell",
+        group: "GENERAL",
+        scope: Scope::Global,
+        // `^D` the twin a terminal without ⌘ delivers, behind the confirm.
+        defaults: &["cmd+shift+g", "ctrl+d"],
     },
     ActionSpec {
         action: Action::CommandPalette,

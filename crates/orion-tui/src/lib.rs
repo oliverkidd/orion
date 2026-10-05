@@ -108,10 +108,16 @@ pub fn run_tui() -> Result<Exit> {
 /// their conversation on their next attach; terminals start a new shell.
 /// Only returns when the exec fails.
 pub fn restart() -> Result<()> {
-    use anyhow::Context as _;
-    use std::os::unix::process::CommandExt as _;
     eprintln!("orion: restarting…");
     runtime()?.block_on(ipc::kill_daemon())?;
+    relaunch()
+}
+
+/// Exec this binary again with the arguments it was started with, the
+/// daemon left as it is. Only returns when the exec fails.
+fn relaunch() -> Result<()> {
+    use anyhow::Context as _;
+    use std::os::unix::process::CommandExt as _;
     let mut args = std::env::args_os();
     // argv[0] over `current_exe`: a binary replaced since launch is the
     // one wanted, and Linux spells the old one `… (deleted)`.
