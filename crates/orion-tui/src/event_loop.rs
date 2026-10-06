@@ -6556,8 +6556,8 @@ fn confirm_upgrade(version: &str) -> ConfirmDialog {
         // Sized to the longest line, never wrapped: keep each under 52.
         message: format!(
             "Install v{version} and restart orion on it?\n\
-             The daemon restarts too: agents pick their\n\
-             conversation back up; terminals start a\n\
+             The daemon restarts too: agents resume, and\n\
+             mid-turn ones carry on; terminals start a\n\
              new shell."
         ),
         action: PendingAction::Upgrade,
@@ -6571,7 +6571,7 @@ fn confirm_restart() -> ConfirmDialog {
         // Sized to the longest line, never wrapped: keep each under 52.
         message: "Stop the daemon and every session in it,\n\
                   then start orion again from scratch?\n\
-                  Agents pick their conversation back up;\n\
+                  Agents resume, and mid-turn ones carry on;\n\
                   terminals start a new shell."
             .into(),
         action: PendingAction::Restart,
