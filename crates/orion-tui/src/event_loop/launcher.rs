@@ -3726,7 +3726,7 @@ mod tests {
             type_text(&mut app, "ship it");
             if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
                 if let PromptKind::QuickPrompt(launch) = &mut prompt.kind {
-                    launch.preset = Some(crate::agent_presets::AgentPreset {
+                    launch.preset = Some(Box::new(crate::agent_presets::AgentPreset {
                         name: "reviewer".into(),
                         kind: orion_core::AgentKind::Claude,
                         custom_harness: None,
@@ -3735,7 +3735,7 @@ mod tests {
                         prefix: "Be strict.".into(),
                         postfix: String::new(),
                         skip_task: false,
-                    });
+                    }));
                 }
             }
             draw_at(&mut app, 140, 40);
@@ -3876,7 +3876,7 @@ mod tests {
                 // A preset on it, so its field is drawn too.
                 if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
                     if let PromptKind::QuickPrompt(launch) = &mut prompt.kind {
-                        launch.preset = Some(crate::agent_presets::AgentPreset {
+                        launch.preset = Some(Box::new(crate::agent_presets::AgentPreset {
                             name: "reviewer".into(),
                             kind: orion_core::AgentKind::Claude,
                             custom_harness: None,
@@ -3885,7 +3885,7 @@ mod tests {
                             prefix: String::new(),
                             postfix: String::new(),
                             skip_task: false,
-                        });
+                        }));
                     }
                 }
             };

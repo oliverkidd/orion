@@ -3867,7 +3867,7 @@ mod tests {
         assert_eq!(box_title(&launch), "New agent");
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
-        launch.preset = Some(a_preset("reviewer"));
+        launch.preset = Some(Box::new(a_preset("reviewer")));
         assert_eq!(box_title(&launch), "New agent");
     }
 
@@ -3976,7 +3976,7 @@ mod tests {
         use crate::keymap::{index_of, KeyChord};
         let mut app = App::new();
         let mut launch = a_launch();
-        launch.preset = Some(a_preset("reviewer"));
+        launch.preset = Some(Box::new(a_preset("reviewer")));
         let head = header(&app, &launch, 200);
         let key = |head: &BoxHeader, field| cells_of(head, field).unwrap_or_default();
         assert!(key(&head, BoxField::Project)
@@ -4124,7 +4124,7 @@ mod tests {
         let mut launch = a_launch();
         launch.model = Some("opus".into());
         launch.effort = Some("high".into());
-        launch.preset = Some(a_preset("reviewer"));
+        launch.preset = Some(Box::new(a_preset("reviewer")));
         for width in 8..=140u16 {
             let head = header(&app, &launch, width);
             let rows = rows_of(&head);
@@ -5473,7 +5473,7 @@ mod tests {
             )
         };
         assert!(border(&launch).contains("^X preset"), "{}", border(&launch));
-        launch.preset = Some(a_preset("reviewer"));
+        launch.preset = Some(Box::new(a_preset("reviewer")));
         let head = header(&app, &launch, BOX_SIZE.0 - 4);
         assert_eq!(
             cells_of(&head, BoxField::Preset).as_deref(),

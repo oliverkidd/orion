@@ -47,6 +47,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::ProjectPicker(v) => v.area,
         Overlay::Onboard(v) => v.area,
         Overlay::Autofix(v) => v.area,
+        Overlay::Todos(v) => v.area,
     }
 }
 

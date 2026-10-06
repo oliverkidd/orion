@@ -2417,6 +2417,8 @@ pub enum Overlay {
     /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
     /// PULL REQUESTS MODAL) — what to send the agent to fix.
     Autofix(Box<crate::autofix::AutofixForm>),
+    /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
+    Todos(crate::todos::TodoView),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -2497,6 +2499,9 @@ pub struct AgentLaunchDraft {
     /// The mode the CLI starts in (see `ClientRequest::CreateAgent::mode`):
     /// edit for every launch but a QUICK PROMPT stepped to plan or ask.
     pub mode: orion_core::AgentMode,
+    /// The TODO this launch was sent at: `create_agent` keeps it by the
+    /// request (`App::todo_pending`) for the Ack to write the session onto.
+    pub todo: Option<crate::todos::TodoRef>,
 }
 
 impl AgentLaunchDraft {
@@ -2530,6 +2535,7 @@ impl AgentLaunchDraft {
             placeholder: None,
             follow: true,
             mode: orion_core::AgentMode::Edit,
+            todo: None,
         }
     }
 }
@@ -4527,6 +4533,16 @@ pub struct App {
     pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
+    /// Each project's TODOS list, by its checkout, read when the modal
+    /// first opens on it and kept for the session — saved on every change
+    /// (`todos::store`).
+    pub todos: HashMap<std::path::PathBuf, crate::todos::TodoFile>,
+    /// Creates sent at a TODO, by request id: the Ack writes the session
+    /// onto the item, an Error forgets it.
+    pub todo_pending: HashMap<u64, crate::todos::TodoRef>,
+    /// TODOS whose **Create in Triage** Linear has not answered yet, by
+    /// checkout and item: a second one is refused until it has.
+    pub todo_creates: std::collections::HashSet<(std::path::PathBuf, u64)>,
     /// The last **Test connection** (Settings → Linear): the checkout
     /// whose key it tried, where that key was found, and what Linear said
     /// — what the row says while that is still the key on show.
@@ -4789,6 +4805,9 @@ impl App {
             linear_failed: std::collections::HashSet::new(),
             linear_tx: None,
             linear_links: crate::linear::LinkStore::default(),
+            todos: HashMap::new(),
+            todo_pending: HashMap::new(),
+            todo_creates: std::collections::HashSet::new(),
             linear_test: None,
             view_jobs: None,
             diff_probe: None,

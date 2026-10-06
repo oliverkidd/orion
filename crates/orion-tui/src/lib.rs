@@ -67,6 +67,7 @@ pub mod syntax;
 pub mod terminal_tail;
 pub mod text_input;
 pub mod theme;
+pub mod todos;
 pub mod tree_browser;
 pub mod ui;
 pub mod update_check;

@@ -120,13 +120,13 @@ pub fn priority_word(priority: u8) -> &'static str {
 
 /// Linear's priorities in the order the rows sort them and the FILTER PICK
 /// lists them: urgent first, no priority last.
-const PRIORITY_ORDER: [u8; 5] = [1, 2, 3, 4, 0];
+pub(crate) const PRIORITY_ORDER: [u8; 5] = [1, 2, 3, 4, 0];
 
 /// What an issue nobody is assigned to says where a name would be.
 const UNASSIGNED: &str = "unassigned";
 
 /// Where a priority sorts: urgent first, no priority last.
-fn priority_rank(priority: u8) -> usize {
+pub(crate) fn priority_rank(priority: u8) -> usize {
     PRIORITY_ORDER
         .iter()
         .position(|p| *p == priority)
@@ -251,7 +251,8 @@ pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
         .replace("{first_id}", first)
 }
 
-/// Browse assigned issues, or attach the current pull request to them.
+/// Browse assigned issues, attach the current pull request to them, or
+/// link one to a TODO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinearMode {
     Browse,
@@ -259,6 +260,13 @@ pub enum LinearMode {
         pr_url: String,
         pr_number: u64,
         back: Box<PullRequestsView>,
+    },
+    /// **Link existing…** from the TODOS MODAL: Enter links the issue
+    /// under the cursor to `item` and goes back to `back`, Esc goes back
+    /// with nothing linked.
+    Link {
+        item: u64,
+        back: Box<crate::todos::TodoView>,
     },
 }
 
@@ -409,6 +417,96 @@ pub enum LinearAnswer {
         dir: PathBuf,
         result: Result<Viewer, String>,
     },
+    /// The TODOS MODAL's linked issues in the checkout `dir`, as Linear
+    /// has them now ([`request_linked`]).
+    Linked {
+        dir: PathBuf,
+        result: Result<Vec<LinkedIssue>, String>,
+    },
+    /// **Create in Triage** for `item` found more than one team and no
+    /// remembered one: which to file it in is the user's to pick.
+    Teams {
+        dir: PathBuf,
+        item: u64,
+        result: Result<Vec<LinearTeam>, String>,
+    },
+    /// The issue **Create in Triage** made for `item` in `team`.
+    Created {
+        dir: PathBuf,
+        item: u64,
+        team: LinearTeam,
+        result: Result<LinkedIssue, String>,
+    },
+}
+
+/// An issue a TODO is linked to, as its chip draws it: what Linear says
+/// of it, or what the LINEAR VIEW last read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedIssue {
+    pub identifier: String,
+    pub url: String,
+    /// The state's name — `In Progress` — its kind — `started` — and its
+    /// Linear colour.
+    pub state: String,
+    pub state_type: String,
+    pub state_color: String,
+    pub priority: u8,
+}
+
+impl LinkedIssue {
+    pub fn of(issue: &LinearIssue) -> Self {
+        Self {
+            identifier: issue.identifier.clone(),
+            url: issue.url.clone(),
+            state: issue.status.clone(),
+            state_type: issue.status_type.clone(),
+            state_color: issue.state_color.clone(),
+            priority: issue.priority,
+        }
+    }
+
+    /// Done or canceled in Linear: a linked todo still open is ticked.
+    pub fn finished(&self) -> bool {
+        finished_kind(&self.state_type)
+    }
+
+    /// One `issue { identifier url state { name type color } priority }`
+    /// node.
+    fn from_json(v: &serde_json::Value) -> Option<Self> {
+        let identifier = json_text(v, "/identifier");
+        (!identifier.is_empty()).then(|| Self {
+            identifier,
+            url: json_text(v, "/url"),
+            state: json_text(v, "/state/name"),
+            state_type: json_text(v, "/state/type"),
+            state_color: json_text(v, "/state/color"),
+            priority: json_priority(v),
+        })
+    }
+}
+
+/// A state kind Linear counts as finished: done, or canceled.
+pub(crate) fn finished_kind(kind: &str) -> bool {
+    matches!(kind, "completed" | "canceled")
+}
+
+/// A Linear team **Create in Triage** can file into, with its triage
+/// state when it takes issues into Triage at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearTeam {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub triage_state: Option<String>,
+}
+
+/// What **Create in Triage** files: the todo's text as the title, its
+/// priority, and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueDraft {
+    pub title: String,
+    pub priority: u8,
+    pub description: String,
 }
 
 /// Why Linear refused to move an issue, and the state it was in before
@@ -557,6 +655,21 @@ pub(crate) fn open_attach(app: &mut App) {
     );
 }
 
+/// **Link existing…** in the TODOS MODAL: the list, for picking the issue
+/// `item` is linked to; `back` is the modal to go back to.
+pub(crate) fn open_link(app: &mut App, item: u64, back: crate::todos::TodoView) {
+    open_on(
+        app,
+        back.project.clone(),
+        back.project_name.clone(),
+        back.dir.clone(),
+        LinearMode::Link {
+            item,
+            back: Box::new(back),
+        },
+    );
+}
+
 fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: LinearMode) {
     let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
     view.selected = clamp_selection(0, list_len(app, &project));
@@ -600,6 +713,16 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
 
 pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     match answer {
+        LinearAnswer::Linked { dir, result } => crate::todos::view::land_linked(app, dir, result),
+        LinearAnswer::Teams { dir, item, result } => {
+            crate::todos::view::land_teams(app, dir, item, result)
+        }
+        LinearAnswer::Created {
+            dir,
+            item,
+            team,
+            result,
+        } => crate::todos::view::land_created(app, dir, item, team, result),
         LinearAnswer::Viewer { dir, result } => {
             let source = key_source(&dir);
             let test = match result {
@@ -840,7 +963,10 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let esc = if !view.query.is_empty() {
         "clear"
-    } else if matches!(view.mode, LinearMode::Attach { .. }) {
+    } else if matches!(
+        view.mode,
+        LinearMode::Attach { .. } | LinearMode::Link { .. }
+    ) {
         "back"
     } else {
         "close"
@@ -866,6 +992,13 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::PRESET.hint(),
             keys::BROWSER.hint(),
             keys::REFRESH.hint(),
+            Hint::new("Esc", esc),
+        ],
+        LinearMode::Link { .. } => vec![
+            keys::CONFIRM.hint_as("link to todo").kept(),
+            keys::TABS.hint(),
+            keys::FILTER.hint(),
+            keys::BROWSER.hint(),
             Hint::new("Esc", esc),
         ],
         LinearMode::Attach { .. } => vec![
@@ -1081,10 +1214,7 @@ pub(crate) fn handle_mouse(
             }
         }
         MouseEventKind::Down(MouseButton::Left) if view.tab_row.contains(pos) => {
-            let hit = view
-                .tab_hits
-                .iter()
-                .position(|(from, to)| (*from..*to).contains(&pos.x));
+            let hit = crate::ui::tab_hit(&view.tab_hits, pos.x);
             if let Some(tab) = hit.and_then(|i| LinearTab::ALL.get(i)) {
                 switch_tab(app, *tab);
             }
@@ -1222,8 +1352,10 @@ fn close(app: &mut App) {
     let Some(Overlay::Linear(view)) = app.overlay.take() else {
         return;
     };
-    if let LinearMode::Attach { back, .. } = view.mode {
-        crate::pr_modal::reopen(app, *back);
+    match view.mode {
+        LinearMode::Attach { back, .. } => crate::pr_modal::reopen(app, *back),
+        LinearMode::Link { back, .. } => crate::todos::reopen(app, *back),
+        LinearMode::Browse => {}
     }
 }
 
@@ -1320,6 +1452,18 @@ fn confirm(app: &mut App) {
             let (url, number, dir) = (pr_url.clone(), *pr_number, view.dir.clone());
             attach_issues(app, dir, url, number, &issues);
         }
+        // The issue under the cursor — one todo is one issue.
+        LinearMode::Link { .. } => {
+            let Some(issue) = selected_issue(app).cloned() else {
+                return;
+            };
+            let Some(Overlay::Linear(view)) = app.overlay.take() else {
+                return;
+            };
+            if let LinearMode::Link { item, back } = view.mode {
+                crate::todos::view::link_issue(app, *back, item, LinkedIssue::of(&issue));
+            }
+        }
     }
 }
 
@@ -1361,7 +1505,7 @@ fn open_preset(app: &mut App) {
     let Some(Overlay::Linear(view)) = &app.overlay else {
         return;
     };
-    if matches!(view.mode, LinearMode::Attach { .. }) {
+    if view.mode != LinearMode::Browse {
         return;
     }
     let issues = picked(app);
@@ -1532,6 +1676,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         LinearMode::Attach { pr_number, .. } => {
             format!("Linear → PR #{pr_number} — {} ({count})", view.project_name)
         }
+        LinearMode::Link { .. } => format!("Linear → todo — {} ({count})", view.project_name),
     };
     let title = if inflight {
         format!("{head}, refreshing…")
@@ -1720,22 +1865,31 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
 /// `◌` in the backlog, `◇` in triage — in the state's own Linear colour,
 /// else quieter the further off it is.
 fn state_mark(issue: &LinearIssue, th: Theme) -> (&'static str, ratatui::style::Color) {
-    let (glyph, fallback) = match issue.status_type.as_str() {
+    state_glyph(&issue.status_type, &issue.state_color, th)
+}
+
+/// [`state_mark`] from a state's kind and Linear colour alone — what a
+/// todo linked to an issue has of it (`todos`). A finished issue, which
+/// the lists here never hold, is a filled `●`.
+pub(crate) fn state_glyph(
+    kind: &str,
+    color: &str,
+    th: Theme,
+) -> (&'static str, ratatui::style::Color) {
+    let (glyph, fallback) = match kind {
         "started" => ("◑", th.muted),
         "unstarted" => ("○", th.dim),
         "backlog" => ("◌", th.faint),
         "triage" => ("◇", th.warn),
+        "completed" => ("●", th.done),
         _ => ("·", th.dim),
     };
-    (
-        glyph,
-        crate::theme::hex(&issue.state_color).unwrap_or(fallback),
-    )
+    (glyph, crate::theme::hex(color).unwrap_or(fallback))
 }
 
 /// A priority as Linear draws it: `‼` for urgent, else three bars with
 /// as many lit as it is high. Nothing for no priority.
-fn priority_mark(priority: u8, th: Theme) -> Vec<Span<'static>> {
+pub(crate) fn priority_mark(priority: u8, th: Theme) -> Vec<Span<'static>> {
     let lit = match priority {
         1 => return vec![Span::styled("‼", Style::default().fg(th.err))],
         2 => 3,
@@ -2097,6 +2251,236 @@ async fn update_state(dir: &Path, issue_id: &str, state_id: &str) -> Result<(), 
     mutation_result(&json, "issueUpdate", "Linear did not move the issue")
 }
 
+/// The fields a linked todo's chip draws, as [`LinkedIssue::from_json`]
+/// reads them.
+const LINKED_FIELDS: &str = "identifier url state { name type color } priority";
+
+/// Every issue in `identifiers` in one ask, one aliased `issue(id:)` per
+/// identifier. One Linear cannot find (moved, deleted) is left out: it
+/// fails the whole ask — `issue` is never null, so Linear nulls `data` —
+/// and then each is asked on its own, the missing ones failing alone. An
+/// error every one of them hits (the key) is the answer's.
+async fn fetch_linked(dir: &Path, identifiers: &[String]) -> Result<Vec<LinkedIssue>, String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let json = graphql(&key, &linked_query(identifiers), serde_json::json!({})).await?;
+    let first = match parse_linked(&json, identifiers.len()) {
+        Ok(found) => return Ok(found),
+        Err(err) if identifiers.len() == 1 => return Err(err),
+        Err(err) => err,
+    };
+    let mut found = Vec::new();
+    let mut failed = 0;
+    for id in identifiers {
+        let one = std::slice::from_ref(id);
+        match graphql(&key, &linked_query(one), serde_json::json!({}))
+            .await
+            .and_then(|json| parse_linked(&json, 1))
+        {
+            Ok(issues) => found.extend(issues),
+            Err(_) => failed += 1,
+        }
+    }
+    if failed == identifiers.len() {
+        return Err(first);
+    }
+    Ok(found)
+}
+
+/// [`fetch_linked`]'s query: `query { i0: issue(id: "RIP-412") { … } … }`.
+fn linked_query(identifiers: &[String]) -> String {
+    let fields: Vec<String> = identifiers
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let id = serde_json::Value::String(id.clone());
+            format!("i{i}: issue(id: {id}) {{ {LINKED_FIELDS} }}")
+        })
+        .collect();
+    format!("query {{ {} }}", fields.join(" "))
+}
+
+fn parse_linked(json: &serde_json::Value, count: usize) -> Result<Vec<LinkedIssue>, String> {
+    let Some(data) = json.get("data").filter(|d| d.is_object()) else {
+        return Err(graphql_error(json).unwrap_or_else(|| "Linear said nothing".into()));
+    };
+    Ok((0..count)
+        .filter_map(|i| data.get(format!("i{i}")))
+        .filter_map(LinkedIssue::from_json)
+        .collect())
+}
+
+/// The teams the key in `dir` can file into, each with its triage state.
+async fn fetch_teams(dir: &Path) -> Result<Vec<LinearTeam>, String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let json = graphql(
+        &key,
+        "query { teams { nodes { id key name triageEnabled states { nodes { id type } } } } }",
+        serde_json::json!({}),
+    )
+    .await?;
+    parse_teams(&json)
+}
+
+fn parse_teams(json: &serde_json::Value) -> Result<Vec<LinearTeam>, String> {
+    let Some(nodes) = json.pointer("/data/teams/nodes").and_then(|v| v.as_array()) else {
+        return Err(graphql_error(json).unwrap_or_else(|| "Linear listed no teams".into()));
+    };
+    let text = |v: &serde_json::Value, key: &str| {
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(nodes
+        .iter()
+        .map(|team| {
+            let triage = team
+                .get("triageEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let triage_state = team
+                .pointer("/states/nodes")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("triage"))
+                .map(|s| text(s, "id"))
+                .filter(|id| triage && !id.is_empty());
+            LinearTeam {
+                id: text(team, "id"),
+                key: text(team, "key"),
+                name: text(team, "name"),
+                triage_state,
+            }
+        })
+        .collect())
+}
+
+/// `draft` filed in `team` — into its Triage, set explicitly: an issue a
+/// team member makes through the API lands in the default state
+/// otherwise.
+async fn create_issue(
+    dir: &Path,
+    team: &LinearTeam,
+    draft: &IssueDraft,
+) -> Result<LinkedIssue, String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let mut input = serde_json::json!({
+        "teamId": team.id,
+        "title": draft.title,
+        "priority": draft.priority,
+        "description": draft.description,
+    });
+    if let Some(state) = &team.triage_state {
+        input["stateId"] = serde_json::Value::String(state.clone());
+    }
+    let json = graphql(
+        &key,
+        &format!(
+            "mutation($input: IssueCreateInput!) {{ issueCreate(input: $input) {{ success issue {{ {LINKED_FIELDS} }} }} }}"
+        ),
+        serde_json::json!({ "input": input }),
+    )
+    .await?;
+    mutation_result(&json, "issueCreate", "Linear did not create the issue")?;
+    json.pointer("/data/issueCreate/issue")
+        .and_then(LinkedIssue::from_json)
+        .ok_or_else(|| "Linear did not say which issue it made".into())
+}
+
+/// The team to file in: the remembered one, else the only one. None when
+/// there are several to pick from — or the remembered one is gone.
+fn pick_team(teams: &[LinearTeam], remembered: Option<&str>) -> Option<LinearTeam> {
+    if let Some(team) = remembered.and_then(|id| teams.iter().find(|t| t.id == id)) {
+        return Some(team.clone());
+    }
+    match teams {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Ask Linear, off the loop, how the issues the TODOS MODAL in `dir`
+/// links to stand now: they land as [`LinearAnswer::Linked`].
+pub(crate) fn request_linked(app: &mut App, dir: PathBuf, identifiers: Vec<String>) {
+    if identifiers.is_empty() {
+        return;
+    }
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let result = fetch_linked(&dir, &identifiers).await;
+        let _ = tx.send(LinearAnswer::Linked { dir, result });
+    });
+}
+
+/// Where **Create in Triage** files: a team the user just picked, or the
+/// one the list remembers (by id), if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamChoice {
+    Picked(LinearTeam),
+    Remembered(Option<String>),
+}
+
+/// The footer's line while **Create in Triage** waits on Linear.
+pub(crate) const CREATING: &str = "creating the issue in Linear…";
+
+/// **Create in Triage** for todo `item`, off the loop: the teams asked
+/// for unless one was picked, the issue made in the one [`pick_team`]
+/// finds — or, with several and none remembered, the teams sent back to
+/// pick from ([`LinearAnswer::Teams`]).
+pub(crate) fn create_for_todo(
+    app: &mut App,
+    dir: PathBuf,
+    item: u64,
+    draft: IssueDraft,
+    choice: TeamChoice,
+) {
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    // One create per todo at a time: a second Enter while Linear is
+    // still answering would file it twice.
+    if !app.todo_creates.insert((dir.clone(), item)) {
+        return;
+    }
+    app.flash = Some(crate::flash::Flash::working(CREATING));
+    tokio::spawn(async move {
+        let team = match choice {
+            TeamChoice::Picked(team) => team,
+            TeamChoice::Remembered(remembered) => match fetch_teams(&dir).await {
+                Err(err) => {
+                    let _ = tx.send(LinearAnswer::Teams {
+                        dir,
+                        item,
+                        result: Err(err),
+                    });
+                    return;
+                }
+                Ok(teams) => match pick_team(&teams, remembered.as_deref()) {
+                    Some(team) => team,
+                    None => {
+                        let _ = tx.send(LinearAnswer::Teams {
+                            dir,
+                            item,
+                            result: Ok(teams),
+                        });
+                        return;
+                    }
+                },
+            },
+        };
+        let result = create_issue(&dir, &team, &draft).await;
+        let _ = tx.send(LinearAnswer::Created {
+            dir,
+            item,
+            team,
+            result,
+        });
+    });
+}
+
 /// A mutation's answer: `Ok` when `data.<field>.success` is true, else
 /// Linear's own error, else `refused`.
 fn mutation_result(json: &serde_json::Value, field: &str, refused: &str) -> Result<(), String> {
@@ -2355,20 +2739,28 @@ fn tag_at(value: &serde_json::Value) -> Option<LinearTag> {
     (!name.is_empty()).then_some(LinearTag { name, color })
 }
 
+/// The string at `path` in an answer's node, or empty.
+fn json_text(value: &serde_json::Value, path: &str) -> String {
+    value
+        .pointer(path)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A node's `priority`, on Linear's 0–4 scale whatever it says.
+fn json_priority(value: &serde_json::Value) -> u8 {
+    value
+        .get("priority")
+        .and_then(|p| p.as_u64())
+        .unwrap_or(0)
+        .min(4) as u8
+}
+
 fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
-    let text = |path: &str| {
-        value
-            .pointer(path)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
+    let text = |path: &str| json_text(value, path);
     Some(LinearIssue {
-        priority: value
-            .get("priority")
-            .and_then(|p| p.as_u64())
-            .unwrap_or(0)
-            .min(4) as u8,
+        priority: json_priority(value),
         state_color: text("/state/color"),
         labels: value
             .pointer("/labels/nodes")
@@ -3778,5 +4170,367 @@ pub(crate) mod tests {
         );
         assert_eq!(short_date("", oct_2026), None);
         assert_eq!(short_date("2026-13-01T00:00:00Z", oct_2026), None);
+    }
+
+    // ---- the TODOS MODAL's Linear ----
+
+    /// A project with a key, its todo list one `Emails` group holding a
+    /// high-priority `run plan`, and the TODOS MODAL up on it, the cursor
+    /// on the item — with Linear's answers coming back on the channel.
+    fn todo_app() -> (
+        App,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+        u64,
+    ) {
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, dir) = app_on(&[(".env", &line)]);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        let mut file = crate::todos::TodoFile::new(dir.path());
+        let group = file.add_group(None, "Emails");
+        let item = file.add_item(group, "run plan", crate::todos::today());
+        file.item_mut(item).unwrap().priority = 2;
+        app.todos.insert(dir.path().into(), file);
+        app.overlay = Some(Overlay::Todos(crate::todos::TodoView::new(
+            ProjectId("p1".into()),
+            "demo".into(),
+            dir.path().into(),
+        )));
+        press(&mut app, plain(KeyCode::Down));
+        (app, dir, rx, item)
+    }
+
+    fn todo_item(app: &App, dir: &tempfile::TempDir, item: u64) -> crate::todos::Item {
+        app.todos[dir.path()].item(item).unwrap().clone()
+    }
+
+    fn todo_view(app: &App) -> &crate::todos::TodoView {
+        match &app.overlay {
+            Some(Overlay::Todos(view)) => view,
+            _ => panic!("not the todos modal"),
+        }
+    }
+
+    /// Land every answer Linear sends until `done` says the flow is over.
+    fn run_linear(
+        app: &mut App,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+        act: impl FnOnce(&mut App),
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            act(app);
+            let answer = rx.recv().await.expect("an answer");
+            land_answer(app, answer);
+        });
+    }
+
+    fn cmd(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SUPER)
+    }
+
+    /// The issue Linear makes, as `issueCreate` answers.
+    fn created_issue() -> serde_json::Value {
+        serde_json::json!({"data": {"issueCreate": {"success": true, "issue": {
+            "identifier": "RIP-431", "url": "https://linear.app/x/issue/RIP-431",
+            "state": {"name": "Triage", "type": "triage", "color": "#fc7840"}, "priority": 2
+        }}}})
+    }
+
+    /// `⌘L` → **Create in Triage**: the one team's triage state set on
+    /// the issue, the item's priority and where it came from with it, and
+    /// the item linked to what Linear made — the team remembered.
+    #[test]
+    fn create_in_triage_files_the_todo_and_links_it() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        press(&mut app, cmd('l'));
+        let pick = todo_view(&app).pick.clone().expect("the menu");
+        assert_eq!(
+            pick.kind,
+            crate::todos::view::PickKind::Menu(vec![
+                crate::todos::view::MenuAction::Create,
+                crate::todos::view::MenuAction::Link,
+            ])
+        );
+        crate::hints::assert_hints_from(
+            &crate::todos::view::hints(todo_view(&app)),
+            crate::todos::view::keys::ALL,
+        );
+        let sent = with_graphql_stub(
+            |key, query| {
+                assert_eq!(key, FAKE_KEY);
+                if query.contains("teams") {
+                    return Ok(serde_json::json!({"data": {"teams": {"nodes": [
+                        {"id": "t1", "key": "RIP", "name": "Riplo", "triageEnabled": true,
+                         "states": {"nodes": [{"id": "s-todo", "type": "unstarted"}, {"id": "s-triage", "type": "triage"}]}}
+                    ]}}}));
+                }
+                assert!(query.contains("issueCreate"), "{query}");
+                Ok(created_issue())
+            },
+            || {
+                run_linear(&mut app, &mut rx, |app| {
+                    press(app, plain(KeyCode::Enter));
+                });
+                graphql_sent()
+            },
+        );
+        let input = &sent[1]["input"];
+        assert_eq!(input["teamId"], "t1");
+        assert_eq!(input["stateId"], "s-triage");
+        assert_eq!(input["priority"], 2);
+        assert_eq!(input["title"], "run plan");
+        assert_eq!(input["description"], "From orion todos · Emails");
+        assert_eq!(
+            todo_item(&app, &dir, item).linear.as_deref(),
+            Some("RIP-431")
+        );
+        assert_eq!(app.todos[dir.path()].linear_team.as_deref(), Some("t1"));
+        assert_eq!(app.flash.as_deref(), Some("Created RIP-431 in Triage"));
+        assert!(todo_view(&app).linked.contains_key("RIP-431"));
+    }
+
+    /// A team that takes no issues into Triage gets the issue in its
+    /// default state, no `stateId` sent, and the footer says so.
+    #[test]
+    fn a_team_without_triage_gets_no_state_id() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        let sent = with_graphql_stub(
+            |_, query| {
+                if query.contains("teams") {
+                    return Ok(serde_json::json!({"data": {"teams": {"nodes": [
+                        {"id": "t1", "key": "RIP", "name": "Riplo", "triageEnabled": false,
+                         "states": {"nodes": [{"id": "s-todo", "type": "unstarted"}]}}
+                    ]}}}));
+                }
+                Ok(created_issue())
+            },
+            || {
+                run_linear(&mut app, &mut rx, |app| {
+                    press(app, cmd('l'));
+                    press(app, plain(KeyCode::Enter));
+                });
+                graphql_sent()
+            },
+        );
+        assert!(sent[1]["input"].get("stateId").is_none(), "{sent:?}");
+        assert_eq!(
+            todo_item(&app, &dir, item).linear.as_deref(),
+            Some("RIP-431")
+        );
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("Linear: Riplo has no Triage — created RIP-431 in its default state")
+        );
+    }
+
+    /// Several teams and none remembered: they come back to pick from, and
+    /// the one picked is where the issue goes — and is remembered.
+    #[test]
+    fn several_teams_are_picked_from() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        with_graphql_stub(
+            |_, query| {
+                if query.contains("teams") {
+                    return Ok(serde_json::json!({"data": {"teams": {"nodes": [
+                        {"id": "t1", "key": "ENG", "name": "Eng", "triageEnabled": false, "states": {"nodes": []}},
+                        {"id": "t2", "key": "RIP", "name": "Riplo", "triageEnabled": true,
+                         "states": {"nodes": [{"id": "s-triage", "type": "triage"}]}}
+                    ]}}}));
+                }
+                Ok(created_issue())
+            },
+            || {
+                run_linear(&mut app, &mut rx, |app| {
+                    press(app, cmd('l'));
+                    press(app, plain(KeyCode::Enter));
+                });
+                let pick = todo_view(&app).pick.clone().expect("the team pick");
+                assert!(
+                    matches!(pick.kind, crate::todos::view::PickKind::Team(ref t) if t.len() == 2)
+                );
+                run_linear(&mut app, &mut rx, |app| {
+                    press(app, plain(KeyCode::Down));
+                    press(app, plain(KeyCode::Enter));
+                });
+                let sent = graphql_sent();
+                assert_eq!(sent.last().unwrap()["input"]["teamId"], "t2");
+            },
+        );
+        assert_eq!(app.todos[dir.path()].linear_team.as_deref(), Some("t2"));
+        assert_eq!(
+            todo_item(&app, &dir, item).linear.as_deref(),
+            Some("RIP-431")
+        );
+    }
+
+    /// The linked issues are asked about in one aliased query; one done in
+    /// Linear ticks its todo — and only that way: the chip says the rest.
+    #[test]
+    fn a_linked_issue_done_in_linear_ticks_its_todo() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        app.todos
+            .get_mut(dir.path())
+            .unwrap()
+            .item_mut(item)
+            .unwrap()
+            .linear = Some("RIP-412".into());
+        with_graphql_stub(
+            |_, query| {
+                assert!(query.contains(r#"i0: issue(id: "RIP-412")"#), "{query}");
+                Ok(serde_json::json!({"data": {"i0": {
+                    "identifier": "RIP-412", "url": "https://linear.app/x/issue/RIP-412",
+                    "state": {"name": "Done", "type": "completed", "color": "#5e6ad2"}, "priority": 2
+                }}}))
+            },
+            || {
+                run_linear(&mut app, &mut rx, |app| {
+                    press(app, cmd('r'));
+                });
+            },
+        );
+        assert!(todo_item(&app, &dir, item).done.is_some(), "ticked");
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("ticked RIP-412 — done in Linear")
+        );
+        assert_eq!(todo_view(&app).linked["RIP-412"].state, "Done");
+        // Unticked by hand, it stays open: the issue was done already.
+        app.todos
+            .get_mut(dir.path())
+            .unwrap()
+            .item_mut(item)
+            .unwrap()
+            .done = None;
+        app.flash = None;
+        with_graphql_stub(
+            |_, _| {
+                Ok(serde_json::json!({"data": {"i0": {
+                    "identifier": "RIP-412", "url": "u",
+                    "state": {"name": "Done", "type": "completed", "color": ""}, "priority": 2
+                }}}))
+            },
+            || run_linear(&mut app, &mut rx, |app| press(app, cmd('r'))),
+        );
+        assert!(
+            todo_item(&app, &dir, item).done.is_none(),
+            "the untick sticks"
+        );
+        assert!(app.flash.is_none());
+    }
+
+    /// One linked issue Linear cannot find nulls the whole aliased answer;
+    /// each is then asked alone, and the one that is there still lands.
+    #[test]
+    fn a_missing_linked_issue_does_not_hide_the_rest() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        let file = app.todos.get_mut(dir.path()).unwrap();
+        file.item_mut(item).unwrap().linear = Some("RIP-1".into());
+        let g = file.groups[0].id;
+        let gone = file.add_item(g, "gone", crate::todos::today());
+        file.item_mut(gone).unwrap().linear = Some("RIP-2".into());
+        with_graphql_stub(
+            |_, query| {
+                if query.contains("RIP-2") {
+                    return Ok(serde_json::json!({"data": null,
+                        "errors": [{"message": "Entity not found: Issue"}]}));
+                }
+                Ok(serde_json::json!({"data": {"i0": {
+                    "identifier": "RIP-1", "url": "u",
+                    "state": {"name": "Todo", "type": "unstarted", "color": ""}, "priority": 0
+                }}}))
+            },
+            || run_linear(&mut app, &mut rx, |app| press(app, cmd('r'))),
+        );
+        let linked = &todo_view(&app).linked;
+        assert!(linked.contains_key("RIP-1"), "{linked:?}");
+        assert!(!linked.contains_key("RIP-2"));
+        assert!(app.flash.is_none(), "{:?}", app.flash);
+    }
+
+    /// While an item's issue is being made, its menu offers no second
+    /// Create, and nothing more is sent.
+    #[test]
+    fn create_in_triage_is_not_sent_twice() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        with_graphql_stub(
+            |_, query| {
+                if query.contains("teams") {
+                    return Ok(serde_json::json!({"data": {"teams": {"nodes": [
+                        {"id": "t1", "key": "RIP", "name": "Riplo", "triageEnabled": false,
+                         "states": {"nodes": []}}
+                    ]}}}));
+                }
+                Ok(created_issue())
+            },
+            || {
+                run_linear(&mut app, &mut rx, |app| {
+                    press(app, cmd('l'));
+                    press(app, plain(KeyCode::Enter));
+                    assert!(app.todo_creates.contains(&(dir.path().into(), item)));
+                    press(app, cmd('l'));
+                    assert_eq!(
+                        todo_view(app).pick.as_ref().map(|p| p.kind.clone()),
+                        Some(crate::todos::view::PickKind::Menu(vec![
+                            crate::todos::view::MenuAction::Link
+                        ]))
+                    );
+                    press(app, plain(KeyCode::Esc));
+                });
+            },
+        );
+        assert!(app.todo_creates.is_empty(), "answered");
+        assert!(rx.try_recv().is_err(), "one create only");
+    }
+
+    /// **Link existing…** opens this list to pick from — `Enter link to
+    /// todo` — and Enter goes back to the TODOS MODAL with the item linked
+    /// to the issue under the cursor; Esc goes back with nothing linked.
+    #[test]
+    fn link_existing_round_trips_through_the_linear_view() {
+        let (mut app, dir, _rx, item) = todo_app();
+        // Nothing asked of Linear here: the list is already in.
+        app.linear_tx = None;
+        app.linear.insert(
+            ProjectId("p1".into()),
+            LinearList {
+                list: vec![issue("1", "ENG-1", "Login")],
+                ..Default::default()
+            },
+        );
+        let to_linear = |app: &mut App| {
+            press(app, cmd('l'));
+            press(app, plain(KeyCode::Down));
+            press(app, plain(KeyCode::Enter));
+            let Some(Overlay::Linear(view)) = &app.overlay else {
+                panic!("the Linear view");
+            };
+            assert!(matches!(view.mode, LinearMode::Link { .. }));
+            assert!(hints(view).iter().any(|h| h.does == "link to todo"));
+        };
+        to_linear(&mut app);
+        press(&mut app, plain(KeyCode::Esc));
+        assert!(todo_view(&app).pick.is_none());
+        assert_eq!(todo_item(&app, &dir, item).linear, None);
+        to_linear(&mut app);
+        press(&mut app, plain(KeyCode::Enter));
+        assert_eq!(todo_item(&app, &dir, item).linear.as_deref(), Some("ENG-1"));
+        assert!(todo_view(&app).linked.contains_key("ENG-1"));
+        // Linked, the menu offers the browser and the way back out.
+        press(&mut app, cmd('l'));
+        assert_eq!(
+            todo_view(&app).pick.as_ref().map(|p| p.kind.clone()),
+            Some(crate::todos::view::PickKind::Menu(vec![
+                crate::todos::view::MenuAction::Browser,
+                crate::todos::view::MenuAction::Unlink,
+            ]))
+        );
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Enter));
+        assert_eq!(todo_item(&app, &dir, item).linear, None, "unlinked");
     }
 }

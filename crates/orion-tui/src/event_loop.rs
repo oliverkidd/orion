@@ -3345,6 +3345,10 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     if matches!(&app.overlay, Some(Overlay::Linear(_))) {
         return crate::linear::paste(app, text);
     }
+    // A list pasted into the TODOS MODAL is added to it (`todos::import`).
+    if matches!(&app.overlay, Some(Overlay::Todos(_))) {
+        return crate::todos::paste(app, text);
+    }
     if matches!(&app.overlay, Some(Overlay::Skills(_))) {
         return crate::skills::paste(app, text);
     }
@@ -4120,6 +4124,7 @@ fn dispatch_action(
         Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
+        Action::Todos => crate::todos::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
@@ -6487,13 +6492,19 @@ fn open_delete_worktree_confirm(app: &mut App) {
 /// rebound onto a bare key keeps that key a modal's own.
 /// The modals whose remove verb is `⌘W` — the PULL REQUESTS MODAL's close,
 /// the SKILLS BROWSER's trash, the AGENT PRESETS list's delete, each behind
-/// its own confirm — up with nothing over them: `⌘W` is theirs.
+/// its own confirm, and the TODOS MODAL's delete — up with nothing over
+/// them: `⌘W` is theirs.
 fn modal_takes_cmd_w(app: &App) -> bool {
     app.vim.is_none()
         && app.page.is_none()
         && matches!(
             app.overlay,
-            Some(Overlay::PullRequests(_) | Overlay::Skills(_) | Overlay::AgentPresets(_))
+            Some(
+                Overlay::PullRequests(_)
+                    | Overlay::Skills(_)
+                    | Overlay::AgentPresets(_)
+                    | Overlay::Todos(_)
+            )
         )
 }
 
@@ -7378,6 +7389,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
+        Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
@@ -9655,6 +9667,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                     .with_issue(back.launch.issue.clone())
                     .with_pr(back.launch.pr.clone())
                     .with_linear(back.launch.linear.clone())
+                    .with_todo(back.launch.todo.clone())
                     // The Claude row's `Tab` toggle rides the pick: the box
                     // comes back a CLAUDE CLOUD one, where it can be one.
                     .with_cloud(cloud)
@@ -10057,16 +10070,14 @@ fn carry_open_band(app: &mut App, left: Option<ProjectId>) {
     app.launcher_expanded = now.and_then(|pid| app.launcher_open_bands.get(&pid).cloned());
 }
 
-/// Land the panel selections on a `/` palette pick. A project or worktree
-/// pick moves the selection (restoring remembered child rows, like a manual
-/// switch), then hands focus to the next visible child panel, since picking
-/// either by name is a step towards one of its children, not an errand in
-/// the column it names. A session pick with `attach` opens
-/// it immediately, exactly like Enter on its row; without, it only lands
-/// on the row in the Sessions panel, previewing like ↑/↓ there. Targets
-/// are re-validated against the
-/// tree — a pick can race a removal, in which case it flashes instead of
-/// jumping.
+/// Close the overlay and land on session `id` as the palette does a
+/// session's row — the cursor on it, the pane reading it: the TODOS
+/// MODAL's way to the agent it sent at an item.
+pub(crate) fn jump_to_session(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
+    app.overlay = None;
+    jump_to_target(app, PaletteTarget::Session(id), Landing::FocusOnly, out);
+}
+
 /// Land the palette/finder on `target`, attaching without the debounce —
 /// the user typed a query and picked a row, which is as explicit as it gets.
 fn jump_to_target(
@@ -10079,6 +10090,16 @@ fn jump_to_target(
     fire_pending_attach(app, out);
 }
 
+/// Land the panel selections on a `/` palette pick. A project or worktree
+/// pick moves the selection (restoring remembered child rows, like a manual
+/// switch), then hands focus to the next visible child panel, since picking
+/// either by name is a step towards one of its children, not an errand in
+/// the column it names. A session pick with `attach` opens
+/// it immediately, exactly like Enter on its row; without, it only lands
+/// on the row in the Sessions panel, previewing like ↑/↓ there. Targets
+/// are re-validated against the
+/// tree — a pick can race a removal, in which case it flashes instead of
+/// jumping.
 fn jump_to_target_inner(
     app: &mut App,
     target: PaletteTarget,
@@ -10854,6 +10875,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         placeholder,
         follow,
         mode,
+        todo,
     } = draft;
     // A PR SESSION is addressed to the PROJECT, not to a checkout: the
     // DAEMON runs it in the PR head branch's own worktree, creating that
@@ -10953,6 +10975,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     let cloud = cloud_prompt.is_some();
     let with_first_prompt = starting_prompt.is_some();
     let req_id = app.alloc_req_id(intent);
+    if let Some(todo) = todo {
+        app.todo_pending.insert(req_id, todo);
+    }
     // The second half of a launch the user already navigated away from:
     // its Ack leaves the cursors where they are, as the first half's did.
     if !follow {
@@ -12202,6 +12227,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::linear::handle_mouse(app, mouse, mouse_pos, out);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::Todos(_))) {
+        crate::todos::handle_mouse(app, mouse, mouse_pos, out);
+        return;
+    }
     if matches!(&app.overlay, Some(Overlay::Skills(_))) {
         crate::skills::handle_mouse(app, mouse, mouse_pos);
         return;
@@ -12993,6 +13022,12 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // real ones, and nothing below moves a cursor, the pane or
             // FOCUS back to them.
             let follow = !app.left_behind.remove(&req_id);
+            // A session sent at a TODO is written onto the item.
+            if let Some(todo) = app.todo_pending.remove(&req_id) {
+                if let Some(EntityId::Agent(id)) = &created {
+                    crate::todos::agent_started(app, todo, id);
+                }
+            }
             match (app.pending.remove(&req_id), created) {
                 (Some(PendingIntent::AttachCreated { focus, placeholder }), Some(id)) => {
                     attach_created(app, id, focus, placeholder, follow, out);
@@ -13203,6 +13238,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             // failed Cloud launch reopens its populated task editor.
             if let Some(id) = &req_id {
                 app.left_behind.remove(id);
+                app.todo_pending.remove(id);
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
@@ -37868,6 +37904,14 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "Todos",
+                |app| {
+                    seed_tree(app);
+                    run_action(app, crate::keymap::Action::Todos);
+                },
+                None,
+            ),
+            (
                 "BranchSwitch",
                 |app| {
                     seed_tree(app);
@@ -38090,6 +38134,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
             Overlay::Autofix(_) => "Autofix",
+            Overlay::Todos(_) => "Todos",
         }
     }
 
@@ -38118,7 +38163,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
         });
     }
 
@@ -39240,6 +39285,559 @@ diff --git a/src/c.rs b/src/c.rs
                 "{:?}",
                 c.action
             );
+        });
+    }
+
+    // ---- the TODOS MODAL ----
+
+    /// 10am on Tuesday 6 October, or `d` October, local.
+    fn todo_clock(d: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, 10, d, 10, 0, 0)
+            .unwrap()
+    }
+
+    fn todo_view(app: &App) -> &crate::todos::TodoView {
+        match &app.overlay {
+            Some(Overlay::Todos(view)) => view,
+            other => panic!(
+                "not the todos modal: {:?}",
+                other.as_ref().map(overlay_label)
+            ),
+        }
+    }
+
+    fn todo_file(app: &App) -> &crate::todos::TodoFile {
+        &app.todos[std::path::Path::new("/tmp/demo")]
+    }
+
+    fn draw_todos(app: &mut App) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, app)).unwrap();
+        terminal
+    }
+
+    /// The modal up on the seeded project, `list` pasted into it.
+    fn todos_with(list: &str) -> App {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        press(
+            &mut app,
+            KeyCode::Char('i'),
+            KeyModifiers::SUPER,
+            &mut Vec::new(),
+        );
+        assert!(paste_into_overlay(&mut app, list));
+        app
+    }
+
+    const TWO_EMAILS: &str = "- Emails\n    - run plan\n    - setup resend\n- UI\n    - chips\n";
+
+    /// `⌘I` opens the TODOS MODAL on the selected project's checkout, and
+    /// `^Q` — its twin on the grid — does too.
+    #[test]
+    fn cmd_i_opens_the_selected_projects_todos() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
+        let view = todo_view(&app);
+        assert_eq!(view.project.0, "p1");
+        assert_eq!(view.dir, std::path::PathBuf::from("/tmp/demo"));
+        assert!(app.todos.contains_key(std::path::Path::new("/tmp/demo")));
+        app.overlay = None;
+        press(
+            &mut app,
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        todo_view(&app);
+    }
+
+    /// The pasted list is groups and items: the fixture's five groups and
+    /// 29 items, drawn under their headers.
+    #[test]
+    fn pasting_a_list_into_todos_adds_its_groups() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut app = todos_with(crate::todos::import::tests::FIXTURE);
+            let file = todo_file(&app);
+            let tops: Vec<&str> = file.subgroups(None).map(|g| g.name.as_str()).collect();
+            assert_eq!(
+                tops,
+                ["Emails", "link sharing", "UI", "MCP fixes", "Side quests"]
+            );
+            assert_eq!(file.items.len(), 29);
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("added 29 items from the pasted list")
+            );
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("▾ Emails"), "{text}");
+            assert!(text.contains("Today 29"), "{text}");
+            assert!(text.contains("setup templates"), "{text}");
+        });
+    }
+
+    /// An item's chips: the agent sent at it while its session is there,
+    /// its Linear issue — in the state the LINEAR VIEW last read it in —
+    /// and how many days it has carried over.
+    #[test]
+    fn a_todo_row_draws_its_chips() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut app = App::new();
+            seed_tree(&mut app);
+            let mut issue = crate::linear::tests::issue("1", "RIP-412", "Run plan");
+            issue.status = "In Progress".into();
+            issue.status_type = "started".into();
+            app.linear.insert(
+                orion_core::ProjectId("p1".into()),
+                crate::linear::LinearList {
+                    list: vec![issue],
+                    ..Default::default()
+                },
+            );
+            let mut file = crate::todos::TodoFile::new(std::path::Path::new("/tmp/demo"));
+            let g = file.add_group(None, "Emails");
+            let id = file.add_item(g, "run plan", todo_clock(4).date_naive());
+            let item = file.item_mut(id).unwrap();
+            item.agent = Some("a1".into());
+            item.linear = Some("RIP-412".into());
+            app.todos.insert("/tmp/demo".into(), file);
+            run_action(&mut app, crate::keymap::Action::Todos);
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("● agent"), "{text}");
+            assert!(text.contains("◑ RIP-412 In Progress"), "{text}");
+            assert!(text.contains("2d"), "{text}");
+            // The session gone, its chip goes with it.
+            app.tree.agents.clear();
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(!text.contains("● agent"), "{text}");
+        });
+    }
+
+    /// `space` ticks the item under the cursor: its box ticked and its
+    /// text struck through, its header counting it done today. The next
+    /// day it is gone from Today and in the Log under the day it was done.
+    #[test]
+    fn a_ticked_todo_strikes_through_then_moves_to_the_log() {
+        let mut out = Vec::new();
+        let mut app = crate::todos::with_now(todo_clock(6), || {
+            let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            let terminal = draw_todos(&mut app);
+            let text = buffer_text(&terminal);
+            assert!(text.contains("☑"), "{text}");
+            assert!(text.contains("✓ 1 today"), "{text}");
+            assert!(text.contains("1 open"), "{text}");
+            let (x, y) = find_cell(&terminal, "run plan");
+            let cell = &terminal.backend().buffer()[(x, y)];
+            assert!(cell
+                .modifier
+                .contains(ratatui::style::Modifier::CROSSED_OUT));
+            // The tick lands at the bottom of its group, and the cursor
+            // stays on its row: the next item is under it.
+            let view = todo_view(&app);
+            assert!(matches!(
+                view.cursor,
+                Some(crate::todos::view::Entry::Item { .. })
+            ));
+            app
+        });
+        crate::todos::with_now(todo_clock(7), || {
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(!text.contains("run plan"), "{text}");
+            assert!(text.contains("setup resend"), "{text}");
+            assert!(text.contains("1d"), "an item carried over says so: {text}");
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            assert_eq!(todo_view(&app).tab, crate::todos::view::TodoTab::Log);
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("Tue 6 Oct · 1 done"), "{text}");
+            assert!(text.contains("run plan"), "{text}");
+            assert!(text.contains("Emails"), "its group beside it: {text}");
+            // `space` on the log unticks it: back on Today, open.
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
+        });
+    }
+
+    /// `←` folds the group — from an item too, the cursor going up to its
+    /// header — and the folded header still counts what is in it; `→`
+    /// opens it again.
+    #[test]
+    fn left_and_right_fold_a_todo_group() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(todo_file(&app).groups[0].collapsed);
+            assert!(matches!(
+                todo_view(&app).cursor,
+                Some(crate::todos::view::Entry::Header { .. })
+            ));
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("▸ Emails"), "{text}");
+            assert!(text.contains("2 open"), "{text}");
+            assert!(!text.contains("run plan"), "{text}");
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert!(!todo_file(&app).groups[0].collapsed);
+            assert!(buffer_text(&draw_todos(&mut app)).contains("run plan"));
+        });
+    }
+
+    /// Typing filters the items, the headers over the ones it finds kept.
+    #[test]
+    fn typing_filters_todos_and_keeps_their_headers() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            for c in "resend".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("▾ Emails"), "{text}");
+            assert!(text.contains("setup resend"), "{text}");
+            assert!(!text.contains("run plan"), "{text}");
+            assert!(!text.contains("chips"), "{text}");
+            // Esc clears the filter first, then closes.
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(todo_view(&app).query.is_empty());
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none());
+        });
+    }
+
+    /// `⌘N` opens a field in the cursor's group and Enter adds the item —
+    /// the field staying open for the next; `⌘2` makes it high, and it
+    /// sorts to the top, a second `⌘2` taking it off; `⌘I` renames; `⌘W` deletes, a group with items
+    /// only on a second press. Each change is on disk at once.
+    #[test]
+    fn todo_items_are_added_prioritised_renamed_and_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::todos::store::with_dir(dir.path().to_path_buf(), || {
+            crate::todos::with_now(todo_clock(6), || {
+                let mut out = Vec::new();
+                let mut app = todos_with(TWO_EMAILS);
+                let cmd = |app: &mut App, c: char, out: &mut Vec<ClientRequest>| {
+                    press(app, KeyCode::Char(c), KeyModifiers::SUPER, out)
+                };
+                cmd(&mut app, 'n', &mut out);
+                for c in "new one".chars() {
+                    press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+                }
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(todo_view(&app).input.is_some(), "ready for the next");
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                let file = todo_file(&app);
+                let emails = file.groups[0].id;
+                let added = file.items.iter().find(|i| i.text == "new one").unwrap();
+                assert_eq!(added.group, emails);
+
+                // Onto it, and high.
+                for _ in 0..3 {
+                    press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+                }
+                cmd(&mut app, '2', &mut out);
+                let first = todo_file(&app).today_items(emails, crate::todos::today())[0].clone();
+                assert_eq!((first.text.as_str(), first.priority), ("new one", 2));
+                assert!(matches!(
+                    todo_view(&app).cursor,
+                    Some(crate::todos::view::Entry::Item { id, .. }) if id == first.id
+                ));
+
+                // Its own priority again takes it off — and back.
+                let priority = |app: &App| todo_file(app).item(first.id).map(|i| i.priority);
+                cmd(&mut app, '2', &mut out);
+                assert_eq!(priority(&app), Some(0));
+                cmd(&mut app, '2', &mut out);
+                assert_eq!(priority(&app), Some(2));
+
+                cmd(&mut app, 'i', &mut out);
+                press(&mut app, KeyCode::Char('!'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(todo_file(&app).items.iter().any(|i| i.text == "new one!"));
+
+                cmd(&mut app, 'w', &mut out);
+                assert!(!todo_file(&app).items.iter().any(|i| i.text == "new one!"));
+
+                // On the header: asked first, then gone with its items.
+                press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+                cmd(&mut app, 'w', &mut out);
+                assert_eq!(todo_view(&app).confirm_delete, Some(emails));
+                let text = buffer_text(&draw_todos(&mut app));
+                assert!(text.contains("delete Emails and its 2 items?"), "{text}");
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(todo_file(&app).group(emails).is_none());
+                assert_eq!(todo_file(&app).items.len(), 1);
+
+                // What is on disk is what the modal shows.
+                let path =
+                    crate::todos::store::path_for(std::path::Path::new("/tmp/demo")).unwrap();
+                let saved: crate::todos::TodoFile =
+                    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                assert_eq!(&saved, todo_file(&app));
+            });
+        });
+    }
+
+    /// `Enter` on a todo opens the QUICK PROMPT over the TODOS MODAL, the
+    /// item's text and group in the box and the launch carrying the todo;
+    /// `⇧Tab` is the AGENT PRESETS for it.
+    #[test]
+    fn enter_on_a_todo_opens_the_box_over_the_modal() {
+        with_seeded_presets(|| {
+            crate::todos::with_now(todo_clock(6), || {
+                let mut out = Vec::new();
+                let mut app = todos_with(TWO_EMAILS);
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+                let id = todo_file(&app).items[0].id;
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                    panic!("the box");
+                };
+                assert_eq!(prompt.input.as_str(), "run plan\n\nContext: todo in Emails");
+                let PromptKind::QuickPrompt(launch) = &prompt.kind else {
+                    panic!("a quick prompt");
+                };
+                assert!(matches!(
+                    launch.under,
+                    Some(crate::quick_prompt::ModalUnder::Todos(_))
+                ));
+                assert_eq!(launch.todo.as_ref().map(|t| t.item), Some(id));
+                assert!(matches!(
+                    launch.target,
+                    crate::quick_prompt::QuickTarget::NewWorktree { .. }
+                ));
+                // The launch's create carries the todo with it.
+                let draft = quick_launch::draft(
+                    launch.clone(),
+                    orion_core::WorktreeId("w1".into()),
+                    "go".into(),
+                    false,
+                    None,
+                );
+                assert_eq!(draft.todo.map(|t| t.item), Some(id));
+                // Esc goes back to the modal.
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                todo_view(&app);
+
+                press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
+                assert!(
+                    matches!(app.overlay, Some(Overlay::AgentPresets(_))),
+                    "the presets"
+                );
+            });
+        });
+    }
+
+    /// The create's Ack writes the session onto the todo: its row shows
+    /// `● agent`, and `Enter` — or a click on the chip — jumps to it. A
+    /// refused create forgets the todo.
+    #[test]
+    fn a_session_sent_at_a_todo_is_remembered_on_it() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            let id = todo_file(&app).items[0].id;
+            let todo = crate::todos::TodoRef {
+                repo_path: "/tmp/demo".into(),
+                item: id,
+                issue_url: None,
+            };
+            let launch = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                out.clear();
+                create_agent(
+                    app,
+                    AgentLaunchDraft {
+                        todo: Some(todo.clone()),
+                        ..AgentLaunchDraft::new(
+                            orion_core::WorktreeId("w1".into()),
+                            orion_core::AgentKind::Claude,
+                            None,
+                            None,
+                        )
+                    },
+                    out,
+                );
+                match out.as_slice() {
+                    [ClientRequest::CreateAgent { req_id, .. }, ..] => *req_id,
+                    other => panic!("no create: {other:?}"),
+                }
+            };
+            let refused = launch(&mut app, &mut out);
+            hse(
+                &mut app,
+                ServerEvent::Error {
+                    req_id: Some(refused),
+                    message: "no".into(),
+                },
+            );
+            assert!(app.todo_pending.is_empty());
+
+            let req_id = launch(&mut app, &mut out);
+            hse(
+                &mut app,
+                ServerEvent::Ack {
+                    req_id,
+                    created: Some(EntityId::Agent(AgentId("a1".into()))),
+                },
+            );
+            assert_eq!(todo_file(&app).items[0].agent.as_deref(), Some("a1"));
+            app.overlay = None;
+            press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
+            let terminal = draw_todos(&mut app);
+            assert!(buffer_text(&terminal).contains("● agent"));
+            let (x, y) = find_cell(&terminal, "● agent");
+            click(&mut app, x, y, &mut out);
+            assert!(app.overlay.is_none(), "the chip jumps to the session");
+
+            press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none(), "Enter jumps to it too");
+            assert_eq!(app.selected_session().map(|a| a.id.0), Some("a1".into()));
+        });
+    }
+
+    /// A box parked from another todo — or from no todo — is not this
+    /// item's: the box opens on the item's own task, and the parked draft
+    /// stays parked for its own box. One parked from this very item comes
+    /// back as it was left.
+    #[test]
+    fn a_draft_parked_for_another_todo_does_not_replace_the_task() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("the box");
+            };
+            let PromptKind::QuickPrompt(run_plan) = prompt.kind.clone() else {
+                panic!("a quick prompt");
+            };
+            let mut other = run_plan.clone();
+            other.todo.as_mut().unwrap().item += 1;
+            assert!(!run_plan.aimed_like(&other), "another todo is another aim");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            let park = |app: &mut App, launch: &crate::quick_prompt::QuickLaunch| {
+                app.quick_draft = Some(crate::quick_prompt::QuickDraft {
+                    launch: launch.clone(),
+                    input: TextInput::multiline_with_text("words for elsewhere"),
+                });
+            };
+            park(&mut app, &other);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("the box");
+            };
+            assert_eq!(prompt.input.as_str(), "run plan\n\nContext: todo in Emails");
+            assert_eq!(
+                app.quick_draft.as_ref().map(|d| d.input.as_str()),
+                Some("words for elsewhere"),
+                "still parked"
+            );
+            app.quick_draft = None;
+            app.overlay = None;
+            press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            park(&mut app, &run_plan);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("the box");
+            };
+            assert_eq!(
+                prompt.input.as_str(),
+                "words for elsewhere",
+                "its own draft"
+            );
+        });
+    }
+
+    /// With a filter typed, a space is the filter's — nothing is ticked.
+    #[test]
+    fn space_types_into_a_todo_filter() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            for c in "run p".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
+            assert_eq!(todo_view(&app).query.as_str(), "run p");
+            assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
+        });
+    }
+
+    /// The footer counts what the paste added: the same list again adds
+    /// nothing. A paste while the menu or the delete question is up adds
+    /// nothing either.
+    #[test]
+    fn a_todo_paste_counts_what_it_added() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            assert!(paste_into_overlay(&mut app, TWO_EMAILS));
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("added 0 items from the pasted list")
+            );
+            assert_eq!(todo_file(&app).items.len(), 3);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('l'), KeyModifiers::SUPER, &mut out);
+            assert!(todo_view(&app).pick.is_some());
+            assert!(paste_into_overlay(&mut app, "- New\n    - thing\n"));
+            assert_eq!(todo_file(&app).items.len(), 3, "the menu takes no paste");
+            assert!(todo_view(&app).query.is_empty());
+        });
+    }
+
+    /// Linear's answer while the TODOS MODAL stands under the box an
+    /// `Enter` opened lands on that modal: back from the box, the chip
+    /// says what Linear said. Teams to pick from with no modal to pick in
+    /// say so in the footer.
+    #[test]
+    fn linear_answers_reach_the_todos_under_the_box() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Prompt(_))));
+            let issue = crate::linear::LinkedIssue {
+                identifier: "RIP-1".into(),
+                url: "https://linear.app/x/issue/RIP-1".into(),
+                state: "Todo".into(),
+                state_type: "unstarted".into(),
+                state_color: String::new(),
+                priority: 0,
+            };
+            crate::todos::view::land_linked(&mut app, "/tmp/demo".into(), Ok(vec![issue]));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(todo_view(&app).linked.contains_key("RIP-1"));
+
+            app.overlay = None;
+            crate::todos::view::land_teams(
+                &mut app,
+                "/tmp/demo".into(),
+                1,
+                Ok(vec![
+                    crate::linear::LinearTeam {
+                        id: "t1".into(),
+                        key: "A".into(),
+                        name: "A".into(),
+                        triage_state: None,
+                    };
+                    2
+                ]),
+            );
+            assert!(app
+                .flash
+                .as_deref()
+                .is_some_and(|f| f.starts_with("Linear has several teams")));
         });
     }
 }

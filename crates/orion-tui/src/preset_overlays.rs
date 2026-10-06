@@ -951,7 +951,7 @@ fn apply_preset_to_quick_prompt(
 
 /// The box `back` with `preset` adopted — its harness, MODEL / EFFORT and
 /// prefix/postfix — keeping where it lands, its issue, pull request,
-/// Linear batch, mode and the modal it stands on.
+/// Linear batch, todo, mode and the modal it stands on.
 fn preset_on_box(
     back: crate::quick_prompt::QuickReturn,
     preset: AgentPreset,
@@ -961,6 +961,7 @@ fn preset_on_box(
         .with_issue(back.launch.issue)
         .with_pr(back.launch.pr)
         .with_linear(back.launch.linear)
+        .with_todo(back.launch.todo)
         .with_mode(back.launch.mode, cfg)
         .with_under(back.launch.under)
 }
