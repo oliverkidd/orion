@@ -8939,17 +8939,15 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             ))
         } else if let Some(composed) = match &prompt.kind {
             // The wrapped text crosses the same argv as the task alone, so
-            // it gets the same ceiling — a long prefix can push a valid
-            // task over it.
+            // it gets the same ceiling — a long prefix, or a LINEAR box's
+            // issues, can push a valid task over it.
             PromptKind::AgentPresetTask { preset, .. } => Some(preset.compose(&value)),
-            PromptKind::QuickPrompt(launch) if launch.preset.is_some() => {
-                Some(launch.compose(&value))
-            }
+            PromptKind::QuickPrompt(launch) => Some(launch.compose(&value)),
             _ => None,
         } {
             (composed.len() > MAX_CLOUD_PROMPT_BYTES).then(|| {
                 format!(
-                    "prefix + task + postfix is too long (max {} KiB)",
+                    "the composed first prompt is too long (max {} KiB)",
                     MAX_CLOUD_PROMPT_BYTES / 1024
                 )
             })
@@ -32347,10 +32345,10 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// The presets list `e` opens on a PROJECT OPEN PRS GROUP row manages
     /// presets as the one on a checkout's row does: `a` adds, `e` edits,
-    /// `d` deletes. Every way back — the editor's save and its Esc, the
-    /// delete confirm's either answer — lands in the PR picker with the
-    /// pull request still riding it, so the next Enter is still a PR
-    /// SESSION.
+    /// `d` deletes. A new preset's save puts it straight on the PR's box;
+    /// every other way back — an edit's save, the editor's Esc, the
+    /// delete confirm's either answer — lands in the PR picker. The pull
+    /// request rides all of them, so the next Enter is still a PR SESSION.
     #[test]
     fn the_pr_preset_picker_adds_edits_and_deletes_presets() {
         with_seeded_presets(|| {
@@ -32377,7 +32375,8 @@ diff --git a/src/c.rs b/src/c.rs
             let (seeded, _) = pr_picker(&app);
             assert_eq!(seeded, ["reviewer", "scratch"]);
 
-            // a: a new preset, saved, the cursor on it.
+            // a: a new preset, saved onto the PR's box; the box's own
+            // picker has the cursor on it.
             press(
                 &mut app,
                 KeyCode::Char('n'),
@@ -32391,6 +32390,20 @@ diff --git a/src/c.rs b/src/c.rs
             );
             type_text(&mut app, "triage", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("the new preset goes on the box, got {:?}", app.overlay);
+            };
+            assert!(
+                prompt.title.starts_with("Quick prompt · PR #7 · triage"),
+                "{}",
+                prompt.title
+            );
+            press(
+                &mut app,
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
             let (names, cursor) = pr_picker(&app);
             assert_eq!(names, ["reviewer", "scratch", "triage"]);
             assert_eq!(cursor, 2, "the cursor lands on the new row");
@@ -34999,8 +35012,8 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// With no presets saved the picker still opens — empty, on the
     /// manager's `a` hint — so the first one is made right there: saving it
-    /// lands back in the picker on it, and Enter hands the box back, text
-    /// intact, under that preset.
+    /// hands the box back, text intact, under that preset — no second
+    /// Enter on its row, whose highlight read as picked.
     #[test]
     fn the_preset_key_without_presets_opens_a_picker_that_adds_one() {
         with_default_config(|| {
@@ -35040,17 +35053,10 @@ diff --git a/src/c.rs b/src/c.rs
                 );
                 type_text(&mut app, "tidy", &mut out);
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                    panic!("the save lands back in the picker, got {:?}", app.overlay);
-                };
-                assert!(view.is_picker(), "still the picker, not the manager");
-                assert_eq!(view.presets.len(), 1);
-                assert_eq!(view.presets[view.selected].name, "tidy");
-
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                    panic!("the pick hands the box back, got {:?}", app.overlay);
+                    panic!("the save hands the box back, got {:?}", app.overlay);
                 };
+                assert_eq!(crate::agent_presets::load().len(), 1, "and saved it");
                 assert_eq!(prompt.input.as_str(), "Fix auth");
                 assert!(prompt.title.contains("tidy"), "{}", prompt.title);
                 assert!(out.is_empty(), "{out:?}");

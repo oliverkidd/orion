@@ -789,7 +789,8 @@ pub(crate) fn open_agent_preset_editor(
 
 /// Enter in the PRESET EDITOR: validate against the stored list, write the
 /// row (in place when editing, appended when new), and land back on it in
-/// the list. A rejected form stays open, the reason on a banner at the top
+/// the list — or, for a new preset made from a QUICK PROMPT's picker, on
+/// that box with the preset on it. A rejected form stays open, the reason on a banner at the top
 /// of it and the caret on the field to fix (`AgentPresetEditor::reject`) —
 /// not in the FOOTER, which is nowhere near the form.
 pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEditor) {
@@ -802,6 +803,7 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
             return;
         }
     };
+    let created = editor.editing.is_none().then(|| preset.clone());
     let index = match editor.editing {
         Some(index) if index < presets.len() => {
             presets[index] = preset;
@@ -817,7 +819,24 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
             "could not save agent presets: {err}"
         )));
     }
-    reopen_presets_list(app, editor.worktree, editor.quick, index);
+    // A preset made from a QUICK PROMPT's picker was made to be used: it
+    // goes straight onto that box, as Enter on its row would put it —
+    // landing back on the list with the new row only highlighted read as
+    // picked, and the box went out without it. Never launched from here,
+    // even a skip-task one: the box comes back for its Enter. A harness
+    // switched off stays on the list, whose Enter says so.
+    match (created, editor.quick) {
+        (Some(preset), Some(back)) => {
+            let cfg = crate::config::Config::load();
+            if cfg.preset_harness_usable(&preset) {
+                let text = back.text.clone();
+                crate::quick_prompt::reopen(app, preset_on_box(back, preset, &cfg), &text);
+            } else {
+                reopen_presets_list(app, editor.worktree, Some(back), index);
+            }
+        }
+        (_, quick) => reopen_presets_list(app, editor.worktree, quick, index),
+    }
 }
 
 /// `Ctrl+d` in the AGENT PRESETS list: the confirm that guards the delete.
@@ -921,17 +940,29 @@ fn apply_preset_to_quick_prompt(
         return;
     }
     let launch_now = preset.skip_task && back.text.trim().is_empty();
-    let launch = crate::quick_prompt::QuickLaunch::of_preset(back.launch.target, preset, &cfg)
-        .with_issue(back.launch.issue)
-        .with_pr(back.launch.pr)
-        .with_linear(back.launch.linear)
-        .with_mode(back.launch.mode, &cfg)
-        .with_under(back.launch.under);
+    let text = back.text.clone();
+    let launch = preset_on_box(back, preset, &cfg);
     if launch_now {
         crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
     } else {
-        crate::quick_prompt::reopen(app, launch, &back.text);
+        crate::quick_prompt::reopen(app, launch, &text);
     }
+}
+
+/// The box `back` with `preset` adopted — its harness, MODEL / EFFORT and
+/// prefix/postfix — keeping where it lands, its issue, pull request,
+/// Linear batch, mode and the modal it stands on.
+fn preset_on_box(
+    back: crate::quick_prompt::QuickReturn,
+    preset: AgentPreset,
+    cfg: &crate::config::Config,
+) -> crate::quick_prompt::QuickLaunch {
+    crate::quick_prompt::QuickLaunch::of_preset(back.launch.target, preset, cfg)
+        .with_issue(back.launch.issue)
+        .with_pr(back.launch.pr)
+        .with_linear(back.launch.linear)
+        .with_mode(back.launch.mode, cfg)
+        .with_under(back.launch.under)
 }
 
 /// Keys in the AGENT PRESETS list. Letters type ahead over the names — so

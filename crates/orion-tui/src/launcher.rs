@@ -1905,8 +1905,8 @@ pub fn project_of(app: &App, target: &QuickTarget) -> Option<ProjectId> {
 }
 
 /// A fresh worktree for `launch` in `project`, on a branch nobody has
-/// yet: named after the issue for an ISSUE SESSION, after the batch for
-/// a LINEAR launch, the random name `n` would offer otherwise.
+/// yet: named after the issue for an ISSUE SESSION or a single LINEAR
+/// issue, the random name `n` would offer otherwise.
 pub fn fresh_worktree(
     app: &App,
     project: ProjectId,

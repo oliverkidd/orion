@@ -1991,8 +1991,8 @@ fn default_harnesses() -> BTreeMap<String, orion_core::harness::HarnessOverride>
     harnesses
 }
 
-/// The task ⌘L fills the QUICK PROMPT with when `linear_task_template` is
-/// empty. `{issues}`, `{ids}` and `{first_id}` are expanded by
+/// The task a LINEAR box sent empty launches on when
+/// `linear_task_template` is empty. `{issues}`, `{ids}` and `{first_id}` are expanded by
 /// `linear::expand_template`.
 pub const DEFAULT_LINEAR_TEMPLATE: &str = "Fix these Linear issues together, in this worktree:
 

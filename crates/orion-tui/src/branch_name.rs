@@ -33,27 +33,15 @@ pub fn issue_name(number: u64, title: &str, taken: &[String]) -> String {
     )
 }
 
-/// A branch for LINEAR issues fixed together in one fresh worktree:
-/// `eng-12-eng-15-fix-login-redirect` — every identifier (the first
-/// [`MAX_LINEAR_IDS`], then `more`), lowercased, then the first issue's
+/// A branch for one LINEAR issue cut into a fresh worktree:
+/// `eng-12-fix-login-redirect` — the identifier, lowercased, then the
 /// title as [`issue_name`] slugs it. Linear's GitHub integration finds
-/// an issue by its identifier in the branch name, so each one stays
-/// spelled whole. A name already in `taken` gets a `-2`, `-3`, … suffix.
-pub fn linear_name(identifiers: &[&str], title: &str, taken: &[String]) -> String {
-    const MAX_LINEAR_IDS: usize = 4;
-    let mut ids: Vec<String> = identifiers
-        .iter()
-        .take(MAX_LINEAR_IDS)
-        .map(|id| title_slug(id))
-        .filter(|id| !id.is_empty())
-        .collect();
-    if identifiers.len() > MAX_LINEAR_IDS {
-        ids.push("more".into());
-    }
-    let head = if ids.is_empty() {
-        "linear".to_string()
-    } else {
-        ids.join("-")
+/// the issue by its identifier in the branch name, so it stays spelled
+/// whole. A name already in `taken` gets a `-2`, `-3`, … suffix.
+pub fn linear_name(identifier: &str, title: &str, taken: &[String]) -> String {
+    let head = match title_slug(identifier) {
+        id if id.is_empty() => "linear".to_string(),
+        id => id,
     };
     unused(&prefixed(&head, &title_slug(title)), taken)
 }
@@ -252,22 +240,18 @@ mod tests {
         );
     }
 
-    /// Every identifier stays whole in a LINEAR batch's branch, so the
-    /// integration can find each issue by name; past four, `more` stands in.
+    /// A LINEAR issue's identifier stays whole in its branch, so the
+    /// integration can find the issue by name.
     #[test]
-    fn linear_branches_carry_every_identifier_and_the_first_title() {
+    fn a_linear_branch_is_the_identifier_then_the_title() {
         assert_eq!(
-            linear_name(&["ENG-12", "ENG-15"], "Fix login redirect", &[]),
-            "eng-12-eng-15-fix-login-redirect"
+            linear_name("ENG-12", "Fix login redirect", &[]),
+            "eng-12-fix-login-redirect"
         );
+        assert_eq!(linear_name("ENG-1", "", &[]), "eng-1");
+        assert_eq!(linear_name("", "", &[]), "linear");
         assert_eq!(
-            linear_name(&["A-1", "A-2", "A-3", "A-4", "A-5"], "x", &[]),
-            "a-1-a-2-a-3-a-4-more-x"
-        );
-        assert_eq!(linear_name(&["ENG-1"], "", &[]), "eng-1");
-        assert_eq!(linear_name(&[], "", &[]), "linear");
-        assert_eq!(
-            linear_name(&["ENG-1"], "Fix", &["eng-1-fix".into()]),
+            linear_name("ENG-1", "Fix", &["eng-1-fix".into()]),
             "eng-1-fix-2"
         );
     }

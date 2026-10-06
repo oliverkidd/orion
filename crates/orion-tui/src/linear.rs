@@ -61,6 +61,10 @@ pub struct LinearIssue {
     pub url: String,
     #[serde(default)]
     pub description: String,
+    /// Linear's word for the priority — `Urgent`, `High`, … — or
+    /// `No priority`; empty when Linear did not say.
+    #[serde(default)]
+    pub priority: String,
     pub status: String,
     #[serde(default)]
     pub status_type: String,
@@ -131,31 +135,51 @@ impl LinearBatch {
         }
     }
 
+    /// The fresh worktree's branch: one issue's is named after it; a
+    /// batch takes the random name any other launch would, as a branch
+    /// spelling out every identifier grew too long to read.
     pub fn branch(&self, taken: &[String]) -> String {
-        let ids: Vec<&str> = self.issues.iter().map(|i| i.identifier.as_str()).collect();
-        let title = self.issues.first().map(|i| i.title.as_str()).unwrap_or("");
-        crate::branch_name::linear_name(&ids, title, taken)
+        match self.issues.as_slice() {
+            [issue] => crate::branch_name::linear_name(&issue.identifier, &issue.title, taken),
+            _ => crate::branch_name::random_name(taken),
+        }
     }
+}
+
+/// `issues` written out in full, a markdown section each — identifier
+/// and title, then state, priority and link, then the whole description
+/// — as `{issues}` expands and as a typed task gets them appended
+/// (`QuickLaunch::compose`). The agent works from this text alone: a
+/// session needs no Linear access of its own to read what it is fixing.
+pub fn issue_sections(issues: &[LinearIssue]) -> String {
+    issues
+        .iter()
+        .map(|i| {
+            let facts: Vec<&str> = [i.status.as_str(), i.priority.as_str(), i.url.as_str()]
+                .into_iter()
+                .filter(|fact| !fact.is_empty())
+                .collect();
+            let desc = match i.description.trim() {
+                "" => "(no description)",
+                desc => desc,
+            };
+            format!(
+                "### {}: {}\n{}\n\n{desc}",
+                i.identifier,
+                i.title,
+                facts.join(" · ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// What `{issues}` / `{ids}` / `{first_id}` expand to in the task template.
 pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
     let ids = ids_of(issues);
     let first = issues.first().map(|i| i.identifier.as_str()).unwrap_or("");
-    let body = issues
-        .iter()
-        .map(|i| {
-            let desc = i.description.trim();
-            if desc.is_empty() {
-                format!("- {} {} ({})", i.identifier, i.title, i.url)
-            } else {
-                format!("- {} {} ({})\n  {desc}", i.identifier, i.title, i.url)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     template
-        .replace("{issues}", &body)
+        .replace("{issues}", &issue_sections(issues))
         .replace("{ids}", &ids)
         .replace("{first_id}", first)
 }
@@ -1128,7 +1152,7 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     let taken = app.project_branches(&project);
     let batch = LinearBatch { issues, task };
     // The project's root, as an issue's box starts; the box's WORKTREE
-    // PICKER offers a fresh worktree named after the batch first.
+    // PICKER offers a fresh worktree first (`LinearBatch::branch`).
     let target = app
         .root_worktree(&project)
         .map(QuickTarget::Worktree)
@@ -1429,7 +1453,7 @@ fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>
 /// What each listed issue is read with: the row, the reading pane, and
 /// its team's workflow states for `⌘S` — the same fields whoever's
 /// issues are asked for.
-const ISSUE_FIELDS: &str = "id identifier title url description state { name type } \
+const ISSUE_FIELDS: &str = "id identifier title url description priorityLabel state { name type } \
     team { id states { nodes { id name type position } } }";
 
 async fn fetch_assigned(dir: &Path, email: &str) -> Result<Assigned, String> {
@@ -1705,6 +1729,11 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        priority: value
+            .get("priorityLabel")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         status: value
             .pointer("/state/name")
             .and_then(|v| v.as_str())
@@ -1931,16 +1960,17 @@ pub fn parse_env_key(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn issue(id: &str, ident: &str, title: &str) -> LinearIssue {
+    pub(crate) fn issue(id: &str, ident: &str, title: &str) -> LinearIssue {
         LinearIssue {
             id: id.into(),
             identifier: ident.into(),
             title: title.into(),
             url: format!("https://linear.app/x/issue/{ident}"),
             description: String::new(),
+            priority: String::new(),
             status: "In Progress".into(),
             status_type: "started".into(),
             team_id: "t1".into(),
@@ -2030,8 +2060,8 @@ mod tests {
         let out = expand_template("Fix {ids} starting with {first_id}\n{issues}", &issues);
         assert!(out.contains("ENG-12, ENG-15"));
         assert!(out.contains("starting with ENG-12"));
-        assert!(out.contains("- ENG-12 Login"));
-        assert!(out.contains("- ENG-15 Logout"));
+        assert!(out.contains("### ENG-12: Login\nIn Progress · https://linear.app/x/issue/ENG-12\n\n(no description)"));
+        assert!(out.contains("### ENG-15: Logout"));
     }
 
     #[test]
@@ -2056,7 +2086,18 @@ mod tests {
         };
         assert_eq!(batch.ids(), "ENG-12, ENG-15");
         assert_eq!(batch.title(), "Linear ENG-12, ENG-15");
-        assert_eq!(batch.branch(&[]), "eng-12-eng-15-fix-login-redirect");
+        let branch = batch.branch(&[]);
+        assert_eq!(
+            branch.split('-').count(),
+            3,
+            "a batch takes a random <adj>-<noun>-<verb> name: {branch}"
+        );
+        assert!(!branch.contains("eng"), "{branch}");
+        let one = LinearBatch {
+            issues: vec![issue("1", "ENG-12", "Fix login redirect")],
+            task: "go".into(),
+        };
+        assert_eq!(one.branch(&[]), "eng-12-fix-login-redirect");
     }
 
     #[test]
@@ -2159,6 +2200,70 @@ mod tests {
             panic!("the LINEAR VIEW, got {:?}", app.overlay);
         };
         assert_eq!(view.marked, BTreeSet::from(["1".into(), "3".into()]));
+    }
+
+    /// Typing in a Linear box never drops the issues: the text goes first
+    /// and the marked issues follow in full, under the preset made from
+    /// the box's own picker — which goes straight onto the box on save.
+    #[test]
+    fn a_typed_task_keeps_the_issues_under_a_preset_made_on_the_spot() {
+        let (mut app, dir, _rx) = paired();
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: orion_core::WorktreeId("w1".into()),
+            project_id: ProjectId("p1".into()),
+            path: dir.path().into(),
+            branch: "dev".into(),
+            is_main: true,
+            sort_order: 0,
+        });
+        let store = dir.path().join("agent_presets.json");
+        crate::agent_presets::with_presets_path(store, || {
+            browse_marked(&mut app);
+            press(&mut app, plain(KeyCode::Enter));
+            press(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::SUPER),
+            );
+            press(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::SUPER),
+            );
+            for c in "Linear Ticket".chars() {
+                press(&mut app, plain(KeyCode::Char(c)));
+            }
+            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
+                panic!("the preset editor, got {:?}", app.overlay);
+            };
+            editor.prefix.insert_str("Plan first.");
+            press(&mut app, plain(KeyCode::Enter));
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("the save hands the box back, got {:?}", app.overlay);
+            };
+            assert!(
+                prompt.title.contains("Linear ENG-1, ENG-3 · Linear Ticket"),
+                "{}",
+                prompt.title
+            );
+            for c in "go".chars() {
+                press(&mut app, plain(KeyCode::Char(c)));
+            }
+            let mut out = Vec::new();
+            crate::event_loop::handle_overlay_key(&mut app, plain(KeyCode::Enter), &mut out);
+            let [ClientRequest::CreateAgent {
+                starting_prompt, ..
+            }] = out.as_slice()
+            else {
+                panic!("one CreateAgent, got {out:?}");
+            };
+            assert_eq!(
+                starting_prompt.as_deref(),
+                Some(
+                    "Plan first.\n\ngo\n\nThe Linear issues, in full — everything you need is here, no Linear access required:\n\n\
+                     ### ENG-1: Login\nIn Progress · https://linear.app/x/issue/ENG-1\n\n(no description)\n\n\
+                     ### ENG-3: Signup\nIn Progress · https://linear.app/x/issue/ENG-3\n\n(no description)"
+                )
+            );
+        });
     }
 
     /// Press `attach` with Linear answered `attachmentLinkGitHubPR`, and
@@ -2550,6 +2655,7 @@ mod tests {
                             "title": "T",
                             "url": "https://linear.app/x/issue/ENG-1",
                             "description": "d",
+                            "priorityLabel": "High",
                             "state": { "name": "Todo", "type": "unstarted" }
                         }]
                     }
@@ -2559,5 +2665,6 @@ mod tests {
         let list = parse_issues(&json, true).unwrap();
         assert_eq!(list[0].identifier, "ENG-1");
         assert_eq!(list[0].status_type, "unstarted");
+        assert_eq!(list[0].priority, "High");
     }
 }

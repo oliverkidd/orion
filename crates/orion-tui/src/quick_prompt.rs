@@ -55,6 +55,11 @@ pub enum QuickTarget {
     },
 }
 
+/// What heads the Linear issues a typed task gets appended: their full
+/// text follows, and the session may have no Linear access of its own.
+const LINEAR_ISSUES_HEADING: &str =
+    "The Linear issues, in full — everything you need is here, no Linear access required:";
+
 /// Everything one QUICK PROMPT will launch with. Resolved from the config
 /// when the box opens and rewritten in place by the box's own pickers —
 /// `Tab` (harness, then MODEL / EFFORT), `⌘U` / `^X` (an AGENT PRESET) and
@@ -470,16 +475,12 @@ impl QuickLaunch {
     }
 
     /// The task Enter sends when the box is empty: an ISSUE SESSION's box
-    /// may be sent as it is, the issue being the task, and a LINEAR box's
-    /// sends the task it was filled with. `None` for every
+    /// may be sent as it is, the issue being the task. `None` for every
     /// other launch, whose empty box sends no task at all — the CLI starts
-    /// bare (`launches_empty`).
+    /// bare (`launches_empty`). A LINEAR box's empty task is its batch's,
+    /// which [`compose`](Self::compose) supplies instead.
     pub fn default_task(&self) -> Option<String> {
-        match (&self.issue, &self.linear) {
-            (Some(issue), _) => Some(issue.default_task()),
-            (None, Some(linear)) => Some(linear.task.clone()),
-            (None, None) => None,
-        }
+        self.issue.as_ref().map(|issue| issue.default_task())
     }
 
     /// Does Enter on an empty box launch? Every box but a CLAUDE CLOUD
@@ -522,11 +523,23 @@ impl QuickLaunch {
     }
 
     /// The STARTING PROMPT this launch sends for `task`: the text itself,
-    /// or the preset's prefix + task + postfix.
+    /// or the preset's prefix + task + postfix. A LINEAR box's task always
+    /// carries its issues: sent empty it is the batch's task (the Linear
+    /// template), and typed text gets the issues written out in full
+    /// under it — typing never drops them.
     pub fn compose(&self, task: &str) -> String {
-        match &self.preset {
-            Some(preset) => preset.compose(task),
+        let task = match &self.linear {
+            Some(batch) if task.trim().is_empty() => batch.task.clone(),
+            Some(batch) => format!(
+                "{}\n\n{LINEAR_ISSUES_HEADING}\n\n{}",
+                task.trim_end(),
+                crate::linear::issue_sections(&batch.issues)
+            ),
             None => task.to_string(),
+        };
+        match &self.preset {
+            Some(preset) => preset.compose(&task),
+            None => task,
         }
     }
 
@@ -570,13 +583,23 @@ impl QuickLaunch {
     pub fn label(&self) -> String {
         match (&self.preset, &self.issue) {
             (Some(preset), issue) => {
-                let (sends, empty) = match (preset.has_wrapping(), issue) {
-                    (true, Some(_)) => ("prefix + your task + postfix", "fix the issue"),
+                let fix = match (issue, &self.linear) {
+                    (Some(_), _) => Some("fix the issue"),
+                    (None, Some(_)) => Some("fix the issues"),
+                    (None, None) => None,
+                };
+                let (sends, empty) = match (preset.has_wrapping(), fix) {
+                    (true, Some(fix)) => ("prefix + your task + postfix", fix),
                     (true, None) => ("prefix + your task + postfix", "prefix + postfix only"),
-                    (false, Some(_)) => ("sent as the first prompt", "fix the issue"),
+                    (false, Some(fix)) => ("sent as the first prompt", fix),
                     (false, None) => ("sent as the first prompt", "start with no prompt"),
                 };
-                format!("{} — {sends} (empty = {empty})", preset.name)
+                let issues = if self.linear.is_some() {
+                    ", the Linear issues added"
+                } else {
+                    ""
+                };
+                format!("{} — {sends}{issues} (empty = {empty})", preset.name)
             }
             (None, Some(issue)) => format!(
                 "what should the agent do about #{}? (empty = fix the issue)",
@@ -584,7 +607,7 @@ impl QuickLaunch {
             ),
             (None, None) => match &self.pr {
                 None if self.linear.is_some() => {
-                    "the task below fixes the picked issues — edit it, then Enter (empty = the same task)"
+                    "what should the agent do? the Linear issues are added below it (empty = fix them together)"
                         .into()
                 }
                 Some(pr) => format!(
@@ -993,6 +1016,42 @@ mod tests {
             launch.compose("Fix auth"),
             "Be strict.\n\nFix auth\n\nRun the tests."
         );
+    }
+
+    /// A LINEAR box sent empty sends its batch's task; typed text gets the
+    /// issues in full under it — a section each, its description whole —
+    /// and a preset wraps the whole of it.
+    #[test]
+    fn a_linear_box_always_carries_its_issues() {
+        let batch = crate::linear::LinearBatch {
+            issues: vec![
+                crate::linear::tests::issue("ENG-1", "ENG-1", "Login"),
+                crate::linear::LinearIssue {
+                    description: "It hangs.".into(),
+                    ..crate::linear::tests::issue("ENG-2", "ENG-2", "Logout")
+                },
+            ],
+            task: "the template".into(),
+        };
+        let cfg = Config::default();
+        let launch = QuickLaunch::from_config(worktree(), &cfg).with_linear(Some(batch));
+        assert_eq!(launch.compose(""), "the template");
+        assert_eq!(launch.compose("  "), "the template");
+        let typed = "go\n\nThe Linear issues, in full — everything you need is here, no Linear access required:\n\n\
+                     ### ENG-1: Login\nIn Progress · https://linear.app/x/issue/ENG-1\n\n(no description)\n\n\
+                     ### ENG-2: Logout\nIn Progress · https://linear.app/x/issue/ENG-2\n\nIt hangs.";
+        assert_eq!(launch.compose("go"), typed);
+        let wrapped = QuickLaunch::of_preset(
+            worktree(),
+            AgentPreset {
+                prefix: "Plan first.".into(),
+                ..preset("linear", AgentKind::Claude)
+            },
+            &cfg,
+        )
+        .with_linear(launch.linear.clone());
+        assert_eq!(wrapped.compose("go"), format!("Plan first.\n\n{typed}"));
+        assert_eq!(wrapped.compose(""), "Plan first.\n\nthe template");
     }
 
     /// A parked DRAFT comes back whole only into the box it left: the
