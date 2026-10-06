@@ -6603,9 +6603,9 @@ fn confirm_upgrade(version: &str) -> ConfirmDialog {
         // Sized to the longest line, never wrapped: keep each under 52.
         message: format!(
             "Install v{version} and restart orion on it?\n\
-             The daemon restarts too: agents resume, and\n\
-             mid-turn ones carry on; terminals start a\n\
-             new shell."
+             If it changes the daemon, that restarts too:\n\
+             agents resume, and mid-turn ones carry on;\n\
+             terminals start a new shell."
         ),
         action: PendingAction::Upgrade,
         area: ratatui::layout::Rect::default(),

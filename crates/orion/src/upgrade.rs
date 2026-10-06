@@ -35,8 +35,8 @@ pub fn run_upgrade(force: bool) -> Result<()> {
 }
 
 /// **Upgrade orion** from inside the TUI: install only. The caller then
-/// restarts the daemon onto the new binary, so no handoff notes or
-/// restart offer here.
+/// reopens on the new binary, restarting the daemon unless
+/// [`daemon_carries_over`], so no handoff notes or restart offer here.
 pub fn install_only() -> Result<()> {
     orion_daemon::lifecycle::ensure_runtime_dir()?;
     upgrade_with(&install_url(), &orion_core::paths::runtime_dir(), false)
@@ -64,6 +64,16 @@ fn finish_daemon_handoff() {
         }
         Ok(IdleShutdown::SessionsLive { count }) => {
             let plural = if count == 1 { "" } else { "s" };
+            let unchanged = std::env::var_os("PATH")
+                .and_then(|path| first_orion_on_path(&path))
+                .is_some_and(|exe| daemon_matches(&exe));
+            if unchanged {
+                println!(
+                    "this release leaves the daemon as it was, so it keeps running \
+                     with its {count} live session{plural}."
+                );
+                return;
+            }
             println!("note: the old daemon is still running with {count} live session{plural}.");
             let installed = std::env::var_os("PATH").and_then(|path| {
                 protocol_version_on_path(&path, &orion_core::paths::runtime_dir())
@@ -124,29 +134,64 @@ fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+/// Whether the daemon running now is already the daemon code of the binary
+/// just installed — the one **Upgrade orion** is about to exec, its argv[0]
+/// — so the upgrade can reopen the TUI and leave the sessions running.
+/// False whenever that can't be shown: no daemon, a daemon from before
+/// source stamps, or a new build that can't say.
+pub fn daemon_carries_over() -> bool {
+    let Some(arg0) = std::env::args_os().next().map(PathBuf::from) else {
+        return false;
+    };
+    // A bare name is looked up on PATH, as the exec will; a relative path
+    // must be pinned here, since the probe runs from the runtime dir.
+    let exe = match std::env::current_dir() {
+        Ok(cwd) if arg0.components().count() > 1 => cwd.join(arg0),
+        _ => arg0,
+    };
+    daemon_matches(&exe)
+}
+
+/// Whether `exe` carries the daemon code the live daemon is running.
+fn daemon_matches(exe: &Path) -> bool {
+    probe(
+        exe,
+        "_daemon-fingerprint",
+        &orion_core::paths::runtime_dir(),
+    )
+    .is_some_and(|stamp| orion_daemon::lifecycle::daemon_runs(&stamp))
+}
+
 /// The protocol version of the first `orion` on `path` — the one the user
 /// runs next, which is where install.sh just put the new build (it warns when
 /// that dir isn't on PATH). None when there is none, or it predates
-/// `_protocol-version`: such a build reads the word as `orion <dir>`, so it
-/// runs from `cwd` — the runtime dir, where no directory by that name will
-/// ever sit to be registered as a project.
+/// `_protocol-version` (see [`probe`]).
 fn protocol_version_on_path(path: &OsStr, cwd: &Path) -> Option<u32> {
+    probe(&first_orion_on_path(path)?, "_protocol-version", cwd)?
+        .parse()
+        .ok()
+}
+
+fn first_orion_on_path(path: &OsStr) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let exe = std::env::split_paths(path)
+    std::env::split_paths(path)
         .map(|dir| dir.join("orion"))
         .find(|p| {
             p.metadata()
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })?;
-    let out = Command::new(exe)
-        .arg("_protocol-version")
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        })
+}
+
+/// What `exe <hook>` prints, trimmed. None when it fails — as a build from
+/// before `hook` existed does: it reads the word as `orion <dir>`, so the
+/// probe runs from `cwd` — the runtime dir, where no directory by that name
+/// will ever sit to be registered as a project.
+fn probe(exe: &Path, hook: &str, cwd: &Path) -> Option<String> {
+    let out = Command::new(exe).arg(hook).current_dir(cwd).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn upgrade_with(url: &str, staging_dir: &Path, force: bool) -> Result<()> {

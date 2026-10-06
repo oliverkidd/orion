@@ -67,6 +67,8 @@ orion runs these CLIs; install at least one.
 orion upgrade
 ```
 
+Versions say what an upgrade costs: a patch release (1.2.**3**) changes only the TUI and CLI, so orion reopens and every session keeps running; a minor release (1.**3**.0) changes the daemon, which has to restart to run the new code: **Upgrade orion** in the app does that for you, while `orion upgrade` leaves it to you when sessions are live (agents resume; terminals start a new shell).
+
 From source: `cargo install --path crates/orion --locked`, then `orion kill && orion` to restart the daemon.
 
 ## Docs

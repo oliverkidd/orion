@@ -135,7 +135,7 @@ pub fn restart() -> Result<()> {
 
 /// Exec this binary again with the arguments it was started with, the
 /// daemon left as it is. Only returns when the exec fails.
-fn relaunch() -> Result<()> {
+pub fn relaunch() -> Result<()> {
     use anyhow::Context as _;
     use std::os::unix::process::CommandExt as _;
     let mut args = std::env::args_os();
