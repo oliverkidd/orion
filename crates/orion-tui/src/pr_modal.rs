@@ -427,6 +427,7 @@ fn visible_rows(query: &str, list: &[OpenPr]) -> Vec<(usize, Vec<usize>)> {
     let parsed = crate::list_filter::parse(query, FACETS);
     let mut rows = crate::list_filter::narrow(
         &parsed,
+        FACETS,
         list.len(),
         |i| list[i].label(),
         |i, key| facet_values(&list[i], key),

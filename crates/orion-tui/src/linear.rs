@@ -1,7 +1,9 @@
 //! The LINEAR VIEW (`⌘L`): open Linear issues in two tabs — `My issues`,
 //! assigned to you, and `Other issues`, the rest of your teams' — grouped
-//! by status, each row's priority, project and labels under its title, and
-//! filtered by `key:value` tokens and the FILTER PICK (`list_filter`).
+//! by status, a line per issue with its priority's letter, the reading
+//! pane setting out its properties as Linear's sidebar does, and filtered
+//! by words (a status, priority or label as well as the title), `key:value`
+//! tokens and the FILTER PICK (`list_filter`).
 //! Issues are picked together so one agent fixes them in one worktree and
 //! opens one pull request. From the PULL REQUESTS MODAL the same list attaches a pull
 //! request to the issues you mark (`attachmentLinkGitHubPR`) — and the
@@ -42,9 +44,9 @@ use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, empty_list_row, fit_parts, fuzzy_highlight_styled, layout_sections,
-    list_header, panel_block, render_row, render_row_lines, row_rect, search_line_lit, sections,
-    truncate, visible_positions, ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, layout_sections, list_header,
+    panel_block, render_row, row_rect, search_line_lit, sections, truncate, visible_positions,
+    ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 
 const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
@@ -821,8 +823,9 @@ pub(crate) mod keys {
     /// The status picker's own.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const SET: Key = Key::new(&["enter"], "set status");
-    /// `My issues` ⇄ `Other issues` — the PULL REQUESTS MODAL's tab keys.
-    pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
+    /// `My issues` ⇄ `Other issues`: plain or with ⇧, as the PULL
+    /// REQUESTS MODAL's tab keys are.
+    pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
     /// The FILTER PICK — the PULL REQUESTS MODAL's too.
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
     #[cfg(test)]
@@ -1020,6 +1023,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Up if shift => view.scroll_by(-1),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
+        // ←/→ (⇧ or not) are the tabs', never the filter line's caret: a
+        // filter is typed and backspaced, not edited mid-line.
+        KeyCode::Left | KeyCode::Right if keys::TABS.matches(&key) => {
+            let other = view.tab.other();
+            switch_tab(app, other);
+        }
         KeyCode::PageDown => view.scroll_by(page),
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
@@ -1031,10 +1040,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::STATUS.matches(&key) => open_status_pick(app),
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
-        _ if keys::TABS.matches(&key) => {
-            let other = view.tab.other();
-            switch_tab(app, other);
-        }
         _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
         _ => {
             if view.query.handle_key(&key).changed() {
@@ -1197,9 +1202,8 @@ fn pick_facets(list: &[LinearIssue], tab: LinearTab, th: Theme) -> Vec<PickFacet
                         let p = PRIORITY_ORDER
                             .into_iter()
                             .find(|p| priority_word(*p) == word)?;
-                        priority_mark(p, th)
-                            .first()
-                            .map(|s| (s.content.to_string(), s.style.fg.unwrap_or(th.muted)))
+                        let (letter, style) = priority_letter(p, th);
+                        Some((letter.to_string(), style.fg.unwrap_or(th.muted)))
                     })
                 }
                 "label" => dotted("label", &|i| i.labels.iter().collect()),
@@ -1442,6 +1446,7 @@ fn filtered(query: &str, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
     let parsed = crate::list_filter::parse(query, FACETS);
     let mut rows = crate::list_filter::narrow(
         &parsed,
+        FACETS,
         list.len(),
         |i| list[i].label(),
         |i, key| facet_values(&list[i], key),
@@ -1565,10 +1570,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     f.render_widget(Paragraph::new(Line::from(strip)), tab_row);
     let below_tabs = crate::ui::below_first_row(list_inner);
     if let Some(query_area) = row_rect(below_tabs, 0) {
-        let placeholder = format!(
-            "type to filter… {} by status, priority, label",
-            keys::FILTER.label()
-        );
+        let placeholder = format!("search title, status, label… {} pick", keys::FILTER.label());
         let line = search_line_lit(&view.query, &placeholder, query_area, th, &parsed.spans);
         f.render_widget(Paragraph::new(line), query_area);
     }
@@ -1601,22 +1603,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     }
     let budget = (rows_area.width as usize).saturating_sub(2);
     let now = orion_core::clock::now_secs() as i64;
-    // A header over each status; a row two lines tall when it has a meta
-    // line.
+    // A header over each status, a line per issue.
     let keys: Vec<&str> = visible
         .iter()
         .map(|(i, _)| issues[*i].status.as_str())
         .collect();
     let entries = sections(&keys, true);
-    let row_h = |v: usize| {
-        if has_meta(&issues[visible[v].0], view.tab) {
-            2
-        } else {
-            1
-        }
-    };
     let (list_start, drawn) =
-        layout_sections(&entries, row_h, cursor_row, view.list_start, rows_area);
+        layout_sections(&entries, |_| 1, cursor_row, view.list_start, rows_area);
     let mut row_rects = Vec::with_capacity(drawn.len());
     for (entry, rect) in drawn {
         match entry {
@@ -1631,11 +1625,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
                 let (index, positions) = &visible[v];
                 let issue = &issues[*index];
                 let marked = view.marked.contains(&issue.id);
-                let mut lines = vec![title_spans(issue, positions, marked, budget, th)];
-                if rect.height > 1 {
-                    lines.push(meta_spans(issue, view.tab, budget, now, th));
-                }
-                render_row_lines(f, rect, lines, Some(*index) == cursor, list_focused, th);
+                let line = title_spans(issue, positions, marked, budget, th);
+                render_row(f, rect, line, Some(*index) == cursor, list_focused, th);
                 row_rects.push((*index, rect));
             }
         }
@@ -1645,14 +1636,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let body_title = current
         .map(|i| i.identifier.clone())
         .unwrap_or_else(|| "Linear".into());
-    let width = body_a.width.saturating_sub(2) as usize;
-    let lines: Vec<Line> = match current {
-        Some(issue) => body_lines(issue, width, th),
-        None => Vec::new(),
-    };
     let mut block = panel_block(&body_title, false, th);
     let body_inner = block.inner(body_a);
-    let max_scroll = (lines.len() as u16).saturating_sub(body_inner.height.max(1));
+    let (read_a, side_a) = reading_areas(body_inner);
+    let lines: Vec<Line> = match current {
+        Some(issue) => body_lines(issue, read_a.width as usize, side_a.is_none(), now, th),
+        None => Vec::new(),
+    };
+    let max_scroll = (lines.len() as u16).saturating_sub(read_a.height.max(1));
     let scroll = view.scroll.min(max_scroll);
     if max_scroll > 0 {
         block = block.title_bottom(
@@ -1683,7 +1674,21 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         crate::list_filter::draw_pick(f, body_inner, &facets, &parsed, pick, th);
     } else {
         let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
-        f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), body_inner);
+        f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), read_a);
+        if let (Some(side), Some(issue)) = (side_a, current) {
+            let rule = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::LEFT)
+                .border_style(Style::default().fg(th.faint));
+            let inner = rule.inner(side);
+            f.render_widget(rule, side);
+            let inner = Rect {
+                x: inner.x + 1,
+                width: inner.width.saturating_sub(1),
+                ..inner
+            };
+            let props = properties(issue, inner.width as usize, now, th);
+            f.render_widget(Paragraph::new(props), inner);
+        }
     }
     // The modal's keys along its bottom edge — none while a box over it
     // has the keys.
@@ -1702,24 +1707,13 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         v.filter_pick = filter_pick;
         v.body_area = body_inner;
         v.browser_area = browser_area;
-        v.view_height = body_inner.height;
+        v.view_height = read_a.height;
         v.body_lines = lines.len();
         if let Some(index) = cursor {
             v.selected = index;
         }
         v.scroll = scroll;
     }
-}
-
-/// Whether [`meta_spans`] has anything to say about an issue on `tab` —
-/// it takes a second line — without building it: rows off screen never
-/// are.
-fn has_meta(issue: &LinearIssue, tab: LinearTab) -> bool {
-    issue.priority != 0
-        || tab == LinearTab::Others
-        || issue.project.is_some()
-        || !issue.labels.is_empty()
-        || !issue.created_at.is_empty()
 }
 
 /// Where an issue's state stands, as a glyph — `◑` started, `○` not yet,
@@ -1759,8 +1753,24 @@ fn priority_mark(priority: u8, th: Theme) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// A row's first line: the mark's tick, the state glyph, `ENG-12` dim and
-/// the title, the chars the filter matched lit.
+/// A priority as one letter on a row — `U`rgent, `H`igh, `M`edium,
+/// `L`ow — louder the higher it is; a faint `·` for none.
+fn priority_letter(priority: u8, th: Theme) -> (&'static str, Style) {
+    match priority {
+        1 => (
+            "U",
+            Style::default().fg(th.err).add_modifier(Modifier::BOLD),
+        ),
+        2 => ("H", Style::default().fg(th.warn)),
+        3 => ("M", Style::default().fg(th.muted)),
+        4 => ("L", Style::default().fg(th.dim)),
+        _ => ("·", Style::default().fg(th.faint)),
+    }
+}
+
+/// A row, one line: the mark's tick, the state glyph, the priority's
+/// letter, `ENG-12` dim and the title, the chars the filter matched lit.
+/// The rest of the issue is the reading pane's.
 fn title_spans(
     issue: &LinearIssue,
     positions: &[usize],
@@ -1783,8 +1793,10 @@ fn title_spans(
         format!("{glyph} "),
         Style::default().fg(color),
     ));
-    // The tick and the state glyph, each with its space.
-    const MARKS_W: usize = 4;
+    let (letter, style) = priority_letter(issue.priority, th);
+    spans.push(Span::styled(format!("{letter} "), style));
+    // The tick, the state glyph and the priority, each with its space.
+    const MARKS_W: usize = 6;
     let full = issue.label();
     let label = truncate(&full, budget.saturating_sub(MARKS_W));
     let positions = visible_positions(positions, &label, &full);
@@ -1806,51 +1818,6 @@ fn title_spans(
         th,
     ));
     spans
-}
-
-/// A row's second line: priority, project and labels in Linear's colours,
-/// the assignee on `Other issues`, and the day it was opened. What does
-/// not fit drops from the right.
-fn meta_spans(
-    issue: &LinearIssue,
-    tab: LinearTab,
-    budget: usize,
-    now: i64,
-    th: Theme,
-) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(th.dim);
-    let dot = |tag: &LinearTag| {
-        let color = crate::theme::hex(&tag.color).unwrap_or(th.muted);
-        vec![
-            Span::styled("● ", Style::default().fg(color)),
-            Span::styled(tag.name.clone(), Style::default().fg(th.muted)),
-        ]
-    };
-    let mut parts: Vec<Vec<Span<'static>>> = Vec::new();
-    if issue.priority != 0 {
-        let mut part = priority_mark(issue.priority, th);
-        part.push(Span::styled(
-            format!(" {}", priority_word(issue.priority)),
-            dim,
-        ));
-        parts.push(part);
-    }
-    if tab == LinearTab::Others {
-        let who = if issue.assignee.is_empty() {
-            UNASSIGNED.to_string()
-        } else {
-            issue.assignee.clone()
-        };
-        parts.push(vec![Span::styled(who, dim)]);
-    }
-    if let Some(project) = &issue.project {
-        parts.push(dot(project));
-    }
-    parts.extend(issue.labels.iter().map(dot));
-    if let Some(day) = short_date(&issue.created_at, now) {
-        parts.push(vec![Span::styled(day, dim)]);
-    }
-    fit_parts(parts, budget, th)
 }
 
 /// `Oct 5` for an RFC 3339 stamp this year, `Oct 5 2025` for one before.
@@ -1905,21 +1872,138 @@ fn draw_status_pick(f: &mut Frame, area: Rect, pick: &StatusPick, th: Theme) {
     }
 }
 
-fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            issue.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!("{} · {}", issue.status, issue.url),
-            Style::default().fg(th.dim),
-        )),
-        Line::from(""),
-    ];
+/// The reading pane at least this wide sets the issue's properties in a
+/// column of their own on its right, as Linear does; narrower, they stack
+/// under the title.
+const SIDE_MIN_W: u16 = 72;
+/// The properties column, its rule included.
+const SIDE_W: u16 = 30;
+/// The widest the description runs: a line past this is hard to read.
+const READ_MAX_W: u16 = 88;
+
+/// The reading pane's inside, split: the text — a column in from either
+/// edge, no wider than [`READ_MAX_W`] — and, when it is wide enough, the
+/// properties column on the right.
+fn reading_areas(inner: Rect) -> (Rect, Option<Rect>) {
+    let (text, side) = if inner.width >= SIDE_MIN_W {
+        let [text, side] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(SIDE_W)]).areas(inner);
+        (text, Some(side))
+    } else {
+        (inner, None)
+    };
+    let pad = if text.width > 4 { 1 } else { 0 };
+    let text = Rect {
+        x: text.x + pad,
+        width: text.width.saturating_sub(pad * 2).min(READ_MAX_W),
+        ..text
+    };
+    (text, side)
+}
+
+/// The issue's properties, a row each as Linear's sidebar lists them: a
+/// dim name, then the value in Linear's colours — one row per label.
+fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Line<'static>> {
+    const NAME_W: usize = 10;
+    let room = width.saturating_sub(NAME_W);
+    let name = |n: &str| Span::styled(format!("{n:<NAME_W$}"), Style::default().fg(th.dim));
+    let text = |t: &str| {
+        Span::styled(
+            truncate(t, room.saturating_sub(2)),
+            Style::default().fg(th.text),
+        )
+    };
+    let dot = |tag: &LinearTag| {
+        let color = crate::theme::hex(&tag.color).unwrap_or(th.muted);
+        vec![
+            Span::styled("● ", Style::default().fg(color)),
+            Span::styled(
+                truncate(&tag.name, room.saturating_sub(2)),
+                Style::default().fg(th.text),
+            ),
+        ]
+    };
+    let mut lines = Vec::new();
+    let mut row = |label: &str, value: Vec<Span<'static>>| {
+        let mut spans = vec![name(label)];
+        spans.extend(value);
+        lines.push(Line::from(spans));
+    };
+    let (glyph, color) = state_mark(issue, th);
+    row(
+        "Status",
+        vec![
+            Span::styled(format!("{glyph} "), Style::default().fg(color)),
+            text(&issue.status),
+        ],
+    );
+    let mut priority = priority_mark(issue.priority, th);
+    priority.push(Span::raw(" "));
+    priority.push(text(priority_word(issue.priority)));
+    row("Priority", priority);
+    let who = if issue.assignee.is_empty() {
+        Span::styled(UNASSIGNED, Style::default().fg(th.dim))
+    } else {
+        text(&issue.assignee)
+    };
+    row("Assignee", vec![who]);
+    match &issue.project {
+        Some(project) => row("Project", dot(project)),
+        None => row(
+            "Project",
+            vec![Span::styled("none", Style::default().fg(th.dim))],
+        ),
+    }
+    if issue.labels.is_empty() {
+        row(
+            "Labels",
+            vec![Span::styled("none", Style::default().fg(th.dim))],
+        );
+    }
+    for (i, label) in issue.labels.iter().enumerate() {
+        row(if i == 0 { "Labels" } else { "" }, dot(label));
+    }
+    for (label, stamp) in [
+        ("Created", &issue.created_at),
+        ("Updated", &issue.updated_at),
+    ] {
+        if let Some(day) = short_date(stamp, now) {
+            row(
+                label,
+                vec![Span::styled(day, Style::default().fg(th.muted))],
+            );
+        }
+    }
+    lines
+}
+
+/// The reading pane's text, `width` wide: the title, wrapped and bold,
+/// the properties under it when they have no column of their own
+/// (`stacked`), then the description.
+fn body_lines(
+    issue: &LinearIssue,
+    width: usize,
+    stacked: bool,
+    now: i64,
+    th: Theme,
+) -> Vec<Line<'static>> {
+    let title = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line> = crate::pr_preview::wrap(&issue.title, width)
+        .into_iter()
+        .map(|row| Line::from(Span::styled(row, title)))
+        .collect();
+    lines.push(Line::default());
+    if stacked {
+        lines.extend(properties(issue, width, now, th));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(width),
+            Style::default().fg(th.faint),
+        )));
+        lines.push(Line::default());
+    }
     if issue.description.trim().is_empty() {
         lines.push(Line::from(Span::styled(
-            "(no description)",
+            "No description",
             Style::default().fg(th.dim),
         )));
     } else {
@@ -3422,11 +3506,9 @@ pub(crate) mod tests {
         assert!(at("IN PROGRESS 1") < at("ENG-1 Started one"), "{screen}");
         assert!(at("ENG-1 Started one") < at("TODO 2"), "{screen}");
         assert!(at("TODO 2") < at("ENG-2 Todo one"), "{screen}");
-        assert!(
-            screen.contains("▂▄▆ High · ● Export PDF · Oct 5"),
-            "{screen}"
-        );
-        assert!(screen.contains("‼ Urgent"), "{screen}");
+        assert!(screen.contains("◑ H ENG-1 Started one"), "{screen}");
+        assert!(screen.contains("○ U ENG-2 Todo one"), "{screen}");
+        assert!(screen.contains("○ · ENG-3 Todo two"), "{screen}");
         assert!(!screen.contains("Their bug"), "{screen}");
 
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
@@ -3438,10 +3520,8 @@ pub(crate) mod tests {
         assert_eq!(the_view(&app).tab, LinearTab::Others);
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-4"));
         let screen = shot(&mut app, 200, 40);
-        assert!(
-            screen.contains("▂▄▆ Medium · Sam · ● Export PDF"),
-            "{screen}"
-        );
+        assert!(screen.contains("Priority  ▂▄▆ Medium"), "{screen}");
+        assert!(screen.contains("Assignee  Sam"), "{screen}");
         assert!(!screen.contains("Started one"), "{screen}");
 
         // A click on the first tab brings `My issues` back.
@@ -3534,10 +3614,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// A click on a row's meta line selects that row; no line of the list
-    /// runs past a narrow pane.
+    /// A row is one line — the state glyph, the priority's letter, the
+    /// identifier and title — a click on it selects it, and no row runs
+    /// past a narrow pane. The labels are the reading pane's.
     #[test]
-    fn rows_are_two_lines_and_fit_a_narrow_pane() {
+    fn rows_are_one_line_with_a_priority_letter() {
         let mut app = view_on(vec![
             rich(
                 "1",
@@ -3546,12 +3627,14 @@ pub(crate) mod tests {
                 ("Todo", "unstarted"),
                 2,
             ),
-            rich("2", "ENG-2", "A second one", ("Todo", "unstarted"), 3),
+            rich("2", "ENG-2", "A second one", ("Todo", "unstarted"), 4),
         ]);
-        shot(&mut app, 200, 40);
+        let screen = shot(&mut app, 200, 40);
+        assert!(screen.contains("○ H ENG-1 A first issue"), "{screen}");
+        assert!(screen.contains("○ L ENG-2 A second one"), "{screen}");
         let (index, rect) = the_view(&app).row_rects[1];
-        assert_eq!(rect.height, 2);
-        let at = Position::new(rect.x + 2, rect.y + 1);
+        assert_eq!(rect.height, 1);
+        let at = Position::new(rect.x + 2, rect.y);
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: at.x,
@@ -3567,15 +3650,119 @@ pub(crate) mod tests {
             shot(&mut app, w, 30);
             let budget = (the_view(&app).list_area.width as usize).saturating_sub(2);
             for issue in rows(&app, &the_view(&app).project) {
-                let width = |spans: &[Span]| -> usize {
-                    spans.iter().map(|s| s.content.chars().count()).sum()
-                };
-                let meta = meta_spans(issue, LinearTab::Others, budget, 0, app.theme);
-                assert!(width(&meta) <= budget, "meta at {w}");
                 let title = title_spans(issue, &[], true, budget, app.theme);
-                assert!(width(&title) <= budget, "title at {w}");
+                let width: usize = title.iter().map(|s| s.content.chars().count()).sum();
+                assert!(width <= budget, "title at {w}");
             }
         }
+    }
+
+    /// The reading pane lists the issue's properties as Linear's sidebar
+    /// does — in a column of their own when it is wide, under the title
+    /// when it is not — and wraps a long title rather than cutting it.
+    #[test]
+    fn the_reading_pane_lists_properties_beside_or_under_the_text() {
+        let mut long = rich(
+            "1",
+            "ENG-1",
+            "A title long enough that a narrow reading pane has to wrap it onto more lines",
+            ("In Progress", "started"),
+            2,
+        );
+        long.assignee = "Sam".into();
+        long.description = "Body text.".into();
+        let mut app = view_on(vec![long]);
+        let wide = shot(&mut app, 220, 40);
+        let row = |screen: &str, needle: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{screen}"))
+                .to_string()
+        };
+        let status = row(&wide, "Status");
+        assert!(status.contains("In Progress"), "{wide}");
+        assert!(row(&wide, "Priority").contains("High"), "{wide}");
+        assert!(row(&wide, "Labels").contains("● Export PDF"), "{wide}");
+        assert!(row(&wide, "Assignee").contains("Sam"), "{wide}");
+        // Beside the text: the title's first line and Status share a row.
+        assert!(status.contains("││ A title long"), "{wide}");
+
+        let narrow = shot(&mut app, 110, 40);
+        let status = row(&narrow, "Status");
+        assert!(
+            status.contains("││ Status"),
+            "stacked under the title\n{narrow}"
+        );
+        assert!(
+            narrow.contains("it onto more lines"),
+            "the title wraps\n{narrow}"
+        );
+        let title_at = narrow.lines().position(|l| l.contains("A title")).unwrap();
+        let body_at = narrow
+            .lines()
+            .position(|l| l.contains("Body text."))
+            .unwrap();
+        let status_at = narrow.lines().position(|l| l.contains("Status")).unwrap();
+        assert!(title_at < status_at && status_at < body_at, "{narrow}");
+    }
+
+    /// Plain ←/→ flip the tabs — the filter line has no caret to move.
+    #[test]
+    fn left_and_right_switch_tabs() {
+        let mut other = rich("2", "ENG-2", "Theirs", ("Todo", "unstarted"), 3);
+        other.mine = false;
+        let mut app = view_on(vec![
+            rich("1", "ENG-1", "Mine", ("Todo", "unstarted"), 2),
+            other,
+        ]);
+        let mut out = Vec::new();
+        handle_key(&mut app, KeyEvent::from(KeyCode::Right), &mut out);
+        assert_eq!(the_view(&app).tab, LinearTab::Others);
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
+        handle_key(&mut app, KeyEvent::from(KeyCode::Left), &mut out);
+        assert_eq!(the_view(&app).tab, LinearTab::Mine);
+        let shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
+        handle_key(&mut app, shift_right, &mut out);
+        assert_eq!(the_view(&app).tab, LinearTab::Others);
+    }
+
+    /// Plain words find issues by their status, priority, labels and
+    /// project as well as their title, a word that names none of them
+    /// still fuzzy-matching the title.
+    #[test]
+    fn words_search_status_priority_and_labels_too() {
+        let mut bug = rich("1", "ENG-1", "Login breaks", ("In Progress", "started"), 2);
+        bug.labels = vec![LinearTag {
+            name: "Bug".into(),
+            color: String::new(),
+        }];
+        let app = view_on(vec![
+            bug,
+            rich("2", "ENG-2", "Export the report", ("Todo", "unstarted"), 4),
+        ]);
+        let list = rows(&app, &the_view(&app).project).to_vec();
+        let ids = |query: &str| -> Vec<String> {
+            filtered(query, &list)
+                .into_iter()
+                .map(|(i, _)| list[i].identifier.clone())
+                .collect()
+        };
+        assert_eq!(ids("bug"), ["ENG-1"]);
+        assert_eq!(ids("high"), ["ENG-1"]);
+        assert_eq!(ids("in progress"), ["ENG-1"]);
+        assert_eq!(ids("todo low"), ["ENG-2"]);
+        assert_eq!(
+            ids("high login"),
+            ["ENG-1"],
+            "a facet word and a title word"
+        );
+        assert_eq!(
+            ids("pdf report"),
+            ["ENG-2"],
+            "the project-less label Export PDF"
+        );
+        assert!(ids("high report").is_empty());
     }
 
     #[test]

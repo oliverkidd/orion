@@ -16,7 +16,7 @@
 //! text, and a key with no value yet (`label:` mid-typing) narrows nothing.
 //!
 //! The FILTER PICK (`⌘F`, [`FilterPick`]) writes the same tokens for you:
-//! the facets down one side, the selected facet's values down the other
+//! one column of each facet's values, ↑/↓ walking them all,
 //! with how many rows carry each, `space` adding or removing the value's
 //! token in the line ([`toggle`]).
 
@@ -181,29 +181,76 @@ pub fn normalize(value: &str) -> String {
     out
 }
 
-/// The rows the line leaves, best first: ranked by its words over
-/// `label(row)` — built only when there are words to rank, every row in
-/// order otherwise — and kept where its tokens pass `values(row, key)`.
-/// Each with the matched char positions of its label.
+/// The rows the line leaves, best first, kept where its tokens pass
+/// `values(row, key)`. Its words rank over `label(row)` — built only when
+/// there are words to rank, every row in order otherwise — and a word
+/// that is not in the label may name one of the row's facet values
+/// instead (`high bug export` is High, labelled bug, about export): the
+/// rows the whole text matches first, then those whose facets took some
+/// words and whose label the rest. Each with the matched char positions
+/// of its label.
 pub fn narrow(
     parsed: &Parsed,
+    keys: &[FacetKey],
     len: usize,
     label: impl Fn(usize) -> String,
     values: impl Fn(usize, &str) -> Vec<String>,
 ) -> Vec<(usize, Vec<usize>)> {
-    let ranked = if parsed.text.split_whitespace().next().is_none() {
-        (0..len).map(|i| (i, Vec::new())).collect()
-    } else {
-        let labels: Vec<String> = (0..len).map(label).collect();
-        crate::fuzzy::rank(&parsed.text, labels.iter().map(String::as_str))
-    };
-    if parsed.tokens.is_empty() {
-        return ranked;
+    let passes =
+        |i: usize| parsed.tokens.is_empty() || matches(&parsed.tokens, |key| values(i, key));
+    let words: Vec<String> = parsed.text.split_whitespace().map(normalize).collect();
+    if words.is_empty() {
+        return (0..len)
+            .filter(|i| passes(*i))
+            .map(|i| (i, Vec::new()))
+            .collect();
     }
-    ranked
+    let mut whole: Vec<(i32, usize, Vec<usize>)> = Vec::new();
+    let mut by_facet: Vec<(i32, usize, Vec<usize>)> = Vec::new();
+    for i in 0..len {
+        if !passes(i) {
+            continue;
+        }
+        let text = label(i);
+        if let Some(m) = crate::fuzzy::fuzzy_match(&parsed.text, &text) {
+            whole.push((m.score, i, m.positions));
+            continue;
+        }
+        let facets: Vec<String> = keys.iter().flat_map(|k| values(i, k.key)).collect();
+        let rest: Vec<&str> = words
+            .iter()
+            .filter(|w| !facets.iter().any(|v| word_prefix(&normalize(v), w)))
+            .map(String::as_str)
+            .collect();
+        if rest.len() == words.len() {
+            continue;
+        }
+        if rest.is_empty() {
+            by_facet.push((0, i, Vec::new()));
+        } else if let Some(m) = crate::fuzzy::fuzzy_match(&rest.join(" "), &text) {
+            by_facet.push((m.score, i, m.positions));
+        }
+    }
+    // Best score first; equal ones keep the list's own order.
+    let best = |rows: &mut Vec<(i32, usize, Vec<usize>)>| {
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)))
+    };
+    best(&mut whole);
+    best(&mut by_facet);
+    whole
         .into_iter()
-        .filter(|(i, _)| matches(&parsed.tokens, |key| values(*i, key)))
+        .chain(by_facet)
+        .map(|(_, i, positions)| (i, positions))
         .collect()
+}
+
+/// Whether `word` starts `value` or any word in it — both normalized.
+fn word_prefix(value: &str, word: &str) -> bool {
+    value.starts_with(word)
+        || value
+            .char_indices()
+            .filter(|(_, c)| *c == ' ')
+            .any(|(i, _)| value[i + 1..].starts_with(word))
 }
 
 /// The cursor's row among the `visible` ones: `selected` while it shows,
@@ -227,11 +274,7 @@ fn value_matches(token: &Token, value: &str) -> bool {
     if token.exact {
         return value == token.norm;
     }
-    value.starts_with(&token.norm)
-        || value
-            .char_indices()
-            .filter(|(_, c)| *c == ' ')
-            .any(|(i, _)| value[i + 1..].starts_with(&token.norm))
+    word_prefix(&value, &token.norm)
 }
 
 /// Whether a row passes the tokens. `values(key)` is the row's values for
@@ -400,22 +443,45 @@ pub struct FilterPick {
     pub value: usize,
 }
 
+/// Every value the picker lists, top to bottom, as `(facet, value)`: the
+/// one column ↑/↓ walks, from a facet's last value on to the next's first.
+fn flat(facets: &[PickFacet]) -> Vec<(usize, usize)> {
+    facets
+        .iter()
+        .enumerate()
+        .flat_map(|(f, facet)| (0..facet.values.len()).map(move |v| (f, v)))
+        .collect()
+}
+
 impl FilterPick {
-    /// ←/→: the next facet round either end, its first value under the
-    /// cursor.
+    /// ←/→: the next facet that has values, round either end, its first
+    /// value under the cursor.
     pub fn step_facet(&mut self, facets: &[PickFacet], delta: i32) {
-        if facets.is_empty() {
-            return;
-        }
         let n = facets.len() as i32;
-        self.facet = (self.facet as i32 + delta).rem_euclid(n) as usize;
-        self.value = 0;
+        let mut facet = self.facet as i32;
+        for _ in 0..n {
+            facet = (facet + delta.signum()).rem_euclid(n);
+            if !facets[facet as usize].values.is_empty() {
+                self.facet = facet as usize;
+                self.value = 0;
+                return;
+            }
+        }
     }
 
-    /// ↑/↓: the next value of the facet, clamped.
+    /// ↑/↓: the next value down the one column, across facets, clamped
+    /// at either end.
     pub fn step_value(&mut self, facets: &[PickFacet], delta: i32) {
-        let len = facets.get(self.facet).map_or(0, |f| f.values.len());
-        self.value = crate::app::clamp_selection(self.value as i64 + delta as i64, len);
+        let all = flat(facets);
+        if all.is_empty() {
+            return;
+        }
+        let here = all
+            .iter()
+            .position(|p| *p == (self.facet, self.value))
+            .unwrap_or(0);
+        let next = (here as i64 + delta as i64).clamp(0, all.len() as i64 - 1) as usize;
+        (self.facet, self.value) = all[next];
     }
 
     /// The cursor kept on the lists as they are now — the counts move as
@@ -423,6 +489,15 @@ impl FilterPick {
     pub fn clamp(&mut self, facets: &[PickFacet]) {
         self.facet = self.facet.min(facets.len().saturating_sub(1));
         let len = facets.get(self.facet).map_or(0, |f| f.values.len());
+        if len == 0 {
+            // Its values all gone: onto the nearest facet that has some.
+            if let Some(&(f, v)) = flat(facets).iter().find(|(f, _)| *f >= self.facet) {
+                (self.facet, self.value) = (f, v);
+            } else if let Some(&(f, _)) = flat(facets).last() {
+                (self.facet, self.value) = (f, 0);
+            }
+            return;
+        }
         self.value = crate::app::clamp_selection(self.value as i64, len);
     }
 
@@ -518,20 +593,10 @@ pub fn handle_key(
     PickKey::Moved
 }
 
-/// The picker's width for the facets' column.
-fn facet_column(facets: &[PickFacet]) -> usize {
-    facets
-        .iter()
-        .map(|f| f.key.title.chars().count())
-        .max()
-        .unwrap_or(0)
-        + 4
-}
-
 /// Draw the FILTER PICK into `area` (the reading pane's inside): a heading,
-/// then the facets down the left — the selected one lit — and its values
-/// beside them, each with its tick, mark, name and count. Returns nothing
-/// to hit-test: the picker is keys only.
+/// then one column — each facet's name, its values under it with their
+/// tick, mark, name and count — scrolled to keep the cursor in view.
+/// Returns nothing to hit-test: the picker is keys only.
 pub fn draw_pick(
     f: &mut Frame,
     area: Rect,
@@ -540,69 +605,64 @@ pub fn draw_pick(
     pick: &FilterPick,
     th: Theme,
 ) {
-    let width = area.width as usize;
-    let mut lines: Vec<Line> = vec![
+    // Counts sit by their names, not across a wide pane.
+    const MAX_W: usize = 48;
+    let width = (area.width as usize).min(MAX_W);
+    let head = vec![
         Line::from(Span::styled(
             "Filter",
             Style::default().fg(th.text).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "space adds the value to the filter line, again takes it out",
+            "space ticks a value; or just type it in the filter line",
             Style::default().fg(th.dim),
         )),
         Line::default(),
     ];
-    let left_w = facet_column(facets);
-    let values = facets.get(pick.facet).map_or(&[][..], |f| &f.values[..]);
-    let height = (area.height as usize).saturating_sub(lines.len());
-    // The values scroll under a follow-window; the facets are a handful.
-    let start = crate::app::window_start(pick.value, height.max(1));
-    let rows = facets
-        .len()
-        .max(values.len().saturating_sub(start))
-        .min(height);
-    let count_w = values
+    let count_w = facets
         .iter()
+        .flat_map(|f| &f.values)
         .map(|v| v.count.to_string().len())
         .max()
         .unwrap_or(1);
-    for r in 0..rows {
-        let mut spans: Vec<Span> = Vec::new();
-        match facets.get(r) {
-            Some(facet) => {
-                let on = r == pick.facet;
-                let active = parsed.tokens.iter().any(|t| t.key == facet.key.key);
-                let mark = if on { "▸ " } else { "  " };
-                let label = format!("{mark}{}", facet.key.title);
-                let mut style = Style::default().fg(if on { th.text } else { th.muted });
-                if on {
-                    style = style.add_modifier(Modifier::BOLD);
-                }
-                let pad = left_w.saturating_sub(label.chars().count() + 2);
-                spans.push(Span::styled(label, style));
-                spans.push(Span::styled(
-                    if active { " •" } else { "  " },
-                    Style::default().fg(th.accent),
-                ));
-                spans.push(Span::raw(" ".repeat(pad)));
-            }
-            None => spans.push(Span::raw(" ".repeat(left_w))),
+    let mut body: Vec<Line> = Vec::new();
+    let mut cursor_line = 0;
+    for (fi, facet) in facets.iter().enumerate() {
+        if facet.values.is_empty() {
+            continue;
         }
-        if let Some(value) = values.get(start + r) {
-            let key = facets[pick.facet].key.key;
-            let at = start + r == pick.value;
-            let on = is_on(parsed, key, &value.value);
-            let tick = if on { "✓ " } else { "  " };
+        if !body.is_empty() {
+            body.push(Line::default());
+        }
+        let active = parsed.tokens.iter().any(|t| t.key == facet.key.key);
+        let here = fi == pick.facet;
+        body.push(Line::from(vec![
+            Span::styled(
+                facet.key.title.to_string(),
+                Style::default()
+                    .fg(if here { th.text } else { th.muted })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if active { " •" } else { "" },
+                Style::default().fg(th.accent),
+            ),
+        ]));
+        for (vi, value) in facet.values.iter().enumerate() {
+            let at = here && vi == pick.value;
+            if at {
+                cursor_line = body.len();
+            }
+            let on = is_on(parsed, facet.key.key, &value.value);
             let mut name_style = Style::default().fg(if on { th.text } else { th.muted });
             if at {
                 name_style = name_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
             }
-            spans.push(Span::styled(
-                if at { "▌" } else { " " },
-                Style::default().fg(th.accent),
-            ));
-            spans.push(Span::styled(tick, Style::default().fg(th.accent)));
-            let mut used = left_w + 3;
+            let mut spans = vec![
+                Span::styled(if at { "▌" } else { " " }, Style::default().fg(th.accent)),
+                Span::styled(if on { "✓ " } else { "  " }, Style::default().fg(th.accent)),
+            ];
+            let mut used = 3;
             if let Some((mark, color)) = &value.mark {
                 spans.push(Span::styled(
                     format!("{mark} "),
@@ -620,17 +680,21 @@ pub fn draw_pick(
                 format!("{:>count_w$}", value.count),
                 Style::default().fg(th.dim),
             ));
-        }
-        lines.push(Line::from(spans));
-    }
-    if values.is_empty() {
-        if let Some(line) = lines.get_mut(3) {
-            line.spans.push(Span::styled(
-                "  nothing to pick",
-                Style::default().fg(th.dim),
-            ));
+            body.push(Line::from(spans));
         }
     }
+    if body.is_empty() {
+        body.push(Line::from(Span::styled(
+            "nothing to pick",
+            Style::default().fg(th.dim),
+        )));
+    }
+    let height = (area.height as usize).saturating_sub(head.len()).max(1);
+    let start = crate::app::window_start(cursor_line, height);
+    let lines: Vec<Line> = head
+        .into_iter()
+        .chain(body.into_iter().skip(start).take(height))
+        .collect();
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -761,19 +825,31 @@ mod tests {
                 })
                 .collect(),
         };
-        let facets = vec![facet(3), facet(1)];
+        let facets = vec![facet(3), facet(0), facet(1)];
         let mut pick = FilterPick::default();
+        // ↓ walks one column: past the first facet's last value onto the
+        // next facet that has any, and stops at the bottom.
+        pick.step_value(&facets, 2);
+        assert_eq!((pick.facet, pick.value), (0, 2));
+        pick.step_value(&facets, 1);
+        assert_eq!((pick.facet, pick.value), (2, 0));
         pick.step_value(&facets, 5);
-        assert_eq!(pick.value, 2);
+        assert_eq!((pick.facet, pick.value), (2, 0));
+        pick.step_value(&facets, -2);
+        assert_eq!((pick.facet, pick.value), (0, 1));
+        // ←/→ jump facets, round either end, over an empty one.
         pick.step_facet(&facets, 1);
-        assert_eq!((pick.facet, pick.value), (1, 0));
+        assert_eq!((pick.facet, pick.value), (2, 0));
         pick.step_facet(&facets, 1);
         assert_eq!(pick.facet, 0);
         pick.step_facet(&facets, -1);
-        assert_eq!(pick.facet, 1);
+        assert_eq!(pick.facet, 2);
         pick.value = 9;
         pick.clamp(&facets);
         assert_eq!(pick.value, 0);
+        pick.facet = 1;
+        pick.clamp(&facets);
+        assert_eq!((pick.facet, pick.value), (2, 0), "off an emptied facet");
     }
 
     #[test]
