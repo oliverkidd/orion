@@ -80,6 +80,10 @@ pub struct Store {
     pub projects: HashMap<ProjectId, Vec<OpenPr>>,
     #[serde(default)]
     pub details: HashMap<String, PrDetail>,
+    /// AUTOFIX's ledger, by pull request URL: the breakage last sent or
+    /// dismissed, so a relaunch does not ask about it again.
+    #[serde(default)]
+    pub autofix: HashMap<String, crate::autofix::Record>,
 }
 
 /// Where this instance keeps its cache. Cheap to clone: it is a path.
@@ -255,6 +259,9 @@ pub fn install(app: &mut App, store: Store) {
             },
         );
     }
+    for (url, record) in store.autofix {
+        app.autofix.ledger.entry(url).or_insert(record);
+    }
     for (url, detail) in store.details {
         if app.pr_detail.contains_key(&url) {
             continue;
@@ -281,6 +288,21 @@ pub fn snapshot(app: &App) -> Store {
             .map(|(project, open)| (project.clone(), open.list.clone()))
             .collect(),
         details: app.pr_detail.clone(),
+        // Only open pull requests' — a merged or closed one never breaks
+        // again.
+        autofix: {
+            let open: HashSet<&str> = app
+                .open_prs
+                .values()
+                .flat_map(|open| open.list.iter().map(|pr| pr.url.as_str()))
+                .collect();
+            app.autofix
+                .ledger
+                .iter()
+                .filter(|(url, _)| open.contains(url.as_str()))
+                .map(|(url, record)| (url.clone(), record.clone()))
+                .collect()
+        },
     }
 }
 
@@ -290,7 +312,8 @@ pub fn snapshot(app: &App) -> Store {
 /// taken, so the caller — the loop, off-thread; the quit path, inline —
 /// only ever writes once per change.
 pub fn take_flush(app: &mut App) -> Option<(PrCache, Store, HashSet<String>)> {
-    if !std::mem::take(&mut app.pr_cache_dirty) {
+    let autofix = std::mem::take(&mut app.autofix.dirty);
+    if !std::mem::take(&mut app.pr_cache_dirty) && !autofix {
         return None;
     }
     let cache = app.pr_cache.clone()?;
@@ -359,6 +382,8 @@ mod tests {
             is_draft: number % 2 == 1,
             health: Default::default(),
             head: format!("head-{number}"),
+            mine: false,
+            head_sha: String::new(),
         }
     }
 
@@ -404,6 +429,19 @@ mod tests {
             .into_iter()
             .collect(),
             details: [(detail(7).url.clone(), detail(7))].into_iter().collect(),
+            autofix: [(
+                open(7).url,
+                crate::autofix::Record {
+                    handled: Some(crate::autofix::Fingerprint {
+                        sha: "abc".into(),
+                        conflicts: true,
+                        checks: vec!["unit".into()],
+                    }),
+                    attempts: 1,
+                },
+            )]
+            .into_iter()
+            .collect(),
         }
     }
 

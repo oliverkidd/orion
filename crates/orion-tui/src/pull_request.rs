@@ -538,7 +538,7 @@ const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!) {
     repository(owner: $owner, name: $repo) { \
     pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
     nodes { number url title isDraft headRefName isCrossRepository \
-    headRepositoryOwner { login } mergeable \
+    headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
 
 /// One row of a project's open-pull-request list.
@@ -561,6 +561,15 @@ pub struct OpenPr {
     /// a name with ours — `main` above all, which every fork has and the
     /// ROOT WORKTREE is on.
     pub head: String,
+    /// Whether the signed-in `gh` user opened it (`viewerDidAuthor`) —
+    /// only these are offered to the AUTOFIX agent.
+    #[serde(default)]
+    pub mine: bool,
+    /// The head branch's tip commit (`headRefOid`): a push moves it, which
+    /// is what lets AUTOFIX ask again about a pull request it already
+    /// asked about. Empty in a cache written before it was asked.
+    #[serde(default)]
+    pub head_sha: String,
 }
 
 /// `#42 title`, or `#42` alone for an untitled one — how a pull request
@@ -736,6 +745,8 @@ pub(crate) fn parse_list(json: &str) -> Option<Vec<OpenPr>> {
                     is_draft: bool_at(v, "isDraft"),
                     health: health(v),
                     head: checkout_branch(v),
+                    mine: bool_at(v, "viewerDidAuthor"),
+                    head_sha: str_at(v, "headRefOid"),
                 })
             })
             .collect(),
@@ -1764,6 +1775,8 @@ mod tests {
             is_draft,
             health: Default::default(),
             head: String::new(),
+            mine: false,
+            head_sha: String::new(),
         };
         let mut list = vec![row(42, true), row(40, false), row(31, true), row(30, false)];
         drafts_last(&mut list);

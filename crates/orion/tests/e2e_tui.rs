@@ -49,12 +49,19 @@ const PROJECT_MENU_ROW: &str = "Remove from list";
 const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 
 /// A data dir as a user who finished first-run setup leaves it: the
-/// ONBOARDING wizard already seen (it would cover the grid every test
-/// drives) and the agents it offers switched on, which a fresh install
-/// leaves off.
+/// ONBOARDING wizard already seen, its "what's new" steps included (either
+/// would cover the grid every test drives) and the agents it offers
+/// switched on, which a fresh install leaves off.
 fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
-    std::fs::write(data_dir.join("config.local.json"), r#"{"onboarded": true}"#).unwrap();
+    std::fs::write(
+        data_dir.join("config.local.json"),
+        format!(
+            r#"{{"onboarded": true, "setup_version": {}}}"#,
+            orion_tui::onboard::SETUP_VERSION
+        ),
+    )
+    .unwrap();
     std::fs::write(
         data_dir.join("config.json"),
         format!(
@@ -1186,4 +1193,57 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(*row, format!("row {}", first + i), "{text}");
     }
+}
+
+/// AUTOFIX, end to end: with **When a PR breaks** on `ask`, a pull request
+/// of the user's that `gh` says conflicts raises the AUTOFIX MODAL on its
+/// own — the conflicts ticked — and `Esc` puts it away. A stub `gh` on
+/// PATH answers the open list (GraphQL) and the PR's body.
+#[test]
+fn tui_autofix_asks_when_my_pr_conflicts() {
+    let stub_bin = tempfile::tempdir().unwrap();
+    let gh = stub_bin.path().join("gh");
+    std::fs::write(
+        &gh,
+        concat!(
+            "#!/bin/sh\n",
+            "case \"$1 $2 $3\" in\n",
+            "  'api graphql'*) printf '%s' '{\"data\":{\"repository\":{\"pullRequests\":{\"nodes\":[",
+            "{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
+            "\"isDraft\":false,\"headRefName\":\"feat\",\"isCrossRepository\":false,",
+            "\"headRepositoryOwner\":{\"login\":\"o\"},\"mergeable\":\"CONFLICTING\",",
+            "\"viewerDidAuthor\":true,\"headRefOid\":\"abc123\",",
+            "\"commits\":{\"nodes\":[{\"commit\":{\"statusCheckRollup\":{\"state\":\"SUCCESS\"}}}]}}",
+            "]}}}}' ;;\n",
+            "  'pr view 7') printf '%s' '{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",",
+            "\"title\":\"Add things\",\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"CONFLICTING\",",
+            "\"statusCheckRollup\":[],\"author\":{\"login\":\"me\"},\"baseRefName\":\"main\",",
+            "\"headRefName\":\"feat\",\"headRefOid\":\"abc123\",\"comments\":[],\"reviews\":[]}' ;;\n",
+            "  'pr view'*) echo 'no pull requests found for branch \"main\"' >&2; exit 1 ;;\n",
+            "  *) exit 1 ;;\n",
+            "esac\n",
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        stub_bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut tui = TuiHarness::spawn_with(&[("PATH", path)], r#", "pr_autofix": "ask""#);
+    let repo = tui.make_repo("autofix-proj");
+    tui.wait_for_text("open your first project");
+    run_command(&mut tui, "open a folder");
+    tui.wait_for_text("Open project");
+    tui.type_str(&repo.to_string_lossy());
+    tui.send(ENTER);
+    tui.wait_for_gone("Open project");
+
+    tui.wait_for_text("Autofix #7");
+    tui.wait_for_text("[x] Merge conflicts");
+    tui.wait_for_text("[ ] Unit tests");
+    tui.send(ESC);
+    tui.wait_for_gone("Autofix #7");
 }

@@ -2411,6 +2411,9 @@ pub enum Overlay {
     BranchSwitch(crate::branch_switch::BranchSwitchView),
     /// `^P` in the LAUNCHER VIEW's box: the PROJECT PICKER.
     ProjectPicker(crate::launcher::ProjectPicker),
+    /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
+    /// PULL REQUESTS MODAL) — what to send the agent to fix.
+    Autofix(Box<crate::autofix::AutofixForm>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -4444,6 +4447,11 @@ pub struct App {
     /// GIT POLL, plus once on quit.
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
+    /// AUTOFIX: the ledger, the watched pull requests and the queued asks
+    /// (`crate::autofix`).
+    pub autofix: crate::autofix::State,
+    /// **When a PR breaks** (Settings → Review), mirrored.
+    pub autofix_mode: crate::autofix::Mode,
     /// Where a file dropped onto a prompt box bound for an agent is copied
     /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
     /// clipboard's image (`clipboard_image`): the main loop installs the
@@ -4731,6 +4739,8 @@ impl App {
             pr_actions_tx: None,
             pr_cache: None,
             pr_cache_dirty: false,
+            autofix: crate::autofix::State::default(),
+            autofix_mode: crate::autofix::Mode::Off,
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
             issues: HashMap::new(),

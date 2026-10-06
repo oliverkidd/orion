@@ -29,7 +29,7 @@ use std::io::{BufWriter, Stdout};
 use std::time::Duration;
 
 mod activate;
-mod alerts;
+pub(crate) mod alerts;
 mod focus_walk;
 mod host_terminal;
 mod launcher;
@@ -471,6 +471,13 @@ async fn main_loop(
                 sweep_pull_request(&mut app, &pr_tx);
                 lookup_open_prs(&mut app, &prs_tx, &mut out);
                 sweep_open_prs(&mut app, &prs_tx, &mut out);
+                // AUTOFIX: the checks of each broken pull request it is
+                // watching, when their turn has come — and a queued ask
+                // onto a free screen.
+                for (url, number, dir) in crate::autofix::due_fetches(&mut app) {
+                    spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
+                }
+                crate::autofix::tick(&mut app);
                 // The selected project's open issues, on the same beat, so
                 // `i` paints rows that are at most a couple of minutes old.
                 crate::issues::refresh_selected(&mut app);
@@ -1480,6 +1487,11 @@ fn note_open_prs_answer(
     app.dirty |= changed;
     app.pr_cache_dirty |= changed;
     reask_checkouts_whose_pr_left(app, &left);
+    // AUTOFIX watches the user's pull requests that broke — on a real
+    // answer, not the old list kept over a failed one.
+    if !failed {
+        crate::autofix::note_list(app, &project, &list);
+    }
     let project_id = project.clone();
     app.open_prs.insert(
         project,
@@ -1799,11 +1811,23 @@ fn lookup_pr_detail(
         app.dirty = true;
         return;
     }
-    app.pr_detail_inflight.insert(pending.url.clone());
+    spawn_pr_detail(app, detail_tx, pending.url, pending.number, pending.dir);
+}
+
+/// Ask `gh pr view` for one pull request's body, off the loop, marked in
+/// flight until it lands in `land_pr_detail`.
+fn spawn_pr_detail(
+    app: &mut App,
+    detail_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<crate::pull_request::PrDetail>)>,
+    url: String,
+    number: u64,
+    dir: std::path::PathBuf,
+) {
+    app.pr_detail_inflight.insert(url.clone());
     let detail_tx = detail_tx.clone();
     tokio::spawn(async move {
-        let detail = crate::pull_request::detail(&pending.dir, pending.number).await;
-        let _ = detail_tx.send((pending.url, detail));
+        let detail = crate::pull_request::detail(&dir, number).await;
+        let _ = detail_tx.send((url, detail));
     });
 }
 
@@ -1821,6 +1845,8 @@ fn land_pr_detail(
     out: &mut Vec<ClientRequest>,
 ) {
     app.pr_detail_inflight.remove(&url);
+    // A watched pull request's checks, for AUTOFIX.
+    crate::autofix::land_detail(app, &url, detail.as_ref(), out);
     match detail {
         Some(detail) => {
             let retired = !detail.is_open();
@@ -3291,6 +3317,10 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     }
     if matches!(&app.overlay, Some(Overlay::Skills(_))) {
         return crate::skills::paste(app, text);
+    }
+    if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
+        crate::autofix::paste(app, text);
+        return true;
     }
     let Some(overlay) = &mut app.overlay else {
         return false;
@@ -7319,6 +7349,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
+        Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
@@ -8470,6 +8501,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
     app.diff_one_at_a_time = cfg.diff_one_at_a_time();
+    app.autofix_mode = cfg.autofix_mode();
     set_hide_draft_prs(app, cfg.hide_draft_prs);
 }
 
@@ -10708,7 +10740,7 @@ fn project_of_worktree(app: &App, worktree: &WorktreeId) -> Option<ProjectId> {
         .map(|w| w.project_id.clone())
 }
 
-fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequest>) {
+pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequest>) {
     // Every launch is work in its project, which gets a tab if it has
     // none — a BACKGROUND LAUNCH's too, though nothing else it does. Not
     // a create that already carries its stand-in row: that is the second
@@ -12094,6 +12126,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::BranchSwitch(_))) {
         crate::branch_switch::handle_mouse(app, mouse, mouse_pos);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
+        crate::autofix::handle_mouse(app, mouse);
         return;
     }
     // Hosts picker: the wheel moves the selection, a click on a row connects
@@ -15591,6 +15627,8 @@ mod tests {
                         is_draft: false,
                         health: Default::default(),
                         head: format!("pr-{number}-head"),
+                        mine: false,
+                        head_sha: String::new(),
                     })
                     .collect(),
                 at: now,
@@ -15786,6 +15824,8 @@ mod tests {
             is_draft: false,
             health: Default::default(),
             head: "pr-7-head".into(),
+            mine: false,
+            head_sha: String::new(),
         }];
 
         // The list lands: the checkout moves under #7, the cursor with it.
@@ -15845,6 +15885,8 @@ mod tests {
             is_draft: false,
             health: Default::default(),
             head: "attach-links".into(),
+            mine: false,
+            head_sha: String::new(),
         }];
         note_open_prs_answer(&mut app, pid.clone(), Some(found.clone()), &mut Vec::new());
         assert_eq!(
@@ -16182,6 +16224,8 @@ mod tests {
                     is_draft,
                     health: Default::default(),
                     head: format!("pr-{number}-head"),
+                    mine: false,
+                    head_sha: String::new(),
                 })
                 .collect();
             note_open_prs_answer(app, pid.clone(), Some(list), &mut Vec::new());
@@ -16359,6 +16403,8 @@ mod tests {
                     is_draft,
                     health: Default::default(),
                     head: format!("pr-{number}-head"),
+                    mine: false,
+                    head_sha: String::new(),
                 })
                 .collect();
             note_open_prs_answer(app, pid.clone(), Some(list), &mut Vec::new());
@@ -16419,6 +16465,8 @@ mod tests {
                 is_draft: false,
                 health: Default::default(),
                 head: "brand-new".into(),
+                mine: false,
+                head_sha: String::new(),
             },
             crate::pull_request::OpenPr {
                 number: 9,
@@ -16427,6 +16475,8 @@ mod tests {
                 is_draft: false,
                 health: Default::default(),
                 head: "number-lines".into(),
+                mine: false,
+                head_sha: String::new(),
             },
             crate::pull_request::OpenPr {
                 number: 7,
@@ -16435,6 +16485,8 @@ mod tests {
                 is_draft: false,
                 health: Default::default(),
                 head: "attach-links".into(),
+                mine: false,
+                head_sha: String::new(),
             },
         ];
         // Halfway down #7's conversation when the refresh lands.
@@ -16633,6 +16685,8 @@ mod tests {
             is_draft,
             health: Default::default(),
             head: format!("pr-{number}-head"),
+            mine: false,
+            head_sha: String::new(),
         }
     }
 
@@ -17661,6 +17715,8 @@ diff --git a/src/b.rs b/src/b.rs
             is_draft: false,
             health: Default::default(),
             head: format!("head-{number}"),
+            mine: false,
+            head_sha: String::new(),
         }
     }
 
@@ -26068,7 +26124,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(diff_paths(&app), ["a.txt"]);
 
             // A head this repo has never seen: the whole diff from GitHub
-            // (`^G` on the Description tab), the modal still up meanwhile.
+            // (`^E` on the Description tab), the modal still up meanwhile.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             if let Some(detail) = app.pr_detail.get_mut(&pr_url(7)) {
                 detail.head_sha = "0".repeat(40);
@@ -26077,7 +26133,7 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
             press(
                 &mut app,
-                KeyCode::Char('g'),
+                KeyCode::Char('e'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
@@ -31967,6 +32023,8 @@ diff --git a/src/c.rs b/src/c.rs
                     is_draft: false,
                     health: Default::default(),
                     head: "hush".into(),
+                    mine: false,
+                    head_sha: String::new(),
                 }],
                 at: now,
                 due: now + OPEN_PRS_REFRESH,
@@ -37569,6 +37627,13 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "Autofix",
+                |app| {
+                    app.overlay = Some(Overlay::Autofix(Box::new(crate::autofix::sample_form())));
+                },
+                None,
+            ),
+            (
                 // Owes the LAUNCHER VIEW's box back, as a picker opened from
                 // the QUICK PROMPT does.
                 "ProjectPicker",
@@ -37730,6 +37795,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
+            Overlay::Autofix(_) => "Autofix",
         }
     }
 
@@ -37758,7 +37824,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 22, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
         });
     }
 

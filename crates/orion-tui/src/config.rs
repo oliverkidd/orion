@@ -101,6 +101,18 @@ pub const MERGE_METHODS: &[&str] = &[
     crate::pr_actions::MergeMethod::Rebase.as_str(),
 ];
 
+/// The **When a PR breaks** choices (Settings → Review), in the order the
+/// row cycles them (`crate::autofix::Mode`).
+pub const AUTOFIX_MODES: &[&str] = &[
+    crate::autofix::Mode::Off.as_str(),
+    crate::autofix::Mode::Ask.as_str(),
+    crate::autofix::Mode::Auto.as_str(),
+];
+
+/// How the **Autofix instructions** row names orion's own instructions —
+/// the empty `autofix_preset`.
+pub const BUILT_IN: &str = "built-in";
+
 /// The **Preset text** choices (Settings → Sessions), in the order the row
 /// cycles them: the [`PresetText`] sides by label.
 pub const PRESET_TEXTS: &[&str] = &[
@@ -252,11 +264,30 @@ pub fn effort_choices_in(
 
 /// [`DEFAULT_CHOICE`] heading a choice list, without doubling a default
 /// the source already carries.
-fn headed(mut rest: Vec<String>) -> Vec<String> {
+fn headed(rest: Vec<String>) -> Vec<String> {
+    headed_by(DEFAULT_CHOICE, rest)
+}
+
+/// `rest` behind `head` — the "follow the default" a row starts on — with
+/// any `default` row of its own dropped, so the default is said once.
+fn headed_by(head: &str, mut rest: Vec<String>) -> Vec<String> {
     rest.retain(|choice| !choice.eq_ignore_ascii_case(DEFAULT_CHOICE));
-    let mut out = vec![DEFAULT_CHOICE.to_string()];
-    out.append(&mut rest);
-    out
+    rest.insert(0, head.to_string());
+    rest
+}
+
+/// A blank row value as `label`, anything else as itself.
+fn blank_as(value: &str, label: &str) -> String {
+    match value.trim() {
+        "" => label.into(),
+        value => value.into(),
+    }
+}
+
+/// `value` trimmed, while it is set and one of `choices`.
+fn picked(value: &str, choices: &[String]) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && fits(value, choices)).then(|| value.to_string())
 }
 
 /// Whether `value` is one of `choices`, case-insensitively and trimmed —
@@ -527,6 +558,10 @@ pub enum SettingKind {
     PrMergeMethod,
     PrDeleteBranch,
     PrDraft,
+    PrAutofix,
+    AutofixPreset,
+    AutofixModel,
+    AutofixEffort,
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
@@ -666,6 +701,10 @@ impl SettingKind {
             | SettingKind::PrDraft => (2026, 10, 4),
             SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
             SettingKind::WorktreeContainers => (2026, 10, 5),
+            SettingKind::PrAutofix
+            | SettingKind::AutofixPreset
+            | SettingKind::AutofixModel
+            | SettingKind::AutofixEffort => (2026, 10, 6),
         }
     }
 
@@ -967,6 +1006,30 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 label: "New PRs as drafts",
                 hint: "A new pull request (^N in the pull requests modal) opens with its Draft box ticked",
                 group: "Pull requests",
+            },
+            SettingSpec {
+                kind: SettingKind::PrAutofix,
+                label: "When a PR breaks",
+                hint: "One of your pull requests hits merge conflicts or failing checks: do nothing, ask (a modal to pick what to fix), or send the autofix agent at once. ^G in the pull requests modal sends it whatever this says",
+                group: "Autofix",
+            },
+            SettingSpec {
+                kind: SettingKind::AutofixPreset,
+                label: "Autofix instructions",
+                hint: "What the autofix agent is told to do: orion's built-in instructions, or an agent preset's text in their place (the pull request, its branches and what failed are always added)",
+                group: "Autofix",
+            },
+            SettingSpec {
+                kind: SettingKind::AutofixModel,
+                label: "Autofix model",
+                hint: "The autofix agent's model — it runs on your default agent (Settings → Agents)",
+                group: "Autofix",
+            },
+            SettingSpec {
+                kind: SettingKind::AutofixEffort,
+                label: "Autofix effort",
+                hint: "The autofix agent's effort",
+                group: "Autofix",
             },
         ]),
     },
@@ -1549,6 +1612,18 @@ pub struct Config {
     /// The new pull request form opens with its Draft box ticked. Off by
     /// default.
     pub pr_draft: bool,
+    /// **When a PR breaks** (Settings → Review): what orion does when one
+    /// of your pull requests hits merge conflicts or failing checks —
+    /// `off`, `ask` (the AUTOFIX modal) or `auto` (send the agent at once).
+    /// See `crate::autofix`.
+    pub pr_autofix: String,
+    /// The AGENT PRESET whose text the autofix agent is told instead of
+    /// orion's built-in instructions; empty = the built-in ones.
+    pub autofix_preset: String,
+    /// The autofix agent's model; empty = the default agent's own default.
+    pub autofix_model: String,
+    /// The autofix agent's effort; empty = the default agent's own default.
+    pub autofix_effort: String,
     /// RETIRED with the line counts always drawn. Through 0.37 the **Card
     /// line counts** SETTING (Settings → Appearance, off by default)
     /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
@@ -1908,6 +1983,10 @@ impl Default for Config {
             pr_merge_method: MERGE_METHODS[0].into(),
             pr_delete_branch: true,
             pr_draft: false,
+            pr_autofix: crate::autofix::Mode::Off.as_str().into(),
+            autofix_preset: String::new(),
+            autofix_model: String::new(),
+            autofix_effort: String::new(),
             card_line_changes: false,
             skip_session_naming: false,
             confirm_on_archive: false,
@@ -3036,6 +3115,58 @@ impl Config {
         out
     }
 
+    /// **When a PR breaks**, read: an unreadable word is off.
+    pub fn autofix_mode(&self) -> crate::autofix::Mode {
+        crate::autofix::Mode::parse(&self.pr_autofix)
+    }
+
+    /// What the **Autofix model** row cycles: empty (the default agent's
+    /// own default) and then every model that harness offers.
+    pub fn autofix_model_choices(&self) -> Vec<String> {
+        headed_by("", model_choices_in(&self.autofix_harness()))
+    }
+
+    /// What the **Autofix effort** row cycles, for the model it would run
+    /// on: empty and then that harness's efforts — just empty when it
+    /// offers none.
+    pub fn autofix_effort_choices(&self) -> Vec<String> {
+        let descriptor = self.autofix_harness();
+        let model = self.autofix_model_in(&descriptor);
+        headed_by("", effort_choices_in(&descriptor, model.as_deref()))
+    }
+
+    /// The default agent's descriptor — what the AUTOFIX agent runs on.
+    fn autofix_harness(&self) -> HarnessDescriptor {
+        let (kind, custom) = self.quick_prompt_harness();
+        self.effective_harness(kind, custom.as_deref())
+    }
+
+    /// The **Autofix model** on `descriptor`: the row's pick while that
+    /// harness still offers it, else its own default.
+    fn autofix_model_in(&self, descriptor: &HarnessDescriptor) -> Option<String> {
+        picked(&self.autofix_model, &model_choices_in(descriptor))
+            .or_else(|| descriptor.default_model().map(str::to_string))
+    }
+
+    /// What the AUTOFIX agent launches on: the default agent
+    /// ([`Config::quick_prompt_harness`]) at the **Autofix model** /
+    /// **Autofix effort** rows — each falling back to that harness's own
+    /// default when blank or no longer offered (the default agent changed
+    /// since it was picked), and the effort fitted to the model, as every
+    /// launch surface does. `(kind, custom, model, effort)`.
+    pub fn autofix_launch(&self) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
+        let (kind, custom) = self.quick_prompt_harness();
+        let descriptor = self.effective_harness(kind, custom.as_deref());
+        let model = self.autofix_model_in(&descriptor);
+        let effort = picked(
+            &self.autofix_effort,
+            &effort_choices_in(&descriptor, model.as_deref()),
+        )
+        .or_else(|| descriptor.default_effort().map(str::to_string));
+        let effort = fit_effort_in(&descriptor, model.as_deref(), effort);
+        (kind, custom, model, effort)
+    }
+
     /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
     /// starts on: the last launch's while REMEMBER HARNESS is on — read
     /// through [`Config::quick_prompt_harness`], so one switched off since
@@ -3224,6 +3355,10 @@ impl Config {
             }
             SettingKind::PrDeleteBranch => on_off(self.pr_delete_branch).into(),
             SettingKind::PrDraft => on_off(self.pr_draft).into(),
+            SettingKind::PrAutofix => self.autofix_mode().as_str().into(),
+            SettingKind::AutofixPreset => blank_as(&self.autofix_preset, BUILT_IN),
+            SettingKind::AutofixModel => blank_as(&self.autofix_model, DEFAULT_CHOICE),
+            SettingKind::AutofixEffort => blank_as(&self.autofix_effort, DEFAULT_CHOICE),
             // A project row with no project to speak of: what one without
             // an entry would show.
             SettingKind::RunCommand | SettingKind::OpenCommand => {
@@ -3416,6 +3551,26 @@ impl Config {
             }
             SettingKind::PrDraft => {
                 self.pr_draft = !self.pr_draft;
+            }
+            SettingKind::PrAutofix => {
+                self.pr_autofix = cycle_choice(&self.pr_autofix, AUTOFIX_MODES, step).into();
+            }
+            SettingKind::AutofixPreset => {
+                let mut choices = vec![String::new()];
+                choices.extend(crate::agent_presets::load().into_iter().map(|p| p.name));
+                self.autofix_preset = cycle_owned(&self.autofix_preset, &choices, step);
+            }
+            SettingKind::AutofixModel => {
+                let choices = self.autofix_model_choices();
+                self.autofix_model = cycle_owned(&self.autofix_model, &choices, step);
+                // A new model can leave the effort off its list.
+                if !fits(&self.autofix_effort, &self.autofix_effort_choices()) {
+                    self.autofix_effort.clear();
+                }
+            }
+            SettingKind::AutofixEffort => {
+                let choices = self.autofix_effort_choices();
+                self.autofix_effort = cycle_owned(&self.autofix_effort, &choices, step);
             }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}
@@ -4862,6 +5017,34 @@ mod tests {
         // A config predating the key keeps animations on.
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(cfg.animations);
+    }
+
+    /// The Autofix rows: off by default, cycling off → ask → auto; the
+    /// instructions built in until a preset is picked; and a model the
+    /// default agent no longer offers launching on its default instead.
+    #[test]
+    fn autofix_rows_cycle_and_fall_back_to_the_defaults() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.value_label(SettingKind::PrAutofix), "off");
+        cfg.cycle_kind(SettingKind::PrAutofix, 1);
+        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Ask);
+        cfg.cycle_kind(SettingKind::PrAutofix, 1);
+        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Auto);
+        assert_eq!(cfg.value_label(SettingKind::AutofixPreset), BUILT_IN);
+        assert_eq!(cfg.value_label(SettingKind::AutofixModel), DEFAULT_CHOICE);
+        let defaults = cfg.autofix_launch();
+        cfg.autofix_model = "no-such-model".into();
+        assert_eq!(cfg.autofix_launch(), defaults);
+        let choices = cfg.autofix_model_choices();
+        assert_eq!(choices.first().map(String::as_str), Some(""));
+        if let Some(model) = choices.get(1) {
+            cfg.cycle_kind(SettingKind::AutofixModel, 1);
+            assert_eq!(&cfg.autofix_model, model);
+            assert_eq!(cfg.autofix_launch().2.as_ref(), Some(model));
+        }
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pr_autofix, "auto");
     }
 
     /// The REVIEW TAB: how the changes viewer opens — the tree, the keys

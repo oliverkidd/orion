@@ -2420,6 +2420,8 @@ mod tests {
                     is_draft: true,
                     health: Default::default(),
                     head: "main".into(),
+                    mine: false,
+                    head_sha: String::new(),
                 }],
                 at: std::time::Instant::now(),
                 due: std::time::Instant::now(),

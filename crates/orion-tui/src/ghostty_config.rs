@@ -156,6 +156,7 @@ const MODAL_KEYS: &[crate::hints::Key] = &[
     crate::pr_modal::keys::CLOSE,
     crate::pr_modal::keys::READY,
     crate::pr_modal::keys::LINEAR,
+    crate::pr_modal::keys::AUTOFIX,
     crate::issues::keys::EDIT,
     crate::issues::keys::COMMENT,
     crate::issues::keys::BROWSER,

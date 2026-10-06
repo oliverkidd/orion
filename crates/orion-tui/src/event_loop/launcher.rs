@@ -4529,6 +4529,8 @@ mod tests {
                     is_draft: false,
                     health: Default::default(),
                     head: "idle".into(),
+                    mine: false,
+                    head_sha: String::new(),
                 }],
                 at: now,
                 due: now + std::time::Duration::from_secs(60),

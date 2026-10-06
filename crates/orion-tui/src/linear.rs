@@ -2138,6 +2138,8 @@ pub(crate) mod tests {
             is_draft: false,
             health: Default::default(),
             head: format!("branch-{number}"),
+            mine: false,
+            head_sha: String::new(),
         }
     }
 

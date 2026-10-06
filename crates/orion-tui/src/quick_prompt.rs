@@ -166,6 +166,7 @@ pub(crate) fn modal_under(overlay: &Overlay) -> Option<ModalUnder> {
             PromptKind::QuickPrompt(launch) => launch.under.clone(),
             _ => None,
         },
+        Overlay::Autofix(form) => form.under.clone().map(ModalUnder::PullRequests),
         other => held_return(other)?.launch.under,
     }
 }

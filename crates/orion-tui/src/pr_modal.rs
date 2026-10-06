@@ -426,6 +426,38 @@ pub(crate) fn selected_pr(app: &App) -> Option<OpenPr> {
     cursor_index(view, list).and_then(|i| list.get(i).cloned())
 }
 
+/// `⌘G`: the AUTOFIX form for the pull request under the cursor — at
+/// once from a fresh body, else once a fresh one lands
+/// (`autofix::land_detail`), so it names the checks failing now.
+fn autofix(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return;
+    };
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    let Some(pr) = selected_pr(app) else {
+        return;
+    };
+    let fresh = !app.pr_detail_stale.contains(&pr.url);
+    if let (true, Some(detail)) = (fresh, app.pr_detail.get(&pr.url).cloned()) {
+        crate::autofix::open_for(app, project, pr, &detail);
+        return;
+    }
+    app.autofix.pending_open = Some(pr.url.clone());
+    app.pr_detail_failed.remove(&pr.url);
+    app.pending_pr_detail = Some((
+        crate::app::PendingPrDetail {
+            url: pr.url.clone(),
+            number: pr.number,
+            dir,
+        },
+        std::time::Instant::now(),
+    ));
+    app.flash = Some(crate::flash::Flash::working(format!(
+        "Reading #{}'s checks…",
+        pr.number
+    )));
+}
+
 /// Whether the modal is what is up.
 pub(crate) fn is_up(app: &App) -> bool {
     matches!(&app.overlay, Some(Overlay::PullRequests(_)))
@@ -814,6 +846,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
         _ if keys::CLOSE.matches(&key) => crate::pr_actions::open_close(app),
         _ if keys::READY.matches(&key) => crate::pr_actions::toggle_draft(app),
+        _ if keys::AUTOFIX.matches(&key) => autofix(app),
         // A PR PICK already came from the LINEAR VIEW: `⌘L` there would
         // stack the two views on each other, so it does nothing.
         _ if keys::LINEAR.matches(&key) && view.pick.is_some() => {}
@@ -954,6 +987,9 @@ pub(crate) mod keys {
     pub const READY: Key = Key::new(&["cmd+d", "ctrl+d"], "ready/draft");
     /// Linear issues to attach the pull request to.
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
+    /// The AUTOFIX form: an agent sent at the pull request's conflicts and
+    /// failing checks (`crate::autofix`).
+    pub const AUTOFIX: Key = Key::new(&["cmd+g", "ctrl+g"], "autofix");
     /// Enter on the PR PICK's list: the pull request attached to the
     /// issues the LINEAR VIEW marked.
     pub const ATTACH: Key = Key::new(&["enter"], "attach to this PR");
@@ -962,7 +998,7 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, CLOSE, READY, LINEAR, ATTACH, TABS, ROWS,
+        MERGE, CLOSE, READY, LINEAR, AUTOFIX, ATTACH, TABS, ROWS,
     ];
 }
 
@@ -998,6 +1034,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
             keys::MERGE.hint(),
             keys::CLOSE.hint(),
             keys::READY.hint(),
+            keys::AUTOFIX.hint(),
             diff,
             browser,
             keys::READ.hint(),
@@ -1021,6 +1058,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
         keys::MERGE.hint(),
         keys::CLOSE.hint(),
         keys::READY.hint(),
+        keys::AUTOFIX.hint(),
         keys::COMMENT.hint(),
         diff,
         browser,
@@ -1325,6 +1363,8 @@ mod tests {
             is_draft,
             health: Health::default(),
             head: format!("branch-{number}"),
+            mine: false,
+            head_sha: String::new(),
         }
     }
 

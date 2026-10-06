@@ -79,6 +79,27 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId, kind: AlertKind) -> Option
     })
 }
 
+/// What one desktop notification says: its headline, the line under it
+/// (empty for none), and the group a newer one of the same name replaces.
+#[derive(Debug, Clone)]
+struct Note {
+    summary: String,
+    place: String,
+    group: String,
+}
+
+impl Note {
+    /// A session's alert: the edge as headline, `<project> · <branch>`
+    /// under it, grouped per session.
+    fn of(alert: &FeedbackAlert) -> Self {
+        Self {
+            summary: summary(alert),
+            place: alert.place.clone(),
+            group: alert.session.clone(),
+        }
+    }
+}
+
 /// Post one desktop notification per alert, detached, on a helper thread
 /// that also reaps it. On macOS that is the NOTIFIER APP — orion's name and
 /// logo, a click brings the terminal back (`notifier_app`) — or
@@ -87,7 +108,21 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId, kind: AlertKind) -> Option
 /// ignored: the sound already rang (or was folded into one that just did),
 /// and a box with no desktop is not an error.
 pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
-    let alerts = alerts.to_vec();
+    post(alerts.iter().map(Note::of).collect());
+}
+
+/// A desktop notification that is not about a session — `summary` over
+/// `body` — through the same notifier [`notify_desktop`] uses, grouped by
+/// its summary.
+pub(crate) fn notify_text(summary: &str, body: &str) {
+    post(vec![Note {
+        summary: summary.to_string(),
+        place: body.to_string(),
+        group: summary.to_string(),
+    }]);
+}
+
+fn post(notes: Vec<Note>) {
     std::thread::spawn(move || {
         let macos = cfg!(target_os = "macos");
         let app = if macos {
@@ -96,14 +131,14 @@ pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
             None
         };
         let activate = app.and_then(|_| super::notifier_app::terminal_bundle_id());
-        for alert in &alerts {
+        for note in &notes {
             let (program, args) = match app {
                 Some(exe) => (
                     exe.to_string_lossy().into_owned(),
-                    notifier_app_args(alert, activate.as_deref()),
+                    notifier_app_args(note, activate.as_deref()),
                 ),
                 None => {
-                    let (program, args) = notifier_command(alert, macos);
+                    let (program, args) = notifier_command(note, macos);
                     (program.to_string(), args)
                 }
             };
@@ -138,54 +173,57 @@ fn summary(alert: &FeedbackAlert) -> String {
 }
 
 /// `terminal-notifier` argv for the NOTIFIER APP: *orion* / the summary /
-/// `<project> · <branch>`, grouped per session so a newer notification
-/// for one replaces its last, and `-activate`-ing the terminal on click.
-/// It reads the message from stdin when `-message` is empty, so a
-/// placeless alert carries the summary as its message instead.
-fn notifier_app_args(alert: &FeedbackAlert, activate: Option<&str>) -> Vec<String> {
-    let summary = summary(alert);
+/// the place, grouped so a newer notification for the same thing replaces
+/// its last, and `-activate`-ing the terminal on click. It reads the
+/// message from stdin when `-message` is empty, so a placeless note
+/// carries the summary as its message instead.
+fn notifier_app_args(note: &Note, activate: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec!["-title".into(), "orion".into()];
-    if alert.place.is_empty() {
-        args.extend(["-message".into(), summary]);
+    if note.place.is_empty() {
+        args.extend(["-message".into(), note.summary.clone()]);
     } else {
         args.extend([
             "-subtitle".into(),
-            summary,
+            note.summary.clone(),
             "-message".into(),
-            alert.place.clone(),
+            note.place.clone(),
         ]);
     }
-    args.extend(["-group".into(), format!("orion:{}", alert.session)]);
+    args.extend(["-group".into(), format!("orion:{}", note.group)]);
     if let Some(id) = activate {
         args.extend(["-activate".into(), id.into()]);
     }
     args
 }
 
-/// The fallback notifier for `alert`, as a program and its argv — never a
+/// The fallback notifier for `note`, as a program and its argv — never a
 /// shell line, so the only quoting is AppleScript's own. macOS shows
-/// *orion* / the summary / *`<project> · <branch>`*; `notify-send` gets
-/// the same as app name, summary and body.
-fn notifier_command(alert: &FeedbackAlert, macos: bool) -> (&'static str, Vec<String>) {
-    let summary = summary(alert);
+/// *orion* / the summary / the place; `notify-send` gets the same as app
+/// name, summary and body.
+fn notifier_command(note: &Note, macos: bool) -> (&'static str, Vec<String>) {
     if macos {
-        let mut script = format!(
-            "display notification {} with title \"orion\" subtitle {}",
-            applescript_str(&alert.place),
-            applescript_str(&summary)
-        );
-        if alert.place.is_empty() {
+        let script = if note.place.is_empty() {
             // No body to show: the subtitle carries the whole message.
-            script = format!(
+            format!(
                 "display notification {} with title \"orion\"",
-                applescript_str(&summary)
-            );
-        }
+                applescript_str(&note.summary)
+            )
+        } else {
+            format!(
+                "display notification {} with title \"orion\" subtitle {}",
+                applescript_str(&note.place),
+                applescript_str(&note.summary)
+            )
+        };
         ("osascript", vec!["-e".into(), script])
     } else {
         (
             "notify-send",
-            vec!["--app-name=orion".into(), summary, alert.place.clone()],
+            vec![
+                "--app-name=orion".into(),
+                note.summary.clone(),
+                note.place.clone(),
+            ],
         )
     }
 }
@@ -240,7 +278,7 @@ mod tests {
     /// gets `notify-send` with the same three under its own names.
     #[test]
     fn notifier_command_names_the_session_and_its_place() {
-        let (program, args) = notifier_command(&alert("Fix Login", "demo · main"), true);
+        let (program, args) = notifier_command(&Note::of(&alert("Fix Login", "demo · main")), true);
         assert_eq!(program, "osascript");
         assert_eq!(
             args,
@@ -250,13 +288,14 @@ mod tests {
             ]
         );
 
-        let (_, args) = notifier_command(&alert("agent-2", ""), true);
+        let (_, args) = notifier_command(&Note::of(&alert("agent-2", "")), true);
         assert_eq!(
             args[1],
             r#"display notification "agent-2 needs feedback" with title "orion""#
         );
 
-        let (program, args) = notifier_command(&alert("Fix Login", "demo · main"), false);
+        let (program, args) =
+            notifier_command(&Note::of(&alert("Fix Login", "demo · main")), false);
         assert_eq!(program, "notify-send");
         assert_eq!(
             args,
@@ -272,7 +311,7 @@ mod tests {
             limit: Some("limit reached"),
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&limited, false);
+        let (_, args) = notifier_command(&Note::of(&limited), false);
         assert_eq!(args[1], "Fix Login: limit reached");
 
         // A crash and an unseen finish say what happened, in the same
@@ -281,7 +320,7 @@ mod tests {
             kind: AlertKind::Crashed,
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&crashed, true);
+        let (_, args) = notifier_command(&Note::of(&crashed), true);
         assert_eq!(
             args[1],
             r#"display notification "demo · main" with title "orion" subtitle "Fix Login stopped with an error""#
@@ -291,7 +330,7 @@ mod tests {
             limit: Some("limit reached"),
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&finished, false);
+        let (_, args) = notifier_command(&Note::of(&finished), false);
         assert_eq!(
             args,
             ["--app-name=orion", "Fix Login finished", "demo · main"]
@@ -341,7 +380,7 @@ mod tests {
             kind: AlertKind::Finished,
             ..alert("Fix Login", "demo · main")
         };
-        let args = notifier_app_args(&finished, Some("com.mitchellh.ghostty"));
+        let args = notifier_app_args(&Note::of(&finished), Some("com.mitchellh.ghostty"));
         assert_eq!(
             args,
             [
@@ -358,7 +397,7 @@ mod tests {
             ]
         );
 
-        let args = notifier_app_args(&alert("agent-2", ""), None);
+        let args = notifier_app_args(&Note::of(&alert("agent-2", "")), None);
         assert_eq!(
             args,
             [

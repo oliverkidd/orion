@@ -47,6 +47,8 @@ enum Page {
     Editor,
     Worktrees,
     Linear,
+    /// AUTOFIX: what happens when one of your pull requests breaks.
+    Autofix,
     Terminal,
     Ready,
 }
@@ -54,7 +56,7 @@ enum Page {
 /// The SETUP VERSION: bumped by a release that adds a step, so a machine
 /// that went through an older setup is shown the new steps on its next
 /// launch ([`pending`]). Each page says which version brought it.
-pub const SETUP_VERSION: u32 = 2;
+pub const SETUP_VERSION: u32 = 3;
 
 impl Page {
     /// The SETUP VERSION this page's offer arrived in. The Terminal page
@@ -62,6 +64,7 @@ impl Page {
     fn added(self) -> u32 {
         match self {
             Page::Terminal => 2,
+            Page::Autofix => 3,
             _ => 1,
         }
     }
@@ -84,6 +87,7 @@ impl Page {
             Page::Editor => "Editor",
             Page::Worktrees => "Worktrees",
             Page::Linear => "Linear",
+            Page::Autofix => "Autofix",
             Page::Terminal => "Terminal",
             Page::Ready => "Ready",
         }
@@ -106,6 +110,7 @@ fn pages(cfg: &Config) -> Vec<Page> {
         Page::Editor,
         Page::Worktrees,
         Page::Linear,
+        Page::Autofix,
         Page::Terminal,
         Page::Ready,
     ]
@@ -154,6 +159,14 @@ const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::WorktreeBaseBranch, Setting
 /// keybinds row only while Ghostty is here ([`setting_rows`]).
 const TERMINAL_ROWS: &[SettingKind] = &[SettingKind::OutsideTerminal, SettingKind::GhosttyKeybinds];
 
+/// The Autofix page's rows: Settings → Review's Autofix group.
+const AUTOFIX_ROWS: &[SettingKind] = &[
+    SettingKind::PrAutofix,
+    SettingKind::AutofixPreset,
+    SettingKind::AutofixModel,
+    SettingKind::AutofixEffort,
+];
+
 /// A Mac without Ghostty.app: ⇧T opens Terminal.app instead, the Terminal
 /// page offers `i` to install it, and says nothing of Ghostty's keys.
 fn ghostty_missing() -> bool {
@@ -167,6 +180,7 @@ fn setting_rows(page: Page) -> Vec<&'static SettingSpec> {
     let kinds = match page {
         Page::Worktrees => WORKTREE_ROWS,
         Page::Terminal => TERMINAL_ROWS,
+        Page::Autofix => AUTOFIX_ROWS,
         Page::Linear => return LINEAR_SETTINGS.iter().collect(),
         _ => return Vec::new(),
     };
@@ -429,7 +443,7 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
             _ => vec![keys::ENTER.hint_as("sign in").kept()],
         },
         Page::Editor => vec![keys::ENTER.hint_as("choose").kept()],
-        Page::Worktrees | Page::Linear | Page::Terminal => {
+        Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => {
             match setting_rows(page).get(view.row).map(|spec| spec.kind) {
                 Some(kind) if kind.is_status() => vec![keys::ENTER.hint_as("test").kept()],
                 Some(kind) if kind.is_text() => vec![keys::ENTER.hint_as("type it").kept()],
@@ -522,7 +536,7 @@ fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
                 )
             }
         }
-        Page::Worktrees | Page::Linear | Page::Terminal => setting_rows(page)
+        Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => setting_rows(page)
             .get(view.row)
             .map(|spec| crate::hints::expand(spec.hint, keymap))
             .unwrap_or_default(),
@@ -616,7 +630,7 @@ fn editor_blurb(editor: &str) -> &'static str {
 
 /// The modal's width: room for the STEP STRIP and a row's columns, never
 /// wider than the screen.
-const MODAL_W: u16 = 82;
+const MODAL_W: u16 = 92;
 
 pub fn draw(f: &mut Frame, app: &mut App, view: &OnboardView, th: Theme) {
     let cfg = Config::load();
@@ -832,7 +846,7 @@ fn page_body(app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16)
         Page::Agents => agents(&mut body, cfg, view, th, width),
         Page::Accounts => accounts(&mut body, cfg, view, th, width),
         Page::Editor => editors(&mut body, cfg, view, th, width, &app.keymap),
-        Page::Worktrees | Page::Linear | Page::Terminal => {
+        Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => {
             settings_page(&mut body, app, cfg, view, page, th, width)
         }
         Page::Ready => ready(&mut body, app, cfg, th, width),
@@ -1199,6 +1213,17 @@ fn settings_page(
                      too.",
                     crate::hints::key_or(keymap, Action::Linear, "The Linear view")
                 ),
+                width,
+                dim,
+            );
+            body.blank();
+        }
+        Page::Autofix => {
+            body.prose(
+                "When one of your pull requests hits merge conflicts or failing checks, Orion can \
+                 send an agent to fix it: resolve the conflicts, reproduce the failing unit and \
+                 e2e tests locally, fix them and push to the PR. Ask shows you what broke and \
+                 lets you pick; auto just goes. ^G in the pull requests modal sends it any time.",
                 width,
                 dim,
             );
@@ -1624,7 +1649,7 @@ fn page_rows(page: Page, cfg: &Config) -> usize {
         Page::Agents => cfg.harness_registry().len(),
         Page::Accounts => cfg.registered_account_rows().len(),
         Page::Editor => editor_rows().len(),
-        Page::Worktrees | Page::Linear | Page::Terminal => setting_rows(page).len(),
+        Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => setting_rows(page).len(),
         Page::Welcome | Page::Ready => 0,
     }
 }
@@ -1679,7 +1704,7 @@ fn activate(app: &mut App) {
         // The overlay's rows, doing what Enter does there: a typed row
         // opens for typing, a status row tests the connection, the rest
         // flip or step.
-        Page::Worktrees | Page::Linear | Page::Terminal => {
+        Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => {
             match setting_rows(page).get(row).map(|spec| spec.kind) {
                 Some(kind) if kind.is_status() => crate::linear::test_connection(app),
                 Some(kind) if kind.is_text() => {
@@ -1701,6 +1726,9 @@ fn activate(app: &mut App) {
 /// rows, keep Ghostty's config in step with them as the overlay does.
 fn cycle_setting(app: &mut App, kind: SettingKind) {
     persist(|cfg| cfg.cycle_kind(kind, 1));
+    if kind == SettingKind::PrAutofix {
+        app.autofix_mode = Config::load().autofix_mode();
+    }
     if matches!(
         kind,
         SettingKind::OutsideTerminal | SettingKind::GhosttyKeybinds
@@ -1866,7 +1894,7 @@ fn toggle(app: &mut App) {
             }
         }),
         Page::Editor => choose_editor_row(app, row),
-        Page::Worktrees | Page::Linear | Page::Terminal => {
+        Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => {
             match setting_rows(page).get(row).map(|spec| spec.kind) {
                 Some(kind) if !kind.is_text() && !kind.is_status() => cycle_setting(app, kind),
                 _ => {}
@@ -1905,8 +1933,9 @@ mod tests {
     }
 
     /// A first run gets every step; a machine on this SETUP VERSION none;
-    /// one through an older setup only the steps added since — on a Mac
-    /// without Ghostty the Terminal page, and Ready to finish on.
+    /// one through an older setup only the steps added since — Autofix
+    /// from 2, and on a Mac without Ghostty the Terminal page from 1 —
+    /// and Ready to finish on.
     #[test]
     fn an_older_setup_opens_on_whats_new() {
         with_temp_config(|| {
@@ -1914,22 +1943,32 @@ mod tests {
                 assert_eq!(pending(&Config::load()), Some(0));
                 persist(|cfg| cfg.onboarded = true);
                 let cfg = Config::load();
+                assert_eq!(pending(&cfg), Some(1));
                 if cfg!(target_os = "macos") {
-                    assert_eq!(pending(&cfg), Some(1));
-                    assert_eq!(view_pages(&cfg, 1), vec![Page::Terminal, Page::Ready]);
+                    assert_eq!(
+                        view_pages(&cfg, 1),
+                        vec![Page::Autofix, Page::Terminal, Page::Ready]
+                    );
                 } else {
-                    // Nothing new to offer: stamped seen, quietly.
-                    assert_eq!(pending(&cfg), None);
-                    assert_eq!(Config::load().setup_version, SETUP_VERSION);
+                    assert_eq!(view_pages(&cfg, 1), vec![Page::Autofix, Page::Ready]);
                 }
+                persist(|cfg| cfg.setup_version = 2);
+                assert_eq!(pending(&Config::load()), Some(2));
+                assert_eq!(
+                    view_pages(&Config::load(), 2),
+                    vec![Page::Autofix, Page::Ready]
+                );
                 persist(|cfg| cfg.setup_version = SETUP_VERSION);
                 assert_eq!(pending(&Config::load()), None);
             });
-            // Ghostty here: the new step has nothing to offer.
+            // Ghostty here: the Terminal step has nothing to offer, Autofix
+            // still does.
             with_programs(&[crate::install::GHOSTTY], || {
                 persist(|cfg| cfg.setup_version = 1);
-                assert_eq!(pending(&Config::load()), None);
-                assert_eq!(Config::load().setup_version, SETUP_VERSION);
+                assert_eq!(
+                    view_pages(&Config::load(), 1),
+                    vec![Page::Autofix, Page::Ready]
+                );
             });
         });
     }
@@ -1976,6 +2015,7 @@ mod tests {
                     Page::Editor,
                     Page::Worktrees,
                     Page::Linear,
+                    Page::Autofix,
                     Page::Terminal,
                     Page::Ready,
                 ]
@@ -1989,6 +2029,7 @@ mod tests {
                     Page::Editor,
                     Page::Worktrees,
                     Page::Linear,
+                    Page::Autofix,
                     Page::Terminal,
                     Page::Ready,
                 ]
@@ -2053,7 +2094,7 @@ mod tests {
     }
 
     fn draw_text(app: &mut App) -> String {
-        draw_at(app, 90, 28)
+        draw_at(app, 96, 28)
     }
 
     /// The text inside the modal's frame, its words run together with
@@ -2092,14 +2133,14 @@ mod tests {
             let shot = draw_text(&mut app);
             assert!(
                 shot.contains(
-                    " Welcome   Agents   Accounts   Editor   Worktrees   Linear   Terminal   Ready "
+                    " Welcome   Agents   Accounts   Editor   Worktrees   Linear   Autofix   Terminal   Ready "
                 ),
                 "{shot}"
             );
             assert_eq!(shot.matches("Agents").count(), 1, "{shot}");
             assert!(shot.contains("Orion setup"), "{shot}");
             let narrow = draw_at(&mut app, 60, 28);
-            assert!(narrow.contains("Step 2 of 8 · Agents"), "{narrow}");
+            assert!(narrow.contains("Step 2 of 9 · Agents"), "{narrow}");
         });
     }
 

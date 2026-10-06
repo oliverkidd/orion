@@ -777,14 +777,20 @@ impl MergeRow {
     ];
 
     fn step(self, down: bool) -> Self {
-        let at = Self::ORDER.iter().position(|r| *r == self).unwrap_or(0);
-        let next = if down {
-            (at + 1).min(Self::ORDER.len() - 1)
-        } else {
-            at.saturating_sub(1)
-        };
-        Self::ORDER[next]
+        step_clamped(&Self::ORDER, self, down)
     }
+}
+
+/// The row after (`down`) or before `at` in a form's `order`, staying put
+/// at either end — ↑/↓ through a form's rows.
+pub(crate) fn step_clamped<T: Copy + PartialEq>(order: &[T], at: T, down: bool) -> T {
+    let i = order.iter().position(|r| *r == at).unwrap_or(0);
+    let next = if down {
+        (i + 1).min(order.len() - 1)
+    } else {
+        i.saturating_sub(1)
+    };
+    order[next]
 }
 
 /// `⌘X`: the merge of the pull request under the cursor.
@@ -2031,7 +2037,7 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, form: &PrForm, focused: bool, th: 
 }
 
 /// A `[x]` box.
-fn check(on: bool) -> &'static str {
+pub(crate) fn check(on: bool) -> &'static str {
     if on {
         "[x]"
     } else {

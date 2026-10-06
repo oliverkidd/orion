@@ -309,6 +309,8 @@ mod tests {
             is_draft: false,
             health: Default::default(),
             head: PR_HEAD.into(),
+            mine: false,
+            head_sha: String::new(),
         }
     }
 
