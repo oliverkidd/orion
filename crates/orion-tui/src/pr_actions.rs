@@ -1,4 +1,4 @@
-//! The PULL REQUESTS MODAL's two forms, each drawn in the reading pane's
+//! The PULL REQUESTS MODAL's forms, each drawn in the reading pane's
 //! place while the list stays up on the left — the ISSUES MODAL's editor,
 //! the same way round:
 //!
@@ -27,6 +27,12 @@
 //!   without merging — a comment left on it first if one is written, and
 //!   its branch deleted on GitHub if that is ticked (only a branch of this
 //!   repo's; a fork's lives elsewhere). Enter runs `gh pr close`.
+//!
+//! * **Review** (`⌘⇧R`, or Enter on the Reviews tab): approve the pull
+//!   request under the cursor, request changes, or comment — a body
+//!   optional on an approval and required otherwise; on one of the user's
+//!   own only a comment, which is all GitHub takes from its author. Enter
+//!   runs `gh pr review`, and the page reads the review back.
 //!
 //! And one verb with no form: `⌘D` ([`toggle_draft`]) marks a draft
 //! ready for review, or turns a ready one back into a draft (`gh pr
@@ -80,6 +86,7 @@ pub enum PrForm {
     Create(CreateForm),
     Merge(MergeForm),
     Close(CloseForm),
+    Review(ReviewForm),
 }
 
 impl PrForm {
@@ -90,6 +97,7 @@ impl PrForm {
             PrForm::Create(f) => f.ticket,
             PrForm::Merge(f) => f.ticket,
             PrForm::Close(f) => f.ticket,
+            PrForm::Review(f) => f.ticket,
         }
     }
 
@@ -99,6 +107,7 @@ impl PrForm {
             PrForm::Create(f) => f.saving.is_some(),
             PrForm::Merge(f) => f.saving.is_some(),
             PrForm::Close(f) => f.saving.is_some(),
+            PrForm::Review(f) => f.saving.is_some(),
         }
     }
 
@@ -109,6 +118,7 @@ impl PrForm {
             PrForm::Create(f) => (&mut f.saving, &mut f.notice),
             PrForm::Merge(f) => (&mut f.saving, &mut f.notice),
             PrForm::Close(f) => (&mut f.saving, &mut f.notice),
+            PrForm::Review(f) => (&mut f.saving, &mut f.notice),
         };
         *saving = None;
         *notice = Some(why);
@@ -1263,6 +1273,213 @@ fn closed_message(number: u64, deleted: bool) -> String {
     format!("closed #{number}{gone}")
 }
 
+// ---- reviewing ----
+
+/// What a review says: the three `gh pr review` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl ReviewVerdict {
+    /// Every verdict, in the order `←`/`→` walk them.
+    const ORDER: &'static [ReviewVerdict] = &[
+        ReviewVerdict::Approve,
+        ReviewVerdict::RequestChanges,
+        ReviewVerdict::Comment,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewVerdict::Approve => "Approve",
+            ReviewVerdict::RequestChanges => "Request changes",
+            ReviewVerdict::Comment => "Comment",
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            ReviewVerdict::Approve => "--approve",
+            ReviewVerdict::RequestChanges => "--request-changes",
+            ReviewVerdict::Comment => "--comment",
+        }
+    }
+
+    /// GitHub takes an approval with nothing written; the other two need
+    /// a word.
+    fn needs_body(self) -> bool {
+        self != ReviewVerdict::Approve
+    }
+
+    /// The Enter hint: what sending it does.
+    fn verb(self) -> &'static str {
+        match self {
+            ReviewVerdict::Approve => "approve",
+            ReviewVerdict::RequestChanges => "request changes",
+            ReviewVerdict::Comment => "comment",
+        }
+    }
+
+    /// The flash it leaves, sent and done.
+    fn done(self, number: u64) -> String {
+        match self {
+            ReviewVerdict::Approve => format!("approved #{number}"),
+            ReviewVerdict::RequestChanges => format!("requested changes on #{number}"),
+            ReviewVerdict::Comment => format!("reviewed #{number} with a comment"),
+        }
+    }
+}
+
+/// The review form's rows, in Tab order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRow {
+    Verdict,
+    Body,
+}
+
+impl ReviewRow {
+    /// Two rows: either way round lands on the other one.
+    fn other(self) -> Self {
+        match self {
+            ReviewRow::Verdict => ReviewRow::Body,
+            ReviewRow::Body => ReviewRow::Verdict,
+        }
+    }
+}
+
+/// `⌘⇧R`, and Enter on the Reviews tab: a review of the pull request
+/// under the cursor — approve it, ask for changes, or comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewForm {
+    pub project: ProjectId,
+    pub dir: PathBuf,
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    /// The signed-in user opened it: GitHub takes only a comment from its
+    /// author, so that is the one verdict offered.
+    pub mine: bool,
+    pub verdict: ReviewVerdict,
+    /// The review's body — optional on an approval.
+    pub body: TextInput,
+    pub row: ReviewRow,
+    pub ticket: u64,
+    pub saving: Option<String>,
+    pub notice: Option<String>,
+    /// As of the last draw: each row's rect, for the mouse.
+    pub rows: Vec<(Rect, ReviewRow)>,
+}
+
+impl ReviewForm {
+    /// The verdicts this pull request can be given.
+    fn verdicts(&self) -> &'static [ReviewVerdict] {
+        if self.mine {
+            &[ReviewVerdict::Comment]
+        } else {
+            ReviewVerdict::ORDER
+        }
+    }
+
+    /// `←`/`→`/Space: the next verdict, round either end.
+    fn step_verdict(&mut self, forward: bool) {
+        let order = self.verdicts();
+        let n = order.len();
+        let at = order.iter().position(|v| *v == self.verdict).unwrap_or(0);
+        let next = if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        };
+        self.verdict = order[next];
+        self.notice = None;
+    }
+}
+
+/// `⌘⇧R`: the review form for the pull request under the cursor —
+/// opening on Approve with the verdict under the caret, or, on one of the
+/// user's own, on Comment with the caret in the box.
+pub(crate) fn open_review(app: &mut App) {
+    let Some(view) = modal(app) else {
+        return;
+    };
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    let Some(pr) = crate::pr_modal::selected_pr(app) else {
+        return;
+    };
+    let (verdict, row) = if pr.mine {
+        (ReviewVerdict::Comment, ReviewRow::Body)
+    } else {
+        (ReviewVerdict::Approve, ReviewRow::Verdict)
+    };
+    let form = ReviewForm {
+        project,
+        dir,
+        number: pr.number,
+        url: pr.url.clone(),
+        title: pr.title.clone(),
+        mine: pr.mine,
+        verdict,
+        body: TextInput::multiline(),
+        row,
+        ticket: crate::view_jobs::ticket(),
+        saving: None,
+        notice: None,
+        rows: Vec::new(),
+    };
+    put_form(app, PrForm::Review(form));
+    app.dirty = true;
+}
+
+/// Enter on the review form: `gh pr review` off the loop, the form held
+/// until the answer lands. A verdict that needs a word and has none says
+/// so and puts the caret in the box instead.
+fn submit_review(app: &mut App) {
+    let tx = app.pr_actions_tx.clone();
+    let Some(form) = review_form(app) else {
+        return;
+    };
+    if form.saving.is_some() {
+        return;
+    }
+    let body = form.body.trim().to_string();
+    if form.verdict.needs_body() && body.is_empty() {
+        form.notice = Some(format!("{} needs a comment", form.verdict.label()));
+        form.row = ReviewRow::Body;
+        return;
+    }
+    let Some(tx) = tx else {
+        return;
+    };
+    form.notice = None;
+    form.saving = Some(format!("reviewing #{}…", form.number));
+    let (project, dir, ticket, number, url, verdict) = (
+        form.project.clone(),
+        form.dir.clone(),
+        form.ticket,
+        form.number,
+        form.url.clone(),
+        form.verdict,
+    );
+    tokio::spawn(async move {
+        let n = number.to_string();
+        let mut args = vec!["pr", "review", n.as_str(), verdict.flag()];
+        if !body.is_empty() {
+            args.extend(["--body", body.as_str()]);
+        }
+        let result = run_piped(gh(&dir, &args), "", REQUEST_TIMEOUT)
+            .await
+            .map(|_| verdict.done(number));
+        let _ = tx.send(Answer::Reviewed {
+            project,
+            url,
+            ticket,
+            result,
+        });
+    });
+}
+
 // ---- ready for review / draft ----
 
 /// `⌘D`: the pull request under the cursor marked ready for review —
@@ -1371,6 +1588,13 @@ pub enum Answer {
         ticket: u64,
         result: Result<String, String>,
     },
+    /// `gh pr review`: what to flash, or why it refused.
+    Reviewed {
+        project: ProjectId,
+        url: String,
+        ticket: u64,
+        result: Result<String, String>,
+    },
     /// `gh pr ready`: pull request `number` marked `ready` for review (or
     /// turned into a draft), or why not.
     Readied {
@@ -1434,6 +1658,13 @@ fn close_pr_form(app: &mut App) -> Option<&mut CloseForm> {
     }
 }
 
+fn review_form(app: &mut App) -> Option<&mut ReviewForm> {
+    match form(app)? {
+        PrForm::Review(f) => Some(f),
+        _ => None,
+    }
+}
+
 /// Close the form, the reading pane back.
 fn close_form(app: &mut App) {
     if let Some(view) = modal(app) {
@@ -1486,6 +1717,12 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             ticket,
             result,
         } => land_done(app, &project, ticket, result, "close the pull request"),
+        Answer::Reviewed {
+            project,
+            url,
+            ticket,
+            result,
+        } => land_reviewed(app, &project, url, ticket, result),
         Answer::Readied {
             project,
             url,
@@ -1575,6 +1812,43 @@ fn land_done(
     }
 }
 
+/// Pull request `url` changed on GitHub: its body and the project's list
+/// are read again, so the page and the row's badge follow.
+fn read_again(app: &mut App, project: &ProjectId, url: String) {
+    app.pr_detail_stale.insert(url);
+    if crate::pr_modal::is_up(app) {
+        crate::pr_modal::schedule_detail(app);
+    }
+    crate::pr_modal::request_list(app, project);
+}
+
+/// `gh pr review` answered: done, the form closes onto the Reviews tab,
+/// the pull request's body and the list read again so the page and the
+/// row's badge carry the review; refused, the form says why.
+fn land_reviewed(
+    app: &mut App,
+    project: &ProjectId,
+    url: String,
+    ticket: u64,
+    result: Result<String, String>,
+) {
+    match result {
+        Ok(said) => {
+            if form_for(app, ticket).is_some() {
+                close_form(app);
+                if let Some(view) = modal(app) {
+                    if view.tabs.switch(crate::pr_preview::PrTab::Reviews) {
+                        view.scroll = 0;
+                    }
+                }
+            }
+            read_again(app, project, url);
+            app.flash = Some(crate::flash::Flash::done(said));
+        }
+        Err(why) => refused(app, ticket, why, "submit the review"),
+    }
+}
+
 /// `gh pr ready` answered: the footer says which way pull request `number`
 /// went, and its body and the list are read again so the page and the
 /// row's badge say it too.
@@ -1588,11 +1862,7 @@ fn land_readied(
 ) {
     app.flash = Some(match result {
         Ok(()) => {
-            app.pr_detail_stale.insert(url);
-            if crate::pr_modal::is_up(app) {
-                crate::pr_modal::schedule_detail(app);
-            }
-            crate::pr_modal::request_list(app, project);
+            read_again(app, project, url);
             crate::flash::Flash::done(if ready {
                 format!("#{number} is ready for review")
             } else {
@@ -1661,6 +1931,9 @@ pub(crate) mod keys {
     /// The close form's.
     pub const CLOSE: Key = Key::new(&["enter"], "close PR");
     pub const DELETE: Key = Key::new(&["space"], "delete branch");
+    /// The review form's.
+    pub const REVIEW: Key = Key::new(&["enter"], "submit review");
+    pub const VERDICT: Key = Key::new(&["left", "right", "space"], "verdict").show(2);
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         FIELD,
@@ -1673,6 +1946,8 @@ pub(crate) mod keys {
         MERGE,
         CLOSE,
         DELETE,
+        REVIEW,
+        VERDICT,
         crate::ui::task_keys::NEWLINE,
     ];
 }
@@ -1723,6 +1998,17 @@ pub(crate) fn hints(form: &PrForm) -> Vec<Hint> {
             hints.push(Hint::new("Esc", "cancel"));
             hints
         }
+        PrForm::Review(form) => {
+            let mut hints = vec![keys::REVIEW.hint_as(form.verdict.verb()).kept()];
+            match form.row {
+                ReviewRow::Verdict if form.verdicts().len() > 1 => hints.push(keys::VERDICT.hint()),
+                ReviewRow::Verdict => {}
+                ReviewRow::Body => hints.push(crate::ui::task_keys::NEWLINE.hint()),
+            }
+            hints.push(keys::FIELD.hint());
+            hints.push(Hint::new("Esc", "cancel"));
+            hints
+        }
     }
 }
 
@@ -1741,6 +2027,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             PrForm::Create(_) => create_key(app, key),
             PrForm::Merge(_) => merge_key(app, key),
             PrForm::Close(_) => close_key(app, key),
+            PrForm::Review(_) => review_key(app, key),
         }
     }
     app.dirty = true;
@@ -1852,6 +2139,36 @@ fn close_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Keys on the review form: Tab between the verdict and the box,
+/// `←`/`→`/Space change the verdict, ↑/↓ step between them past the box's
+/// first line, a letter typed on the verdict lands in the box, and Enter
+/// sends — a line break in the box on the NEWLINE chords.
+fn review_key(app: &mut App, key: KeyEvent) {
+    let Some(form) = review_form(app) else {
+        return;
+    };
+    let on_body = form.row == ReviewRow::Body;
+    match key.code {
+        _ if keys::FIELD.matches(&key) => form.row = form.row.other(),
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if !on_body => {
+            form.step_verdict(key.code != KeyCode::Left)
+        }
+        KeyCode::Down if !on_body => form.row = ReviewRow::Body,
+        KeyCode::Up if on_body && !form.body.handle_key(&key).consumed() => {
+            form.row = ReviewRow::Verdict
+        }
+        KeyCode::Enter if !(on_body && form.body.takes_newline(&key)) => submit_review(app),
+        _ if !on_body && is_char_key(&key) => {
+            form.row = ReviewRow::Body;
+            if form.body.handle_key(&key).changed() {
+                form.notice = None;
+            }
+        }
+        _ if on_body && form.body.handle_key(&key).changed() => form.notice = None,
+        _ => {}
+    }
+}
+
 /// `←`/`→`/Space on a merge row: the next method the repo allows, or the
 /// box flipped.
 fn change_merge_row(form: &mut MergeForm, forward: bool) {
@@ -1900,6 +2217,14 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
         if form.saving.is_none() {
             form.row = CloseRow::Comment;
             form.comment.insert_str(text);
+        }
+        return true;
+    }
+    if let PrForm::Review(form) = form {
+        if form.saving.is_none() {
+            form.row = ReviewRow::Body;
+            form.body.insert_str(text);
+            form.notice = None;
         }
         return true;
     }
@@ -1985,6 +2310,16 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position) {
             }
             form.row = row;
         }
+    } else if let Some(form) = review_form(app) {
+        if !clicked {
+            return;
+        }
+        if let Some(&(_, row)) = form.rows.iter().find(|(r, _)| r.contains(at)) {
+            if row == ReviewRow::Verdict {
+                form.step_verdict(true);
+            }
+            form.row = row;
+        }
     }
     app.dirty = true;
 }
@@ -2000,6 +2335,7 @@ pub struct Drawn {
     create_rows: Vec<(Rect, CreateField)>,
     merge_rows: Vec<(Rect, MergeRow)>,
     close_rows: Vec<(Rect, CloseRow)>,
+    review_rows: Vec<(Rect, ReviewRow)>,
     picks: Vec<(Rect, usize)>,
     /// The view the description — or the close form's comment — was
     /// drawn with.
@@ -2024,6 +2360,12 @@ pub(crate) fn write_back(form: &mut PrForm, drawn: Drawn) {
                 form.comment.set_view(view);
             }
         }
+        PrForm::Review(form) => {
+            form.rows = drawn.review_rows;
+            if let Some(view) = drawn.body_view {
+                form.body.set_view(view);
+            }
+        }
     }
 }
 
@@ -2033,6 +2375,7 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, form: &PrForm, focused: bool, th: 
         PrForm::Create(form) => draw_create(f, area, form, focused, th),
         PrForm::Merge(form) => draw_merge(f, area, form, focused, th),
         PrForm::Close(form) => draw_close(f, area, form, focused, th),
+        PrForm::Review(form) => draw_review(f, area, form, focused, th),
     }
 }
 
@@ -2401,6 +2744,97 @@ fn draw_close(f: &mut Frame, area: Rect, form: &CloseForm, focused: bool, th: Th
         &form.comment,
         on(CloseRow::Comment),
         "(optional — left on the pull request as it closes)",
+        th,
+    );
+    drawn
+}
+
+/// The rows over the review form's box — the title, what it is, a gap
+/// and the verdict.
+const REVIEW_ROWS: u16 = 4;
+
+fn draw_review(f: &mut Frame, area: Rect, form: &ReviewForm, focused: bool, th: Theme) -> Drawn {
+    let (inner, foot_w) = form_frame(
+        f,
+        area,
+        &format!("Review #{}", form.number),
+        form.notice.as_deref(),
+        form.saving.as_deref(),
+        focused,
+        th,
+    );
+    let mut drawn = Drawn {
+        foot_w,
+        ..Drawn::default()
+    };
+    let width = usize::from(inner.width);
+    let dim = Style::default().fg(th.dim);
+    let text = Style::default().fg(th.text);
+    let muted = Style::default().fg(th.muted);
+    let on = |row: ReviewRow| focused && form.row == row && form.saving.is_none();
+    let others = form.verdicts().len() > 1;
+    let tint = match form.verdict {
+        ReviewVerdict::Approve => th.ok,
+        ReviewVerdict::RequestChanges => th.err,
+        ReviewVerdict::Comment => th.text,
+    };
+    let about = if form.mine {
+        "your own pull request — GitHub takes only a comment from its author"
+    } else {
+        "your review, posted to GitHub"
+    };
+    let mut verdict = vec![
+        form_label("Verdict", on(ReviewRow::Verdict), th),
+        Span::styled(if others { "◂ " } else { "  " }, muted),
+        Span::styled(
+            form.verdict.label(),
+            Style::default().fg(tint).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if others {
+        verdict.push(Span::styled(" ▸", muted));
+    }
+    let lines: [(Option<ReviewRow>, Vec<Span<'static>>); REVIEW_ROWS as usize] = [
+        (
+            None,
+            vec![Span::styled(
+                format!("{INDENT}{}", form.title),
+                text.add_modifier(Modifier::BOLD),
+            )],
+        ),
+        (None, vec![Span::styled(format!("{INDENT}{about}"), dim)]),
+        (None, Vec::new()),
+        (Some(ReviewRow::Verdict), verdict),
+    ];
+    for (i, (row, spans)) in lines.into_iter().enumerate() {
+        let Some(rect) = row_rect(inner, i) else {
+            break;
+        };
+        f.render_widget(Paragraph::new(crate::pr_preview::fit(spans, width)), rect);
+        if let Some(row) = row {
+            drawn.review_rows.push((rect, row));
+        }
+    }
+    let box_area = Rect {
+        y: inner.y.saturating_add(REVIEW_ROWS),
+        height: inner.height.saturating_sub(REVIEW_ROWS),
+        ..inner
+    };
+    if box_area.height < 3 || box_area.width < 4 {
+        return drawn;
+    }
+    drawn.review_rows.push((box_area, ReviewRow::Body));
+    drawn.body_view = form_text_box(
+        f,
+        box_area,
+        "Comment",
+        &form.body,
+        on(ReviewRow::Body),
+        if form.verdict.needs_body() {
+            "(required — what the review says)"
+        } else {
+            "(optional — left with the approval)"
+        },
         th,
     );
     drawn
