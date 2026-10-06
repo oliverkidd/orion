@@ -36,6 +36,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::FileTabs(v) => v.area,
         Overlay::Metrics(v) => v.area,
         Overlay::Usage(v) => v.area,
+        Overlay::Stacks(v) => v.area,
         Overlay::Hosts(v) => v.area,
         Overlay::AgentPresets(v) => v.area,
         Overlay::AgentPresetEditor(v) => v.area,
@@ -103,6 +104,7 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             | Overlay::FileTabs(_)
             | Overlay::Metrics(_)
             | Overlay::Usage(_)
+            | Overlay::Stacks(_)
             | Overlay::Hosts(_)
             | Overlay::Skills(_)
             | Overlay::BranchSwitch(_),

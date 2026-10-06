@@ -185,6 +185,7 @@ const MODAL_KEYS: &[crate::hints::Key] = &[
     crate::todos::view::keys::DELETE,
     crate::todos::view::keys::LINEAR,
     crate::todos::view::keys::REFRESH,
+    crate::stacks::keys::DOWN,
     crate::hints::COPY_PATH,
     crate::hints::IN_CURSOR,
 ];
@@ -897,6 +898,7 @@ mod tests {
             crate::preset_overlays::keys::ALL,
             crate::ui::diff_keys::ALL_KEYS,
             crate::branch_switch::keys::ALL,
+            crate::stacks::keys::ALL,
             &[
                 crate::ui::finder_keys::ATTACH,
                 crate::ui::finder_keys::FOCUS_ROW,

@@ -101,6 +101,7 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             HitTarget::LauncherCard(_)
             | HitTarget::LauncherBand(_)
             | HitTarget::LauncherBandPr(_)
+            | HitTarget::LauncherBandStack(_)
             | HitTarget::LauncherCardIssue(_)
             | HitTarget::LauncherStripLeft(_)
             | HitTarget::LauncherStripRight(_)

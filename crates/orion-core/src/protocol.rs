@@ -1,3 +1,4 @@
+use crate::compose::{Stack, StackVerb};
 use crate::entities::{
     Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, Worktree,
 };
@@ -7,7 +8,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 47;
+pub const PROTOCOL_VERSION: u32 = 48;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -395,6 +396,15 @@ pub enum ClientRequest {
         req_id: u64,
     },
 
+    /// STACK STATUS: start, stop or take down compose project `project`
+    /// (`docker compose -p`). Acked once docker returns; the new state
+    /// follows as a `StacksChanged`.
+    StackAction {
+        req_id: u64,
+        project: String,
+        verb: StackVerb,
+    },
+
     /// The end of a live session's output ring — what a TERMINAL's card on
     /// the grid shows as the last lines its shell printed. Answered by
     /// `ServerEvent::OutputTail` with the same req_id (not an Ack).
@@ -564,6 +574,14 @@ pub enum ServerEvent {
         paths: Vec<PathBuf>,
     },
 
+    /// STACK STATUS: every docker compose project on the machine, sent
+    /// when it changes and right after `Snapshot`. `stacks: None` is docker
+    /// out of reach, `error` saying why; `Some(vec![])` is no stacks.
+    StacksChanged {
+        stacks: Option<Vec<Stack>>,
+        error: Option<String>,
+    },
+
     // -- PTY plane (only to clients attached to that session) --
     /// Ring replay on attach; client resets its parser before applying.
     Scrollback {
@@ -602,4 +620,42 @@ pub enum ServerEvent {
         session: SessionRef,
         tail: Option<OutputTail>,
     },
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    #[test]
+    fn stack_frames_round_trip() {
+        let req = ClientRequest::StackAction {
+            req_id: 3,
+            project: "riplo-wt".into(),
+            verb: StackVerb::DownVolumes,
+        };
+        let back: ClientRequest = rmp_serde::from_slice(&rmp_serde::to_vec(&req).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            ClientRequest::StackAction { req_id: 3, ref project, verb: StackVerb::DownVolumes }
+                if project == "riplo-wt"
+        ));
+        let ev = ServerEvent::StacksChanged {
+            stacks: Some(vec![Stack {
+                project: "riplo-wt".into(),
+                dirs: vec![PathBuf::from("/src/wt")],
+                running: 4,
+                total: 5,
+            }]),
+            error: None,
+        };
+        let back: ServerEvent = rmp_serde::from_slice(&rmp_serde::to_vec(&ev).unwrap()).unwrap();
+        let ServerEvent::StacksChanged {
+            stacks: Some(s),
+            error: None,
+        } = back
+        else {
+            panic!("{back:?}");
+        };
+        assert_eq!((s[0].running, s[0].total), (4, 5));
+    }
 }
