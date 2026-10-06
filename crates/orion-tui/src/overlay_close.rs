@@ -153,7 +153,7 @@ pub(crate) fn force_close(app: &mut App) -> bool {
         _ => app.overlay = None,
     }
     if let Some(draft) = parked {
-        app.quick_draft = Some(draft);
+        app.quick_draft.park(draft);
     }
     true
 }

@@ -7464,7 +7464,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 let parked = crate::quick_prompt::draft_of(prompt);
                 app.overlay = None;
                 if let Some(draft) = parked {
-                    app.quick_draft = Some(draft);
+                    app.quick_draft.park(draft);
                 }
                 if back_to_settings {
                     reopen_settings(app);
@@ -9032,8 +9032,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         return;
     }
     // A QUICK PROMPT sending the SAVED DRAFT spends it.
-    if matches!(prompt.kind, PromptKind::QuickPrompt(_)) {
-        crate::saved_draft::launched(app, prompt.input.as_str());
+    if let PromptKind::QuickPrompt(launch) = &prompt.kind {
+        crate::saved_draft::launched(app, &launch.target, prompt.input.as_str());
     }
     match prompt.kind {
         PromptKind::AddProject => open_folder(app, shellexpand_home(&value), out),
@@ -13302,7 +13302,7 @@ pub(crate) fn reopen_prompt_with(app: &mut App, mut kind: PromptKind, text: Stri
     if let PromptKind::QuickPrompt(launch) = &mut kind {
         crate::quick_prompt::restack(app, launch);
         // The launch spent the SAVED DRAFT; the text is the draft again.
-        crate::saved_draft::refused(app, &text);
+        crate::saved_draft::refused(app, &launch.target, &text);
     }
     open_prompt(app, kind);
     if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
@@ -34742,11 +34742,12 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// Closing the box is not throwing the prompt away: Esc, a click
     /// outside and the HARDWIRED UNLOCK park what was typed, and the next
-    /// QUICK PROMPT takes it back — whole, harness pick and all, when it
-    /// is aimed at the same checkout, and text-only into a box aimed
-    /// somewhere else (the cursor moved onto another worktree's band, or
-    /// the WORKTREE PICKER re-aimed the box). Clearing the box and closing it is how a
-    /// draft is thrown away; an empty box parks nothing.
+    /// QUICK PROMPT at the same place takes it back, harness pick and all.
+    /// Each place keeps its own: a box aimed somewhere else — the cursor
+    /// on another worktree's band, or the WORKTREE PICKER re-aiming the
+    /// box at a fresh worktree — neither takes nor drops another place's
+    /// draft. Clearing the box and closing it is how a draft is thrown
+    /// away; an empty box parks nothing.
     #[test]
     fn a_closed_quick_prompt_is_parked_and_the_next_box_takes_it_back() {
         with_default_config(|| {
@@ -34776,7 +34777,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "Esc closes the box");
-            assert!(app.quick_draft.is_some(), "and parks what was typed");
+            assert!(!app.quick_draft.is_empty(), "and parks what was typed");
 
             // The same place: the box comes back whole, and the slot is
             // empty again.
@@ -34791,7 +34792,7 @@ diff --git a/src/c.rs b/src/c.rs
             };
             assert_eq!(prompt.input.as_str(), "Fix auth");
             assert_eq!(prompt.title, "Quick prompt (codex)", "the pick too");
-            assert!(app.quick_draft.is_none(), "taken back, not copied");
+            assert!(app.quick_draft.is_empty(), "taken back, not copied");
 
             // The HARDWIRED UNLOCK parks it the same way.
             press(
@@ -34801,7 +34802,7 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert!(app.overlay.is_none(), "^q closes the box");
-            assert!(app.quick_draft.is_some(), "and parks it");
+            assert!(!app.quick_draft.is_empty(), "and parks it");
 
             // The cursor on a checkout with nothing running in it has no
             // band to be on, so it moves nothing: the box still lands on
@@ -34827,13 +34828,12 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(matches!(&prompt.kind, PromptKind::QuickPrompt(launch)
                 if launch.target == root));
 
-            // A box aimed somewhere else — the WORKTREE PICKER aimed it at
-            // a fresh worktree before it was closed — does not hand its aim
-            // and spec to the next box; the text is the user's, so it
-            // still comes back.
+            // Re-aimed at a fresh worktree and closed, the draft is that
+            // project's fresh-worktree box's: the root's next box is empty
+            // and the settings' harness again.
             pick_fresh_worktree(&mut app, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(app.quick_draft.is_some(), "Esc parks the re-aimed box");
+            assert!(!app.quick_draft.is_empty(), "Esc parks the re-aimed box");
             press(
                 &mut app,
                 KeyCode::Char('n'),
@@ -34843,19 +34843,16 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.input.as_str(), "Fix auth");
-            assert_eq!(
-                prompt.title, "Quick prompt (claude)",
-                "a differently aimed box is the settings' harness again"
-            );
+            assert_eq!(prompt.input.as_str(), "", "another place's draft");
+            assert_eq!(prompt.title, "Quick prompt (claude)");
             assert!(matches!(&prompt.kind, PromptKind::QuickPrompt(launch)
                 if launch.target == root));
 
             // A session running in `feat` gives it a band, and the cursor
-            // on that band aims the box there: a different checkout, so
-            // the text comes back into feat's own box.
+            // on that band aims the box there: a box of its own, its draft
+            // parked beside the others and never the root's.
+            assert!(paste_into_overlay(&mut app, "For main"));
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(app.quick_draft.is_some(), "Esc parks the root box");
             seed_agent_in(&mut app, "a2", &orion_core::WorktreeId("w2".into()));
             app.sel_worktree = 1;
             assert_eq!(
@@ -34871,7 +34868,7 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.input.as_str(), "Fix auth");
+            assert_eq!(prompt.input.as_str(), "", "main's draft stays main's");
             let feat =
                 crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w2".into()));
             assert!(
@@ -34879,6 +34876,25 @@ diff --git a/src/c.rs b/src/c.rs
                 "the box is the band's checkout's: {:?}",
                 prompt.kind
             );
+            assert!(paste_into_overlay(&mut app, "For feat"));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            app.sel_worktree = 0;
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert_eq!(box_text(&app), "For main");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            app.sel_worktree = 1;
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert_eq!(box_text(&app), "For feat");
 
             // Cleared and closed: nothing is parked, and the next box is
             // the empty one it should be.
@@ -34886,7 +34902,6 @@ diff --git a/src/c.rs b/src/c.rs
                 prompt.input.clear();
             }
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(app.quick_draft.is_none(), "an empty box parks nothing");
             press(
                 &mut app,
                 KeyCode::Char('n'),
@@ -34894,6 +34909,11 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.is_empty()));
+            app.overlay = None;
+            assert!(
+                app.quick_draft.take(&feat).is_none(),
+                "an empty box parks nothing"
+            );
             assert!(out.is_empty(), "none of this launches anything: {out:?}");
         });
     }
@@ -36646,6 +36666,18 @@ diff --git a/src/c.rs b/src/c.rs
         app
     }
 
+    /// The root checkout `seed_tree` selects, as a SAVED DRAFT place.
+    fn main_place() -> crate::saved_draft::DraftPlace {
+        crate::saved_draft::DraftPlace::Worktree(orion_core::WorktreeId("w1".into()))
+    }
+
+    /// The SAVED DRAFT on disk at `path` for the root checkout.
+    fn saved_text(path: &std::path::Path) -> String {
+        crate::saved_draft::SavedDraft::at(path.to_path_buf())
+            .text(&main_place())
+            .to_string()
+    }
+
     /// What is typed into the box is on disk as it is typed — no exit
     /// hook to wait for — and a box opened after a restart starts from it,
     /// caret at its end, saying so until the first edit.
@@ -36660,16 +36692,10 @@ diff --git a/src/c.rs b/src/c.rs
             type_into(&mut app, "Fix auth", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
             type_into(&mut app, "then ship", &mut out);
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                "Fix auth\nthen ship"
-            );
+            assert_eq!(saved_text(&path), "Fix auth\nthen ship");
             // A paste is an edit too.
             assert!(paste_into_overlay(&mut app, " it"));
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                "Fix auth\nthen ship it"
-            );
+            assert_eq!(saved_text(&path), "Fix auth\nthen ship it");
 
             // The window closes: no Esc, no clean shutdown.
             drop(app);
@@ -36686,16 +36712,47 @@ diff --git a/src/c.rs b/src/c.rs
                 unreachable!();
             };
             assert!(!prompt.draft_restored, "an edit lets the cue go");
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                "Fix auth\nthen ship it!"
-            );
+            assert_eq!(saved_text(&path), "Fix auth\nthen ship it!");
 
             // Emptied by hand, the draft goes with the text.
             press(&mut app, KeyCode::Char('a'), KeyModifiers::SUPER, &mut out);
             press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             assert_eq!(box_text(&app), "");
-            assert!(!path.exists(), "an empty box is no draft");
+            assert_eq!(saved_text(&path), "", "an empty box is no draft");
+        });
+    }
+
+    /// Each worktree keeps its own SAVED DRAFT across a restart: a box on
+    /// another checkout opens empty, and its own text is put down beside
+    /// the first's rather than over it.
+    #[test]
+    fn the_saved_draft_is_kept_per_worktree() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(crate::saved_draft::FILE_NAME);
+            let mut out = Vec::new();
+            let mut app = restarted(&path);
+            seed_feat_worktree(&mut app, "w2", "feat");
+            seed_agent_in(&mut app, "a2", &orion_core::WorktreeId("w2".into()));
+            open_quick_box(&mut app, &mut out);
+            type_into(&mut app, "For main", &mut out);
+            app.overlay = None;
+            app.sel_worktree = 1;
+            open_quick_box(&mut app, &mut out);
+            assert_eq!(box_text(&app), "", "main's draft is not feat's");
+            type_into(&mut app, "For feat", &mut out);
+            assert_eq!(saved_text(&path), "For main");
+
+            drop(app);
+            let mut app = restarted(&path);
+            seed_feat_worktree(&mut app, "w2", "feat");
+            seed_agent_in(&mut app, "a2", &orion_core::WorktreeId("w2".into()));
+            open_quick_box(&mut app, &mut out);
+            assert_eq!(box_text(&app), "For main");
+            app.overlay = None;
+            app.sel_worktree = 1;
+            open_quick_box(&mut app, &mut out);
+            assert_eq!(box_text(&app), "For feat");
         });
     }
 
@@ -36709,14 +36766,14 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = restarted(&path);
             open_quick_box(&mut app, &mut out);
             type_into(&mut app, "Fix auth", &mut out);
-            assert!(path.exists());
+            assert_eq!(saved_text(&path), "Fix auth");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 out.iter()
                     .any(|r| matches!(r, ClientRequest::CreateAgent { .. })),
                 "{out:?}"
             );
-            assert!(!path.exists(), "the launch spent the draft");
+            assert_eq!(saved_text(&path), "", "the launch spent the draft");
             open_quick_box(&mut app, &mut out);
             assert_eq!(box_text(&app), "");
         });
@@ -36731,7 +36788,7 @@ diff --git a/src/c.rs b/src/c.rs
         with_seeded_presets(|| {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(crate::saved_draft::FILE_NAME);
-            std::fs::write(&path, "my draft").unwrap();
+            crate::saved_draft::SavedDraft::at(path.clone()).save(&main_place(), "my draft");
             let mut out = Vec::new();
             let mut app = restarted(&path);
             open_quick_box(&mut app, &mut out);
@@ -36744,7 +36801,7 @@ diff --git a/src/c.rs b/src/c.rs
             reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "refused".into());
             assert_eq!(box_text(&app), "refused");
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if !p.draft_restored));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+            assert_eq!(saved_text(&path), "my draft");
             app.overlay = None;
 
             let worktree = app.selected_worktree().unwrap().id.clone();
@@ -36755,7 +36812,7 @@ diff --git a/src/c.rs b/src/c.rs
 
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert_eq!(follow_up_text(&app).as_deref(), Some(""));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "my draft");
+            assert_eq!(saved_text(&path), "my draft");
         });
     }
 
@@ -36777,9 +36834,9 @@ diff --git a/src/c.rs b/src/c.rs
             };
             type_into(&mut app, "Fix auth", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(!path.exists());
+            assert_eq!(saved_text(&path), "");
             reopen_prompt_with(&mut app, PromptKind::QuickPrompt(launch), "Fix auth".into());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "Fix auth");
+            assert_eq!(saved_text(&path), "Fix auth");
         });
     }
 

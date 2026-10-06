@@ -23,15 +23,17 @@
 //!
 //! A box closed without launching does not take what was typed with it:
 //! Esc, a click outside and the HARDWIRED UNLOCK park it as a
-//! [`QuickDraft`] (`App::quick_draft`), and the next box opened takes it
+//! [`QuickDraft`] (`App::quick_draft`), and the next box opened at the same
+//! place — the same worktree, or a fresh one in the same project — takes it
 //! back ([`open_box`]). Nor does a window closed with the box up: the text
 //! is the SAVED DRAFT on disk as it is typed (`saved_draft`), and a fresh
-//! box after a restart opens on it.
+//! box at that place after a restart opens on it.
 
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Focus, Overlay, PromptDialog, PromptKind};
 use crate::config::{fit_effort, Config};
 use crate::pull_request::{OpenPr, PrLaunch};
+use crate::saved_draft::DraftPlace;
 use crate::text_input::TextInput;
 use orion_core::{AgentKind, AgentMode, ProjectId, WorktreeId};
 
@@ -231,17 +233,41 @@ impl QuickReturn {
 /// A QUICK PROMPT box abandoned with something typed in it: the launch as
 /// it stood and the field itself — text, caret and scroll. Nothing typed
 /// into the box is lost to the press that closes it; the draft waits in
-/// `App::quick_draft` for the next box ([`open_box`]).
-///
-/// One slot, in memory only: the last box abandoned is the one that comes
-/// back, and none of it outlives the process. The next box empties the
-/// slot whether or not it was aimed the same way, so a draft is restored
-/// once — cleared out of the box it lands in and sent on Enter, or
-/// abandoned again and parked again.
+/// `App::quick_draft` for the next box at its place ([`open_box`]).
 #[derive(Debug, Clone)]
 pub struct QuickDraft {
     pub launch: QuickLaunch,
     pub input: TextInput,
+}
+
+/// The parked DRAFTS: one slot per place a box is aimed at
+/// ([`DraftPlace`] — a worktree, or a fresh one in a project), in memory
+/// only; the SAVED DRAFT is what outlives the process. A box takes its own
+/// place's slot and nobody else's: what was typed for one checkout never
+/// turns up in another's box. Taking empties the slot, so a draft is
+/// restored once — cleared out of the box it lands in and sent on Enter,
+/// or abandoned again and parked again.
+#[derive(Debug, Clone, Default)]
+pub struct QuickDrafts(std::collections::HashMap<DraftPlace, QuickDraft>);
+
+impl QuickDrafts {
+    /// Park `draft` in its box's place, over whatever was parked there.
+    pub fn park(&mut self, draft: QuickDraft) {
+        self.0.insert(DraftPlace::of(&draft.launch.target), draft);
+    }
+
+    /// The draft parked at the place `target` is in, taken out of its slot.
+    pub fn take(&mut self, target: &QuickTarget) -> Option<QuickDraft> {
+        self.0.remove(&DraftPlace::of(target))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 /// The DRAFT a box on its way out leaves behind: a QUICK PROMPT with
@@ -269,22 +295,23 @@ pub(crate) fn draft_of_return(back: &QuickReturn) -> Option<QuickDraft> {
 }
 
 /// Open a fresh QUICK PROMPT box on `launch`, taking back the DRAFT the
-/// last abandoned box left — every way into the box but the ones that
-/// carry their own text (a picker's return trip, a refused create) comes
-/// through here.
+/// last box abandoned at the same place left — every way into the box but
+/// the ones that carry their own text (a picker's return trip, a refused
+/// create) comes through here.
 ///
-/// The text always comes back: it is the user's, not the target's. The
-/// spec comes back with it only when the parked box was aimed at the same
-/// place ([`QuickLaunch::aimed_like`]) — coming back to the same box is
-/// coming back to the harness or AGENT PRESET picked in it, while a box
-/// aimed somewhere else keeps the aim and spec it was opened with. Either
+/// Only a draft parked at this box's place comes back: the same worktree,
+/// or a fresh worktree in the same project. Its text always does; the spec
+/// comes back with it only when the parked box was aimed alike
+/// ([`QuickLaunch::aimed_like`]) — coming back to the same box is coming
+/// back to the harness or AGENT PRESET picked in it, while a box for
+/// another issue or pull request keeps the spec it was opened with. Either
 /// way the slot is emptied: the draft is in this box now, and clearing it
 /// here and pressing Esc is how it is thrown away. With the slot empty —
 /// after a restart, a window closed on the box — the text comes back from
-/// the SAVED DRAFT on disk instead (`saved_draft::restore`), caret at its
-/// end; either way the box says `draft restored`.
+/// the place's SAVED DRAFT on disk instead (`saved_draft::restore`), caret
+/// at its end; either way the box says `draft restored`.
 pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
-    let (launch, restored) = match app.quick_draft.take() {
+    let (launch, restored) = match app.quick_draft.take(&launch.target) {
         // What the box stands on is where it is opened now, never where
         // the parked one was.
         Some(draft) if draft.launch.aimed_like(&launch) => (
@@ -295,7 +322,10 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
             Some(draft.input),
         ),
         Some(draft) => (launch, Some(draft.input)),
-        None => (launch, crate::saved_draft::restore(app)),
+        None => {
+            let restored = crate::saved_draft::restore(app, &launch.target);
+            (launch, restored)
+        }
     };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
     put_restored(app, restored);
@@ -315,13 +345,13 @@ fn put_restored(app: &mut App, restored: Option<TextInput>) {
 /// PICKER (`QuickReturn::from_box` false): the pick is the spec, and the
 /// DRAFT the last abandoned box left hands back its text alone. The
 /// harness was chosen a moment ago, on purpose, so no parked spec
-/// overrides it the way [`open_box`]'s same-aim rule would; the slot is
-/// emptied all the same, the text being in this box now. An empty slot
-/// falls back to the SAVED DRAFT, as [`open_box`]'s does.
+/// overrides it the way [`open_box`]'s same-aim rule would; the place's
+/// slot is emptied all the same, the text being in this box now. An empty
+/// slot falls back to the place's SAVED DRAFT, as [`open_box`]'s does.
 pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
-    let restored = match app.quick_draft.take() {
+    let restored = match app.quick_draft.take(&launch.target) {
         Some(draft) => Some(draft.input),
-        None => crate::saved_draft::restore(app),
+        None => crate::saved_draft::restore(app, &launch.target),
     };
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
     put_restored(app, restored);
@@ -805,6 +835,8 @@ pub(crate) fn picker_context(app: &App, launch: &QuickLaunch) -> Option<Worktree
 /// launch, and on Esc with the one it left with. The text is restored
 /// either way; that is the whole point of the round trip.
 pub(crate) fn reopen(app: &mut App, launch: QuickLaunch, text: &str) {
+    // A picker may have re-aimed the box: its draft follows it.
+    crate::saved_draft::followed(app, &launch.target, text);
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
     if let Some(crate::app::Overlay::Prompt(prompt)) = &mut app.overlay {
         prompt.input.insert_str(text);

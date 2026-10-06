@@ -212,12 +212,14 @@ footer says so and nothing is pasted.
 
 ## The quick prompt's draft
 
-The QUICK PROMPT's text is saved to `quick_prompt_draft.txt` in the DATA DIR as you type it — each
+The QUICK PROMPT's text is saved to `quick_prompt_drafts.json` in the DATA DIR as you type it, one draft
+per place: the worktree the box lands in, or the project for a box that cuts a fresh worktree. Each
 change rewritten whole through a temporary file, nothing written when nothing changed. Closing the
 terminal window kills orion without a clean shutdown, so there is no exit hook to rely on; with the
-text already on disk, the next box opened after a restart starts from it, caret at its end, its
+text already on disk, the next box opened at the same place after a restart starts from it, caret at its end, its
 explanation line reading `draft restored · …` until the first edit. Within one run the box you
-closed comes back the same way, with its harness and preset (`Esc` parks it).
+closed comes back the same way, with its harness and preset (`Esc` parks it), but only into a box
+at the same place. A box a picker re-aims takes its draft with it.
 
 Sending the box deletes the draft, and so does emptying it by hand. A launch the daemon refuses
 comes back with its text, which is the draft again. Boxes that carry their own text — a refused

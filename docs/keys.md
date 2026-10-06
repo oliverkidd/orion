@@ -445,12 +445,14 @@ the column, its title heading each, no commit list.
 `⌘N` opens a wrapped, multi-row task box that starts a new agent in the checkout under the cursor
 with what you typed as its first prompt. Which CLI it launches is the `Agent` row under **Quick
 prompt** in Settings → Agents. `Enter` launches; `Enter` on the box empty starts the session bare.
-`Esc`, a click outside it and `^Q` park what you typed, and the next `⌘N` opens on it.
+`Esc`, a click outside it and `^Q` park what you typed, and the next `⌘N` at the same place opens
+on it. Each worktree keeps its own draft, and so does each project's fresh-worktree box, so a draft
+you typed for one checkout never turns up in another's box.
 
-What you type is also saved as you type it, to `quick_prompt_draft.txt` in the DATA DIR, so closing
-the terminal window with the box up loses nothing: the next `⌘N` after a restart opens on the
-draft, caret at its end, its dim explanation line starting `draft restored ·` until you edit it.
-Launching it, or emptying the box, deletes the file. A box that brings its own text — a launch
+What you type is also saved as you type it, per place, to `quick_prompt_drafts.json` in the DATA
+DIR, so closing the terminal window with the box up loses nothing: the next `⌘N` there after a
+restart opens on the draft, caret at its end, its dim explanation line starting `draft restored ·` until you edit it.
+Launching it, or emptying the box, deletes that place's draft. A box that brings its own text — a launch
 the daemon refused, handed back — never takes the draft or overwrites it.
 
 Its header names everything the launch is made of, each field beside the key that changes it — where
