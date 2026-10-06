@@ -1,0 +1,30 @@
+crates/orion-tui/src/markdown.rs
+  s_b7422551297df0::t_464410dc29b5bf 358
+  s_b7422551297df0::t_252783a9b95eea 18-21,24-25,63-66,254-276,305,356-357,638-640,642-652,913,925,938-1269,1952-2012
+  s_b7422551297df0::t_feb80991d11201 641
+  s_760618fc34ce5c::t_913c65598a007a 2013
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3a854a7dbaec1a3918d226edeef1022893dcb36",
+  "prompts": {},
+  "sessions": {
+    "s_760618fc34ce5c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed63a345-51c8-46a9-b1b3-5110af7773da",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    },
+    "s_b7422551297df0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f5cd2d6-a054-42ae-b936-f0d517e8c485",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
