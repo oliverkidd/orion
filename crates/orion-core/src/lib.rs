@@ -5,6 +5,7 @@ pub mod compose;
 pub mod crashlog;
 pub mod entities;
 pub mod env;
+pub mod env_files;
 pub mod harness;
 pub mod host;
 pub mod ids;

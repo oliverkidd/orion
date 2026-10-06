@@ -21,9 +21,6 @@ use tokio::process::Command;
 /// lock, so a pathological tree must not hold every worktree op with it.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The pathspec git matches: `.env` and every `.env.*` at any depth.
-const ENV_PATHSPEC: &str = ":(glob)**/.env*";
-
 /// Link every ignored `.env*` file of `main` into `worktree` at the same
 /// relative path. Returns the paths linked, relative to the checkout.
 pub async fn link(main: &Path, worktree: &Path) -> Result<Vec<PathBuf>> {
@@ -60,7 +57,7 @@ async fn ignored_env_files(main: &Path) -> Result<Vec<PathBuf>> {
             "--exclude-standard",
             "-z",
             "--",
-            ENV_PATHSPEC,
+            orion_core::env_files::PATHSPEC,
         ])
         .kill_on_drop(true);
     let output = match tokio::time::timeout(LIST_TIMEOUT, command.output()).await {
@@ -79,13 +76,7 @@ fn parse_listing(out: &str) -> Vec<PathBuf> {
     out.split('\0')
         .filter(|entry| !entry.is_empty())
         .map(PathBuf::from)
-        .filter(|path| {
-            let is_env = path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".env"));
-            let in_node_modules = path.components().any(|c| c.as_os_str() == "node_modules");
-            is_env && !in_node_modules
-        })
+        .filter(|path| orion_core::env_files::is_env_file(path))
         .collect()
 }
 

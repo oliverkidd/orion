@@ -405,8 +405,10 @@ fn count_lines(bytes: &[u8]) -> u64 {
 }
 
 /// Every file in the checkout (tracked + untracked, gitignore respected) in
-/// git listing order, for the fuzzy file finder. `Err` is a user-facing
-/// flash message.
+/// git listing order, for the fuzzy file finder — plus the ignored `.env*`
+/// files after them: `.env.local` and its kind are gitignored by design,
+/// yet they are files you open (and the ones `link_env_files` symlinks into
+/// every worktree). `Err` is a user-facing flash message.
 pub fn list_files(root: &Path) -> Result<Vec<String>, String> {
     let output = run_git(
         root,
@@ -422,12 +424,44 @@ pub fn list_files(root: &Path) -> Result<Vec<String>, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git ls-files failed: {}", stderr.trim()));
     }
-    Ok(output
-        .stdout
+    let mut files = nul_separated(&output.stdout);
+    files.extend(ignored_env_files(root));
+    Ok(files)
+}
+
+/// The ignored, untracked ENV FILES (`orion_core::env_files`). None when
+/// git can't say.
+fn ignored_env_files(root: &Path) -> Vec<String> {
+    let Ok(output) = run_git(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            orion_core::env_files::PATHSPEC,
+        ],
+    ) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    nul_separated(&output.stdout)
+        .into_iter()
+        .filter(|path| orion_core::env_files::is_env_file(Path::new(path)))
+        .collect()
+}
+
+/// `git … -z` output as paths.
+fn nul_separated(stdout: &[u8]) -> Vec<String> {
+    stdout
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
         .map(|p| String::from_utf8_lossy(p).into_owned())
-        .collect())
+        .collect()
 }
 
 /// Does this checkout have any commit? Unborn HEAD changes the diff command.
@@ -1176,6 +1210,36 @@ mod tests {
         assert!(files.contains(&"tracked.txt".to_string()), "{files:?}");
         assert!(files.contains(&"fresh.txt".to_string()), "{files:?}");
         assert!(!files.contains(&"ignored.txt".to_string()), "{files:?}");
+    }
+
+    /// Gitignored `.env*` files are still files you open: listed after
+    /// the rest, at any depth — never one under `node_modules`, and no
+    /// other ignored file.
+    #[test]
+    fn list_files_keeps_ignored_env_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_repo(&dir);
+        std::fs::write(
+            repo.join(".gitignore"),
+            ".env.local\n.env\nnode_modules\nbuild.log\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join(".env.local"), "KEY=1\n").unwrap();
+        std::fs::create_dir_all(repo.join("apps/web")).unwrap();
+        std::fs::write(repo.join("apps/web/.env"), "KEY=2\n").unwrap();
+        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        std::fs::write(repo.join("node_modules/pkg/.env"), "KEY=3\n").unwrap();
+        std::fs::write(repo.join("build.log"), "noise\n").unwrap();
+
+        let files = list_files(&repo).unwrap();
+        assert!(files.contains(&".env.local".to_string()), "{files:?}");
+        assert!(files.contains(&"apps/web/.env".to_string()), "{files:?}");
+        assert!(
+            !files.iter().any(|f| f.contains("node_modules")),
+            "{files:?}"
+        );
+        assert!(!files.contains(&"build.log".to_string()), "{files:?}");
+        assert_eq!(files.iter().filter(|f| *f == ".env.local").count(), 1);
     }
 
     #[test]
