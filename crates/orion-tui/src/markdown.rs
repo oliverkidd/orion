@@ -15,11 +15,14 @@
 //! hanging indents, quotes behind a bar, fenced code on a raised surface
 //! with the TREE BROWSER's highlighting, tables in aligned columns, links
 //! underlined with the address dim beside them. Images are their alt text
-//! in brackets — a terminal has no picture to show — and raw HTML stays
-//! raw, dimmed, rather than being guessed at.
+//! in brackets — a terminal has no picture to show. In a file, raw HTML
+//! stays raw, dimmed, rather than being guessed at; in a GitHub body
+//! ([`Breaks::Hard`]) it is drawn the way github.com draws it — see
+//! GITHUB HTML below.
 
 use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options,
+    Parser, Tag, TagEnd,
 };
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -57,7 +60,10 @@ pub enum Breaks {
     Reflow,
     /// GitHub's comment rule: every newline is a line break — an issue or
     /// pull request body typed into the browser, where a list without
-    /// markers reads as a list only if its rows stay rows.
+    /// markers reads as a list only if its rows stay rows. The body is
+    /// read as github.com shows it, too: its HTML is drawn rather than
+    /// printed, `<details>` stays shut on its summary, and a link is its
+    /// text — the address is the browser's business.
     Hard,
 }
 
@@ -245,6 +251,29 @@ struct Renderer {
     links: Vec<(String, usize)>,
     /// Open images: where in `inline` the alt text began.
     images: Vec<usize>,
+    /// GITHUB HTML: what is open, so the body draws as github.com does.
+    html: HtmlState,
+}
+
+/// GITHUB HTML's place in the body: the tags left open, an unfinished tag
+/// or comment carried from one HTML event to the next.
+#[derive(Debug, Default)]
+struct HtmlState {
+    /// A tag cut off at the end of an event, waiting for its `>`.
+    pending: String,
+    /// Inside `<!-- … -->`.
+    comment: bool,
+    /// Open `<details>`, outermost first.
+    details: usize,
+    /// Inside the outermost `<details>`'s `<summary>` — the one row a
+    /// shut `<details>` shows.
+    summary: bool,
+    /// `<ul>`/`<ol>` and `<li>` opened by HTML, so a stray close tag can't
+    /// pop a markdown list's gutter.
+    lists: Vec<bool>,
+    items: usize,
+    /// Inside `<code>`.
+    code: usize,
 }
 
 impl Renderer {
@@ -273,6 +302,7 @@ impl Renderer {
             table: None,
             links: Vec::new(),
             images: Vec::new(),
+            html: HtmlState::default(),
         }
     }
 
@@ -322,6 +352,9 @@ impl Renderer {
         }
         if self.link > 0 {
             s = s.fg(self.th.accent).add_modifier(Modifier::UNDERLINED);
+        }
+        if self.html.code > 0 {
+            s = s.fg(self.th.special);
         }
         s
     }
@@ -602,6 +635,21 @@ impl Renderer {
     // ---- events ----
 
     fn event(&mut self, ev: Event<'_>) {
+        if self.breaks == Breaks::Hard {
+            match ev {
+                Event::Html(t) | Event::InlineHtml(t) => return self.html(&t),
+                Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock) => {
+                    self.flush_inline();
+                    self.need_blank = true;
+                    return;
+                }
+                // A shut `<details>` hides its markdown as well as its HTML.
+                // Its blocks open and close inside it, so dropping both
+                // ends keeps the renderer balanced.
+                _ if self.collapsed() => return,
+                _ => {}
+            }
+        }
         match ev {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -862,7 +910,7 @@ impl Renderer {
                     // read, not followed: its address stays out of the way.
                     let badge =
                         start < self.inline.len() && self.inline[start..].iter().all(|a| a.image);
-                    if !badge && shows_address(&dest, &text) {
+                    if !badge && self.breaks == Breaks::Reflow && shows_address(&dest, &text) {
                         let style = self.dim();
                         self.space = true;
                         self.push_text(&format!("({dest})"), style);
@@ -874,19 +922,7 @@ impl Renderer {
                     let alt = self.inline_text(start);
                     let kind = self.inline.get(start).map_or(Kind::Word, |a| a.kind);
                     self.inline.truncate(start);
-                    let alt = alt.trim();
-                    let label = if alt.is_empty() {
-                        "[image]".to_string()
-                    } else {
-                        format!("[{alt}]")
-                    };
-                    let style = self.dim();
-                    self.inline.push(Atom {
-                        text: label,
-                        style,
-                        kind,
-                        image: true,
-                    });
+                    self.push_image(alt.trim(), kind);
                 }
             }
             TagEnd::FootnoteDefinition
@@ -897,6 +933,338 @@ impl Renderer {
             | TagEnd::Subscript => {}
         }
     }
+}
+
+impl Renderer {
+    /// An image's stand-in: its alt text in brackets, dim.
+    fn push_image(&mut self, alt: &str, kind: Kind) {
+        let text = if alt.is_empty() {
+            "[image]".to_string()
+        } else {
+            format!("[{alt}]")
+        };
+        let style = self.dim();
+        self.inline.push(Atom {
+            text,
+            style,
+            kind,
+            image: true,
+        });
+        self.space = false;
+    }
+
+    // ---- GITHUB HTML ----
+    //
+    // A GitHub body is markdown with HTML through it, and bots write little
+    // else: Linear's linkback is a `<details>` of `<a>` and `<p>`, Vercel's
+    // table cells are `<a><sup><img>` and `<relative-time>`. github.com
+    // draws that HTML, so here it is drawn too — the tags a cell grid can
+    // say something with become what they mean, comments vanish, and any
+    // other tag goes quietly, leaving its text.
+
+    /// Is the renderer inside a shut `<details>`, past its summary?
+    fn collapsed(&self) -> bool {
+        self.html.details > 0 && !(self.html.summary && self.html.details == 1)
+    }
+
+    /// One HTML event: its tags acted on, its text flowed as prose.
+    fn html(&mut self, chunk: &str) {
+        let mut src = std::mem::take(&mut self.html.pending);
+        src.push_str(chunk);
+        let mut rest = src.as_str();
+        while !rest.is_empty() {
+            if self.html.comment {
+                match rest.find("-->") {
+                    Some(end) => {
+                        self.html.comment = false;
+                        rest = &rest[end + 3..];
+                    }
+                    None => return,
+                }
+                continue;
+            }
+            let Some(lt) = rest.find('<') else {
+                self.html_text(rest);
+                return;
+            };
+            self.html_text(&rest[..lt]);
+            rest = &rest[lt..];
+            if let Some(after) = rest.strip_prefix("<!--") {
+                self.html.comment = true;
+                rest = after;
+                continue;
+            }
+            let is_tag = rest[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!');
+            if !is_tag {
+                self.html_text("<");
+                rest = &rest[1..];
+                continue;
+            }
+            match tag_end(rest) {
+                Some(end) => {
+                    self.html_tag(&rest[1..end]);
+                    rest = &rest[end + 1..];
+                }
+                None => {
+                    self.html.pending = rest.to_string();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Text between tags: entities decoded, whitespace folded as a browser
+    /// folds it.
+    fn html_text(&mut self, text: &str) {
+        if text.is_empty() || self.collapsed() {
+            return;
+        }
+        let text = decode_entities(text);
+        let folded: String = text
+            .split(|c: char| c.is_ascii_whitespace())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let style = self.style();
+        self.push_text(&folded, style);
+    }
+
+    /// One tag, `<` and `>` stripped.
+    fn html_tag(&mut self, inner: &str) {
+        let close = inner.starts_with('/');
+        let body = inner.trim_start_matches('/');
+        let name_end = body
+            .find(|c: char| c.is_ascii_whitespace() || c == '/')
+            .unwrap_or(body.len());
+        let name = body[..name_end].to_ascii_lowercase();
+        let attrs = &body[name_end..];
+
+        // `<details>` is counted even while hidden, so the right
+        // `</details>` opens the body back up.
+        match (name.as_str(), close) {
+            ("details", false) => {
+                if !self.collapsed() {
+                    self.html_block();
+                }
+                self.html.details += 1;
+                return;
+            }
+            ("details", true) => {
+                self.html.details = self.html.details.saturating_sub(1);
+                if self.html.details == 0 {
+                    self.html.summary = false;
+                    self.need_blank = true;
+                }
+                return;
+            }
+            ("summary", false) if self.html.details == 1 => {
+                self.html.summary = true;
+                self.html_block();
+                let style = Style::default().fg(self.th.dim);
+                self.push_text("▸", style);
+                self.space = true;
+                self.bold += 1;
+                return;
+            }
+            ("summary", true) if self.html.summary => {
+                self.bold = self.bold.saturating_sub(1);
+                self.flush_inline();
+                self.html.summary = false;
+                return;
+            }
+            _ => {}
+        }
+        if self.collapsed() {
+            return;
+        }
+        match (name.as_str(), close) {
+            ("a", false) => self.start(Tag::Link {
+                link_type: LinkType::Inline,
+                dest_url: CowStr::from(attr(attrs, "href").unwrap_or_default()),
+                title: CowStr::from(""),
+                id: CowStr::from(""),
+            }),
+            ("a", true) => {
+                if !self.links.is_empty() {
+                    self.end(TagEnd::Link);
+                }
+            }
+            // An image without alt text is decoration — an avatar, a
+            // spacer — and says nothing in a terminal.
+            ("img", _) => {
+                if let Some(alt) = attr(attrs, "alt").filter(|a| !a.trim().is_empty()) {
+                    let kind = if self.space { Kind::Word } else { Kind::Glue };
+                    self.push_image(alt.trim(), kind);
+                }
+            }
+            ("br", _) => self.push_break(),
+            ("hr", _) => self.event(Event::Rule),
+            ("b" | "strong", false) => self.bold += 1,
+            ("b" | "strong", true) => self.bold = self.bold.saturating_sub(1),
+            ("i" | "em", false) => self.italic += 1,
+            ("i" | "em", true) => self.italic = self.italic.saturating_sub(1),
+            ("s" | "del" | "strike", false) => self.strike += 1,
+            ("s" | "del" | "strike", true) => self.strike = self.strike.saturating_sub(1),
+            ("code" | "kbd" | "tt", false) => self.html.code += 1,
+            ("code" | "kbd" | "tt", true) => self.html.code = self.html.code.saturating_sub(1),
+            (h, false) if heading_level(h).is_some() => {
+                self.html_block();
+                self.heading = heading_level(h);
+            }
+            (h, true) if heading_level(h).is_some() => {
+                if let Some(level) = self.heading {
+                    self.end(TagEnd::Heading(level));
+                }
+            }
+            ("ul" | "ol", false) => {
+                let ordered = name == "ol";
+                self.html.lists.push(ordered);
+                self.start(Tag::List(ordered.then_some(1)));
+            }
+            ("ul" | "ol", true) => {
+                if let Some(ordered) = self.html.lists.pop() {
+                    self.flush_inline();
+                    self.end(TagEnd::List(ordered));
+                }
+            }
+            ("li", false) if !self.html.lists.is_empty() => {
+                self.html.items += 1;
+                self.start(Tag::Item);
+            }
+            ("li", true) if self.html.items > 0 => {
+                self.html.items -= 1;
+                self.end(TagEnd::Item);
+            }
+            ("p" | "div" | "blockquote" | "pre" | "table" | "tr" | "section", _) => {
+                self.html_block()
+            }
+            ("td" | "th", _) => self.space = true,
+            _ => {}
+        }
+    }
+
+    /// A block tag: what came before is a paragraph of its own.
+    fn html_block(&mut self) {
+        if !self.inline.is_empty() {
+            self.flush_inline();
+            self.need_blank = true;
+        }
+    }
+}
+
+/// Where the tag starting at `s[0] == '<'` ends — its `>`, outside quotes.
+fn tag_end(s: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, c) in s.char_indices().skip(1) {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '>') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The value of attribute `name` in a tag's attribute text, decoded.
+fn attr(attrs: &str, name: &str) -> Option<String> {
+    let mut rest = attrs;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '/');
+        if rest.is_empty() {
+            return None;
+        }
+        let key_end = rest
+            .find(|c: char| c.is_ascii_whitespace() || c == '=' || c == '/')
+            .unwrap_or(rest.len());
+        let key = &rest[..key_end];
+        rest = rest[key_end..].trim_start();
+        let mut value = None;
+        if let Some(after) = rest.strip_prefix('=') {
+            let after = after.trim_start();
+            let (v, tail) = match after.chars().next() {
+                Some(q @ ('"' | '\'')) => match after[1..].find(q) {
+                    Some(end) => (&after[1..1 + end], &after[end + 2..]),
+                    None => (&after[1..], ""),
+                },
+                _ => {
+                    let end = after
+                        .find(|c: char| c.is_ascii_whitespace())
+                        .unwrap_or(after.len());
+                    (&after[..end], &after[end..])
+                }
+            };
+            value = Some(v);
+            rest = tail;
+        }
+        if key.eq_ignore_ascii_case(name) {
+            return Some(decode_entities(value.unwrap_or("")));
+        }
+    }
+}
+
+fn heading_level(tag: &str) -> Option<HeadingLevel> {
+    Some(match tag {
+        "h1" => HeadingLevel::H1,
+        "h2" => HeadingLevel::H2,
+        "h3" => HeadingLevel::H3,
+        "h4" => HeadingLevel::H4,
+        "h5" => HeadingLevel::H5,
+        "h6" => HeadingLevel::H6,
+        _ => return None,
+    })
+}
+
+/// The entities GitHub bodies actually use, and numeric ones.
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let semi = rest.find(';').filter(|&i| i <= 10);
+        let decoded = semi.and_then(|i| {
+            let name = &rest[1..i];
+            let ch = match name {
+                "amp" => '&',
+                "lt" => '<',
+                "gt" => '>',
+                "quot" => '"',
+                "apos" => '\'',
+                "nbsp" => ' ',
+                "mdash" => '—',
+                "ndash" => '–',
+                "hellip" => '…',
+                _ => {
+                    let num = name.strip_prefix('#')?;
+                    let code = match num.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => num.parse().ok()?,
+                    };
+                    char::from_u32(code)?
+                }
+            };
+            Some((ch, i))
+        });
+        match decoded {
+            Some((ch, i)) => {
+                out.push(ch);
+                rest = &rest[i + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Is a link's address worth showing beside its text? Not when the text
@@ -1579,6 +1947,68 @@ mod tests {
             plain(&out),
             ["<img src=\"long.png\"", "alt=\"some words here\">"]
         );
+    }
+
+    fn github(text: &str, width: usize) -> Vec<String> {
+        plain(&render(text, width, Breaks::Hard, Style::default(), th()))
+    }
+
+    #[test]
+    fn a_github_body_draws_its_html_as_github_does() {
+        // Linear's linkback: comments vanish, `<details>` stays shut on
+        // its summary, a link is its text.
+        let linear = "<!-- linear-linkback -->\n\n<details>\n<summary><a href=\"https://linear.app/x/issue/R-1\">R-1 Tags get cut off</a></summary>\n<p>\n\nHidden **issue** body.\n\n- also hidden\n\n</p>\n</details>\n<!-- linear-review-link -->\n<p><a href=\"https://linear.app/x/review/1\">Review in Linear</a></p>\n";
+        assert_eq!(
+            github(linear, 60),
+            ["▸ R-1 Tags get cut off", "", "Review in Linear"]
+        );
+        let out = render(linear, 60, Breaks::Hard, Style::default(), th());
+        let link = span_with(&out, "Review");
+        assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(span_with(&out, "R-1")
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+
+        // Vercel's table: a decorative avatar goes, `<relative-time>`
+        // leaves its text, entities decode, addresses stay out.
+        let vercel = "| Project | Updated |\n| :--- | :--- |\n| <a href=\"https://v.com\"><sup><img src=\"a.png\" width=\"16\" alt=\"\" /></sup></a> [app](https://v.com/app) | <relative-time datetime=\"x\">Oct 6 &amp; on</relative-time> |\n";
+        assert_eq!(
+            github(vercel, 60),
+            [
+                "Project │ Updated",
+                "────────┼───────────",
+                "app     │ Oct 6 & on"
+            ]
+        );
+    }
+
+    #[test]
+    fn github_html_breaks_blocks_lists_and_lines() {
+        let body = "<p align=\"center\">\n  <img src=\"x.png\" alt=\"Logo\">\n</p>\n\n<h2>Setup</h2>\n<ul><li>one <b>bold</b></li><li>two</li></ul>\n\ntext<br>more <code>x</code> <!-- gone -->\n";
+        assert_eq!(
+            github(body, 40),
+            [
+                "[Logo]",
+                "",
+                "Setup",
+                "─────",
+                "",
+                "• one bold",
+                "• two",
+                "",
+                "text",
+                "more x"
+            ]
+        );
+        let out = render(body, 40, Breaks::Hard, Style::default(), th());
+        let code = out
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == "x");
+        assert_eq!(code.and_then(|s| s.style.fg), Some(th().special));
+        // A file still shows its HTML as written.
+        assert!(plain(&lines(body, 40)).contains(&"<h2>Setup</h2>".to_string()));
     }
 
     #[test]
