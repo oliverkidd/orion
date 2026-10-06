@@ -1,7 +1,11 @@
 //! The PULL REQUESTS MODAL: the selected project's open pull requests,
 //! listed down the left in the PROJECT OPEN PRS GROUP's order — newest
-//! first, the drafts sunk below the finished ones — and the one under the
-//! cursor read on the right, as the PULL REQUEST PAGE. Two panels, and
+//! first, the drafts sunk below the finished ones — gathered into
+//! sections (yours, the ones waiting on your review, the rest), each row's
+//! author, age, checks, review and labels on a line under its title, and
+//! the one under the cursor read on the right, as the PULL REQUEST PAGE.
+//! `⌘F` and `key:value` tokens in the filter narrow by facet
+//! (`list_filter`). Two panels, and
 //! `Tab` / `⇧Tab` hand the keys from one to the other as they do in the
 //! DIFF VIEWER ([`PrFocus`]): the list's keys walk the pull requests and
 //! type into its filter, the page's walk its tabs (`←`/`→`) and their rows
@@ -67,17 +71,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{
-    clamp_selection, window_start, App, HitTarget, Overlay, PendingPrDetail, PromptKind,
-};
+use crate::app::{clamp_selection, App, HitTarget, Overlay, PendingPrDetail, PromptKind};
+use crate::list_filter::{FacetKey, FilterPick, PickFacet, PickValue};
 use crate::pr_preview::{Nav, PrTab};
-use crate::pull_request::OpenPr;
+use crate::pull_request::{Checks, OpenPr, PrSection, Review};
 use crate::quick_prompt::{ModalUnder, QuickLaunch};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, panel_block, render_row, row_rect,
-    search_line, truncate, visible_positions, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, layout_sections, list_header,
+    panel_block, render_row_lines, row_rect, search_line_lit, sections, truncate,
+    visible_positions, ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 
 /// A list younger than this is what opening the modal shows, with no
@@ -175,13 +179,21 @@ pub struct PullRequestsView {
     /// it; `Rect::default()` — no point inside — while there is none.
     pub browser_area: Rect,
     /// The list's live filter: the rows narrow to the fuzzy matches of
-    /// `#42 title`, best first ([`visible_rows`]), as every letter lands.
-    /// Empty shows every row in the list's order.
+    /// `#42 title`, best first ([`visible_rows`]), as every letter lands,
+    /// and to the `key:value` tokens among the words ([`FACETS`]). Empty
+    /// shows every row in the list's order, section by section.
     pub query: TextInput,
-    /// Where the cursor sat among the visible rows as of the last draw:
-    /// the follow-window's anchor, and what a click's row math counts
-    /// from.
-    pub cursor_row: usize,
+    /// The first list entry drawn — a row or a section header — as of the
+    /// last draw: where the next draw's window starts from, so it moves
+    /// only as far as the cursor makes it (`ui::stacked_rows`).
+    pub list_start: usize,
+    /// Each drawn row's rect, by index into the project's list, as of the
+    /// last draw: what a click hit-tests, rows being two lines tall and
+    /// headers between them.
+    pub row_rects: Vec<(usize, Rect)>,
+    /// The FILTER PICK (`⌘F`) in the page's place, while it is up: every
+    /// key is its own (`list_filter`).
+    pub filter_pick: Option<FilterPick>,
     /// The last click on a row — when, and which pull request — so a
     /// second click on the same row inside the DOUBLE-CLICK window opens it
     /// in the browser (`event_loop::is_double_click`).
@@ -215,18 +227,14 @@ impl PullRequestsView {
             body_area: Rect::default(),
             browser_area: Rect::default(),
             query: TextInput::new(),
-            cursor_row: 0,
+            list_start: 0,
+            row_rects: Vec::new(),
+            filter_pick: None,
             last_row_click: None,
             focus: PrFocus::List,
             form: None,
             pick: None,
         }
-    }
-
-    /// First visible row of the list's stateless follow-window, over the
-    /// rows the filter leaves.
-    pub fn window_start(&self, height: usize) -> usize {
-        window_start(self.cursor_row, height)
     }
 
     pub fn max_scroll(&self) -> u16 {
@@ -277,6 +285,7 @@ fn show(app: &mut App, mut view: PullRequestsView) {
     let start = app
         .selected_worktree_pr()
         .and_then(|pr| list.iter().position(|row| row.url == pr.url))
+        .or_else(|| visible_rows("", list).first().map(|(i, _)| *i))
         .unwrap_or(0);
     view.selected = clamp_selection(start as i64, list.len());
     view.selected_url = list.get(view.selected).map(|pr| pr.url.clone());
@@ -363,19 +372,67 @@ fn rows<'a>(app: &'a App, project: &ProjectId) -> &'a [OpenPr] {
         .map_or(&[], |open| open.list.as_slice())
 }
 
-/// Is there a filter to apply — text in the row beyond whitespace?
+/// Is there a filter to apply — words beyond whitespace, or a token?
 fn has_query(view: &PullRequestsView) -> bool {
-    view.query.split_whitespace().next().is_some()
+    crate::list_filter::parse(&view.query, FACETS).is_active()
+}
+
+/// The keys the filter line takes besides its words (`list_filter`):
+/// `author:sam label:bug review:approved checks:failing is:draft`.
+pub(crate) const FACETS: &[FacetKey] = &[
+    FacetKey::new("author", "Author"),
+    FacetKey::new("label", "Label"),
+    FacetKey::new("review", "Review"),
+    FacetKey::new("checks", "Checks"),
+    FacetKey::new("is", "State"),
+];
+
+/// The filter's word for how a pull request's checks stand.
+fn checks_word(checks: Checks) -> &'static str {
+    match checks {
+        Checks::Passing => "passing",
+        Checks::Failing => "failing",
+        Checks::Pending => "pending",
+        Checks::Absent => "",
+    }
+}
+
+/// A row's values for one of the [`FACETS`].
+fn facet_values(pr: &OpenPr, key: &str) -> Vec<String> {
+    match key {
+        "author" => vec![pr.meta.author.clone()],
+        "label" => pr.meta.labels.iter().map(|l| l.name.clone()).collect(),
+        "review" => vec![pr.meta.review.word().to_string()],
+        "checks" => vec![checks_word(pr.checks()).to_string()],
+        "is" => {
+            let mut is = vec![if pr.is_draft { "draft" } else { "ready" }.to_string()];
+            if pr.health.conflicts {
+                is.push("conflicts".to_string());
+            }
+            is
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The rows the filter leaves, top to bottom: indices into `list`, each
-/// with the matched char positions of its `#42 title` (lit when drawn);
-/// every row in list order with nothing typed. Worked out afresh on every
-/// call rather than kept — a project's open pull requests are a handful
-/// — so it can never go stale against the list.
+/// with the matched char positions of its `#42 title` (lit when drawn).
+/// The words rank the rows best first and the tokens narrow them; then
+/// they gather by [`PrSection`] — yours, then the ones waiting on your
+/// review, then the rest — keeping that order inside each. With nothing
+/// typed, every row in list order, section by section. Worked out afresh
+/// on every call rather than kept — a project's open pull requests are a
+/// handful — so it can never go stale against the list.
 fn visible_rows(query: &str, list: &[OpenPr]) -> Vec<(usize, Vec<usize>)> {
-    let labels: Vec<String> = list.iter().map(|pr| pr.label()).collect();
-    crate::fuzzy::rank(query, labels.iter().map(String::as_str))
+    let parsed = crate::list_filter::parse(query, FACETS);
+    let mut rows = crate::list_filter::narrow(
+        &parsed,
+        list.len(),
+        |i| list[i].label(),
+        |i, key| facet_values(&list[i], key),
+    );
+    rows.sort_by_key(|(i, _)| list[*i].section());
+    rows
 }
 
 /// The row under the cursor, as an index into `list`: `selected` while
@@ -390,12 +447,7 @@ fn cursor_index(view: &PullRequestsView, list: &[OpenPr]) -> Option<usize> {
     if !has_query(view) {
         return Some(clamp_selection(view.selected as i64, list.len()));
     }
-    let visible = visible_rows(&view.query, list);
-    if visible.iter().any(|(i, _)| *i == view.selected) {
-        Some(view.selected)
-    } else {
-        visible.first().map(|(i, _)| *i)
-    }
+    crate::list_filter::cursor_in(&visible_rows(&view.query, list), view.selected)
 }
 
 /// A list that landed within [`FRESH`]: the modal opens on it as it is.
@@ -789,6 +841,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         crate::pr_actions::handle_key(app, key);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::PullRequests(v)) if v.filter_pick.is_some()) {
+        filter_pick_key(app, &key);
+        return;
+    }
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
@@ -851,6 +907,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // stack the two views on each other, so it does nothing.
         _ if keys::LINEAR.matches(&key) && view.pick.is_some() => {}
         _ if keys::LINEAR.matches(&key) => crate::linear::open_attach(app),
+        // The FILTER PICK in the page's place, the keys its own.
+        _ if keys::FILTER.matches(&key) => {
+            view.focus = PrFocus::List;
+            view.filter_pick = Some(FilterPick::default());
+        }
         // Everything else feeds the always-live fuzzy filter, which edits
         // like a terminal line (see text_input) — and typing hands the
         // list the keys.
@@ -862,6 +923,71 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
     }
     app.dirty = true;
+}
+
+/// A key while the FILTER PICK is up: its cursor moves, `space` adds or
+/// takes out the value's token in the filter line — the rows narrowing
+/// behind it — and Enter or Esc puts it away.
+fn filter_pick_key(app: &mut App, key: &KeyEvent) {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return;
+    };
+    let facets = pick_facets(rows(app, &view.project), app.theme);
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
+    let changed =
+        crate::list_filter::apply_key(&mut view.filter_pick, &mut view.query, FACETS, &facets, key);
+    if changed {
+        query_changed(app);
+    }
+    app.dirty = true;
+}
+
+/// The FILTER PICK's facets over the project's rows: who opened them, their
+/// labels (in their GitHub colours), and the fixed words for review,
+/// checks and state — each value with how many rows carry it.
+fn pick_facets(list: &[OpenPr], th: Theme) -> Vec<PickFacet> {
+    use crate::list_filter::{by_count, fixed_values, plain_values, tally};
+    let count = |key: &str| tally(list.iter(), |pr| facet_values(pr, key));
+    let label_colour = |name: &str| {
+        list.iter()
+            .flat_map(|pr| &pr.meta.labels)
+            .find(|l| l.name.eq_ignore_ascii_case(name))
+            .and_then(|l| crate::theme::hex(&l.color))
+            .unwrap_or(th.muted)
+    };
+    FACETS
+        .iter()
+        .map(|facet| {
+            let values = match facet.key {
+                "label" => by_count(count("label"))
+                    .into_iter()
+                    .map(|(value, count)| PickValue {
+                        mark: Some(("●".to_string(), label_colour(&value))),
+                        value,
+                        count,
+                    })
+                    .collect(),
+                "review" => fixed_values(
+                    &["approved", "changes", "required"],
+                    &count("review"),
+                    |_| None,
+                ),
+                "checks" => {
+                    fixed_values(&["passing", "failing", "pending"], &count("checks"), |_| {
+                        None
+                    })
+                }
+                "is" => fixed_values(&["ready", "draft", "conflicts"], &count("is"), |_| None),
+                key => plain_values(by_count(count(key))),
+            };
+            PickFacet {
+                key: *facet,
+                values,
+            }
+        })
+        .collect()
 }
 
 /// Mouse in the PULL REQUESTS MODAL: the wheel moves the cursor over the
@@ -925,19 +1051,19 @@ pub(crate) fn handle_mouse(
         // A click on the page hands it the keys.
         MouseEventKind::Down(MouseButton::Left) if over_body => view.focus = PrFocus::Page,
         MouseEventKind::Down(MouseButton::Left) => {
-            let list = view.list_area;
-            let first = view.window_start(list.height as usize);
-            // The row math counts the filter's matches, not the whole list.
-            let prs: &[OpenPr] = app
-                .open_prs
-                .get(&view.project)
-                .map_or(&[], |open| open.list.as_slice());
-            let visible = visible_rows(&view.query, prs);
-            if let Some(row) = crate::list_hit::row_at(list, first, visible.len(), mouse_pos) {
+            // Rows are two lines tall with headers between them: the rects
+            // the last draw laid them out in say which one is under the
+            // pointer.
+            let hit = crate::ui::row_hit(&view.row_rects, mouse_pos);
+            let number = hit.and_then(|index| {
+                app.open_prs
+                    .get(&view.project)
+                    .and_then(|open| open.list.get(index))
+                    .map(|pr| pr.number)
+            });
+            if let (Some(index), Some(number)) = (hit, number) {
                 view.focus = PrFocus::List;
-                let index = visible[row].0;
-                let double =
-                    crate::event_loop::is_double_click(&mut view.last_row_click, prs[index].number);
+                let double = crate::event_loop::is_double_click(&mut view.last_row_click, number);
                 select(app, index as i64);
                 if double {
                     open_in_browser(app, out);
@@ -995,10 +1121,12 @@ pub(crate) mod keys {
     pub const ATTACH: Key = Key::new(&["enter"], "attach to this PR");
     pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
     pub const ROWS: Key = crate::pr_preview::keys::MODAL_ROWS;
+    /// The FILTER PICK — the LINEAR VIEW's too.
+    pub const FILTER: Key = crate::list_filter::keys::FILTER;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, CLOSE, READY, LINEAR, AUTOFIX, ATTACH, TABS, ROWS,
+        MERGE, CLOSE, READY, LINEAR, AUTOFIX, ATTACH, TABS, ROWS, FILTER,
     ];
 }
 
@@ -1012,6 +1140,9 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     if let Some(form) = &view.form {
         return crate::pr_actions::hints(form);
+    }
+    if view.filter_pick.is_some() {
+        return crate::list_filter::hints();
     }
     let tab = view.tabs.tab;
     let diff = match tab {
@@ -1049,7 +1180,12 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     } else {
         keys::PROMPT.hint()
     };
-    let mut hints = vec![enter.kept(), keys::PANEL.hint().kept(), keys::TABS.hint()];
+    let mut hints = vec![
+        enter.kept(),
+        keys::PANEL.hint().kept(),
+        keys::FILTER.hint(),
+        keys::TABS.hint(),
+    ];
     if tab.lists() {
         hints.push(keys::ROWS.hint());
     }
@@ -1079,6 +1215,78 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
 }
 
 // ---- drawing ----
+
+/// A row's first line: its state glyph — `●` open, `○` a draft, red for
+/// one in trouble — then [`row_spans`].
+fn title_spans(pr: &OpenPr, positions: &[usize], budget: usize, th: Theme) -> Vec<Span<'static>> {
+    let glyph = if pr.is_draft { "○ " } else { "● " };
+    let color = match (pr.trouble(), pr.is_draft) {
+        (Some(_), _) => th.err,
+        (None, true) => th.faint,
+        (None, false) => th.ok,
+    };
+    let mut spans = vec![Span::styled(glyph, Style::default().fg(color))];
+    spans.extend(row_spans(pr, positions, budget.saturating_sub(2), th));
+    spans
+}
+
+/// A row's second line, dim, its parts joined by ` · `: who opened it
+/// (left out under `Yours`), how long ago, the checks as `passed/total`
+/// (`✓` all passed, `◐` some still running, `✗` some failed), the review
+/// decision, the comment count, and its labels in their GitHub colours.
+/// What does not fit drops from the right — the labels first. Empty for a
+/// row with nothing to say (the slim query's, an old cache's).
+fn meta_spans(pr: &OpenPr, budget: usize, now: i64, th: Theme) -> Vec<Span<'static>> {
+    const MS_PER_SEC: i64 = 1000;
+    let meta = &pr.meta;
+    let dim = Style::default().fg(th.dim);
+    let mut parts: Vec<Vec<Span<'static>>> = Vec::new();
+    if pr.section() != PrSection::Yours && !meta.author.is_empty() {
+        parts.push(vec![Span::styled(meta.author.clone(), dim)]);
+    }
+    if let Some(at) = crate::pull_request::rfc3339_secs(&meta.created_at) {
+        let ago = crate::hosts::ago_label((now - at).max(0) * MS_PER_SEC);
+        if !ago.is_empty() {
+            parts.push(vec![Span::styled(ago, dim)]);
+        }
+    }
+    if let Some(checks) = meta.checks {
+        let (glyph, color) = match pr.checks() {
+            Checks::Failing => ("✗", th.err),
+            Checks::Pending => ("◐", th.warn),
+            _ => ("✓", th.ok),
+        };
+        parts.push(vec![
+            Span::styled(format!("{glyph} "), Style::default().fg(color)),
+            Span::styled(format!("{}/{}", checks.passed, checks.total()), dim),
+        ]);
+    }
+    let review = match meta.review {
+        Review::Approved => Some(("✓ approved", th.ok)),
+        Review::Changes => Some(("✗ changes", th.err)),
+        Review::Required => Some(("○ review", th.muted)),
+        Review::None => None,
+    };
+    if let Some((word, color)) = review {
+        parts.push(vec![Span::styled(word, Style::default().fg(color))]);
+    }
+    if meta.comments > 0 {
+        let noun = if meta.comments == 1 {
+            "comment"
+        } else {
+            "comments"
+        };
+        parts.push(vec![Span::styled(format!("{} {noun}", meta.comments), dim)]);
+    }
+    for label in &meta.labels {
+        let color = crate::theme::hex(&label.color).unwrap_or(th.muted);
+        parts.push(vec![Span::styled(
+            label.name.clone(),
+            Style::default().fg(color),
+        )]);
+    }
+    crate::ui::fit_parts(parts, budget, th)
+}
 
 /// One list row's spans: `#42` dim, the title in the group row's color
 /// (`pr_row::look` — dimmed for a draft, red for a pull request GitHub
@@ -1132,6 +1340,38 @@ fn row_spans(pr: &OpenPr, positions: &[usize], budget: usize, th: Theme) -> Vec<
     spans
 }
 
+/// Whether [`meta_spans`] has anything to say about a row — it takes a
+/// second line — without building it: rows off screen never are.
+fn has_meta(pr: &OpenPr) -> bool {
+    let meta = &pr.meta;
+    (pr.section() != PrSection::Yours && !meta.author.is_empty())
+        || !meta.created_at.is_empty()
+        || meta.checks.is_some()
+        || meta.review != Review::None
+        || meta.comments > 0
+        || !meta.labels.is_empty()
+}
+
+/// What a draw records for the mouse and the next draw — the modal, the
+/// list's rows and where each landed — handing back the view for what
+/// the reading side records on top.
+fn record_list(
+    app: &mut App,
+    area: Rect,
+    list_area: Rect,
+    list_start: usize,
+    row_rects: Vec<(usize, Rect)>,
+) -> Option<&mut PullRequestsView> {
+    let Some(Overlay::PullRequests(v)) = &mut app.overlay else {
+        return None;
+    };
+    v.area = area;
+    v.list_area = list_area;
+    v.list_start = list_start;
+    v.row_rects = row_rects;
+    Some(v)
+}
+
 /// The PULL REQUESTS MODAL: the list down the left, the reading pane on
 /// the right. `backdrop` draws it as the layer under a QUICK PROMPT box
 /// opened from it (`QuickLaunch::under`): dim frames and an unfocused
@@ -1161,6 +1401,7 @@ pub(crate) fn draw(
     // answer that worked, however old — and no second ask is running yet.
     let stale = app.open_prs_failed.contains(&view.project) && !inflight;
     // The rows the filter leaves, and where the cursor sits among them.
+    let parsed = crate::list_filter::parse(&view.query, FACETS);
     let visible = visible_rows(&view.query, &rows);
     let cursor = cursor_index(view, &rows);
     let cursor_row = cursor
@@ -1169,7 +1410,7 @@ pub(crate) fn draw(
 
     // ---- left: the list ----
     // The count reads `matches/all` while a filter is on.
-    let count = if has_query(view) {
+    let count = if parsed.is_active() {
         format!("{}/{}", visible.len(), rows.len())
     } else {
         rows.len().to_string()
@@ -1188,14 +1429,20 @@ pub(crate) fn draw(
     );
     // The panel with the keys wears the accent — neither, while a box
     // over the modal or a form in the page's place has them.
-    let list_focused = !backdrop && view.form.is_none() && view.focus == PrFocus::List;
-    let page_focused = !backdrop && view.form.is_none() && view.focus == PrFocus::Page;
+    let side_up = view.form.is_some() || view.filter_pick.is_some();
+    let list_focused = !backdrop && !side_up && view.focus == PrFocus::List;
+    let page_focused = !backdrop && !side_up && view.focus == PrFocus::Page;
     let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
-    // The always-live filter on the list's first line, the rows under it.
+    // The always-live filter on the list's first line, the rows under it;
+    // its `key:value` tokens lit.
     if let Some(query_area) = row_rect(list_inner, 0) {
-        let line = search_line(&view.query, "type to filter…", query_area, th);
+        let placeholder = format!(
+            "type to filter… {} by label, author, checks",
+            keys::FILTER.label()
+        );
+        let line = search_line_lit(&view.query, &placeholder, query_area, th, &parsed.spans);
         f.render_widget(Paragraph::new(line), query_area);
     }
     let mut rows_area = crate::ui::below_first_row(list_inner);
@@ -1224,20 +1471,55 @@ pub(crate) fn draw(
     } else if visible.is_empty() {
         empty_list_row(f, rows_area, "no pull requests match", th);
     }
-    let start = window_start(cursor_row, rows_area.height as usize);
+    // Sections — yours, waiting on your review, the rest — once there is
+    // more than one; a row two lines tall when it has a meta line.
+    let keys: Vec<PrSection> = visible.iter().map(|(i, _)| rows[*i].section()).collect();
+    let entries = sections(&keys, false);
+    let row_h = |v: usize| if has_meta(&rows[visible[v].0]) { 2 } else { 1 };
+    let (list_start, drawn) =
+        layout_sections(&entries, row_h, cursor_row, view.list_start, rows_area);
     let budget = (rows_area.width as usize).saturating_sub(2);
-    for (row, (index, positions)) in visible.iter().enumerate().skip(start) {
-        let Some(row_area) = row_rect(rows_area, row - start) else {
-            break;
-        };
-        render_row(
-            f,
-            row_area,
-            row_spans(&rows[*index], positions, budget, th),
-            Some(*index) == cursor,
-            list_focused,
-            th,
-        );
+    let now = orion_core::clock::now_secs() as i64;
+    let mut row_rects = Vec::with_capacity(drawn.len());
+    for (entry, rect) in drawn {
+        match entry {
+            ListEntry::Header { first, count } => {
+                let line = Line::from(list_header(keys[first].name(), count, None, th));
+                f.render_widget(Paragraph::new(line), rect);
+            }
+            ListEntry::Row(v) => {
+                let (index, positions) = &visible[v];
+                let pr = &rows[*index];
+                let mut lines = vec![title_spans(pr, positions, budget, th)];
+                if rect.height > 1 {
+                    lines.push(meta_spans(pr, budget, now, th));
+                }
+                render_row_lines(f, rect, lines, Some(*index) == cursor, list_focused, th);
+                row_rects.push((*index, rect));
+            }
+        }
+    }
+
+    // ---- right: the FILTER PICK in the page's place, while it is up ----
+    if let Some(pick) = &view.filter_pick {
+        let block = panel_block("Filter", !backdrop, th);
+        let inner = block.inner(body_a);
+        f.render_widget(block, body_a);
+        let facets = pick_facets(&rows, th);
+        let mut pick = *pick;
+        pick.clamp(&facets);
+        crate::list_filter::draw_pick(f, inner, &facets, &parsed, &pick, th);
+        if !backdrop {
+            crate::hints::draw_on_border(f, area, &hints(view), 0, th);
+        }
+        if let Some(v) = record_list(app, area, rows_area, list_start, row_rects) {
+            v.body_area = Rect::default();
+            v.browser_area = Rect::default();
+            v.tabs.tab_hits.clear();
+            v.tabs.row_hits.clear();
+            v.filter_pick = Some(pick);
+        }
+        return;
     }
 
     // ---- right: a form in the page's place, while one is up ----
@@ -1246,10 +1528,7 @@ pub(crate) fn draw(
         if !backdrop {
             crate::hints::draw_on_border(f, area, &hints(view), drawn.foot_w, th);
         }
-        if let Some(Overlay::PullRequests(v)) = &mut app.overlay {
-            v.area = area;
-            v.list_area = rows_area;
-            v.cursor_row = cursor_row;
+        if let Some(v) = record_list(app, area, rows_area, list_start, row_rects) {
             v.body_area = Rect::default();
             v.browser_area = Rect::default();
             if let Some(form) = &mut v.form {
@@ -1325,10 +1604,7 @@ pub(crate) fn draw(
 
     // Write-back (draw works on a clone): the rects the mouse hit-tests,
     // the pane's size for paging, and the clamped cursor and scroll.
-    if let Some(Overlay::PullRequests(v)) = &mut app.overlay {
-        v.area = area;
-        v.list_area = rows_area;
-        v.cursor_row = cursor_row;
+    if let Some(v) = record_list(app, area, rows_area, list_start, row_rects) {
         v.body_area = body_inner;
         v.browser_area = browser_area;
         v.view_height = body_h;
@@ -1365,6 +1641,7 @@ mod tests {
             head: format!("branch-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }
     }
 
@@ -2624,5 +2901,251 @@ mod tests {
         let shot = screen(&mut app, 120, 40);
         assert!(!shot.contains("open in browser"), "{shot}");
         assert_eq!(view(&app).browser_area, Rect::default());
+    }
+
+    /// A row with the meta the full list query brings: opened by `author`
+    /// an hour ago, its checks and review as given, mine or not.
+    fn rich(number: u64, title: &str, author: &str, mine: bool) -> OpenPr {
+        use crate::pull_request::{CheckTally, PrLabel, PrMeta};
+        let hour_ago = orion_core::clock::now_secs() - 3600;
+        OpenPr {
+            mine,
+            meta: PrMeta {
+                author: author.into(),
+                created_at: orion_core::crashlog::format_timestamp(hour_ago),
+                review_requested: false,
+                review: Review::Approved,
+                comments: 5,
+                labels: vec![PrLabel {
+                    name: "analytics".into(),
+                    color: "1d76db".into(),
+                }],
+                checks: Some(CheckTally {
+                    passed: 27,
+                    failed: 0,
+                    pending: 2,
+                }),
+            },
+            ..pr(number, title, false)
+        }
+    }
+
+    /// The list gathers into sections — yours, the ones waiting on your
+    /// review, everyone else's — each under a header with its count, and
+    /// each row reads its meta under its title: author (not on your own),
+    /// age, checks, review, comments, labels. ↓ walks the rows in that
+    /// order and never lands on a header.
+    #[test]
+    fn rows_gather_into_sections_with_a_meta_line_under_each() {
+        let mut asked = rich(41, "Speed up the grid", "jacobrvl", false);
+        asked.meta.review_requested = true;
+        let (mut app, _) = app_with(
+            vec![
+                rich(43, "Others' work", "sam", false),
+                asked,
+                rich(42, "My fix", "me", true),
+            ],
+            true,
+        );
+        open(&mut app);
+        let shot = screen(&mut app, 240, 40);
+        let at = |needle: &str| {
+            shot.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from\n{shot}"))
+        };
+        assert!(at("YOURS 1") < at("● #42 My fix"), "{shot}");
+        assert!(at("● #42 My fix") < at("REVIEW REQUESTED 1"), "{shot}");
+        assert!(
+            at("REVIEW REQUESTED 1") < at("● #41 Speed up the grid"),
+            "{shot}"
+        );
+        assert!(at("● #41 Speed up the grid") < at("OTHERS 1"), "{shot}");
+        assert!(at("OTHERS 1") < at("● #43 Others' work"), "{shot}");
+        assert!(
+            shot.contains("1h ago · ◐ 27/29 · ✓ approved · 5 comments · analytics"),
+            "your own row leaves your name off\n{shot}"
+        );
+        assert!(shot.contains("sam · 1h ago"), "{shot}");
+
+        // The cursor opens on the first row shown, and ↓ walks the
+        // sections' order.
+        assert_eq!(selected_pr(&app).unwrap().number, 42);
+        handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
+        assert_eq!(selected_pr(&app).unwrap().number, 41);
+        handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
+        assert_eq!(selected_pr(&app).unwrap().number, 43);
+    }
+
+    /// A list that is all one section shows no header at all: there is
+    /// nothing to tell apart.
+    #[test]
+    fn one_section_alone_has_no_header() {
+        let (mut app, _) = app_with(
+            vec![rich(43, "A", "sam", false), rich(44, "B", "kim", false)],
+            true,
+        );
+        open(&mut app);
+        let shot = screen(&mut app, 160, 40);
+        assert!(!shot.contains("OTHERS"), "{shot}");
+        assert!(shot.contains("#43 A"), "{shot}");
+    }
+
+    /// `key:value` tokens in the filter narrow by a facet — label, author,
+    /// checks, review, state — beside the fuzzy words, and the count says
+    /// `matches/all`.
+    #[test]
+    fn tokens_in_the_filter_narrow_by_facet() {
+        let mut failing = rich(40, "Bump deps", "dependabot", false);
+        failing.health.checks = Checks::Failing;
+        failing.meta.checks = Some(crate::pull_request::CheckTally {
+            passed: 27,
+            failed: 2,
+            pending: 0,
+        });
+        failing.meta.labels.clear();
+        let mut draft = rich(39, "Spike", "sam", false);
+        draft.is_draft = true;
+        let list = vec![rich(42, "Fix login", "sam", false), failing, draft];
+        let shown = |query: &str| -> Vec<u64> {
+            visible_rows(query, &list)
+                .iter()
+                .map(|(i, _)| list[*i].number)
+                .collect()
+        };
+        assert_eq!(shown("checks:failing"), vec![40]);
+        assert_eq!(shown("label:analytics"), vec![42, 39]);
+        assert_eq!(shown("-label:analytics"), vec![40]);
+        assert_eq!(shown("author:sam is:draft"), vec![39]);
+        assert_eq!(shown("author:sam fix"), vec![42]);
+        assert_eq!(shown("review:approved"), vec![42, 40, 39]);
+        assert_eq!(
+            shown("label:"),
+            vec![42, 40, 39],
+            "a key mid-typing narrows nothing"
+        );
+
+        let (mut app, _) = app_with(list, true);
+        open(&mut app);
+        type_str(&mut app, "checks:failing");
+        assert_eq!(selected_pr(&app).unwrap().number, 40);
+        let shot = screen(&mut app, 160, 40);
+        assert!(shot.contains("Pull requests — demo (1/3)"), "{shot}");
+    }
+
+    /// `⌘F` puts the FILTER PICK in the page's place: ←/→ walk the facets,
+    /// ↑/↓ their values, `space` writes the value's token into the filter
+    /// line (the rows narrowing behind it) and takes it out again, and
+    /// Enter puts the picker away with the filter kept.
+    #[test]
+    fn the_filter_pick_writes_tokens_into_the_filter() {
+        let mut failing = rich(40, "Bump deps", "dependabot", false);
+        failing.health.checks = Checks::Failing;
+        failing.meta.checks = Some(crate::pull_request::CheckTally {
+            passed: 27,
+            failed: 2,
+            pending: 0,
+        });
+        let (mut app, _) = app_with(vec![rich(42, "Fix login", "sam", false), failing], true);
+        open(&mut app);
+        let mut out = Vec::new();
+        handle_key(&mut app, cmd('f'), &mut out);
+        assert!(view(&app).filter_pick.is_some());
+        let shot = screen(&mut app, 160, 40);
+        assert!(shot.contains("Filter"), "{shot}");
+        assert!(shot.contains("dependabot"), "{shot}");
+        crate::hints::assert_hints_from(&hints(view(&app)), crate::list_filter::keys::ALL);
+
+        // Author → Label → Review → Checks; `failing` is its second value.
+        for _ in 0..3 {
+            handle_key(&mut app, key(KeyCode::Right), &mut out);
+        }
+        handle_key(&mut app, key(KeyCode::Down), &mut out);
+        handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+        assert_eq!(view(&app).query.as_str(), "checks:\"failing\"");
+        assert_eq!(selected_pr(&app).unwrap().number, 40);
+        let shot = screen(&mut app, 160, 40);
+        assert!(shot.contains("✓ failing"), "the value is ticked\n{shot}");
+
+        handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+        assert_eq!(view(&app).query.as_str(), "", "space again takes it out");
+        handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+        handle_key(&mut app, key(KeyCode::Enter), &mut out);
+        assert!(view(&app).filter_pick.is_none());
+        assert_eq!(
+            view(&app).query.as_str(),
+            "checks:\"failing\"",
+            "the filter stays"
+        );
+        assert!(
+            matches!(app.overlay, Some(Overlay::PullRequests(_))),
+            "Enter launched nothing"
+        );
+    }
+
+    /// A click anywhere on a two-line row — its meta line too — selects
+    /// it; a click on a section header selects nothing.
+    #[test]
+    fn a_click_on_a_rows_second_line_selects_it() {
+        let (mut app, _) = app_with(
+            vec![
+                rich(43, "Others' work", "sam", false),
+                rich(42, "My fix", "me", true),
+            ],
+            true,
+        );
+        open(&mut app);
+        screen(&mut app, 160, 40);
+        let list = view(&app).list_area;
+        let click = |app: &mut App, y: u16| {
+            let at = Position::new(list.x + 2, y);
+            let ev = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: at.x,
+                row: at.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse(app, ev, at, &mut Vec::new());
+        };
+        // YOURS, #42 (2 lines), OTHERS, #43 (2 lines).
+        assert_eq!(selected_pr(&app).unwrap().number, 42);
+        click(&mut app, list.y + 5);
+        assert_eq!(selected_pr(&app).unwrap().number, 43);
+        click(&mut app, list.y);
+        assert_eq!(selected_pr(&app).unwrap().number, 43, "a header is no row");
+        click(&mut app, list.y + 2);
+        assert_eq!(selected_pr(&app).unwrap().number, 42);
+    }
+
+    /// However narrow the list, no row's line runs past the pane: the meta
+    /// drops its parts from the right instead.
+    #[test]
+    fn no_row_runs_past_a_narrow_list() {
+        let (mut app, _) = app_with(
+            vec![
+                rich(
+                    42,
+                    "A rather long title for a pull request",
+                    "someone-long",
+                    false,
+                ),
+                rich(41, "Mine", "me", true),
+            ],
+            true,
+        );
+        open(&mut app);
+        for w in [60u16, 80, 100, 160] {
+            screen(&mut app, w, 30);
+            let v = view(&app);
+            let budget = (v.list_area.width as usize).saturating_sub(2);
+            let rows = rows(&app, &v.project).to_vec();
+            for pr in &rows {
+                let meta = meta_spans(pr, budget, orion_core::clock::now_secs() as i64, app.theme);
+                let w_meta: usize = meta.iter().map(|s| s.content.chars().count()).sum();
+                assert!(w_meta <= budget, "meta {w_meta} > {budget} at {w}");
+                let title = title_spans(pr, &[], budget, app.theme);
+                let w_title: usize = title.iter().map(|s| s.content.chars().count()).sum();
+                assert!(w_title <= budget, "title {w_title} > {budget} at {w}");
+            }
+        }
     }
 }

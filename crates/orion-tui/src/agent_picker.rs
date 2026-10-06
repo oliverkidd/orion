@@ -311,6 +311,7 @@ mod tests {
             head: PR_HEAD.into(),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }
     }
 

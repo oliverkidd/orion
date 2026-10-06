@@ -2422,6 +2422,7 @@ mod tests {
                     head: "main".into(),
                     mine: false,
                     head_sha: String::new(),
+                    meta: Default::default(),
                 }],
                 at: std::time::Instant::now(),
                 due: std::time::Instant::now(),

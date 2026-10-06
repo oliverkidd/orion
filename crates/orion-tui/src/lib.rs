@@ -38,6 +38,7 @@ pub mod keys;
 pub mod launcher;
 pub mod linear;
 pub mod links;
+pub mod list_filter;
 pub(crate) mod list_hit;
 pub mod markdown;
 pub mod markdown_view;

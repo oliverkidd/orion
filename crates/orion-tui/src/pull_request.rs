@@ -185,8 +185,9 @@ pub(crate) async fn gh(
 
 /// [`gh`] with the failure kept: `Err` carries what `gh` printed to stderr
 /// on a bad exit, and nothing at all when it could not be run or timed
-/// out. Only [`lookup`] reads it — `gh pr view` says "no pull request" and
-/// "no network" with the same exit code and only the message apart.
+/// out. [`lookup`] reads it — `gh pr view` says "no pull request" and
+/// "no network" with the same exit code and only the message apart — and
+/// [`list`], to tell a query GitHub refused from one that never reached it.
 async fn run_gh(
     dir: Option<&Path>,
     args: &[&str],
@@ -528,18 +529,132 @@ fn check_state(word: &str) -> CheckState {
 pub const LIST_LIMIT: usize = 100;
 
 /// The one GraphQL query [`list`] runs — `gh pr list`'s own fields, in its
-/// own newest-first order, save the checks. `gh pr list --json
+/// own newest-first order, save the checks, and what the PULL REQUESTS
+/// MODAL's rows say under their titles ([`PrMeta`]). `gh pr list --json
 /// statusCheckRollup` asks for every check context on every pull
 /// request's head commit, and on a busy repo (80 open pull requests, 30
 /// to 60 checks each) GitHub gives up on that with a 504 every time, so
 /// the list never refreshed again (#106). All the row needs is one word
-/// per pull request, and GitHub computes it: the rollup's `state`.
+/// per pull request, and GitHub computes it: the rollup's `state` — and
+/// the `28/29` beside it is GitHub's own tally too (`*CountsByState`),
+/// one number per state, never a context listed. `viewer` names the
+/// signed-in user, whose review requests the modal sorts to the top.
 const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!) { \
+    viewer { login } \
+    repository(owner: $owner, name: $repo) { \
+    pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
+    nodes { number url title isDraft headRefName isCrossRepository \
+    headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
+    createdAt reviewDecision author { login } comments { totalCount } \
+    labels(first: 10) { nodes { name color } } \
+    reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } \
+    commits(last: 1) { nodes { commit { statusCheckRollup { state \
+    contexts(first: 1) { checkRunCountsByState { state count } \
+    statusContextCountsByState { state count } } } } } } } } } }";
+
+/// [`LIST_QUERY`] as it was before the rows grew their meta line: the
+/// fields the panels need and nothing else. [`list`] falls back on it when
+/// the full query fails, so a GitHub that balks at the extra fields costs
+/// the modal its meta line, never the list its refresh.
+const LIST_QUERY_SLIM: &str = "query($owner: String!, $repo: String!, $limit: Int!) { \
     repository(owner: $owner, name: $repo) { \
     pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
     nodes { number url title isDraft headRefName isCrossRepository \
     headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
+
+/// GitHub's verdict on a pull request's reviews (`reviewDecision`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Review {
+    /// No review is required, or the repo has no rule for it.
+    #[default]
+    None,
+    Approved,
+    Changes,
+    Required,
+}
+
+impl Review {
+    fn of(word: &str) -> Self {
+        match word {
+            "APPROVED" => Review::Approved,
+            "CHANGES_REQUESTED" => Review::Changes,
+            "REVIEW_REQUIRED" => Review::Required,
+            _ => Review::None,
+        }
+    }
+
+    /// The filter's word for it (`review:approved`), and the row's.
+    pub fn word(self) -> &'static str {
+        match self {
+            Review::None => "",
+            Review::Approved => "approved",
+            Review::Changes => "changes",
+            Review::Required => "required",
+        }
+    }
+}
+
+/// A GitHub label: its name and its hex colour (`d73a4a`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PrLabel {
+    pub name: String,
+    pub color: String,
+}
+
+/// How a pull request's checks stand, by count — GitHub's own tally of
+/// the head commit's check runs and statuses. A skipped job counts for
+/// neither side, as `gh pr checks` leaves it out of its passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CheckTally {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+}
+
+impl CheckTally {
+    pub fn total(self) -> u32 {
+        self.passed + self.failed + self.pending
+    }
+}
+
+/// What the PULL REQUESTS MODAL's second line says about a row: who opened
+/// it and when, how its review and checks stand, how much talk and which
+/// labels. Empty for a row the slim query or an older cache brought.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrMeta {
+    pub author: String,
+    /// `createdAt`, RFC 3339.
+    pub created_at: String,
+    /// The signed-in user is asked to review it, by name (not by a team).
+    pub review_requested: bool,
+    pub review: Review,
+    pub comments: u32,
+    pub labels: Vec<PrLabel>,
+    /// None where the head commit has no checks, or nobody asked.
+    pub checks: Option<CheckTally>,
+}
+
+/// Which part of the PULL REQUESTS MODAL a row lists under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PrSection {
+    /// The signed-in user opened it.
+    Yours,
+    /// Someone asked the signed-in user to review it.
+    ReviewRequested,
+    Others,
+}
+
+impl PrSection {
+    pub fn name(self) -> &'static str {
+        match self {
+            PrSection::Yours => "Yours",
+            PrSection::ReviewRequested => "Review requested",
+            PrSection::Others => "Others",
+        }
+    }
+}
 
 /// One row of a project's open-pull-request list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,6 +685,9 @@ pub struct OpenPr {
     /// asked about. Empty in a cache written before it was asked.
     #[serde(default)]
     pub head_sha: String,
+    /// The PULL REQUESTS MODAL's meta line.
+    #[serde(default)]
+    pub meta: PrMeta,
 }
 
 /// `#42 title`, or `#42` alone for an untitled one — how a pull request
@@ -604,6 +722,30 @@ impl OpenPr {
     /// health's word is the row's.
     pub fn trouble(&self) -> Option<Trouble> {
         self.health.trouble()
+    }
+
+    /// How its checks stand, as the PULL REQUESTS MODAL's row and filter
+    /// say it: GitHub's per-state tally when the list brought one — what
+    /// the row's `27/29` counts — else the rollup's word.
+    pub fn checks(&self) -> Checks {
+        match self.meta.checks {
+            Some(tally) if tally.failed > 0 => Checks::Failing,
+            Some(tally) if tally.pending > 0 => Checks::Pending,
+            Some(_) => Checks::Passing,
+            None => self.health.checks,
+        }
+    }
+
+    /// The PULL REQUESTS MODAL's section for it: yours first, then the
+    /// ones waiting on your review, then the rest.
+    pub fn section(&self) -> PrSection {
+        if self.mine {
+            PrSection::Yours
+        } else if self.meta.review_requested {
+            PrSection::ReviewRequested
+        } else {
+            PrSection::Others
+        }
     }
 }
 
@@ -660,7 +802,19 @@ impl PrLaunch {
 /// resolves its repo.
 pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
     let limit = format!("limit={LIST_LIMIT}");
-    let out = repo_graphql(dir, LIST_QUERY, &limit, TIMEOUT).await?;
+    match run_repo_graphql(dir, LIST_QUERY, &limit, TIMEOUT).await {
+        Ok(out) => {
+            if let Some(rows) = parse_list(&out) {
+                return Some(rows);
+            }
+        }
+        // `gh` could not be run, or timed out: the slim query would fare
+        // no better, and asking it would only double the wait.
+        Err(stderr) if stderr.is_empty() => return None,
+        // GitHub answered, and refused the full query.
+        Err(_) => {}
+    }
+    let out = repo_graphql(dir, LIST_QUERY_SLIM, &limit, TIMEOUT).await?;
     parse_list(&out)
 }
 
@@ -674,8 +828,18 @@ async fn repo_graphql(
     var: &str,
     timeout: std::time::Duration,
 ) -> Option<String> {
+    run_repo_graphql(dir, query, var, timeout).await.ok()
+}
+
+/// [`repo_graphql`] with the failure kept, as [`run_gh`] keeps it.
+async fn run_repo_graphql(
+    dir: &Path,
+    query: &str,
+    var: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     let query = format!("query={query}");
-    gh(
+    run_gh(
         Some(dir),
         &[
             "api",
@@ -734,6 +898,10 @@ pub(crate) fn parse_list(json: &str) -> Option<Vec<OpenPr>> {
     let rows = answer
         .pointer("/data/repository/pullRequests/nodes")?
         .as_array()?;
+    let viewer = answer
+        .pointer("/data/viewer/login")
+        .and_then(|l| l.as_str())
+        .unwrap_or_default();
     Some(
         rows.iter()
             .filter_map(|v| {
@@ -747,10 +915,73 @@ pub(crate) fn parse_list(json: &str) -> Option<Vec<OpenPr>> {
                     head: checkout_branch(v),
                     mine: bool_at(v, "viewerDidAuthor"),
                     head_sha: str_at(v, "headRefOid"),
+                    meta: meta(v, viewer),
                 })
             })
             .collect(),
     )
+}
+
+/// A [`LIST_QUERY`] node's [`PrMeta`], `viewer` the signed-in login (empty
+/// when the answer did not say).
+fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
+    let nodes = |path: &str| {
+        v.pointer(path)
+            .and_then(|n| n.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    };
+    let review_requested = !viewer.is_empty()
+        && nodes("/reviewRequests/nodes").iter().any(|r| {
+            r.pointer("/requestedReviewer/login")
+                .and_then(|l| l.as_str())
+                .is_some_and(|login| login.eq_ignore_ascii_case(viewer))
+        });
+    PrMeta {
+        author: v
+            .pointer("/author/login")
+            .and_then(|l| l.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        created_at: str_at(v, "createdAt"),
+        review_requested,
+        review: Review::of(&str_at(v, "reviewDecision")),
+        comments: v
+            .pointer("/comments/totalCount")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32,
+        labels: nodes("/labels/nodes")
+            .iter()
+            .map(|l| PrLabel {
+                name: str_at(l, "name"),
+                color: str_at(l, "color"),
+            })
+            .filter(|l| !l.name.is_empty())
+            .collect(),
+        checks: v
+            .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts")
+            .and_then(check_tally),
+    }
+}
+
+/// GitHub's per-state counts of a commit's check runs and statuses, as
+/// passed / failed / pending. A skipped or neutral run counts for neither
+/// side; None when there is nothing to count.
+fn check_tally(contexts: &serde_json::Value) -> Option<CheckTally> {
+    let mut tally = CheckTally::default();
+    for list in ["checkRunCountsByState", "statusContextCountsByState"] {
+        for entry in arr_at(contexts, list) {
+            let n = u64_at(entry, "count") as u32;
+            match str_at(entry, "state").as_str() {
+                "SUCCESS" => tally.passed += n,
+                "NEUTRAL" | "SKIPPED" => {}
+                "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+                | "STARTUP_FAILURE" | "STALE" => tally.failed += n,
+                _ => tally.pending += n,
+            }
+        }
+    }
+    (tally.total() > 0).then_some(tally)
 }
 
 /// A [`LIST_QUERY`] answer as `gh api graphql` prints it, around `nodes`
@@ -1672,10 +1903,74 @@ mod tests {
     /// repo and froze the list on its last good answer (#106).
     #[test]
     fn the_list_query_asks_for_the_rollup_state_alone() {
-        assert!(LIST_QUERY.contains("statusCheckRollup { state }"));
-        assert!(!LIST_QUERY.contains("contexts"));
-        assert!(LIST_QUERY.contains("states: OPEN"));
-        assert!(LIST_QUERY.contains("orderBy: {field: CREATED_AT, direction: DESC}"));
+        for query in [LIST_QUERY, LIST_QUERY_SLIM] {
+            assert!(query.contains("statusCheckRollup { state"));
+            assert!(query.contains("states: OPEN"));
+            assert!(query.contains("orderBy: {field: CREATED_AT, direction: DESC}"));
+        }
+        // The full query's checks are GitHub's tally, never the contexts
+        // themselves; the slim one asks for nothing past the state.
+        assert!(LIST_QUERY.contains("contexts(first: 1) { checkRunCountsByState"));
+        assert!(!LIST_QUERY.contains("nodes { ... on CheckRun"));
+        assert!(LIST_QUERY_SLIM.contains("statusCheckRollup { state }"));
+        assert!(!LIST_QUERY_SLIM.contains("contexts"));
+    }
+
+    /// The meta line's fields come off the node; the sections off who
+    /// opened it and who was asked to review it.
+    #[test]
+    fn the_list_reads_the_meta_line_and_the_section() {
+        let answer = r#"{"data":{"viewer":{"login":"Me"},"repository":{"pullRequests":{"nodes":[
+          {"number":1,"url":"https://github.com/o/r/pull/1","title":"Mine","viewerDidAuthor":true,
+           "createdAt":"2026-10-06T09:10:27Z","reviewDecision":"APPROVED","author":{"login":"me"},
+           "comments":{"totalCount":5},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
+           "reviewRequests":{"nodes":[]},
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING","contexts":{
+             "checkRunCountsByState":[{"state":"SUCCESS","count":27},{"state":"SKIPPED","count":11},
+               {"state":"IN_PROGRESS","count":1},{"state":"FAILURE","count":0}],
+             "statusContextCountsByState":[{"state":"SUCCESS","count":1}]}}}}]}},
+          {"number":2,"url":"https://github.com/o/r/pull/2","title":"Asked","viewerDidAuthor":false,
+           "reviewDecision":"REVIEW_REQUIRED","author":{"login":"sam"},
+           "reviewRequests":{"nodes":[{"requestedReviewer":{}},{"requestedReviewer":{"login":"me"}}]},
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}},
+          {"number":3,"url":"https://github.com/o/r/pull/3","title":"Theirs","author":null,
+           "reviewRequests":{"nodes":[{"requestedReviewer":{"login":"someone"}}]}}
+        ]}}}}"#;
+        let prs = parse_list(answer).expect("parsed");
+        let m = &prs[0].meta;
+        assert_eq!(m.author, "me");
+        assert_eq!(m.created_at, "2026-10-06T09:10:27Z");
+        assert_eq!(m.review, Review::Approved);
+        assert_eq!(m.comments, 5);
+        assert_eq!(
+            m.labels,
+            vec![PrLabel {
+                name: "bug".into(),
+                color: "d73a4a".into()
+            }]
+        );
+        assert_eq!(
+            m.checks,
+            Some(CheckTally {
+                passed: 28,
+                failed: 0,
+                pending: 1
+            }),
+            "skipped runs count for neither side"
+        );
+        assert_eq!(prs[0].section(), PrSection::Yours);
+        assert_eq!(prs[1].section(), PrSection::ReviewRequested);
+        assert_eq!(prs[1].meta.review, Review::Required);
+        assert_eq!(prs[1].meta.checks, None);
+        assert_eq!(prs[2].section(), PrSection::Others);
+        assert_eq!(prs[2].meta, PrMeta::default());
+        // The slim answer (no viewer, no meta) still lists, its meta empty.
+        let slim = parse_list(&list_answer(
+            r#"[{"number":4,"url":"https://github.com/o/r/pull/4","viewerDidAuthor":true}]"#,
+        ))
+        .expect("parsed");
+        assert_eq!(slim[0].meta, PrMeta::default());
+        assert_eq!(slim[0].section(), PrSection::Yours);
     }
 
     /// Trouble is an open pull request's: a merged or closed one is past
@@ -1777,6 +2072,7 @@ mod tests {
             head: String::new(),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         };
         let mut list = vec![row(42, true), row(40, false), row(31, true), row(30, false)];
         drafts_last(&mut list);

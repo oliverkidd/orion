@@ -1212,6 +1212,7 @@ pub(crate) fn sample_form() -> AutofixForm {
         head: "feat".into(),
         mine: true,
         head_sha: String::new(),
+        meta: Default::default(),
     };
     AutofixForm::new(ProjectId("p".into()), pr, &detail)
 }
@@ -1261,6 +1262,7 @@ mod tests {
             head: "feat".into(),
             mine: true,
             head_sha: "abc123".into(),
+            meta: Default::default(),
         }
     }
 

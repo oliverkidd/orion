@@ -650,6 +650,7 @@ mod tests {
             head: format!("pr-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         };
         let now = std::time::Instant::now();
         let mut open_prs = HashMap::new();
@@ -711,6 +712,7 @@ mod tests {
             head: format!("pr-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         };
         let now = std::time::Instant::now();
         let mut open_prs = HashMap::new();
@@ -783,6 +785,7 @@ mod tests {
             head: format!("pr-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         };
         let now = std::time::Instant::now();
         let mut open_prs = HashMap::new();

@@ -2931,7 +2931,7 @@ fn key_hint(app: &App, action: crate::keymap::Action) -> String {
 /// the spans and each label's screen x-range for click hit-testing. A
 /// strip wider than `width` drops the padding inside each label, so every
 /// tab stays on screen a little closer together.
-fn tab_strip<'a>(
+pub(crate) fn tab_strip<'a>(
     x: u16,
     width: u16,
     labels: impl Iterator<Item = &'a str>,
@@ -3803,6 +3803,72 @@ pub(crate) fn render_row(
     th: Theme,
 ) {
     render_button(f, area, vec![spans], selected, focused, th, 0, th.accent);
+}
+
+/// [`render_row`] for an entry several lines tall — a title over its meta
+/// line: the selection fill and the `▌` marker run down every line.
+pub(crate) fn render_row_lines(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Vec<Span>>,
+    selected: bool,
+    focused: bool,
+    th: Theme,
+) {
+    render_button(f, area, lines, selected, focused, th, 0, th.accent);
+}
+
+/// `parts` joined by a faint ` · `, as many as fit in `budget` from the
+/// left, under a two-cell indent that lines them up with the title.
+pub(crate) fn fit_parts(
+    parts: Vec<Vec<Span<'static>>>,
+    budget: usize,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    const INDENT: &str = "  ";
+    const SEP: &str = " · ";
+    use unicode_width::UnicodeWidthStr;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = INDENT.width();
+    for part in parts {
+        let w: usize = part.iter().map(|s| s.content.width()).sum();
+        let sep = if spans.is_empty() { 0 } else { SEP.width() };
+        if used + sep + w > budget {
+            break;
+        }
+        if spans.is_empty() {
+            spans.push(Span::raw(INDENT));
+        } else {
+            spans.push(Span::styled(SEP, Style::default().fg(th.faint)));
+        }
+        used += sep + w;
+        spans.extend(part);
+    }
+    spans
+}
+
+/// A section header inside a list — ` NAME count` — muted and bold, as
+/// the FILE FINDER's and SETTINGS' are, with an optional mark of its own
+/// before the name (a Linear state's glyph, in the state's colour).
+pub(crate) fn list_header(
+    name: &str,
+    count: usize,
+    mark: Option<Span<'static>>,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw(" ")];
+    if let Some(mark) = mark {
+        spans.push(mark);
+    }
+    spans.push(Span::styled(
+        name.to_uppercase(),
+        Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!(" {count}"),
+        Style::default().fg(th.dim),
+    ));
+    spans
 }
 
 /// Render one list entry as a button `area.height` rows tall: the
@@ -4824,6 +4890,19 @@ pub(crate) fn input_spans(
     cursor: Color,
     th: Theme,
 ) -> Vec<Span<'static>> {
+    input_spans_lit(input, budget, cursor, th, &[])
+}
+
+/// [`input_spans`] with the plain text inside `lit` (char ranges, end
+/// exclusive) in the accent — the filter line's `key:value` tokens
+/// (`list_filter`), which read as the chips they are.
+pub(crate) fn input_spans_lit(
+    input: &TextInput,
+    budget: usize,
+    cursor: Color,
+    th: Theme,
+    lit: &[(usize, usize)],
+) -> Vec<Span<'static>> {
     let chars: Vec<char> = input.chars().collect();
     let caret = input.cursor_chars();
     let selection = input.selection_chars();
@@ -4837,11 +4916,12 @@ pub(crate) fn input_spans(
     };
     let end = (start + budget).min(total);
 
-    let mut cells: Vec<(char, FieldCell)> = (start..end)
+    let mut cells: Vec<(char, FieldCell, bool)> = (start..end)
         .map(|i| {
             (
                 chars.get(i).copied().unwrap_or(' '),
                 FieldCell::at(i, caret, selection),
+                lit.iter().any(|&(a, b)| (a..b).contains(&i)),
             )
         })
         .collect();
@@ -4859,8 +4939,30 @@ pub(crate) fn input_spans(
     }
 
     let plain = Style::default().fg(th.text);
+    let token = Style::default().fg(th.accent);
     let block = Style::default().fg(th.on_accent).bg(cursor);
-    field_spans(cells, plain, selected_style(th.text, th), block)
+    let selected = selected_style(th.text, th);
+    let style = |cell: FieldCell, lit: bool| match cell {
+        FieldCell::Plain if lit => token,
+        FieldCell::Plain => plain,
+        FieldCell::Selected => selected,
+        FieldCell::Caret => block,
+    };
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut run_style = plain;
+    for (c, cell, lit) in cells {
+        let s = style(cell, lit);
+        if s != run_style && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), run_style));
+        }
+        run_style = s;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, run_style));
+    }
+    spans
 }
 
 /// The always-live search row every fuzzy overlay shares: a dim placeholder
@@ -4878,6 +4980,141 @@ pub(crate) fn search_line(
         ));
     }
     Line::from(input_spans(input, area.width as usize, th.accent, th))
+}
+
+/// [`search_line`] with the filter's `key:value` tokens lit
+/// (`list_filter::Parsed::spans`).
+pub(crate) fn search_line_lit(
+    input: &TextInput,
+    placeholder: &str,
+    area: Rect,
+    th: Theme,
+    lit: &[(usize, usize)],
+) -> Line<'static> {
+    if input.is_empty() {
+        return search_line(input, placeholder, area, th);
+    }
+    Line::from(input_spans_lit(
+        input,
+        area.width as usize,
+        th.accent,
+        th,
+        lit,
+    ))
+}
+
+/// One entry of a list gathered into sections: a header over the run of
+/// rows that share a key, or a row — each an index into the rows shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListEntry {
+    /// The first row it heads, and how many it does.
+    Header {
+        first: usize,
+        count: usize,
+    },
+    Row(usize),
+}
+
+/// A section header's height, in lines.
+pub(crate) const HEADER_H: u16 = 1;
+
+/// The rows shown, `keys` their section keys in order, with a header over
+/// each run of one key — over every run when `always`, else only when
+/// there is more than one run to tell apart.
+pub(crate) fn sections<K: PartialEq>(keys: &[K], always: bool) -> Vec<ListEntry> {
+    let several = keys.windows(2).any(|w| w[0] != w[1]);
+    let mut entries = Vec::with_capacity(keys.len() + 4);
+    for (v, key) in keys.iter().enumerate() {
+        if (always || several) && (v == 0 || keys[v - 1] != *key) {
+            let count = keys[v..].iter().take_while(|k| *k == key).count();
+            entries.push(ListEntry::Header { first: v, count });
+        }
+        entries.push(ListEntry::Row(v));
+    }
+    entries
+}
+
+/// Lay a sectioned list out in `area`: rows `row_h(row)` lines tall,
+/// headers [`HEADER_H`], the cursor's row — and the header over it, when
+/// it is its section's first — kept on screen ([`stacked_rows`]). The
+/// first entry drawn, and each drawn entry with its rect.
+pub(crate) fn layout_sections(
+    entries: &[ListEntry],
+    row_h: impl Fn(usize) -> u16,
+    cursor_row: usize,
+    prev: usize,
+    area: Rect,
+) -> (usize, Vec<(ListEntry, Rect)>) {
+    let heights: Vec<u16> = entries
+        .iter()
+        .map(|e| match e {
+            ListEntry::Header { .. } => HEADER_H,
+            ListEntry::Row(v) => row_h(*v),
+        })
+        .collect();
+    let cursor = entries
+        .iter()
+        .position(|e| *e == ListEntry::Row(cursor_row))
+        .unwrap_or(0);
+    let first = match cursor.checked_sub(1).map(|i| entries[i]) {
+        Some(ListEntry::Header { .. }) => cursor - 1,
+        _ => cursor,
+    };
+    let (start, drawn) = stacked_rows(&heights, first, cursor, prev, area);
+    let drawn = drawn.into_iter().map(|(i, r)| (entries[i], r)).collect();
+    (start, drawn)
+}
+
+/// Which row a click at `pos` lands on, by the rects the last draw laid
+/// the rows out in (`(row, rect)`).
+pub(crate) fn row_hit(rects: &[(usize, Rect)], pos: Position) -> Option<usize> {
+    rects
+        .iter()
+        .find(|(_, rect)| rect.contains(pos))
+        .map(|(row, _)| *row)
+}
+
+/// The first entry to draw of a list whose entries are `heights` rows
+/// tall, and where each lands in `area`: the entries `first..=last` (the
+/// cursor's row, and the section header over it when there is one) kept
+/// on screen — `last` before `first` when they do not both fit — moving
+/// the window from `prev` (the last draw's first entry) only as far as
+/// that takes, so the list does not jump while the cursor walks inside
+/// it. An entry that only partly fits at the bottom is clipped.
+pub(crate) fn stacked_rows(
+    heights: &[u16],
+    first: usize,
+    last: usize,
+    prev: usize,
+    area: Rect,
+) -> (usize, Vec<(usize, Rect)>) {
+    if heights.is_empty() || area.height == 0 {
+        return (0, Vec::new());
+    }
+    let last = last.min(heights.len() - 1);
+    let first = first.min(last);
+    let span = |a: usize, b: usize| heights[a..=b].iter().map(|&h| h as usize).sum::<usize>();
+    let mut start = prev.min(first);
+    while start < last && span(start, last) > area.height as usize {
+        start += 1;
+    }
+    // A window that ends short of the area's bottom with entries above it
+    // to show — the list shrank under a filter — slides back down.
+    let mut fill = span(start, heights.len() - 1);
+    while start > 0 && fill + heights[start - 1] as usize <= area.height as usize {
+        start -= 1;
+        fill += heights[start] as usize;
+    }
+    let mut rects = Vec::new();
+    let mut y = 0usize;
+    for (i, &h) in heights.iter().enumerate().skip(start) {
+        let Some(rect) = rows_rect(area, y, h) else {
+            break;
+        };
+        rects.push((i, rect));
+        y += h as usize;
+    }
+    (start, rects)
 }
 
 /// The i-th single-height row inside `inner`, or None when it overflows.
@@ -5018,6 +5255,35 @@ mod tests {
         draw_black_background(&mut buf, area);
         assert_eq!(buf[(0, 0)].bg, crate::theme::BLACK_BACKGROUND);
         assert_eq!(buf[(1, 0)].bg, app.theme.sel_bg, "a fill stays on top");
+    }
+
+    #[test]
+    fn stacked_rows_keep_the_cursor_and_its_header_on_screen() {
+        // A header (1) over three two-line rows, another header, two more.
+        let heights = [1, 2, 2, 2, 1, 2, 2];
+        let area = Rect::new(0, 10, 20, 5);
+        let starts = |first, last, prev| stacked_rows(&heights, first, last, prev, area).0;
+        // At the top everything from the first entry shows.
+        assert_eq!(starts(0, 1, 0), 0);
+        let (_, rects) = stacked_rows(&heights, 0, 1, 0, area);
+        assert_eq!(rects[0], (0, Rect::new(0, 10, 20, 1)));
+        assert_eq!(rects[1], (1, Rect::new(0, 11, 20, 2)));
+        // The last row clipped to the one line left.
+        assert_eq!(rects[2], (2, Rect::new(0, 13, 20, 2)));
+        // Walking down past the bottom moves the window as little as it
+        // must: header 4 and row 5 need rows 3..=5 off the top.
+        assert_eq!(starts(4, 5, 0), 3);
+        // Walking back up inside the window leaves it where it is.
+        assert_eq!(starts(5, 5, 3), 3);
+        // Up past its top brings the header back with its row.
+        assert_eq!(starts(0, 1, 3), 0);
+        // Header and row too tall together: the row wins.
+        let tight = Rect::new(0, 0, 20, 2);
+        assert_eq!(stacked_rows(&heights, 4, 5, 0, tight).0, 5);
+        // A window left past a list that shrank slides back to fill.
+        assert_eq!(stacked_rows(&heights[..3], 1, 1, 2, area).0, 0);
+        // Nothing to lay out.
+        assert_eq!(stacked_rows(&[], 0, 0, 3, area), (0, Vec::new()));
     }
 
     #[test]

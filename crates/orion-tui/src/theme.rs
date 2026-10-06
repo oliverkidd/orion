@@ -264,6 +264,18 @@ pub fn shade(c: [f32; 3], level: f32) -> Color {
     Color::Rgb(v(c[0]), v(c[1]), v(c[2]))
 }
 
+/// A colour a service hands us as hex — a GitHub label's `d73a4a`, a
+/// Linear state's `#f2c94c` — as truecolor. None for anything else, the
+/// caller's own role colour standing in.
+pub fn hex(s: &str) -> Option<Color> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 || !s.is_ascii() {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
+    Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
+}
+
 /// The RGB a terminal most likely shows for `c`: xterm's defaults for the
 /// sixteen named colors, the 6×6×6 cube and the gray ramp for the rest of
 /// the 256.
@@ -324,6 +336,16 @@ pub fn rgb(c: Color) -> Option<(u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_reads_a_services_colour_with_or_without_its_hash() {
+        assert_eq!(hex("d73a4a"), Some(Color::Rgb(0xd7, 0x3a, 0x4a)));
+        assert_eq!(hex("#F2C94C"), Some(Color::Rgb(0xf2, 0xc9, 0x4c)));
+        assert_eq!(hex(""), None);
+        assert_eq!(hex("#fff"), None);
+        assert_eq!(hex("zzzzzz"), None);
+        assert_eq!(hex("ééé"), None);
+    }
 
     /// Red, green, blue coordinates (0..=5) of a 6x6x6 cube color.
     fn cube(c: Color) -> Option<[u8; 3]> {

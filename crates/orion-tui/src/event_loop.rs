@@ -15629,6 +15629,7 @@ mod tests {
                         head: format!("pr-{number}-head"),
                         mine: false,
                         head_sha: String::new(),
+                        meta: Default::default(),
                     })
                     .collect(),
                 at: now,
@@ -15826,6 +15827,7 @@ mod tests {
             head: "pr-7-head".into(),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }];
 
         // The list lands: the checkout moves under #7, the cursor with it.
@@ -15887,6 +15889,7 @@ mod tests {
             head: "attach-links".into(),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }];
         note_open_prs_answer(&mut app, pid.clone(), Some(found.clone()), &mut Vec::new());
         assert_eq!(
@@ -16226,6 +16229,7 @@ mod tests {
                     head: format!("pr-{number}-head"),
                     mine: false,
                     head_sha: String::new(),
+                    meta: Default::default(),
                 })
                 .collect();
             note_open_prs_answer(app, pid.clone(), Some(list), &mut Vec::new());
@@ -16405,6 +16409,7 @@ mod tests {
                     head: format!("pr-{number}-head"),
                     mine: false,
                     head_sha: String::new(),
+                    meta: Default::default(),
                 })
                 .collect();
             note_open_prs_answer(app, pid.clone(), Some(list), &mut Vec::new());
@@ -16467,6 +16472,7 @@ mod tests {
                 head: "brand-new".into(),
                 mine: false,
                 head_sha: String::new(),
+                meta: Default::default(),
             },
             crate::pull_request::OpenPr {
                 number: 9,
@@ -16477,6 +16483,7 @@ mod tests {
                 head: "number-lines".into(),
                 mine: false,
                 head_sha: String::new(),
+                meta: Default::default(),
             },
             crate::pull_request::OpenPr {
                 number: 7,
@@ -16487,6 +16494,7 @@ mod tests {
                 head: "attach-links".into(),
                 mine: false,
                 head_sha: String::new(),
+                meta: Default::default(),
             },
         ];
         // Halfway down #7's conversation when the refresh lands.
@@ -16687,6 +16695,7 @@ mod tests {
             head: format!("pr-{number}-head"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }
     }
 
@@ -17717,6 +17726,7 @@ diff --git a/src/b.rs b/src/b.rs
             head: format!("head-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }
     }
 
@@ -32025,6 +32035,7 @@ diff --git a/src/c.rs b/src/c.rs
                     head: "hush".into(),
                     mine: false,
                     head_sha: String::new(),
+                    meta: Default::default(),
                 }],
                 at: now,
                 due: now + OPEN_PRS_REFRESH,

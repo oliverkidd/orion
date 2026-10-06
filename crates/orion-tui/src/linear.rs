@@ -1,6 +1,9 @@
-//! The LINEAR VIEW (`⌘L`): open Linear issues assigned to you, picked
-//! together so one agent fixes them in one worktree and opens one pull
-//! request. From the PULL REQUESTS MODAL the same list attaches a pull
+//! The LINEAR VIEW (`⌘L`): open Linear issues in two tabs — `My issues`,
+//! assigned to you, and `Other issues`, the rest of your teams' — grouped
+//! by status, each row's priority, project and labels under its title, and
+//! filtered by `key:value` tokens and the FILTER PICK (`list_filter`).
+//! Issues are picked together so one agent fixes them in one worktree and
+//! opens one pull request. From the PULL REQUESTS MODAL the same list attaches a pull
 //! request to the issues you mark (`attachmentLinkGitHubPR`) — and the
 //! other way round, `⌘U` here flips to that modal as a PR PICK, Enter on
 //! a pull request attaching it to the issues marked here. Both ends run
@@ -32,14 +35,16 @@ use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{clamp_selection, window_start, App, HitTarget, Overlay};
+use crate::list_filter::{FacetKey, FilterPick, PickFacet, PickValue};
 use crate::markdown::{self, Breaks};
 use crate::pr_modal::PullRequestsView;
 use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, panel_block, render_row, row_rect,
-    search_line, truncate, visible_positions, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    centered_rect_pct, empty_list_row, fit_parts, fuzzy_highlight_styled, layout_sections,
+    list_header, panel_block, render_row, render_row_lines, row_rect, search_line_lit, sections,
+    truncate, visible_positions, ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 
 const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
@@ -52,7 +57,8 @@ const LINEAR_URL: &str = "https://api.linear.app/graphql";
 const KEY_NAME: &str = "LINEAR_API_KEY";
 const ENV_FILES: &[&str] = &[".env.local", ".env"];
 
-/// One open Linear issue assigned to the configured user.
+/// One open Linear issue: assigned to the configured user (`mine`), or
+/// someone else's or nobody's in one of their teams.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearIssue {
     pub id: String,
@@ -61,10 +67,6 @@ pub struct LinearIssue {
     pub url: String,
     #[serde(default)]
     pub description: String,
-    /// Linear's word for the priority — `Urgent`, `High`, … — or
-    /// `No priority`; empty when Linear did not say.
-    #[serde(default)]
-    pub priority: String,
     pub status: String,
     #[serde(default)]
     pub status_type: String,
@@ -72,6 +74,61 @@ pub struct LinearIssue {
     /// to (`LinearList::states`).
     #[serde(default)]
     pub team_id: String,
+    /// Linear's priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+    #[serde(default)]
+    pub priority: u8,
+    /// The workflow state's colour, as Linear's hex (`#f2c94c`).
+    #[serde(default)]
+    pub state_color: String,
+    #[serde(default)]
+    pub labels: Vec<LinearTag>,
+    #[serde(default)]
+    pub project: Option<LinearTag>,
+    /// The assignee's display name; empty for nobody.
+    #[serde(default)]
+    pub assignee: String,
+    /// Assigned to the configured user: the `My issues` tab's, else
+    /// `Other issues`'.
+    #[serde(default)]
+    pub mine: bool,
+    /// RFC 3339.
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// A label or a project: its name and Linear's hex colour for it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LinearTag {
+    pub name: String,
+    pub color: String,
+}
+
+/// Linear's word for a priority, as the rows and the filter say it.
+pub fn priority_word(priority: u8) -> &'static str {
+    match priority {
+        1 => "Urgent",
+        2 => "High",
+        3 => "Medium",
+        4 => "Low",
+        _ => "No priority",
+    }
+}
+
+/// Linear's priorities in the order the rows sort them and the FILTER PICK
+/// lists them: urgent first, no priority last.
+const PRIORITY_ORDER: [u8; 5] = [1, 2, 3, 4, 0];
+
+/// What an issue nobody is assigned to says where a name would be.
+const UNASSIGNED: &str = "unassigned";
+
+/// Where a priority sorts: urgent first, no priority last.
+fn priority_rank(priority: u8) -> usize {
+    PRIORITY_ORDER
+        .iter()
+        .position(|p| *p == priority)
+        .unwrap_or(PRIORITY_ORDER.len())
 }
 
 /// One of a team's workflow states — `Todo`, `In Progress`, `Done` —
@@ -82,6 +139,9 @@ pub struct LinearState {
     pub id: String,
     pub name: String,
     pub kind: String,
+    /// Linear's hex colour for it.
+    #[serde(default)]
+    pub color: String,
 }
 
 /// `⌘S`: the issue under the cursor, and the states it can move to,
@@ -155,7 +215,12 @@ pub fn issue_sections(issues: &[LinearIssue]) -> String {
     issues
         .iter()
         .map(|i| {
-            let facts: Vec<&str> = [i.status.as_str(), i.priority.as_str(), i.url.as_str()]
+            let priority = if i.priority == 0 {
+                ""
+            } else {
+                priority_word(i.priority)
+            };
+            let facts: Vec<&str> = [i.status.as_str(), priority, i.url.as_str()]
                 .into_iter()
                 .filter(|fact| !fact.is_empty())
                 .collect();
@@ -195,6 +260,37 @@ pub enum LinearMode {
     },
 }
 
+/// The LINEAR VIEW's two lists: the issues assigned to you, and the rest
+/// of your teams' open ones — someone else's, or nobody's yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinearTab {
+    #[default]
+    Mine,
+    Others,
+}
+
+impl LinearTab {
+    pub const ALL: [LinearTab; 2] = [LinearTab::Mine, LinearTab::Others];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LinearTab::Mine => "My issues",
+            LinearTab::Others => "Other issues",
+        }
+    }
+
+    fn holds(self, issue: &LinearIssue) -> bool {
+        issue.mine == (self == LinearTab::Mine)
+    }
+
+    fn other(self) -> Self {
+        match self {
+            LinearTab::Mine => LinearTab::Others,
+            LinearTab::Others => LinearTab::Mine,
+        }
+    }
+}
+
 /// The modal's own state. The rows live on [`App::linear`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinearView {
@@ -210,11 +306,24 @@ pub struct LinearView {
     pub body_area: Rect,
     pub browser_area: Rect,
     pub query: TextInput,
-    pub cursor_row: usize,
     pub marked: BTreeSet<String>,
     pub mode: LinearMode,
     /// The status picker, while it is up: every key but Esc is its own.
     pub status_pick: Option<StatusPick>,
+    /// Which list shows: `My issues` or `Other issues`.
+    pub tab: LinearTab,
+    /// The tab strip's labels' screen x-ranges and its row, for the click.
+    pub tab_hits: Vec<(u16, u16)>,
+    pub tab_row: Rect,
+    /// The first list entry drawn — a row or a status header — as of the
+    /// last draw (`ui::stacked_rows`).
+    pub list_start: usize,
+    /// Each drawn row's rect, by index into the project's list, as of the
+    /// last draw: what a click hit-tests.
+    pub row_rects: Vec<(usize, Rect)>,
+    /// The FILTER PICK (`⌘F`) in the reading pane's place, while it is
+    /// up: every key is its own (`list_filter`).
+    pub filter_pick: Option<FilterPick>,
 }
 
 impl LinearView {
@@ -232,10 +341,15 @@ impl LinearView {
             body_area: Rect::default(),
             browser_area: Rect::default(),
             query: TextInput::new(),
-            cursor_row: 0,
             marked: BTreeSet::new(),
             mode,
             status_pick: None,
+            tab: LinearTab::Mine,
+            tab_hits: Vec::new(),
+            tab_row: Rect::default(),
+            list_start: 0,
+            row_rects: Vec::new(),
+            filter_pick: None,
         }
     }
 
@@ -249,24 +363,24 @@ impl LinearView {
     }
 }
 
-/// What Linear last said about a project's assigned issues, and the
-/// workflow states of the teams they belong to, by team id, in Linear's
-/// own order.
+/// What Linear last said about a project's open issues — the configured
+/// user's and the rest of their teams' — and the workflow states of the
+/// teams they belong to, by team id, in Linear's own order.
 #[derive(Debug, Clone, Default)]
 pub struct LinearList {
     pub list: Vec<LinearIssue>,
     pub states: HashMap<String, Vec<LinearState>>,
+    /// Linear had more of the other issues than one page holds
+    /// ([`OTHERS_LIMIT`]): the list says it shows the most recent.
+    pub more: bool,
 }
-
-/// What [`fetch_assigned`] reads: the issues, and their teams' states.
-type Assigned = (Vec<LinearIssue>, HashMap<String, Vec<LinearState>>);
 
 /// A finished Linear call, back on the loop.
 #[derive(Debug, Clone)]
 pub enum LinearAnswer {
     List {
         project: ProjectId,
-        list: Result<Assigned, String>,
+        list: Result<LinearList, String>,
     },
     /// An issue moved to another state — or why not, with the state it
     /// had, to put back.
@@ -302,6 +416,7 @@ pub struct StatusRefused {
     pub why: String,
     pub status: String,
     pub status_type: String,
+    pub state_color: String,
 }
 
 /// The account a key belongs to, as Linear's `viewer` query names it.
@@ -420,7 +535,7 @@ pub(crate) fn open_attach(app: &mut App) {
         view.project_name.clone(),
         view.dir.clone(),
     );
-    let Some(pr) = selected_open_pr(app) else {
+    let Some(pr) = crate::pr_modal::selected_pr(app) else {
         return;
     };
     let back = match &app.overlay {
@@ -438,32 +553,6 @@ pub(crate) fn open_attach(app: &mut App) {
             back: Box::new(back),
         },
     );
-}
-
-fn selected_open_pr(app: &App) -> Option<crate::pull_request::OpenPr> {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return None;
-    };
-    let list = app
-        .open_prs
-        .get(&view.project)
-        .map(|o| o.list.as_slice())
-        .unwrap_or(&[]);
-    if list.is_empty() {
-        return None;
-    }
-    let labels: Vec<String> = list.iter().map(|pr| pr.label()).collect();
-    let i = if view.query.split_whitespace().next().is_none() {
-        clamp_selection(view.selected as i64, list.len())
-    } else {
-        let ranked = crate::fuzzy::rank(view.query.as_str(), labels.iter().map(String::as_str));
-        ranked
-            .iter()
-            .find(|(i, _)| *i == view.selected)
-            .or(ranked.first())
-            .map(|(i, _)| *i)?
-    };
-    list.get(i).cloned()
 }
 
 fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: LinearMode) {
@@ -499,7 +588,7 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
         .trim()
         .to_string();
     tokio::spawn(async move {
-        let result = fetch_assigned(&dir, &email).await;
+        let result = fetch_lists(&dir, &email).await;
         let _ = tx.send(LinearAnswer::List {
             project,
             list: result,
@@ -530,11 +619,10 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
         LinearAnswer::List { project, list } => {
             app.linear_inflight.remove(&project);
             match list {
-                Ok((list, states)) => {
-                    let n = list.len();
+                Ok(fetched) => {
+                    let n = fetched.list.len();
                     app.linear_failed.remove(&project);
-                    app.linear
-                        .insert(project.clone(), LinearList { list, states });
+                    app.linear.insert(project.clone(), fetched);
                     if let Some(Overlay::Linear(view)) = &mut app.overlay {
                         if view.project == project {
                             view.selected = clamp_selection(view.selected as i64, n);
@@ -588,6 +676,7 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 {
                     issue.status = refused.status;
                     issue.status_type = refused.status_type;
+                    issue.state_color = refused.state_color;
                 }
                 app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't move {identifier}: {}",
@@ -732,9 +821,13 @@ pub(crate) mod keys {
     /// The status picker's own.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const SET: Key = Key::new(&["enter"], "set status");
+    /// `My issues` ⇄ `Other issues` — the PULL REQUESTS MODAL's tab keys.
+    pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
+    /// The FILTER PICK — the PULL REQUESTS MODAL's too.
+    pub const FILTER: Key = crate::list_filter::keys::FILTER;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, PICK, SET,
+        MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, PICK, SET, TABS, FILTER,
     ];
 }
 
@@ -756,10 +849,15 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "cancel"),
         ];
     }
+    if view.filter_pick.is_some() {
+        return crate::list_filter::hints();
+    }
     match view.mode {
         LinearMode::Browse => vec![
             keys::MARK.hint(),
             keys::CONFIRM.hint().kept(),
+            keys::TABS.hint(),
+            keys::FILTER.hint(),
             keys::ATTACH.hint(),
             keys::STATUS.hint(),
             keys::PRESET.hint(),
@@ -770,6 +868,8 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         LinearMode::Attach { .. } => vec![
             keys::MARK.hint(),
             keys::CONFIRM.hint_as("attach marked to this PR").kept(),
+            keys::TABS.hint(),
+            keys::FILTER.hint(),
             keys::STATUS.hint(),
             keys::BROWSER.hint(),
             Hint::new("Esc", esc),
@@ -805,6 +905,7 @@ fn open_status_pick(app: &mut App) {
         .position(|s| s.name == issue.status)
         .unwrap_or(0);
     if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.filter_pick = None;
         view.status_pick = Some(StatusPick {
             issue_id: issue.id,
             identifier: issue.identifier,
@@ -858,9 +959,14 @@ fn set_status(app: &mut App) {
     if issue.status == state.name {
         return;
     }
-    let (status, status_type) = (issue.status.clone(), issue.status_type.clone());
+    let (status, status_type, state_color) = (
+        issue.status.clone(),
+        issue.status_type.clone(),
+        issue.state_color.clone(),
+    );
     issue.status = state.name.clone();
     issue.status_type = state.kind.clone();
+    issue.state_color = state.color.clone();
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
@@ -872,6 +978,7 @@ fn set_status(app: &mut App) {
                 why,
                 status,
                 status_type,
+                state_color,
             });
         let _ = tx.send(LinearAnswer::Status {
             project,
@@ -897,6 +1004,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         handle_pick_key(app, key);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.filter_pick.is_some()) {
+        filter_pick_key(app, &key);
+        return;
+    }
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
@@ -920,6 +1031,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::STATUS.matches(&key) => open_status_pick(app),
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
+        _ if keys::TABS.matches(&key) => {
+            let other = view.tab.other();
+            switch_tab(app, other);
+        }
+        _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
         _ => {
             if view.query.handle_key(&key).changed() {
                 query_changed(app);
@@ -959,6 +1075,15 @@ pub(crate) fn handle_mouse(
                 view.scroll_by(-WHEEL_LINES);
             }
         }
+        MouseEventKind::Down(MouseButton::Left) if view.tab_row.contains(pos) => {
+            let hit = view
+                .tab_hits
+                .iter()
+                .position(|(from, to)| (*from..*to).contains(&pos.x));
+            if let Some(tab) = hit.and_then(|i| LinearTab::ALL.get(i)) {
+                switch_tab(app, *tab);
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) if list.contains(pos) => {
             if let Some(i) = row_under(app, pos) {
                 if let Some(Overlay::Linear(view)) = &mut app.overlay {
@@ -972,15 +1097,121 @@ pub(crate) fn handle_mouse(
     app.dirty = true;
 }
 
+/// The row under the pointer, by the rects the last draw laid the rows
+/// out in — they are two lines tall, with status headers between them.
 fn row_under(app: &App, pos: Position) -> Option<usize> {
     let Overlay::Linear(view) = app.overlay.as_ref()? else {
         return None;
     };
-    let list = rows(app, &view.project);
-    let visible = visible_rows(&view.query, list);
-    let start = window_start(view.cursor_row, view.list_area.height as usize);
-    let y = pos.y.checked_sub(view.list_area.y)? as usize;
-    visible.get(start + y).map(|(i, _)| *i)
+    crate::ui::row_hit(&view.row_rects, pos)
+}
+
+/// Show `tab`'s list, the cursor on its first row the filter leaves and
+/// the window back at the top. Marks stay, whichever tab they were made
+/// on: Enter takes every marked issue.
+fn switch_tab(app: &mut App, tab: LinearTab) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    if view.tab == tab {
+        return;
+    }
+    view.tab = tab;
+    view.list_start = 0;
+    view.scroll = 0;
+    let list = app
+        .linear
+        .get(&view.project)
+        .map(|l| l.list.as_slice())
+        .unwrap_or(&[]);
+    if let Some((first, _)) = visible_rows(view, list).first() {
+        view.selected = *first;
+    }
+}
+
+/// A key while the FILTER PICK is up: its cursor moves, `space` adds or
+/// takes out the value's token in the filter line — the rows narrowing
+/// behind it — and Enter or Esc puts it away.
+fn filter_pick_key(app: &mut App, key: &KeyEvent) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let facets = pick_facets(rows(app, &view.project), view.tab, app.theme);
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let changed =
+        crate::list_filter::apply_key(&mut view.filter_pick, &mut view.query, FACETS, &facets, key);
+    if changed {
+        query_changed(app);
+    }
+    app.dirty = true;
+}
+
+/// The FILTER PICK's facets over the tab's issues: their states in the
+/// sections' order, the priorities, labels and projects in Linear's
+/// colours, and — on `Other issues` — who they are assigned to.
+fn pick_facets(list: &[LinearIssue], tab: LinearTab, th: Theme) -> Vec<PickFacet> {
+    use crate::list_filter::{by_count, fixed_values, plain_values, tally};
+    let issues: Vec<&LinearIssue> = list.iter().filter(|i| tab.holds(i)).collect();
+    let count = |key: &str| tally(issues.iter().copied(), |i| facet_values(i, key));
+    // A label's or a project's dot, in the colour its first carrier gives.
+    let dotted = |key: &str, tags: &dyn Fn(&LinearIssue) -> Vec<&LinearTag>| -> Vec<PickValue> {
+        by_count(count(key))
+            .into_iter()
+            .map(|(value, count)| {
+                let color = issues
+                    .iter()
+                    .flat_map(|i| tags(i))
+                    .find(|t| t.name.eq_ignore_ascii_case(&value))
+                    .and_then(|t| crate::theme::hex(&t.color))
+                    .unwrap_or(th.muted);
+                PickValue {
+                    mark: Some(("●".to_string(), color)),
+                    value,
+                    count,
+                }
+            })
+            .collect()
+    };
+    FACETS
+        .iter()
+        // Every issue on `My issues` is yours: nobody else to pick.
+        .filter(|facet| facet.key != "assignee" || tab == LinearTab::Others)
+        .map(|facet| {
+            let values = match facet.key {
+                "status" => count("status")
+                    .into_iter()
+                    .map(|(value, count)| {
+                        let mark = issues.iter().find(|i| i.status == value).map(|i| {
+                            let (glyph, color) = state_mark(i, th);
+                            (glyph.to_string(), color)
+                        });
+                        PickValue { value, count, mark }
+                    })
+                    .collect(),
+                "priority" => {
+                    let words: Vec<&str> =
+                        PRIORITY_ORDER.iter().map(|p| priority_word(*p)).collect();
+                    fixed_values(&words, &count("priority"), |word| {
+                        let p = PRIORITY_ORDER
+                            .into_iter()
+                            .find(|p| priority_word(*p) == word)?;
+                        priority_mark(p, th)
+                            .first()
+                            .map(|s| (s.content.to_string(), s.style.fg.unwrap_or(th.muted)))
+                    })
+                }
+                "label" => dotted("label", &|i| i.labels.iter().collect()),
+                "project" => dotted("project", &|i| i.project.iter().collect()),
+                key => plain_values(by_count(count(key))),
+            };
+            PickFacet {
+                key: *facet,
+                values,
+            }
+        })
+        .collect()
 }
 
 fn close(app: &mut App) {
@@ -1026,7 +1257,7 @@ fn step(app: &mut App, delta: i32) {
         return;
     };
     let list = rows(app, &view.project);
-    let visible = visible_rows(&view.query, list);
+    let visible = visible_rows(view, list);
     if visible.is_empty() {
         return;
     }
@@ -1178,28 +1409,74 @@ fn rows<'a>(app: &'a App, project: &ProjectId) -> &'a [LinearIssue] {
         .unwrap_or(&[])
 }
 
-fn has_query(view: &LinearView) -> bool {
-    view.query.split_whitespace().next().is_some()
+/// The keys the filter line takes besides its words (`list_filter`):
+/// `status:todo p:high label:bug project:"Export PDF" assignee:sam`.
+pub(crate) const FACETS: &[FacetKey] = &[
+    FacetKey::new("status", "Status"),
+    FacetKey::new("priority", "Priority").aliases(&["p"]),
+    FacetKey::new("label", "Label"),
+    FacetKey::new("project", "Project"),
+    FacetKey::new("assignee", "Assignee"),
+];
+
+/// An issue's values for one of the [`FACETS`].
+fn facet_values(issue: &LinearIssue, key: &str) -> Vec<String> {
+    match key {
+        "status" => vec![issue.status.clone()],
+        // `p:none` as well as the word the rows say.
+        "priority" if issue.priority == 0 => vec![priority_word(0).to_string(), "none".into()],
+        "priority" => vec![priority_word(issue.priority).to_string()],
+        "label" => issue.labels.iter().map(|l| l.name.clone()).collect(),
+        "project" => issue.project.iter().map(|p| p.name.clone()).collect(),
+        "assignee" if issue.assignee.is_empty() => vec![UNASSIGNED.to_string()],
+        "assignee" => vec![issue.assignee.clone()],
+        _ => Vec::new(),
+    }
 }
 
-fn visible_rows(query: &TextInput, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
-    let labels: Vec<String> = list.iter().map(|i| i.label()).collect();
-    crate::fuzzy::rank(query.as_str(), labels.iter().map(String::as_str))
+/// The issues the filter line leaves, either tab's, top to bottom:
+/// narrowed by its tokens and ranked by its words, then gathered by state
+/// in the list's own order of states (`parse_issues`) — each with the
+/// matched char positions of its `ENG-12 title`.
+fn filtered(query: &str, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
+    let parsed = crate::list_filter::parse(query, FACETS);
+    let mut rows = crate::list_filter::narrow(
+        &parsed,
+        list.len(),
+        |i| list[i].label(),
+        |i, key| facet_values(&list[i], key),
+    );
+    rows.sort_by(|(a, _), (b, _)| {
+        let (a, b) = (&list[*a], &list[*b]);
+        status_rank(&a.status_type)
+            .cmp(&status_rank(&b.status_type))
+            .then_with(|| a.status.cmp(&b.status))
+    });
+    rows
 }
 
+/// [`filtered`]'s rows on `tab`.
+fn on_tab(
+    tab: LinearTab,
+    rows: &[(usize, Vec<usize>)],
+    list: &[LinearIssue],
+) -> Vec<(usize, Vec<usize>)> {
+    rows.iter()
+        .filter(|(i, _)| tab.holds(&list[*i]))
+        .cloned()
+        .collect()
+}
+
+/// The issues the view shows: the tab's, as [`filtered`] leaves them.
+fn visible_rows(view: &LinearView, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
+    on_tab(view.tab, &filtered(&view.query, list), list)
+}
+
+/// The issue under the cursor: `selected` while the view shows it, else
+/// the first row it does show — a tab switch, a filter or a refresh may
+/// have hidden it.
 fn cursor_index(view: &LinearView, list: &[LinearIssue]) -> Option<usize> {
-    if list.is_empty() {
-        return None;
-    }
-    if !has_query(view) {
-        return Some(clamp_selection(view.selected as i64, list.len()));
-    }
-    let visible = visible_rows(&view.query, list);
-    if visible.iter().any(|(i, _)| *i == view.selected) {
-        Some(view.selected)
-    } else {
-        visible.first().map(|(i, _)| *i)
-    }
+    crate::list_filter::cursor_in(&visible_rows(view, list), view.selected)
 }
 
 fn selected_issue(app: &App) -> Option<&LinearIssue> {
@@ -1227,16 +1504,22 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let issues: Vec<LinearIssue> = rows(app, &view.project).to_vec();
     let inflight = app.linear_inflight.contains(&view.project);
     let failed = app.linear_failed.contains(&view.project);
-    let visible = visible_rows(&view.query, &issues);
-    let cursor = cursor_index(view, &issues);
+    let more = app.linear.get(&view.project).is_some_and(|l| l.more);
+    let parsed = crate::list_filter::parse(&view.query, FACETS);
+    // One pass of the filter over both tabs: the tab's rows, and each
+    // tab's count for its label.
+    let all = filtered(&view.query, &issues);
+    let visible = on_tab(view.tab, &all, &issues);
+    let cursor = crate::list_filter::cursor_in(&visible, view.selected);
     let cursor_row = cursor
         .and_then(|c| visible.iter().position(|(i, _)| *i == c))
         .unwrap_or(0);
 
-    let count = if has_query(view) {
-        format!("{}/{}", visible.len(), issues.len())
+    let in_tab = issues.iter().filter(|i| view.tab.holds(i)).count();
+    let count = if parsed.is_active() {
+        format!("{}/{in_tab}", visible.len())
     } else {
-        issues.len().to_string()
+        in_tab.to_string()
     };
     let marked = view.marked.len();
     let head = match &view.mode {
@@ -1252,78 +1535,110 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else {
         head
     };
+    let side_up = view.status_pick.is_some() || view.filter_pick.is_some();
+    let list_focused = list_focused && !side_up;
     let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
-    if let Some(query_area) = row_rect(list_inner, 0) {
-        let line = search_line(&view.query, "type to filter…", query_area, th);
+    // The tabs on the first line, each with how many rows it shows under
+    // the filter; the filter under them, its tokens lit.
+    let tab_row = row_rect(list_inner, 0).unwrap_or_default();
+    let labels: Vec<String> = LinearTab::ALL
+        .iter()
+        .map(|tab| {
+            let n = all.iter().filter(|(i, _)| tab.holds(&issues[*i])).count();
+            format!("{} {n}", tab.name())
+        })
+        .collect();
+    let active = LinearTab::ALL
+        .iter()
+        .position(|t| *t == view.tab)
+        .unwrap_or(0);
+    let (strip, tab_hits) = crate::ui::tab_strip(
+        tab_row.x,
+        tab_row.width,
+        labels.iter().map(String::as_str),
+        active,
+        false,
+        th,
+    );
+    f.render_widget(Paragraph::new(Line::from(strip)), tab_row);
+    let below_tabs = crate::ui::below_first_row(list_inner);
+    if let Some(query_area) = row_rect(below_tabs, 0) {
+        let placeholder = format!(
+            "type to filter… {} by status, priority, label",
+            keys::FILTER.label()
+        );
+        let line = search_line_lit(&view.query, &placeholder, query_area, th, &parsed.spans);
         f.render_widget(Paragraph::new(line), query_area);
     }
-    let rows_area = crate::ui::below_first_row(list_inner);
-    if issues.is_empty() {
+    let mut rows_area = crate::ui::below_first_row(below_tabs);
+    if more && view.tab == LinearTab::Others {
+        if let Some(note) = row_rect(rows_area, 0) {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("showing the {OTHERS_LIMIT} most recently updated"),
+                    Style::default().fg(th.dim),
+                )),
+                note,
+            );
+        }
+        rows_area = crate::ui::below_first_row(rows_area);
+    }
+    if in_tab == 0 {
         let text = if failed {
             "couldn't list Linear issues — check LINEAR_API_KEY and Settings → Linear account"
         } else if inflight || app.linear_tx.is_some() && !app.linear.contains_key(&view.project) {
             "asking Linear…"
-        } else {
+        } else if view.tab == LinearTab::Mine {
             "no open issues assigned to you"
+        } else {
+            "no other open issues in your teams"
         };
         empty_list_row(f, rows_area, text, th);
     } else if visible.is_empty() {
         empty_list_row(f, rows_area, "no issues match", th);
     }
-    let start = window_start(cursor_row, rows_area.height as usize);
-    for (row, (index, positions)) in visible.iter().enumerate().skip(start) {
-        let Some(row_area) = row_rect(rows_area, row - start) else {
-            break;
-        };
-        let issue = &issues[*index];
-        // A marked row is ticked in the accent — it is a choice the keys
-        // made, not a status, so not the `●` a session's STATUS MARK is.
-        let marked = view.marked.contains(&issue.id);
-        let tick = if marked { "✓ " } else { "  " };
-        let full = format!("{tick}{}", issue.label());
-        // The status, behind the mark of where it stands — `◑` started,
-        // `○` not yet, `◌` in the backlog — quieter the further off it is.
-        let (state_mark, state_color) = match issue.status_type.as_str() {
-            "started" => ("◑ ", th.muted),
-            "unstarted" => ("○ ", th.dim),
-            "backlog" => ("◌ ", th.faint),
-            _ => ("", th.dim),
-        };
-        let status = if issue.status.is_empty() {
-            String::new()
+    let budget = (rows_area.width as usize).saturating_sub(2);
+    let now = orion_core::clock::now_secs() as i64;
+    // A header over each status; a row two lines tall when it has a meta
+    // line.
+    let keys: Vec<&str> = visible
+        .iter()
+        .map(|(i, _)| issues[*i].status.as_str())
+        .collect();
+    let entries = sections(&keys, true);
+    let row_h = |v: usize| {
+        if has_meta(&issues[visible[v].0], view.tab) {
+            2
         } else {
-            format!("{state_mark}{}", issue.status)
-        };
-        let budget = (rows_area.width as usize).saturating_sub(2);
-        let status_w = status.chars().count();
-        let text_budget = budget.saturating_sub(if status_w > 0 { status_w + 2 } else { 0 });
-        let label = truncate(&full, text_budget);
-        let pos = visible_positions(positions, &label, &full);
-        let used = label.chars().count();
-        let mut spans = fuzzy_highlight_styled(&label, pos, Style::default(), th);
-        if marked {
-            // The tick alone takes the accent; the label after it keeps
-            // its own style and highlights.
-            if let Some(first) = spans.first().cloned() {
-                if let Some(rest) = first.content.strip_prefix("✓ ") {
-                    let rest = rest.to_string();
-                    spans[0] = Span::styled(
-                        "✓ ",
-                        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-                    );
-                    if !rest.is_empty() {
-                        spans.insert(1, Span::styled(rest, first.style));
-                    }
+            1
+        }
+    };
+    let (list_start, drawn) =
+        layout_sections(&entries, row_h, cursor_row, view.list_start, rows_area);
+    let mut row_rects = Vec::with_capacity(drawn.len());
+    for (entry, rect) in drawn {
+        match entry {
+            ListEntry::Header { first, count } => {
+                let issue = &issues[visible[first].0];
+                let (glyph, color) = state_mark(issue, th);
+                let mark = Span::styled(format!("{glyph} "), Style::default().fg(color));
+                let line = Line::from(list_header(&issue.status, count, Some(mark), th));
+                f.render_widget(Paragraph::new(line), rect);
+            }
+            ListEntry::Row(v) => {
+                let (index, positions) = &visible[v];
+                let issue = &issues[*index];
+                let marked = view.marked.contains(&issue.id);
+                let mut lines = vec![title_spans(issue, positions, marked, budget, th)];
+                if rect.height > 1 {
+                    lines.push(meta_spans(issue, view.tab, budget, now, th));
                 }
+                render_row_lines(f, rect, lines, Some(*index) == cursor, list_focused, th);
+                row_rects.push((*index, rect));
             }
         }
-        if status_w > 0 && used + status_w < budget {
-            spans.push(Span::raw(" ".repeat(budget - used - status_w)));
-            spans.push(Span::styled(status, Style::default().fg(state_color)));
-        }
-        render_row(f, row_area, spans, Some(*index) == cursor, list_focused, th);
     }
 
     let current = cursor.and_then(|i| issues.get(i));
@@ -1359,8 +1674,13 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         ),
         None => Rect::default(),
     };
+    let mut filter_pick = view.filter_pick;
     if let Some(pick) = &view.status_pick {
         draw_status_pick(f, body_inner, pick, th);
+    } else if let Some(pick) = &mut filter_pick {
+        let facets = pick_facets(&issues, view.tab, th);
+        pick.clamp(&facets);
+        crate::list_filter::draw_pick(f, body_inner, &facets, &parsed, pick, th);
     } else {
         let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
         f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), body_inner);
@@ -1375,7 +1695,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     if let Some(Overlay::Linear(v)) = &mut app.overlay {
         v.area = area;
         v.list_area = rows_area;
-        v.cursor_row = cursor_row;
+        v.list_start = list_start;
+        v.row_rects = row_rects;
+        v.tab_hits = tab_hits;
+        v.tab_row = tab_row;
+        v.filter_pick = filter_pick;
         v.body_area = body_inner;
         v.browser_area = browser_area;
         v.view_height = body_inner.height;
@@ -1385,6 +1709,168 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         }
         v.scroll = scroll;
     }
+}
+
+/// Whether [`meta_spans`] has anything to say about an issue on `tab` —
+/// it takes a second line — without building it: rows off screen never
+/// are.
+fn has_meta(issue: &LinearIssue, tab: LinearTab) -> bool {
+    issue.priority != 0
+        || tab == LinearTab::Others
+        || issue.project.is_some()
+        || !issue.labels.is_empty()
+        || !issue.created_at.is_empty()
+}
+
+/// Where an issue's state stands, as a glyph — `◑` started, `○` not yet,
+/// `◌` in the backlog, `◇` in triage — in the state's own Linear colour,
+/// else quieter the further off it is.
+fn state_mark(issue: &LinearIssue, th: Theme) -> (&'static str, ratatui::style::Color) {
+    let (glyph, fallback) = match issue.status_type.as_str() {
+        "started" => ("◑", th.muted),
+        "unstarted" => ("○", th.dim),
+        "backlog" => ("◌", th.faint),
+        "triage" => ("◇", th.warn),
+        _ => ("·", th.dim),
+    };
+    (
+        glyph,
+        crate::theme::hex(&issue.state_color).unwrap_or(fallback),
+    )
+}
+
+/// A priority as Linear draws it: `‼` for urgent, else three bars with
+/// as many lit as it is high. Nothing for no priority.
+fn priority_mark(priority: u8, th: Theme) -> Vec<Span<'static>> {
+    let lit = match priority {
+        1 => return vec![Span::styled("‼", Style::default().fg(th.err))],
+        2 => 3,
+        3 => 2,
+        4 => 1,
+        _ => return vec![Span::styled("···", Style::default().fg(th.faint))],
+    };
+    "▂▄▆"
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let color = if i < lit { th.muted } else { th.faint };
+            Span::styled(c.to_string(), Style::default().fg(color))
+        })
+        .collect()
+}
+
+/// A row's first line: the mark's tick, the state glyph, `ENG-12` dim and
+/// the title, the chars the filter matched lit.
+fn title_spans(
+    issue: &LinearIssue,
+    positions: &[usize],
+    marked: bool,
+    budget: usize,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    // A marked row is ticked in the accent — it is a choice the keys
+    // made, not a status, so not the `●` a session's STATUS MARK is.
+    let mut spans = vec![if marked {
+        Span::styled(
+            "✓ ",
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    }];
+    let (glyph, color) = state_mark(issue, th);
+    spans.push(Span::styled(
+        format!("{glyph} "),
+        Style::default().fg(color),
+    ));
+    // The tick and the state glyph, each with its space.
+    const MARKS_W: usize = 4;
+    let full = issue.label();
+    let label = truncate(&full, budget.saturating_sub(MARKS_W));
+    let positions = visible_positions(positions, &label, &full);
+    let ident_w = issue.identifier.chars().count().min(label.chars().count());
+    let split = positions.partition_point(|&p| p < ident_w);
+    let ident: String = label.chars().take(ident_w).collect();
+    let rest: String = label.chars().skip(ident_w).collect();
+    spans.extend(fuzzy_highlight_styled(
+        &ident,
+        &positions[..split],
+        Style::default().fg(th.dim),
+        th,
+    ));
+    let rest_positions: Vec<usize> = positions[split..].iter().map(|p| p - ident_w).collect();
+    spans.extend(fuzzy_highlight_styled(
+        &rest,
+        &rest_positions,
+        Style::default().fg(th.text),
+        th,
+    ));
+    spans
+}
+
+/// A row's second line: priority, project and labels in Linear's colours,
+/// the assignee on `Other issues`, and the day it was opened. What does
+/// not fit drops from the right.
+fn meta_spans(
+    issue: &LinearIssue,
+    tab: LinearTab,
+    budget: usize,
+    now: i64,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(th.dim);
+    let dot = |tag: &LinearTag| {
+        let color = crate::theme::hex(&tag.color).unwrap_or(th.muted);
+        vec![
+            Span::styled("● ", Style::default().fg(color)),
+            Span::styled(tag.name.clone(), Style::default().fg(th.muted)),
+        ]
+    };
+    let mut parts: Vec<Vec<Span<'static>>> = Vec::new();
+    if issue.priority != 0 {
+        let mut part = priority_mark(issue.priority, th);
+        part.push(Span::styled(
+            format!(" {}", priority_word(issue.priority)),
+            dim,
+        ));
+        parts.push(part);
+    }
+    if tab == LinearTab::Others {
+        let who = if issue.assignee.is_empty() {
+            UNASSIGNED.to_string()
+        } else {
+            issue.assignee.clone()
+        };
+        parts.push(vec![Span::styled(who, dim)]);
+    }
+    if let Some(project) = &issue.project {
+        parts.push(dot(project));
+    }
+    parts.extend(issue.labels.iter().map(dot));
+    if let Some(day) = short_date(&issue.created_at, now) {
+        parts.push(vec![Span::styled(day, dim)]);
+    }
+    fit_parts(parts, budget, th)
+}
+
+/// `Oct 5` for an RFC 3339 stamp this year, `Oct 5 2025` for one before.
+fn short_date(stamp: &str, now: i64) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut ymd = stamp
+        .get(..10)?
+        .splitn(3, '-')
+        .map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    let month = MONTHS.get(usize::try_from(m - 1).ok()?)?;
+    const SECS_PER_DAY: i64 = 86_400;
+    let (this_year, _, _) = orion_core::crashlog::civil_from_days(now.div_euclid(SECS_PER_DAY));
+    Some(if y >= this_year {
+        format!("{month} {d}")
+    } else {
+        format!("{month} {d} {y}")
+    })
 }
 
 /// The status picker in the reading pane's place: what it is for, then a
@@ -1450,45 +1936,67 @@ fn body_lines(issue: &LinearIssue, width: usize, th: Theme) -> Vec<Line<'static>
 
 // ---- Linear HTTP (key never on argv) ----
 
-/// What each listed issue is read with: the row, the reading pane, and
-/// its team's workflow states for `⌘S` — the same fields whoever's
-/// issues are asked for.
-const ISSUE_FIELDS: &str = "id identifier title url description priorityLabel state { name type } \
-    team { id states { nodes { id name type position } } }";
+/// What each listed issue is read with: the row and its meta line, the
+/// reading pane, and its team's workflow states for `⌘S` — the same
+/// fields whoever's issues are asked for.
+const ISSUE_FIELDS: &str = "id identifier title url description priority createdAt updatedAt \
+    state { name type color } labels { nodes { name color } } project { name color } \
+    assignee { displayName } \
+    team { id states { nodes { id name type position color } } }";
 
-async fn fetch_assigned(dir: &Path, email: &str) -> Result<Assigned, String> {
+/// How many of the configured user's issues one ask lists.
+const MINE_LIMIT: usize = 100;
+/// How many of the rest of their teams' — Linear's most a page holds, the
+/// most recently touched first.
+pub const OTHERS_LIMIT: usize = 250;
+
+/// Not done and not canceled: the open issues.
+const OPEN_STATES: &str = r#"state: { type: { nin: ["completed", "canceled"] } }"#;
+
+/// Both tabs' issues in one ask, as two aliased lists: `mine`, assigned to
+/// the key's owner — or to `email`, when Settings → Linear account names
+/// someone — and `others`, open issues in that person's teams assigned to
+/// someone else or to nobody.
+async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
-    let (query, variables) = if email.is_empty() {
+    let (query, variables) = lists_query(email);
+    let json = graphql(&key, &query, variables).await?;
+    parse_lists(&json)
+}
+
+/// [`fetch_lists`]' query and its variables.
+fn lists_query(email: &str) -> (String, serde_json::Value) {
+    // `me` picks out the configured user — as an assignee, and among a
+    // team's members.
+    let (head, me, not_me, variables) = if email.is_empty() {
         (
-            format!(
-                r#"query {{
-              viewer {{
-                assignedIssues(first: 100, filter: {{ state: {{ type: {{ nin: ["completed", "canceled"] }} }} }}) {{
-                  nodes {{ {ISSUE_FIELDS} }}
-                }}
-              }}
-            }}"#
-            ),
+            "query",
+            "isMe: { eq: true }",
+            "isMe: { eq: false }",
             serde_json::json!({}),
         )
     } else {
         (
-            format!(
-                r#"query($email: String!) {{
-              issues(first: 100, filter: {{
-                assignee: {{ email: {{ eq: $email }} }}
-                state: {{ type: {{ nin: ["completed", "canceled"] }} }}
-              }}) {{
-                nodes {{ {ISSUE_FIELDS} }}
-              }}
-            }}"#
-            ),
+            "query($email: String!)",
+            "email: { eq: $email }",
+            "email: { neq: $email }",
             serde_json::json!({ "email": email }),
         )
     };
-    let json = graphql(&key, &query, variables).await?;
-    let issues = parse_issues(&json, email.is_empty())?;
-    Ok((issues, parse_states(&json, email.is_empty())))
+    let query = format!(
+        r#"{head} {{
+          mine: issues(first: {MINE_LIMIT}, orderBy: updatedAt, filter: {{
+            assignee: {{ {me} }}
+            {OPEN_STATES}
+          }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
+          others: issues(first: {OTHERS_LIMIT}, orderBy: updatedAt, filter: {{
+            team: {{ members: {{ some: {{ {me} }} }} }}
+            or: [{{ assignee: {{ null: true }} }}, {{ assignee: {{ {not_me} }} }}]
+            {OPEN_STATES}
+          }}) {{ nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage }} }}
+        }}"#
+    );
+    (query, variables)
 }
 
 /// Move issue `issue_id` to the workflow state `state_id`.
@@ -1517,25 +2025,31 @@ fn mutation_result(json: &serde_json::Value, field: &str, refused: &str) -> Resu
     Err(graphql_error(json).unwrap_or_else(|| refused.to_string()))
 }
 
-/// The issues' nodes in a [`fetch_assigned`] answer: the viewer's own, or
-/// an assignee's by email.
-fn issue_nodes(json: &serde_json::Value, viewer: bool) -> Option<&Vec<serde_json::Value>> {
-    let at = if viewer {
-        "/data/viewer/assignedIssues/nodes"
-    } else {
-        "/data/issues/nodes"
-    };
-    json.pointer(at)?.as_array()
+/// The issues' nodes in a [`fetch_lists`] answer, each with whether it
+/// came in the `mine` list. None when the answer has neither list.
+fn issue_nodes(json: &serde_json::Value) -> Option<Vec<(&serde_json::Value, bool)>> {
+    let mine = json.pointer("/data/mine/nodes").and_then(|v| v.as_array());
+    let others = json
+        .pointer("/data/others/nodes")
+        .and_then(|v| v.as_array());
+    if mine.is_none() && others.is_none() {
+        return None;
+    }
+    let mut nodes = Vec::new();
+    for (list, is_mine) in [(mine, true), (others, false)] {
+        nodes.extend(list.into_iter().flatten().map(|n| (n, is_mine)));
+    }
+    Some(nodes)
 }
 
 /// Each team's workflow states, from the issues' `team` fields, in
 /// Linear's `position` order.
-fn parse_states(json: &serde_json::Value, viewer: bool) -> HashMap<String, Vec<LinearState>> {
+fn parse_states(json: &serde_json::Value) -> HashMap<String, Vec<LinearState>> {
     let mut out: HashMap<String, Vec<LinearState>> = HashMap::new();
-    for team in issue_nodes(json, viewer)
+    for team in issue_nodes(json)
         .into_iter()
         .flatten()
-        .filter_map(|n| n.get("team"))
+        .filter_map(|(n, _)| n.get("team"))
     {
         let Some(id) = team.get("id").and_then(|v| v.as_str()) else {
             continue;
@@ -1556,6 +2070,11 @@ fn parse_states(json: &serde_json::Value, viewer: bool) -> HashMap<String, Vec<L
                         name: s.get("name")?.as_str()?.to_string(),
                         kind: s
                             .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        color: s
+                            .get("color")
                             .and_then(|t| t.as_str())
                             .unwrap_or_default()
                             .to_string(),
@@ -1697,25 +2216,88 @@ async fn curl_graphql(
         .map_err(|_| "Linear returned something that wasn't JSON".into())
 }
 
-fn parse_issues(json: &serde_json::Value, viewer: bool) -> Result<Vec<LinearIssue>, String> {
+/// A [`fetch_lists`] answer as the list keeps it: both lists' issues,
+/// their teams' states, and whether Linear had more of the others.
+fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
+    Ok(LinearList {
+        list: parse_issues(json)?,
+        states: parse_states(json),
+        more: json
+            .pointer("/data/others/pageInfo/hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+/// The issues of both lists, in the order the LINEAR VIEW's sections go:
+/// by where their state stands (started, not yet, the backlog, the
+/// rest), the state's name, then priority — urgent first, none last —
+/// and the most recently touched first.
+fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
     if let Some(err) = graphql_error(json) {
         return Err(err);
     }
-    let Some(nodes) = issue_nodes(json, viewer) else {
+    let Some(nodes) = issue_nodes(json) else {
         return Err("Linear returned no issue list".into());
     };
-    let mut issues: Vec<LinearIssue> = nodes.iter().filter_map(issue_from).collect();
+    let mut issues: Vec<LinearIssue> = nodes
+        .iter()
+        .filter_map(|(node, mine)| {
+            issue_from(node).map(|issue| LinearIssue {
+                mine: *mine,
+                ..issue
+            })
+        })
+        .collect();
     issues.sort_by(|a, b| {
         status_rank(&a.status_type)
             .cmp(&status_rank(&b.status_type))
             .then_with(|| a.status.cmp(&b.status))
+            .then_with(|| priority_rank(a.priority).cmp(&priority_rank(b.priority)))
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.identifier.cmp(&b.identifier))
     });
     Ok(issues)
 }
 
+/// A node's `{ name color }` as a tag; None without a name.
+fn tag_at(value: &serde_json::Value) -> Option<LinearTag> {
+    let name = value.get("name")?.as_str()?.to_string();
+    let color = value
+        .get("color")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+    (!name.is_empty()).then_some(LinearTag { name, color })
+}
+
 fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
+    let text = |path: &str| {
+        value
+            .pointer(path)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     Some(LinearIssue {
+        priority: value
+            .get("priority")
+            .and_then(|p| p.as_u64())
+            .unwrap_or(0)
+            .min(4) as u8,
+        state_color: text("/state/color"),
+        labels: value
+            .pointer("/labels/nodes")
+            .and_then(|n| n.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(tag_at)
+            .collect(),
+        project: value.get("project").and_then(tag_at),
+        assignee: text("/assignee/displayName"),
+        mine: false,
+        created_at: text("/createdAt"),
+        updated_at: text("/updatedAt"),
         id: value.get("id")?.as_str()?.to_string(),
         identifier: value.get("identifier")?.as_str()?.to_string(),
         title: value
@@ -1726,11 +2308,6 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
         url: value.get("url")?.as_str()?.to_string(),
         description: value
             .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        priority: value
-            .get("priorityLabel")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -1970,10 +2547,17 @@ pub(crate) mod tests {
             title: title.into(),
             url: format!("https://linear.app/x/issue/{ident}"),
             description: String::new(),
-            priority: String::new(),
             status: "In Progress".into(),
             status_type: "started".into(),
             team_id: "t1".into(),
+            priority: 0,
+            state_color: String::new(),
+            labels: Vec::new(),
+            project: None,
+            assignee: String::new(),
+            mine: true,
+            created_at: String::new(),
+            updated_at: String::new(),
         }
     }
 
@@ -1982,7 +2566,7 @@ pub(crate) mod tests {
     /// the row says so before Linear answers, and a refusal puts it back.
     #[test]
     fn ctrl_s_moves_an_issue_to_another_state() {
-        let json = serde_json::json!({"data": {"viewer": {"assignedIssues": {"nodes": [
+        let json = serde_json::json!({"data": {"mine": {"nodes": [
             {"id": "1", "identifier": "ENG-12", "title": "Login", "url": "https://linear.app/x/issue/ENG-12",
              "state": {"name": "In Progress", "type": "started"},
              "team": {"id": "t1", "states": {"nodes": [
@@ -1990,10 +2574,10 @@ pub(crate) mod tests {
                 {"id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0},
                 {"id": "s2", "name": "In Progress", "type": "started", "position": 2.0}
              ]}}}
-        ]}}}});
-        let issues = parse_issues(&json, true).unwrap();
+        ]}}});
+        let issues = parse_issues(&json).unwrap();
         assert_eq!(issues[0].team_id, "t1");
-        let states = parse_states(&json, true);
+        let states = parse_states(&json);
         let names: Vec<&str> = states["t1"].iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Todo", "In Progress", "Done"]);
 
@@ -2004,6 +2588,7 @@ pub(crate) mod tests {
             LinearList {
                 list: issues,
                 states,
+                more: false,
             },
         );
         app.overlay = Some(Overlay::Linear(LinearView::new(
@@ -2041,6 +2626,7 @@ pub(crate) mod tests {
                     why: "not allowed".into(),
                     status: "In Progress".into(),
                     status_type: "started".into(),
+                    state_color: String::new(),
                 }),
             },
         );
@@ -2140,6 +2726,7 @@ pub(crate) mod tests {
             head: format!("branch-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }
     }
 
@@ -2171,6 +2758,7 @@ pub(crate) mod tests {
                     issue("3", "ENG-3", "Signup"),
                 ],
                 states: HashMap::new(),
+                more: false,
             },
         );
         let now = std::time::Instant::now();
@@ -2649,24 +3237,359 @@ pub(crate) mod tests {
     fn parse_viewer_list() {
         let json = serde_json::json!({
             "data": {
-                "viewer": {
-                    "assignedIssues": {
-                        "nodes": [{
-                            "id": "abc",
-                            "identifier": "ENG-1",
-                            "title": "T",
-                            "url": "https://linear.app/x/issue/ENG-1",
-                            "description": "d",
-                            "priorityLabel": "High",
-                            "state": { "name": "Todo", "type": "unstarted" }
-                        }]
-                    }
+                "mine": {
+                    "nodes": [{
+                        "id": "abc",
+                        "identifier": "ENG-1",
+                        "title": "T",
+                        "url": "https://linear.app/x/issue/ENG-1",
+                        "description": "d",
+                        "priority": 2,
+                        "state": { "name": "Todo", "type": "unstarted" }
+                    }]
                 }
             }
         });
-        let list = parse_issues(&json, true).unwrap();
+        let list = parse_issues(&json).unwrap();
         assert_eq!(list[0].identifier, "ENG-1");
         assert_eq!(list[0].status_type, "unstarted");
-        assert_eq!(list[0].priority, "High");
+        assert_eq!(priority_word(list[0].priority), "High");
+        assert!(list[0].mine);
+    }
+
+    /// An issue with a priority, labels and a status of its own.
+    fn rich(id: &str, ident: &str, title: &str, status: (&str, &str), priority: u8) -> LinearIssue {
+        LinearIssue {
+            status: status.0.into(),
+            status_type: status.1.into(),
+            priority,
+            labels: vec![LinearTag {
+                name: "Export PDF".into(),
+                color: "#26b5ce".into(),
+            }],
+            created_at: "2026-10-05T22:44:07.232Z".into(),
+            ..issue(id, ident, title)
+        }
+    }
+
+    /// An app with `list` as the project's issues and the LINEAR VIEW up.
+    fn view_on(list: Vec<LinearIssue>) -> App {
+        let mut app = App::new();
+        let project = ProjectId("p1".into());
+        app.linear.insert(
+            project.clone(),
+            LinearList {
+                list,
+                states: HashMap::new(),
+                more: false,
+            },
+        );
+        app.overlay = Some(Overlay::Linear(LinearView::new(
+            project,
+            "demo".into(),
+            PathBuf::from("/nonexistent"),
+            LinearMode::Browse,
+        )));
+        app
+    }
+
+    fn the_view(app: &App) -> &LinearView {
+        match &app.overlay {
+            Some(Overlay::Linear(v)) => v,
+            other => panic!("expected the LINEAR VIEW, got {other:?}"),
+        }
+    }
+
+    fn shot(app: &mut App, w: u16, h: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            let Some(Overlay::Linear(v)) = app.overlay.clone() else {
+                panic!("no LINEAR VIEW");
+            };
+            draw(f, app, &v, app.theme, false);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn selected_id(app: &App) -> Option<String> {
+        selected_issue(app).map(|i| i.identifier.clone())
+    }
+
+    /// Both lists come in one answer: the configured user's (`mine`) and
+    /// the rest of their teams' (`others`), each issue knowing which, with
+    /// its priority, labels, project, assignee and state colour — sorted
+    /// by state, then priority (none last), then the latest touched.
+    #[test]
+    fn both_lists_parse_with_their_meta() {
+        let json = serde_json::json!({"data": {
+            "mine": {"nodes": [
+                {"id": "1", "identifier": "ENG-1", "title": "Low", "url": "https://linear.app/x/issue/ENG-1",
+                 "priority": 4, "updatedAt": "2026-10-01T00:00:00Z",
+                 "state": {"name": "Todo", "type": "unstarted", "color": "#26b5ce"}},
+                {"id": "2", "identifier": "ENG-2", "title": "Urgent", "url": "https://linear.app/x/issue/ENG-2",
+                 "priority": 1, "createdAt": "2026-10-05T22:44:07.232Z",
+                 "labels": {"nodes": [{"name": "Export PDF", "color": "#26b5ce"}, {"name": ""}]},
+                 "project": {"name": "Exports", "color": "#f2c94c"},
+                 "assignee": {"displayName": "me"},
+                 "state": {"name": "Todo", "type": "unstarted"}}
+            ]},
+            "others": {"nodes": [
+                {"id": "3", "identifier": "ENG-3", "title": "Theirs", "url": "https://linear.app/x/issue/ENG-3",
+                 "priority": 0, "assignee": null,
+                 "state": {"name": "In Progress", "type": "started"}}
+            ], "pageInfo": {"hasNextPage": true}}
+        }});
+        let fetched = parse_lists(&json).unwrap();
+        assert!(fetched.more);
+        let ids: Vec<&str> = fetched.list.iter().map(|i| i.identifier.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["ENG-3", "ENG-2", "ENG-1"],
+            "started first, then urgent before low"
+        );
+        let urgent = &fetched.list[1];
+        assert!(urgent.mine);
+        assert_eq!(urgent.priority, 1);
+        assert_eq!(urgent.labels.len(), 1, "a nameless label is dropped");
+        assert_eq!(urgent.project.as_ref().unwrap().name, "Exports");
+        assert_eq!(urgent.assignee, "me");
+        assert_eq!(fetched.list[2].state_color, "#26b5ce");
+        assert!(!fetched.list[0].mine);
+        assert_eq!(fetched.list[0].assignee, "");
+        // An answer with neither list is a miss.
+        assert!(parse_lists(&serde_json::json!({"data": {}})).is_err());
+    }
+
+    /// The one ask names both lists; with Settings → Linear account set,
+    /// that person stands in for the key's owner on both.
+    #[test]
+    fn the_lists_query_asks_for_mine_and_the_teams_others() {
+        let (query, vars) = lists_query("");
+        assert!(query.contains("mine: issues(first: 100"), "{query}");
+        assert!(query.contains("others: issues(first: 250"), "{query}");
+        assert!(
+            query.contains("assignee: { isMe: { eq: true } }"),
+            "{query}"
+        );
+        assert!(
+            query.contains("members: { some: { isMe: { eq: true } } }"),
+            "{query}"
+        );
+        assert!(query.contains("{ assignee: { null: true } }"), "{query}");
+        assert!(query.contains("pageInfo { hasNextPage }"), "{query}");
+        assert_eq!(vars, serde_json::json!({}));
+        let (query, vars) = lists_query("sam@x.co");
+        assert!(query.starts_with("query($email: String!)"), "{query}");
+        assert!(query.contains("email: { neq: $email }"), "{query}");
+        assert!(!query.contains("isMe"), "{query}");
+        assert_eq!(vars, serde_json::json!({"email": "sam@x.co"}));
+    }
+
+    /// The view opens on `My issues`, grouped under a header per status
+    /// with its count, each row reading its priority, labels and day
+    /// under its title; ↓ skips the headers. `⇧→` and a click on the tab
+    /// show `Other issues`, whose rows also say whose they are.
+    #[test]
+    fn tabs_split_mine_from_others_and_sections_group_by_status() {
+        let mut theirs = rich("4", "ENG-4", "Their bug", ("Todo", "unstarted"), 3);
+        theirs.mine = false;
+        theirs.assignee = "Sam".into();
+        let mut app = view_on(vec![
+            rich("1", "ENG-1", "Started one", ("In Progress", "started"), 2),
+            rich("2", "ENG-2", "Todo one", ("Todo", "unstarted"), 1),
+            rich("3", "ENG-3", "Todo two", ("Todo", "unstarted"), 0),
+            theirs,
+        ]);
+        let screen = shot(&mut app, 200, 40);
+        assert!(screen.contains("My issues 3"), "{screen}");
+        assert!(screen.contains("Other issues 1"), "{screen}");
+        let at = |needle: &str| {
+            screen
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from\n{screen}"))
+        };
+        assert!(at("IN PROGRESS 1") < at("ENG-1 Started one"), "{screen}");
+        assert!(at("ENG-1 Started one") < at("TODO 2"), "{screen}");
+        assert!(at("TODO 2") < at("ENG-2 Todo one"), "{screen}");
+        assert!(
+            screen.contains("▂▄▆ High · ● Export PDF · Oct 5"),
+            "{screen}"
+        );
+        assert!(screen.contains("‼ Urgent"), "{screen}");
+        assert!(!screen.contains("Their bug"), "{screen}");
+
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
+        handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut Vec::new());
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
+
+        let shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
+        handle_key(&mut app, shift_right, &mut Vec::new());
+        assert_eq!(the_view(&app).tab, LinearTab::Others);
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-4"));
+        let screen = shot(&mut app, 200, 40);
+        assert!(
+            screen.contains("▂▄▆ Medium · Sam · ● Export PDF"),
+            "{screen}"
+        );
+        assert!(!screen.contains("Started one"), "{screen}");
+
+        // A click on the first tab brings `My issues` back.
+        let (from, _) = the_view(&app).tab_hits[0];
+        let row = the_view(&app).tab_row;
+        let at = Position::new(from + 1, row.y);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, click, at, &mut Vec::new());
+        assert_eq!(the_view(&app).tab, LinearTab::Mine);
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
+    }
+
+    /// Tokens narrow by status, priority, label, project and assignee —
+    /// beside the fuzzy words — within the tab showing.
+    #[test]
+    fn tokens_narrow_the_issues_by_facet() {
+        let mut theirs = rich("4", "ENG-4", "Their bug", ("Todo", "unstarted"), 2);
+        theirs.mine = false;
+        theirs.assignee = "Sam".into();
+        let list = vec![
+            rich("1", "ENG-1", "Started one", ("In Progress", "started"), 2),
+            rich("2", "ENG-2", "Todo one", ("Todo", "unstarted"), 1),
+            LinearIssue {
+                labels: vec![LinearTag {
+                    name: "bug".into(),
+                    color: String::new(),
+                }],
+                ..rich("3", "ENG-3", "Todo two", ("Todo", "unstarted"), 0)
+            },
+            theirs,
+        ];
+        let shown = |tab: LinearTab, q: &str| -> Vec<String> {
+            on_tab(tab, &filtered(q, &list), &list)
+                .iter()
+                .map(|(i, _)| list[*i].identifier.clone())
+                .collect()
+        };
+        assert_eq!(shown(LinearTab::Mine, "p:high"), ["ENG-1"]);
+        assert_eq!(
+            shown(LinearTab::Mine, "p:urgent p:high"),
+            ["ENG-1", "ENG-2"]
+        );
+        assert_eq!(shown(LinearTab::Mine, "p:none"), ["ENG-3"]);
+        assert_eq!(shown(LinearTab::Mine, "status:todo label:bug"), ["ENG-3"]);
+        assert_eq!(shown(LinearTab::Mine, "status:in-progress"), ["ENG-1"]);
+        assert_eq!(
+            shown(LinearTab::Mine, "label:export -label:bug"),
+            ["ENG-1", "ENG-2"]
+        );
+        assert_eq!(shown(LinearTab::Others, "assignee:sam p:high"), ["ENG-4"]);
+        assert_eq!(shown(LinearTab::Mine, "two"), ["ENG-3"]);
+    }
+
+    /// `⌘F` puts the FILTER PICK in the reading pane's place; `space` on a
+    /// priority writes `priority:` into the filter line, the rows and the
+    /// tab's count narrowing behind it, and Esc puts it away.
+    #[test]
+    fn the_filter_pick_writes_a_priority_token() {
+        let mut app = view_on(vec![
+            rich("1", "ENG-1", "Started one", ("In Progress", "started"), 2),
+            rich("2", "ENG-2", "Todo one", ("Todo", "unstarted"), 1),
+        ]);
+        let mut out = Vec::new();
+        let cmd_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER);
+        handle_key(&mut app, cmd_f, &mut out);
+        assert!(the_view(&app).filter_pick.is_some());
+        crate::hints::assert_hints_from(&hints(the_view(&app)), crate::list_filter::keys::ALL);
+        let screen = shot(&mut app, 200, 40);
+        assert!(screen.contains("Status"), "{screen}");
+        assert!(screen.contains("Priority"), "{screen}");
+        // Status → Priority; Urgent is its first value.
+        handle_key(&mut app, KeyEvent::from(KeyCode::Right), &mut out);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char(' ')), &mut out);
+        assert_eq!(the_view(&app).query.as_str(), "priority:\"Urgent\"");
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
+        let screen = shot(&mut app, 200, 40);
+        assert!(screen.contains("My issues 1"), "{screen}");
+        assert!(screen.contains("(1/2)"), "{screen}");
+        handle_key(&mut app, KeyEvent::from(KeyCode::Esc), &mut out);
+        assert!(the_view(&app).filter_pick.is_none());
+        assert_eq!(the_view(&app).query.as_str(), "priority:\"Urgent\"");
+        assert!(
+            matches!(app.overlay, Some(Overlay::Linear(_))),
+            "Esc closed the picker only"
+        );
+    }
+
+    /// A click on a row's meta line selects that row; no line of the list
+    /// runs past a narrow pane.
+    #[test]
+    fn rows_are_two_lines_and_fit_a_narrow_pane() {
+        let mut app = view_on(vec![
+            rich(
+                "1",
+                "ENG-1",
+                "A first issue with a long title",
+                ("Todo", "unstarted"),
+                2,
+            ),
+            rich("2", "ENG-2", "A second one", ("Todo", "unstarted"), 3),
+        ]);
+        shot(&mut app, 200, 40);
+        let (index, rect) = the_view(&app).row_rects[1];
+        assert_eq!(rect.height, 2);
+        let at = Position::new(rect.x + 2, rect.y + 1);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, click, at, &mut Vec::new());
+        assert_eq!(
+            selected_issue(&app).map(|i| i.id.clone()),
+            Some(rows(&app, &the_view(&app).project)[index].id.clone())
+        );
+        for w in [60u16, 90, 140] {
+            shot(&mut app, w, 30);
+            let budget = (the_view(&app).list_area.width as usize).saturating_sub(2);
+            for issue in rows(&app, &the_view(&app).project) {
+                let width = |spans: &[Span]| -> usize {
+                    spans.iter().map(|s| s.content.chars().count()).sum()
+                };
+                let meta = meta_spans(issue, LinearTab::Others, budget, 0, app.theme);
+                assert!(width(&meta) <= budget, "meta at {w}");
+                let title = title_spans(issue, &[], true, budget, app.theme);
+                assert!(width(&title) <= budget, "title at {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_dates_name_the_year_only_when_it_is_not_this_one() {
+        let oct_2026 = 1_791_000_000; // 2026-10-03
+        assert_eq!(
+            short_date("2026-10-05T22:44:07Z", oct_2026).as_deref(),
+            Some("Oct 5")
+        );
+        assert_eq!(
+            short_date("2025-01-31T00:00:00Z", oct_2026).as_deref(),
+            Some("Jan 31 2025")
+        );
+        assert_eq!(short_date("", oct_2026), None);
+        assert_eq!(short_date("2026-13-01T00:00:00Z", oct_2026), None);
     }
 }

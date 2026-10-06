@@ -384,6 +384,7 @@ mod tests {
             head: format!("head-{number}"),
             mine: false,
             head_sha: String::new(),
+            meta: Default::default(),
         }
     }
 
