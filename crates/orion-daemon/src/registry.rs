@@ -2439,6 +2439,128 @@ impl Daemon {
         }
     }
 
+    /// Bring back the agents the boot sweep found cut off mid-turn (`ids`,
+    /// from `Store::sweep_disconnected`): a daemon restart — an upgrade,
+    /// `orion kill` — took their PTYs, and they would otherwise sit dead
+    /// until someone attached and typed "continue". Each is resumed on
+    /// its stored session id, opening on [`RESUME_INTERRUPTED_PROMPT`]
+    /// where its CLI takes one, [`PREWARM_STAGGER`] apart like the
+    /// prewarm sweep. Off the caller's task: every boot is a fork/exec.
+    pub fn resume_interrupted(self: &Arc<Self>, ids: Vec<AgentId>) {
+        if ids.is_empty() {
+            return;
+        }
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            for id in ids {
+                if daemon.shutdown.is_cancelled() {
+                    return;
+                }
+                let worker = daemon.clone();
+                let target = id.clone();
+                let resumed =
+                    tokio::task::spawn_blocking(move || worker.resume_interrupted_agent(&target))
+                        .await;
+                match resumed {
+                    Ok(Ok(true)) => {
+                        tracing::info!(agent = %id, "resumed a session the restart interrupted")
+                    }
+                    Ok(Ok(false)) => continue,
+                    Ok(Err(e)) => {
+                        tracing::warn!(agent = %id, error = %e, "resume after restart failed")
+                    }
+                    Err(e) => {
+                        tracing::warn!(agent = %id, error = %e, "resume after restart panicked")
+                    }
+                }
+                tokio::time::sleep(PREWARM_STAGGER).await;
+            }
+        });
+    }
+
+    /// One agent of [`Self::resume_interrupted`]. False when there is
+    /// nothing to bring back: archived, a Cloud row, no session id to
+    /// resume, or already running (an Attach got there first).
+    fn resume_interrupted_agent(self: &Arc<Self>, id: &AgentId) -> Result<bool> {
+        // `ensure_session`'s gate: an Attach racing this boot must not
+        // fork a second CLI for the same row.
+        let _gate = self.spawn_gate.lock().unwrap();
+        if self.is_alive(&SessionRef::Agent(id.clone())) {
+            return Ok(false);
+        }
+        let Some(agent) = self.store.get_agent(id)? else {
+            return Ok(false);
+        };
+        if agent.archived || agent.cloud_session_id.is_some() || agent.session_id.is_none() {
+            return Ok(false);
+        }
+        let worktree = self
+            .store
+            .get_worktree(&agent.worktree_id)?
+            .context("worktree not found")?;
+        let harness = resolve_harness(agent.kind, agent.custom_harness.as_deref())?;
+        // A Claude transcript gone from disk boots the spawn fresh, and a
+        // fresh session has no request to continue: leave it for an attach.
+        if agent
+            .session_id
+            .as_deref()
+            .is_some_and(|sid| self.claude_transcript_missing(&agent, &harness, sid))
+        {
+            return Ok(false);
+        }
+        // Only CLIs verified to open a resumed session on a trailing prompt
+        // get one (the relocation notice's flag); the rest come back at
+        // their input box, still `disconnected` until their next turn.
+        let prompt = harness
+            .relocation_prompt
+            .then_some(RESUME_INTERRUPTED_PROMPT);
+        if prompt.is_some() {
+            // Working from the moment it boots, as a launch with a task is
+            // (see `create_agent`): persisted first, so a spawn failure can
+            // put the row back, and seeded with the launch reprieve.
+            self.apply_status_effects(id, vec![Effect::SetStatus(AgentStatus::Running)]);
+            self.status_machines
+                .lock()
+                .unwrap()
+                .insert(id.clone(), AgentStatusMachine::launching());
+        }
+        let spawned = self.spawn_agent_session_with(
+            &agent,
+            &worktree,
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            None,
+            prompt,
+            orion_core::harness::AgentMode::Edit,
+        );
+        if let Err(e) = spawned {
+            if prompt.is_some() {
+                self.status_machines.lock().unwrap().remove(id);
+                self.apply_status_effects(id, vec![Effect::SetStatus(AgentStatus::Disconnected)]);
+            }
+            return Err(e);
+        }
+        self.try_broadcast_agent(id);
+        Ok(true)
+    }
+
+    /// Whether `sid` is a Claude session with no transcript behind it, so
+    /// a resume of it would find "No conversation found". Looked for where
+    /// the harness keeps its transcripts, a second account's own config
+    /// dir included (`claude_projects_roots`). An override (tests) never
+    /// resumes, so it skips the look.
+    fn claude_transcript_missing(
+        &self,
+        agent: &Agent,
+        harness: &HarnessDescriptor,
+        sid: &str,
+    ) -> bool {
+        std::env::var_os(env::AGENT_CMD).is_none()
+            && self
+                .claude_projects_roots(agent, harness)
+                .is_some_and(|roots| claude_transcript_exists(&roots, sid) == Some(false))
+    }
+
     pub(crate) fn spawn_agent_session(
         self: &Arc<Self>,
         agent: &Agent,
@@ -2576,20 +2698,12 @@ impl Daemon {
         // A Claude session id with no transcript behind it — a CLI nobody
         // sent a prompt, or a session Claude's cleanup has deleted — resumes
         // into "No conversation found" and a dead pane: boot fresh instead.
-        // Looked for where the harness keeps its transcripts, a second
-        // account's own config dir included (`claude_projects_roots`). An
-        // override (tests) never resumes, so it skips the look.
         let unresumable;
         let agent = match agent.session_id.as_deref() {
             Some(sid)
                 if cloud_task.is_none()
-                    && cmd_override.is_none()
                     && attach.is_none()
-                    && self
-                        .claude_projects_roots(agent, &harness)
-                        .is_some_and(|roots| {
-                            claude_transcript_exists(&roots, sid) == Some(false)
-                        }) =>
+                    && self.claude_transcript_missing(agent, &harness, sid) =>
             {
                 tracing::info!(agent = %agent.id, session = %sid, "no Claude transcript for the session — spawning fresh");
                 if let Err(e) = self.store.set_agent_session_id(&agent.id, None) {
@@ -3265,6 +3379,11 @@ session into it once your current turn ends. So when the command succeeds, end y
 tell the user in one line that the session is moving into the worktree, and make no further tool \
 calls or edits — you will be resumed inside the worktree with a prompt to carry on there. If the \
 command fails, report the error and carry on in the current checkout.";
+
+/// The first prompt of a session [`Daemon::resume_interrupted`] brings back.
+const RESUME_INTERRUPTED_PROMPT: &str =
+    "[orion] orion restarted (an upgrade or `orion kill`) and stopped this session mid-turn. \
+     Continue the user's most recent request from where you left off.";
 
 /// The prompt a relocated session is resumed with: it names the checkout
 /// the process now runs in and asks for the work to pick back up there, so
@@ -5090,6 +5209,88 @@ mod tests {
         };
         daemon.store.insert_worktree(&worktree).unwrap();
         (dir, worktree)
+    }
+
+    /// A daemon restart (an upgrade, `orion kill`) takes every PTY: the
+    /// rows the boot sweep finds cut off mid-turn come back on their own,
+    /// working, instead of waiting for an attach and a typed "continue".
+    #[tokio::test]
+    async fn a_restart_resumes_the_agents_it_cut_off_mid_turn() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        // `/bin/cat` stands in for the CLI: spawned verbatim, it blocks on
+        // the PTY instead of running anything.
+        let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
+        let row = |name: &str, status, session_id: Option<&str>, archived| Agent {
+            id: AgentId(format!("agent-{name}")),
+            worktree_id: worktree.id.clone(),
+            name: name.into(),
+            status,
+            archived,
+            archived_at: 0,
+            unseen: false,
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: session_id.map(String::from),
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: false,
+            issue_url: None,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        };
+        for agent in [
+            row("working", AgentStatus::Running, Some("sid-1"), false),
+            row("asking", AgentStatus::NeedsFeedback, Some("sid-2"), false),
+            row("done", AgentStatus::Finished, Some("sid-3"), false),
+            row("never-prompted", AgentStatus::Running, None, false),
+            row("archived", AgentStatus::Running, Some("sid-4"), true),
+        ] {
+            daemon.store.insert_agent(&agent).unwrap();
+        }
+        let interrupted = daemon.store.sweep_disconnected().unwrap();
+
+        for id in &interrupted {
+            let worker = daemon.clone();
+            let id = id.clone();
+            tokio::task::spawn_blocking(move || worker.resume_interrupted_agent(&id).unwrap())
+                .await
+                .unwrap();
+        }
+        let alive =
+            |name: &str| daemon.is_alive(&SessionRef::Agent(AgentId(format!("agent-{name}"))));
+        let status = |name: &str| {
+            daemon
+                .store
+                .get_agent(&AgentId(format!("agent-{name}")))
+                .unwrap()
+                .unwrap()
+                .status
+        };
+        for name in ["working", "asking"] {
+            assert!(alive(name), "{name} is resumed");
+            assert_eq!(status(name), AgentStatus::Running, "{name} carries on");
+        }
+        // Seeded with the launch reprieve: the resumed CLI's startup
+        // progress-clear does not green it out before the turn begins.
+        let working = AgentId("agent-working".into());
+        daemon.apply_hook_event(&working, HookEvent::Progress { busy: false }, None);
+        assert_eq!(status("working"), AgentStatus::Running);
+
+        // Idle at the restart: resumes on its next attach, as before.
+        assert!(!alive("done"));
+        assert_eq!(status("done"), AgentStatus::Finished);
+        // No session to resume, or put away: nothing to bring back.
+        assert!(!alive("never-prompted"));
+        assert!(!alive("archived"));
+
+        // An Attach that got there first is never doubled.
+        assert!(!daemon.resume_interrupted_agent(&working).unwrap());
+        daemon.kill_all();
+        drop(dir);
     }
 
     #[tokio::test]

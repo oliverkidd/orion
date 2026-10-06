@@ -871,7 +871,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Restart,
         id: "restart",
         label: "Restart orion",
-        hint: "Stop the daemon and every agent and terminal in it, then start orion again from scratch, behind a confirmation. Agents pick their conversation back up; terminals start a new shell",
+        hint: "Stop the daemon and every agent and terminal in it, then start orion again from scratch, behind a confirmation. Agents resume, and any cut off mid-turn carry on; terminals start a new shell",
         group: "GENERAL",
         scope: Scope::Global,
         // ⌘⇧R, HOME's key; `^X` the twin a terminal without ⌘ delivers.
@@ -882,7 +882,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Upgrade,
         id: "upgrade",
         label: "Upgrade orion",
-        hint: "Install the newer release the footer offers, then restart orion and its daemon on it, behind a confirmation. Agents pick their conversation back up; terminals start a new shell",
+        hint: "Install the newer release the footer offers, then restart orion and its daemon on it, behind a confirmation. Agents resume, and any cut off mid-turn carry on; terminals start a new shell",
         group: "GENERAL",
         scope: Scope::Global,
         // `^D` the twin a terminal without ⌘ delivers, behind the confirm.

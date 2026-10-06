@@ -120,8 +120,9 @@ pub fn run_tui() -> Result<Exit> {
 /// terminal: stop the daemon and every session in it, as `orion kill`
 /// does, then exec this binary again with the arguments it was started
 /// with. The new client finds no daemon and spawns a fresh one from the
-/// binary on disk — a rebuilt or upgraded orion included. Agents resume
-/// their conversation on their next attach; terminals start a new shell.
+/// binary on disk — a rebuilt or upgraded orion included. Agents cut off
+/// mid-turn are resumed by the new daemon as it boots and told to carry
+/// on; the rest resume on their next attach; terminals start a new shell.
 /// Only returns when the exec fails.
 pub fn restart() -> Result<()> {
     eprintln!("orion: restarting…");

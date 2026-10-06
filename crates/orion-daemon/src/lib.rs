@@ -74,16 +74,22 @@ async fn serve() -> Result<()> {
 
     let store = std::sync::Arc::new(store::Store::open(&paths::db_path())?);
     // Agents persisted as live had their PTYs die with the previous daemon.
-    match store.sweep_disconnected() {
-        Ok(swept) if !swept.is_empty() => {
-            tracing::info!(
-                count = swept.len(),
-                "boot sweep: marked orphaned agents disconnected"
-            )
+    // They are resumed below, once the daemon can spawn.
+    let interrupted = match store.sweep_disconnected() {
+        Ok(swept) => {
+            if !swept.is_empty() {
+                tracing::info!(
+                    count = swept.len(),
+                    "boot sweep: marked orphaned agents disconnected"
+                );
+            }
+            swept
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "boot sweep failed"),
-    }
+        Err(e) => {
+            tracing::warn!(error = %e, "boot sweep failed");
+            Vec::new()
+        }
+    };
 
     // Hook receiver: loopback HTTP endpoint the claude hook one-liners hit.
     // It shares the store to answer UserPromptSubmit hooks with the
@@ -98,15 +104,26 @@ async fn serve() -> Result<()> {
     {
         let daemon = daemon.clone();
         tokio::spawn(async move {
-            while let Some(hooks::HookDelivery {
-                agent_id,
-                event,
-                session_id,
-                cwd,
-                transcript,
-                prompt,
-            }) = hook_rx.recv().await
-            {
+            loop {
+                // Stops at shutdown, ahead of `kill_all`: the hooks the
+                // dying CLIs fire must not overwrite the mid-turn status
+                // the next daemon's boot sweep resumes from.
+                let delivery = tokio::select! {
+                    biased;
+                    _ = daemon.shutdown.cancelled() => break,
+                    delivery = hook_rx.recv() => delivery,
+                };
+                let Some(hooks::HookDelivery {
+                    agent_id,
+                    event,
+                    session_id,
+                    cwd,
+                    transcript,
+                    prompt,
+                }) = delivery
+                else {
+                    break;
+                };
                 let captures_session = event.captures_session();
                 daemon.apply_hook_event(&agent_id, event.clone(), session_id.clone());
                 // The prompt itself, for the row's RECENT PROMPTS. After
@@ -138,6 +155,10 @@ async fn serve() -> Result<()> {
             }
         });
     }
+
+    // Sessions the restart cut off mid-turn carry on without waiting for
+    // someone to attach and type "continue".
+    daemon.resume_interrupted(interrupted);
 
     // Learn which agent CLIs are installed before anyone asks, so a create
     // that has to refuse ("codex was not found on your PATH") answers at once
