@@ -63,6 +63,7 @@ pub mod saved_draft;
 pub mod skills;
 pub mod splash;
 pub mod spotify;
+pub mod stacks;
 pub mod syntax;
 pub mod terminal_tail;
 pub mod text_input;

@@ -192,6 +192,9 @@ pub struct Daemon {
     /// — so an attach replays how the run ended instead of running it
     /// again. Dropped when the run starts again, is stopped, or its row goes.
     finished_runs: Mutex<HashMap<TerminalId, FinishedRun>>,
+    /// STACK STATUS: the last docker compose listing, and the poke that
+    /// asks for a fresh one now.
+    pub stacks: crate::stacks::StackWatch,
 }
 
 impl Daemon {
@@ -218,6 +221,7 @@ impl Daemon {
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),
+            stacks: crate::stacks::StackWatch::default(),
         })
     }
 

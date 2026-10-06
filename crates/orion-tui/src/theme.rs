@@ -106,6 +106,11 @@ pub struct Theme {
     /// project's tab. Rests on `done`, so a preset that moves `done` moves
     /// this with it.
     pub done_sweep: [Color; 3],
+    /// The STACK TRAIL a running compose stack's `⬡` draws in down its
+    /// band's rule, `[head, mid, tail]`: the light runs on dashes only.
+    pub stack_sweep: [Color; 3],
+    /// The `⬡`'s flash as the trail arrives, `[rise, peak, fall]`.
+    pub stack_flash: [Color; 3],
     /// Focused-surface background, behind the session pane or the card
     /// keys land in: the accent's own hue taken down to a near-black —
     /// OKLCH lightness 0.20 and chroma 0.04 in every preset (mono's is
@@ -187,6 +192,12 @@ impl Theme {
                 Color::Indexed(183),
             ],
             done_sweep: done,
+            stack_sweep: [Color::Indexed(114), Color::Indexed(71), Color::Indexed(65)],
+            stack_flash: [
+                Color::Indexed(114),
+                Color::Indexed(157),
+                Color::Indexed(114),
+            ],
             focus_tint,
         }
     }

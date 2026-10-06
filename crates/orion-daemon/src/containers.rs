@@ -18,11 +18,11 @@ use std::time::Duration;
 
 /// How long `docker ps` may take — an engine that is starting up, or
 /// wedged, must not hold the worktree lock.
-const PS_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const PS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long one project's `compose stop` / `down` may take: compose gives
 /// each container 10 s to stop before killing it, in parallel.
-const COMPOSE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const COMPOSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Apply `policy` to the compose projects started in the deleted
 /// `worktree`. Returns the warnings for the clients; what it did goes to
@@ -33,13 +33,18 @@ pub async fn release(worktree: &Path, policy: WorktreeContainers) -> Vec<String>
     if policy == WorktreeContainers::Off || worktree.exists() {
         return Vec::new();
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let home = orion_core::env::home_dir();
-    let Some(docker) = compose::find_docker(&path, home.as_deref()) else {
+    let Some(docker) = find_docker() else {
         tracing::info!("worktree_containers: no docker CLI, nothing to release");
         return Vec::new();
     };
     release_with(&docker, worktree, policy).await
+}
+
+/// The `docker` CLI the DAEMON runs: on its PATH, else where the
+/// installers put it ([`compose::find_docker`]).
+pub(crate) fn find_docker() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    compose::find_docker(&path, orion_core::env::home_dir().as_deref())
 }
 
 /// [`release`] with the docker CLI already found.
@@ -77,7 +82,7 @@ async fn release_with(docker: &Path, worktree: &Path, policy: WorktreeContainers
 
 /// Run `docker args`: its stdout, or why it failed in one line — the last
 /// line of its stderr, which is where docker says what went wrong.
-async fn run<S: AsRef<std::ffi::OsStr>>(
+pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(
     docker: &Path,
     args: &[S],
     timeout: Duration,
@@ -117,16 +122,16 @@ fn path_with(docker: &Path) -> OsString {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A stub `docker` in a temp dir, running `body` under `/bin/sh`.
-    struct Stub {
+    pub(crate) struct Stub {
         dir: tempfile::TempDir,
     }
 
     impl Stub {
-        fn new(body: &str) -> Self {
+        pub(crate) fn new(body: &str) -> Self {
             use std::os::unix::fs::PermissionsExt;
             let stub = Self {
                 dir: tempfile::tempdir().unwrap(),
@@ -147,11 +152,11 @@ mod tests {
             ))
         }
 
-        fn docker(&self) -> PathBuf {
+        pub(crate) fn docker(&self) -> PathBuf {
             self.dir.path().join("docker")
         }
 
-        fn calls(&self) -> Vec<String> {
+        pub(crate) fn calls(&self) -> Vec<String> {
             std::fs::read_to_string(self.dir.path().join("calls"))
                 .unwrap_or_default()
                 .lines()
