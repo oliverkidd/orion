@@ -132,6 +132,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         ui_state: None,
                     });
                     let _ = out_tx.send(snapshot).await;
+                    let _ = out_tx.send(daemon.stacks.current()).await;
                     let mut rx = daemon.events.subscribe();
                     let tx = out_tx.clone();
                     tokio::spawn(async move {
@@ -327,6 +328,20 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                                 .map(Some),
                         )
                         .await;
+                    });
+                }
+                ClientRequest::StackAction {
+                    req_id,
+                    project,
+                    verb,
+                } => {
+                    // `compose stop` waits up to 10s a container; off the
+                    // request loop like a worktree delete.
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let result = crate::stacks::act(&daemon, &project, verb).await;
+                        reply_done(&out_tx, req_id, result).await;
                     });
                 }
                 ClientRequest::DeleteWorktree { req_id, id, force } => {

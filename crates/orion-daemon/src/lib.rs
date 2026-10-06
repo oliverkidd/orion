@@ -17,6 +17,7 @@ pub mod server;
 pub mod session_model;
 pub mod session_title;
 pub mod sibling;
+pub mod stacks;
 pub mod status;
 pub mod store;
 pub mod worktree_hooks;
@@ -249,6 +250,14 @@ async fn serve() -> Result<()> {
                 }
             }
         });
+    }
+
+    // STACK STATUS: which docker compose stacks exist and run, for the
+    // band's `⬡` and the Stacks modal.
+    {
+        let daemon = daemon.clone();
+        let interval = env_interval(env::STACK_POLL_MS, 5_000);
+        tokio::spawn(stacks::watch(daemon, interval));
     }
 
     // Claude's `/model` rides no hook either, but the switch lands in the
