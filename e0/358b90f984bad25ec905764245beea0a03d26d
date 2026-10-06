@@ -1,0 +1,50 @@
+crates/orion-tui/src/event_loop.rs
+  s_2450ebe2ac75ae::t_f4d0df307b455d 8876
+  s_2450ebe2ac75ae::t_161a2aa219958e 32203-32206,32233-32234,32248-32261,34870-34871,34912,34914
+  s_2450ebe2ac75ae::t_8ac39ca174bb76 8873-8874,8881
+crates/orion-tui/src/config.rs
+  s_2450ebe2ac75ae::t_f4d0df307b455d 1957-1958
+crates/orion-tui/src/linear.rs
+  s_2450ebe2ac75ae::t_8a52a19f7e81eb 2206
+  s_2450ebe2ac75ae::t_016ae0481a2ade 64-67,149-154,158-171,174,182,1456,1732-1733,2063-2064,2658,2668
+  s_2450ebe2ac75ae::t_c682d9d26371e8 138-140,142-145,2089,2096-2100
+  s_2450ebe2ac75ae::t_7032b8dd5a9147 1155
+  s_2450ebe2ac75ae::t_cf534a94d5151a 155,175-180
+  s_2450ebe2ac75ae::t_c0556724315937 2094
+  s_2450ebe2ac75ae::t_55c556b61bf7a4 2261-2263
+  s_2450ebe2ac75ae::t_f4d0df307b455d 1973,2090-2093,2095
+  s_2450ebe2ac75ae::t_afbeff999fdeea 2205,2207-2260,2264-2268
+  s_2450ebe2ac75ae::t_1c7b88bc88cffd 1734-1736,1963,1966
+crates/orion-tui/src/branch_name.rs
+  s_2450ebe2ac75ae::t_c682d9d26371e8 36-37,39-44,243-244,246,248-249,251-252,254
+crates/orion-tui/src/launcher.rs
+  s_2450ebe2ac75ae::t_7032b8dd5a9147 1908-1909
+crates/orion-tui/src/quick_prompt.rs
+  s_2450ebe2ac75ae::t_cf534a94d5151a 478,483,526-527,531-533,535,537,539-542,586-592,594,597-602,610
+  s_2450ebe2ac75ae::t_f4d0df307b455d 480-481,534,536
+  s_2450ebe2ac75ae::t_216eef0bbc2352 58-62
+  s_2450ebe2ac75ae::t_32f5a48698f4ea 528-529,1022-1023
+  s_2450ebe2ac75ae::t_117c961572a41f 1021,1024-1027,1033-1039,1043-1056
+  s_2450ebe2ac75ae::t_55c556b61bf7a4 1040-1042
+  s_2450ebe2ac75ae::t_d6a393f2d57155 1028-1032
+crates/orion-tui/src/preset_overlays.rs
+  s_2450ebe2ac75ae::t_f4d0df307b455d 792-793,828-836,838
+  s_2450ebe2ac75ae::t_7f8cb6657f9fcd 806,822-827,837,839,943-944,948,952-965
+  s_2450ebe2ac75ae::t_c20eb1b05e22f2 966-967
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0358b90f984bad25ec905764245beea0a03d26d",
+  "prompts": {},
+  "sessions": {
+    "s_2450ebe2ac75ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c8d2ce8-04e4-4a5e-af93-7bf8b3e7a6cd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
