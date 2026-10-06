@@ -100,6 +100,10 @@ fn main() -> Result<()> {
             println!("{}", orion_core::PROTOCOL_VERSION);
             Ok(())
         }
+        Some(Command::DaemonFingerprint) => {
+            println!("{}", orion_daemon::lifecycle::BUILD_FINGERPRINT);
+            Ok(())
+        }
         None => match cli.dir {
             Some(dir) => orion_tui::run_add_project(dir),
             None => run_tui(),
@@ -179,11 +183,17 @@ fn run_tui() -> Result<()> {
         orion_tui::Exit::Restart => {
             log_fatal(orion_tui::restart(), &orion_core::paths::tui_log_path())
         }
-        // **Upgrade orion**: install, then restart the daemon
-        // and the TUI onto the new binary.
+        // **Upgrade orion**: install, then reopen the TUI on the new
+        // binary — restarting the daemon too, unless the new build carries
+        // the very daemon code that is running.
         orion_tui::Exit::Upgrade => {
             upgrade::install_only()?;
-            orion_tui::restart()
+            if upgrade::daemon_carries_over() {
+                eprintln!("orion: the daemon is unchanged — reopening, sessions kept…");
+                orion_tui::relaunch()
+            } else {
+                orion_tui::restart()
+            }
         }
         orion_tui::Exit::Quit => Ok(()),
     }

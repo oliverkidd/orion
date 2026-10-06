@@ -177,10 +177,17 @@ main() {
     # running on the old binary until it's restarted, and `orion kill` is the
     # user's call because it stops every session. `orion upgrade` handles this
     # itself (shutting down an idle daemon) and suppresses the note via
-    # ORION_UPGRADE_HANDOFF.
+    # ORION_UPGRADE_HANDOFF. The new binary knows whether the running daemon
+    # is already its daemon code, and says nothing when it is; a build too old
+    # to have the hook fails it (it reads the word as a directory, run from
+    # `/` where none is), and gets the plain note.
     if [ -z "${ORION_UPGRADE_HANDOFF:-}" ] && pgrep -f 'orion daemon' >/dev/null 2>&1; then
-        say "note: a orion daemon from the previous version is still running."
-        say "      run 'orion kill' to restart onto the new one (stops all sessions)."
+        if note=$(cd / && "$installed" _stale-daemon-note 2>/dev/null); then
+            if [ -n "$note" ]; then say "$note"; fi
+        else
+            say "note: a orion daemon from the previous version is still running."
+            say "      run 'orion kill' to restart onto the new one (stops all sessions)."
+        fi
     fi
 }
 

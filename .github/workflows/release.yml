@@ -4,10 +4,17 @@ name: Release
 # update indicator and `orion upgrade` look for.
 #
 # The version: Cargo.toml's [workspace.package] version is the floor. When no
-# tag at or above it exists, that version ships as is; otherwise the patch of
-# the newest tag is bumped. So patch releases are automatic, and a minor or
-# major bump is a one-line edit to Cargo.toml. The stamped version is written
-# into the build only, never committed back to main.
+# tag at or above it exists, that version ships as is. Otherwise the newest
+# tag is bumped by what changed since it:
+#   - minor (x.Y.0) when any DAEMON input changed — the paths listed in
+#     crates/orion-daemon/daemon-inputs.txt, the same list build.rs hashes into
+#     the daemon's build stamp. Upgrading across a minor release restarts the
+#     daemon, and with it every session.
+#   - patch (x.y.Z) otherwise: TUI and CLI only, so an upgrade reopens orion
+#     and the running daemon keeps its sessions.
+# A major release is a judgement call, never automatic: raise the floor in
+# Cargo.toml to the next major (2.0.0) in the change that earns it. The stamped
+# version is written into the build only, never committed back to main.
 #
 # Put `[skip release]` in the head commit message to push without releasing.
 # Pushing a `v*` tag by hand still releases exactly that tag.
@@ -54,7 +61,13 @@ jobs:
           elif [ "$latest" != "$base" ] && [ "$(printf '%s\n%s\n' "$latest" "$base" | sort -V | tail -n1)" = "$base" ]; then
             next="$base"
           else
-            next=$(echo "$latest" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+            inputs=$(grep -v '^#' crates/orion-daemon/daemon-inputs.txt | grep -v '^[[:space:]]*$')
+            # shellcheck disable=SC2086 # one pathspec per line of the list
+            if git diff --quiet "v$latest" HEAD -- $inputs; then
+              next=$(echo "$latest" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+            else
+              next=$(echo "$latest" | awk -F. '{printf "%d.%d.0", $1, $2 + 1}')
+            fi
           fi
           echo "version=$next" >> "$GITHUB_OUTPUT"
           if [ "${GITHUB_EVENT_NAME}" = push ]; then

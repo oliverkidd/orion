@@ -108,60 +108,42 @@ fn libc_flock(fd: i32) -> i32 {
     unsafe { flock(fd, LOCK_EX | LOCK_NB) }
 }
 
-/// Record this process's binary fingerprint so installers can tell whether
-/// the running daemon is already on the build they just installed. Called by
-/// the daemon at startup; best-effort (staleness checks treat a missing
-/// stamp as "unknown build", which reads as stale). Returns the stamp for
+/// The DAEMON's build: a hash of the sources it is built from, baked in by
+/// build.rs (see `daemon-inputs.txt`). Releases that leave the daemon's code
+/// alone share it, so the daemon they find running is already theirs.
+pub const BUILD_FINGERPRINT: &str = env!("ORION_DAEMON_FINGERPRINT");
+
+/// Record this daemon's build so installers can tell whether the running
+/// daemon is already on the build they just installed. Called by the daemon
+/// at startup; best-effort (staleness checks treat a missing stamp as
+/// "unknown build", which reads as stale). Returns the stamp for
 /// [`rewrite_buildstamp`].
 pub fn write_buildstamp() -> Option<String> {
-    let stamp = exe_buildstamp()?;
-    rewrite_buildstamp(&stamp);
-    Some(stamp)
+    rewrite_buildstamp(BUILD_FINGERPRINT);
+    Some(BUILD_FINGERPRINT.to_string())
 }
 
 /// Put the startup stamp back, on the pidfile's refresh tick and for the same
-/// cleaner. Never re-hashed: after an upgrade the file at `current_exe` is
-/// the new build, and stamping that would pass a stale daemon off as fresh.
+/// cleaner. Always the stamp this process started with: after an upgrade
+/// the file at `current_exe` is the new build, and its stamp would pass a
+/// stale daemon off as fresh.
 pub fn rewrite_buildstamp(stamp: &str) {
     let _ = fs::write(paths::buildstamp_path(), stamp);
 }
 
-/// True when a live daemon is running different code than this binary — or
-/// predates buildstamps entirely, so its build is unknown.
+/// True when a live daemon is running different daemon code than this
+/// binary — or predates source stamps, so its build is unknown.
 pub fn daemon_is_stale() -> bool {
-    if !PidfileLock::is_daemon_alive() {
-        return false;
-    }
-    match (
-        fs::read_to_string(paths::buildstamp_path()).ok(),
-        exe_buildstamp(),
-    ) {
-        (Some(recorded), Some(current)) => recorded.trim() != current,
-        _ => true,
-    }
+    PidfileLock::is_daemon_alive() && !daemon_runs(BUILD_FINGERPRINT)
 }
 
-/// Content fingerprint of this process's executable.
-fn exe_buildstamp() -> Option<String> {
-    fingerprint_file(&std::env::current_exe().ok()?)
-}
-
-/// FNV-style multiply-xor over 8-byte words, then the length — an identity
-/// check, not security, and word-wide because the daemon hashes its own
-/// ~30MB debug binary at startup under the e2e tests.
-fn fingerprint_file(path: &Path) -> Option<String> {
-    const PRIME: u64 = 0x100_0000_01b3;
-    let bytes = fs::read(path).ok()?;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut words = bytes.chunks_exact(8);
-    for word in &mut words {
-        hash = (hash ^ u64::from_le_bytes(word.try_into().unwrap())).wrapping_mul(PRIME);
-    }
-    let mut tail = [0u8; 8];
-    tail[..words.remainder().len()].copy_from_slice(words.remainder());
-    hash = (hash ^ u64::from_le_bytes(tail)).wrapping_mul(PRIME);
-    hash = (hash ^ bytes.len() as u64).wrapping_mul(PRIME);
-    Some(format!("{hash:016x}"))
+/// Whether a live daemon is running the build stamped `fingerprint`. A
+/// daemon from before source stamps recorded a hash of its whole binary,
+/// which no fingerprint equals, so it never passes for current.
+pub fn daemon_runs(fingerprint: &str) -> bool {
+    PidfileLock::is_daemon_alive()
+        && fs::read_to_string(paths::buildstamp_path())
+            .is_ok_and(|recorded| recorded.trim() == fingerprint.trim())
 }
 
 /// Create the runtime dir with 0700 perms — this is the auth boundary.
@@ -259,30 +241,5 @@ mod tests {
 
         assert!(!first.refresh());
         assert!(PidfileLock::acquire_at(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn fingerprint_is_stable_for_identical_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("a");
-        let b = tmp.path().join("b");
-        // Same bytes at different paths/inodes — the cp+mv install dance.
-        fs::write(&a, b"identical build bytes").unwrap();
-        fs::write(&b, b"identical build bytes").unwrap();
-        assert_eq!(fingerprint_file(&a), fingerprint_file(&b));
-    }
-
-    #[test]
-    fn different_content_gets_a_different_fingerprint() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file = tmp.path().join("f");
-        // Lengths off and on the 8-byte word boundary, plus zero-padding
-        // ambiguity: "x" vs "x\0" must differ even though the padded tail
-        // word is identical.
-        let mut seen = std::collections::HashSet::new();
-        for content in [&b""[..], b"x", b"x\0", b"12345678", b"123456789"] {
-            fs::write(&file, content).unwrap();
-            assert!(seen.insert(fingerprint_file(&file).unwrap()));
-        }
     }
 }

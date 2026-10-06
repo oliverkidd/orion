@@ -322,6 +322,11 @@ pub(crate) enum Command {
     /// attach to the daemon left running.
     #[command(hide = true, name = "_protocol-version")]
     ProtocolVersion,
+    /// Upgrade hook: print the stamp of the daemon code this binary carries,
+    /// so the build it replaces can tell whether the running daemon is
+    /// already that code and can keep its sessions.
+    #[command(hide = true, name = "_daemon-fingerprint")]
+    DaemonFingerprint,
 }
 
 const ADD_EXAMPLES: &str = "\

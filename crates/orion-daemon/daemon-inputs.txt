@@ -1,0 +1,16 @@
+# Everything the DAEMON is built from, as paths from the repository root.
+#
+# Two readers, one list:
+#   - build.rs hashes these into ORION_DAEMON_FINGERPRINT, the stamp a running
+#     daemon records. An upgrade whose new binary carries the same stamp leaves
+#     the daemon, and every session in it, running.
+#   - the release workflow diffs these against the last tag: any change is a
+#     minor release (x.Y.0), none a patch (x.y.Z).
+#
+# Err on the side of listing too much: a path missing here is daemon code an
+# upgrade would silently skip; an extra one only costs a restart.
+crates/orion-core
+crates/orion-daemon
+vendor/vt100
+Cargo.toml
+Cargo.lock
