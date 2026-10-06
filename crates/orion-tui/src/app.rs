@@ -1901,6 +1901,9 @@ pub struct FileFinder {
     /// How many of `matches` lead as the `Recent` section: `recent_files`
     /// while the query is empty, none once anything is typed.
     pub recent: usize,
+    /// Line Enter opens the file at: 1, or the line of a clicked path
+    /// whose candidates this finder lists (`with_line`).
+    pub line: u64,
 }
 
 /// One drawn row of the FILE FINDER's list.
@@ -1931,9 +1934,16 @@ impl FileFinder {
             recents: Vec::new(),
             recent_files: Vec::new(),
             recent: 0,
+            line: 1,
         };
         finder.apply_filter();
         finder
+    }
+
+    /// Open the chosen file at `line` rather than its first.
+    pub fn with_line(mut self, line: u64) -> Self {
+        self.line = line;
+        self
     }
 
     /// Lead with `recents` — the checkout's RECENT FILES, newest first —

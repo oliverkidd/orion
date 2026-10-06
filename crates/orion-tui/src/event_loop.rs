@@ -5871,10 +5871,10 @@ fn open_selected_file(app: &mut App) {
     let Some(path) = finder.selected_path().map(str::to_string) else {
         return;
     };
-    let (root, editor) = (finder.root.clone(), finder.editor.clone());
+    let (root, editor, line) = (finder.root.clone(), finder.editor.clone(), finder.line);
     // Size guess from the last-drawn body; the post-draw sync corrects it.
     let size = vim_size_guess(app);
-    if open_file(app, &editor, &root, &path, 1, size) {
+    if open_file(app, &editor, &root, &path, line, size) {
         close_finder_behind_editor(app);
     }
 }
@@ -5938,25 +5938,45 @@ pub(crate) fn vim_size_guess(app: &App) -> (u16, u16) {
 
 /// ⌥click on a file path in the terminal pane: resolve it against the
 /// attached session's worktree and open it in the editor modal at the
-/// referenced line — a markdown file as its MARKDOWN PAGE.
+/// referenced line — a markdown file as its MARKDOWN PAGE. A path that
+/// isn't there as printed (`src/app.rs` for `crates/orion-tui/src/app.rs`,
+/// a bare `app.rs`, one from another checkout) is looked up by its tail
+/// ([`file_link_matches`]): one match opens, several open the FILE FINDER
+/// over just those, Enter taking the line along.
 fn open_file_link(app: &mut App, path: &str, line: Option<u64>) {
-    let Some(root) = attached_worktree_root(app) else {
-        return;
-    };
-    let Some(file) = resolve_file_link(&root, path) else {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "file not found: {path}"
-        )));
+    let Some((root, branch)) = attached_worktree(app).map(|w| (w.path.clone(), w.branch.clone()))
+    else {
         return;
     };
     let editor = crate::config::Config::load().editor_command();
+    let line = line.unwrap_or(1);
+    let file = match resolve_file_link(&root, path) {
+        Some(file) => file,
+        None => {
+            let files = crate::git_diff::list_files(&root).unwrap_or_default();
+            let mut found = file_link_matches(&files, path);
+            if found.len() > 1 {
+                app.overlay = Some(Overlay::Files(
+                    FileFinder::new(root, branch, editor, found).with_line(line),
+                ));
+                return;
+            }
+            let Some(file) = found.pop() else {
+                app.flash = Some(crate::flash::Flash::failed(format!(
+                    "file not found: {path}"
+                )));
+                return;
+            };
+            file
+        }
+    };
     let size = vim_size_guess(app);
-    open_file(app, &editor, &root, &file, line.unwrap_or(1), size);
+    open_file(app, &editor, &root, &file, line, size);
 }
 
-/// Worktree root of the attached agent or shell; falls back to the
-/// selected worktree when nothing is attached (or it isn't in the tree yet).
-fn attached_worktree_root(app: &App) -> Option<std::path::PathBuf> {
+/// Worktree of the attached agent or shell; falls back to the selected
+/// worktree when nothing is attached (or it isn't in the tree yet).
+fn attached_worktree(app: &App) -> Option<&orion_core::Worktree> {
     let worktree_id = app.term.as_ref().and_then(|t| match &t.sref {
         SessionRef::Agent(id) => app
             .tree
@@ -5974,7 +5994,39 @@ fn attached_worktree_root(app: &App) -> Option<std::path::PathBuf> {
     worktree_id
         .and_then(|id| app.tree.worktrees.iter().find(|w| &w.id == id))
         .or_else(|| app.selected_worktree())
-        .map(|w| w.path.clone())
+}
+
+/// [`attached_worktree`]'s checkout dir.
+fn attached_worktree_root(app: &App) -> Option<std::path::PathBuf> {
+    attached_worktree(app).map(|w| w.path.clone())
+}
+
+/// The worktree's files (`git ls-files`, root-relative) a clicked path
+/// that isn't there as printed could mean: those ending with it, whole
+/// components at a time — `src/app.rs` finds `crates/orion-tui/src/app.rs`
+/// but not `src/myapp.rs`. When nothing ends with all of it, its leading
+/// components go one at a time, so `/other/checkout/src/app.rs`,
+/// `…/src/app.rs` and `../app.rs` still land on this checkout's copy.
+fn file_link_matches(files: &[String], path: &str) -> Vec<String> {
+    let parts: Vec<&str> = path
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    for skip in 0..parts.len() {
+        let tail = parts[skip..].join("/");
+        let found: Vec<String> = files
+            .iter()
+            .filter(|f| {
+                f.strip_suffix(tail.as_str())
+                    .is_some_and(|head| head.is_empty() || head.ends_with('/'))
+            })
+            .cloned()
+            .collect();
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    Vec::new()
 }
 
 /// Resolve a clicked path against the worktree: expand `~/`, try it as
@@ -23185,6 +23237,81 @@ diff --git a/src/c.rs b/src/c.rs
             None,
             "directories don't open"
         );
+    }
+
+    #[test]
+    fn file_link_matches_finds_partial_paths_by_their_tail() {
+        let files: Vec<String> = [
+            "crates/orion-tui/src/app.rs",
+            "crates/orion-core/src/app.rs",
+            "crates/orion-tui/src/myapp.rs",
+            "README.md",
+        ]
+        .map(String::from)
+        .to_vec();
+        let found = |path| file_link_matches(&files, path);
+        assert_eq!(
+            found("orion-tui/src/app.rs"),
+            ["crates/orion-tui/src/app.rs"],
+            "a partial path finds the one file it ends"
+        );
+        assert_eq!(
+            found("src/app.rs"),
+            [
+                "crates/orion-tui/src/app.rs",
+                "crates/orion-core/src/app.rs"
+            ],
+            "whole components only: not myapp.rs"
+        );
+        assert_eq!(
+            found("/Users/x/other-checkout/crates/orion-tui/src/app.rs"),
+            ["crates/orion-tui/src/app.rs"],
+            "another checkout's absolute path lands on this one's copy"
+        );
+        assert_eq!(found("/src/myapp.rs"), ["crates/orion-tui/src/myapp.rs"]);
+        assert_eq!(found("./README.md"), ["README.md"]);
+        assert_eq!(found("../../README.md"), ["README.md"]);
+        assert!(found("src/nope.rs").is_empty());
+    }
+
+    /// A path that isn't there as printed opens the one file it can mean
+    /// at its line, and the FILE FINDER over the candidates when it could
+    /// mean several, Enter keeping the line.
+    #[test]
+    fn a_partial_file_link_opens_its_file_or_a_finder_of_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        for sub in ["crates/a/src", "crates/b/src"] {
+            std::fs::create_dir_all(repo.join(sub)).unwrap();
+        }
+        std::fs::write(repo.join("crates/a/src/only.rs"), "x\ny\n").unwrap();
+        std::fs::write(repo.join("crates/a/src/lib.rs"), "").unwrap();
+        std::fs::write(repo.join("crates/b/src/lib.rs"), "").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.vim_tx = Some(tx);
+
+        with_config_json(r#"{"editor": "/bin/sh"}"#, || {
+            open_file_link(&mut app, "src/only.rs", Some(2));
+        });
+        assert_eq!(
+            app.vim.as_ref().map(|v| v.title.as_str()),
+            Some("crates/a/src/only.rs:2")
+        );
+        app.vim = None;
+
+        with_config_json(r#"{"editor": "/bin/sh"}"#, || {
+            open_file_link(&mut app, "src/lib.rs", Some(7));
+        });
+        let Some(Overlay::Files(finder)) = &app.overlay else {
+            panic!("ambiguous path opens the finder");
+        };
+        let mut files = finder.files.clone();
+        files.sort();
+        assert_eq!(files, ["crates/a/src/lib.rs", "crates/b/src/lib.rs"]);
+        assert_eq!(finder.line, 7);
+        assert!(app.vim.is_none());
     }
 
     fn mev(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
