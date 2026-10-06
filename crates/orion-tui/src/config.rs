@@ -1451,6 +1451,11 @@ pub struct Config {
     /// from before it existed. Local-only, like `onboarded`.
     #[serde(default)]
     pub setup_version: u32,
+    /// The orion version this machine last saw WHAT'S NEW for
+    /// (`crate::whats_new`): the next launch of a newer build opens on the
+    /// releases since. Empty on a config from before it existed. Local-only.
+    #[serde(default)]
+    pub seen_version: String,
     /// How long an idle session in an unviewed worktree lives before the
     /// daemon reaps its PTY: "1m", "5m", "15m", "30m", "1h"; "off"
     /// disables. Owned by the daemon (which does the parsing and reaping);
@@ -1956,6 +1961,7 @@ impl Default for Config {
             linear_auto_attach: true,
             onboarded: false,
             setup_version: 0,
+            seen_version: String::new(),
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             prewarm_agents: true,
             prewarm_sessions: true,
@@ -2045,7 +2051,12 @@ const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_mark
 /// is stays on this one. The local file is created for a key set away
 /// from its default, and an unreadable one is never rewritten — the key
 /// goes unsaved instead.
-const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded", "setup_version"];
+const LOCAL_KEYS: &[&str] = &[
+    "linear_assignee_email",
+    "onboarded",
+    "setup_version",
+    "seen_version",
+];
 
 /// Production starts with every harness off, including grok (whose
 /// built-in default is on, so the map has to say otherwise) — a fresh

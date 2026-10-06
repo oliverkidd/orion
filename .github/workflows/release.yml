@@ -81,7 +81,11 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
+      # Full history and tags: the build bakes in every release's notes
+      # from git (crates/orion-tui/build.rs) for the What's new page.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')

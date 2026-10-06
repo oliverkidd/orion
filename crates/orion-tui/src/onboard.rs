@@ -39,6 +39,9 @@ use crate::ui::centered_rect;
 /// One page of the wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
+    /// WHAT'S NEW: the releases since the last one this machine ran, ahead
+    /// of the setup steps they added — after an upgrade only.
+    WhatsNew,
     Welcome,
     Agents,
     /// CLAUDE ACCOUNTS: sign the default account in, add another.
@@ -81,6 +84,7 @@ impl Page {
     /// Its name on the STEP STRIP.
     fn label(self) -> &'static str {
         match self {
+            Page::WhatsNew => "What's new",
             Page::Welcome => "Welcome",
             Page::Agents => "Agents",
             Page::Accounts => "Accounts",
@@ -119,17 +123,32 @@ fn pages(cfg: &Config) -> Vec<Page> {
     .collect()
 }
 
-/// The pages a run of setup walks: all of them from `since` 0, else only
-/// those a later SETUP VERSION added that have something to offer here,
-/// and Ready to finish on.
+/// The pages a run of setup walks: all of them from `since` 0, else
+/// WHAT'S NEW while there are releases this machine has not seen, then
+/// the steps a later SETUP VERSION added that have something to offer
+/// here, and Ready to finish on after those.
 fn view_pages(cfg: &Config, since: u32) -> Vec<Page> {
     let all = pages(cfg);
-    if since == 0 {
-        return all;
+    let news = !crate::whats_new::unseen(cfg).is_empty();
+    let mut out = Vec::new();
+    if news {
+        out.push(Page::WhatsNew);
     }
-    all.into_iter()
-        .filter(|page| *page == Page::Ready || (page.added() > since && page.offered()))
-        .collect()
+    // The whole wizard (Run setup) still shows notes not yet seen, rather
+    // than stamping them seen unread.
+    if since == 0 {
+        out.extend(all);
+        return out;
+    }
+    let steps: Vec<Page> = all
+        .into_iter()
+        .filter(|page| *page != Page::Ready && page.added() > since && page.offered())
+        .collect();
+    if !steps.is_empty() || !news {
+        out.extend(steps);
+        out.push(Page::Ready);
+    }
+    out
 }
 
 /// Whether setup should open at startup, and from which version: `Some(0)`
@@ -142,14 +161,25 @@ pub fn pending(cfg: &Config) -> Option<u32> {
     }
     // A config from before the version existed went through version 1.
     let seen = cfg.setup_version.max(1);
-    if seen >= SETUP_VERSION {
-        return None;
-    }
-    if view_pages(cfg, seen).len() > 1 {
+    if view_pages(cfg, seen) != [Page::Ready] {
         return Some(seen);
     }
-    persist(|cfg| cfg.setup_version = SETUP_VERSION);
+    // Nothing new to show: stamp it seen, quietly — and only when that
+    // changes something, so a launch with no news writes nothing.
+    if mark_seen(&mut cfg.clone()) {
+        persist(|cfg| {
+            mark_seen(cfg);
+        });
+    }
     None
+}
+
+/// This build's setup steps and release notes, stamped seen. Whether
+/// anything moved.
+fn mark_seen(cfg: &mut Config) -> bool {
+    let steps = cfg.setup_version < SETUP_VERSION;
+    cfg.setup_version = cfg.setup_version.max(SETUP_VERSION);
+    crate::whats_new::stamp_seen(cfg) | steps
 }
 
 /// The Worktrees page's rows: Settings → General's, by kind.
@@ -306,7 +336,7 @@ pub fn dismiss(app: &mut App) {
     app.dirty = true;
     persist(|cfg| {
         cfg.onboarded = true;
-        cfg.setup_version = SETUP_VERSION;
+        mark_seen(cfg);
     });
 }
 
@@ -433,6 +463,13 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
     }
     let page = view.current(cfg);
     let mut hints = match page {
+        Page::WhatsNew => vec![keys::ENTER
+            .hint_as(if view_pages(cfg, view.since).len() == 1 {
+                "done"
+            } else {
+                "set up what's new"
+            })
+            .kept()],
         Page::Welcome => vec![keys::ENTER.hint_as("start").kept()],
         Page::Agents => vec![
             keys::TOGGLE.hint_as("on/off").kept(),
@@ -510,6 +547,10 @@ fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
     let page = view.current(cfg);
     match page {
         Page::Welcome | Page::Ready => String::new(),
+        Page::WhatsNew if view_pages(cfg, view.since).len() > 1 => {
+            "↑/↓ walk the releases. Enter goes on to the setup steps they added.".into()
+        }
+        Page::WhatsNew => "↑/↓ walk the releases.".into(),
         Page::Agents => agent_explanation(cfg, view.row),
         Page::Accounts => cfg
             .registered_account_rows()
@@ -657,6 +698,8 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &OnboardView, th: Theme) {
         crate::ui::modal_block(
             if view.since == 0 {
                 " Orion setup "
+            } else if view_pages(&cfg, view.since).contains(&Page::WhatsNew) {
+                " What's new in Orion "
             } else {
                 " New in Orion setup "
             },
@@ -767,11 +810,22 @@ impl Body {
     /// [`Body::prose`] `indent` columns in, every wrapped row under the
     /// first — a command, a link.
     fn indented(&mut self, text: &str, indent: usize, width: u16, style: Style) {
-        let room = usize::from(width).saturating_sub(indent + 1).max(1);
-        let pad = " ".repeat(indent);
-        for line in crate::pr_preview::wrap(text, room) {
+        self.item("", text, indent, width, style);
+    }
+
+    /// `text` wrapped `indent` columns in behind `mark` (`• `), its wrapped
+    /// rows hanging under the text rather than the mark — a list item.
+    fn item(&mut self, mark: &str, text: &str, indent: usize, width: u16, style: Style) {
+        let hang = indent + mark.chars().count();
+        let room = usize::from(width).saturating_sub(hang + 1).max(1);
+        for (i, line) in crate::pr_preview::wrap(text, room).into_iter().enumerate() {
+            let lead = if i == 0 {
+                format!("{}{mark}", " ".repeat(indent))
+            } else {
+                " ".repeat(hang)
+            };
             self.lines
-                .push(Line::from(Span::styled(format!("{pad}{line}"), style)));
+                .push(Line::from(Span::styled(format!("{lead}{line}"), style)));
         }
     }
 
@@ -842,6 +896,7 @@ fn page_body(app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16)
     let mut body = Body::new(width);
     let page = view.current(cfg);
     match page {
+        Page::WhatsNew => whats_new(&mut body, cfg, view, th, width),
         Page::Welcome => welcome(&mut body, app, th, width),
         Page::Agents => agents(&mut body, cfg, view, th, width),
         Page::Accounts => accounts(&mut body, cfg, view, th, width),
@@ -860,6 +915,60 @@ fn page_body(app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16)
         body.prose(note, width, Style::default().fg(th.muted));
     }
     body
+}
+
+/// WHAT'S NEW: each release since the one this machine last ran, newest
+/// first — its version and day, then every change in it with what its
+/// commit said. The cursor walks the releases; the one under it stays in
+/// sight, its last line kept on screen.
+fn whats_new(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
+    let text = Style::default().fg(th.text);
+    let dim = Style::default().fg(th.dim);
+    let releases = crate::whats_new::unseen(cfg);
+    let since = crate::whats_new::seen(cfg)
+        .map(|(a, b, c)| format!(" since v{a}.{b}.{c}"))
+        .unwrap_or_default();
+    let n = releases.len();
+    body.prose(
+        &format!(
+            "You're on v{} — {n} release{} {}{since}, newest first.",
+            crate::whats_new::current(),
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "is new" } else { "are new" },
+        ),
+        width,
+        dim,
+    );
+    for (i, release) in releases.iter().enumerate() {
+        body.blank();
+        let on = i == view.row;
+        body.lines.push(Line::from(vec![
+            Span::styled(
+                if on { " › " } else { "   " },
+                Style::default().fg(th.accent),
+            ),
+            Span::styled(
+                format!("v{}", release.version),
+                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", release.date), dim),
+        ]));
+        for change in release.changes {
+            body.item(
+                "• ",
+                change.title,
+                3,
+                width,
+                text.add_modifier(Modifier::BOLD),
+            );
+            for detail in change.details {
+                body.item("– ", detail, 5, width, dim);
+            }
+        }
+        if on {
+            body.selected = Some(body.lines.len() - 1);
+        }
+    }
 }
 
 fn welcome(body: &mut Body, app: &App, th: Theme, width: u16) {
@@ -1650,6 +1759,7 @@ fn page_rows(page: Page, cfg: &Config) -> usize {
         Page::Accounts => cfg.registered_account_rows().len(),
         Page::Editor => editor_rows().len(),
         Page::Worktrees | Page::Linear | Page::Autofix | Page::Terminal => setting_rows(page).len(),
+        Page::WhatsNew => crate::whats_new::unseen(cfg).len(),
         Page::Welcome | Page::Ready => 0,
     }
 }
@@ -1682,7 +1792,7 @@ fn activate(app: &mut App) {
         return;
     };
     match page {
-        Page::Welcome | Page::Ready => next(app),
+        Page::WhatsNew | Page::Welcome | Page::Ready => next(app),
         Page::Agents => cycle_selected_model(app),
         Page::Accounts => {
             let step = match cfg.registered_account_rows().into_iter().nth(row) {
@@ -1900,7 +2010,7 @@ fn toggle(app: &mut App) {
                 _ => {}
             }
         }
-        Page::Welcome | Page::Accounts | Page::Ready => {}
+        Page::WhatsNew | Page::Welcome | Page::Accounts | Page::Ready => {}
     }
     app.dirty = true;
 }
@@ -1941,7 +2051,11 @@ mod tests {
         with_temp_config(|| {
             with_programs(&[], || {
                 assert_eq!(pending(&Config::load()), Some(0));
-                persist(|cfg| cfg.onboarded = true);
+                // This build's release notes seen: the setup steps alone.
+                persist(|cfg| {
+                    cfg.onboarded = true;
+                    cfg.seen_version = crate::whats_new::current().into();
+                });
                 let cfg = Config::load();
                 assert_eq!(pending(&cfg), Some(1));
                 if cfg!(target_os = "macos") {
@@ -2790,6 +2904,94 @@ mod tests {
                         }
                     }
                 }
+            });
+        });
+    }
+
+    /// Releases this test build "shipped": one past what the machine saw.
+    static NEWS: &[crate::whats_new::Release] = &[
+        crate::whats_new::Release {
+            version: "1.0.0",
+            date: "2026-10-06",
+            changes: &[crate::whats_new::Change {
+                title: "PR autofix",
+                details: &["An agent sent at your PR's conflicts and failing checks"],
+            }],
+        },
+        crate::whats_new::Release {
+            version: "0.9.9",
+            date: "2026-10-05",
+            changes: &[crate::whats_new::Change {
+                title: "File links open partial paths",
+                details: &[],
+            }],
+        },
+        crate::whats_new::Release {
+            version: "0.9.8",
+            date: "2026-10-04",
+            changes: &[],
+        },
+    ];
+
+    /// After an upgrade, setup opens on WHAT'S NEW — every release since
+    /// the one this machine last ran, stacked newest first — ahead of the
+    /// setup steps added since; with no steps missed, the notes alone, and
+    /// closing them stamps this build seen.
+    #[test]
+    fn an_upgrade_opens_on_whats_new_ahead_of_the_missed_steps() {
+        with_temp_config(|| {
+            crate::whats_new::with_releases(NEWS, || {
+                persist(|cfg| {
+                    cfg.onboarded = true;
+                    cfg.setup_version = 2;
+                    cfg.seen_version = "0.9.8".into();
+                });
+                let cfg = Config::load();
+                assert_eq!(pending(&cfg), Some(2));
+                assert_eq!(
+                    view_pages(&cfg, 2),
+                    vec![Page::WhatsNew, Page::Autofix, Page::Ready]
+                );
+
+                persist(|cfg| cfg.setup_version = SETUP_VERSION);
+                let cfg = Config::load();
+                let since = pending(&cfg).expect("news to show");
+                assert_eq!(view_pages(&cfg, since), vec![Page::WhatsNew]);
+                let mut app = App::new();
+                open(&mut app, &cfg, since);
+                let shot = draw_text(&mut app);
+                for text in [
+                    "What's new in Orion",
+                    "since v0.9.8",
+                    "v1.0.0",
+                    "PR autofix",
+                    "v0.9.9",
+                    "File links open partial paths",
+                    "done",
+                ] {
+                    assert!(shot.contains(text), "{text} missing:\n{shot}");
+                }
+                assert!(!shot.contains("v0.9.8  "), "the one seen is not news");
+                handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
+                assert!(app.overlay.is_none());
+                assert_eq!(Config::load().seen_version, crate::whats_new::current());
+                assert_eq!(pending(&Config::load()), None, "seen now");
+            });
+        });
+    }
+
+    /// A launch with nothing new writes nothing.
+    #[test]
+    fn no_news_is_no_write() {
+        with_temp_config(|| {
+            crate::whats_new::with_releases(NEWS, || {
+                persist(|cfg| {
+                    cfg.onboarded = true;
+                    cfg.setup_version = SETUP_VERSION;
+                    cfg.seen_version = "999.0.0".into();
+                });
+                assert_eq!(pending(&Config::load()), None);
+                assert_eq!(Config::load().seen_version, "999.0.0", "never lowered");
             });
         });
     }

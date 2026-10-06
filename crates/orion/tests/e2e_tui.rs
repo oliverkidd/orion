@@ -49,16 +49,18 @@ const PROJECT_MENU_ROW: &str = "Remove from list";
 const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 
 /// A data dir as a user who finished first-run setup leaves it: the
-/// ONBOARDING wizard already seen, its "what's new" steps included (either
-/// would cover the grid every test drives) and the agents it offers
+/// ONBOARDING wizard already seen, its new setup steps and this build's
+/// release notes included (any of them would cover the grid every test
+/// drives) and the agents it offers
 /// switched on, which a fresh install leaves off.
 fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
     std::fs::write(
         data_dir.join("config.local.json"),
         format!(
-            r#"{{"onboarded": true, "setup_version": {}}}"#,
-            orion_tui::onboard::SETUP_VERSION
+            r#"{{"onboarded": true, "setup_version": {}, "seen_version": "{}"}}"#,
+            orion_tui::onboard::SETUP_VERSION,
+            orion_tui::whats_new::current()
         ),
     )
     .unwrap();
