@@ -1,0 +1,24 @@
+docs/2026-10-06-spotify-footer/spotify-footer.md
+  s_9bed4f62f30098::t_4e70121a844aaa 124
+  s_9bed4f62f30098::t_f3c541d3fc3390 1-123,125-177
+docs/2026-10-06-project-todos/project-todos.md
+  s_9bed4f62f30098::t_98e5c194d32fb5 131
+  s_9bed4f62f30098::t_dad7ad8cb276d8 357
+  s_9bed4f62f30098::t_b178dfb83a235c 1-130,132-356
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a47b0b9cae00119d5ff5ad59fe598a1a783c9f1",
+  "prompts": {},
+  "sessions": {
+    "s_9bed4f62f30098": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "589f2f00-137a-4e76-ba03-23cfa1507809",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
