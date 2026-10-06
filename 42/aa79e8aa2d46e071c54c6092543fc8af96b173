@@ -1,0 +1,73 @@
+crates/orion-core/src/compose.rs
+  s_d1c0ccd493bbd1::t_dc7cff7b1b2ff8 6-8,15,68,70-72,74,100-278,451-557
+crates/orion-core/src/env.rs
+  s_d1c0ccd493bbd1::t_59a9f3b3c2bc83 34-36
+crates/orion-core/src/protocol.rs
+  s_d1c0ccd493bbd1::t_e9a09355fe12cf 1,11,399-407,577-584,624-661
+crates/orion-daemon/src/containers.rs
+  s_d1c0ccd493bbd1::t_65cf4aa703746d 21,25,36,43-49,85,125,129,134,155,159
+crates/orion-daemon/src/lib.rs
+  s_d1c0ccd493bbd1::t_61734a514e3d16 20,255-262
+crates/orion-daemon/src/registry.rs
+  s_d1c0ccd493bbd1::t_f6dd5e5af08b04 195-197,224
+crates/orion-daemon/src/server.rs
+  s_d1c0ccd493bbd1::t_501b92f37437a3 135,333-346
+crates/orion-daemon/src/stacks.rs
+  s_d1c0ccd493bbd1::t_db4d4688c62209 1-194
+crates/orion-tui/src/app.rs
+  s_d1c0ccd493bbd1::t_1cd509beff83b3 28-32,125-127,2407-2408,4369-4377,4781-4783,5131-5133,5135-5137,5170-5198
+crates/orion-tui/src/event_loop.rs
+  s_d1c0ccd493bbd1::t_4a252298ad0120 3748-3749,4102-4103,4995,6512,7265-7267,7405,11690,12232-12235,12470-12473,12700,13039,13220-13222,13265,29562-29825,38471
+crates/orion-tui/src/event_loop/focus_walk.rs
+  s_d1c0ccd493bbd1::t_a7375a93ead7f4 104
+crates/orion-tui/src/ghostty_config.rs
+  s_d1c0ccd493bbd1::t_a81ca6285c6e4d 189,902
+crates/orion-tui/src/keymap.rs
+  s_d1c0ccd493bbd1::t_78f966072677a5 203-204,868-885
+crates/orion-tui/src/lib.rs
+  s_d1c0ccd493bbd1::t_5a6aad3e08e76e 66
+crates/orion-tui/src/overlay_close.rs
+  s_d1c0ccd493bbd1::t_03e52bfad154d5 39,107
+crates/orion-tui/src/perf.rs
+  s_d1c0ccd493bbd1::t_5d3d54649748b5 164
+crates/orion-tui/src/stacks.rs
+  s_d1c0ccd493bbd1::t_14960ab33c6a54 1-434
+crates/orion-tui/src/theme.rs
+  s_d1c0ccd493bbd1::t_ee7e8ff2b5fd21 109-113,195-200
+crates/orion-tui/src/todos/view.rs
+  s_d1c0ccd493bbd1::t_9a3d41912f08d4 1060-1067
+crates/orion-tui/src/ui.rs
+  s_d1c0ccd493bbd1::t_2852de6608f1f1 2605
+crates/orion-tui/src/ui/launcher_view.rs
+  s_d1c0ccd493bbd1::t_43e75b27b52483 2054,2059-2108,5731-5874
+docs/2026-10-06-stack-status/stack-status.md
+  s_d1c0ccd493bbd1::t_2d718ddfc1b773 1-401
+docs/configuration.md
+  s_d1c0ccd493bbd1::t_c3dde4728676aa 689-694
+docs/keys.md
+  s_d1c0ccd493bbd1::t_9e762bfa5eb1a7 119
+scripts/shot/scenes/stacks-modal.keys
+  s_d1c0ccd493bbd1::t_78ee042e0f82e9 1-3
+scripts/shot/scenes/stacks-modal.setup.sh
+  s_d1c0ccd493bbd1::t_3105c0fcb2c172 1-2
+scripts/shot/scenes/stacks.keys
+  s_d1c0ccd493bbd1::t_01d8004b594c99 1-2
+scripts/shot/scenes/stacks.setup.sh
+  s_d1c0ccd493bbd1::t_51369fe5409949 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "42aa79e8aa2d46e071c54c6092543fc8af96b173",
+  "prompts": {},
+  "sessions": {
+    "s_d1c0ccd493bbd1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "37177e50-8137-4706-bf0d-a9c2bc23225c",
+        "model": "unknown"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
