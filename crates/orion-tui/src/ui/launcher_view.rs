@@ -2051,8 +2051,59 @@ fn draw_band_rule(
             ));
         }
     }
+    hits.extend(paint_stack_mark(buf, r, app, &band.worktree));
     hits.push((r, HitTarget::LauncherBand(rule.index)));
     hits
+}
+
+/// STACK STATUS on a band's rule: the `⬡` over its last `─` — the tail's,
+/// or the fill's when there is no right block — green while the
+/// worktree's compose stack runs, faint while it is stopped, and nothing
+/// without one. A running stack's STACK TRAIL runs into it down the
+/// rule's dashes, one column a frame, and it flashes as the light lands;
+/// the light skips text but keeps time across it, so its pace is even.
+/// The click on the mark opens the Stacks modal.
+fn paint_stack_mark(
+    buf: &mut Buffer,
+    r: Rect,
+    app: &App,
+    worktree: &orion_core::WorktreeId,
+) -> Option<(Rect, HitTarget)> {
+    let stack = app.stack_of(worktree)?;
+    let th = app.theme;
+    // The rightmost dash: the rule's own last cell unless it was cut.
+    let h = (r.x..r.right())
+        .rev()
+        .find(|&x| buf[(x, r.y)].symbol() == "─")?;
+    let running = stack.state() == orion_core::compose::StackState::Running;
+    let mut mark = if running { th.ok } else { th.faint };
+    if running && app.animations {
+        let x0 = (r.x..h)
+            .find(|&x| buf[(x, r.y)].symbol() == "─")
+            .unwrap_or(h);
+        let phase = app.sweep_phase() % crate::app::STACK_TRAIL_PERIOD;
+        for x in x0..h {
+            if buf[(x, r.y)].symbol() != "─" {
+                continue;
+            }
+            if let Some(&c) = th.stack_sweep.get(phase.wrapping_sub(usize::from(x - x0))) {
+                buf[(x, r.y)].set_fg(c);
+            }
+        }
+        if let Some(&c) = th.stack_flash.get(phase.wrapping_sub(usize::from(h - x0))) {
+            mark = c;
+        }
+    }
+    buf[(h, r.y)].set_symbol(crate::stacks::MARK).set_fg(mark);
+    Some((
+        Rect {
+            x: h,
+            width: 1,
+            height: 1,
+            ..r
+        },
+        HitTarget::LauncherBandStack(worktree.clone()),
+    ))
 }
 
 /// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
@@ -5675,6 +5726,150 @@ mod tests {
         let text = row_string(&buf, 0);
         assert!(text.starts_with("── ⎇ feat-x ─"), "narrow: {text:?}");
         assert!(!text.contains('*'), "the counts go first: {text:?}");
+    }
+
+    /// An app whose checkout `w1` (at `/src/feat-x`) has a compose stack with
+    /// `running` of its 5 containers up, at STACK TRAIL frame `phase`.
+    fn with_stack(running: u16, phase: usize) -> App {
+        use orion_core::{ProjectId, Worktree, WorktreeId};
+        let mut app = App::new();
+        app.tree.worktrees.push(Worktree {
+            id: WorktreeId("w1".into()),
+            project_id: ProjectId("p1".into()),
+            path: "/src/feat-x".into(),
+            branch: "feat-x".into(),
+            is_main: false,
+            sort_order: 0,
+        });
+        app.stacks = Some(vec![orion_core::compose::Stack {
+            project: "riplo-wt".into(),
+            dirs: vec!["/src/feat-x".into()],
+            running,
+            total: 5,
+        }]);
+        let frame = crate::app::SWEEP_FRAME.as_millis() as u64;
+        app.splash_epoch = std::time::Instant::now()
+            - std::time::Duration::from_millis(phase as u64 * frame + frame / 2);
+        app
+    }
+
+    /// A running stack's `⬡` takes the rule's last dash — the tail's, past
+    /// the counts — in green, and the rule keeps its width.
+    #[test]
+    fn a_running_stack_marks_the_rules_right_end() {
+        let mut app = with_stack(5, 79);
+        app.animations = false;
+        app.worktree_ahead
+            .insert(orion_core::WorktreeId("w1".into()), (4, 0));
+        let th = app.theme;
+        let band = a_band(false, "feat-x");
+        let buf = rule_row(&app, &band, 50);
+        let text = row_string(&buf, 0);
+        assert!(text.ends_with(" ⇡4 ─⬡"), "{text:?}");
+        assert_eq!(text.chars().count(), 50);
+        assert_eq!(painted(&buf, 0, th.ok), "⬡");
+    }
+
+    /// With no right block the `⬡` takes the fill's last dash; a stopped
+    /// stack's is faint.
+    #[test]
+    fn a_stopped_stack_marks_the_last_fill_dash_faintly() {
+        let app = with_stack(0, 0);
+        let th = app.theme;
+        let buf = rule_row(&app, &a_band(false, "feat-x"), 40);
+        let text = row_string(&buf, 0);
+        assert!(text.ends_with("──⬡"), "{text:?}");
+        assert!(painted(&buf, 0, th.faint).contains('⬡'));
+        assert_eq!(painted(&buf, 0, th.ok), "");
+    }
+
+    /// No stack, no mark: the rule is the one it always was.
+    #[test]
+    fn no_stack_leaves_the_rule_alone() {
+        let mut app = with_stack(5, 0);
+        let band = a_band(false, "feat-x");
+        let marked = row_string(&rule_row(&app, &band, 40), 0);
+        app.stacks = Some(Vec::new());
+        let plain = row_string(&rule_row(&app, &band, 40), 0);
+        assert!(!plain.contains('⬡'), "{plain:?}");
+        assert!(plain.ends_with("───"));
+        assert_eq!(marked.chars().count(), plain.chars().count());
+    }
+
+    /// The STACK TRAIL lights dashes only: at the frame its head is over
+    /// the branch name nothing there changes colour, and a frame that
+    /// puts it on a dash paints that dash the head's shade. The `⬡`
+    /// flashes as the light lands, and stays still with animations off.
+    #[test]
+    fn the_stack_trail_runs_on_dashes_into_the_mark() {
+        let band = a_band(false, "feat-x");
+        let head = |app: &App| app.theme.stack_sweep[0];
+        // `── ⎇ feat-x ───…`: columns 0–1 dashes, `feat-x` at 5–10.
+        let app = with_stack(5, 0);
+        let buf = rule_row(&app, &band, 40);
+        assert_eq!(
+            buf[(0, 0)].fg,
+            head(&app),
+            "the light starts at the left end"
+        );
+        let app = with_stack(5, 7);
+        let buf = rule_row(&app, &band, 40);
+        assert_eq!(painted(&buf, 0, head(&app)), "", "over text: nothing lit");
+        assert_eq!(buf[(7, 0)].symbol(), "a");
+        let app = with_stack(5, 14);
+        let buf = rule_row(&app, &band, 40);
+        assert_eq!(buf[(14, 0)].fg, head(&app));
+        assert_eq!(buf[(14, 0)].symbol(), "─");
+        // The `⬡` sits at column 39; the light reaches it at frame 39.
+        let app = with_stack(5, 40);
+        let buf = rule_row(&app, &band, 40);
+        assert_eq!(buf[(39, 0)].symbol(), "⬡");
+        assert_eq!(
+            buf[(39, 0)].fg,
+            app.theme.stack_flash[1],
+            "peak of the flash"
+        );
+        let mut app = with_stack(5, 40);
+        app.animations = false;
+        let buf = rule_row(&app, &band, 40);
+        assert_eq!(buf[(39, 0)].fg, app.theme.ok);
+        assert_eq!(painted(&buf, 0, app.theme.stack_sweep[0]), "");
+    }
+
+    /// The `⬡` is its own click: registered ahead of the band's rule.
+    #[test]
+    fn the_stack_mark_is_a_hit_ahead_of_the_rule() {
+        let app = with_stack(5, 0);
+        let band = a_band(false, "feat-x");
+        let facts = rule_facts(&app, &band, app.theme);
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 40, 1));
+        let hits = draw_band_rule(
+            &mut buf,
+            &app,
+            Rect::new(0, 0, 40, 1),
+            &band,
+            &facts,
+            BandRule {
+                index: 0,
+                on: false,
+                lit: false,
+                more: 0,
+                cols: RuleColumns::of([&facts]),
+            },
+        );
+        let stack_at = hits
+            .iter()
+            .position(|(r, h)| {
+                *h == HitTarget::LauncherBandStack(orion_core::WorktreeId("w1".into()))
+                    && r.x == 39
+                    && r.width == 1
+            })
+            .expect("the mark's hit");
+        let band_at = hits
+            .iter()
+            .position(|(_, h)| *h == HitTarget::LauncherBand(0))
+            .unwrap();
+        assert!(stack_at < band_at);
     }
 
     /// Every rule on the grid gives its pull request and its counts the

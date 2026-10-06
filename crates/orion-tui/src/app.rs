@@ -25,6 +25,11 @@ pub const SWEEP_FRAME: std::time::Duration = std::time::Duration::from_millis(10
 /// SHIMMER: a finish nobody has looked at sweeps until somebody does.
 pub const ONE_SHOT_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Frames in one pass of the STACK TRAIL: the light runs into a running
+/// stack's `⬡` once every eight seconds — long enough for a full-width
+/// rule, rare enough to stay out of the way.
+pub const STACK_TRAIL_PERIOD: usize = 80;
+
 /// Frames of the WORKING SPINNER, the dot a running session wears: a
 /// quarter turn every [`SPIN_FRAMES_PER_STEP`] sweep frames.
 pub const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -117,6 +122,9 @@ pub enum HitTarget {
     /// runs. Only a checkout with a pull request has one, and it is only
     /// as wide as its text, so the rest of the rule is still the band's.
     LauncherBandPr(WorktreeId),
+    /// The STACK MARK `⬡` at a band's right end, registered ahead of the
+    /// rule so it wins: a click opens the Stacks modal on that stack.
+    LauncherBandStack(WorktreeId),
     /// The ISSUE NUMBER on a session's card — its `#15`, drawn while the
     /// `card_issue_number` setting is on — by the card's session,
     /// registered ahead of the card, so it wins: a click lands the cursor
@@ -2396,6 +2404,8 @@ pub enum Overlay {
     Metrics(MetricsView),
     /// `⇧U`: ACCOUNT USAGE — how much is left on each linked account.
     Usage(crate::usage::UsageView),
+    /// `⇧S`: STACK STATUS — every docker compose stack, to start or stop.
+    Stacks(crate::stacks::StacksView),
     Hosts(HostsView),
     /// `e` in the SESSIONS PANEL: the AGENT PRESETS list.
     AgentPresets(crate::preset_overlays::AgentPresetsView),
@@ -4356,6 +4366,15 @@ pub struct App {
     /// beside its changed files: commits ahead, commits behind — a band's
     /// `⇡4 ⇣1`. Only a checkout that is either has an entry.
     pub worktree_ahead: HashMap<WorktreeId, (usize, usize)>,
+    /// STACK STATUS: every docker compose stack on the machine, as the
+    /// DAEMON last saw it — `None` while docker is out of reach (or before
+    /// the first answer), `stacks_error` saying why.
+    pub stacks: Option<Vec<orion_core::compose::Stack>>,
+    pub stacks_error: Option<String>,
+    /// Stacks with a verb in flight, by project, and its req_id: what the
+    /// Stacks modal's row reads until the Ack or Error. The DAEMON polls
+    /// again before it acks, so the listing that follows shows the result.
+    pub stack_pending: HashMap<String, (orion_core::compose::StackVerb, u64)>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -4759,6 +4778,9 @@ impl App {
             worktree_changes_inflight: None,
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
+            stacks: None,
+            stacks_error: None,
+            stack_pending: HashMap::new(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
             attention_walk: None,
@@ -5106,14 +5128,13 @@ impl App {
             && !self.splash_active()
             && (self.tree.agents.iter().any(|a| {
                 !a.archived && (self.spins(a) || self.shows_unread(a) || fresh_alarm(a, now))
+            }) || self.visible_worktrees().iter().any(|w| {
+                self.merge_sweeping(&w.id)
+                    || (self.any_stack_running() && self.stack_running(&w.id))
             }) || self
-                .visible_worktrees()
-                .iter()
-                .any(|w| self.merge_sweeping(&w.id))
-                || self
-                    .flash
-                    .as_ref()
-                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
+                .flash
+                .as_ref()
+                .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
                 || self.update_available.is_some())
     }
 
@@ -5144,6 +5165,35 @@ impl App {
     /// over `orion ssh`, where the desktop is the wrong one).
     pub fn may_notify_desktop(&self) -> bool {
         !self.window_focused && !self.is_remote
+    }
+
+    /// STACK STATUS: the compose stack started in `worktree`'s checkout,
+    /// if any — a nested checkout's stack is its own, not its parent's.
+    pub fn stack_of(&self, worktree: &WorktreeId) -> Option<&orion_core::compose::Stack> {
+        let stacks = self.stacks.as_deref().filter(|s| !s.is_empty())?;
+        let wt = self.tree.worktrees.iter().find(|w| &w.id == worktree)?;
+        orion_core::compose::stack_in(stacks, &wt.path, &self.checkout_paths())
+    }
+
+    /// Every checkout's directory, for [`orion_core::compose::owner_of`].
+    pub fn checkout_paths(&self) -> Vec<&std::path::Path> {
+        self.tree
+            .worktrees
+            .iter()
+            .map(|w| w.path.as_path())
+            .collect()
+    }
+
+    /// Whether any stack on the machine is up — the cheap check before
+    /// asking which band it is on.
+    fn any_stack_running(&self) -> bool {
+        self.stacks.iter().flatten().any(|s| s.running > 0)
+    }
+
+    /// Whether `worktree`'s stack is up: its band's `⬡` runs the trail.
+    pub fn stack_running(&self, worktree: &WorktreeId) -> bool {
+        self.stack_of(worktree)
+            .is_some_and(|s| s.state() == orion_core::compose::StackState::Running)
     }
 
     /// Whether `worktree`'s MERGED BAND is still inside its ONE-SHOT SWEEP.

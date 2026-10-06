@@ -200,6 +200,8 @@ pub enum Action {
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
     /// account, window by window.
     Usage,
+    Stacks,
+    StopAllStacks,
     Help,
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
@@ -862,6 +864,24 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["shift+u"],
+    },
+    ActionSpec {
+        action: Action::Stacks,
+        id: "stacks",
+        label: "Stacks",
+        hint: "Every docker compose stack on this machine and the worktree it belongs to — start, stop or take one down",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["shift+s"],
+    },
+    ActionSpec {
+        action: Action::StopAllStacks,
+        id: "stop_all_stacks",
+        label: "Stop all stacks",
+        hint: "Stop every running docker compose stack on this machine — containers and data are kept",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Help,

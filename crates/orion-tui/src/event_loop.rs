@@ -3745,6 +3745,8 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Usage(_)
         | Overlay::Skills(_)
         | Overlay::ProjectPicker(_) => true,
+        // A take-down waiting on its answer: Esc cancels that first.
+        Overlay::Stacks(view) => view.confirm.is_none(),
         Overlay::Onboard(view) => !view.asking(),
         _ => false,
     }
@@ -4097,6 +4099,8 @@ fn dispatch_action(
         Action::ClaudeAccounts => open_claude_accounts(app, None),
         Action::Metrics => open_metrics(app, out),
         Action::Usage => crate::usage::open(app),
+        Action::Stacks => crate::stacks::open(app),
+        Action::StopAllStacks => crate::stacks::stop_all(app, out),
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
         // the first column. Landing on the pane takes the input lock:
@@ -4988,6 +4992,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::ClaudeAccounts
             | Action::Metrics
             | Action::Usage
+            | Action::Stacks
             | Action::Hosts
             | Action::AgentPresets
             | Action::Skills
@@ -6504,6 +6509,7 @@ fn modal_takes_cmd_w(app: &App) -> bool {
                     | Overlay::Skills(_)
                     | Overlay::AgentPresets(_)
                     | Overlay::Todos(_)
+                    | Overlay::Stacks(_)
             )
         )
 }
@@ -7256,7 +7262,9 @@ fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientReq
         HitTarget::LauncherDrawerEntry(band, entry) => {
             launcher::select_drawer_entry(app, band, entry, out)
         }
-        HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
+        HitTarget::LauncherBandPr(ref wid) | HitTarget::LauncherBandStack(ref wid) => {
+            launcher::select_band_of(app, wid, out)
+        }
         HitTarget::LauncherCardIssue(ref id) => launcher::select_issue_card(app, id, out),
         _ => false,
     }
@@ -7394,6 +7402,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
+        Overlay::Stacks(_) => crate::stacks::handle_key(app, key, out),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
@@ -11678,6 +11687,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             h,
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
+                | HitTarget::LauncherBandStack(_)
                 | HitTarget::LauncherCardIssue(_)
                 | HitTarget::LauncherStripLeft(_)
                 | HitTarget::LauncherStripRight(_)
@@ -12219,6 +12229,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::usage::handle_mouse(app, mouse, mouse_pos);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::Stacks(_))) {
+        crate::stacks::handle_mouse(app, mouse, mouse_pos, out);
+        return;
+    }
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         crate::pr_modal::handle_mouse(app, mouse, mouse_pos, out);
         return;
@@ -12453,6 +12467,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandPr(wid)) => {
                     launcher::click_pull_request(app, &wid, out)
                 }
+                // The STACK MARK `⬡`: the Stacks modal, on that stack.
+                Some(HitTarget::LauncherBandStack(wid)) => {
+                    crate::stacks::open_at(app, &wid);
+                }
                 // The ISSUE NUMBER on a session's card: the cursor onto
                 // the card, and the issue in the browser, through the very
                 // `open_issue` `⇧I` runs.
@@ -12679,6 +12697,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                         HitTarget::LauncherCard(_)
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
+                            | HitTarget::LauncherBandStack(_)
                             | HitTarget::LauncherCardIssue(_)
                             | HitTarget::LauncherStripLeft(_)
                             | HitTarget::LauncherStripRight(_)
@@ -13017,6 +13036,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             reconcile_selection_inner(app, before, out);
         }
         ServerEvent::Ack { req_id, created } => {
+            crate::stacks::settled(app, req_id);
             // False for a create the user has navigated away from since
             // firing it (`App::left_behind`): the rows still become the
             // real ones, and nothing below moves a cursor, the pane or
@@ -13197,6 +13217,9 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             refresh_palette(app);
             app.dirty = true;
         }
+        ServerEvent::StacksChanged { stacks, error } => {
+            crate::stacks::listed(app, stacks, error);
+        }
         // `orion open` in a session: the user asked to see these files.
         ServerEvent::FilesOpened { root, paths, .. } => {
             crate::file_tabs::open(app, root, paths);
@@ -13239,6 +13262,7 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             if let Some(id) = &req_id {
                 app.left_behind.remove(id);
                 app.todo_pending.remove(id);
+                crate::stacks::settled(app, *id);
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
@@ -29535,6 +29559,270 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.overlay.is_none());
     }
 
+    // ---- `⇧S` stacks ----
+
+    fn a_stack(project: &str, dir: &str, running: u16, total: u16) -> orion_core::compose::Stack {
+        orion_core::compose::Stack {
+            project: project.into(),
+            dirs: vec![dir.into()],
+            running,
+            total,
+        }
+    }
+
+    fn list_stacks(app: &mut App, stacks: Vec<orion_core::compose::Stack>) {
+        hse(
+            app,
+            ServerEvent::StacksChanged {
+                stacks: Some(stacks),
+                error: None,
+            },
+        );
+    }
+
+    fn stack_actions(out: &[ClientRequest]) -> Vec<(u64, String, orion_core::compose::StackVerb)> {
+        out.iter()
+            .filter_map(|r| match r {
+                ClientRequest::StackAction {
+                    req_id,
+                    project,
+                    verb,
+                } => Some((*req_id, project.clone(), *verb)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A running stack on a worktree on screen keeps the sweep clock
+    /// going for its trail; a stopped one, or animations off, does not.
+    #[test]
+    fn a_running_stack_keeps_the_sweep_ticking() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = orion_core::WorktreeId("w1".into());
+        assert!(!app.status_anim_active());
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 0, 3)]);
+        assert!(app.stack_of(&w1).is_some());
+        assert!(!app.status_anim_active(), "stopped: still");
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
+        assert!(app.status_anim_active(), "running: the trail moves");
+        app.animations = false;
+        assert!(!app.status_anim_active());
+        app.animations = true;
+        hse(
+            &mut app,
+            ServerEvent::StacksChanged {
+                stacks: None,
+                error: Some("Cannot connect to the Docker daemon".into()),
+            },
+        );
+        assert!(app.stack_of(&w1).is_none(), "docker gone: no marks");
+        assert!(!app.status_anim_active());
+    }
+
+    /// `⇧S` lists every stack — the selected project's first, the cursor
+    /// on the selected worktree's — and Enter starts a stopped one; its
+    /// row says so until the Ack.
+    #[test]
+    fn stacks_modal_lists_every_stack_and_enter_toggles_one() {
+        use orion_core::compose::StackVerb;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        list_stacks(
+            &mut app,
+            vec![
+                a_stack("aaa-elsewhere", "/opt/elsewhere", 4, 4),
+                a_stack("demo", "/tmp/demo", 0, 3),
+            ],
+        );
+        let chord = crate::keymap::KeyChord::parse("shift+s").unwrap();
+        assert_eq!(
+            app.keymap.lookup(crate::keymap::Scope::Global, &chord),
+            Some(crate::keymap::Action::Stacks)
+        );
+        out.extend(run_action(&mut app, crate::keymap::Action::Stacks));
+        let rows = crate::stacks::rows(&app);
+        assert_eq!(rows[0].stack.project, "demo", "this project's first");
+        assert_eq!(rows[0].place, "main · demo");
+        assert_eq!(rows[1].place, "/opt/elsewhere");
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Stacks · 1 running"), "{text}");
+        assert!(text.contains("4/4 up"), "{text}");
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let sent = stack_actions(&out);
+        assert_eq!(sent.len(), 1);
+        let (req_id, project, verb) = sent[0].clone();
+        assert_eq!((project.as_str(), verb), ("demo", StackVerb::Start));
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("starting…"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert_eq!(stack_actions(&out).len(), 1, "not twice while it runs");
+
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 3, 3)]);
+        assert!(app.stack_pending.contains_key("demo"), "until its Ack");
+        hse(
+            &mut app,
+            ServerEvent::Ack {
+                req_id,
+                created: None,
+            },
+        );
+        assert!(app.stack_pending.is_empty());
+        press(&mut app, KeyCode::Char('S'), KeyModifiers::SHIFT, &mut out);
+        assert!(app.overlay.is_none(), "⇧S closes it again");
+    }
+
+    /// ⌘W asks first: Esc changes its mind, Enter takes the stack down
+    /// with its volumes kept, ⌘W again takes the volumes too. A refused
+    /// verb's row goes back to what it said.
+    #[test]
+    fn stacks_modal_takes_a_stack_down_only_once_confirmed() {
+        use orion_core::compose::StackVerb;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 3, 3)]);
+        crate::stacks::open(&mut app);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        assert!(stack_actions(&out).is_empty());
+        assert!(
+            matches!(app.overlay, Some(Overlay::Stacks(_))),
+            "esc only cancels"
+        );
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let down = stack_actions(&out)[0].0;
+        hse(
+            &mut app,
+            ServerEvent::Ack {
+                req_id: down,
+                created: None,
+            },
+        );
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
+        let sent = stack_actions(&out);
+        let verbs: Vec<StackVerb> = sent.iter().map(|s| s.2).collect();
+        assert_eq!(verbs, [StackVerb::Down, StackVerb::DownVolumes]);
+        assert!(app.stack_pending.contains_key("demo"));
+        hse(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(sent[1].0),
+                message: "couldn't take down demo: no such project".into(),
+            },
+        );
+        assert!(
+            app.stack_pending.is_empty(),
+            "a refusal settles the row too"
+        );
+    }
+
+    /// `s` in the modal, and **Stop all stacks** in the palette, stop
+    /// every running stack and nothing else.
+    #[test]
+    fn stop_all_stops_only_the_running_stacks() {
+        use orion_core::compose::StackVerb;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        list_stacks(
+            &mut app,
+            vec![
+                a_stack("a", "/opt/a", 2, 2),
+                a_stack("b", "/opt/b", 0, 2),
+                a_stack("c", "/opt/c", 1, 2),
+            ],
+        );
+        crate::stacks::open(&mut app);
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
+        let sent: Vec<(String, StackVerb)> = stack_actions(&out)
+            .into_iter()
+            .map(|(_, p, v)| (p, v))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                ("a".to_string(), StackVerb::Stop),
+                ("c".to_string(), StackVerb::Stop)
+            ]
+        );
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
+        assert_eq!(stack_actions(&out).len(), 2, "not again while they run");
+        app.overlay = None;
+        app.stack_pending.clear();
+        let more = run_action(&mut app, crate::keymap::Action::StopAllStacks);
+        assert_eq!(stack_actions(&more).len(), 2);
+    }
+
+    /// More stacks than fit: the list scrolls to keep the cursor in view,
+    /// and a click lands on the row drawn there.
+    #[test]
+    fn stacks_modal_scrolls_to_the_cursor() {
+        let mut app = App::new();
+        let mut out = Vec::new();
+        let stacks: Vec<_> = (0..30)
+            .map(|i| a_stack(&format!("stack-{i:02}"), &format!("/opt/s{i:02}"), 0, 1))
+            .collect();
+        list_stacks(&mut app, stacks);
+        crate::stacks::open(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(110, 16)).unwrap();
+        for _ in 0..29 {
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        }
+        let text = buffer_text(&terminal);
+        assert!(text.contains("stack-29"), "{text}");
+        assert!(!text.contains("stack-00"), "{text}");
+        let Some(Overlay::Stacks(view)) = &app.overlay else {
+            panic!("the modal");
+        };
+        let (list, first) = (view.list_area, view.first);
+        assert!(first > 0);
+        let click = |row: u16| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: list.x + 10,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::stacks::handle_mouse(
+            &mut app,
+            click(list.y),
+            ratatui::layout::Position::new(list.x + 10, list.y),
+            &mut out,
+        );
+        let Some(Overlay::Stacks(view)) = &app.overlay else {
+            panic!("the modal");
+        };
+        assert_eq!(
+            view.selected.as_deref(),
+            Some(format!("stack-{first:02}").as_str())
+        );
+    }
+
+    /// Docker out of reach says so in the modal, instead of an empty list.
+    #[test]
+    fn stacks_modal_says_when_docker_is_missing() {
+        let mut app = App::new();
+        hse(
+            &mut app,
+            ServerEvent::StacksChanged {
+                stacks: None,
+                error: Some("no docker CLI found".into()),
+            },
+        );
+        crate::stacks::open(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("No docker CLI found"));
+    }
+
     // ---- `⇧U` account usage modal ----
 
     fn usage_account(
@@ -38180,6 +38468,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::FileTabs(_) => "FileTabs",
             Overlay::Metrics(_) => "Metrics",
             Overlay::Usage(_) => "Usage",
+            Overlay::Stacks(_) => "Stacks",
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",

@@ -686,6 +686,12 @@ How a project is matched, and when it is left alone:
   (`docker ps` gets 15 s) is a one-line warning in every client; the worktree stays deleted. What it
   stopped or removed is logged in `daemon.log`.
 
+While a checkout is still there, its stack's state is on the grid: the DAEMON asks `docker ps` every
+5 seconds (`ORION_STACK_POLL_MS` changes that; it waits 30 seconds after docker stops answering) and
+every client draws a `⬡` at the right end of the band of a worktree with a stack — green while the
+stack runs, faint while it is stopped. `⇧S` opens STACKS, every compose stack on the machine with the
+worktree it belongs to, to start, stop or take one down ([Keys](keys.md)).
+
 `orion doctor` lists the compose projects whose every container was started in a directory that is
 gone — a checkout deleted while this was `off`, or deleted outside orion — with the
 `docker compose -p <project> down --volumes` that removes each ([Commands](commands.md#checking-the-machine)).

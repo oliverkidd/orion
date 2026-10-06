@@ -1061,7 +1061,8 @@ fn agent(app: &mut App, item: u64, out: &mut Vec<ClientRequest>) {
         .as_ref()
         .is_some_and(|d| d.launch.todo_item() == launch.todo_item());
     if resumed {
-        app.quick_draft.park(parked.expect("resumed means parked"));
+        app.quick_draft
+            .park(parked.expect("resumed is a parked draft"));
         crate::quick_prompt::open_box(app, launch);
         return;
     }
