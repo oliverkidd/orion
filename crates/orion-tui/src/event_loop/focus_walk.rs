@@ -136,6 +136,7 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::FooterUsage
             | HitTarget::FooterHome
             | HitTarget::FooterUpgrade
+            | HitTarget::FooterSpotify(_)
             | HitTarget::FooterCrumb(_)
             | HitTarget::ModalBrowser,
         )

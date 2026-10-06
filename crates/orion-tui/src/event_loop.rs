@@ -394,6 +394,15 @@ async fn main_loop(
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let update_interval = crate::update_check::interval();
     let mut next_update_check = tokio::time::Instant::now();
+    // What Spotify is playing, asked of the app over AppleScript off the
+    // loop (`spotify::interval`; macOS only, and the e2e tests turn it
+    // off): every beat while a track is up, a slower one while it isn't.
+    // Every answer lands here, a button's command's poll included.
+    let (spotify_tx, mut spotify_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::spotify::Answer>();
+    app.spotify_tx = Some(spotify_tx.clone());
+    let spotify_interval = crate::spotify::interval();
+    let mut next_spotify = tokio::time::Instant::now();
     let mut next_metrics_poll = tokio::time::Instant::now();
     let mut next_tail_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
@@ -725,6 +734,27 @@ async fn main_loop(
                 if let Some(version) = answer {
                     app.dirty |= app.update_available.as_deref() != Some(version.as_str());
                     app.update_available = Some(version);
+                }
+            }
+            _ = tokio::time::sleep_until(next_spotify),
+                if spotify_interval.is_some() && app.spotify_enabled && !app.spotify_denied =>
+            {
+                if app.spotify_in_flight == 0 {
+                    app.spotify_in_flight += 1;
+                    crate::spotify::spawn_poll(app.spotify_seq, spotify_tx.clone());
+                }
+                let beat = spotify_interval.unwrap_or(crate::spotify::DEFAULT_INTERVAL);
+                next_spotify = tokio::time::Instant::now()
+                    + if app.spotify.is_some() {
+                        beat
+                    } else {
+                        beat.max(crate::spotify::IDLE_INTERVAL)
+                    };
+            }
+            answer = spotify_rx.recv() => {
+                // Never None: `spotify_tx` lives as long as the loop.
+                if let Some(answer) = answer {
+                    land_spotify(&mut app, answer);
                 }
             }
             // The hover debounce: the cursor has rested on a pull request
@@ -8502,7 +8532,58 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.diff_start = cfg.diff_start();
     app.diff_one_at_a_time = cfg.diff_one_at_a_time();
     app.autofix_mode = cfg.autofix_mode();
+    // Turned off, the readout goes at once; the poll stops with it.
+    app.spotify_enabled = cfg.spotify;
+    if !cfg.spotify && app.spotify.take().is_some() {
+        app.dirty = true;
+    }
     set_hide_draft_prs(app, cfg.hide_draft_prs);
+}
+
+/// A Spotify poll's answer: the footer's readout follows it, repainting
+/// only on a change. A denied AUTOMATION prompt stops the polling for the
+/// rest of the run and says once, in the footer, where to allow it.
+fn land_spotify(app: &mut App, answer: crate::spotify::Answer) {
+    use crate::spotify::Heard;
+    app.spotify_in_flight = app.spotify_in_flight.saturating_sub(1);
+    match answer.heard {
+        // Turned off while it was out: drop it.
+        _ if !app.spotify_enabled => {}
+        // Heard before the latest click: what it says is already stale.
+        Heard::Track(_) if answer.seq < app.spotify_seq => {}
+        Heard::Track(track) => {
+            app.dirty |= app.spotify != track;
+            app.spotify = track;
+        }
+        Heard::Denied => {
+            if !app.spotify_denied {
+                app.flash = Some(crate::flash::Flash::setup(crate::spotify::DENIED));
+            }
+            app.spotify_denied = true;
+            app.spotify = None;
+            app.dirty = true;
+        }
+    }
+}
+
+/// A click on one of the SPOTIFY READOUT's buttons. The command goes out
+/// at once, its own poll behind it under a fresh press count, so no poll
+/// already out can land after it with the old state. A play/pause flips
+/// the glyph here too, ahead of that poll, so the button answers the click
+/// the moment it lands.
+fn press_spotify(app: &mut App, button: crate::spotify::Button) {
+    let Some(tx) = app.spotify_tx.clone() else {
+        return;
+    };
+    app.spotify_seq += 1;
+    app.spotify_in_flight += 1;
+    crate::spotify::spawn_command(button, app.spotify_seq, tx);
+    if button == crate::spotify::Button::PlayPause {
+        if let Some(np) = &mut app.spotify {
+            np.playing = !np.playing;
+            app.dirty = true;
+        }
+    }
 }
 
 /// `R` in the settings overlay, confirmed: rewrite config.json from the
@@ -11590,6 +11671,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::FooterUsage
                 | HitTarget::FooterHome
                 | HitTarget::FooterUpgrade
+                | HitTarget::FooterSpotify(_)
                 | HitTarget::FooterCrumb(_)
         )
     });
@@ -12385,6 +12467,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::FooterHome) => toggle_home(app),
                 // The `⇡ v…` beside it, and HOME's upgrade line.
                 Some(HitTarget::FooterUpgrade) => open_upgrade(app),
+                // A SPOTIFY READOUT button: its command, straight to the
+                // app, with a poll behind it.
+                Some(HitTarget::FooterSpotify(button)) => press_spotify(app, button),
                 // A part of the footer's breadcrumb: down onto the grid with
                 // the cursor on it.
                 Some(HitTarget::FooterCrumb(part)) => launcher::click_crumb(app, part, out),
@@ -19317,6 +19402,204 @@ diff --git a/src/c.rs b/src/c.rs
             keyed.last(),
             Some(ClientRequest::GetMetrics { .. })
         ));
+    }
+
+    /// An app with a metrics reading (so the footer has its `1 agent · 1.0
+    /// GB` readout) and `spotify` up, for the SPOTIFY READOUT tests.
+    fn spotify_footer_app(spotify: Option<crate::spotify::NowPlaying>) -> App {
+        use orion_core::{MetricsSnapshot, SessionMetrics};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        app.client_rss_bytes = 100 * 1024 * 1024;
+        app.last_metrics = Some(MetricsSnapshot {
+            daemon_pid: 1,
+            daemon_rss_bytes: 200 * 1024 * 1024,
+            system_total_bytes: 0,
+            sessions: vec![SessionMetrics {
+                session: SessionRef::Agent(AgentId("a1".into())),
+                pid: 10,
+                rss_bytes: 724 * 1024 * 1024,
+                procs: 3,
+                prewarm: None,
+            }],
+        });
+        app.spotify_enabled = true;
+        app.spotify = spotify;
+        app
+    }
+
+    fn midnight_city(playing: bool) -> crate::spotify::NowPlaying {
+        crate::spotify::NowPlaying {
+            playing,
+            title: "Midnight City".into(),
+            artist: "M83".into(),
+        }
+    }
+
+    /// The footer's bottom row, as text.
+    fn footer_row(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let y = buf.area.height - 1;
+        (0..buf.area.width)
+            .filter_map(|x| buf.cell((x, y)))
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    /// The SPOTIFY READOUT: what is playing, just left of the memory
+    /// readout, its play/pause glyph a button the pointer underlines.
+    #[test]
+    fn the_footer_shows_what_spotify_is_playing() {
+        use crate::spotify::Button;
+        use crossterm::event::Event;
+        use ratatui::style::Modifier;
+        let mut app = spotify_footer_app(Some(midnight_city(true)));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let row = footer_row(&terminal);
+        assert!(
+            row.trim_end()
+                .ends_with("♪ Midnight City · M83  ⏮ ⏸ ⏭  1 agent · 1.0 GB"),
+            "left of the usage readout:\n{row}"
+        );
+
+        let rect = app
+            .hit_rect(&HitTarget::FooterSpotify(Button::PlayPause))
+            .expect("the play/pause button is a target");
+        let cell = |terminal: &Terminal<TestBackend>| {
+            terminal
+                .backend()
+                .buffer()
+                .cell((rect.x, rect.y))
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(cell(&terminal).symbol(), "⏸", "its target covers the glyph");
+        assert_eq!(rect.width, 2, "and the space after it");
+        assert!(!cell(&terminal).modifier.contains(Modifier::UNDERLINED));
+        for button in [Button::Previous, Button::Next] {
+            assert!(app.hit_rect(&HitTarget::FooterSpotify(button)).is_some());
+        }
+
+        let mut out = Vec::new();
+        handle_terminal_event(
+            &mut app,
+            Event::Mouse(mev(MouseEventKind::Moved, rect.x, rect.y)),
+            &mut out,
+        );
+        assert_eq!(
+            app.hover_crumb,
+            Some(HitTarget::FooterSpotify(Button::PlayPause))
+        );
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert!(
+            cell(&terminal).modifier.contains(Modifier::UNDERLINED),
+            "the pointer underlines it"
+        );
+
+        // Paused, the glyph is play.
+        app.spotify = Some(midnight_city(false));
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        assert_eq!(cell(&terminal).symbol(), "▶");
+    }
+
+    /// A poll that set out before a click lands after it without undoing
+    /// it: the track it heard is dropped, but it still counts back in, so
+    /// the beat isn't held off for good.
+    #[test]
+    fn a_poll_from_before_a_click_cannot_undo_it() {
+        use crate::spotify::{Answer, Heard};
+        let mut app = spotify_footer_app(Some(midnight_city(true)));
+        // A beat's poll is out under press count 0…
+        app.spotify_in_flight = 1;
+        // …and the click flips the glyph and sends its command under 1.
+        app.spotify_seq = 1;
+        app.spotify_in_flight += 1;
+        app.spotify = Some(midnight_city(false));
+
+        land_spotify(
+            &mut app,
+            Answer {
+                seq: 0,
+                heard: Heard::Track(Some(midnight_city(true))),
+            },
+        );
+        assert_eq!(app.spotify, Some(midnight_city(false)), "stale, dropped");
+        assert_eq!(app.spotify_in_flight, 1, "but counted back in");
+
+        land_spotify(
+            &mut app,
+            Answer {
+                seq: 1,
+                heard: Heard::Track(Some(midnight_city(false))),
+            },
+        );
+        assert_eq!(app.spotify, Some(midnight_city(false)));
+        assert_eq!(app.spotify_in_flight, 0);
+        land_spotify(
+            &mut app,
+            Answer {
+                seq: 1,
+                heard: Heard::Track(None),
+            },
+        );
+        assert_eq!(app.spotify, None, "a current poll is heard");
+        assert_eq!(app.spotify_in_flight, 0, "never below zero");
+    }
+
+    /// Nothing playing, nothing drawn: no targets, and the hints have the
+    /// width the readout would have taken.
+    #[test]
+    fn the_footer_reserves_nothing_without_spotify() {
+        let mut app = spotify_footer_app(None);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let bare = footer_row(&terminal);
+        assert!(!bare.contains('♪'), "{bare}");
+        assert!(
+            !app.hits
+                .iter()
+                .any(|(_, t)| matches!(t, HitTarget::FooterSpotify(_))),
+            "no Spotify targets"
+        );
+
+        app.spotify = Some(midnight_city(true));
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let with = footer_row(&terminal);
+        let hints = |row: &str| row.split('♪').next().unwrap().trim_end().chars().count();
+        assert!(
+            hints(&bare) > hints(&with),
+            "the hints give way to the readout:\n{bare}\n{with}"
+        );
+    }
+
+    /// On a narrow bar the readout shortens or goes, and the memory
+    /// readout keeps every character.
+    #[test]
+    fn a_narrow_footer_shortens_spotify_before_the_usage() {
+        let mut app = spotify_footer_app(Some(crate::spotify::NowPlaying {
+            playing: true,
+            title: "Midnight City (Remastered 2021)".into(),
+            artist: "Anthony Gonzalez".into(),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let row = footer_row(&terminal);
+        assert!(
+            row.trim_end().ends_with("  1 agent · 1.0 GB"),
+            "the usage is intact:\n{row}"
+        );
+        assert!(
+            !row.contains("(Remastered 2021) · Anthony Gonzalez"),
+            "the readout shortened:\n{row}"
+        );
+        // A third of the bar is twenty cells: the artist goes, and the
+        // title keeps what is left.
+        assert!(
+            row.trim_end()
+                .ends_with("♪ Midnight C…  ⏮ ⏸ ⏭  1 agent · 1.0 GB"),
+            "{row}"
+        );
     }
 
     /// Running / needs-feedback sessions head the list and hold their

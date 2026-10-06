@@ -206,6 +206,9 @@ pub enum HitTarget {
     FooterHome,
     /// The footer's `⇡ v…` and HOME's upgrade line: **Upgrade orion**.
     FooterUpgrade,
+    /// One of the footer's SPOTIFY READOUT buttons (`⏮ ⏸ ⏭`): a click
+    /// sends Spotify that command (`event_loop::press_spotify`).
+    FooterSpotify(crate::spotify::Button),
     /// A part of the footer's breadcrumb: a click goes back down onto the
     /// grid with the cursor on that part
     /// (`event_loop::launcher::click_crumb`).
@@ -3901,6 +3904,27 @@ pub struct App {
     /// nameplate. `None` until the update check finds one; a check that
     /// can't ask leaves it as it was.
     pub update_available: Option<String>,
+    /// What Spotify is playing, for the footer's SPOTIFY READOUT
+    /// (`crate::spotify`): `None` while it is closed, stopped or empty, the
+    /// readout off, or no poll has answered yet.
+    pub spotify: Option<crate::spotify::NowPlaying>,
+    /// The Spotify polls and button commands out: the beat skips while
+    /// any are, rather than start another `osascript` beside them.
+    pub spotify_in_flight: usize,
+    /// Clicks on the readout's buttons so far. Every poll carries the count
+    /// it set out under, and a track one heard before the latest click is
+    /// dropped — it would undo the glyph the click just flipped.
+    pub spotify_seq: u64,
+    /// The AUTOMATION prompt was denied (`-1743`): the poll has stopped for
+    /// the rest of the run, the footer having said once where to allow it.
+    pub spotify_denied: bool,
+    /// The **Spotify in footer** setting. Mirrors the config, refreshed at
+    /// startup and when the settings overlay applies a change; off here
+    /// until startup applies it.
+    pub spotify_enabled: bool,
+    /// Where the Spotify polls and commands answer — the loop's channel,
+    /// held here so a click on one of the readout's buttons can reach it.
+    pub spotify_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::spotify::Answer>>,
     /// The last `h`/`l` (or ←/→) that landed on the end of the panel row,
     /// or `k`/`j` (↑/↓) on a panel's first row, and stayed put, with when
     /// it arrived: a second press of the same action inside `DOUBLE_TAP`
@@ -4620,6 +4644,12 @@ impl App {
             upgrade: false,
             flash: None,
             update_available: None,
+            spotify: None,
+            spotify_in_flight: 0,
+            spotify_seq: 0,
+            spotify_denied: false,
+            spotify_enabled: false,
+            spotify_tx: None,
             edge_tap: None,
             release_watch: None,
             overlay: None,

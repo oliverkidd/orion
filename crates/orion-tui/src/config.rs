@@ -537,6 +537,7 @@ pub enum SettingKind {
     ShowAllWorktrees,
     Theme,
     Animations,
+    Spotify,
     BlackBackground,
     HideCardMarks,
     HighlightCurrentCard,
@@ -704,7 +705,8 @@ impl SettingKind {
             SettingKind::PrAutofix
             | SettingKind::AutofixPreset
             | SettingKind::AutofixModel
-            | SettingKind::AutofixEffort => (2026, 10, 6),
+            | SettingKind::AutofixEffort
+            | SettingKind::Spotify => (2026, 10, 6),
         }
     }
 
@@ -911,6 +913,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::Animations,
                 label: "Animations",
                 hint: "Status text sweep and splash motion (off = fewer repaints)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::Spotify,
+                label: "Spotify in footer",
+                hint: "Show what Spotify is playing, with ⏮ ⏸ ⏭ buttons (macOS)",
                 group: "",
             },
             SettingSpec {
@@ -1528,6 +1536,12 @@ pub struct Config {
     /// status-text sweep and the splash's motion). Off trades them for
     /// fewer repaints on constrained machines.
     pub animations: bool,
+    /// SPOTIFY IN FOOTER: the footer's readout of what the Spotify desktop
+    /// app is playing, `♪ Midnight City · M83  ⏮ ⏸ ⏭`, its glyphs buttons
+    /// (`crate::spotify`). macOS only, asked over AppleScript; on by
+    /// default, and nothing shows while Spotify is closed. Off, the poll
+    /// stops too.
+    pub spotify: bool,
     /// BLACK BACKGROUND: paint every cell nothing else colored pure black
     /// — the grid, the cards, the session pane, the overlays — instead of
     /// leaving it on the terminal's own background, which in a stock
@@ -1968,6 +1982,7 @@ impl Default for Config {
             show_all_worktrees: true,
             theme: "default".into(),
             animations: true,
+            spotify: true,
             black_background: true,
             hide_card_marks: false,
             highlight_current_card: true,
@@ -3337,6 +3352,7 @@ impl Config {
             SettingKind::ShowAllWorktrees => on_off(self.show_all_worktrees).into(),
             SettingKind::Theme => self.theme.clone(),
             SettingKind::Animations => on_off(self.animations).into(),
+            SettingKind::Spotify => on_off(self.spotify).into(),
             SettingKind::BlackBackground => on_off(self.black_background).into(),
             SettingKind::HideCardMarks => shown_hidden(self.hide_card_marks).into(),
             SettingKind::HighlightCurrentCard => on_off(self.highlight_current_card).into(),
@@ -3502,6 +3518,9 @@ impl Config {
             }
             SettingKind::Animations => {
                 self.animations = !self.animations;
+            }
+            SettingKind::Spotify => {
+                self.spotify = !self.spotify;
             }
             SettingKind::BlackBackground => {
                 self.black_background = !self.black_background;
@@ -5322,6 +5341,30 @@ mod tests {
             older.black_background,
             "a config predating the key turns it on"
         );
+    }
+
+    /// SPOTIFY IN FOOTER: on out of the box, toggled off from its
+    /// Appearance row, persisted under `spotify`; a config predating the
+    /// key turns it on, and a saved `false` is honoured.
+    #[test]
+    fn spotify_default_on_toggle_and_persist() {
+        let mut cfg = Config::default();
+        assert!(cfg.spotify);
+        let (tab, row) = locate(SettingKind::Spotify).unwrap();
+        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
+        cfg.cycle(tab, row, 0);
+        assert!(!cfg.spotify);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        assert!(!load_from(&path).spotify);
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw.get("spotify"), Some(&serde_json::json!(false)));
+
+        let older: Config = serde_json::from_str("{}").unwrap();
+        assert!(older.spotify, "a config predating the key turns it on");
     }
 
     /// HIDE CARD MARKS: off out of the box, toggled on from its

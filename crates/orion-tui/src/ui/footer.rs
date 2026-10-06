@@ -4,7 +4,8 @@
 //! (a button: a click goes HOME), the BREADCRUMB in the grid's own marks
 //! (`orbit-api ⎇ feat/auth-tokens ◐ Token store`, each part a link back
 //! to it), `· archived`, `· full screen` or `· home` when you are somewhere
-//! other than the grid, and at the right edge the live counts. Between
+//! other than the grid, and at the right edge the live counts, what
+//! Spotify is playing just before them ([`crate::spotify`]). Between
 //! the two go KEY HINTS, and only while no modal is up ([`hints`]): a
 //! modal's keys are on its own bottom border (`crate::hints::modal_block`),
 //! so the footer never repeats or contradicts them. With nothing up, the
@@ -530,8 +531,24 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|s| s.chars().count() as u16 + 2)
         .unwrap_or(0)
         .min(area.width);
+    // Beside it, what Spotify is playing (`crate::spotify`), in at most a
+    // third of the bar — and never so much the readout can't keep its
+    // room. It gives way before the counts do, and the hints before it.
+    let spotify_hover = match app.hover_crumb {
+        Some(HitTarget::FooterSpotify(button)) => Some(button),
+        _ => None,
+    };
+    let spot_max = (area.width / 3).min(area.width.saturating_sub(right_w + 2));
+    let spot = app
+        .spotify
+        .as_ref()
+        .and_then(|np| crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover));
+    let spot_w = spot.as_ref().map_or(0, |r| r.width);
     let left = Rect {
-        width: area.width.saturating_sub(right_w),
+        width: area
+            .width
+            .saturating_sub(right_w)
+            .saturating_sub(if spot.is_some() { spot_w + 2 } else { 0 }),
         ..area
     };
     // Which orion this is, at the far left: the one thing on the bar that
@@ -561,35 +578,15 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         let x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
         let width = plate.chars().count() as u16;
         let hovered = app.hover_crumb == Some(HitTarget::FooterHome);
-        let style = if hovered {
-            Style::default()
-                .fg(th.text)
-                .add_modifier(Modifier::UNDERLINED)
-        } else {
-            Style::default().fg(th.dim)
-        };
-        app.hits.push((
-            Rect {
-                x,
-                width: width.min(left.width.saturating_sub(x - left.x)),
-                ..left
-            },
-            HitTarget::FooterHome,
-        ));
+        let style = footer_button_style(th, hovered);
+        push_hit(app, left, x, width, HitTarget::FooterHome);
         spans.push(Span::styled(plate, style));
         if let Some(update) = update {
             // A button too: **Upgrade orion**, shimmering green so a new
             // release is hard to miss.
             let x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
             let width = update.chars().count() as u16;
-            app.hits.push((
-                Rect {
-                    x,
-                    width: width.min(left.right().saturating_sub(x)),
-                    ..left
-                },
-                HitTarget::FooterUpgrade,
-            ));
+            push_hit(app, left, x, width, HitTarget::FooterUpgrade);
             let mut base = Style::default().add_modifier(Modifier::BOLD);
             if app.hover_crumb == Some(HitTarget::FooterUpgrade) {
                 base = base.add_modifier(Modifier::UNDERLINED);
@@ -612,16 +609,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
                         words.style = words.style.add_modifier(Modifier::UNDERLINED);
                     }
                 }
-                if x < left.right() {
-                    app.hits.push((
-                        Rect {
-                            x,
-                            width: width.min(left.right() - x),
-                            ..left
-                        },
-                        target,
-                    ));
-                }
+                push_hit(app, left, x, width, target);
             }
             spans.extend(seg_spans);
             x += width;
@@ -635,6 +623,26 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         None => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }
     f.render_widget(Paragraph::new(Line::from(spans)), left);
+    if let Some(spot) = spot {
+        let rect = Rect {
+            x: area.x + area.width.saturating_sub(right_w + spot_w),
+            width: spot_w,
+            ..area
+        };
+        // Each glyph is a button, its target the glyph and the space after
+        // it, inside the readout's own cells; the title is only words.
+        for (button, col) in spot.buttons {
+            let width = col.end - col.start + 1;
+            push_hit(
+                app,
+                rect,
+                rect.x + col.start,
+                width,
+                HitTarget::FooterSpotify(button),
+            );
+        }
+        f.render_widget(Paragraph::new(Line::from(spot.spans)), rect);
+    }
     if let Some(usage) = usage {
         let right = Rect {
             x: area.x + area.width.saturating_sub(right_w),
@@ -646,16 +654,10 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         // pointer on it lifts it to full text and underlines it, as the
         // header's buttons are. Only the words are the target, laid where
         // the right alignment puts them, not the padding beside them.
-        let span = Span::styled(usage, Style::default().fg(th.dim));
-        let span = if app.hover_crumb == Some(HitTarget::FooterUsage) {
-            span.style(
-                Style::default()
-                    .fg(th.text)
-                    .add_modifier(Modifier::UNDERLINED),
-            )
-        } else {
-            span
-        };
+        let span = Span::styled(
+            usage,
+            footer_button_style(th, app.hover_crumb == Some(HitTarget::FooterUsage)),
+        );
         let width = (span.width() as u16).min(right.width);
         app.hits.push((
             Rect {
@@ -669,6 +671,36 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             Paragraph::new(Line::from(span)).alignment(ratatui::layout::Alignment::Right),
             right,
         );
+    }
+}
+
+/// A dim button on the bar — the nameplate, the memory readout, the
+/// Spotify glyphs — as it is drawn: lifted to full text and underlined
+/// while the pointer is on it (`hovered`), since nothing about a dim word
+/// says it can be clicked.
+pub(crate) fn footer_button_style(th: crate::theme::Theme, hovered: bool) -> Style {
+    if hovered {
+        Style::default()
+            .fg(th.text)
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(th.dim)
+    }
+}
+
+/// `target`'s hit rect on the bar: `width` cells from `x`, clipped to
+/// `within`, and none at all once `x` is past it — so a button the bar
+/// cut short can't take a click meant for its neighbour.
+fn push_hit(app: &mut App, within: Rect, x: u16, width: u16, target: HitTarget) {
+    if x < within.right() {
+        app.hits.push((
+            Rect {
+                x,
+                width: width.min(within.right() - x),
+                ..within
+            },
+            target,
+        ));
     }
 }
 

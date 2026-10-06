@@ -29,14 +29,7 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// is `0` (off — the e2e tests, whose footers must not depend on what
 /// GitHub has published), else [`DEFAULT_INTERVAL`].
 pub fn interval() -> Option<Duration> {
-    match orion_core::env::non_empty(orion_core::env::UPDATE_CHECK_SECS) {
-        None => Some(DEFAULT_INTERVAL),
-        Some(v) => match v.parse::<u64>() {
-            Ok(0) => None,
-            Ok(secs) => Some(Duration::from_secs(secs)),
-            Err(_) => Some(DEFAULT_INTERVAL),
-        },
-    }
+    orion_core::env::secs_override(orion_core::env::UPDATE_CHECK_SECS, DEFAULT_INTERVAL)
 }
 
 /// Run one check off the loop. `tx` hears the newer version when there is
@@ -166,25 +159,5 @@ mod tests {
             "a dev build ahead of the last release"
         );
         assert_eq!(newer_than("garbage", "0.21.0"), None);
-    }
-
-    /// One test for every state of the override, since it is one
-    /// process-wide variable nothing else in this crate reads.
-    #[test]
-    fn interval_reads_the_env_override() {
-        let var = orion_core::env::UPDATE_CHECK_SECS;
-        std::env::remove_var(var);
-        assert_eq!(interval(), Some(DEFAULT_INTERVAL));
-        std::env::set_var(var, "0");
-        assert_eq!(interval(), None, "0 turns it off");
-        std::env::set_var(var, "90");
-        assert_eq!(interval(), Some(Duration::from_secs(90)));
-        std::env::set_var(var, "soon");
-        assert_eq!(
-            interval(),
-            Some(DEFAULT_INTERVAL),
-            "nonsense is the default"
-        );
-        std::env::remove_var(var);
     }
 }
