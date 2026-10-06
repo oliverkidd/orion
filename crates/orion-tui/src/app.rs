@@ -4147,14 +4147,15 @@ pub struct App {
     /// quick prompt opened on the same pull request starts from it
     /// instead, as a refused pull request comment does.
     pub parked_pr_prompt: Option<(String, String)>,
-    /// The QUICK PROMPT box last abandoned with something typed in it
+    /// The QUICK PROMPT boxes abandoned with something typed in them
     /// (`quick_prompt::QuickDraft`) — Esc, a click outside, the HARDWIRED
-    /// UNLOCK. The next box opened takes it back, so a press that closes
-    /// the box costs nothing typed; one slot, in memory — the SAVED DRAFT
-    /// below is what outlives the process.
-    pub quick_draft: Option<crate::quick_prompt::QuickDraft>,
+    /// UNLOCK — one per place (worktree, or fresh worktree in a project).
+    /// The next box opened at that place takes it back, so a press that
+    /// closes the box costs nothing typed; in memory only — the SAVED
+    /// DRAFT below is what outlives the process.
+    pub quick_draft: crate::quick_prompt::QuickDrafts,
     /// The SAVED DRAFT (`saved_draft`): the QUICK PROMPT's unsent text on
-    /// disk, written as it is typed, so a window closed mid-sentence keeps
+    /// disk, per place, written as it is typed, so a window closed mid-sentence keeps
     /// the sentence for the next box. The main loop installs the DATA
     /// DIR's at startup; the unit tests leave it `None` (or install a
     /// temporary one), so no test touches the real user's draft.
@@ -4666,7 +4667,7 @@ impl App {
             last_session_for_worktree: HashMap::new(),
             pending_prewarm: None,
             parked_pr_prompt: None,
-            quick_draft: None,
+            quick_draft: Default::default(),
             saved_draft: None,
             pending_attach: None,
             attached_sref: None,

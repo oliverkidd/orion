@@ -9323,7 +9323,7 @@ mod tests {
             pick_fresh_worktree(&mut app, &mut Vec::new());
             assert!(self::launch(&app).0.is_new_worktree(), "this box's pick");
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            app.quick_draft = None;
+            app.quick_draft.clear();
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let (launch, _) = self::launch(&app);
             assert!(
@@ -11386,7 +11386,7 @@ mod tests {
             // A parked draft aimed the same way: its text comes back, the
             // pick's harness stays, and the slot is emptied.
             app.overlay = None;
-            app.quick_draft = Some(crate::quick_prompt::QuickDraft {
+            app.quick_draft.park(crate::quick_prompt::QuickDraft {
                 launch: QuickLaunch::from_config(feat.clone(), &crate::config::Config::default()),
                 input: crate::text_input::TextInput::multiline_with_text("parked words"),
             });
@@ -11396,7 +11396,7 @@ mod tests {
             let (picked, typed) = launch(&app);
             assert_eq!(typed, "parked words");
             assert_eq!(picked.kind, row_kind, "the parked spec overrode the pick");
-            assert!(app.quick_draft.is_none(), "the draft was not taken");
+            assert!(app.quick_draft.is_empty(), "the draft was not taken");
         });
     }
 
