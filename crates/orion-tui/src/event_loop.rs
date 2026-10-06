@@ -39782,7 +39782,7 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
             let park = |app: &mut App, launch: &crate::quick_prompt::QuickLaunch| {
-                app.quick_draft = Some(crate::quick_prompt::QuickDraft {
+                app.quick_draft.park(crate::quick_prompt::QuickDraft {
                     launch: launch.clone(),
                     input: TextInput::multiline_with_text("words for elsewhere"),
                 });
@@ -39794,11 +39794,14 @@ diff --git a/src/c.rs b/src/c.rs
             };
             assert_eq!(prompt.input.as_str(), "run plan\n\nContext: todo in Emails");
             assert_eq!(
-                app.quick_draft.as_ref().map(|d| d.input.as_str()),
+                app.quick_draft
+                    .take(&other.target)
+                    .map(|d| d.input.as_str().to_string())
+                    .as_deref(),
                 Some("words for elsewhere"),
                 "still parked"
             );
-            app.quick_draft = None;
+            app.quick_draft.clear();
             app.overlay = None;
             press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);

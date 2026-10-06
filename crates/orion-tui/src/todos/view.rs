@@ -1056,17 +1056,20 @@ fn agent(app: &mut App, item: u64, out: &mut Vec<ClientRequest>) {
     // A draft parked from a box for this very todo comes back as it was
     // left; one for anything else stays parked, and the box opens on the
     // item's task — never on words meant for another.
-    let parked = app.quick_draft.take();
+    let parked = app.quick_draft.take(&launch.target);
     let resumed = parked
         .as_ref()
         .is_some_and(|d| d.launch.todo_item() == launch.todo_item());
     if resumed {
-        app.quick_draft = parked;
+        app.quick_draft
+            .park(parked.expect("resumed is a parked draft"));
         crate::quick_prompt::open_box(app, launch);
         return;
     }
     crate::quick_prompt::open_picked_box(app, launch);
-    app.quick_draft = parked;
+    if let Some(draft) = parked {
+        app.quick_draft.park(draft);
+    }
     if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
         prompt.input = TextInput::multiline_with_text(task);
         prompt.draft_restored = false;
