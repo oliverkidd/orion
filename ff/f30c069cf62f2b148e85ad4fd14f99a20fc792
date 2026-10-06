@@ -1,0 +1,51 @@
+crates/orion/src/main.rs
+  s_d3446679030193::t_e031a43eb99155 103-106,186-188,191-196
+crates/orion/src/cli.rs
+  s_d3446679030193::t_e031a43eb99155 325-329
+crates/orion-tui/src/lib.rs
+  s_d3446679030193::t_a24d58e9b8aa3b 137
+CLAUDE.md
+  s_d3446679030193::t_58251735861ed5 1-11
+.github/workflows/release.yml
+  s_d3446679030193::t_6fed5a1c25db1f 7-17,64-70
+crates/orion/src/upgrade.rs
+  s_d3446679030193::t_9092907b96c708 38-39,67-76,137-156,163,168,170-175,177,182-190,194
+  s_d3446679030193::t_f6a3811cc88c22 157-162
+  s_d3446679030193::t_09463b6aa9e7b1 164
+install.sh
+  s_d3446679030193::t_5f7705301aa384 180-183,185,187-190
+  s_d3446679030193::t_9b386693f73405 186
+crates/orion-daemon/daemon-inputs.txt
+  s_d3446679030193::t_c280353b23139f 1-16
+crates/orion-daemon/src/lifecycle.rs
+  s_d3446679030193::t_82ace031af521b 111-119,122-123,127-129,134-135,137,140-146
+README.md
+  s_d3446679030193::t_2bf0101d0424bd 71
+  s_d3446679030193::t_58251735861ed5 70
+crates/orion-daemon/build.rs
+  s_d3446679030193::t_a62a6ea780897a 1-20,25-29,34-90,92-114
+  s_d3446679030193::t_f6a3811cc88c22 21-24,30-33,91
+docs/commands.md
+  s_d3446679030193::t_2bf0101d0424bd 164-166
+crates/orion-tui/src/event_loop.rs
+  s_d3446679030193::t_67301438e05750 39785,39797-39800,39804
+  s_d3446679030193::t_5f7705301aa384 6600-6602
+crates/orion-tui/src/todos/view.rs
+  s_d3446679030193::t_5dd2e110efb69a 1059,1064,1069-1071
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fff30c069cf62f2b148e85ad4fd14f99a20fc792",
+  "prompts": {},
+  "sessions": {
+    "s_d3446679030193": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8942cb61-a8ae-400c-805c-34ecb6035f10",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
