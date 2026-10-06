@@ -79,7 +79,8 @@ pub struct QuickLaunch {
     /// The AGENT PRESET `⌘U` / `^X` picked: its prefix and postfix wrap
     /// the typed text into the STARTING PROMPT, and it pins the harness.
     /// `Tab` picking a harness clears it — a launch spec has one source.
-    pub preset: Option<AgentPreset>,
+    /// Boxed, so every prompt kind is not as large as a preset.
+    pub preset: Option<Box<AgentPreset>>,
     /// The GitHub issue this launch is for, when the box was opened from
     /// the ISSUES MODAL: named in the title, sent to the DAEMON as the
     /// session's persisted context (`CreateAgent::issue_url`), the name
@@ -104,6 +105,11 @@ pub struct QuickLaunch {
     /// attached to every one of them. Kept across the box's pickers, as
     /// the issue is; `^P` is refused, the issues being this project's.
     pub linear: Option<crate::linear::LinearBatch>,
+    /// The TODO this launch is sent at, when the box was opened from the
+    /// TODOS MODAL: its Ack writes the new session onto the item
+    /// (`todos::agent_started`), and a linked Linear issue's URL is the
+    /// session's context. Kept across the box's pickers, as the issue is.
+    pub todo: Option<crate::todos::TodoRef>,
     /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
     /// `Tab` picker toggles it, as it does in the NEW AGENT PICKER, and
     /// Enter sends the typed text as the cloud task (`claude --cloud
@@ -134,6 +140,7 @@ pub enum ModalUnder {
     Issues(Box<crate::issues::IssuesView>),
     PullRequests(Box<crate::pr_modal::PullRequestsView>),
     Linear(Box<crate::linear::LinearView>),
+    Todos(Box<crate::todos::TodoView>),
 }
 
 impl ModalUnder {
@@ -143,6 +150,7 @@ impl ModalUnder {
             Overlay::Issues(view) => Some(Self::Issues(Box::new(view.clone()))),
             Overlay::PullRequests(view) => Some(Self::PullRequests(Box::new(view.clone()))),
             Overlay::Linear(view) => Some(Self::Linear(Box::new(view.clone()))),
+            Overlay::Todos(view) => Some(Self::Todos(Box::new(view.clone()))),
             _ => None,
         }
     }
@@ -153,6 +161,7 @@ impl ModalUnder {
             Self::Issues(view) => crate::issues::reopen(app, *view),
             Self::PullRequests(view) => crate::pr_modal::reopen(app, *view),
             Self::Linear(view) => crate::linear::reopen(app, *view),
+            Self::Todos(view) => crate::todos::reopen(app, *view),
         }
     }
 }
@@ -420,6 +429,7 @@ impl QuickLaunch {
             issue: None,
             pr: None,
             linear: None,
+            todo: None,
             under: None,
             cloud: false,
             mode: AgentMode::Edit,
@@ -455,6 +465,14 @@ impl QuickLaunch {
     /// batch survives a `Tab` or `^X` pick as the issue does.
     pub fn with_linear(mut self, linear: Option<crate::linear::LinearBatch>) -> Self {
         self.linear = linear;
+        self
+    }
+
+    /// The same launch, for the TODO `todo` (or for none). What every
+    /// picker's return trip does to the launch it rebuilt, so the todo
+    /// survives a `Tab` or `^X` pick as the issue does.
+    pub fn with_todo(mut self, todo: Option<crate::todos::TodoRef>) -> Self {
+        self.todo = todo;
         self
     }
 
@@ -539,7 +557,7 @@ impl QuickLaunch {
             preset.effort.clone(),
             cfg,
         );
-        launch.preset = Some(preset);
+        launch.preset = Some(Box::new(preset));
         launch
     }
 
@@ -652,8 +670,8 @@ impl QuickLaunch {
     }
 
     /// Are two launches aimed at the same place — the same checkout, or a
-    /// fresh one in the same PROJECT, for the same issue and the same pull
-    /// request? The branch a fresh worktree gets is minted when the box
+    /// fresh one in the same PROJECT, for the same issue, the same pull
+    /// request and the same todo? The branch a fresh worktree gets is minted when the box
     /// opens, so two boxes aimed at a new checkout in one project are aimed
     /// alike however their names differ. What a parked [`QuickDraft`] is
     /// matched on: the same aim is the same box reopened, so the whole of
@@ -671,6 +689,12 @@ impl QuickLaunch {
             && self.issue == other.issue
             && self.pr == other.pr
             && self.linear == other.linear
+            && self.todo_item() == other.todo_item()
+    }
+
+    /// The TODO this launch is for, by list and item.
+    pub fn todo_item(&self) -> Option<(&std::path::Path, u64)> {
+        self.todo.as_ref().map(|t| (t.repo_path.as_path(), t.item))
     }
 
     /// Does Enter cut a fresh worktree before it launches? The box's frame
@@ -1310,7 +1334,7 @@ mod tests {
         assert_eq!(plain.compose(""), "", "and sends it no first prompt");
 
         let wrapped = QuickLaunch {
-            preset: Some(preset("reviewer", AgentKind::Claude)),
+            preset: Some(Box::new(preset("reviewer", AgentKind::Claude))),
             ..plain.clone()
         };
         assert!(wrapped.launches_empty());

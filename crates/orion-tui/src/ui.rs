@@ -104,6 +104,7 @@ pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hin
                 Some(ModalUnder::Issues(_)) => "back to issues",
                 Some(ModalUnder::PullRequests(_)) => "back to pull requests",
                 Some(ModalUnder::Linear(_)) => "back to Linear",
+                Some(ModalUnder::Todos(_)) => "back to todos",
                 None => "cancel",
             };
             let mut hints = vec![SUBMIT.hint().kept(), NEWLINE.hint()];
@@ -923,6 +924,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Some(ModalUnder::Issues(view)) => crate::issues::draw(f, app, &view, th, true),
         Some(ModalUnder::PullRequests(view)) => crate::pr_modal::draw(f, app, &view, th, true),
         Some(ModalUnder::Linear(view)) => crate::linear::draw(f, app, &view, th, true),
+        Some(ModalUnder::Todos(view)) => crate::todos::draw(f, app, &view, th, true),
         None => {}
     }
     match overlay {
@@ -1349,6 +1351,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                         (Act(&[Issues]), "issues: prompt, preset, edit"),
                         (Act(&[PullRequests]), "pull requests: read / launch"),
                         (Act(&[Linear]), "Linear issues"),
+                        (Act(&[Todos]), "todos: tick, prioritise, import"),
                         (Act(&[SwitchBranch]), "switch the ⌂ root's branch"),
                     ],
                 ),
@@ -2594,6 +2597,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::Issues(view) => crate::issues::draw(f, app, &view, th, false),
         Overlay::PullRequests(view) => crate::pr_modal::draw(f, app, &view, th, false),
         Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
+        Overlay::Todos(view) => crate::todos::draw(f, app, &view, th, false),
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
@@ -2969,6 +2973,12 @@ pub(crate) fn tab_strip<'a>(
         strip.push(Span::styled(label, style));
     }
     (strip, hits)
+}
+
+/// Which of a [`tab_strip`]'s labels column `x` is on, by the ranges it
+/// handed back.
+pub(crate) fn tab_hit(hits: &[(u16, u16)], x: u16) -> Option<usize> {
+    hits.iter().position(|(from, to)| (*from..*to).contains(&x))
 }
 
 /// The rule under a tab strip, the modal's inner width.
@@ -3729,7 +3739,7 @@ pub(crate) fn status_dot(
 /// you or crashed, the done color for a finish nobody has read, gold for
 /// one working, and gray for everything at rest — a read finish, a fresh
 /// session, one starting up; the quietest gray for one gone offline.
-fn status_color(status: Option<AgentStatus>, unseen: bool, th: Theme) -> Color {
+pub(crate) fn status_color(status: Option<AgentStatus>, unseen: bool, th: Theme) -> Color {
     match status {
         Some(AgentStatus::NeedsFeedback | AgentStatus::Terminated) => th.err,
         Some(AgentStatus::Finished) if unseen => th.done,
@@ -3825,10 +3835,21 @@ pub(crate) fn fit_parts(
     budget: usize,
     th: Theme,
 ) -> Vec<Span<'static>> {
+    fit_parts_at(parts, budget, th).0
+}
+
+/// [`fit_parts`], with the column (from the spans' start) and width of
+/// each part that fit — what a click on one of them hit-tests.
+pub(crate) fn fit_parts_at(
+    parts: Vec<Vec<Span<'static>>>,
+    budget: usize,
+    th: Theme,
+) -> (Vec<Span<'static>>, Vec<(usize, usize)>) {
     const INDENT: &str = "  ";
     const SEP: &str = " · ";
     use unicode_width::UnicodeWidthStr;
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut at = Vec::new();
     let mut used = INDENT.width();
     for part in parts {
         let w: usize = part.iter().map(|s| s.content.width()).sum();
@@ -3841,10 +3862,11 @@ pub(crate) fn fit_parts(
         } else {
             spans.push(Span::styled(SEP, Style::default().fg(th.faint)));
         }
+        at.push((used + sep, w));
         used += sep + w;
         spans.extend(part);
     }
-    spans
+    (spans, at)
 }
 
 /// A section header inside a list — ` NAME count` — muted and bold, as
@@ -5420,6 +5442,7 @@ mod tests {
             issue: None,
             pr: None,
             linear: None,
+            todo: None,
             under: None,
             cloud: false,
             mode: orion_core::AgentMode::Edit,

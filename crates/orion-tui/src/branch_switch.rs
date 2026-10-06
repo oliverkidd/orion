@@ -74,13 +74,13 @@ const PATH_CHUNK: usize = 200;
 // ---- width ----
 
 /// Screen cells `s` takes: a gitmoji or a CJK subject is two a character.
-fn cells(s: &str) -> usize {
+pub(crate) fn cells(s: &str) -> usize {
     Span::raw(s).width()
 }
 
 /// `s` cut to `max` cells with a `…` marking the cut — `ui::truncate` by
 /// cells rather than chars, so wide text can't push past its budget.
-fn fit(s: &str, max: usize) -> String {
+pub(crate) fn fit(s: &str, max: usize) -> String {
     if cells(s) <= max {
         return s.to_string();
     }

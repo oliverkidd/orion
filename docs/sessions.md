@@ -733,3 +733,58 @@ frame — opens it in the browser and marks it read on the way out (on the Check
 a check, the check's own page), and `Esc` closes the
 modal (twice, with a filter typed). The hotkey is
 rebindable (`pull_requests`).
+
+## TODOS
+
+`⌘I` (`^Q` where the terminal sends no ⌘) opens the selected PROJECT's own todo list, modelled on
+a daily todo: groups that nest and fold, each item with Linear's priority, sorted by it inside its
+group. The list is this machine's alone — one file per checkout under orion's data folder
+(`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the
+checkout's path, the path written inside it — and is never written into the repo, so `git status`
+stays clean. Every change is saved at once; a file that will not read is moved aside to
+`<name>.corrupt-<time>.json`, the footer saying so, rather than written over.
+
+**Today** is the groups, each header totalling its open items at each priority (`‼` urgent, `▆`
+high, `▄` medium, `▂` low), how many are open and how many were ticked today — nested groups counted
+in, a folded header included — and under it a line per item: its box, its priority as Linear draws
+it, the text, and on the right the agent sent at it, the Linear issue it is linked to and how many
+days it has carried over (`2d`). `Space` ticks an item: it strikes through and sinks to the bottom of
+its group for the rest of the day, and from the next day on it is in the **Log** (`⇧→`), under the
+day it was done, where `Space` unticks it back onto Today. Nothing unfinished goes anywhere — it is
+simply still there tomorrow, a day older. Days are local: a tick at 11pm is that day's.
+
+`⌘N` types a new item into the cursor's group — `Enter` adds it and opens the next, `Esc` stops —
+`⌘⇧N` a new group beside it, `⌘I` renames in place, `⌘1`–`⌘4` set the priority (the item's own
+again takes it off) and `⌘W` deletes, a group with items in it only after a second press. Typing
+filters the items, keeping their headers.
+
+**Pasting a list in.** Paste an indented Markdown list into the modal — a list copied out of a notes
+app — and it is added: `- `, `* ` or `+ ` bullets, a tab or four spaces a level (two when that is
+the list's smallest indent), `**bold**` taken off, other lines (a `Todo` heading) passed over. A
+bullet with bullets under it becomes a group, merged into one of the same name at the same level
+rather than beside it; one without becomes an item, open and with no priority; items at the top
+with no group go into **Inbox**.
+
+**An agent on an item.** `Enter` opens the QUICK PROMPT over the modal, aimed at a fresh worktree,
+the item's text in the box with `Context: todo in <group › subgroup>` under it — and its Linear
+issue, when it has one, whose URL is also the session's context, as an ISSUE SESSION's is. Edit it
+and `Enter` sends it; `Esc` comes back to the list. `⇧Tab` picks one of your AGENT PRESETS
+instead. The session it starts is written onto the item: its row shows `● agent`, in the session's
+STATUS MARK colour, and from then on `Enter` — or a click on the chip — closes the modal and lands
+on that session. When the session is deleted the chip goes, and `Enter` sends a new one.
+
+**Linear.** `⌘L` on an item opens its Linear menu, with only what applies:
+
+- **Create in Triage** files the item in your team's Triage (`issueCreate`, with the project's
+  `LINEAR_API_KEY`): its text the title, its priority Linear's, `From orion todos · <group>` the
+  description. The team is the one the list remembers, the only one the key has, or — with several
+  — one you pick, remembered for next time. A team that does not use Triage gets the issue in its
+  default state, and the footer says so.
+- **Link existing…** opens the Linear issues modal to pick one: `Enter` links the issue under the
+  cursor and comes back, `Esc` comes back with nothing linked.
+- **Open in browser** and **Unlink**, once it is linked.
+
+A linked item's chip shows the issue's state — `◇` triage, `○` todo, `◑` in progress, `●` done —
+its identifier and the state's name; a click on it opens the issue. Linear is asked how every linked
+issue stands each time the modal opens, and again on `⌘R`; an issue done or canceled there ticks its
+item. The sync is one way: ticking an item leaves its issue alone.

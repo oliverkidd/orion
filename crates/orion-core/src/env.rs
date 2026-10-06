@@ -4,6 +4,7 @@
 //! back to a default.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Id of the agent a hook or CLI invocation is running inside. Set on every
 /// agent PTY, scrubbed from plain terminals.
@@ -43,6 +44,9 @@ pub const EDITOR: &str = "ORION_EDITOR";
 /// (the footer's `⇡ vX.Y.Z` update indicator); `0` turns it off, as the
 /// e2e tests do so their footers never depend on what GitHub has published.
 pub const UPDATE_CHECK_SECS: &str = "ORION_UPDATE_CHECK_SECS";
+/// Cadence in seconds of the footer's Spotify poll; `0` turns it off, as the
+/// e2e tests do so their footers never depend on what's playing.
+pub const SPOTIFY_POLL_SECS: &str = "ORION_SPOTIFY_POLL_SECS";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";
@@ -99,6 +103,22 @@ pub fn non_empty(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|v| !v.is_empty())
 }
 
+/// A cadence in seconds read from `var` — [`UPDATE_CHECK_SECS`],
+/// [`SPOTIFY_POLL_SECS`] — through [`parse_secs`].
+pub fn secs_override(var: &str, default: Duration) -> Option<Duration> {
+    parse_secs(non_empty(var).as_deref(), default)
+}
+
+/// A seconds override as a cadence: unset (or empty) and anything that
+/// isn't a whole number are `default`; `0` is `None`, off.
+pub fn parse_secs(value: Option<&str>, default: Duration) -> Option<Duration> {
+    match value.map(str::parse::<u64>) {
+        None | Some(Err(_)) => Some(default),
+        Some(Ok(0)) => None,
+        Some(Ok(secs)) => Some(Duration::from_secs(secs)),
+    }
+}
+
 /// `$HOME`, when the environment has one. Read as an `OsString` so a
 /// non-UTF-8 home still resolves — every `~/` expansion goes through here.
 pub fn home_dir() -> Option<PathBuf> {
@@ -108,6 +128,23 @@ pub fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seconds_override_reads_as_a_cadence() {
+        let default = Duration::from_secs(60);
+        assert_eq!(parse_secs(None, default), Some(default), "unset");
+        assert_eq!(parse_secs(Some("0"), default), None, "0 turns it off");
+        assert_eq!(
+            parse_secs(Some("90"), default),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            parse_secs(Some("soon"), default),
+            Some(default),
+            "nonsense is the default"
+        );
+        assert_eq!(parse_secs(Some("-1"), default), Some(default));
+    }
 
     #[test]
     fn non_empty_treats_unset_and_empty_alike() {

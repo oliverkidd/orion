@@ -103,6 +103,8 @@ pub enum Action {
     PullRequests,
     /// `⌘L`: the LINEAR VIEW — open Linear issues assigned to you.
     Linear,
+    /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
+    Todos,
     /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
     /// another branch, asking what to do with uncommitted changes.
     SwitchBranch,
@@ -490,6 +492,18 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+l", "ctrl+l"],
+    },
+    ActionSpec {
+        action: Action::Todos,
+        id: "todos",
+        label: "Todos",
+        hint: "This project's todo list: tick off, prioritise, send an agent or a Linear issue from any item",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        // ⌘I is the one ⌘ letter neither macOS nor Ghostty keeps; `^I` is
+        // Tab, so its twin is `^Q` — free on the grid, where only a
+        // locked pane reads it (its hatch).
+        defaults: &["cmd+i", "ctrl+q"],
     },
     ActionSpec {
         action: Action::SwitchBranch,
@@ -2067,8 +2081,9 @@ mod tests {
             map.lookup(Scope::Terminal, &ctrl_q),
             Some(Action::UnlockTerminal)
         );
-        // ^q in the panels is free — the scopes never read the same press.
-        assert_eq!(map.lookup(Scope::Global, &ctrl_q), None);
+        // ^q in the panels is another action's — the scopes never read
+        // the same press: there it is the TODOS MODAL's twin.
+        assert_eq!(map.lookup(Scope::Global, &ctrl_q), Some(Action::Todos));
         assert_eq!(
             map.lookup(Scope::Global, &KeyChord::parse("ctrl+c").unwrap()),
             Some(Action::Quit)

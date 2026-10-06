@@ -206,6 +206,9 @@ pub enum HitTarget {
     FooterHome,
     /// The footer's `⇡ v…` and HOME's upgrade line: **Upgrade orion**.
     FooterUpgrade,
+    /// One of the footer's SPOTIFY READOUT buttons (`⏮ ⏸ ⏭`): a click
+    /// sends Spotify that command (`event_loop::press_spotify`).
+    FooterSpotify(crate::spotify::Button),
     /// A part of the footer's breadcrumb: a click goes back down onto the
     /// grid with the cursor on that part
     /// (`event_loop::launcher::click_crumb`).
@@ -2414,6 +2417,8 @@ pub enum Overlay {
     /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
     /// PULL REQUESTS MODAL) — what to send the agent to fix.
     Autofix(Box<crate::autofix::AutofixForm>),
+    /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
+    Todos(crate::todos::TodoView),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -2494,6 +2499,9 @@ pub struct AgentLaunchDraft {
     /// The mode the CLI starts in (see `ClientRequest::CreateAgent::mode`):
     /// edit for every launch but a QUICK PROMPT stepped to plan or ask.
     pub mode: orion_core::AgentMode,
+    /// The TODO this launch was sent at: `create_agent` keeps it by the
+    /// request (`App::todo_pending`) for the Ack to write the session onto.
+    pub todo: Option<crate::todos::TodoRef>,
 }
 
 impl AgentLaunchDraft {
@@ -2527,6 +2535,7 @@ impl AgentLaunchDraft {
             placeholder: None,
             follow: true,
             mode: orion_core::AgentMode::Edit,
+            todo: None,
         }
     }
 }
@@ -3901,6 +3910,27 @@ pub struct App {
     /// nameplate. `None` until the update check finds one; a check that
     /// can't ask leaves it as it was.
     pub update_available: Option<String>,
+    /// What Spotify is playing, for the footer's SPOTIFY READOUT
+    /// (`crate::spotify`): `None` while it is closed, stopped or empty, the
+    /// readout off, or no poll has answered yet.
+    pub spotify: Option<crate::spotify::NowPlaying>,
+    /// The Spotify polls and button commands out: the beat skips while
+    /// any are, rather than start another `osascript` beside them.
+    pub spotify_in_flight: usize,
+    /// Clicks on the readout's buttons so far. Every poll carries the count
+    /// it set out under, and a track one heard before the latest click is
+    /// dropped — it would undo the glyph the click just flipped.
+    pub spotify_seq: u64,
+    /// The AUTOMATION prompt was denied (`-1743`): the poll has stopped for
+    /// the rest of the run, the footer having said once where to allow it.
+    pub spotify_denied: bool,
+    /// The **Spotify in footer** setting. Mirrors the config, refreshed at
+    /// startup and when the settings overlay applies a change; off here
+    /// until startup applies it.
+    pub spotify_enabled: bool,
+    /// Where the Spotify polls and commands answer — the loop's channel,
+    /// held here so a click on one of the readout's buttons can reach it.
+    pub spotify_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::spotify::Answer>>,
     /// The last `h`/`l` (or ←/→) that landed on the end of the panel row,
     /// or `k`/`j` (↑/↓) on a panel's first row, and stayed put, with when
     /// it arrived: a second press of the same action inside `DOUBLE_TAP`
@@ -4504,6 +4534,16 @@ pub struct App {
     pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
+    /// Each project's TODOS list, by its checkout, read when the modal
+    /// first opens on it and kept for the session — saved on every change
+    /// (`todos::store`).
+    pub todos: HashMap<std::path::PathBuf, crate::todos::TodoFile>,
+    /// Creates sent at a TODO, by request id: the Ack writes the session
+    /// onto the item, an Error forgets it.
+    pub todo_pending: HashMap<u64, crate::todos::TodoRef>,
+    /// TODOS whose **Create in Triage** Linear has not answered yet, by
+    /// checkout and item: a second one is refused until it has.
+    pub todo_creates: std::collections::HashSet<(std::path::PathBuf, u64)>,
     /// The last **Test connection** (Settings → Linear): the checkout
     /// whose key it tried, where that key was found, and what Linear said
     /// — what the row says while that is still the key on show.
@@ -4621,6 +4661,12 @@ impl App {
             upgrade: false,
             flash: None,
             update_available: None,
+            spotify: None,
+            spotify_in_flight: 0,
+            spotify_seq: 0,
+            spotify_denied: false,
+            spotify_enabled: false,
+            spotify_tx: None,
             edge_tap: None,
             release_watch: None,
             overlay: None,
@@ -4760,6 +4806,9 @@ impl App {
             linear_failed: std::collections::HashSet::new(),
             linear_tx: None,
             linear_links: crate::linear::LinkStore::default(),
+            todos: HashMap::new(),
+            todo_pending: HashMap::new(),
+            todo_creates: std::collections::HashSet::new(),
             linear_test: None,
             view_jobs: None,
             diff_probe: None,

@@ -147,8 +147,10 @@ pub const EDITOR_CHORDS: &[&str] = &[
 /// never sees them: each modal's verb shares its letter with the grid's
 /// action for the same thing (⌘E changes, ⌘R refresh, ⌘O open outside,
 /// ⌘N new, ⌘W close), and the few with no grid twin (⌘I edit, ⌘D
-/// ready/draft, ⌘X merge) still have to reach orion. Released whatever
-/// the keymap says, as [`EDITOR_CHORDS`] are.
+/// ready/draft, ⌘X merge, the TODOS MODAL's ⌘⇧N new group and ⌘1–⌘4
+/// priorities) still have to reach orion. Released whatever the keymap
+/// says, as [`EDITOR_CHORDS`] are — the digits by their key too, as
+/// [`unbinds`] releases the tab digits.
 const MODAL_KEYS: &[crate::hints::Key] = &[
     crate::pr_modal::keys::DIFF,
     crate::pr_modal::keys::NEW,
@@ -173,6 +175,16 @@ const MODAL_KEYS: &[crate::hints::Key] = &[
     crate::ui::finder_keys::FOCUS_ROW,
     crate::ui::finder_keys::SOURCE,
     crate::branch_switch::keys::FETCH,
+    crate::todos::view::keys::NEW,
+    crate::todos::view::keys::NEW_GROUP,
+    crate::todos::view::keys::RENAME,
+    crate::todos::view::keys::URGENT,
+    crate::todos::view::keys::HIGH,
+    crate::todos::view::keys::MEDIUM,
+    crate::todos::view::keys::LOW,
+    crate::todos::view::keys::DELETE,
+    crate::todos::view::keys::LINEAR,
+    crate::todos::view::keys::REFRESH,
     crate::hints::COPY_PATH,
     crate::hints::IN_CURSOR,
 ];
@@ -182,7 +194,10 @@ fn modal_unbinds() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for key in MODAL_KEYS {
         for chord in key.chords() {
-            if let Some(t) = trigger(&chord).filter(|_| releases(&chord)) {
+            if !releases(&chord) {
+                continue;
+            }
+            for t in triggers(&chord) {
                 if !out.contains(&t) {
                     out.push(t);
                 }
@@ -190,6 +205,22 @@ fn modal_unbinds() -> Vec<String> {
         }
     }
     out
+}
+
+/// `chord`'s triggers: [`trigger`], and for a digit its key's spelling as
+/// well (`super+0` and `super+digit_0`), since Ghostty binds the tab
+/// digits both ways.
+fn triggers(chord: &KeyChord) -> Vec<String> {
+    let Some(trigger) = trigger(chord) else {
+        return Vec::new();
+    };
+    let digit = match chord.code {
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            Some(trigger.replace(&format!("+{c}"), &format!("+digit_{c}")))
+        }
+        _ => None,
+    };
+    std::iter::once(trigger).chain(digit).collect()
 }
 
 /// The ⌘ chords macOS turns into something else before the terminal can
@@ -264,16 +295,7 @@ fn keymap_unbinds(keymap: &Keymap) -> Vec<String> {
             if !releases(chord) {
                 continue;
             }
-            let Some(trigger) = trigger(chord) else {
-                continue;
-            };
-            let digit = match chord.code {
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    Some(trigger.replace(&format!("+{c}"), &format!("+digit_{c}")))
-                }
-                _ => None,
-            };
-            for t in std::iter::once(trigger).chain(digit) {
+            for t in triggers(chord) {
                 if !out.contains(&t) {
                     out.push(t);
                 }
@@ -757,6 +779,7 @@ mod tests {
                 "super+r",
                 "super+u",
                 "super+l",
+                "super+i",
                 "super+shift+a",
                 "super+shift+u",
                 "super+backspace",
@@ -783,8 +806,7 @@ mod tests {
         let block = block(&keymap);
         assert!(block.starts_with(&format!("{BEGIN}\nkeybind = super+k=unbind\n")));
         assert!(block.ends_with(&format!(
-            "keybind = super+shift+l=unbind\n\
-             keybind = super+i=unbind\n\
+            "keybind = super+shift+n=unbind\n\
              keybind = performable:super+c=copy_to_clipboard:mixed\n{END}\n"
         )));
         assert!(
@@ -800,6 +822,10 @@ mod tests {
         assert!(
             !block.contains("super+m="),
             "⌘M is no key of orion's: Ghostty keeps it"
+        );
+        assert!(
+            !block.contains("super+0=") && !block.contains("super+digit_0="),
+            "⌘0 stays Ghostty's font-size reset"
         );
     }
 
@@ -866,6 +892,7 @@ mod tests {
             crate::pr_actions::keys::ALL,
             crate::issues::keys::ALL,
             crate::linear::keys::ALL,
+            crate::todos::view::keys::ALL,
             crate::skills::keys::ALL,
             crate::preset_overlays::keys::ALL,
             crate::ui::diff_keys::ALL_KEYS,
