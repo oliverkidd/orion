@@ -35,6 +35,7 @@ crates/orion-core/src/crashlog.rs
   s_e28ee5cd7dd29f::t_0f4a6ac33479b1 64
 docs/keys.md
   s_e28ee5cd7dd29f::t_ef328ae32f194e 254,280-295
+  s_e28ee5cd7dd29f::t_9eebc0e4cd70c4 253
 crates/orion-tui/src/lib.rs
   s_e28ee5cd7dd29f::t_80165d710768c0 41
 crates/orion-tui/src/pull_request.rs
@@ -42,6 +43,7 @@ crates/orion-tui/src/pull_request.rs
   s_e28ee5cd7dd29f::t_6449796cd966d4 532-533,538-541,543,548-562,566-658,681-682,688-690,726,739-749,816-817,901-904,916,918,925-986,1906-1945,1953,1959-1973,2073,2075
   s_e28ee5cd7dd29f::t_a0781e6f6ec6a5 188-190,805-815,831-840,842
   s_e28ee5cd7dd29f::t_58eb1c5c78fd23 727-738
+  s_e28ee5cd7dd29f::t_402586f2feb07f 544-547
 crates/orion-tui/src/event_loop/launcher.rs
   s_e28ee5cd7dd29f::t_37fa2d415fb12e 4532,4534
 crates/orion-tui/src/pr_cache.rs
@@ -64,6 +66,7 @@ crates/orion-tui/src/pr_modal.rs
   s_e28ee5cd7dd29f::t_9a88e80b20ee7c 939-940,972-976,978-980
   s_e28ee5cd7dd29f::t_d9a6c57f8624a5 1283-1286,1441-1444,1497,2958-2961,3021-3025,3074-3075,3077-3078,3125-3130
   s_e28ee5cd7dd29f::t_9790f6f6e57f48 944,992,1374
+  s_e28ee5cd7dd29f::t_83b3cd3892834e 1129
 crates/orion-tui/src/theme.rs
   s_e28ee5cd7dd29f::t_0194d4627be374 340-349
   s_e28ee5cd7dd29f::t_9e3c0a27e02043 267-278
@@ -73,6 +76,8 @@ crates/orion-tui/src/list_filter.rs
   s_e28ee5cd7dd29f::t_d9a6c57f8624a5 137-139,342-345,560-563,607-610
   s_e28ee5cd7dd29f::t_266b17946bd5bc 245
   s_e28ee5cd7dd29f::t_d074eebb278195 11-13,69-72,144,150-151,167-179,220-223,226-230,234,246-258,262-264,269,272-275,278-280,284,297,331,705-709,734,736
+crates/orion-tui/src/autofix.rs
+  s_e28ee5cd7dd29f::t_2d7bee8f8506fd 1215,1265
 ---
 {
   "schema_version": "authorship/3.0.0",
