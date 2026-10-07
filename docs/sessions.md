@@ -561,7 +561,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   the card you came from: there is no pane to come back down to. `⌘N` opens the box again, on the project under the cursor.
 
 - **The project's own menu** — its verbs, which a session card has no room for — is a
-  right-click on its PROJECT TAB: **New worktree**; **Run** / **Stop run** and **Open** for the
+  right-click on its PROJECT TAB: **New worktree**; **Start stack** / **Stop stack** and **Open** for the
   checkout the grid would launch into, and **Delete worktree** when that is a linked one; **Rename**, a label only —
   the folder on disk keeps its name, and an empty name goes back to it; and **Remove from list**,
   behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
