@@ -2317,13 +2317,14 @@ pub struct SettingsView {
 impl SettingsView {
     /// `tab`/`selected`/`on_tabs` are the remembered cursor position
     /// (`App::settings_tab` / `App::settings_selected` /
-    /// `App::settings_on_tabs`), clamped in case the lists shrank between
-    /// builds.
+    /// `App::settings_on_tabs`), the tab clamped in case the list shrank
+    /// between builds — the row is [`App::settings_row`]'s to clamp, it
+    /// knowing how many projects the Project tab lists.
     pub fn new(tab: usize, selected: usize, on_tabs: bool) -> Self {
         let tab = tab.min(crate::config::tab_count().saturating_sub(1));
         Self {
             tab,
-            selected: selected.min(crate::config::tab_len(tab).saturating_sub(1)),
+            selected,
             on_tabs,
             ..Self::default()
         }
@@ -4872,7 +4873,25 @@ impl App {
             .get(tab)
             .copied()
             .unwrap_or(0)
-            .min(crate::config::tab_len(tab).saturating_sub(1))
+            .min(self.settings_len(tab).saturating_sub(1))
+    }
+
+    /// A settings tab's rows, the Project tab's a block per project.
+    pub fn settings_rows(&self, tab: usize) -> Vec<crate::config::SettingsRow> {
+        crate::config::settings_rows(tab, self.tree.projects.len())
+    }
+
+    /// How many selectable rows a settings tab holds.
+    pub fn settings_len(&self, tab: usize) -> usize {
+        crate::config::tab_len(tab, self.tree.projects.len())
+    }
+
+    /// The project a Project tab row edits — in tree order, which a
+    /// project's recent use never reshuffles under the cursor.
+    pub fn settings_project(&self, tab: usize, index: usize) -> Option<&Project> {
+        self.tree
+            .projects
+            .get(crate::config::project_at(tab, index)?)
     }
 
     /// Record where the settings cursor is parked, so the next open lands

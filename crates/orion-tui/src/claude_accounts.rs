@@ -1911,7 +1911,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 "on · ~/.claude-2 · same as ~/.claude"
             );
             assert_eq!(cfg.account_value(&AccountRow::Add), "~/.claude-3");
-            let rows = crate::config::settings_rows(crate::config::agents_tab());
+            let rows = crate::config::settings_rows(crate::config::agents_tab(), 0);
             let add = crate::config::AGENTS_HEAD.len() + 2;
             let at = rows
                 .iter()
@@ -2168,7 +2168,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 "not in orion · signed in as old@b.co"
             );
             // Under its own header, after the accounts.
-            let shown = crate::config::settings_rows(crate::config::agents_tab());
+            let shown = crate::config::settings_rows(crate::config::agents_tab(), 0);
             assert!(
                 shown.contains(&crate::config::SettingsRow::Header(
                     crate::config::MACHINE_GROUP.into()

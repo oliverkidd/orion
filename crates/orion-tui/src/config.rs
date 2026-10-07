@@ -165,6 +165,9 @@ pub const LINEAR_KEY_OWNER: &str = "the key's owner";
 /// What the task template row shows while it is empty: the built-in
 /// [`DEFAULT_LINEAR_TEMPLATE`].
 pub const LINEAR_TEMPLATE_DEFAULT: &str = "default";
+/// The Project tab with no project to list.
+pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
+
 /// What the Project tab's **Run command** row shows while it is empty:
 /// the checkout's `.orion.json` is what `r` reads then.
 pub const PROJECT_FILE_CHOICE: &str = orion_core::project_file::FILE_NAME;
@@ -431,9 +434,9 @@ pub struct SettingSpec {
 }
 
 /// What a tab shows. Ordinary tabs are a list of value settings. The
-/// Project tab is a list too, but its rows are one project's — the one
-/// selected in the PROJECTS PANEL, named on the tab's first line — and
-/// read and write that project's entry instead of a top-level key. The
+/// Project tab is a list too, but of every project in turn: each one's
+/// name, then these rows, which read and write that project's entry
+/// instead of a top-level key ([`project_at`]). The
 /// Hotkeys tab is generated from [`crate::keymap::ACTIONS`] instead, so a
 /// new action shows up there without being declared twice — and the Agents
 /// tab is generated from the harness registry, so a new CLI shows up
@@ -1056,16 +1059,16 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
         body: TabBody::Values(LINEAR_SETTINGS),
     },
     // Settings that belong to one project rather than to orion. The tab
-    // edits the selected project's entry in `projects` and names that
-    // project on its first line, so a row here never reads as a switch
-    // for every project at once.
+    // lists every project under its own name, each with these rows, and a
+    // row edits that project's entry in `projects` — so none of them reads
+    // as a switch for every project at once.
     SettingsTab {
         title: "Project",
         body: TabBody::Project(&[
             SettingSpec {
                 kind: SettingKind::RunCommand,
                 label: "Run command",
-                hint: "Shell line a menu's Run starts in this project's worktrees (empty = its .orion.json \"run\")",
+                hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start (empty = its .orion.json \"run\", else docker compose start)",
                 group: "",
             },
             SettingSpec {
@@ -1164,11 +1167,13 @@ pub fn tab_settings(tab: usize) -> &'static [SettingSpec] {
     }
 }
 
-/// How many selectable rows a tab holds. The Agents tab reads the
+/// How many selectable rows a tab holds, with `projects` in the tree —
+/// the Project tab has its rows once for each. The Agents tab reads the
 /// registry, so a new CLI grows it without a code change.
-pub fn tab_len(tab: usize) -> usize {
+pub fn tab_len(tab: usize, projects: usize) -> usize {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
-        Some(TabBody::Values(settings) | TabBody::Project(settings)) => settings.len(),
+        Some(TabBody::Values(settings)) => settings.len(),
+        Some(TabBody::Project(settings)) => settings.len() * projects,
         Some(TabBody::Hotkeys) => crate::keymap::ACTIONS.len(),
         Some(TabBody::Agents) => {
             let cfg = Config::load();
@@ -1181,9 +1186,23 @@ pub fn tab_len(tab: usize) -> usize {
 /// The static value setting at a tab-local index, if the tab declares one
 /// there: the full list on ordinary tabs, the head on the Agents tab
 /// (its harness rows resolve through [`Config::agent_row`]), never on
-/// Hotkeys.
+/// Hotkeys. On the Project tab, the same row in every project's block
+/// ([`project_at`] says whose).
 pub fn setting_at(tab: usize, index: usize) -> Option<&'static SettingSpec> {
-    tab_settings(tab).get(index)
+    match SETTINGS_TABS.get(tab).map(|t| t.body) {
+        Some(TabBody::Project(settings)) => settings.get(index % settings.len()),
+        _ => tab_settings(tab).get(index),
+    }
+}
+
+/// Which project a Project tab row is: its index in the tree's project
+/// list, each project's rows following the one before's. None on every
+/// other tab.
+pub fn project_at(tab: usize, index: usize) -> Option<usize> {
+    match SETTINGS_TABS.get(tab).map(|t| t.body) {
+        Some(TabBody::Project(settings)) => Some(index / settings.len()),
+        _ => None,
+    }
 }
 
 /// Where an Agents tab harness row lives, as `(tab, row)`. Reads the
@@ -1227,8 +1246,8 @@ pub fn all_settings() -> impl Iterator<Item = (usize, usize, &'static SettingSpe
 /// The Agents tab reads the registry for its harness rows.
 pub fn hint_at(tab: usize, index: usize) -> String {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
-        Some(TabBody::Values(settings) | TabBody::Project(settings)) => {
-            settings.get(index).map(setting_hint).unwrap_or_default()
+        Some(TabBody::Values(_) | TabBody::Project(_)) => {
+            setting_at(tab, index).map(setting_hint).unwrap_or_default()
         }
         Some(TabBody::Hotkeys) => crate::keymap::spec_at(index)
             .map(|s| s.hint)
@@ -1266,10 +1285,10 @@ fn setting_hint(spec: &SettingSpec) -> String {
 pub enum SettingsRow {
     Blank,
     Header(String),
-    /// The Project tab's first line: the selected project's name and repo
-    /// path, which the renderer reads off the app — the row map is static
-    /// and only knows there is such a line. Not selectable.
-    Project,
+    /// A Project tab heading: the name and repo path of the tree's
+    /// project at this index, which the renderer reads off the app — the
+    /// row map only knows how many there are. Not selectable.
+    Project(usize),
     /// Label + value line for the value setting at this tab-local index.
     Setting(usize),
     /// Label + chord list for `keymap::ACTIONS[index]`.
@@ -1290,18 +1309,27 @@ impl SettingsRow {
     }
 }
 
-pub fn settings_rows(tab: usize) -> Vec<SettingsRow> {
+/// A tab's rows top to bottom, with `projects` in the tree for the
+/// Project tab to give each its own block.
+pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
         Some(TabBody::Values(settings)) => grouped(
             settings.iter().map(|s| s.group.to_string()),
             SettingsRow::Setting,
         ),
         Some(TabBody::Project(settings)) => {
-            let mut rows = vec![SettingsRow::Project];
-            rows.extend(grouped(
-                settings.iter().map(|s| s.group.to_string()),
-                SettingsRow::Setting,
-            ));
+            if projects == 0 {
+                return vec![SettingsRow::Note(NO_PROJECTS.into())];
+            }
+            let mut rows = Vec::new();
+            for project in 0..projects {
+                if project > 0 {
+                    rows.push(SettingsRow::Blank);
+                }
+                rows.push(SettingsRow::Project(project));
+                let first = project * settings.len();
+                rows.extend((first..first + settings.len()).map(SettingsRow::Setting));
+            }
             rows
         }
         Some(TabBody::Hotkeys) => grouped(
@@ -5765,21 +5793,39 @@ mod tests {
         assert!(cfg.projects.is_empty());
     }
 
-    /// The Project tab: one line naming the project, then its rows, every
-    /// one of them a project row — and no project row anywhere else.
+    /// The Project tab: every project in turn, a line naming it then its
+    /// rows — each of them a project row, and no project row anywhere
+    /// else. A row knows its project and setting by index alone.
     #[test]
-    fn the_project_tab_names_the_project_then_lists_its_rows() {
+    fn the_project_tab_lists_every_project_under_its_name() {
+        use SettingsRow::{Blank, Project, Setting};
         let tab = project_tab();
         assert_eq!(SETTINGS_TABS[tab].title, "Project");
         assert!(tab < hotkeys_tab());
-        let rows = settings_rows(tab);
-        assert_eq!(rows[0], SettingsRow::Project);
         assert_eq!(
-            rows[1..],
-            (0..tab_len(tab))
-                .map(SettingsRow::Setting)
-                .collect::<Vec<_>>()[..]
+            settings_rows(tab, 2),
+            [
+                Project(0),
+                Setting(0),
+                Setting(1),
+                Blank,
+                Project(1),
+                Setting(2),
+                Setting(3)
+            ]
         );
+        assert_eq!(tab_len(tab, 2), 4);
+        let kind = |i| setting_at(tab, i).map(|s| s.kind);
+        assert_eq!(kind(2), Some(SettingKind::RunCommand));
+        assert_eq!(kind(3), Some(SettingKind::OpenCommand));
+        assert_eq!(project_at(tab, 1), Some(0));
+        assert_eq!(project_at(tab, 2), Some(1));
+        assert_eq!(project_at(0, 2), None);
+        assert_eq!(
+            settings_rows(tab, 0),
+            [SettingsRow::Note(NO_PROJECTS.into())]
+        );
+        assert_eq!(tab_len(tab, 0), 0);
         for (t, _, spec) in all_settings() {
             assert_eq!(
                 spec.kind.is_project(),
@@ -6675,13 +6721,13 @@ mod tests {
 
             // Each tab's rows walk its own index space, in order.
             for (t, tab) in SETTINGS_TABS.iter().enumerate() {
-                let indices: Vec<usize> = settings_rows(t)
+                let indices: Vec<usize> = settings_rows(t, 1)
                     .into_iter()
                     .filter_map(|row| row.index())
                     .collect();
                 assert_eq!(
                     indices,
-                    (0..tab_len(t)).collect::<Vec<_>>(),
+                    (0..tab_len(t, 1)).collect::<Vec<_>>(),
                     "{} rows",
                     tab.title
                 );
@@ -6690,7 +6736,7 @@ mod tests {
             // A value tab carries headers exactly when its rows name
             // groups; Hotkeys and Agents always do.
             for (t, tab) in SETTINGS_TABS.iter().enumerate() {
-                let headers = settings_rows(t)
+                let headers = settings_rows(t, 1)
                     .into_iter()
                     .filter(|row| matches!(row, SettingsRow::Header(_)))
                     .count();
@@ -6716,7 +6762,7 @@ mod tests {
             // Read the rows back the way the screen shows them: a header,
             // then the labels under it, with a blank between sections.
             let mut sections: Vec<(String, Vec<String>)> = Vec::new();
-            for row in settings_rows(tab) {
+            for row in settings_rows(tab, 1) {
                 match row {
                     SettingsRow::Header(title) => sections.push((title, Vec::new())),
                     SettingsRow::Setting(i) => {
@@ -6737,7 +6783,7 @@ mod tests {
                             .push(label);
                     }
                     SettingsRow::Blank => assert!(!sections.is_empty(), "no leading blank"),
-                    SettingsRow::Project | SettingsRow::Hotkey(_) | SettingsRow::Note(_) => {
+                    SettingsRow::Project(_) | SettingsRow::Hotkey(_) | SettingsRow::Note(_) => {
                         unreachable!()
                     }
                 }
@@ -6814,7 +6860,7 @@ mod tests {
             );
 
             // One blank line separates the sections and nothing else does.
-            let blanks = settings_rows(tab)
+            let blanks = settings_rows(tab, 1)
                 .into_iter()
                 .filter(|row| *row == SettingsRow::Blank)
                 .count();
@@ -6847,7 +6893,7 @@ mod tests {
             with_config_path(path, || {
                 let tab = agents_tab();
                 let cfg = Config::load();
-                let sections: Vec<String> = settings_rows(tab)
+                let sections: Vec<String> = settings_rows(tab, 1)
                     .into_iter()
                     .filter_map(|row| match row {
                         SettingsRow::Header(title) => Some(title),
@@ -6876,7 +6922,7 @@ mod tests {
                     locate_agent("agy", HarnessField::Effort).expect("its effort row shows");
                 assert_eq!(cfg.agent_value("agy", HarnessField::Effort), "default");
                 assert_eq!(
-                    tab_len(tab),
+                    tab_len(tab, 1),
                     AGENTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
                 );
                 // ... and the picker offers it after the built-ins.
@@ -6906,10 +6952,10 @@ mod tests {
         with_empty_config(|| {
             assert!(tab_count() >= 2);
             for (t, tab) in SETTINGS_TABS.iter().enumerate() {
-                assert!(tab_len(t) > 0, "{} is empty", tab.title);
+                assert!(tab_len(t, 1) > 0, "{} is empty", tab.title);
                 assert!(!tab.title.is_empty());
             }
-            assert_eq!(tab_len(hotkeys_tab()), crate::keymap::ACTIONS.len());
+            assert_eq!(tab_len(hotkeys_tab(), 1), crate::keymap::ACTIONS.len());
         });
     }
 

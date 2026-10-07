@@ -320,6 +320,12 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
             }
         }
     }
+    // `⌘⇧S` on the band's checkout: its run or its stack, started or
+    // stopped — the same word the card's menu says.
+    if !app.is_placeholder_worktree(&bands[band_at].worktree) {
+        let does = crate::stacks::menu_label(app, &bands[band_at].worktree).to_lowercase();
+        list.push(act(km, Action::ToggleStack, &does));
+    }
     // On a card of a linked checkout, the whole worktree in one go —
     // `⌫` on an empty band already names it.
     if card.is_some() && !bands[band_at].is_main {
