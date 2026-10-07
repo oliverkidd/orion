@@ -1,6 +1,9 @@
-//! The TODOS MODAL: one project's list in two tabs — **Today**, the
-//! groups with their open items and the ones ticked today struck through
-//! at the bottom, and the **Log**, what was done on each day before. A
+//! The TODOS MODAL: every open project's list, a tab each along the top
+//! in the projects' own order (`⇧←`/`⇧→`, as the PULL REQUESTS MODAL
+//! walks its tabs), opened from anywhere on the selected project's. Each
+//! list is in two tabs (`Tab`) — **Today**, the groups with their open
+//! items and the ones ticked today struck through at the bottom, and the
+//! **Log**, what was done on each day before. A
 //! line per item — more where its text wraps: its box, its priority as
 //! the one letter Linear's rows use too, the text, and on the right what
 //! it is tied to — the agent sent at it, the Linear issue it is linked
@@ -13,12 +16,15 @@
 //!
 //! The list is the [`App`]'s (`App::todos`, by checkout), so it outlives
 //! the modal; the view holds the cursor, the filter and the field being
-//! typed into. Every change is saved at once (`store::save`). A row is
-//! edited where it stands: typing on it adds to its end, `⌫` opens it
-//! with the last character gone, and `⌘⌫` deletes it. `⌘F` opens the
-//! filter, which keeps the headers over the items that match; a paste of
-//! more than one line, with no field open, is read as an indented list
-//! and added in (`import`).
+//! typed into. A project left for another is parked as it was — cursor,
+//! filter, Today or Log — and comes back so while the modal is up; what
+//! was half done on it (a field, the `⌘L` menu, a delete asked) is let
+//! go. Every change is saved at once (`store::save`). A row is edited
+//! where it stands: typing on it adds to its end, `⌫` opens it with the
+//! last character gone, and `⌘⌫` deletes it. `⌘F` opens the filter,
+//! which keeps the headers over the items that match; a paste of more
+//! than one line, with no field open, is read as an indented list and
+//! added in (`import`).
 //!
 //! Each item reaches out two ways. `Enter` sends an agent at it — the
 //! QUICK PROMPT over the modal, the item's text and group in the box —
@@ -245,6 +251,11 @@ pub struct TodoView {
     /// The tab strip's labels' screen x-ranges and its row, for the click.
     pub tab_hits: Vec<(u16, u16)>,
     pub tab_row: Rect,
+    /// The project strip's, the same.
+    pub project_hits: Vec<(u16, u16)>,
+    pub project_row: Rect,
+    /// The other projects' tabs as they were left, by project.
+    pub parked: HashMap<ProjectId, TodoView>,
 }
 
 impl TodoView {
@@ -269,7 +280,19 @@ impl TodoView {
             row_rects: Vec::new(),
             tab_hits: Vec::new(),
             tab_row: Rect::default(),
+            project_hits: Vec::new(),
+            project_row: Rect::default(),
+            parked: HashMap::new(),
         }
+    }
+
+    /// Put away to come back to: the cursor, the filter and the tab kept,
+    /// what was half done let go.
+    fn park(mut self) -> Self {
+        self.input = None;
+        self.pick = None;
+        self.confirm_delete = None;
+        self
     }
 }
 
@@ -307,8 +330,10 @@ pub(crate) mod keys {
     pub const DELETE: Key = Key::new(&["cmd+backspace", "ctrl+w"], "delete");
     /// The filter row, as every list modal opens its own.
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
-    /// Today ⇄ Log, as the PULL REQUESTS MODAL's page tabs.
+    /// The project tabs, as the PULL REQUESTS MODAL's page tabs.
     pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
+    /// Today ⇄ Log.
+    pub const LOG: Key = Key::new(&["tab"], "log");
     /// The field's: the new item, group or edit in.
     pub const SAVE: Key = Key::new(&["enter"], "save");
     /// The field's other way out: saved, and the cursor a row on.
@@ -331,7 +356,7 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         DONE, FOLD, JUMP, NEW, NEW_GROUP, EDIT, URGENT, HIGH, MEDIUM, LOW, DELETE, FILTER, TABS,
-        SAVE, SAVE_MOVE, CONFIRM, AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE,
+        LOG, SAVE, SAVE_MOVE, CONFIRM, AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE,
     ];
 }
 
@@ -376,6 +401,8 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
             let mut hints = vec![
                 keys::DONE.hint().kept(),
                 keys::AGENT.hint().kept(),
+                keys::TABS.hint_as("projects"),
+                keys::LOG.hint(),
                 keys::NEW.hint(),
                 keys::EDIT.hint(),
                 keys::DELETE.hint(),
@@ -389,7 +416,6 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
                 keys::NEW_GROUP.hint(),
                 keys::PRESET.hint(),
                 keys::REFRESH.hint(),
-                keys::TABS.hint(),
                 Hint::new("Esc", "close"),
             ]);
             hints
@@ -397,34 +423,112 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         TodoTab::Log => vec![
             keys::DONE.hint_as("not done").kept(),
             keys::EDIT.hint(),
+            keys::TABS.hint_as("projects"),
+            keys::LOG.hint_as("today"),
             keys::FILTER.hint(),
-            keys::TABS.hint(),
             Hint::new("Esc", "close"),
         ],
     }
 }
 
-/// `⌘I` on the grid: the selected project's list.
+/// `⌘I`, from anywhere: the modal on the selected project's tab — or,
+/// with none selected, the first project's.
 pub(crate) fn open(app: &mut App) {
-    let Some(project) = app.selected_project().cloned() else {
+    let project = app
+        .selected_project()
+        .or_else(|| app.tree.projects.first())
+        .cloned();
+    let Some(project) = project else {
+        app.flash = Some(crate::flash::Flash::note(
+            "no projects yet — add one to keep todos for it",
+        ));
         return;
     };
     open_on(app, project.id, project.name, project.repo_path);
 }
 
 fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
-    if !app.todos.contains_key(&dir) {
-        let loaded = store::load(&dir);
-        if let Some(problem) = loaded.problem {
-            app.flash = Some(crate::flash::Flash::failed(problem));
-        }
-        app.todos.insert(dir.clone(), loaded.file);
+    // Every tab's list, for the counts on the strip.
+    let dirs: Vec<PathBuf> = app
+        .tree
+        .projects
+        .iter()
+        .map(|p| p.repo_path.clone())
+        .chain(std::iter::once(dir.clone()))
+        .collect();
+    for dir in dirs {
+        load_list(app, dir);
     }
     let mut view = TodoView::new(project, name, dir);
     view.linked = linked_from_linear(app, &view);
     app.overlay = Some(Overlay::Todos(view));
     app.dirty = true;
     refresh_linked(app);
+}
+
+/// `dir`'s list read in, unless it already is.
+fn load_list(app: &mut App, dir: PathBuf) {
+    if app.todos.contains_key(&dir) {
+        return;
+    }
+    let loaded = store::load(&dir);
+    if let Some(problem) = loaded.problem {
+        app.flash = Some(crate::flash::Flash::failed(problem));
+    }
+    app.todos.insert(dir, loaded.file);
+}
+
+/// The project tabs: every open project, in the projects' own order.
+fn projects(app: &App) -> Vec<(ProjectId, String, PathBuf)> {
+    app.tree
+        .projects
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone(), p.repo_path.clone()))
+        .collect()
+}
+
+/// `⇧←`/`⇧→`: the project `delta` tabs over, round the ends.
+fn step_project(app: &mut App, delta: i32) {
+    let tabs = projects(app);
+    let Some(view) = view(app) else {
+        return;
+    };
+    if tabs.is_empty() {
+        return;
+    }
+    let next = match tabs.iter().position(|(id, ..)| *id == view.project) {
+        Some(at) => (at as i32 + delta).rem_euclid(tabs.len() as i32) as usize,
+        None => 0,
+    };
+    let (id, name, dir) = tabs[next].clone();
+    show_project(app, id, name, dir);
+}
+
+/// The modal onto `project`'s tab: the one it is on parked, `project`'s
+/// back as it was left — or, first time on it, at its top, Linear asked
+/// how its linked issues stand.
+fn show_project(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
+    if view(app).is_none_or(|v| v.project == project) {
+        return;
+    }
+    load_list(app, dir.clone());
+    let fresh = TodoView::new(project.clone(), name.clone(), dir);
+    let linked = linked_from_linear(app, &fresh);
+    let Some(view) = view_mut(app) else {
+        return;
+    };
+    let mut parked = std::mem::take(&mut view.parked);
+    let back = parked.remove(&project);
+    let first_time = back.is_none();
+    let mut next = back.unwrap_or(TodoView { linked, ..fresh });
+    // The name may have changed since it was parked.
+    next.project_name = name;
+    let left = std::mem::replace(view, next).park();
+    parked.insert(left.project.clone(), left);
+    view.parked = parked;
+    if first_time {
+        refresh_linked(app);
+    }
 }
 
 /// Ask Linear how every linked issue stands now (`⌘R`, and on open).
@@ -776,8 +880,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     match key.code {
         KeyCode::Esc if filtering => close_filter(app),
         KeyCode::Esc => app.overlay = None,
-        // ⇧←/⇧→ are the tabs', plain ←/→ the fold's.
+        // ⇧←/⇧→ are the project tabs', plain ←/→ the fold's.
         _ if keys::TABS.matches(&key) => {
+            step_project(app, if key.code == KeyCode::Left { -1 } else { 1 });
+        }
+        _ if keys::LOG.matches(&key) => {
             let other = view.tab.other();
             switch_tab(app, other);
         }
@@ -1427,7 +1534,11 @@ fn view_on<'a>(app: &'a mut App, dir: &std::path::Path) -> Option<&'a mut TodoVi
         },
         _ => return None,
     };
-    (view.dir == dir).then_some(view)
+    // A project the modal has moved off is answered where it is parked.
+    if view.dir == dir {
+        return Some(view);
+    }
+    view.parked.values_mut().find(|v| v.dir == dir)
 }
 
 /// Linear's answer on the linked issues: their chips say how they stand,
@@ -1622,6 +1733,12 @@ pub(crate) fn handle_mouse(
     match mouse.kind {
         MouseEventKind::ScrollDown if list.contains(pos) => step(app, 1),
         MouseEventKind::ScrollUp if list.contains(pos) => step(app, -1),
+        MouseEventKind::Down(MouseButton::Left) if view.project_row.contains(pos) => {
+            let hit = crate::ui::tab_hit(&view.project_hits, pos.x);
+            if let Some((id, name, dir)) = hit.and_then(|i| projects(app).get(i).cloned()) {
+                show_project(app, id, name, dir);
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) if view.tab_row.contains(pos) => {
             let tab = crate::ui::tab_hit(&view.tab_hits, pos.x).and_then(|i| TodoTab::ALL.get(i));
             if let Some(tab) = tab {
@@ -1737,14 +1854,40 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     let today = super::today();
     let empty = TodoFile::new(&view.dir);
     let file = app.todos.get(&view.dir).unwrap_or(&empty);
-    let title = format!("Todos · {} · {}", view.project_name, day_label(today));
+    let title = format!("Todos · {}", day_label(today));
     let block = panel_block(&title, focused, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // The tabs on the first line — Today with what is open — and against
-    // its right edge the week so far, when there is room for it.
-    let tab_row = row_rect(inner, 0).unwrap_or_default();
+    // A tab per project on the first line, each with what is open in it;
+    // under it the list's own tabs — Today with what is open — and
+    // against their right edge the week so far, when there is room for it.
+    let tabs = projects(app);
+    let project_row = row_rect(inner, 0).unwrap_or_default();
+    let labels: Vec<String> = tabs
+        .iter()
+        .map(
+            |(_, name, dir)| match app.todos.get(dir).map(TodoFile::open_count) {
+                Some(n) if n > 0 => format!("{name} {n}"),
+                _ => name.clone(),
+            },
+        )
+        .collect();
+    let active = tabs
+        .iter()
+        .position(|(id, ..)| *id == view.project)
+        .unwrap_or(usize::MAX);
+    let (strip, project_hits) = crate::ui::tab_strip(
+        project_row.x,
+        project_row.width,
+        labels.iter().map(String::as_str),
+        active,
+        false,
+        th,
+    );
+    f.render_widget(Paragraph::new(Line::from(strip)), project_row);
+    let below_projects = crate::ui::below_first_row(inner);
+    let tab_row = row_rect(below_projects, 0).unwrap_or_default();
     let labels = [format!("Today {}", file.open_count()), "Log".to_string()];
     let active = TodoTab::ALL
         .iter()
@@ -1773,7 +1916,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         f.render_widget(Paragraph::new(line), right);
     }
     // Under the tabs the filter while `⌘F` has it up, else a blank row.
-    let below_tabs = crate::ui::below_first_row(inner);
+    let below_tabs = crate::ui::below_first_row(below_projects);
     if let Some(query_area) = row_rect(below_tabs, 0).filter(|_| view.filtering) {
         let line = search_line(&view.query, "type to filter…", query_area, th);
         f.render_widget(Paragraph::new(line), query_area);
@@ -1879,6 +2022,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         v.row_rects = row_rects;
         v.tab_hits = tab_hits;
         v.tab_row = tab_row;
+        v.project_hits = project_hits;
+        v.project_row = project_row;
         if let Some(at) = cursor {
             v.selected = at;
             v.cursor = entries.get(at).copied();
@@ -2386,6 +2531,25 @@ mod tests {
         // Four wide characters are eight columns: two to a six-column line.
         let wide = lines("日本語版", 6, 6);
         assert_eq!(wide, [(0, "日本語".into()), (3, "版".into())]);
+    }
+
+    /// A tab put away keeps its cursor, filter and tab, and lets go of
+    /// what was half done on it.
+    #[test]
+    fn a_parked_tab_keeps_its_place_and_drops_the_half_done() {
+        let mut v = view();
+        v.tab = TodoTab::Log;
+        v.query.insert_str("resend");
+        v.cursor = Some(Entry::Item { id: 3, depth: 1 });
+        v.input = Some((InputKind::Item { group: None }, TextInput::new()));
+        v.pick = Some(Pick::new(3, PickKind::Menu(vec![MenuAction::Link])));
+        v.confirm_delete = Some(1);
+        let parked = v.clone().park();
+        assert_eq!(parked.tab, TodoTab::Log);
+        assert_eq!(parked.query.trim(), "resend");
+        assert_eq!(parked.cursor, v.cursor);
+        assert!(parked.input.is_none() && parked.pick.is_none());
+        assert!(parked.confirm_delete.is_none());
     }
 
     /// Folded groups show their header only; a filter opens them, keeps

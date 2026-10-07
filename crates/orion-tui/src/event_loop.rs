@@ -39957,6 +39957,66 @@ diff --git a/src/c.rs b/src/c.rs
         todo_view(&app);
     }
 
+    /// A tab per open project, in the projects' order, each with what is
+    /// open in it: `⇧←`/`⇧→` walk them round the ends, each project's tab
+    /// coming back as it was left — its cursor, filter and Today or Log.
+    /// `Tab` is Today ⇄ Log.
+    #[test]
+    fn shift_arrows_walk_a_tab_per_project() {
+        use crate::todos::view::{Entry, TodoTab};
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: orion_core::Entity::Project(orion_core::Project {
+                        id: orion_core::ProjectId("p2".into()),
+                        name: "nightshift".into(),
+                        repo_path: "/tmp/nightshift".into(),
+                        sort_order: 1,
+                    }),
+                },
+            );
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("demo 3"), "{text}");
+            assert!(text.contains("⇧←/⇧→ projects · Tab log"), "{text}");
+            assert!(text.contains("nightshift"), "{text}");
+
+            // Left on an item with a filter typed.
+            press(
+                &mut app,
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            let cursor = todo_view(&app).cursor;
+            assert!(matches!(cursor, Some(Entry::Item { .. })));
+
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            let view = todo_view(&app);
+            assert_eq!(view.project.0, "p2");
+            assert_eq!(view.dir, std::path::PathBuf::from("/tmp/nightshift"));
+            assert!(view.query.is_empty());
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(!text.contains("setup resend"), "{text}");
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_view(&app).tab, TodoTab::Log);
+
+            // Round the end and back on demo, as it was left.
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            let view = todo_view(&app);
+            assert_eq!(view.project.0, "p1");
+            assert_eq!(view.query.trim(), "r");
+            assert_eq!(view.cursor, cursor);
+            assert_eq!(view.tab, TodoTab::Today);
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
+            assert_eq!(todo_view(&app).tab, TodoTab::Log, "nightshift's Log");
+        });
+    }
+
     /// The pasted list is groups and items: the fixture's five groups and
     /// 29 items, drawn under their headers.
     #[test]
@@ -40052,7 +40112,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(!text.contains("run plan"), "{text}");
             assert!(text.contains("setup resend"), "{text}");
             assert!(text.contains("1d"), "an item carried over says so: {text}");
-            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert_eq!(todo_view(&app).tab, crate::todos::view::TodoTab::Log);
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("Tue 6 Oct · 1 done"), "{text}");

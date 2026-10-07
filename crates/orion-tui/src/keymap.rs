@@ -103,7 +103,7 @@ pub enum Action {
     PullRequests,
     /// `⌘L`: the LINEAR VIEW — open Linear issues assigned to you.
     Linear,
-    /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
+    /// `⌘I`: the TODOS MODAL — every project's todo list, a tab each.
     Todos,
     /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
     /// another branch, asking what to do with uncommitted changes.
@@ -502,7 +502,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Todos,
         id: "todos",
         label: "Todos",
-        hint: "This project's todo list: tick off, prioritise, send an agent or a Linear issue from any item",
+        hint: "Your todo lists, a tab per project: tick off, prioritise, send an agent or a Linear issue from any item",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         // ⌘I is the one ⌘ letter neither macOS nor Ghostty keeps; `^I` is
