@@ -4783,7 +4783,7 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                     "the task ⌘L fills in: {issues}, {ids}, {first_id} expand (empty = default)"
                 }
                 crate::config::SettingKind::RunCommand => {
-                    "shell line the right-click menu's Run starts in this project's worktrees (empty = the checkout's .orion.json \"run\")"
+                    "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = the checkout's .orion.json \"run\", else docker compose start)"
                 }
                 crate::config::SettingKind::OpenCommand => {
                     "shell line ⌘O → Open command runs to open a worktree of this project (empty = the checkout's .orion.json \"open\")"
@@ -8137,7 +8137,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     }
 
     let (tab, selected, on_tabs) = (view.tab, view.selected, view.on_tabs);
-    let last = crate::config::tab_len(tab).saturating_sub(1);
+    let last = app.settings_len(tab).saturating_sub(1);
     let tabs = crate::config::tab_count();
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -8569,13 +8569,17 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             }
             return;
         }
-        // A PROJECT TAB row edits the selected project's entry — every
-        // one of them typed. With no project to edit — an empty tree —
-        // say so rather than open a prompt with nowhere to write.
+        // A PROJECT TAB row edits the entry of the project whose block
+        // it is in — every one of them typed. With no project to edit —
+        // an empty tree — say so rather than open a prompt with nowhere
+        // to write.
         let project = if spec.kind.is_project() {
-            let Some(path) = app.selected_project().map(|p| p.repo_path.clone()) else {
+            let Some(path) = app
+                .settings_project(tab, index)
+                .map(|p| p.repo_path.clone())
+            else {
                 if let Some(view) = settings_mut(app) {
-                    view.warn("no project selected — this tab edits the one under the cursor");
+                    view.warn(crate::config::NO_PROJECTS);
                 }
                 return;
             };
@@ -12438,10 +12442,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 let row = first_row + (mouse.row - body.y) as usize;
                 // Group headers and blanks aren't clickable; the shared
                 // row map keeps this in step with the renderer.
-                if let Some(index) = crate::config::settings_rows(tab)
-                    .get(row)
-                    .and_then(|r| r.index())
-                {
+                if let Some(index) = app.settings_rows(tab).get(row).and_then(|r| r.index()) {
                     // A click moves the cursor there, as j/k would; on the
                     // row it was already on, it is Enter.
                     run_settings_cmd(app, SettingsCmd::Move(index));
@@ -29260,7 +29261,7 @@ diff --git a/src/c.rs b/src/c.rs
 
     #[test]
     fn hotkeys_tab_includes_the_cursor_launch_chords() {
-        let ids: Vec<&str> = crate::config::settings_rows(crate::config::hotkeys_tab())
+        let ids: Vec<&str> = crate::config::settings_rows(crate::config::hotkeys_tab(), 0)
             .into_iter()
             .filter_map(|row| match row {
                 crate::config::SettingsRow::Hotkey(i) => crate::keymap::spec_at(i).map(|s| s.id),
@@ -29878,6 +29879,8 @@ diff --git a/src/c.rs b/src/c.rs
             app.keymap.lookup(crate::keymap::Scope::Global, &chord),
             Some(crate::keymap::Action::ToggleStack)
         );
+        let footer = |app: &App| crate::hints::text(&crate::ui::footer::hints(app), usize::MAX);
+        assert!(footer(&app).contains(" start stack"), "{}", footer(&app));
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(
             out.iter().any(
@@ -29900,6 +29903,7 @@ diff --git a/src/c.rs b/src/c.rs
                 entity: Entity::Terminal(run(true)),
             },
         );
+        assert!(footer(&app).contains(" stop stack"), "{}", footer(&app));
         out.clear();
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(
@@ -34952,16 +34956,17 @@ diff --git a/src/c.rs b/src/c.rs
             .collect()
     }
 
-    /// **Run command** on the PROJECT TAB: Enter opens a prompt titled with
-    /// the project, pre-filled with its stored command; Enter there writes
+    /// **Run command** on the PROJECT TAB, which lists every project
+    /// whichever is selected: Enter opens a prompt titled with the row's
+    /// project, pre-filled with its stored command; Enter there writes
     /// `run_command` into that project's entry (and nothing else), the
-    /// row reads it back, the tab on another project still reads
+    /// row reads it back, the next project's row still reads
     /// `.orion.json`; ←/→ only explain themselves; Esc keeps the old
     /// value; an empty Enter puts the file back and drops the key. With
-    /// no project in the tree the row reads `n/a`, and Enter opens nothing
+    /// no project in the tree the tab says so, and Enter opens nothing
     /// and says why.
     #[test]
-    fn the_project_tab_run_command_is_typed_into_the_selected_projects_entry() {
+    fn the_project_tab_run_command_is_typed_into_each_projects_entry() {
         use crate::config::SettingKind::RunCommand;
         use orion_core::{Entity, Project, ProjectId};
         let draw_to_string = |app: &mut App, w: u16, h: u16| {
@@ -34992,14 +34997,14 @@ diff --git a/src/c.rs b/src/c.rs
             app.sel_project = 0;
             let tab = crate::config::project_tab();
             let (_, row) = crate::config::locate(RunCommand).unwrap();
-            let open_on_row = |app: &mut App, out: &mut Vec<ClientRequest>| {
+            let open_at = |app: &mut App, out: &mut Vec<ClientRequest>, row: usize| {
                 press(app, KeyCode::Char('s'), KeyModifiers::NONE, out);
                 let digit = char::from_digit(tab as u32 + 1, 10).unwrap();
                 press(app, KeyCode::Char(digit), KeyModifiers::NONE, out);
                 // Wherever the jump left the cursor — the strip, or the
                 // row the overlay remembered — climb to the strip and
                 // walk down to the row.
-                for _ in 0..crate::config::tab_len(tab) {
+                for _ in 0..app.settings_len(tab) {
                     press(app, KeyCode::Up, KeyModifiers::NONE, out);
                 }
                 for _ in 0..=row {
@@ -35008,10 +35013,15 @@ diff --git a/src/c.rs b/src/c.rs
                 let view = settings(app).expect("settings open");
                 assert_eq!((view.tab, view.selected, view.on_tabs), (tab, row, false));
             };
+            let open_on_row = |app: &mut App, out: &mut Vec<ClientRequest>| open_at(app, out, row);
 
             open_on_row(&mut app, &mut out);
             let screen = draw_to_string(&mut app, 100, 40);
             assert!(screen.contains("Run command"), "{screen}");
+            assert!(
+                screen.contains("demo") && screen.contains("/tmp/other"),
+                "every project has its block: {screen}"
+            );
             assert!(
                 screen.contains("[.orion.json]"),
                 "unset reads as the file: {screen}"
@@ -35076,16 +35086,21 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!((view.tab, view.selected), (tab, row));
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
-            // The other project reads its own (unset) value.
-            app.sel_project = 1;
-            open_on_row(&mut app, &mut out);
+            // The other project's block reads its own (unset) value, and
+            // its row edits its own entry — the selected project or not.
+            let other = row + crate::config::tab_settings(tab).len();
+            open_at(&mut app, &mut out, other);
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("/tmp/other"), "{screen}");
             assert!(screen.contains("[.orion.json]"), "{screen}");
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("expected the run command prompt, got {:?}", app.overlay);
+            };
+            assert_eq!(prompt.title, "Run command · other");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
             // An empty Enter is the way back to the file — the entry goes.
-            app.sel_project = 0;
             open_on_row(&mut app, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             for _ in 0.."npm run dev".len() {
@@ -35107,12 +35122,12 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let view = settings(&app).unwrap();
             assert!(
-                matches!(&view.notice, Some((text, _)) if text.contains("no project selected")),
+                matches!(&view.notice, Some((text, _)) if text == crate::config::NO_PROJECTS),
                 "{:?}",
                 view.notice
             );
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("[n/a]"), "{screen}");
+            assert!(screen.contains("no projects yet"), "{screen}");
             assert_eq!(saved(&path)["projects"], serde_json::json!({}), "untouched");
         });
     }
@@ -38146,7 +38161,7 @@ diff --git a/src/c.rs b/src/c.rs
             // The first clickable row of the open tab, and its screen line.
             let row_line = |app: &App| {
                 let view = settings(app).expect("settings are open");
-                let rows = crate::config::settings_rows(view.tab);
+                let rows = app.settings_rows(view.tab);
                 let line = rows
                     .iter()
                     .position(|r| r.index().is_some())

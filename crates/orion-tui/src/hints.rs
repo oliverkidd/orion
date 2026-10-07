@@ -706,7 +706,7 @@ mod tests {
             .map(|spec| spec.hint.to_string())
             .collect();
         for tab in 0..crate::config::tab_count() {
-            for index in 0..crate::config::tab_len(tab) {
+            for index in 0..crate::config::tab_len(tab, 1) {
                 texts.push(crate::config::hint_at(tab, index));
             }
         }

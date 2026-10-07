@@ -1564,14 +1564,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // terminal now that the Hotkeys tab alone is forty rows.
             let cfg = crate::config::Config::load();
             let tab = view.tab;
-            let rows = crate::config::settings_rows(tab);
-            // The Project tab's rows are the selected project's: its
-            // name and path head the tab, and its entry is what the
-            // values read. No project (an empty tree) leaves them n/a.
-            let project = app
-                .selected_project()
-                .map(|p| (p.name.clone(), p.repo_path.clone()));
-            let project_settings = project.as_ref().map(|(_, path)| cfg.project(path));
+            let rows = app.settings_rows(tab);
             // Rows the modal spends on anything but settings: the tab
             // strip and its rule above the body, and a blank and the
             // EXPLANATION's two rows below it. The keys are on the bottom
@@ -1648,28 +1641,30 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             Style::default().fg(th.warn),
                         )));
                     }
-                    crate::config::SettingsRow::Project => match &project {
-                        Some((name, path)) => {
-                            let name = format!(" {name}");
-                            let room = (inner.width as usize).saturating_sub(name.chars().count());
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    name,
-                                    Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(truncate(&format!("  {}", path.display()), room), dim),
-                            ]));
-                        }
-                        None => lines.push(Line::from(Span::styled(
-                            " no project selected — these rows are the selected project's",
-                            Style::default().fg(th.warn),
-                        ))),
-                    },
+                    crate::config::SettingsRow::Project(p) => {
+                        // A project's heading: its name, and its repo
+                        // path dim beside it.
+                        let (name, path) = app
+                            .tree
+                            .projects
+                            .get(*p)
+                            .map(|p| (p.name.as_str(), p.repo_path.display().to_string()))
+                            .unwrap_or_default();
+                        let name = format!(" {name}");
+                        let room = (inner.width as usize).saturating_sub(name.chars().count());
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                name,
+                                Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(truncate(&format!("  {path}"), room), dim),
+                        ]));
+                    }
                     crate::config::SettingsRow::Setting(i) => {
                         // The Agents tab resolves its harness rows through
                         // the registry; every other values tab reads its
                         // static spec, and a PROJECT TAB row reads the
-                        // selected project's entry.
+                        // entry of the project whose block it is in.
                         let (label, value, prefix) = if tab == crate::config::agents_tab() {
                             match (crate::config::AGENTS_HEAD.get(*i), cfg.account_row(*i)) {
                                 (Some(spec), _) => {
@@ -1703,9 +1698,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                             let spec = crate::config::setting_at(tab, *i)
                                 .expect("settings_rows indexes this tab's settings");
                             let value = if spec.kind.is_project() {
-                                project_settings
-                                    .as_ref()
-                                    .map(|s| s.value_label(spec.kind))
+                                app.settings_project(tab, *i)
+                                    .map(|p| cfg.project(&p.repo_path).value_label(spec.kind))
                                     .unwrap_or_else(|| "n/a".into())
                             } else if let Some(status) = crate::linear::status_value(app, spec.kind)
                             {
