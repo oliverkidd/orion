@@ -2401,6 +2401,8 @@ pub enum Overlay {
     Usage(crate::usage::UsageView),
     /// `⇧S`: STACK STATUS — every docker compose stack, to start or stop.
     Stacks(crate::stacks::StacksView),
+    /// **Clean unused worktrees** (`crate::clean_worktrees`).
+    CleanWorktrees(crate::clean_worktrees::CleanView),
     Hosts(HostsView),
     /// `e` in the SESSIONS PANEL: the AGENT PRESETS list.
     AgentPresets(crate::preset_overlays::AgentPresetsView),
@@ -4597,6 +4599,9 @@ pub struct App {
     /// The PULLs and PUSHes running, and where their answers go
     /// (`crate::git_sync`).
     pub git_sync: crate::git_sync::Shared,
+    /// **Clean unused worktrees**' check and where it lands
+    /// (`crate::clean_worktrees`).
+    pub clean_worktrees: crate::clean_worktrees::Shared,
     /// BASE SYNC: each project's root fetched, and fast-forwarded on its
     /// base branch, on the **Fetch base branch** beat (`crate::base_sync`).
     pub base_sync: crate::base_sync::Shared,
@@ -4844,6 +4849,7 @@ impl App {
             deleting: std::collections::HashSet::new(),
             branch_switch: Default::default(),
             git_sync: Default::default(),
+            clean_worktrees: Default::default(),
             base_sync: Default::default(),
             last_metrics: None,
             client_rss_bytes: 0,
