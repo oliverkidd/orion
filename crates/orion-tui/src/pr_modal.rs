@@ -162,6 +162,12 @@ pub struct PullRequestsView {
     /// cursor on it, and one that retired it lands on its neighbour
     /// ([`list_changed`]).
     pub selected_url: Option<String>,
+    /// Where the cursor sits among the rows as drawn — sections and the
+    /// filter applied — as of the last move or draw: a refresh that
+    /// retires the cursor's pull request lands on the row that took this
+    /// place on screen, not the one that took its index in GitHub's order
+    /// ([`list_changed`]).
+    pub selected_row: usize,
     /// Top visible line of the reading side's body, under its head.
     pub scroll: u16,
     /// The reading side's body height and total line count as of the last
@@ -189,10 +195,11 @@ pub struct PullRequestsView {
     /// last draw: where the next draw's window starts from, so it moves
     /// only as far as the cursor makes it (`ui::stacked_rows`).
     pub list_start: usize,
-    /// Each drawn row's rect, by index into the project's list, as of the
-    /// last draw: what a click hit-tests, rows being two lines tall and
-    /// headers between them.
-    pub row_rects: Vec<(usize, Rect)>,
+    /// Each drawn row's rect, by its pull request's URL, as of the last
+    /// draw: what a click hit-tests, rows being two lines tall and headers
+    /// between them. By URL, not index, so a list that landed since the
+    /// draw cannot turn a click into its neighbour.
+    pub row_rects: Vec<(String, Rect)>,
     /// The FILTER PICK (`⌘F`) in the page's place, while it is up: every
     /// key is its own (`list_filter`).
     pub filter_pick: Option<FilterPick>,
@@ -220,6 +227,7 @@ impl PullRequestsView {
             dir,
             selected: 0,
             selected_url: None,
+            selected_row: 0,
             scroll: 0,
             view_height: 0,
             body_lines: 0,
@@ -566,7 +574,12 @@ pub(crate) fn list_changed(app: &mut App) {
     let (index, url) = match found {
         Some(i) => (i, view.selected_url.clone()),
         None => {
-            let i = clamp_selection(view.selected as i64, list.len());
+            let visible = visible_rows(&view.query, list);
+            let row = clamp_selection(view.selected_row as i64, visible.len());
+            let i = visible.get(row).map_or_else(
+                || clamp_selection(view.selected as i64, list.len()),
+                |(i, _)| *i,
+            );
             (i, list.get(i).map(|pr| pr.url.clone()))
         }
     };
@@ -576,6 +589,10 @@ pub(crate) fn list_changed(app: &mut App) {
     let moved = url != view.selected_url;
     view.selected = index;
     view.selected_url = url;
+    sync_row(app);
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
     if moved {
         view.scroll = 0;
         view.tabs.rewind();
@@ -602,8 +619,26 @@ fn select(app: &mut App, index: i64) {
         view.scroll = 0;
         view.tabs.rewind();
     }
+    sync_row(app);
     schedule_detail(app);
     app.dirty = true;
+}
+
+/// Settle [`PullRequestsView::selected_row`] onto where the cursor now
+/// sits among the visible rows.
+fn sync_row(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return;
+    };
+    let list = rows(app, &view.project);
+    let row = cursor_index(view, list).and_then(|c| {
+        visible_rows(&view.query, list)
+            .iter()
+            .position(|(i, _)| *i == c)
+    });
+    if let (Some(row), Some(Overlay::PullRequests(view))) = (row, &mut app.overlay) {
+        view.selected_row = row;
+    }
 }
 
 /// ↑/↓, the wheel: the cursor `delta` rows through the visible ones —
@@ -1061,14 +1096,23 @@ pub(crate) fn handle_mouse(
             // Rows are two lines tall with headers between them: the rects
             // the last draw laid them out in say which one is under the
             // pointer.
-            let hit = crate::ui::row_hit(&view.row_rects, mouse_pos);
-            let number = hit.and_then(|index| {
-                app.open_prs
-                    .get(&view.project)
-                    .and_then(|open| open.list.get(index))
-                    .map(|pr| pr.number)
+            let url = view
+                .row_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(mouse_pos))
+                .map(|(url, _)| url.clone());
+            let project = view.project.clone();
+            let hit = url.and_then(|url| {
+                rows(app, &project)
+                    .iter()
+                    .enumerate()
+                    .find(|(_, pr)| pr.url == url)
+                    .map(|(index, pr)| (index, pr.number))
             });
-            if let (Some(index), Some(number)) = (hit, number) {
+            let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+                return;
+            };
+            if let Some((index, number)) = hit {
                 view.focus = PrFocus::List;
                 let double = crate::event_loop::is_double_click(&mut view.last_row_click, number);
                 select(app, index as i64);
@@ -1378,7 +1422,7 @@ fn record_list(
     area: Rect,
     list_area: Rect,
     list_start: usize,
-    row_rects: Vec<(usize, Rect)>,
+    row_rects: Vec<(String, Rect)>,
 ) -> Option<&mut PullRequestsView> {
     let Some(Overlay::PullRequests(v)) = &mut app.overlay else {
         return None;
@@ -1513,7 +1557,7 @@ pub(crate) fn draw(
                     lines.push(meta_spans(pr, budget, now, th));
                 }
                 render_row_lines(f, rect, lines, Some(*index) == cursor, list_focused, th);
-                row_rects.push((*index, rect));
+                row_rects.push((pr.url.clone(), rect));
             }
         }
     }
@@ -1635,6 +1679,7 @@ pub(crate) fn draw(
                 v.selected = index;
                 v.selected_url = rows.get(index).map(|pr| pr.url.clone());
             }
+            v.selected_row = cursor_row;
         }
         v.scroll = scroll;
     }
@@ -1865,6 +1910,45 @@ mod tests {
         );
         assert_eq!(view(&app).scroll, 0, "a different pull request");
         assert_eq!(pending_url(&app), Some("https://github.com/o/r/pull/42"));
+    }
+
+    /// A merged row's cursor lands on the row that took its place on
+    /// screen. GitHub's order is not the drawn one — your own pull
+    /// requests are gathered at the top — so the row that took its index
+    /// in the list may sit in another section entirely.
+    #[test]
+    fn a_retired_row_hands_the_cursor_to_its_neighbour_on_screen() {
+        let mine = |number, title| OpenPr {
+            mine: true,
+            ..pr(number, title, false)
+        };
+        // Drawn: #43, #41 (yours), then #42, #40.
+        let (mut app, project) = app_with(
+            vec![
+                mine(43, "Mine A"),
+                pr(42, "Theirs A", false),
+                mine(41, "Mine B"),
+                pr(40, "Theirs B", false),
+            ],
+            true,
+        );
+        open(&mut app);
+        handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
+        assert_eq!(
+            view(&app).selected_url.as_deref(),
+            Some("https://github.com/o/r/pull/41")
+        );
+        app.open_prs.get_mut(&project).unwrap().list = vec![
+            mine(43, "Mine A"),
+            pr(42, "Theirs A", false),
+            pr(40, "Theirs B", false),
+        ];
+        list_changed(&mut app);
+        assert_eq!(
+            view(&app).selected_url.as_deref(),
+            Some("https://github.com/o/r/pull/42"),
+            "the row drawn under #41, not #40 at its old index"
+        );
     }
 
     /// Enter on the list opens the QUICK PROMPT for a PR SESSION on the
