@@ -2514,7 +2514,8 @@ fn refresh_pr_diff_view(view: &mut DiffView, diff: &str) -> bool {
 /// The file rows of a pull-request diff: one per chunk, in git's order,
 /// each marked as its own header says — `A` for a new file, `D` for a
 /// deleted one, `R` (from its old path) for a rename, `M` for the rest —
-/// the letters `git diff --name-status` gives a commit's files.
+/// the letters `git diff --name-status` gives a commit's files — and its
+/// lines added and removed, counted from its hunks.
 fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> {
     chunks
         .iter()
@@ -2523,6 +2524,7 @@ fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> 
                 path: path.clone(),
                 orig_path: None,
                 xy: ['M', ' '],
+                lines: None,
             };
             for line in text.lines().take_while(|l| !l.starts_with("@@")) {
                 if line.starts_with("new file mode") {
@@ -2534,6 +2536,16 @@ fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> 
                     file.orig_path = Some(from.to_string());
                 }
             }
+            let mut lines = crate::git_diff::LineChanges::default();
+            for line in text.lines().skip_while(|l| !l.starts_with("@@")) {
+                match line.as_bytes().first() {
+                    Some(b'+') => lines.added += 1,
+                    Some(b'-') => lines.removed += 1,
+                    _ => {}
+                }
+            }
+            // A binary file's diff has no hunk to count.
+            file.lines = text.lines().any(|l| l.starts_with("@@")).then_some(lines);
             file
         })
         .collect()
@@ -2911,7 +2923,10 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
     app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
     app.issues_collapsed = state.issues_collapsed;
-    if let Some(w) = state.diff_files_width {
+    if let Some(w) = state
+        .diff_files_width
+        .filter(|&w| w != crate::app::OLD_DEFAULT_DIFF_FILES_W)
+    {
         // The draw re-caps it to the actual modal width.
         app.diff_files_width = w.clamp(crate::app::MIN_DIFF_FILES_W, MAX_RESTORED_WIDTH);
     }
@@ -17613,7 +17628,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         );
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("╭ crates/tui/src/ ─"), "{text}");
+        assert!(text.contains("crates/tui/src/ — 2 changed files"), "{text}");
 
         // ← folds it, → opens it again, a second → steps inside.
         press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
@@ -25697,11 +25712,13 @@ diff --git a/src/c.rs b/src/c.rs
                     path: "alpha.rs".into(),
                     orig_path: None,
                     xy: ['M', ' '],
+                    lines: None,
                 },
                 DiffFile {
                     path: "beta.rs".into(),
                     orig_path: None,
                     xy: ['?', '?'],
+                    lines: None,
                 },
             ],
             true,
@@ -26038,6 +26055,7 @@ diff --git a/src/c.rs b/src/c.rs
                 path: format!("src/f{i:02}.rs"),
                 orig_path: None,
                 xy: ['M', ' '],
+                lines: None,
             })
             .collect();
         let mut view = DiffView::new(
@@ -26050,7 +26068,7 @@ diff --git a/src/c.rs b/src/c.rs
         view.show_diff(Some("src/f00.rs"), text.join("\n"), false);
         view.view_height = 20;
         view.area = ratatui::layout::Rect::new(0, 0, 100, 30);
-        view.files_width = 30;
+        view.column_w = 30;
         view.list_area = ratatui::layout::Rect::new(1, 2, 28, 10);
         let mut app = App::new();
         seed_tree(&mut app);
@@ -26805,6 +26823,7 @@ diff --git a/src/c.rs b/src/c.rs
             path: path.into(),
             orig_path: None,
             xy: ['M', ' '],
+            lines: None,
         };
         let mut view = DiffView::new(
             "/nonexistent-orion-diff-test".into(),
@@ -26962,11 +26981,15 @@ diff --git a/src/c.rs b/src/c.rs
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let (area, width_before) = match &app.overlay {
-            Some(Overlay::Diff(v)) => (v.area, v.files_width),
+            Some(Overlay::Diff(v)) => (v.area, v.column_w),
             _ => panic!("diff overlay gone"),
         };
         assert!(area.width > 0, "modal area written back during draw");
-        assert_eq!(width_before, crate::app::DEFAULT_DIFF_FILES_W);
+        assert_eq!(
+            width_before,
+            area.width / 2,
+            "never dragged: the default, held to half a narrow modal"
+        );
 
         let bx = area.x + width_before;
         let mut out = Vec::new();
