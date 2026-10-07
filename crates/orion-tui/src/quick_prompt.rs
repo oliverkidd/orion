@@ -592,6 +592,49 @@ impl QuickLaunch {
         }
     }
 
+    /// The box with its preset's prefix and postfix written into `text`
+    /// rather than wrapped round it unseen at Enter: the box shows what
+    /// will be sent, and every word is the user's to edit. The launch
+    /// keeps the preset for its name and harness, its text emptied so
+    /// [`Self::compose`] never wraps twice. `replacing` is the preset the
+    /// box was on before, as saved: its text, where the box still starts
+    /// or ends with it, comes off first, so a swap never stacks two. The
+    /// text comes back in two halves, the caret's place between them:
+    /// prefix and task, then the postfix — typing goes where the task does.
+    pub fn inline_preset(
+        mut self,
+        text: &str,
+        replacing: Option<&AgentPreset>,
+    ) -> (Self, String, String) {
+        let mut task = text.trim();
+        if let Some(old) = replacing {
+            let (prefix, postfix) = (old.prefix.trim(), old.postfix.trim());
+            if !prefix.is_empty() {
+                task = task.strip_prefix(prefix).unwrap_or(task).trim_start();
+            }
+            if !postfix.is_empty() {
+                task = task.strip_suffix(postfix).unwrap_or(task).trim_end();
+            }
+        }
+        let Some(preset) = self.preset.as_mut() else {
+            return (self, text.to_string(), String::new());
+        };
+        let (prefix, postfix) = (preset.prefix.trim(), preset.postfix.trim());
+        let head = match (prefix.is_empty(), task.is_empty()) {
+            (true, _) => task.to_string(),
+            (false, true) => format!("{prefix}\n\n"),
+            (false, false) => format!("{prefix}\n\n{task}"),
+        };
+        let tail = if postfix.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{postfix}")
+        };
+        preset.prefix.clear();
+        preset.postfix.clear();
+        (self, head, tail)
+    }
+
     /// The dialog's title: the issue (when the box is for one), the preset
     /// (when one is applied), the worktree Enter will cut first (when it
     /// is a new one) and the flags it will actually launch with, so Enter
@@ -859,11 +902,19 @@ pub(crate) fn picker_context(app: &App, launch: &QuickLaunch) -> Option<Worktree
 /// launch, and on Esc with the one it left with. The text is restored
 /// either way; that is the whole point of the round trip.
 pub(crate) fn reopen(app: &mut App, launch: QuickLaunch, text: &str) {
+    reopen_around(app, launch, text, "");
+}
+
+/// [`reopen`] with the caret between `head` and `tail` rather than at the
+/// end: a preset just written in (`QuickLaunch::inline_preset`) puts it
+/// where the task goes, above the postfix.
+pub(crate) fn reopen_around(app: &mut App, launch: QuickLaunch, head: &str, tail: &str) {
     // A picker may have re-aimed the box: its draft follows it.
-    crate::saved_draft::followed(app, &launch.target, text);
+    crate::saved_draft::followed(app, &launch.target, &format!("{head}{tail}"));
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
     if let Some(crate::app::Overlay::Prompt(prompt)) = &mut app.overlay {
-        prompt.input.insert_str(text);
+        prompt.input.insert_str(head);
+        prompt.input.insert_after_caret(tail);
     }
 }
 
@@ -1314,6 +1365,43 @@ mod tests {
             wrapped.title(),
             "Quick prompt · reviewer · new worktree yellow-fox-jumps (cursor)"
         );
+    }
+
+    /// A preset picked onto a box is written into its text, the caret's
+    /// place between task and postfix, and never wrapped again at Enter;
+    /// swapping presets takes the old one's text out first.
+    #[test]
+    fn a_preset_is_written_into_the_box_and_swaps_cleanly() {
+        let cfg = Config::default();
+        let strict = AgentPreset {
+            prefix: "Be strict.".into(),
+            postfix: "Run the tests.".into(),
+            ..preset("reviewer", AgentKind::Claude)
+        };
+        let (launch, head, tail) = QuickLaunch::of_preset(worktree(), strict.clone(), &cfg)
+            .inline_preset("Fix auth", None);
+        assert_eq!(head, "Be strict.\n\nFix auth");
+        assert_eq!(tail, "\n\nRun the tests.");
+        assert_eq!(launch.compose("as typed"), "as typed", "no second wrapping");
+        assert_eq!(
+            launch.preset.as_ref().map(|p| p.name.as_str()),
+            Some("reviewer")
+        );
+
+        let planner = AgentPreset {
+            prefix: "Plan first.".into(),
+            ..preset("planner", AgentKind::Claude)
+        };
+        let (_, head, tail) = QuickLaunch::of_preset(worktree(), planner.clone(), &cfg)
+            .inline_preset(&format!("{head}{tail}"), Some(&strict));
+        assert_eq!(
+            (head.as_str(), tail.as_str()),
+            ("Plan first.\n\nFix auth", "")
+        );
+
+        let (_, head, _) =
+            QuickLaunch::of_preset(worktree(), planner, &cfg).inline_preset("", None);
+        assert_eq!(head, "Plan first.\n\n", "a blank line to type the task on");
     }
 
     /// An empty box launches: with no preset the CLI starts with no first

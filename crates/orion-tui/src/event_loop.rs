@@ -35818,9 +35818,10 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `^X` picks a saved AGENT PRESET for this launch: its harness,
-    /// its MODEL / EFFORT, and its prefix/postfix around what was typed.
+    /// its MODEL / EFFORT, and its prefix/postfix written into the box
+    /// around what was typed — on screen, the caret where the task goes.
     #[test]
-    fn the_preset_key_applies_a_preset_and_wraps_the_task() {
+    fn the_preset_key_writes_the_preset_into_the_box() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -35874,14 +35875,22 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("the pick should hand the box back, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.input.as_str(), "Fix auth");
+            assert_eq!(
+                prompt.input.as_str(),
+                "Be strict.\n\nFix auth\n\nRun the tests."
+            );
+            assert_eq!(
+                prompt.input.cursor_chars(),
+                "Be strict.\n\nFix auth".chars().count(),
+                "the caret ends the task, above the postfix"
+            );
             assert_eq!(
                 prompt.title,
                 "Quick prompt · reviewer (claude · opus · high)"
             );
             assert!(
-                prompt.label.contains("prefix + your task + postfix"),
-                "{}",
+                prompt.label.contains("sent as the first prompt"),
+                "the box holds the whole prompt now: {}",
                 prompt.label
             );
 
@@ -35900,14 +35909,15 @@ diff --git a/src/c.rs b/src/c.rs
                         && effort == "high"
                         && text == "Be strict.\n\nFix auth\n\nRun the tests."
                 ),
-                "the preset wraps the typed task: {out:?}"
+                "the box goes out as it reads: {out:?}"
             );
         });
     }
 
-    /// A preset's task is optional in the QUICK PROMPT too: an empty box it
-    /// is on launches on prefix + postfix. A `skip_task` preset picked over
-    /// an empty box launches at once; over typed text it is only applied.
+    /// A preset's task is optional in the QUICK PROMPT too: picked over an
+    /// empty box it fills it with prefix + postfix, sent as they stand. A
+    /// `skip_task` preset picked over an empty box launches at once; over
+    /// typed text it is only written in.
     #[test]
     fn presets_make_the_quick_prompt_task_optional() {
         with_seeded_presets(|| {
@@ -35941,15 +35951,27 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(&app.overlay, Some(Overlay::Prompt(_))),
-                "an asking preset hands the box back: {:?}",
-                app.overlay
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("an asking preset hands the box back: {:?}", app.overlay);
+            };
+            assert_eq!(
+                prompt.input.as_str(),
+                "Be strict.\n\n\n\nRun the tests.",
+                "a blank line for the task between prefix and postfix"
             );
             assert!(out.is_empty(), "{out:?}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert!(wrapped(&out), "the empty box sends the wrapping: {out:?}");
+            assert!(
+                matches!(
+                    out.as_slice(),
+                    [ClientRequest::CreateAgent {
+                        starting_prompt: Some(text),
+                        ..
+                    }] if text == "Be strict.\n\n\n\nRun the tests."
+                ),
+                "the box goes out as it reads: {out:?}"
+            );
 
             // The same preset set to skip the task.
             let mut presets = crate::agent_presets::load();
@@ -35975,7 +35997,10 @@ diff --git a/src/c.rs b/src/c.rs
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("typed text keeps the box, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.input.as_str(), "Fix auth");
+            assert_eq!(
+                prompt.input.as_str(),
+                "Be strict.\n\nFix auth\n\nRun the tests."
+            );
             assert!(out.is_empty(), "{out:?}");
 
             // Over an empty box it launches the moment it is picked.

@@ -829,8 +829,7 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
         (Some(preset), Some(back)) => {
             let cfg = crate::config::Config::load();
             if cfg.preset_harness_usable(&preset) {
-                let text = back.text.clone();
-                crate::quick_prompt::reopen(app, preset_on_box(back, preset, &cfg), &text);
+                reopen_box_with_preset(app, back, preset, &cfg);
             } else {
                 reopen_presets_list(app, editor.worktree, Some(back), index);
             }
@@ -896,7 +895,8 @@ pub(crate) fn open_agent_preset_task(
         if skip {
             crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
         } else {
-            crate::quick_prompt::reopen(app, launch, "");
+            let (launch, head, tail) = launch.inline_preset("", None);
+            crate::quick_prompt::reopen_around(app, launch, &head, &tail);
         }
         return;
     }
@@ -913,7 +913,8 @@ pub(crate) fn open_agent_preset_task(
 
 /// The picker's Enter: adopt the hovered AGENT PRESET — its harness,
 /// MODEL / EFFORT and prefix/postfix — for the QUICK PROMPT that opened
-/// the list, and hand the box back with its text — or, for a `skip_task`
+/// the list, and hand the box back with the prefix and postfix written
+/// round its text (`QuickLaunch::inline_preset`) — or, for a `skip_task`
 /// preset picked over an empty box, launch it as Enter on that box would;
 /// typed text stays the user's to send. A harness switched off in
 /// Settings → Agents is refused here, where the row is, rather than by a
@@ -939,14 +940,33 @@ fn apply_preset_to_quick_prompt(
         )));
         return;
     }
-    let launch_now = preset.skip_task && back.text.trim().is_empty();
-    let text = back.text.clone();
-    let launch = preset_on_box(back, preset, &cfg);
-    if launch_now {
+    if preset.skip_task && back.text.trim().is_empty() {
+        let launch = preset_on_box(back, preset, &cfg);
         crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
     } else {
-        crate::quick_prompt::reopen(app, launch, &text);
+        reopen_box_with_preset(app, back, preset, &cfg);
     }
+}
+
+/// Hand the box `back` again with `preset` adopted and its prefix and
+/// postfix written round the text (`QuickLaunch::inline_preset`), the
+/// caret where the task goes. The preset the box was on before, as saved,
+/// has its text in the box already: a swap takes that out first.
+fn reopen_box_with_preset(
+    app: &mut App,
+    back: crate::quick_prompt::QuickReturn,
+    preset: AgentPreset,
+    cfg: &crate::config::Config,
+) {
+    let replacing = back.launch.preset.as_ref().and_then(|on| {
+        crate::agent_presets::load()
+            .into_iter()
+            .find(|saved| saved.name == on.name)
+    });
+    let text = back.text.clone();
+    let (launch, head, tail) =
+        preset_on_box(back, preset, cfg).inline_preset(&text, replacing.as_ref());
+    crate::quick_prompt::reopen_around(app, launch, &head, &tail);
 }
 
 /// The box `back` with `preset` adopted — its harness, MODEL / EFFORT and

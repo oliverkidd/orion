@@ -483,6 +483,15 @@ impl TextInput {
         self.goal = None;
     }
 
+    /// [`insert_str`](Self::insert_str) with the caret left where it was,
+    /// before the run: text that belongs after what is typed next.
+    pub fn insert_after_caret(&mut self, s: &str) {
+        self.delete_selection();
+        let at = self.cursor;
+        self.insert_str(s);
+        self.cursor = at;
+    }
+
     /// Apply one key press. Returns [`Edit::Ignored`] for anything that
     /// isn't an editing key, leaving it for the caller.
     pub fn handle_key(&mut self, key: &KeyEvent) -> Edit {
