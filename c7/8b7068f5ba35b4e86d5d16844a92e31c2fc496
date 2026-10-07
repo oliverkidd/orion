@@ -1,0 +1,62 @@
+crates/orion-tui/src/keymap.rs
+  s_f33e938de97df0::t_77edbbe28d1b2d 208-210,903-906,908
+  s_f33e938de97df0::t_ae2e94756d91fb 907
+  s_907f76b240c7d2::t_5a59f04a9f074b 909-911
+crates/orion-tui/src/lib.rs
+  s_f33e938de97df0::t_77edbbe28d1b2d 11
+crates/orion-tui/src/event_loop.rs
+  s_f33e938de97df0::t_77edbbe28d1b2d 381-384,832-836,4146
+  s_f33e938de97df0::t_01a62d5e6a06aa 12356-12359
+  s_f33e938de97df0::t_ec11159f3d8a25 3788
+  s_f33e938de97df0::t_ffca1a6925abca 9562-9573
+  s_f33e938de97df0::t_dd6617f35456fa 7525
+  s_f33e938de97df0::t_ccfb6371b4de04 13335-13337
+  s_f33e938de97df0::t_68deaf473eacc0 9466
+  s_f33e938de97df0::t_e3f3a7c7d7e35b 38749
+crates/orion-tui/src/perf.rs
+  s_f33e938de97df0::t_2287808f792f3f 165
+crates/orion-tui/src/ui.rs
+  s_f33e938de97df0::t_fce19674a567b0 2606
+crates/orion-tui/src/overlay_close.rs
+  s_f33e938de97df0::t_e97f8985c58f85 40
+  s_f33e938de97df0::t_03e8404eb73cfc 109
+crates/orion-tui/src/app.rs
+  s_f33e938de97df0::t_77edbbe28d1b2d 4602-4604,4852
+  s_f33e938de97df0::t_58b64987e49da3 2404-2405
+crates/orion-tui/src/clean_worktrees.rs
+  s_f33e938de97df0::t_f6372981f9701d 1-2,5,23-24,33,35-36,69,92,94-98,104-105,111-125,135-136,148,150,191-192,195-197,199-206,267,307-310,312-317,323,326-328,331-334,337-338,402-404,452,469-471,527,530,560,634,653,689-694,697-719,741-749,751-753,785,794-795,801-806,808-810,817,826,828-830,832,837,839-840,846-847,898-900,907-912,918-919
+  s_f33e938de97df0::t_1f935de794921c 518
+  s_f33e938de97df0::t_462996cf02d808 106-110
+  s_f33e938de97df0::t_e367daf005a794 873,876
+  s_f33e938de97df0::t_71ded3801b54c5 424
+  s_f33e938de97df0::t_21306557421ae8 162-166,486
+  s_f33e938de97df0::t_21c2d93e3d62c4 385
+  s_f33e938de97df0::t_078a9d813408f2 3-4,6-22,25-32,34,37-68,70-91,93,99-103,126-134,137-147,149,151-161,167-190,193-194,198,207-266,268-306,311,318-322,324-325,329-330,335-336,339-384,386-401,405-423,425-451,453-468,472-485,487-517,519-526,528-529,531-559,561-633,635-652,654-688,695-696,750,754-784,786-793,796-800,807,811-816,818-825,827,831,833-836,838,841-845,848-871,874-875,877-897,901-906,913-917
+  s_f33e938de97df0::t_77edbbe28d1b2d 720-723,725-740
+  s_f33e938de97df0::t_816f57dbac1ed6 724
+  s_f33e938de97df0::t_e30ed353528c53 872
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c78b7068f5ba35b4e86d5d16844a92e31c2fc496",
+  "prompts": {},
+  "sessions": {
+    "s_907f76b240c7d2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9402fa72-560a-4cd6-b864-59dd3db3eb02",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    },
+    "s_f33e938de97df0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fe1e78aa-ebe5-49bc-b054-d3b2760171cc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
