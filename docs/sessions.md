@@ -744,19 +744,25 @@ checkout's path, the path written inside it — and is never written into the re
 stays clean. Every change is saved at once; a file that will not read is moved aside to
 `<name>.corrupt-<time>.json`, the footer saying so, rather than written over.
 
-**Today** is the groups, each header totalling its open items at each priority (`‼` urgent, `▆`
-high, `▄` medium, `▂` low), how many are open and how many were ticked today — nested groups counted
-in, a folded header included — and under it a line per item: its box, its priority as Linear draws
-it, the text, and on the right the agent sent at it, the Linear issue it is linked to and how many
-days it has carried over (`2d`). `Space` ticks an item: it strikes through and sinks to the bottom of
-its group for the rest of the day, and from the next day on it is in the **Log** (`⇧→`), under the
-day it was done, where `Space` unticks it back onto Today. Nothing unfinished goes anywhere — it is
-simply still there tomorrow, a day older. Days are local: a tick at 11pm is that day's.
+**Today** is the groups. A top-level group is a section: its name in capitals, a rule across, and its
+open items at each priority (`U`rgent, `H`igh, `M`edium, `L`ow — the letters the Linear issues modal
+uses too), how many are open and how many were ticked today, nested groups and folded headers counted
+in. A group under it says only how many are open. Under each header is a line per item — more when
+its text is long enough to wrap: its box, its priority letter, the text, and on the right the agent
+sent at it, the Linear issue it is linked to and how many days it has carried over (`2d`). The tab
+row's right end says what was ticked today and this week, with a bar for each day from Monday.
+`Space` ticks an item: it strikes through and sinks to the bottom of its group for the rest of the
+day, and from the next day on it is in the **Log** (`⇧→`), under the day it was done, where `Space`
+unticks it back onto Today. Nothing unfinished goes anywhere — it is simply still there tomorrow, a
+day older. Days are local: a tick at 11pm is that day's.
 
-`⌘N` types a new item into the cursor's group — `Enter` adds it and opens the next, `Esc` stops —
-`⌘⇧N` a new group beside it, `⌘I` renames in place, `⌘1`–`⌘4` set the priority (the item's own
-again takes it off) and `⌘W` deletes, a group with items in it only after a second press. Typing
-filters the items, keeping their headers.
+A row is edited where it stands: typing on an item or a group header adds to its end, and `⌫` opens
+it with its last character gone; `Enter` saves, `↑`/`↓` save and move on, `Esc` puts it back.
+`⌘N` types a new item into the cursor's group (so does typing on `+ new item`) — `Enter` adds it and
+opens the next, `Esc` stops — `⌘⇧N` a new group beside it, `⌘1`–`⌘4` set the priority (the item's
+own again takes it off) and `⌘⌫` deletes, a group with items in it only after a second press.
+`⌘↑`/`⌘↓` jump from group to group. `⌘F` opens the filter, which keeps the matching items under
+their headers.
 
 **Pasting a list in.** Paste an indented Markdown list into the modal — a list copied out of a notes
 app — and it is added: `- `, `* ` or `+ ` bullets, a tab or four spaces a level (two when that is

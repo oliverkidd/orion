@@ -178,7 +178,6 @@ const MODAL_KEYS: &[crate::hints::Key] = &[
     crate::branch_switch::keys::FETCH,
     crate::todos::view::keys::NEW,
     crate::todos::view::keys::NEW_GROUP,
-    crate::todos::view::keys::RENAME,
     crate::todos::view::keys::URGENT,
     crate::todos::view::keys::HIGH,
     crate::todos::view::keys::MEDIUM,

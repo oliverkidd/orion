@@ -6514,8 +6514,7 @@ fn open_delete_worktree_confirm(app: &mut App) {
 /// rebound onto a bare key keeps that key a modal's own.
 /// The modals whose remove verb is `⌘W` — the PULL REQUESTS MODAL's close,
 /// the SKILLS BROWSER's trash, the AGENT PRESETS list's delete, each behind
-/// its own confirm, and the TODOS MODAL's delete — up with nothing over
-/// them: `⌘W` is theirs.
+/// its own confirm — up with nothing over them: `⌘W` is theirs.
 fn modal_takes_cmd_w(app: &App) -> bool {
     app.vim.is_none()
         && app.page.is_none()
@@ -6525,7 +6524,6 @@ fn modal_takes_cmd_w(app: &App) -> bool {
                 Overlay::PullRequests(_)
                     | Overlay::Skills(_)
                     | Overlay::AgentPresets(_)
-                    | Overlay::Todos(_)
                     | Overlay::Stacks(_)
             )
         )
@@ -39824,7 +39822,7 @@ diff --git a/src/c.rs b/src/c.rs
                 Some("added 29 items from the pasted list")
             );
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▾ Emails"), "{text}");
+            assert!(text.contains("▾ EMAILS"), "{text}");
             assert!(text.contains("Today 29"), "{text}");
             assert!(text.contains("setup templates"), "{text}");
         });
@@ -39880,8 +39878,8 @@ diff --git a/src/c.rs b/src/c.rs
             let terminal = draw_todos(&mut app);
             let text = buffer_text(&terminal);
             assert!(text.contains("☑"), "{text}");
-            assert!(text.contains("✓ 1 today"), "{text}");
-            assert!(text.contains("1 open"), "{text}");
+            assert!(text.contains("· 1 open · ✓1"), "{text}");
+            assert!(text.contains("✓1 today · ✓1 this week"), "{text}");
             let (x, y) = find_cell(&terminal, "run plan");
             let cell = &terminal.backend().buffer()[(x, y)];
             assert!(cell
@@ -39929,7 +39927,7 @@ diff --git a/src/c.rs b/src/c.rs
                 Some(crate::todos::view::Entry::Header { .. })
             ));
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▸ Emails"), "{text}");
+            assert!(text.contains("▸ EMAILS"), "{text}");
             assert!(text.contains("2 open"), "{text}");
             assert!(!text.contains("run plan"), "{text}");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -39938,23 +39936,26 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// Typing filters the items, the headers over the ones it finds kept.
+    /// `⌘F` opens the filter, which keeps the headers over the items it
+    /// finds; Esc clears it and puts it away, then closes.
     #[test]
     fn typing_filters_todos_and_keeps_their_headers() {
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
             let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::SUPER, &mut out);
             for c in "resend".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▾ Emails"), "{text}");
+            assert!(text.contains("▾ EMAILS"), "{text}");
             assert!(text.contains("setup resend"), "{text}");
             assert!(!text.contains("run plan"), "{text}");
             assert!(!text.contains("chips"), "{text}");
-            // Esc clears the filter first, then closes.
+            // Esc clears the filter and puts it away first, then closes.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).query.is_empty());
+            assert!(!todo_view(&app).filtering);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none());
         });
@@ -39962,8 +39963,9 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// `⌘N` opens a field in the cursor's group and Enter adds the item —
     /// the field staying open for the next; `⌘2` makes it high, and it
-    /// sorts to the top, a second `⌘2` taking it off; `⌘I` renames; `⌘W` deletes, a group with items
-    /// only on a second press. Each change is on disk at once.
+    /// sorts to the top, a second `⌘2` taking it off; typing on it adds to
+    /// its end; `⌘⌫` deletes, a group with items only on a second press.
+    /// Each change is on disk at once.
     #[test]
     fn todo_items_are_added_prioritised_renamed_and_deleted() {
         let dir = tempfile::tempdir().unwrap();
@@ -40005,17 +40007,19 @@ diff --git a/src/c.rs b/src/c.rs
                 cmd(&mut app, '2', &mut out);
                 assert_eq!(priority(&app), Some(2));
 
-                cmd(&mut app, 'i', &mut out);
                 press(&mut app, KeyCode::Char('!'), KeyModifiers::NONE, &mut out);
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert!(todo_file(&app).items.iter().any(|i| i.text == "new one!"));
 
-                cmd(&mut app, 'w', &mut out);
+                let delete = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                    press(app, KeyCode::Backspace, KeyModifiers::SUPER, out)
+                };
+                delete(&mut app, &mut out);
                 assert!(!todo_file(&app).items.iter().any(|i| i.text == "new one!"));
 
                 // On the header: asked first, then gone with its items.
                 press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
-                cmd(&mut app, 'w', &mut out);
+                delete(&mut app, &mut out);
                 assert_eq!(todo_view(&app).confirm_delete, Some(emails));
                 let text = buffer_text(&draw_todos(&mut app));
                 assert!(text.contains("delete Emails and its 2 items?"), "{text}");
@@ -40211,17 +40215,126 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// With a filter typed, a space is the filter's — nothing is ticked.
+    /// With the filter up, a space is the filter's — nothing is ticked.
     #[test]
     fn space_types_into_a_todo_filter() {
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
             let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::SUPER, &mut out);
             for c in "run p".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
             assert_eq!(todo_view(&app).query.as_str(), "run p");
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
+        });
+    }
+
+    /// A row is edited where it stands: `⌫` opens it with its last
+    /// character gone, a character typed on it is added to its end — on a
+    /// header, to the group's name — and `↓` saves it and moves on. Typed
+    /// on `+ new item`, it starts one. Nothing typed filters.
+    #[test]
+    fn a_todo_row_is_edited_in_place() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            let key = |app: &mut App, code: KeyCode, out: &mut Vec<ClientRequest>| {
+                press(app, code, KeyModifiers::NONE, out)
+            };
+            key(&mut app, KeyCode::Down, &mut out);
+            key(&mut app, KeyCode::Backspace, &mut out);
+            assert_eq!(
+                todo_view(&app).input.as_ref().map(|(_, i)| i.as_str()),
+                Some("run pla")
+            );
+            for c in "ns".chars() {
+                key(&mut app, KeyCode::Char(c), &mut out);
+            }
+            key(&mut app, KeyCode::Down, &mut out);
+            assert!(todo_view(&app).input.is_none());
+            assert!(todo_file(&app).items.iter().any(|i| i.text == "run plans"));
+            assert!(matches!(
+                todo_view(&app).cursor,
+                Some(crate::todos::view::Entry::Item { id, .. })
+                    if todo_file(&app).item(id).map(|i| i.text.as_str()) == Some("setup resend")
+            ));
+
+            // A letter on a header goes on the group's name.
+            press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+            key(&mut app, KeyCode::Char('!'), &mut out);
+            key(&mut app, KeyCode::Enter, &mut out);
+            assert_eq!(todo_file(&app).groups[0].name, "Emails!");
+            assert!(todo_view(&app).query.is_empty(), "typing never filters");
+
+            // `↓` on the empty field a run of new items leaves open lands
+            // on the row under it, not the one after.
+            press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            for c in "added".chars() {
+                key(&mut app, KeyCode::Char(c), &mut out);
+            }
+            key(&mut app, KeyCode::Enter, &mut out);
+            key(&mut app, KeyCode::Down, &mut out);
+            assert!(todo_view(&app).input.is_none());
+            assert!(matches!(
+                todo_view(&app).cursor,
+                Some(crate::todos::view::Entry::Header { group, .. })
+                    if todo_file(&app).group(group).map(|g| g.name.as_str()) == Some("UI")
+            ));
+
+            // On `+ new item`, a new item in the group over it.
+            press(&mut app, KeyCode::End, KeyModifiers::NONE, &mut out);
+            key(&mut app, KeyCode::Char('x'), &mut out);
+            key(&mut app, KeyCode::Enter, &mut out);
+            key(&mut app, KeyCode::Esc, &mut out);
+            let file = todo_file(&app);
+            let ui = file.subgroups(None).find(|g| g.name == "UI").unwrap().id;
+            assert!(file.items.iter().any(|i| i.text == "x" && i.group == ui));
+        });
+    }
+
+    /// `⌘↓`/`⌘↑` jump from group header to group header, nested ones
+    /// included, over the items between.
+    #[test]
+    fn cmd_arrows_jump_between_todo_groups() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with("- A\n    - a1\n    - B\n        - b1\n- C\n    - c1\n");
+            let header = |app: &App| match todo_view(app).cursor {
+                Some(crate::todos::view::Entry::Header { group, .. }) => {
+                    todo_file(app).group(group).map(|g| g.name.clone())
+                }
+                _ => None,
+            };
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("B"));
+            press(&mut app, KeyCode::Down, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("C"));
+            press(&mut app, KeyCode::Down, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("C"), "no header past it");
+            press(&mut app, KeyCode::Up, KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Up, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("A"));
+        });
+    }
+
+    /// A long item wraps under its own text rather than running off the
+    /// edge: every word of it on screen, none cut with `…`.
+    #[test]
+    fn a_long_todo_wraps() {
+        crate::todos::with_now(todo_clock(6), || {
+            let long = "wrap this todo across lines because it is far too long to sit on one row of the modal at this width at all";
+            let mut app = todos_with(&format!("- G\n    - {long}\n"));
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(!text.contains('…'), "{text}");
+            for word in ["wrap", "because", "modal", "width", "all"] {
+                assert!(text.contains(word), "{word}: {text}");
+            }
+            let view = todo_view(&app);
+            let item_rect = view.row_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
+            assert!(item_rect.height >= 2, "{item_rect:?}");
         });
     }
 
