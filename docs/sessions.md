@@ -736,8 +736,10 @@ rebindable (`pull_requests`).
 
 ## TODOS
 
-`⌘I` (`^Q` where the terminal sends no ⌘) opens the selected PROJECT's own todo list, modelled on
-a daily todo: groups that nest and fold, each item with Linear's priority, sorted by it inside its
+`⌘I` (`^Q` where the terminal sends no ⌘) opens the TODOS MODAL: every open PROJECT's own todo
+list, a tab each along the top in the projects' order, opened on the selected project's tab
+(`⇧←`/`⇧→` or a click for another; each comes back as it was left while the modal is up). Each
+list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, sorted by it inside its
 group. The list is this machine's alone — one file per checkout under orion's data folder
 (`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the
 checkout's path, the path written inside it — and is never written into the repo, so `git status`
