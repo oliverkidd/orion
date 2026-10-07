@@ -1,0 +1,40 @@
+crates/orion-tui/src/event_loop.rs
+  s_38b36f084da30b::t_74ff578c178b60 35821-35822,35824,35878-35886,35892-35893,35912
+  s_38b36f084da30b::t_987d149dbf5aa2 35917-35920,35954-35960,35965-35974,36000-36003
+crates/orion-tui/src/quick_prompt.rs
+  s_38b36f084da30b::t_bb8e1844160e12 595-600,609-619,621,633-634,636-637
+  s_38b36f084da30b::t_d7cfa21e6d4f10 1370-1380,1383-1385,1390-1396,1401-1406
+  s_38b36f084da30b::t_df2060485b1617 905-911,913,916-917
+  s_38b36f084da30b::t_d41346a91dd7cf 620,622-632,635
+  s_38b36f084da30b::t_391d2b08b88722 1381-1382,1386-1389,1397-1400
+  s_38b36f084da30b::t_1513745d8dd953 601-608
+crates/orion-tui/src/linear.rs
+  s_38b36f084da30b::t_49954097fba102 1533-1541
+  s_38b36f084da30b::t_6b8cce38b63cbe 3262-3264,3304-3308,3317-3319,3321-3323,3326-3328,3333-3335,3337
+  s_38b36f084da30b::t_a1bf9df6eccbac 3320
+  s_38b36f084da30b::t_391d2b08b88722 3309-3313,3329-3332
+crates/orion-tui/src/preset_overlays.rs
+  s_38b36f084da30b::t_45b3f1e18e49d7 916-917
+  s_38b36f084da30b::t_6ea09e86aa75e8 898-899
+  s_38b36f084da30b::t_b31bf5591c8f05 832,943-944,947,951-960,966-969
+  s_38b36f084da30b::t_c1c4e52b2848c1 961-965
+  s_38b36f084da30b::t_babb56e99b3935 970-971
+crates/orion-tui/src/text_input.rs
+  s_38b36f084da30b::t_3d7d30d483ae38 486-494
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c08028c40a3973e8862dbae9c3b78fcb612d82c6",
+  "prompts": {},
+  "sessions": {
+    "s_38b36f084da30b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "962cf0c6-fb35-40e8-b437-1594cabd758b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
