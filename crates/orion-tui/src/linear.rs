@@ -571,7 +571,8 @@ impl KeySource {
 
 /// Branch → Linear issues, so a pull request cut from a ⌘L launch, or
 /// from a worktree the issues were linked to (`⌘.`), can be attached once
-/// GitHub lists it.
+/// GitHub lists it. A link outlives its attach (`attached`): the LINEAR
+/// VIEW still shows the issue as picked up by that branch ([`IssueWork`]).
 #[derive(Debug, Clone, Default)]
 pub struct LinkStore {
     path: Option<PathBuf>,
@@ -582,6 +583,9 @@ pub struct LinkStore {
 pub(crate) struct PendingLink {
     issue_ids: Vec<String>,
     identifiers: Vec<String>,
+    /// The branch's pull request took the issues already: nothing waits.
+    #[serde(default)]
+    attached: bool,
 }
 
 impl LinkStore {
@@ -612,18 +616,46 @@ impl LinkStore {
         self.persist();
     }
 
+    /// [`remember`](Self::remember) for issues `branch`'s open pull
+    /// request was attached to on the spot: kept for show, waiting on
+    /// nothing.
+    pub fn remember_attached(&mut self, branch: &str, issues: &[LinearIssue]) {
+        self.remember(branch, issues);
+        if let Some(link) = self.links.get_mut(branch) {
+            link.attached = true;
+            self.persist();
+        }
+    }
+
     /// The identifiers waiting on `branch`'s pull request.
     pub fn pending(&self, branch: &str) -> &[String] {
         self.links
             .get(branch)
+            .filter(|l| !l.attached)
             .map(|l| l.identifiers.as_slice())
             .unwrap_or_default()
     }
 
+    /// What `branch`'s new pull request attaches to, once: the link stays,
+    /// marked attached, so the issues still show the branch.
     pub(crate) fn take(&mut self, branch: &str) -> Option<PendingLink> {
-        let link = self.links.remove(branch)?;
+        let link = self.links.get_mut(branch).filter(|l| !l.attached)?;
+        link.attached = true;
+        let taken = link.clone();
         self.persist();
-        Some(link)
+        Some(taken)
+    }
+
+    /// The branches `issue_id` was linked to, in name order.
+    pub fn branches_of(&self, issue_id: &str) -> Vec<&str> {
+        let mut branches: Vec<&str> = self
+            .links
+            .iter()
+            .filter(|(_, l)| l.issue_ids.iter().any(|id| id == issue_id))
+            .map(|(b, _)| b.as_str())
+            .collect();
+        branches.sort_unstable();
+        branches
     }
 
     fn persist(&self) {
@@ -637,6 +669,97 @@ impl LinkStore {
             let _ = std::fs::write(path, text);
         }
     }
+}
+
+/// What orion has going on one issue: the branch it was linked to (`⌘.`,
+/// a ⌘L launch) or whose name carries its identifier (`fix/eng-12-…`),
+/// the loudest of that worktree's sessions, and the branch's open pull
+/// request — the work column on a row, the right end of the page's border.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueWork {
+    pub branch: String,
+    /// The sessions' rollup and whether a finish there is unread; `None`
+    /// with no session on the branch.
+    pub session: Option<(orion_core::entities::AgentStatus, bool)>,
+    /// The open pull request's number and colour — crimson in trouble,
+    /// faint a draft, green otherwise.
+    pub pr: Option<(u64, ratatui::style::Color)>,
+}
+
+/// Whether `branch` names the issue `identifier` (`ENG-12`): the
+/// identifier, any case, with no letter or digit before it and no digit
+/// after — `eng-12-fix` and `feat/ENG-12` do, `eng-123` doesn't.
+fn names_issue(branch: &str, identifier: &str) -> bool {
+    let (branch, id) = (branch.to_ascii_lowercase(), identifier.to_ascii_lowercase());
+    if id.is_empty() {
+        return false;
+    }
+    branch.match_indices(&id).any(|(at, _)| {
+        let before = branch[..at].chars().next_back();
+        let after = branch[at + id.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric())
+            && !after.is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+/// [`IssueWork`] for `issue` in `project`: a linked branch first — one
+/// with a checkout before one without — else a checkout whose branch
+/// names the issue; `None` when nothing has picked it up.
+pub(crate) fn work_of(
+    app: &App,
+    project: &ProjectId,
+    issue: &LinearIssue,
+    th: Theme,
+) -> Option<IssueWork> {
+    use orion_core::entities::Worktree;
+    let worktrees: Vec<&Worktree> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == project)
+        .collect();
+    let checkout = |branch: &str| worktrees.iter().copied().find(|w| w.branch == branch);
+    let linked = app.linear_links.branches_of(&issue.id);
+    let branch: String = linked
+        .iter()
+        .find(|b| checkout(b).is_some())
+        .or(linked.first())
+        .map(|b| b.to_string())
+        .or_else(|| {
+            worktrees
+                .iter()
+                .find(|w| !w.is_main && names_issue(&w.branch, &issue.identifier))
+                .map(|w| w.branch.clone())
+        })?;
+    let session = checkout(&branch).and_then(|wt| {
+        let agents: Vec<_> = app
+            .tree
+            .agents
+            .iter()
+            .filter(|a| a.worktree_id == wt.id && !a.archived)
+            .collect();
+        let status = crate::app::rollup(agents.iter().map(|a| a.status))?;
+        Some((status, agents.iter().any(|a| a.unseen)))
+    });
+    let pr = app
+        .open_prs
+        .get(project)
+        .and_then(|o| o.list.iter().find(|pr| pr.head == branch))
+        .map(|pr| {
+            let color = if pr.trouble().is_some() {
+                th.err
+            } else if pr.is_draft {
+                th.faint
+            } else {
+                th.ok
+            };
+            (pr.number, color)
+        });
+    Some(IssueWork {
+        branch,
+        session,
+        pr,
+    })
 }
 
 /// `⌘L` on the grid: browse assigned issues for the selected project.
@@ -1249,6 +1372,7 @@ fn link_worktree(app: &mut App) {
         .and_then(|o| o.list.iter().find(|pr| &pr.head == branch))
         .map(|pr| (pr.url.clone(), pr.number));
     if let Some((url, number)) = open {
+        app.linear_links.remember_attached(branch, &pick.issues);
         attach_issues(app, dir, url, number, &pick.issues);
         return;
     }
@@ -1886,6 +2010,22 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     }
     let budget = (rows_area.width as usize).saturating_sub(2);
     let now = orion_core::clock::now_secs() as i64;
+    // What orion has going on each issue, for the rows' work column and
+    // the page's border.
+    let works: HashMap<usize, Option<IssueWork>> = visible
+        .iter()
+        .map(|(i, _)| (*i, work_of(app, &view.project, &issues[*i], th)))
+        .chain(cursor.map(|c| (c, work_of(app, &view.project, &issues[c], th))))
+        .collect();
+    let pr_w = works.values().flatten().next().map(|_| {
+        works
+            .values()
+            .flatten()
+            .filter_map(|w| w.pr.map(|(n, _)| n.to_string().len() + 1))
+            .max()
+            .unwrap_or(0)
+    });
+    let spin = app.spin_phase();
     // A header over each status, a line per issue.
     let keys: Vec<&str> = visible
         .iter()
@@ -1908,7 +2048,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
                 let (index, positions) = &visible[v];
                 let issue = &issues[*index];
                 let marked = view.marked.contains(&issue.id);
-                let line = title_spans(issue, positions, marked, budget, th);
+                let work = WorkColumn {
+                    work: works.get(index).cloned().flatten(),
+                    pr_w,
+                    spin,
+                };
+                let line = title_spans(issue, positions, marked, budget, &work, th);
                 render_row(f, rect, line, Some(*index) == cursor, list_focused, th);
                 row_rects.push((*index, rect));
             }
@@ -1921,9 +2066,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         .unwrap_or_else(|| "Linear".into());
     let mut block = panel_block(&body_title, false, th);
     let body_inner = block.inner(body_a);
-    let (read_a, side_a) = reading_areas(body_inner);
+    let read_a = reading_area(body_inner);
     let lines: Vec<Line> = match current {
-        Some(issue) => body_lines(issue, read_a.width as usize, side_a.is_none(), now, th),
+        Some(issue) => body_lines(issue, read_a.width as usize, now, th),
         None => Vec::new(),
     };
     let max_scroll = (lines.len() as u16).saturating_sub(read_a.height.max(1));
@@ -1948,6 +2093,29 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         ),
         None => Rect::default(),
     };
+    // orion's side of the issue at the border's right end, left of the
+    // `↗`: kept apart from Linear's properties under it.
+    let border_work = cursor
+        .and_then(|c| works.get(&c).cloned().flatten())
+        .filter(|_| browser_area.width > 0);
+    if let Some(work) = border_work {
+        let spans = border_work_spans(&work, spin, th);
+        let w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let title_end = body_a.x + 1 + body_title.chars().count() as u16 + 2;
+        if let Some(x) = browser_area
+            .x
+            .checked_sub(w as u16 + 1)
+            .filter(|x| *x > title_end)
+        {
+            let at = Rect {
+                x,
+                y: body_a.y,
+                width: w as u16,
+                height: 1,
+            };
+            f.render_widget(Paragraph::new(Line::from(spans)), at);
+        }
+    }
     let mut filter_pick = view.filter_pick;
     if let Some(pick) = &view.status_pick {
         draw_status_pick(f, body_inner, pick, th);
@@ -1960,20 +2128,6 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else {
         let shown: Vec<Line> = lines.iter().skip(scroll as usize).cloned().collect();
         f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), read_a);
-        if let (Some(side), Some(issue)) = (side_a, current) {
-            let rule = ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::LEFT)
-                .border_style(Style::default().fg(th.faint));
-            let inner = rule.inner(side);
-            f.render_widget(rule, side);
-            let inner = Rect {
-                x: inner.x + 1,
-                width: inner.width.saturating_sub(1),
-                ..inner
-            };
-            let props = properties(issue, inner.width as usize, now, th);
-            f.render_widget(Paragraph::new(props), inner);
-        }
     }
     // The modal's keys along its bottom edge — none while a box over it
     // has the keys.
@@ -2056,6 +2210,7 @@ fn title_spans(
     positions: &[usize],
     marked: bool,
     budget: usize,
+    work: &WorkColumn,
     th: Theme,
 ) -> Vec<Span<'static>> {
     // A marked row is ticked in the accent — it is a choice the keys
@@ -2078,7 +2233,8 @@ fn title_spans(
     // The tick, the state glyph and the priority, each with its space.
     const MARKS_W: usize = 6;
     let full = issue.label();
-    let label = truncate(&full, budget.saturating_sub(MARKS_W));
+    let room = budget.saturating_sub(MARKS_W + work.width());
+    let label = truncate(&full, room);
     let positions = visible_positions(positions, &label, &full);
     let ident_w = issue.identifier.chars().count().min(label.chars().count());
     let split = positions.partition_point(|&p| p < ident_w);
@@ -2097,7 +2253,101 @@ fn title_spans(
         Style::default().fg(th.text),
         th,
     ));
+    if work.width() > 0 {
+        spans.push(Span::raw(
+            " ".repeat(room.saturating_sub(label.chars().count())),
+        ));
+        spans.extend(work.spans(th));
+    }
     spans
+}
+
+/// [`IssueWork`] on the page's border: ` ⎇ eng-12-fix… ● #42 `, the
+/// branch cut to [`BORDER_BRANCH_W`].
+fn border_work_spans(work: &IssueWork, spin: Option<usize>, th: Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("⎇ ", Style::default().fg(th.accent)),
+        Span::styled(
+            truncate(&work.branch, BORDER_BRANCH_W),
+            Style::default().fg(th.muted),
+        ),
+    ];
+    if let Some((status, unseen)) = work.session {
+        spans.push(Span::raw(" "));
+        spans.push(crate::ui::status_dot(Some(status), unseen, spin, th));
+    } else {
+        spans.push(Span::raw(" "));
+    }
+    if let Some((number, color)) = work.pr {
+        spans.push(Span::styled(
+            format!("#{number} "),
+            Style::default().fg(color),
+        ));
+    }
+    spans
+}
+
+/// The most of a branch's name the page's border shows.
+const BORDER_BRANCH_W: usize = 24;
+
+/// The work column at a row's right end, the PULL REQUESTS MODAL's status
+/// column's counterpart: `⎇` for a branch that picked the issue up, its
+/// sessions' STATUS MARK, then the open pull request's `#42` in a column
+/// as wide as the list's widest. Blank on a row nothing picked up, and no
+/// column at all on a list where nothing was.
+pub(crate) struct WorkColumn {
+    work: Option<IssueWork>,
+    /// The widest `#42` on the list, `None` when no row has work.
+    pr_w: Option<usize>,
+    spin: Option<usize>,
+}
+
+impl WorkColumn {
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
+        WorkColumn {
+            work: None,
+            pr_w: None,
+            spin: None,
+        }
+    }
+
+    /// The cells the column takes, the space before it included.
+    fn width(&self) -> usize {
+        // ` ⎇ ● ` and the number with a space before it.
+        self.pr_w.map_or(0, |w| 6 + if w > 0 { w + 1 } else { 0 })
+    }
+
+    fn spans(&self, th: Theme) -> Vec<Span<'static>> {
+        let Some(pr_w) = self.pr_w else {
+            return Vec::new();
+        };
+        let Some(work) = &self.work else {
+            return vec![Span::raw(" ".repeat(self.width()))];
+        };
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled("⎇ ", Style::default().fg(th.accent)),
+            match work.session {
+                Some((status, unseen)) => {
+                    crate::ui::status_dot(Some(status), unseen, self.spin, th)
+                }
+                None => Span::raw("  "),
+            },
+        ];
+        if pr_w > 0 {
+            spans.push(match work.pr {
+                Some((number, color)) => Span::styled(
+                    format!(" {:>pr_w$}", format!("#{number}")),
+                    Style::default().fg(color),
+                ),
+                None => Span::raw(" ".repeat(pr_w + 1)),
+            });
+        }
+        spans.push(Span::raw(" "));
+        spans
+    }
 }
 
 /// `Oct 5` for an RFC 3339 stamp this year, `Oct 5 2025` for one before.
@@ -2201,139 +2451,145 @@ fn draw_side_pick<'a>(
     }
 }
 
-/// The reading pane at least this wide sets the issue's properties in a
-/// column of their own on its right, as Linear does; narrower, they stack
-/// under the title.
-const SIDE_MIN_W: u16 = 72;
-/// The properties column, its rule included.
-const SIDE_W: u16 = 30;
 /// The widest the description runs: a line past this is hard to read.
 const READ_MAX_W: u16 = 88;
 
-/// The reading pane's inside, split: the text — a column in from either
-/// edge, no wider than [`READ_MAX_W`] — and, when it is wide enough, the
-/// properties column on the right.
-fn reading_areas(inner: Rect) -> (Rect, Option<Rect>) {
-    let (text, side) = if inner.width >= SIDE_MIN_W {
-        let [text, side] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(SIDE_W)]).areas(inner);
-        (text, Some(side))
-    } else {
-        (inner, None)
-    };
-    let pad = if text.width > 4 { 1 } else { 0 };
-    let text = Rect {
-        x: text.x + pad,
-        width: text.width.saturating_sub(pad * 2).min(READ_MAX_W),
-        ..text
-    };
-    (text, side)
+/// The reading pane's text area: a column in from either edge, no wider
+/// than [`READ_MAX_W`].
+fn reading_area(inner: Rect) -> Rect {
+    let pad = if inner.width > 4 { 1 } else { 0 };
+    Rect {
+        x: inner.x + pad,
+        width: inner.width.saturating_sub(pad * 2).min(READ_MAX_W),
+        ..inner
+    }
 }
 
-/// The issue's properties, a row each as Linear's sidebar lists them: a
-/// dim name, then the value in Linear's colours — one row per label.
+/// The issue's properties at the head of the page, as the PULL REQUEST
+/// PAGE carries its own under its border: a dim name, then the value in
+/// Linear's colours — status and priority, assignee and project, side by
+/// side while the pane has room for two ([`PAIR_W`] each), one per row
+/// otherwise; the labels on a row of their own; then the dates.
 fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Line<'static>> {
     const NAME_W: usize = 10;
-    let room = width.saturating_sub(NAME_W);
+    let paired = width >= PAIR_W * 2;
+    let cell_w = if paired { PAIR_W } else { width };
+    let room = cell_w.saturating_sub(NAME_W + 1);
     let name = |n: &str| Span::styled(format!("{n:<NAME_W$}"), Style::default().fg(th.dim));
-    let text = |t: &str| {
-        Span::styled(
-            truncate(t, room.saturating_sub(2)),
-            Style::default().fg(th.text),
-        )
-    };
+    let text = |t: &str, style: Style| Span::styled(truncate(t, room.saturating_sub(2)), style);
+    let plain = Style::default().fg(th.text);
+    let quiet = Style::default().fg(th.dim);
     let dot = |tag: &LinearTag| {
         let color = crate::theme::hex(&tag.color).unwrap_or(th.muted);
         vec![
             Span::styled("● ", Style::default().fg(color)),
-            Span::styled(
-                truncate(&tag.name, room.saturating_sub(2)),
-                Style::default().fg(th.text),
-            ),
+            text(&tag.name, plain),
         ]
     };
-    let mut lines = Vec::new();
-    let mut row = |label: &str, value: Vec<Span<'static>>| {
+    let cell = |label: &str, value: Vec<Span<'static>>| {
         let mut spans = vec![name(label)];
         spans.extend(value);
-        lines.push(Line::from(spans));
+        spans
     };
     let (glyph, color) = state_mark(issue, th);
-    row(
+    let status = cell(
         "Status",
         vec![
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
-            text(&issue.status),
+            text(&issue.status, plain),
         ],
     );
-    row(
+    let priority = cell(
         "Priority",
         vec![
             priority_mark(issue.priority, th),
             Span::raw(" "),
-            text(priority_word(issue.priority)),
+            text(priority_word(issue.priority), plain),
         ],
     );
-    let who = if issue.assignee.is_empty() {
-        Span::styled(UNASSIGNED, Style::default().fg(th.dim))
-    } else {
-        text(&issue.assignee)
-    };
-    row("Assignee", vec![who]);
-    match &issue.project {
-        Some(project) => row("Project", dot(project)),
-        None => row(
-            "Project",
-            vec![Span::styled("none", Style::default().fg(th.dim))],
-        ),
-    }
-    if issue.labels.is_empty() {
-        row(
-            "Labels",
-            vec![Span::styled("none", Style::default().fg(th.dim))],
-        );
-    }
-    for (i, label) in issue.labels.iter().enumerate() {
-        row(if i == 0 { "Labels" } else { "" }, dot(label));
-    }
-    for (label, stamp) in [
+    let assignee = cell(
+        "Assignee",
+        vec![if issue.assignee.is_empty() {
+            Span::styled(UNASSIGNED, quiet)
+        } else {
+            text(&issue.assignee, plain)
+        }],
+    );
+    let project = cell(
+        "Project",
+        match &issue.project {
+            Some(project) => dot(project),
+            None => vec![Span::styled("none", quiet)],
+        },
+    );
+    let dates: Vec<Vec<Span<'static>>> = [
         ("Created", &issue.created_at),
         ("Updated", &issue.updated_at),
-    ] {
-        if let Some(day) = short_date(stamp, now) {
-            row(
-                label,
-                vec![Span::styled(day, Style::default().fg(th.muted))],
-            );
+    ]
+    .into_iter()
+    .filter_map(|(label, stamp)| {
+        let day = short_date(stamp, now)?;
+        Some(cell(
+            label,
+            vec![Span::styled(day, Style::default().fg(th.muted))],
+        ))
+    })
+    .collect();
+    let mut labels = vec![name("Labels")];
+    if issue.labels.is_empty() {
+        labels.push(Span::styled("none", quiet));
+    }
+    for (i, label) in issue.labels.iter().enumerate() {
+        if i > 0 {
+            labels.push(Span::raw("   "));
         }
+        labels.extend(dot(label));
+    }
+    let mut lines = Vec::new();
+    let pair = |lines: &mut Vec<Line<'static>>, cells: Vec<Vec<Span<'static>>>| {
+        if paired {
+            let mut spans = Vec::new();
+            for (i, cell) in cells.into_iter().enumerate() {
+                if i > 0 {
+                    let used: usize = spans.iter().map(|s: &Span| s.content.chars().count()).sum();
+                    spans.push(Span::raw(" ".repeat(PAIR_W.saturating_sub(used))));
+                }
+                spans.extend(cell);
+            }
+            lines.push(crate::pr_preview::fit(spans, width));
+        } else {
+            for cell in cells {
+                lines.push(crate::pr_preview::fit(cell, width));
+            }
+        }
+    };
+    pair(&mut lines, vec![status, priority]);
+    pair(&mut lines, vec![assignee, project]);
+    lines.push(crate::pr_preview::fit(labels, width));
+    if !dates.is_empty() {
+        pair(&mut lines, dates);
     }
     lines
 }
 
+/// One property's column when two sit side by side ([`properties`]).
+const PAIR_W: usize = 34;
+
 /// The reading pane's text, `width` wide: the title, wrapped and bold,
-/// the properties under it when they have no column of their own
-/// (`stacked`), then the description.
-fn body_lines(
-    issue: &LinearIssue,
-    width: usize,
-    stacked: bool,
-    now: i64,
-    th: Theme,
-) -> Vec<Line<'static>> {
+/// the properties under it over a rule, then the description.
+fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Line<'static>> {
     let title = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line> = crate::pr_preview::wrap(&issue.title, width)
         .into_iter()
         .map(|row| Line::from(Span::styled(row, title)))
         .collect();
     lines.push(Line::default());
-    if stacked {
-        lines.extend(properties(issue, width, now, th));
-        lines.push(Line::from(Span::styled(
-            "─".repeat(width),
-            Style::default().fg(th.faint),
-        )));
-        lines.push(Line::default());
-    }
+    lines.extend(properties(issue, width, now, th));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(width),
+        Style::default().fg(th.faint),
+    )));
+    lines.push(Line::default());
     if issue.description.trim().is_empty() {
         lines.push(Line::from(Span::styled(
             "No description",
@@ -4368,7 +4624,7 @@ pub(crate) mod tests {
             shot(&mut app, w, 30);
             let budget = (the_view(&app).list_area.width as usize).saturating_sub(2);
             for issue in rows(&app, &the_view(&app).project) {
-                let title = title_spans(issue, &[], true, budget, app.theme);
+                let title = title_spans(issue, &[], true, budget, &WorkColumn::none(), app.theme);
                 let width: usize = title.iter().map(|s| s.content.chars().count()).sum();
                 assert!(width <= budget, "title at {w}");
             }
@@ -4379,7 +4635,7 @@ pub(crate) mod tests {
     /// does — in a column of their own when it is wide, under the title
     /// when it is not — and wraps a long title rather than cutting it.
     #[test]
-    fn the_reading_pane_lists_properties_beside_or_under_the_text() {
+    fn the_reading_pane_heads_the_text_with_the_properties() {
         let mut long = rich(
             "1",
             "ENG-1",
@@ -4390,7 +4646,6 @@ pub(crate) mod tests {
         long.assignee = "Sam".into();
         long.description = "Body text.".into();
         let mut app = view_on(vec![long]);
-        let wide = shot(&mut app, 220, 40);
         let row = |screen: &str, needle: &str| {
             screen
                 .lines()
@@ -4398,31 +4653,125 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("no {needle}\n{screen}"))
                 .to_string()
         };
+        let wide = shot(&mut app, 220, 40);
+        // Two to a row while the pane has room: status beside priority,
+        // assignee beside project; the labels on a row of their own.
         let status = row(&wide, "Status");
-        assert!(status.contains("In Progress"), "{wide}");
-        assert!(row(&wide, "Priority").contains("High"), "{wide}");
-        assert!(row(&wide, "Labels").contains("● Export PDF"), "{wide}");
+        assert!(
+            status.contains("In Progress") && status.contains("High"),
+            "{wide}"
+        );
         assert!(row(&wide, "Assignee").contains("Sam"), "{wide}");
-        // Beside the text: the title's first line and Status share a row.
-        assert!(status.contains("││ A title long"), "{wide}");
+        assert!(row(&wide, "Labels").contains("● Export PDF"), "{wide}");
 
         let narrow = shot(&mut app, 110, 40);
-        let status = row(&narrow, "Status");
         assert!(
-            status.contains("││ Status"),
-            "stacked under the title\n{narrow}"
+            !row(&narrow, "Status").contains("Priority"),
+            "one to a row\n{narrow}"
         );
         assert!(
             narrow.contains("it onto more lines"),
             "the title wraps\n{narrow}"
         );
-        let title_at = narrow.lines().position(|l| l.contains("A title")).unwrap();
-        let body_at = narrow
-            .lines()
-            .position(|l| l.contains("Body text."))
-            .unwrap();
-        let status_at = narrow.lines().position(|l| l.contains("Status")).unwrap();
-        assert!(title_at < status_at && status_at < body_at, "{narrow}");
+        for screen in [&wide, &narrow] {
+            let at = |needle: &str| screen.lines().position(|l| l.contains(needle)).unwrap();
+            assert!(
+                at("A title") < at("Status") && at("Status") < at("Body text."),
+                "title, properties, text\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_branch_names_an_issue_by_its_identifier_alone() {
+        assert!(names_issue("eng-12-fix-login", "ENG-12"));
+        assert!(names_issue("fix/ENG-12", "ENG-12"));
+        assert!(names_issue("riplo-1004-riplo-1007-more", "RIPLO-1007"));
+        assert!(!names_issue("eng-123-other", "ENG-12"));
+        assert!(!names_issue("xeng-12", "ENG-12"));
+        assert!(!names_issue("main", "ENG-12"));
+    }
+
+    /// An issue a worktree picked up — linked with `⌘.`, or named in its
+    /// branch — wears `⎇`, the sessions' mark and the open pull request on
+    /// its row, and the branch on the page's border; links outlive their
+    /// attach.
+    #[test]
+    fn picked_up_issues_show_their_branch_session_and_pull_request() {
+        let mut app = view_on(vec![
+            rich("1", "ENG-1", "Linked by hand", ("Todo", "unstarted"), 2),
+            rich(
+                "2",
+                "ENG-2",
+                "Named by its branch",
+                ("Todo", "unstarted"),
+                3,
+            ),
+            rich("3", "ENG-3", "Nobody's", ("Todo", "unstarted"), 3),
+        ]);
+        for (n, branch) in [(1, "solar-lemur"), (2, "fix/eng-2-thing")] {
+            app.tree.worktrees.push(orion_core::Worktree {
+                id: orion_core::WorktreeId(format!("w{n}")),
+                project_id: ProjectId("p1".into()),
+                path: PathBuf::from(format!("/wt/{n}")),
+                branch: branch.into(),
+                is_main: false,
+                sort_order: n,
+            });
+        }
+        app.tree.agents.push(orion_core::Agent {
+            id: orion_core::AgentId("a".into()),
+            worktree_id: orion_core::WorktreeId("w1".into()),
+            name: "a".into(),
+            status: orion_core::AgentStatus::NeedsFeedback,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: Default::default(),
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: None,
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: true,
+            issue_url: None,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        });
+        app.linear_links
+            .remember("solar-lemur", &[issue("1", "ENG-1", "Linked by hand")]);
+        assert!(app.linear_links.take("solar-lemur").is_some());
+        let th = app.theme;
+        let project = ProjectId("p1".into());
+        let list = rows(&app, &project).to_vec();
+        let work = |i: usize| work_of(&app, &project, &list[i], th);
+        let linked = work(0).expect("linked by hand, kept after its attach");
+        assert_eq!(linked.branch, "solar-lemur");
+        assert_eq!(
+            linked.session.map(|(s, _)| s),
+            Some(orion_core::AgentStatus::NeedsFeedback)
+        );
+        assert_eq!(work(1).expect("named").branch, "fix/eng-2-thing");
+        assert_eq!(work(1).unwrap().session, None);
+        assert_eq!(work(2), None);
+
+        let screen = shot(&mut app, 220, 40);
+        let row = |needle: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap()
+                .to_string()
+        };
+        assert!(row("ENG-1 Linked by hand").contains("⎇ ●"), "{screen}");
+        assert!(row("ENG-2 Named").contains('⎇'), "{screen}");
+        assert!(!row("ENG-3 Nobody's").contains('⎇'), "{screen}");
+        assert!(
+            row("ENG-1 ─").contains("⎇ solar-lemur"),
+            "the border\n{screen}"
+        );
     }
 
     /// Plain ←/→ flip the tabs — the filter line has no caret to move.
