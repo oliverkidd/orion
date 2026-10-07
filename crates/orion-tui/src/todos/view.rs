@@ -1,18 +1,24 @@
 //! The TODOS MODAL: one project's list in two tabs — **Today**, the
 //! groups with their open items and the ones ticked today struck through
 //! at the bottom, and the **Log**, what was done on each day before. A
-//! line per item: its box, Linear's priority glyph, the text, and on the
-//! right what it is tied to — the agent sent at it, the Linear issue it
-//! is linked to — and how many days it has carried over. A group's
-//! header folds it (`←`/`→`) and totals what is open in it at each
-//! priority, nested groups and all, and what was ticked today.
+//! line per item — more where its text wraps: its box, its priority as
+//! the one letter Linear's rows use too, the text, and on the right what
+//! it is tied to — the agent sent at it, the Linear issue it is linked
+//! to — and how many days it has carried over. A top-level group's
+//! header is a section — its name in capitals, a rule across to what is
+//! open in it at each priority, nested groups and all, and what was
+//! ticked today; a group under it says only how many are open. Each
+//! folds (`←`/`→`), and `⌘↑`/`⌘↓` jump from header to header. The tab row
+//! says what was ticked today and this week, day by day.
 //!
 //! The list is the [`App`]'s (`App::todos`, by checkout), so it outlives
 //! the modal; the view holds the cursor, the filter and the field being
-//! typed into. Every change is saved at once (`store::save`). Typing
-//! filters the items, keeping the headers over the ones that match; a
-//! paste of more than one line, with no field open, is read as an
-//! indented list and added in (`import`).
+//! typed into. Every change is saved at once (`store::save`). A row is
+//! edited where it stands: typing on it adds to its end, `⌫` opens it
+//! with the last character gone, and `⌘⌫` deletes it. `⌘F` opens the
+//! filter, which keeps the headers over the items that match; a paste of
+//! more than one line, with no field open, is read as an indented list
+//! and added in (`import`).
 //!
 //! Each item reaches out two ways. `Enter` sends an agent at it — the
 //! QUICK PROMPT over the modal, the item's text and group in the box —
@@ -38,6 +44,7 @@ use ratatui::Frame;
 
 use super::{store, Item, TodoFile, TodoRef};
 use crate::app::{App, Overlay};
+use crate::keymap::KeyChord;
 pub use crate::linear::LinkedIssue;
 use crate::linear::{IssueDraft, LinearTeam, TeamChoice};
 use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
@@ -214,10 +221,12 @@ pub struct TodoView {
     pub selected: usize,
     pub cursor: Option<Entry>,
     pub query: TextInput,
-    /// The field in the list — a new item, a new group, a rename — while
-    /// one is open: every key but the hatches is its own.
+    /// The filter row is up (`⌘F`): typing is the filter's, not the row's.
+    pub filtering: bool,
+    /// The field in the list — a new item, a new group, a row being
+    /// edited — while one is open: every key but the hatches is its own.
     pub input: Option<(InputKind, TextInput)>,
-    /// A group with items in it that `⌘W` asked to delete: Enter (or `⌘W`
+    /// A group with items in it that `⌘⌫` asked to delete: Enter (or `⌘⌫`
     /// again) does, any other key keeps it.
     pub confirm_delete: Option<u64>,
     /// What Linear said about the linked issues, by identifier.
@@ -248,6 +257,7 @@ impl TodoView {
             selected: 0,
             cursor: None,
             query: TextInput::new(),
+            filtering: false,
             input: None,
             confirm_delete: None,
             linked: HashMap::new(),
@@ -265,7 +275,8 @@ impl TodoView {
 
 /// The TODOS MODAL's own keys: one table [`handle_key`] matches and
 /// [`hints`] spells. Each verb is the one every modal gives it — `⌘N`
-/// new, `⌘I` edit, `⌘W` remove — with its `^` twin.
+/// new, `⌘F` filter — with its `^` twin; a row is edited by typing on it,
+/// so there is no rename key.
 pub(crate) mod keys {
     use crate::hints::Key;
 
@@ -273,13 +284,17 @@ pub(crate) mod keys {
     pub const DONE: Key = Key::new(&["space"], "done");
     /// The group at the cursor folded away or opened.
     pub const FOLD: Key = Key::new(&["left", "right"], "fold").show(2);
+    /// The previous or next group's header, nested ones included. `⌥` is
+    /// the twin where no ⌘ arrives: `^↑`/`^↓` are macOS's Mission Control.
+    pub const JUMP: Key = Key::new(&["cmd+up", "cmd+down", "alt+up", "alt+down"], "groups").show(2);
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new item");
     /// `^⇧N` arrives only where the KITTY PROTOCOL does: `^N` and `^⇧N`
     /// are one byte in a legacy terminal.
     pub const NEW_GROUP: Key = Key::new(&["cmd+shift+n", "ctrl+shift+n"], "new group");
-    /// The issues modal's and the agent presets' edit: `^E`, as `^I` is
-    /// Tab.
-    pub const RENAME: Key = Key::new(&["cmd+i", "ctrl+e"], "rename");
+    /// The row under the cursor opened where it stands, its last
+    /// character gone; any other character typed on it is added to its
+    /// end.
+    pub const EDIT: Key = Key::new(&["backspace"], "edit");
     /// Linear's priorities, urgent to low — the item's own again takes
     /// it off. No `^` twins: a legacy terminal sends `^3` as Esc and `^4`
     /// as `^\`.
@@ -287,12 +302,18 @@ pub(crate) mod keys {
     pub const HIGH: Key = Key::new(&["cmd+2"], "high");
     pub const MEDIUM: Key = Key::new(&["cmd+3"], "medium");
     pub const LOW: Key = Key::new(&["cmd+4"], "low");
-    pub const DELETE: Key = Key::new(&["cmd+w", "ctrl+w"], "delete");
+    /// The grid's delete-worktree key, on a row: the item, or the group
+    /// and everything in it. `^W` where no ⌘ arrives.
+    pub const DELETE: Key = Key::new(&["cmd+backspace", "ctrl+w"], "delete");
+    /// The filter row, as every list modal opens its own.
+    pub const FILTER: Key = crate::list_filter::keys::FILTER;
     /// Today ⇄ Log, as the PULL REQUESTS MODAL's page tabs.
     pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
-    /// The field's: the new item, group or name in.
+    /// The field's: the new item, group or edit in.
     pub const SAVE: Key = Key::new(&["enter"], "save");
-    pub const CONFIRM: Key = Key::new(&["enter", "cmd+w", "ctrl+w"], "delete");
+    /// The field's other way out: saved, and the cursor a row on.
+    pub const SAVE_MOVE: Key = Key::new(&["up", "down"], "save & move").show(2);
+    pub const CONFIRM: Key = Key::new(&["enter", "cmd+backspace", "ctrl+w"], "delete");
     /// The priority keys, each with Linear's level for it.
     pub const PRIORITIES: [(Key, u8); 4] = [(URGENT, 1), (HIGH, 2), (MEDIUM, 3), (LOW, 4)];
     /// The LINEAR VIEW's `Enter` and `⇧Tab`: an agent on the item, or
@@ -309,8 +330,8 @@ pub(crate) mod keys {
     pub const CHOOSE: Key = Key::new(&["enter"], "choose");
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        DONE, FOLD, NEW, NEW_GROUP, RENAME, URGENT, HIGH, MEDIUM, LOW, DELETE, TABS, SAVE, CONFIRM,
-        AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE,
+        DONE, FOLD, JUMP, NEW, NEW_GROUP, EDIT, URGENT, HIGH, MEDIUM, LOW, DELETE, FILTER, TABS,
+        SAVE, SAVE_MOVE, CONFIRM, AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE,
     ];
 }
 
@@ -321,12 +342,16 @@ fn priority_hint() -> Option<crate::hints::Hint> {
         .then(|| crate::hints::Hint::new(format!("{}-4", keys::URGENT.label()), "priority"))
 }
 
-/// The keys along the modal's bottom edge. Esc clears a typed filter
+/// The keys along the modal's bottom edge. Esc puts the filter away
 /// first.
 pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     if view.input.is_some() {
-        return vec![keys::SAVE.hint().kept(), Hint::new("Esc", "cancel")];
+        return vec![
+            keys::SAVE.hint().kept(),
+            keys::SAVE_MOVE.hint(),
+            Hint::new("Esc", "revert"),
+        ];
     }
     if view.confirm_delete.is_some() {
         return vec![keys::CONFIRM.hint().kept(), Hint::new("Esc", "keep")];
@@ -338,36 +363,43 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "cancel"),
         ];
     }
-    let esc = if view.query.is_empty() {
-        "close"
-    } else {
-        "clear"
-    };
+    if view.filtering {
+        return vec![
+            keys::AGENT.hint().kept(),
+            keys::PICK.hint_as("move"),
+            keys::DELETE.hint(),
+            Hint::new("Esc", "clear"),
+        ];
+    }
     match view.tab {
         TodoTab::Today => {
             let mut hints = vec![
                 keys::DONE.hint().kept(),
                 keys::AGENT.hint().kept(),
                 keys::NEW.hint(),
+                keys::EDIT.hint(),
+                keys::DELETE.hint(),
+                keys::FILTER.hint(),
+                keys::JUMP.hint(),
                 keys::LINEAR.hint(),
             ];
             hints.extend(priority_hint());
             hints.extend([
                 keys::FOLD.hint(),
-                keys::RENAME.hint(),
                 keys::NEW_GROUP.hint(),
-                keys::DELETE.hint(),
                 keys::PRESET.hint(),
                 keys::REFRESH.hint(),
                 keys::TABS.hint(),
-                Hint::new("Esc", esc),
+                Hint::new("Esc", "close"),
             ]);
             hints
         }
         TodoTab::Log => vec![
             keys::DONE.hint_as("not done").kept(),
+            keys::EDIT.hint(),
+            keys::FILTER.hint(),
             keys::TABS.hint(),
-            Hint::new("Esc", esc),
+            Hint::new("Esc", "close"),
         ],
     }
 }
@@ -689,11 +721,23 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
             return true;
         }
     }
+    let line = text.replace(['\r', '\n'], " ");
     let Some(view) = view_mut(app) else {
         return false;
     };
-    view.query.insert_str(&text.replace(['\r', '\n'], " "));
-    query_changed(app);
+    if view.filtering {
+        view.query.insert_str(&line);
+        query_changed(app);
+    } else {
+        // As typing would: onto the end of the row — or, with no row to
+        // go on, into the filter.
+        start_edit(app, Some(&line));
+        if let Some(view) = view_mut(app).filter(|v| v.input.is_none()) {
+            view.filtering = true;
+            view.query.insert_str(&line);
+            query_changed(app);
+        }
+    }
     true
 }
 
@@ -723,26 +767,21 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         return;
     };
     let today = view.tab == TodoTab::Today;
-    let filtered = !view.query.is_empty();
+    let filtering = view.filtering;
     let page = view.list_area.height.max(1) as i32;
     let priority = keys::PRIORITIES
         .iter()
         .find(|(k, _)| k.matches(&key))
         .map(|(_, level)| *level);
     match key.code {
-        KeyCode::Esc if filtered => {
-            if let Some(view) = view_mut(app) {
-                view.query.clear();
-            }
-            query_changed(app);
-        }
+        KeyCode::Esc if filtering => close_filter(app),
         KeyCode::Esc => app.overlay = None,
-        // ⇧←/⇧→ are the tabs', plain ←/→ the fold's: a filter is typed
-        // and backspaced, not edited mid-line.
+        // ⇧←/⇧→ are the tabs', plain ←/→ the fold's.
         _ if keys::TABS.matches(&key) => {
             let other = view.tab.other();
             switch_tab(app, other);
         }
+        _ if keys::JUMP.matches(&key) => jump(app, key.code == KeyCode::Down),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
         KeyCode::PageDown => step(app, page),
@@ -760,20 +799,39 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::PRESET.matches(&key) => preset(app),
         _ if keys::LINEAR.matches(&key) => open_menu(app),
         _ if keys::REFRESH.matches(&key) => refresh_linked(app),
-        // A space typed into a filter is the filter's.
-        _ if keys::DONE.matches(&key) && !filtered => done(app),
+        _ if keys::DELETE.matches(&key) => delete(app),
+        _ if keys::FILTER.matches(&key) => {
+            if let Some(view) = view_mut(app) {
+                view.filtering = true;
+            }
+        }
         _ if keys::NEW.matches(&key) && today => start_item(app),
         _ if keys::NEW_GROUP.matches(&key) && today => start_group(app),
-        _ if keys::RENAME.matches(&key) => start_rename(app),
-        _ if keys::DELETE.matches(&key) => delete(app),
         _ if priority.is_some() => set_priority(app, priority.unwrap_or_default()),
-        _ => {
+        // With the filter up, what is typed is the filter's — a space
+        // too.
+        _ if filtering => {
             let changed = view_mut(app).is_some_and(|v| v.query.handle_key(&key).changed());
             if changed {
                 query_changed(app);
             }
         }
+        _ if keys::DONE.matches(&key) => done(app),
+        _ if keys::EDIT.matches(&key) => start_edit(app, None),
+        KeyCode::Char(c) if crate::key_combo::is_text_key(&KeyChord::from_event(&key)) => {
+            start_edit(app, Some(&c.to_string()))
+        }
+        _ => {}
     }
+}
+
+/// `Esc` with the filter up: what was typed goes, and the filter with it.
+fn close_filter(app: &mut App) {
+    if let Some(view) = view_mut(app) {
+        view.query.clear();
+        view.filtering = false;
+    }
+    query_changed(app);
 }
 
 /// Show `tab`, the cursor on its first row.
@@ -789,7 +847,8 @@ fn switch_tab(app: &mut App, tab: TodoTab) {
 }
 
 /// A key while the field is open: Enter puts it in — a new item opens the
-/// next one in the same place, for a run of them — Esc lets it go.
+/// next one in the same place, for a run of them — `↑`/`↓` put it in and
+/// move on, Esc lets it go.
 fn input_key(app: &mut App, key: KeyEvent) {
     let Some(view) = view_mut(app) else {
         return;
@@ -803,17 +862,50 @@ fn input_key(app: &mut App, key: KeyEvent) {
             view.input = None;
             view.cursor = None;
         }
-        _ if keys::SAVE.matches(&key) => {
-            let text = input.trim().to_string();
-            view.input = None;
-            if text.is_empty() {
-                return;
+        _ if keys::SAVE.matches(&key) => save_field(app, kind),
+        // Saved as Enter would, then a row on — the next field a new item
+        // would open stays shut.
+        _ if keys::SAVE_MOVE.matches(&key) => {
+            let next = beside_field(app, key.code == KeyCode::Up);
+            save_field(app, kind);
+            if let Some(view) = view_mut(app) {
+                view.input = None;
             }
-            commit(app, kind, &text);
+            match next {
+                Some(next) => land_on(app, |e| *e == next),
+                None => step(app, if key.code == KeyCode::Up { -1 } else { 1 }),
+            }
         }
         _ => {
             input.handle_key(&key);
         }
+    }
+}
+
+/// The row over (`up`) or under the open field, while the field still
+/// stands in the rows: where `↑`/`↓` take the cursor once it is put in.
+fn beside_field(app: &App, up: bool) -> Option<Entry> {
+    let (entries, _) = rows_now(app)?;
+    let at = entries
+        .iter()
+        .position(|e| matches!(e, Entry::Input { .. }))?;
+    let found = if up {
+        (0..at).rev().find(|i| entries[*i].selectable())
+    } else {
+        (at + 1..entries.len()).find(|i| entries[*i].selectable())
+    };
+    found.map(|i| entries[i])
+}
+
+/// The field shut and what was typed in it put in — nothing, when it was
+/// left empty.
+fn save_field(app: &mut App, kind: InputKind) {
+    let Some((_, input)) = view_mut(app).and_then(|v| v.input.take()) else {
+        return;
+    };
+    let text = input.trim().to_string();
+    if !text.is_empty() {
+        commit(app, kind, &text);
     }
 }
 
@@ -899,20 +991,66 @@ fn start_group(app: &mut App) {
     open_input(app, InputKind::Group { parent }, "");
 }
 
-/// `⌘I`: the name or text of the row under the cursor, to edit in place.
-fn start_rename(app: &mut App) {
-    let Some(target) = target(app) else {
+/// Typing on a row: the row opened where it stands, `append` added to its
+/// end — or, for `⌫` (`None`), its last character gone. On `+ new item`
+/// it is a new item, in the group above.
+fn start_edit(app: &mut App, append: Option<&str>) {
+    let Some(entry) = current(app) else {
         return;
     };
     let Some(file) = list(app) else {
         return;
     };
-    let text = match target {
-        Target::Group(id) => file.group(id).map(|g| g.name.clone()),
-        Target::Item(id) => file.item(id).map(|i| i.text.clone()),
+    let (kind, text) = match entry {
+        Entry::Header { group, .. } => match file.group(group) {
+            Some(g) => (InputKind::Rename(Target::Group(group)), g.name.clone()),
+            None => return,
+        },
+        Entry::Item { id, .. } => match file.item(id) {
+            Some(i) => (InputKind::Rename(Target::Item(id)), i.text.clone()),
+            None => return,
+        },
+        Entry::AddRow => (
+            InputKind::Item {
+                group: cursor_group(app),
+            },
+            String::new(),
+        ),
+        Entry::Input { .. } | Entry::Day { .. } => return,
     };
-    if let Some(text) = text {
-        open_input(app, InputKind::Rename(target), &text);
+    open_input(app, kind, &text);
+    let Some((_, input)) = view_mut(app).and_then(|v| v.input.as_mut()) else {
+        return;
+    };
+    match append {
+        Some(text) => input.insert_str(text),
+        None => {
+            input.handle_key(&KeyEvent::from(KeyCode::Backspace));
+        }
+    }
+}
+
+/// `⌘↓`/`⌘↑`: the cursor onto the next (or previous) group's header,
+/// nested groups' included — on the Log, the first item of the next (or
+/// previous) day.
+fn jump(app: &mut App, down: bool) {
+    let Some((entries, Some(at))) = rows_now(app) else {
+        return;
+    };
+    let header = |i: &usize| match entries[*i] {
+        Entry::Header { .. } => true,
+        Entry::Item { .. } => i
+            .checked_sub(1)
+            .is_some_and(|p| matches!(entries[p], Entry::Day { .. })),
+        _ => false,
+    };
+    let found = if down {
+        (at + 1..entries.len()).find(header)
+    } else {
+        (0..at).rev().find(header)
+    };
+    if let Some(i) = found {
+        put_cursor(app, i, Some(entries[i]));
     }
 }
 
@@ -987,7 +1125,7 @@ fn set_priority(app: &mut App, level: u8) {
     }
 }
 
-/// `⌘W`: the item goes; a group goes at once when it is empty, else
+/// `⌘⌫`: the item goes; a group goes at once when it is empty, else
 /// after a second press says so.
 fn delete(app: &mut App) {
     match target(app) {
@@ -1527,11 +1665,11 @@ fn click_row(app: &mut App, pos: Position) {
     let Some(index) = crate::ui::row_hit(&view.row_rects, pos) else {
         return;
     };
-    let row_x = view
+    let row = view
         .row_rects
         .iter()
         .find(|(i, _)| *i == index)
-        .map_or(0, |(_, r)| r.x);
+        .map_or(Rect::default(), |(_, r)| *r);
     let Some((entries, _)) = rows_now(app) else {
         return;
     };
@@ -1539,25 +1677,15 @@ fn click_row(app: &mut App, pos: Position) {
         return;
     };
     put_cursor(app, index, Some(entry));
-    // The box or the fold glyph, right after the gutter and the indent.
-    let mark_x = row_x + GUTTER_W + INDENT_W * entry.depth();
-    let on_mark = (mark_x..mark_x + MARK_W).contains(&pos.x);
+    // The box or the fold glyph, right after the gutter and the indent —
+    // on the first line: under it a wrapped item's text runs on.
+    let mark_x = row.x + GUTTER_W + INDENT_W * entry.depth();
+    let on_mark = pos.y == row.y && (mark_x..mark_x + MARK_W).contains(&pos.x);
     match entry {
         Entry::Item { .. } if on_mark => done(app),
         Entry::Header { .. } if on_mark => done(app),
         Entry::AddRow => start_item(app),
         _ => {}
-    }
-}
-
-/// The header's per-priority glyph: `‼` urgent, then one bar as high as
-/// the level — the LINEAR VIEW's bars, one at a time.
-fn rank_glyph(rank: usize, th: Theme) -> Span<'static> {
-    match rank {
-        0 => Span::styled("‼", Style::default().fg(th.err)),
-        1 => Span::styled("▆", Style::default().fg(th.muted)),
-        2 => Span::styled("▄", Style::default().fg(th.muted)),
-        _ => Span::styled("▂", Style::default().fg(th.muted)),
     }
 }
 
@@ -1596,8 +1724,6 @@ const GUTTER_W: u16 = 1;
 const INDENT_W: u16 = 2;
 /// An item's box or a header's fold glyph, with the space after it.
 const MARK_W: u16 = 2;
-/// The columns a priority glyph takes — `▂▄▆` — padded to for `‼`.
-const PRIORITY_W: usize = 3;
 
 /// `depth` levels of indent.
 fn indent(depth: u16) -> Span<'static> {
@@ -1616,8 +1742,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // The tabs on the first line — Today with what is open — and the
-    // filter under them.
+    // The tabs on the first line — Today with what is open — and against
+    // its right edge the week so far, when there is room for it.
     let tab_row = row_rect(inner, 0).unwrap_or_default();
     let labels = [format!("Today {}", file.open_count()), "Log".to_string()];
     let active = TodoTab::ALL
@@ -1632,11 +1758,24 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         false,
         th,
     );
+    let strip_w = width_of(&strip);
     f.render_widget(Paragraph::new(Line::from(strip)), tab_row);
+    let summary = week_summary(file, today, th);
+    // A gap after the tabs, and the frame's margin on the right.
+    const GAP: usize = 2;
+    const MARGIN: u16 = 1;
+    if strip_w + GAP + width_of(&summary) + usize::from(MARGIN) <= tab_row.width as usize {
+        let right = Rect {
+            width: tab_row.width.saturating_sub(MARGIN),
+            ..tab_row
+        };
+        let line = Line::from(summary).alignment(ratatui::layout::Alignment::Right);
+        f.render_widget(Paragraph::new(line), right);
+    }
+    // Under the tabs the filter while `⌘F` has it up, else a blank row.
     let below_tabs = crate::ui::below_first_row(inner);
-    if let Some(query_area) = row_rect(below_tabs, 0) {
-        let placeholder = "type to filter · paste an indented list to add it";
-        let line = search_line(&view.query, placeholder, query_area, th);
+    if let Some(query_area) = row_rect(below_tabs, 0).filter(|_| view.filtering) {
+        let line = search_line(&view.query, "type to filter…", query_area, th);
         f.render_widget(Paragraph::new(line), query_area);
     }
     let rows_area = crate::ui::below_first_row(below_tabs);
@@ -1651,30 +1790,54 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         };
         crate::ui::empty_list_row(f, rows_area, text, th);
     }
+    let budget = (rows_area.width as usize).saturating_sub(2);
+    let row = Row {
+        app,
+        file,
+        view,
+        today,
+        budget,
+        th,
+    };
+    let drawn_lines: Vec<_> = entries.iter().map(|e| row.lines(*e)).collect();
+    // A section, a day or `+ new item` past the first row stands a blank
+    // line below what is over it.
+    let gaps: Vec<bool> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| i > 0 && spaced(*e, view.tab))
+        .collect();
+    let heights: Vec<u16> = drawn_lines
+        .iter()
+        .zip(&gaps)
+        .map(|((lines, _), gap)| lines.len().max(1) as u16 + u16::from(*gap))
+        .collect();
     // The cursor's row on screen — and the day over it, on the Log.
     let at = cursor.unwrap_or(0);
     let first = match at.checked_sub(1).map(|i| entries[i]) {
         Some(Entry::Day { .. }) => at - 1,
         _ => at,
     };
-    let heights = vec![1; entries.len()];
     let (list_start, drawn) =
         crate::ui::stacked_rows(&heights, first, at, view.list_start, rows_area);
-    let budget = (rows_area.width as usize).saturating_sub(2);
     let mut row_rects = Vec::with_capacity(drawn.len());
     let mut chip_hits = Vec::new();
+    let mut drawn_lines = drawn_lines;
     for (i, rect) in drawn {
         let entry = entries[i];
-        let selected = cursor == Some(i);
-        let row = Row {
-            app,
-            file,
-            view,
-            today,
-            budget,
-            th,
+        let (lines, spots) = std::mem::take(&mut drawn_lines[i]);
+        let rect = if gaps[i] {
+            Rect {
+                y: rect.y + 1,
+                height: rect.height.saturating_sub(1),
+                ..rect
+            }
+        } else {
+            rect
         };
-        let (spans, spots) = row.spans(entry);
+        if rect.height == 0 {
+            continue;
+        }
         if let Entry::Item { id, .. } = entry {
             for (chip, x, w) in spots {
                 let x = rect.x + GUTTER_W + x as u16;
@@ -1682,16 +1845,19 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
             }
         }
         if entry.selectable() {
-            render_row(
+            crate::ui::render_row_lines(
                 f,
                 rect,
-                spans,
-                selected,
+                lines,
+                cursor == Some(i),
                 focused && view.input.is_none(),
                 th,
             );
         } else {
-            f.render_widget(Paragraph::new(Line::from(spans)), rect);
+            f.render_widget(
+                Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>()),
+                rect,
+            );
         }
         row_rects.push((i, rect));
     }
@@ -1720,6 +1886,53 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     }
 }
 
+/// Whether `entry` stands a blank line below the row over it: a
+/// top-level group's header (or the field naming one), a day in the Log,
+/// and `+ new item`.
+fn spaced(entry: Entry, tab: TodoTab) -> bool {
+    match entry {
+        Entry::Header { depth: 0, .. } | Entry::AddRow | Entry::Day { .. } => true,
+        Entry::Input { depth: 0 } => tab == TodoTab::Today,
+        _ => false,
+    }
+}
+
+/// The tab row's right end: what was ticked today and this week, then
+/// the week a bar a day from Monday — today's brightest, the days to
+/// come a faint `·`.
+fn week_summary(file: &TodoFile, today: NaiveDate, th: Theme) -> Vec<Span<'static>> {
+    use chrono::Datelike;
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let days = file.week_ticks(today);
+    let at = today.weekday().num_days_from_monday() as usize;
+    let max = days.iter().copied().max().unwrap_or(0).max(1);
+    // The busiest day reaches the tallest bar.
+    const TOP: usize = BARS.len() - 1;
+    let mut spans = vec![
+        Span::styled(format!("✓{}", days[at]), Style::default().fg(th.ok)),
+        Span::styled(" today · ", Style::default().fg(th.dim)),
+        Span::styled(
+            format!("✓{}", days.iter().sum::<usize>()),
+            Style::default().fg(th.ok),
+        ),
+        Span::styled(" this week ", Style::default().fg(th.dim)),
+    ];
+    for (i, n) in days.iter().enumerate() {
+        let (bar, color) = match (i.cmp(&at), *n) {
+            (std::cmp::Ordering::Greater, _) => ('·', th.faint),
+            (_, 0) => (BARS[0], th.faint),
+            (std::cmp::Ordering::Equal, n) => (BARS[n * TOP / max], th.text),
+            (_, n) => (BARS[n * TOP / max], th.muted),
+        };
+        spans.push(Span::styled(bar.to_string(), Style::default().fg(color)));
+    }
+    spans
+}
+
+/// A row's lines, and where the chips a click acts on sit on its first:
+/// each chip with its column from the line's start and its width.
+type RowLines = (Vec<Vec<Span<'static>>>, Vec<(Chip, usize, usize)>);
+
 /// What every row of one draw is drawn from.
 struct Row<'a> {
     app: &'a App,
@@ -1731,8 +1944,9 @@ struct Row<'a> {
 }
 
 impl Row<'_> {
-    /// `entry`'s line, and — on an item — where its clickable chips are.
-    fn spans(&self, entry: Entry) -> (Vec<Span<'static>>, Vec<(Chip, usize, usize)>) {
+    /// `entry`'s lines — an item's text wraps onto more — and, on an item,
+    /// where its clickable chips are on the first.
+    fn lines(&self, entry: Entry) -> RowLines {
         let (file, view, th, budget) = (self.file, self.view, self.th, self.budget);
         let line = match entry {
             Entry::Header { group, depth } => {
@@ -1740,8 +1954,8 @@ impl Row<'_> {
             }
             Entry::Item { id, depth } => {
                 return match file.item(id) {
-                    Some(item) => item_spans(self, item, depth),
-                    None => (Vec::new(), Vec::new()),
+                    Some(item) => item_lines(self, item, depth),
+                    None => (vec![Vec::new()], Vec::new()),
                 }
             }
             Entry::Input { depth } => input_row(view, depth, budget, th),
@@ -1754,7 +1968,7 @@ impl Row<'_> {
                 vec![
                     Span::styled(words, Style::default().fg(th.dim)),
                     Span::styled(
-                        format!("  {}", keys::NEW.label()),
+                        format!("  {} · or type here", keys::NEW.label()),
                         Style::default().fg(th.faint),
                     ),
                 ]
@@ -1767,7 +1981,7 @@ impl Row<'_> {
                 Span::styled(format!(" · {count} done"), Style::default().fg(th.dim)),
             ],
         };
-        (line, Vec::new())
+        (vec![line], Vec::new())
     }
 }
 
@@ -1821,9 +2035,11 @@ fn draw_pick(f: &mut Frame, area: Rect, file: &TodoFile, pick: &mut Pick, th: Th
     pick.start = start;
 }
 
-/// A group's header: the fold glyph and the name, and against the right
-/// edge its open items at each priority, how many are open, and how many
-/// were ticked today — nested groups counted in, folded or not.
+/// A group's header. A top-level one is a section: the fold glyph, the
+/// name in capitals, a rule across, and against the right edge its open
+/// items at each priority, how many are open and how many were ticked
+/// today — nested groups counted in, folded or not. A group under it says
+/// only how many are open.
 fn header_spans(
     file: &TodoFile,
     view: &TodoView,
@@ -1849,56 +2065,127 @@ fn header_spans(
             ),
         ];
     }
+    let top = depth == 0;
     let counts = file.counts(group, today);
-    let mut right: Vec<Span<'static>> = Vec::new();
-    // The levels with something open — no priority is in the total.
-    for (rank, n) in counts.open.iter().enumerate().take(super::PRIORITIES - 1) {
-        if *n > 0 {
-            right.push(rank_glyph(rank, th));
-            right.push(Span::styled(format!(" {n}  "), Style::default().fg(th.dim)));
+    let dim = Style::default().fg(th.dim);
+    let open = Span::styled(format!("{} open", counts.open_total()), dim);
+    let right = if top {
+        let mut right: Vec<Span<'static>> = Vec::new();
+        // The levels with something open — no priority is in the total.
+        let levels = crate::linear::PRIORITY_ORDER.iter().zip(counts.open.iter());
+        for (priority, n) in levels.take(super::PRIORITIES - 1) {
+            if *n > 0 {
+                right.push(crate::linear::priority_mark(*priority, th));
+                right.push(Span::styled(format!("{n} "), dim));
+            }
         }
-    }
-    right.push(Span::styled(
-        format!("{} open", counts.open_total()),
-        Style::default().fg(th.dim),
-    ));
-    if counts.done_today > 0 {
-        right.push(Span::styled(
-            format!("  ✓ {} today", counts.done_today),
-            Style::default().fg(th.ok),
-        ));
-    }
+        right.push(Span::styled("· ", Style::default().fg(th.faint)));
+        right.push(open);
+        if counts.done_today > 0 {
+            right.push(Span::styled(" · ", Style::default().fg(th.faint)));
+            right.push(Span::styled(
+                format!("✓{}", counts.done_today),
+                Style::default().fg(th.ok),
+            ));
+        }
+        right
+    } else {
+        vec![open]
+    };
     let fold = if g.collapsed { "▸ " } else { "▾ " };
     let left = vec![
         indent(depth),
-        Span::styled(fold, Style::default().fg(th.muted)),
+        Span::styled(
+            fold,
+            Style::default().fg(if top { th.muted } else { th.dim }),
+        ),
     ];
+    let full = if top {
+        g.name.to_uppercase()
+    } else {
+        g.name.clone()
+    };
+    // A space either side of the rule, and at least a cell of it.
+    const AROUND_RULE: usize = 2;
     let room = budget
-        .saturating_sub(width_of(&left) + width_of(&right) + 1)
+        .saturating_sub(width_of(&left) + width_of(&right) + AROUND_RULE + 1)
         .max(4);
-    let name = truncate(&g.name, room);
-    let positions = crate::fuzzy::fuzzy_match(view.query.trim(), &g.name)
-        .map(|m| visible_positions(&m.positions, &name, &g.name).to_vec())
+    let name = truncate(&full, room);
+    let positions = crate::fuzzy::fuzzy_match(view.query.trim(), &full)
+        .map(|m| visible_positions(&m.positions, &name, &full).to_vec())
         .unwrap_or_default();
-    let name = fuzzy_highlight_styled(
-        &name,
-        &positions,
-        Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        th,
-    );
-    justify(left, name, right, budget)
+    let style = Style::default()
+        .fg(if top { th.text } else { th.muted })
+        .add_modifier(Modifier::BOLD);
+    let name = fuzzy_highlight_styled(&name, &positions, style, th);
+    if !top {
+        return justify(left, name, right, budget);
+    }
+    let rule = budget
+        .saturating_sub(width_of(&left) + width_of(&name) + width_of(&right) + AROUND_RULE)
+        .max(1);
+    let mut spans = left;
+    spans.extend(name);
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("─".repeat(rule), Style::default().fg(th.edge)));
+    spans.push(Span::raw(" "));
+    spans.extend(right);
+    spans
 }
 
-/// An item's line: its box, its priority, its text — struck through when
-/// it was ticked today — and its chips against the right edge, dropped
-/// from the right when the line is short: the agent sent at it, its
-/// Linear issue, how many days it has carried over. With the spans, the
-/// columns (from the line's start) of the chips a click acts on.
-fn item_spans(
-    row: &Row,
-    item: &Item,
-    depth: u16,
-) -> (Vec<Span<'static>>, Vec<(Chip, usize, usize)>) {
+/// `text` broken at spaces into lines of at most `first` columns, then
+/// `rest` — each line with the char it starts at, so the filter's
+/// highlights land on the line they are in. A word longer than a line is
+/// cut across lines. Its own rather than `pr_preview::wrap`, which has
+/// neither the narrower first line (the chips' room) nor the offsets;
+/// columns are display columns, so a wide character takes two.
+fn wrap_at(text: &str, first: usize, rest: usize) -> Vec<(usize, String)> {
+    use unicode_width::UnicodeWidthChar;
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut width = first.max(1);
+    while start < chars.len() {
+        // As many chars as fit `width` columns — at least one.
+        let mut end = start;
+        let mut used = 0;
+        while let Some(c) = chars.get(end) {
+            let w = c.width().unwrap_or(0);
+            if used + w > width && end > start {
+                break;
+            }
+            used += w;
+            end += 1;
+        }
+        let cut = if end == chars.len() {
+            end
+        } else {
+            (start + 1..=end)
+                .rev()
+                .find(|&i| chars[i] == ' ')
+                .unwrap_or(end)
+        };
+        out.push((start, chars[start..cut].iter().collect()));
+        start = cut;
+        while chars.get(start) == Some(&' ') {
+            start += 1;
+        }
+        width = rest.max(1);
+    }
+    if out.is_empty() {
+        out.push((0, String::new()));
+    }
+    out
+}
+
+/// An item's lines: its box, its priority letter, its text — struck
+/// through when it was ticked today, and wrapped under its own first
+/// character when it is long — and its chips against the right edge of
+/// the first line, dropped from the right when the line is short: the
+/// agent sent at it, its Linear issue, how many days it has carried over.
+/// With the lines, the columns (from the line's start) of the chips a
+/// click acts on.
+fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
     let Row {
         app,
         file,
@@ -1914,10 +2201,8 @@ fn item_spans(
     } else {
         Span::styled("☐ ", Style::default().fg(th.dim))
     });
-    let mark = crate::linear::priority_mark(item.priority, th);
-    let pad = PRIORITY_W.saturating_sub(width_of(&mark));
-    left.extend(mark);
-    left.push(Span::raw(" ".repeat(pad + 1)));
+    left.push(crate::linear::priority_mark(item.priority, th));
+    left.push(Span::raw(" "));
 
     let mut parts: Vec<(Option<Chip>, Vec<Span<'static>>)> = Vec::new();
     if let Some(agent) = live_agent(app, item) {
@@ -1950,20 +2235,14 @@ fn item_spans(
     // As many as fit, with where each landed — the one cut the line and
     // the click both read.
     let (kinds, parts): (Vec<Option<Chip>>, Vec<_>) = parts.into_iter().unzip();
-    let chip_budget = budget.saturating_sub(width_of(&left) + MIN_TEXT_W);
+    let lead = width_of(&left);
+    let chip_budget = budget.saturating_sub(lead + MIN_TEXT_W);
     let (chips, at) = fit_parts_at(parts, chip_budget, th);
-    let spots: Vec<(Chip, usize, usize)> = kinds
-        .into_iter()
-        .zip(at)
-        .filter_map(|(kind, (x, w))| Some((kind?, x, w)))
-        .collect();
-    let room = budget.saturating_sub(width_of(&left) + width_of(&chips) + 1);
-    let text = truncate(&item.text, room.max(1));
     let positions = if view.query.trim().is_empty() {
         Vec::new()
     } else {
         crate::fuzzy::fuzzy_match(view.query.trim(), &item.text)
-            .map(|m| visible_positions(&m.positions, &text, &item.text).to_vec())
+            .map(|m| m.positions)
             .unwrap_or_default()
     };
     let base = if done && view.tab == TodoTab::Today {
@@ -1973,14 +2252,34 @@ fn item_spans(
     } else {
         Style::default().fg(th.text)
     };
-    let text = fuzzy_highlight_styled(&text, &positions, base, th);
-    let before = width_of(&left) + width_of(&text);
-    let start = budget.saturating_sub(width_of(&chips)).max(before);
-    let spots = spots
-        .into_iter()
-        .map(|(chip, x, w)| (chip, start + x, w))
-        .collect();
-    (justify(left, text, chips, budget), spots)
+    let first = budget.saturating_sub(lead + width_of(&chips) + 1);
+    let rest = budget.saturating_sub(lead);
+    let mut lines = Vec::new();
+    let mut spots = Vec::new();
+    for (n, (start, text)) in wrap_at(&item.text, first, rest).into_iter().enumerate() {
+        let count = text.chars().count();
+        let here: Vec<usize> = positions
+            .iter()
+            .filter(|p| (start..start + count).contains(p))
+            .map(|p| p - start)
+            .collect();
+        let text = fuzzy_highlight_styled(&text, &here, base, th);
+        if n > 0 {
+            let mut line = vec![Span::raw(" ".repeat(lead))];
+            line.extend(text);
+            lines.push(line);
+            continue;
+        }
+        let before = lead + width_of(&text);
+        let from = budget.saturating_sub(width_of(&chips)).max(before);
+        spots = kinds
+            .iter()
+            .zip(&at)
+            .filter_map(|(kind, (x, w))| Some(((*kind)?, from + x, *w)))
+            .collect();
+        lines.push(justify(left.clone(), text, chips.clone(), budget));
+    }
+    (lines, spots)
 }
 
 /// The session sent at `item`, while it is still there.
@@ -2067,6 +2366,26 @@ mod tests {
         v.input = None;
         v.confirm_delete = Some(1);
         check(&v);
+        v.confirm_delete = None;
+        v.filtering = true;
+        check(&v);
+    }
+
+    /// Lines break at spaces, the first narrower than the rest, each
+    /// with the char it starts at; a wide character takes two columns,
+    /// and a word too long for a line is cut.
+    #[test]
+    fn items_wrap_by_display_width() {
+        let lines = |text, first, rest| -> Vec<(usize, String)> { wrap_at(text, first, rest) };
+        assert_eq!(
+            lines("one two three four", 7, 10),
+            [(0, "one two".into()), (8, "three four".into())]
+        );
+        assert_eq!(lines("", 5, 5), [(0, String::new())]);
+        assert_eq!(lines("abcdefgh", 3, 3).len(), 3);
+        // Four wide characters are eight columns: two to a six-column line.
+        let wide = lines("日本語版", 6, 6);
+        assert_eq!(wide, [(0, "日本語".into()), (3, "版".into())]);
     }
 
     /// Folded groups show their header only; a filter opens them, keeps

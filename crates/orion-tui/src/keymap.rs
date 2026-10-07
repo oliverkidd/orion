@@ -201,6 +201,9 @@ pub enum Action {
     /// account, window by window.
     Usage,
     Stacks,
+    /// `⌘⇧S`: start the cursor's checkout's stack — its RUN COMMAND, in
+    /// the pane — or stop it.
+    ToggleStack,
     StopAllStacks,
     Help,
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
@@ -567,7 +570,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Rename,
         id: "rename",
         label: "Rename",
-        hint: "Rename the session under the cursor (the checkout's run command is the menu's Run / Stop)",
+        hint: "Rename the session under the cursor",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["r"],
@@ -873,6 +876,17 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["shift+s"],
+    },
+    ActionSpec {
+        action: Action::ToggleStack,
+        id: "toggle_stack",
+        label: "Start/stop stack",
+        hint: "Start the selected checkout's stack — its run command (Settings → Project, or .orion.json \"run\"), else its compose stack — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        // ^Z rather than ^⇧S, which only the kitty protocol can send;
+        // raw mode keeps it from suspending anything.
+        defaults: &["cmd+shift+s", "ctrl+z"],
     },
     ActionSpec {
         action: Action::StopAllStacks,

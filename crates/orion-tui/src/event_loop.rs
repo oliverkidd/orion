@@ -2514,7 +2514,8 @@ fn refresh_pr_diff_view(view: &mut DiffView, diff: &str) -> bool {
 /// The file rows of a pull-request diff: one per chunk, in git's order,
 /// each marked as its own header says — `A` for a new file, `D` for a
 /// deleted one, `R` (from its old path) for a rename, `M` for the rest —
-/// the letters `git diff --name-status` gives a commit's files.
+/// the letters `git diff --name-status` gives a commit's files — and its
+/// lines added and removed, counted from its hunks.
 fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> {
     chunks
         .iter()
@@ -2523,6 +2524,7 @@ fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> 
                 path: path.clone(),
                 orig_path: None,
                 xy: ['M', ' '],
+                lines: None,
             };
             for line in text.lines().take_while(|l| !l.starts_with("@@")) {
                 if line.starts_with("new file mode") {
@@ -2534,6 +2536,16 @@ fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> 
                     file.orig_path = Some(from.to_string());
                 }
             }
+            let mut lines = crate::git_diff::LineChanges::default();
+            for line in text.lines().skip_while(|l| !l.starts_with("@@")) {
+                match line.as_bytes().first() {
+                    Some(b'+') => lines.added += 1,
+                    Some(b'-') => lines.removed += 1,
+                    _ => {}
+                }
+            }
+            // A binary file's diff has no hunk to count.
+            file.lines = text.lines().any(|l| l.starts_with("@@")).then_some(lines);
             file
         })
         .collect()
@@ -2911,7 +2923,10 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
     app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
     app.issues_collapsed = state.issues_collapsed;
-    if let Some(w) = state.diff_files_width {
+    if let Some(w) = state
+        .diff_files_width
+        .filter(|&w| w != crate::app::OLD_DEFAULT_DIFF_FILES_W)
+    {
         // The draw re-caps it to the actual modal width.
         app.diff_files_width = w.clamp(crate::app::MIN_DIFF_FILES_W, MAX_RESTORED_WIDTH);
     }
@@ -4118,6 +4133,11 @@ fn dispatch_action(
         Action::Usage => crate::usage::open(app),
         Action::Stacks => crate::stacks::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
+        Action::ToggleStack => {
+            if let Some(id) = crate::git_sync::target(app) {
+                toggle_stack_in(app, &id, out);
+            }
+        }
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
         // the first column. Landing on the pane takes the input lock:
@@ -4263,18 +4283,13 @@ fn dispatch_action(
                     open_prompt(app, PromptKind::RenameProject { id });
                 }
             }
-            // Nothing on the Worktrees panel is renamed, so `r` is RUN
-            // there: the checkout's `.orion.json` RUN COMMAND, started or
-            // stopped. The KEY COMBO DISPLAY says which, not "Rename".
+            // Nothing on the Worktrees panel is renamed, so `r` is `⌘⇧S`
+            // there: the checkout's stack, started or stopped. The KEY
+            // COMBO DISPLAY says which, not "Rename".
             Focus::Worktrees => {
-                let running = app
+                let does = app
                     .selected_worktree()
-                    .is_some_and(|w| app.worktree_running(&w.id));
-                let does = if running {
-                    "Stop the run"
-                } else {
-                    "Run worktree"
-                };
+                    .map_or("Start stack", |w| crate::stacks::menu_label(app, &w.id));
                 crate::key_combo::note(app, &[*chord], Some(does));
                 toggle_run(app, out);
             }
@@ -5347,32 +5362,81 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
     if app.selected_worktree_pr().is_some() {
         return;
     }
-    let Some(w) = app.selected_worktree().cloned() else {
+    let Some(id) = app.selected_worktree().map(|w| w.id.clone()) else {
         return;
     };
-    toggle_run_in(app, &w, out);
+    toggle_stack_in(app, &id, out);
 }
 
-/// Ask the DAEMON to start `worktree`'s run, or to stop it while it runs.
-fn toggle_run_in(app: &mut App, worktree: &orion_core::Worktree, out: &mut Vec<ClientRequest>) {
-    if app.is_placeholder_worktree(&worktree.id) {
+/// `⌘⇧S`, a menu's **Start stack** / **Stop stack**, `Enter` in STACKS:
+/// start `worktree`'s stack, or stop it.
+///
+/// Starting runs its RUN COMMAND in its RUN TERMINAL (the DAEMON falls
+/// back to `docker compose start` on the checkout's stack when none is
+/// set), and the pane follows it there to watch it boot. Stopping sends
+/// that run a `^C`, so its own trap winds the stack down in view — a
+/// second press kills it — and a stack started outside orion, with no
+/// run to interrupt, gets `docker compose stop`.
+pub(crate) fn toggle_stack_in(
+    app: &mut App,
+    worktree: &orion_core::WorktreeId,
+    out: &mut Vec<ClientRequest>,
+) {
+    if app.is_placeholder_worktree(worktree)
+        || !app.tree.worktrees.iter().any(|w| &w.id == worktree)
+    {
         return;
     }
-    let start = !app.worktree_running(&worktree.id);
-    let id = worktree.id.clone();
-    send(app, out, |req_id| {
-        if start {
-            ClientRequest::StartRun {
-                req_id,
-                worktree: id,
-            }
+    let id = worktree.clone();
+    // A run that has since ended, here or from another client, is no
+    // longer being stopped.
+    let ended: Vec<_> = app
+        .runs_stopping
+        .iter()
+        .filter(|w| !app.worktree_running(w))
+        .cloned()
+        .collect();
+    for w in ended {
+        app.runs_stopping.remove(&w);
+    }
+    if app.worktree_running(&id) {
+        let again = !app.runs_stopping.insert(id.clone());
+        let key = crate::hints::key_or(
+            &app.keymap,
+            crate::keymap::Action::ToggleStack,
+            "Stop stack",
+        );
+        app.flash = Some(crate::flash::Flash::note(if again {
+            "killing the run".to_string()
         } else {
-            ClientRequest::StopRun {
-                req_id,
-                worktree: id,
-            }
-        }
-    });
+            format!("stopping — it winds down in its terminal; {key} again kills it")
+        }));
+        send(app, out, |req_id| ClientRequest::StopRun {
+            req_id,
+            worktree: id,
+        });
+        return;
+    }
+    let up = app
+        .stack_of(&id)
+        .filter(|s| s.state() == orion_core::compose::StackState::Running)
+        .map(|s| s.project.clone());
+    if let Some(project) = up {
+        crate::stacks::send(app, out, &project, orion_core::compose::StackVerb::Stop);
+        return;
+    }
+    send_with(
+        app,
+        out,
+        PendingIntent::AttachCreated {
+            focus: false,
+            placeholder: None,
+        },
+        |req_id| ClientRequest::StartRun {
+            req_id,
+            worktree: id,
+        },
+    );
 }
 
 /// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
@@ -6514,8 +6578,7 @@ fn open_delete_worktree_confirm(app: &mut App) {
 /// rebound onto a bare key keeps that key a modal's own.
 /// The modals whose remove verb is `⌘W` — the PULL REQUESTS MODAL's close,
 /// the SKILLS BROWSER's trash, the AGENT PRESETS list's delete, each behind
-/// its own confirm, and the TODOS MODAL's delete — up with nothing over
-/// them: `⌘W` is theirs.
+/// its own confirm — up with nothing over them: `⌘W` is theirs.
 fn modal_takes_cmd_w(app: &App) -> bool {
     app.vim.is_none()
         && app.page.is_none()
@@ -6525,7 +6588,6 @@ fn modal_takes_cmd_w(app: &App) -> bool {
                 Overlay::PullRequests(_)
                     | Overlay::Skills(_)
                     | Overlay::AgentPresets(_)
-                    | Overlay::Todos(_)
                     | Overlay::Stacks(_)
             )
         )
@@ -6931,11 +6993,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         return items;
     };
     items.push(MenuItem::new(
-        if app.worktree_running(&w.id) {
-            "Stop run"
-        } else {
-            "Run"
-        },
+        crate::stacks::menu_label(app, &w.id),
         MenuAction::ToggleRun(w.id.clone()),
     ));
     items.push(MenuItem::new(
@@ -7170,11 +7228,7 @@ pub(crate) fn menu_quick_return(menu: &ContextMenu) -> Option<crate::quick_promp
 
 /// A checkout's context menu: what a right-click on an EMPTY BAND opens.
 fn worktree_menu_items(app: &App, w: &orion_core::Worktree) -> Vec<MenuItem> {
-    let run = if app.worktree_running(&w.id) {
-        "Stop run"
-    } else {
-        "Run"
-    };
+    let run = crate::stacks::menu_label(app, &w.id);
     let mut items = vec![
         MenuItem::new("New agent", MenuAction::NewAgent(w.id.clone())),
         MenuItem::new("New terminal", MenuAction::NewTerminal(w.id.clone())),
@@ -9835,11 +9889,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 delete_link(app, &row);
             }
         }
-        MenuAction::ToggleRun(id) => {
-            if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
-                toggle_run_in(app, &w, out);
-            }
-        }
+        MenuAction::ToggleRun(id) => toggle_stack_in(app, &id, out),
         MenuAction::OpenWorktree(id) => {
             if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
                 open_worktree(app, &w);
@@ -17613,7 +17663,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         );
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("╭ crates/tui/src/ ─"), "{text}");
+        assert!(text.contains("crates/tui/src/ — 2 changed files"), "{text}");
 
         // ← folds it, → opens it again, a second → steps inside.
         press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
@@ -25697,11 +25747,13 @@ diff --git a/src/c.rs b/src/c.rs
                     path: "alpha.rs".into(),
                     orig_path: None,
                     xy: ['M', ' '],
+                    lines: None,
                 },
                 DiffFile {
                     path: "beta.rs".into(),
                     orig_path: None,
                     xy: ['?', '?'],
+                    lines: None,
                 },
             ],
             true,
@@ -26038,6 +26090,7 @@ diff --git a/src/c.rs b/src/c.rs
                 path: format!("src/f{i:02}.rs"),
                 orig_path: None,
                 xy: ['M', ' '],
+                lines: None,
             })
             .collect();
         let mut view = DiffView::new(
@@ -26050,7 +26103,7 @@ diff --git a/src/c.rs b/src/c.rs
         view.show_diff(Some("src/f00.rs"), text.join("\n"), false);
         view.view_height = 20;
         view.area = ratatui::layout::Rect::new(0, 0, 100, 30);
-        view.files_width = 30;
+        view.column_w = 30;
         view.list_area = ratatui::layout::Rect::new(1, 2, 28, 10);
         let mut app = App::new();
         seed_tree(&mut app);
@@ -26805,6 +26858,7 @@ diff --git a/src/c.rs b/src/c.rs
             path: path.into(),
             orig_path: None,
             xy: ['M', ' '],
+            lines: None,
         };
         let mut view = DiffView::new(
             "/nonexistent-orion-diff-test".into(),
@@ -26962,11 +27016,15 @@ diff --git a/src/c.rs b/src/c.rs
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let (area, width_before) = match &app.overlay {
-            Some(Overlay::Diff(v)) => (v.area, v.files_width),
+            Some(Overlay::Diff(v)) => (v.area, v.column_w),
             _ => panic!("diff overlay gone"),
         };
         assert!(area.width > 0, "modal area written back during draw");
-        assert_eq!(width_before, crate::app::DEFAULT_DIFF_FILES_W);
+        assert_eq!(
+            width_before,
+            area.width / 2,
+            "never dragged: the default, held to half a narrow modal"
+        );
 
         let bx = area.x + width_before;
         let mut out = Vec::new();
@@ -29724,20 +29782,26 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.status_anim_active());
     }
 
-    /// `⇧S` lists every stack — the selected project's first, the cursor
-    /// on the selected worktree's — and Enter starts a stopped one; its
-    /// row says so until the Ack.
+    /// `⇧S` has a tab per project — the selected one's first, on the
+    /// selected worktree — listing every checkout in its bands' order,
+    /// with a stack or without; then a tab for the stacks orion can't
+    /// place. Enter on a checkout starts it as `⌘⇧S` does, its run; on a
+    /// stack alone, by compose, its row saying so until the Ack.
     #[test]
-    fn stacks_modal_lists_every_stack_and_enter_toggles_one() {
+    fn stacks_modal_has_a_tab_per_project_and_one_for_the_rest() {
+        use crate::stacks::TabId;
         use orion_core::compose::StackVerb;
         let mut app = App::new();
         seed_tree(&mut app);
+        seed_feat_worktree(&mut app, "w2", "feat");
+        seed_other_project(&mut app);
         let mut out = Vec::new();
         list_stacks(
             &mut app,
             vec![
                 a_stack("aaa-elsewhere", "/opt/elsewhere", 4, 4),
                 a_stack("demo", "/tmp/demo", 0, 3),
+                a_stack("secret", "/tmp/secret", 2, 2),
             ],
         );
         let chord = crate::keymap::KeyChord::parse("shift+s").unwrap();
@@ -29746,29 +29810,47 @@ diff --git a/src/c.rs b/src/c.rs
             Some(crate::keymap::Action::Stacks)
         );
         out.extend(run_action(&mut app, crate::keymap::Action::Stacks));
-        let rows = crate::stacks::rows(&app);
-        assert_eq!(rows[0].stack.project, "demo", "this project's first");
-        assert_eq!(rows[0].place, "main · demo");
-        assert_eq!(rows[1].place, "/opt/elsewhere");
+        let tabs = crate::stacks::tabs(&app);
+        let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["demo", "secret 1", "Outside orion 1"]);
+        let places: Vec<&str> = tabs[0].rows.iter().map(|r| r.place.as_str()).collect();
+        assert_eq!(places, ["⌂ main", "⎇ feat"], "every checkout, root first");
+        assert!(tabs[0].rows[1].stack.is_none());
+        assert_eq!(tabs[2].id, TabId::Outside);
+        assert_eq!(tabs[2].rows[0].place, "/opt/elsewhere");
 
         let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Stacks · 1 running"), "{text}");
-        assert!(text.contains("4/4 up"), "{text}");
+        assert!(text.contains("Stacks · 2 running"), "{text}");
+        assert!(text.contains("Outside orion"), "{text}");
+        assert!(text.contains("0/3"), "{text}");
 
+        // A checkout: its run, the pane to follow it.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let run = out.iter().find_map(|r| match r {
+            ClientRequest::StartRun { req_id, worktree } if worktree.0 == "w1" => Some(*req_id),
+            _ => None,
+        });
+        let run = run.unwrap_or_else(|| panic!("Enter starts the checkout's run: {out:?}"));
+        assert!(matches!(
+            app.pending.get(&run),
+            Some(PendingIntent::AttachCreated { focus: false, .. })
+        ));
+        assert!(stack_actions(&out).is_empty());
+
+        // A stack alone, on the last tab: by compose.
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         let sent = stack_actions(&out);
         assert_eq!(sent.len(), 1);
         let (req_id, project, verb) = sent[0].clone();
-        assert_eq!((project.as_str(), verb), ("demo", StackVerb::Start));
+        assert_eq!((project.as_str(), verb), ("aaa-elsewhere", StackVerb::Stop));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("starting…"));
+        assert!(buffer_text(&terminal).contains("stopping…"));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert_eq!(stack_actions(&out).len(), 1, "not twice while it runs");
-
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 3, 3)]);
-        assert!(app.stack_pending.contains_key("demo"), "until its Ack");
         hse(
             &mut app,
             ServerEvent::Ack {
@@ -29779,6 +29861,75 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.stack_pending.is_empty());
         press(&mut app, KeyCode::Char('S'), KeyModifiers::SHIFT, &mut out);
         assert!(app.overlay.is_none(), "⇧S closes it again");
+    }
+
+    /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run,
+    /// the pane following — and stops it: a ^C to the run (the flash says
+    /// a second press kills it), or compose for a stack orion didn't start.
+    #[test]
+    fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
+        use orion_core::compose::StackVerb;
+        use orion_core::{Entity, TerminalId, TerminalTab};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        let chord = crate::keymap::KeyChord::parse("cmd+shift+s").unwrap();
+        assert_eq!(
+            app.keymap.lookup(crate::keymap::Scope::Global, &chord),
+            Some(crate::keymap::Action::ToggleStack)
+        );
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(
+            out.iter().any(
+                |r| matches!(r, ClientRequest::StartRun { worktree, .. } if worktree.0 == "w1")
+            ),
+            "{out:?}"
+        );
+
+        let run = |alive| TerminalTab {
+            id: TerminalId("run1".into()),
+            worktree_id: orion_core::WorktreeId("w1".into()),
+            name: "run".into(),
+            sort_order: 0,
+            alive,
+            run_command: Some("just start".into()),
+        };
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(run(true)),
+            },
+        );
+        out.clear();
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StopRun { .. }]),
+            "{out:?}"
+        );
+        let flash = app.flash.as_deref().unwrap_or_default().to_string();
+        assert!(flash.contains("again kills it"), "{flash}");
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(app.flash.as_deref().unwrap_or_default().contains("killing"));
+
+        // The run gone, a stack still up that orion didn't start: compose.
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(run(false)),
+            },
+        );
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
+        assert_eq!(
+            crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
+            "Stop stack"
+        );
+        out.clear();
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        let sent: Vec<_> = stack_actions(&out)
+            .into_iter()
+            .map(|(_, p, v)| (p, v))
+            .collect();
+        assert_eq!(sent, [("demo".to_string(), StackVerb::Stop)]);
     }
 
     /// ⌘W asks first: Esc changes its mind, Enter takes the stack down
@@ -29906,7 +30057,7 @@ diff --git a/src/c.rs b/src/c.rs
         };
         assert_eq!(
             view.selected.as_deref(),
-            Some(format!("stack-{first:02}").as_str())
+            Some(format!("\tstack-{first:02}").as_str())
         );
     }
 
@@ -39824,7 +39975,7 @@ diff --git a/src/c.rs b/src/c.rs
                 Some("added 29 items from the pasted list")
             );
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▾ Emails"), "{text}");
+            assert!(text.contains("▾ EMAILS"), "{text}");
             assert!(text.contains("Today 29"), "{text}");
             assert!(text.contains("setup templates"), "{text}");
         });
@@ -39880,8 +40031,8 @@ diff --git a/src/c.rs b/src/c.rs
             let terminal = draw_todos(&mut app);
             let text = buffer_text(&terminal);
             assert!(text.contains("☑"), "{text}");
-            assert!(text.contains("✓ 1 today"), "{text}");
-            assert!(text.contains("1 open"), "{text}");
+            assert!(text.contains("· 1 open · ✓1"), "{text}");
+            assert!(text.contains("✓1 today · ✓1 this week"), "{text}");
             let (x, y) = find_cell(&terminal, "run plan");
             let cell = &terminal.backend().buffer()[(x, y)];
             assert!(cell
@@ -39929,7 +40080,7 @@ diff --git a/src/c.rs b/src/c.rs
                 Some(crate::todos::view::Entry::Header { .. })
             ));
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▸ Emails"), "{text}");
+            assert!(text.contains("▸ EMAILS"), "{text}");
             assert!(text.contains("2 open"), "{text}");
             assert!(!text.contains("run plan"), "{text}");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -39938,23 +40089,26 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// Typing filters the items, the headers over the ones it finds kept.
+    /// `⌘F` opens the filter, which keeps the headers over the items it
+    /// finds; Esc clears it and puts it away, then closes.
     #[test]
     fn typing_filters_todos_and_keeps_their_headers() {
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
             let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::SUPER, &mut out);
             for c in "resend".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▾ Emails"), "{text}");
+            assert!(text.contains("▾ EMAILS"), "{text}");
             assert!(text.contains("setup resend"), "{text}");
             assert!(!text.contains("run plan"), "{text}");
             assert!(!text.contains("chips"), "{text}");
-            // Esc clears the filter first, then closes.
+            // Esc clears the filter and puts it away first, then closes.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).query.is_empty());
+            assert!(!todo_view(&app).filtering);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none());
         });
@@ -39962,8 +40116,9 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// `⌘N` opens a field in the cursor's group and Enter adds the item —
     /// the field staying open for the next; `⌘2` makes it high, and it
-    /// sorts to the top, a second `⌘2` taking it off; `⌘I` renames; `⌘W` deletes, a group with items
-    /// only on a second press. Each change is on disk at once.
+    /// sorts to the top, a second `⌘2` taking it off; typing on it adds to
+    /// its end; `⌘⌫` deletes, a group with items only on a second press.
+    /// Each change is on disk at once.
     #[test]
     fn todo_items_are_added_prioritised_renamed_and_deleted() {
         let dir = tempfile::tempdir().unwrap();
@@ -40005,17 +40160,19 @@ diff --git a/src/c.rs b/src/c.rs
                 cmd(&mut app, '2', &mut out);
                 assert_eq!(priority(&app), Some(2));
 
-                cmd(&mut app, 'i', &mut out);
                 press(&mut app, KeyCode::Char('!'), KeyModifiers::NONE, &mut out);
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert!(todo_file(&app).items.iter().any(|i| i.text == "new one!"));
 
-                cmd(&mut app, 'w', &mut out);
+                let delete = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                    press(app, KeyCode::Backspace, KeyModifiers::SUPER, out)
+                };
+                delete(&mut app, &mut out);
                 assert!(!todo_file(&app).items.iter().any(|i| i.text == "new one!"));
 
                 // On the header: asked first, then gone with its items.
                 press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
-                cmd(&mut app, 'w', &mut out);
+                delete(&mut app, &mut out);
                 assert_eq!(todo_view(&app).confirm_delete, Some(emails));
                 let text = buffer_text(&draw_todos(&mut app));
                 assert!(text.contains("delete Emails and its 2 items?"), "{text}");
@@ -40211,17 +40368,126 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// With a filter typed, a space is the filter's — nothing is ticked.
+    /// With the filter up, a space is the filter's — nothing is ticked.
     #[test]
     fn space_types_into_a_todo_filter() {
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
             let mut app = todos_with(TWO_EMAILS);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::SUPER, &mut out);
             for c in "run p".chars() {
                 press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
             }
             assert_eq!(todo_view(&app).query.as_str(), "run p");
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
+        });
+    }
+
+    /// A row is edited where it stands: `⌫` opens it with its last
+    /// character gone, a character typed on it is added to its end — on a
+    /// header, to the group's name — and `↓` saves it and moves on. Typed
+    /// on `+ new item`, it starts one. Nothing typed filters.
+    #[test]
+    fn a_todo_row_is_edited_in_place() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with(TWO_EMAILS);
+            let key = |app: &mut App, code: KeyCode, out: &mut Vec<ClientRequest>| {
+                press(app, code, KeyModifiers::NONE, out)
+            };
+            key(&mut app, KeyCode::Down, &mut out);
+            key(&mut app, KeyCode::Backspace, &mut out);
+            assert_eq!(
+                todo_view(&app).input.as_ref().map(|(_, i)| i.as_str()),
+                Some("run pla")
+            );
+            for c in "ns".chars() {
+                key(&mut app, KeyCode::Char(c), &mut out);
+            }
+            key(&mut app, KeyCode::Down, &mut out);
+            assert!(todo_view(&app).input.is_none());
+            assert!(todo_file(&app).items.iter().any(|i| i.text == "run plans"));
+            assert!(matches!(
+                todo_view(&app).cursor,
+                Some(crate::todos::view::Entry::Item { id, .. })
+                    if todo_file(&app).item(id).map(|i| i.text.as_str()) == Some("setup resend")
+            ));
+
+            // A letter on a header goes on the group's name.
+            press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+            key(&mut app, KeyCode::Char('!'), &mut out);
+            key(&mut app, KeyCode::Enter, &mut out);
+            assert_eq!(todo_file(&app).groups[0].name, "Emails!");
+            assert!(todo_view(&app).query.is_empty(), "typing never filters");
+
+            // `↓` on the empty field a run of new items leaves open lands
+            // on the row under it, not the one after.
+            press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            for c in "added".chars() {
+                key(&mut app, KeyCode::Char(c), &mut out);
+            }
+            key(&mut app, KeyCode::Enter, &mut out);
+            key(&mut app, KeyCode::Down, &mut out);
+            assert!(todo_view(&app).input.is_none());
+            assert!(matches!(
+                todo_view(&app).cursor,
+                Some(crate::todos::view::Entry::Header { group, .. })
+                    if todo_file(&app).group(group).map(|g| g.name.as_str()) == Some("UI")
+            ));
+
+            // On `+ new item`, a new item in the group over it.
+            press(&mut app, KeyCode::End, KeyModifiers::NONE, &mut out);
+            key(&mut app, KeyCode::Char('x'), &mut out);
+            key(&mut app, KeyCode::Enter, &mut out);
+            key(&mut app, KeyCode::Esc, &mut out);
+            let file = todo_file(&app);
+            let ui = file.subgroups(None).find(|g| g.name == "UI").unwrap().id;
+            assert!(file.items.iter().any(|i| i.text == "x" && i.group == ui));
+        });
+    }
+
+    /// `⌘↓`/`⌘↑` jump from group header to group header, nested ones
+    /// included, over the items between.
+    #[test]
+    fn cmd_arrows_jump_between_todo_groups() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with("- A\n    - a1\n    - B\n        - b1\n- C\n    - c1\n");
+            let header = |app: &App| match todo_view(app).cursor {
+                Some(crate::todos::view::Entry::Header { group, .. }) => {
+                    todo_file(app).group(group).map(|g| g.name.clone())
+                }
+                _ => None,
+            };
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("B"));
+            press(&mut app, KeyCode::Down, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("C"));
+            press(&mut app, KeyCode::Down, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("C"), "no header past it");
+            press(&mut app, KeyCode::Up, KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Up, KeyModifiers::SUPER, &mut out);
+            assert_eq!(header(&app).as_deref(), Some("A"));
+        });
+    }
+
+    /// A long item wraps under its own text rather than running off the
+    /// edge: every word of it on screen, none cut with `…`.
+    #[test]
+    fn a_long_todo_wraps() {
+        crate::todos::with_now(todo_clock(6), || {
+            let long = "wrap this todo across lines because it is far too long to sit on one row of the modal at this width at all";
+            let mut app = todos_with(&format!("- G\n    - {long}\n"));
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(!text.contains('…'), "{text}");
+            for word in ["wrap", "because", "modal", "width", "all"] {
+                assert!(text.contains(word), "{word}: {text}");
+            }
+            let view = todo_view(&app);
+            let item_rect = view.row_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
+            assert!(item_rect.height >= 2, "{item_rect:?}");
         });
     }
 

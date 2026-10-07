@@ -3,7 +3,7 @@
 //! matching files and the hierarchies containing them.
 
 use crate::app::{
-    clamp_files_width, clamp_selection, max_scroll, scrolled_by, window_start, DEFAULT_DIFF_FILES_W,
+    clamp_files_width, clamp_selection, max_scroll, scrolled_by, window_start, DEFAULT_TREE_FILES_W,
 };
 use crate::git_diff::cap_lines;
 use crate::markdown::{self, Rendered};
@@ -243,7 +243,7 @@ impl TreeBrowser {
             list_area: Rect::default(),
             preview_area: Rect::default(),
             area: Rect::default(),
-            files_width: DEFAULT_DIFF_FILES_W,
+            files_width: DEFAULT_TREE_FILES_W,
             files_drag: None,
             jobs: None,
             listing: None,

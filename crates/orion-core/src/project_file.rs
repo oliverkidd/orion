@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Both values are shell command lines, and both run in the selected
-//! worktree's checkout. `run` is the RUN COMMAND: a menu's **Run** starts
-//! it in a RUN TERMINAL the DAEMON holds, and **Stop run** stops it. `open`
+//! worktree's checkout. `run` is the RUN COMMAND: `⌘⇧S` (a menu's **Start
+//! stack**) starts it in a RUN TERMINAL the DAEMON holds, and stops it. `open`
 //! is the OPEN COMMAND: `Shift+Enter` on a worktree fires it once, from the
 //! TUI.
 //!
@@ -35,7 +35,7 @@ pub const FILE_NAME: &str = ".orion.json";
 /// for a newer orion still works in this one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ProjectFile {
-    /// The RUN COMMAND, started and stopped with `r`.
+    /// The RUN COMMAND, started and stopped with `⌘⇧S`.
     #[serde(default)]
     pub run: Option<String>,
     /// The OPEN COMMAND, fired with `Shift+Enter`.

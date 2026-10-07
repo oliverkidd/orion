@@ -1047,9 +1047,8 @@ fn project_menu(app: &mut App, at: (u16, u16)) {
         MenuAction::NewWorktree(project.clone()),
     )];
     if let Some(w) = crate::launcher::checkout_for(app, &project) {
-        let running = app.worktree_running(&w);
         items.push(MenuItem::new(
-            if running { "Stop run" } else { "Run" },
+            crate::stacks::menu_label(app, &w),
             MenuAction::ToggleRun(w.clone()),
         ));
         items.push(MenuItem::new("Open", MenuAction::OpenWorktree(w.clone())));

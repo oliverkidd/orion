@@ -2983,7 +2983,7 @@ pub(crate) fn tab_hit(hits: &[(u16, u16)], x: u16) -> Option<usize> {
 }
 
 /// The rule under a tab strip, the modal's inner width.
-fn strip_rule(width: u16, th: Theme) -> Line<'static> {
+pub(crate) fn strip_rule(width: u16, th: Theme) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width as usize),
         Style::default().fg(th.muted),
@@ -3893,6 +3893,19 @@ pub(crate) fn render_row(
     th: Theme,
 ) {
     render_button(f, area, vec![spans], selected, focused, th, 0, th.accent);
+}
+
+/// [`render_row`] for an entry several lines tall — a title over its meta
+/// line: the selection fill and the `▌` marker run down every line.
+pub(crate) fn render_row_lines(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Vec<Span>>,
+    selected: bool,
+    focused: bool,
+    th: Theme,
+) {
+    render_button(f, area, lines, selected, focused, th, 0, th.accent);
 }
 
 /// `parts` joined by a faint ` · `, as many as fit in `budget` from the
@@ -5320,6 +5333,31 @@ fn fmt_mem(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// [`truncate`] by terminal cells rather than chars, for a row whose text
+/// a wide glyph (an emoji, CJK) must not push past what is pinned to its
+/// right. What it keeps is a prefix of `s`, so char positions into `s`
+/// still hold for it (`visible_positions`).
+pub(crate) fn truncate_cells(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 1;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > max {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    if max > 0 {
+        out.push('…');
+    }
+    out
 }
 
 /// Clip `s` to `max` chars, spending the last one on `…` when it had to

@@ -318,6 +318,7 @@ mod tests {
                 path: p.to_string(),
                 orig_path: None,
                 xy: ['M', ' '],
+                lines: None,
             })
             .collect()
     }
