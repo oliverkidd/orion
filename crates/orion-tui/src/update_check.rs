@@ -32,24 +32,51 @@ pub fn interval() -> Option<Duration> {
     orion_core::env::secs_override(orion_core::env::UPDATE_CHECK_SECS, DEFAULT_INTERVAL)
 }
 
-/// Run one check off the loop. `tx` hears the newer version when there is
-/// one and nothing otherwise, so a re-check that can't ask never clears an
-/// indicator an earlier one lit (a release does not un-publish).
-pub fn spawn(tx: tokio::sync::mpsc::UnboundedSender<String>) {
+/// What one check found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    /// A published release (`0.22.0`) strictly newer than this build.
+    Newer(String),
+    /// This build is the latest release, or a dev build ahead of it.
+    Current,
+    /// The check couldn't ask, or GitHub's answer wasn't a release tag.
+    Unknown,
+}
+
+/// One check's answer to the loop. `asked` marks the check **Upgrade
+/// orion** ran on demand, whose answer is shown whatever it is; the slow
+/// beat's answers only ever light the indicator, so a re-check that can't
+/// ask never clears one an earlier check lit (a release does not
+/// un-publish).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub status: Status,
+    pub asked: bool,
+}
+
+/// Run one check off the loop; `tx` hears what it found.
+pub fn spawn(tx: tokio::sync::mpsc::UnboundedSender<Answer>, asked: bool) {
     tokio::spawn(async move {
-        if let Some(version) = newer_release().await {
-            let _ = tx.send(version);
-        }
+        let status = check().await;
+        let _ = tx.send(Answer { status, asked });
     });
 }
 
-/// The latest published version (`0.22.0`) when it is strictly newer than
-/// this build; `None` for up to date, ahead of it (a dev build past the
-/// last release), or couldn't ask.
-pub async fn newer_release() -> Option<String> {
-    let redirect = probe(LATEST_URL).await?;
-    let tag = tag_from_redirect(&redirect)?;
-    newer_than(tag, env!("CARGO_PKG_VERSION"))
+/// Ask GitHub for the latest release and compare it with this build.
+pub async fn check() -> Status {
+    let Some(redirect) = probe(LATEST_URL).await else {
+        return Status::Unknown;
+    };
+    let Some(tag) = tag_from_redirect(&redirect) else {
+        return Status::Unknown;
+    };
+    if parse_version(tag).is_none() {
+        return Status::Unknown;
+    }
+    match newer_than(tag, env!("CARGO_PKG_VERSION")) {
+        Some(version) => Status::Newer(version),
+        None => Status::Current,
+    }
 }
 
 /// Where `url` redirects to, without following it — GitHub's answer to

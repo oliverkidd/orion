@@ -392,10 +392,16 @@ async fn main_loop(
         crate::usage::Usage::load(orion_core::paths::data_dir().join(crate::usage::CACHE_FILE));
     // A newer orion published on GitHub, probed off the loop at start and
     // then on a slow beat (`update_check::interval`; the e2e tests turn it
-    // off). Only a newer version ever arrives, so the footer's indicator,
-    // once lit, survives a check that later can't ask.
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // off). The beat's answers only ever light the footer's indicator, so
+    // once lit it survives a check that later can't ask. **Upgrade orion**
+    // asks again on demand through the same channel when no newer release
+    // is known yet, so one published within the beat is never missed.
+    let (update_tx, mut update_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::update_check::Answer>();
     let update_interval = crate::update_check::interval();
+    if update_interval.is_some() {
+        app.update_tx = Some(update_tx.clone());
+    }
     let mut next_update_check = tokio::time::Instant::now();
     // What Spotify is playing, asked of the app over AppleScript off the
     // loop (`spotify::interval`; macOS only, and the e2e tests turn it
@@ -731,15 +737,15 @@ async fn main_loop(
                 }
             }
             _ = tokio::time::sleep_until(next_update_check), if update_interval.is_some() => {
-                crate::update_check::spawn(update_tx.clone());
+                crate::update_check::spawn(update_tx.clone(), false);
                 next_update_check = tokio::time::Instant::now()
                     + update_interval.unwrap_or(crate::update_check::DEFAULT_INTERVAL);
             }
             answer = update_rx.recv() => {
                 // Never None: `update_tx` lives as long as the loop.
-                if let Some(version) = answer {
-                    app.dirty |= app.update_available.as_deref() != Some(version.as_str());
-                    app.update_available = Some(version);
+                if let Some(answer) = answer {
+                    note_update_answer(&mut app, answer);
+                    app.dirty = true;
                 }
             }
             _ = tokio::time::sleep_until(next_spotify),
@@ -6590,21 +6596,54 @@ fn confirm_quit() -> ConfirmDialog {
     }
 }
 
-/// The confirm before **Restart orion** (`⌘⇧R`, HOME's key): the TUI
-/// quits, the DAEMON is stopped with every session in it, and the binary
-/// starts again from scratch (`crate::restart`). The message says what is
-/// lost — a running turn, a terminal's shell — and what is not.
-/// **Upgrade orion**: the confirm when a newer release is out, a flash
-/// saying this one is current when not.
+/// **Upgrade orion**: the confirm when a newer release is known. When none
+/// is yet, the slow beat may simply not have seen it, so ask GitHub now;
+/// the answer lands in [`note_update_answer`]. With no checker running
+/// (the e2e tests turn it off) it says this one is current.
 pub(super) fn open_upgrade(app: &mut App) {
-    match app.update_available.clone() {
-        Some(v) => app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v))),
-        None => {
-            app.flash = Some(crate::flash::Flash::note(format!(
-                "orion v{} is the latest release",
-                env!("CARGO_PKG_VERSION")
-            )))
+    if let Some(v) = app.update_available.clone() {
+        app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v)));
+        return;
+    }
+    match app.update_tx.clone() {
+        Some(tx) => {
+            crate::update_check::spawn(tx, true);
+            app.flash = Some(crate::flash::Flash::working(
+                "checking GitHub for a newer orion…",
+            ));
         }
+        None => app.flash = Some(latest_release_flash()),
+    }
+}
+
+fn latest_release_flash() -> crate::flash::Flash {
+    crate::flash::Flash::note(format!(
+        "orion v{} is the latest release",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// One update check's answer. A newer release lights the footer's
+/// indicator either way; an on-demand check (**Upgrade orion**) also says
+/// what it found — the upgrade confirm, unless something else has been
+/// opened since, or a flash for current and couldn't ask.
+fn note_update_answer(app: &mut App, answer: crate::update_check::Answer) {
+    use crate::update_check::Status;
+    match answer.status {
+        Status::Newer(v) => {
+            if answer.asked && app.overlay.is_none() {
+                app.flash = None;
+                app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v)));
+            }
+            app.update_available = Some(v);
+        }
+        Status::Current if answer.asked => app.flash = Some(latest_release_flash()),
+        Status::Unknown if answer.asked => {
+            app.flash = Some(crate::flash::Flash::failed(
+                "couldn't reach GitHub to check for a newer orion",
+            ))
+        }
+        _ => {}
     }
 }
 
@@ -6623,6 +6662,10 @@ fn confirm_upgrade(version: &str) -> ConfirmDialog {
     }
 }
 
+/// The confirm before **Restart orion** (`⌘⇧R`, HOME's key): the TUI
+/// quits, the DAEMON is stopped with every session in it, and the binary
+/// starts again from scratch (`crate::restart`). The message says what is
+/// lost — a running turn, a terminal's shell — and what is not.
 fn confirm_restart() -> ConfirmDialog {
     ConfirmDialog {
         title: "Restart orion".into(),
@@ -19226,6 +19269,55 @@ diff --git a/src/c.rs b/src/c.rs
             !text.contains(stamp),
             "nameplate should have yielded:\n{text}"
         );
+    }
+
+    /// **Upgrade orion** with no newer release known asks GitHub now: a
+    /// newer one opens the confirm, current and couldn't-ask flash, and the
+    /// slow beat's answers only ever light the indicator.
+    #[test]
+    fn upgrade_checks_on_demand_when_nothing_newer_is_known() {
+        use crate::update_check::{Answer, Status};
+        let mut app = App::new();
+        let answer = |status, asked| Answer { status, asked };
+
+        note_update_answer(&mut app, answer(Status::Current, false));
+        note_update_answer(&mut app, answer(Status::Unknown, false));
+        assert!(
+            app.flash.is_none() && app.overlay.is_none(),
+            "the beat is silent"
+        );
+
+        note_update_answer(&mut app, answer(Status::Current, true));
+        assert!(app
+            .flash
+            .as_deref()
+            .unwrap()
+            .contains("is the latest release"));
+
+        note_update_answer(&mut app, answer(Status::Unknown, true));
+        assert!(app
+            .flash
+            .as_deref()
+            .unwrap()
+            .contains("couldn't reach GitHub"));
+        assert!(app.update_available.is_none());
+
+        note_update_answer(&mut app, answer(Status::Newer("9.9.9".into()), true));
+        assert_eq!(app.update_available.as_deref(), Some("9.9.9"));
+        assert!(app.flash.is_none());
+        assert!(matches!(
+            &app.overlay,
+            Some(Overlay::Confirm(c)) if matches!(c.action, PendingAction::Upgrade)
+        ));
+
+        // Without a checker (the e2e tests) it answers from what it knows.
+        let mut app = App::new();
+        open_upgrade(&mut app);
+        assert!(app
+            .flash
+            .as_deref()
+            .unwrap()
+            .contains("is the latest release"));
     }
 
     /// A newer published release rides the nameplate as `⇡ vX.Y.Z` and

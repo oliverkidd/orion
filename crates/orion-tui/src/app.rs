@@ -3920,6 +3920,9 @@ pub struct App {
     /// nameplate. `None` until the update check finds one; a check that
     /// can't ask leaves it as it was.
     pub update_available: Option<String>,
+    /// Where an on-demand update check (**Upgrade orion**) sends its
+    /// answer; `None` while the checker is off (the e2e tests).
+    pub update_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::update_check::Answer>>,
     /// What Spotify is playing, for the footer's SPOTIFY READOUT
     /// (`crate::spotify`): `None` while it is closed, stopped or empty, the
     /// readout off, or no poll has answered yet.
@@ -4683,6 +4686,7 @@ impl App {
             upgrade: false,
             flash: None,
             update_available: None,
+            update_tx: None,
             spotify: None,
             spotify_in_flight: 0,
             spotify_seq: 0,
