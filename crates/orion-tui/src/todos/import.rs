@@ -81,17 +81,25 @@ fn build(flat: &[(usize, String)], at: &mut usize, level: usize) -> Vec<Node> {
     out
 }
 
-/// A bullet line's indent, in columns — a tab four — and its text: `- `,
-/// `* ` or `+ `, a task box and a surrounding `**…**` taken off. None for
-/// any other line.
+/// The bullets a line can start with: Markdown's, and the dots a notes
+/// app or a word processor copies out.
+const BULLETS: [&str; 6] = ["- ", "* ", "+ ", "• ", "◦ ", "▪ "];
+
+/// A bullet line's indent, in columns — a tab four — and its text: the
+/// bullet, a task box and a surrounding `**…**` taken off. None for any
+/// other line.
 fn bullet(line: &str) -> Option<(usize, String)> {
     let body = line.trim_start_matches([' ', '\t']);
     let lead = &line[..line.len() - body.len()];
     let indent = lead.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
-    let rest = ["- ", "* ", "+ "]
-        .iter()
-        .find_map(|b| body.strip_prefix(b))?;
-    let mut text = rest.trim();
+    let rest = BULLETS.iter().find_map(|b| body.strip_prefix(b))?;
+    let text = tidy(rest);
+    (!text.is_empty()).then(|| (indent, text.to_string()))
+}
+
+/// `text` with a task box and a surrounding `**…**` taken off.
+fn tidy(text: &str) -> &str {
+    let mut text = text.trim();
     if let Some(after) = ["[ ] ", "[x] ", "[X] "]
         .iter()
         .find_map(|b| text.strip_prefix(b))
@@ -105,7 +113,24 @@ fn bullet(line: &str) -> Option<(usize, String)> {
     {
         text = inner.trim();
     }
-    (!text.is_empty()).then(|| (indent, text.to_string()))
+    text
+}
+
+/// Each line of `text` that has anything on it, as one item: its bullet,
+/// if it has one, a task box, a surrounding `**…**` and a `;` closing it
+/// taken off. What a paste of lines into a new item's field adds.
+pub fn lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| {
+            let line = line.trim();
+            let line = BULLETS
+                .iter()
+                .find_map(|b| line.strip_prefix(b))
+                .unwrap_or(line);
+            tidy(line.trim_end_matches(';')).to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 /// How many items `nodes` hold, nested ones included.
@@ -290,6 +315,30 @@ pub(crate) mod tests {
     fn an_overdeep_indent_is_one_level() {
         let nodes = parse("- G\n            - x\n");
         assert_eq!(item_count(children(&nodes, "G")), 1);
+    }
+
+    /// Lines pasted into a new item's field are an item each, with or
+    /// without a bullet, and the `;` that listed them taken off.
+    #[test]
+    fn pasted_lines_are_an_item_each() {
+        let text = "deck folders;\n  ◦ speaker notes;\n\n  ◦ smart model routing;\n  • [ ] the hint-unmet note.\n- **bold**\n";
+        assert_eq!(
+            lines(text),
+            [
+                "deck folders",
+                "speaker notes",
+                "smart model routing",
+                "the hint-unmet note.",
+                "bold",
+            ]
+        );
+    }
+
+    /// The dots a notes app copies out are bullets too.
+    #[test]
+    fn dots_are_bullets() {
+        let nodes = parse("• G\n  ◦ x\n  ▪ y\n");
+        assert_eq!(item_count(children(&nodes, "G")), 2);
     }
 
     #[test]

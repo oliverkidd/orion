@@ -809,8 +809,30 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     if view.pick.is_some() || view.confirm_delete.is_some() {
         return true;
     }
-    if let Some((_, input)) = &mut view.input {
-        input.insert_str(&text.replace(['\r', '\n'], " "));
+    if let Some((kind, input)) = &mut view.input {
+        let kind = *kind;
+        let lines = super::import::lines(text);
+        // Lines into a new item's field are an item each: the first goes
+        // on what was typed, the field opens again under the last.
+        if matches!(kind, InputKind::Item { .. }) && lines.len() > 1 {
+            input.insert_str(&lines[0]);
+            save_field(app, kind);
+            for line in &lines[1..] {
+                let Some(kind) = view_mut(app)
+                    .and_then(|v| v.input.as_ref())
+                    .map(|(k, _)| *k)
+                else {
+                    break;
+                };
+                commit(app, kind, line);
+            }
+            app.flash = Some(crate::flash::Flash::done(format!(
+                "added {}",
+                crate::bundle::plural(lines.len(), "item")
+            )));
+        } else {
+            input.insert_str(&text.replace(['\r', '\n'], " "));
+        }
         return true;
     }
     if text.trim().contains('\n') {
