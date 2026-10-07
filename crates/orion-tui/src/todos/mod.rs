@@ -194,6 +194,23 @@ impl TodoFile {
         }
     }
 
+    /// How many items were ticked on each day of `today`'s week, Monday
+    /// first: the tab row's sparkline. Days still to come are 0.
+    pub fn week_ticks(&self, today: NaiveDate) -> [usize; 7] {
+        use chrono::Datelike;
+        let monday = today - chrono::Days::new(u64::from(today.weekday().num_days_from_monday()));
+        let mut days = [0; 7];
+        for day in self.items.iter().filter_map(Item::done_on) {
+            let Ok(i) = usize::try_from((day - monday).num_days()) else {
+                continue;
+            };
+            if let Some(n) = days.get_mut(i) {
+                *n += 1;
+            }
+        }
+        days
+    }
+
     /// Every open item, the Today tab's badge.
     pub fn open_count(&self) -> usize {
         self.items.iter().filter(|i| i.done.is_none()).count()
@@ -485,6 +502,22 @@ mod tests {
             texts(&file.today_items(g, day(7))),
             ["ship it", "still open"]
         );
+    }
+
+    /// The week runs Monday to Sunday: a tick the Sunday before is last
+    /// week's, one on Monday the week's first day.
+    #[test]
+    fn the_week_counts_ticks_from_monday() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let g = file.add_group(None, "G");
+        // 2026-10-04 is a Sunday, 10-05 a Monday, 10-07 a Wednesday.
+        for (d, h) in [(4, 12), (5, 9), (5, 18), (7, 8)] {
+            let id = file.add_item(g, "x", day(1));
+            file.toggle(id, at(d, h));
+        }
+        file.add_item(g, "open", day(1));
+        assert_eq!(file.week_ticks(day(7)), [2, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(file.week_ticks(day(4)), [0, 0, 0, 0, 0, 0, 1]);
     }
 
     /// The log reads newest day first.

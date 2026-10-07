@@ -1887,24 +1887,10 @@ pub(crate) fn state_glyph(
     (glyph, crate::theme::hex(color).unwrap_or(fallback))
 }
 
-/// A priority as Linear draws it: `‼` for urgent, else three bars with
-/// as many lit as it is high. Nothing for no priority.
-pub(crate) fn priority_mark(priority: u8, th: Theme) -> Vec<Span<'static>> {
-    let lit = match priority {
-        1 => return vec![Span::styled("‼", Style::default().fg(th.err))],
-        2 => 3,
-        3 => 2,
-        4 => 1,
-        _ => return vec![Span::styled("···", Style::default().fg(th.faint))],
-    };
-    "▂▄▆"
-        .chars()
-        .enumerate()
-        .map(|(i, c)| {
-            let color = if i < lit { th.muted } else { th.faint };
-            Span::styled(c.to_string(), Style::default().fg(color))
-        })
-        .collect()
+/// [`priority_letter`] as one styled span.
+pub(crate) fn priority_mark(priority: u8, th: Theme) -> Span<'static> {
+    let (letter, style) = priority_letter(priority, th);
+    Span::styled(letter, style)
 }
 
 /// A priority as one letter on a row — `U`rgent, `H`igh, `M`edium,
@@ -2091,10 +2077,14 @@ fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
             text(&issue.status),
         ],
     );
-    let mut priority = priority_mark(issue.priority, th);
-    priority.push(Span::raw(" "));
-    priority.push(text(priority_word(issue.priority)));
-    row("Priority", priority);
+    row(
+        "Priority",
+        vec![
+            priority_mark(issue.priority, th),
+            Span::raw(" "),
+            text(priority_word(issue.priority)),
+        ],
+    );
     let who = if issue.assignee.is_empty() {
         Span::styled(UNASSIGNED, Style::default().fg(th.dim))
     } else {
@@ -3912,7 +3902,7 @@ pub(crate) mod tests {
         assert_eq!(the_view(&app).tab, LinearTab::Others);
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-4"));
         let screen = shot(&mut app, 200, 40);
-        assert!(screen.contains("Priority  ▂▄▆ Medium"), "{screen}");
+        assert!(screen.contains("Priority  M Medium"), "{screen}");
         assert!(screen.contains("Assignee  Sam"), "{screen}");
         assert!(!screen.contains("Started one"), "{screen}");
 
