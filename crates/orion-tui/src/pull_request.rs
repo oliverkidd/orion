@@ -474,7 +474,7 @@ fn rollup_state(rollup: &serde_json::Value) -> Checks {
 /// pending; else it passes — a skipped or neutral job is not a failure.
 fn checks(rollup: &[serde_json::Value]) -> Checks {
     let mut out = Checks::Absent;
-    for entry in rollup {
+    for entry in latest_runs(rollup) {
         let one = match check_state(&check_word(entry)) {
             CheckState::Passed | CheckState::Skipped => Checks::Passing,
             CheckState::Failed => return Checks::Failing,
@@ -486,6 +486,66 @@ fn checks(rollup: &[serde_json::Value]) -> Checks {
         };
     }
     out
+}
+
+/// A rollup's entries with every superseded run of a check left out, the
+/// way `gh pr checks` and the pull request page leave them out. A commit's
+/// rollup keeps every run its checks ever had: a workflow started twice on
+/// the same head — the first cancelled by its concurrency group, or a
+/// failure re-run as a fresh run — leaves the old run's `CANCELLED` and
+/// `FAILURE` beside the new one's `SUCCESS` (#1321 on riplo-os read as
+/// failing while every check had passed). A check is its workflow and its
+/// name (a commit status, its context), and the run that started last is
+/// the one that stands. GitHub's order is kept for the rest.
+fn latest_runs(rollup: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    let key = |entry: &serde_json::Value| (workflow_name(entry), check_name(entry));
+    let mut latest: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for (i, entry) in rollup.iter().enumerate() {
+        latest
+            .entry(key(entry))
+            .and_modify(|kept| {
+                if started_at(entry) >= started_at(&rollup[*kept]) {
+                    *kept = i;
+                }
+            })
+            .or_insert(i);
+    }
+    let mut kept: Vec<usize> = latest.into_values().collect();
+    kept.sort_unstable();
+    kept.into_iter().map(|i| &rollup[i]).collect()
+}
+
+/// A rollup entry's name: a check run's `name`, a commit status's
+/// `context`.
+fn check_name(entry: &serde_json::Value) -> String {
+    match str_at(entry, "name") {
+        name if !name.is_empty() => name,
+        _ => str_at(entry, "context"),
+    }
+}
+
+/// The Actions workflow a rollup entry ran in: `gh`'s flattened
+/// `workflowName`, or GraphQL's own path to it ([`FAILING_PART`]).
+fn workflow_name(entry: &serde_json::Value) -> String {
+    match str_at(entry, "workflowName") {
+        name if !name.is_empty() => name,
+        _ => entry
+            .pointer("/checkSuite/workflowRun/workflow/name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+/// When a rollup entry started — a commit status's `createdAt` where
+/// GraphQL gives it no `startedAt`. RFC 3339 in UTC, so the strings order
+/// as the times do.
+fn started_at(entry: &serde_json::Value) -> String {
+    match str_at(entry, "startedAt") {
+        at if !at.is_empty() => at,
+        _ => str_at(entry, "createdAt"),
+    }
 }
 
 /// One rollup entry's word: a check run's `conclusion` once `COMPLETED`
@@ -802,9 +862,10 @@ impl PrLaunch {
 /// resolves its repo.
 pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
     let limit = format!("limit={LIST_LIMIT}");
-    match run_repo_graphql(dir, LIST_QUERY, &limit, TIMEOUT).await {
+    match run_repo_graphql(dir, LIST_QUERY, &[&limit], TIMEOUT).await {
         Ok(out) => {
-            if let Some(rows) = parse_list(&out) {
+            if let Some(mut rows) = parse_list(&out) {
+                recheck_failing(dir, &mut rows).await;
                 return Some(rows);
             }
         }
@@ -814,48 +875,126 @@ pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
         // GitHub answered, and refused the full query.
         Err(_) => {}
     }
-    let out = repo_graphql(dir, LIST_QUERY_SLIM, &limit, TIMEOUT).await?;
-    parse_list(&out)
+    let out = repo_graphql(dir, LIST_QUERY_SLIM, &[&limit], TIMEOUT).await?;
+    let mut rows = parse_list(&out)?;
+    recheck_failing(dir, &mut rows).await;
+    Some(rows)
+}
+
+/// How many failing rows one refresh reads the checks of
+/// ([`recheck_failing`]). Every context of a busy repo's pull requests in
+/// one query is what made GitHub 504 (#106); a handful is not.
+const RECHECK_LIMIT: usize = 20;
+
+/// [`FAILING_QUERY`]'s part for one pull request, aliased by its number.
+const FAILING_PART: &str = "p{n}: pullRequest(number: {n}) { \
+    commits(last: 1) { nodes { commit { statusCheckRollup { \
+    contexts(first: 100) { nodes { __typename \
+    ... on CheckRun { name status conclusion startedAt \
+    checkSuite { workflowRun { workflow { name } } } } \
+    ... on StatusContext { context state createdAt } } } } } } } }";
+
+/// The query [`recheck_failing`] runs: [`FAILING_PART`] once per number.
+fn failing_query(numbers: &[u64]) -> String {
+    let parts: Vec<String> = numbers
+        .iter()
+        .map(|n| FAILING_PART.replace("{n}", &n.to_string()))
+        .collect();
+    format!(
+        "query($owner: String!, $repo: String!) {{ \
+         repository(owner: $owner, name: $repo) {{ {} }} }}",
+        parts.join(" ")
+    )
+}
+
+/// Read again the checks of the rows GitHub calls failing, and fold them
+/// without the runs a later one superseded ([`latest_runs`]). A list row's
+/// word is the rollup's server-side `state`, and its tally the rollup's
+/// per-state counts — both counting every run the head commit ever had,
+/// so a cancelled or re-run workflow leaves the row red after its new run
+/// passed. Only `Failing` can be wrong that way — a superseded run is
+/// done, so it never holds a row pending — and failing rows are few, so
+/// they alone are asked about, in one query. A row the answer leaves out
+/// keeps GitHub's word: unsure stays red rather than going quiet.
+async fn recheck_failing(dir: &Path, rows: &mut [OpenPr]) {
+    let numbers: Vec<u64> = rows
+        .iter()
+        .filter(|pr| pr.health.checks == Checks::Failing)
+        .map(|pr| pr.number)
+        .take(RECHECK_LIMIT)
+        .collect();
+    if numbers.is_empty() {
+        return;
+    }
+    if let Some(out) = repo_graphql(dir, &failing_query(&numbers), &[], TIMEOUT).await {
+        apply_recheck(&out, rows);
+    }
+}
+
+/// Fold a [`failing_query`] answer into the rows it asked about.
+fn apply_recheck(json: &str, rows: &mut [OpenPr]) {
+    let Ok(answer) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
+    for pr in rows.iter_mut() {
+        let path = format!(
+            "/data/repository/p{}/commits/nodes/0/commit/statusCheckRollup/contexts/nodes",
+            pr.number
+        );
+        let Some(contexts) = answer.pointer(&path).and_then(|n| n.as_array()) else {
+            continue;
+        };
+        pr.health.checks = checks(contexts);
+        // The tally rides on the full query only: a slim row has none to
+        // correct, and gains none here.
+        if pr.meta.checks.is_some() {
+            pr.meta.checks = tally(contexts);
+        }
+    }
+}
+
+/// [`check_tally`] counted off the contexts themselves, superseded runs
+/// left out.
+fn tally(contexts: &[serde_json::Value]) -> Option<CheckTally> {
+    let mut tally = CheckTally::default();
+    for entry in latest_runs(contexts) {
+        match check_state(&check_word(entry)) {
+            CheckState::Passed => tally.passed += 1,
+            CheckState::Skipped => {}
+            CheckState::Failed => tally.failed += 1,
+            CheckState::Running => tally.pending += 1,
+        }
+    }
+    (tally.total() > 0).then_some(tally)
 }
 
 /// One GraphQL `query` about `dir`'s repo through `gh api graphql`, its
-/// `$owner` and `$repo` filled in by `gh` from the checkout and `var`
-/// (`name=value`) the one more variable it takes. `None` when `gh`
+/// `$owner` and `$repo` filled in by `gh` from the checkout and `vars`
+/// (`name=value`) any more it takes. `None` when `gh`
 /// couldn't answer within `timeout`.
 async fn repo_graphql(
     dir: &Path,
     query: &str,
-    var: &str,
+    vars: &[&str],
     timeout: std::time::Duration,
 ) -> Option<String> {
-    run_repo_graphql(dir, query, var, timeout).await.ok()
+    run_repo_graphql(dir, query, vars, timeout).await.ok()
 }
 
 /// [`repo_graphql`] with the failure kept, as [`run_gh`] keeps it.
 async fn run_repo_graphql(
     dir: &Path,
     query: &str,
-    var: &str,
+    vars: &[&str],
     timeout: std::time::Duration,
 ) -> Result<String, String> {
     let query = format!("query={query}");
-    run_gh(
-        Some(dir),
-        &[
-            "api",
-            "graphql",
-            "-F",
-            "owner={owner}",
-            "-F",
-            "repo={repo}",
-            "-F",
-            var,
-            "-f",
-            &query,
-        ],
-        timeout,
-    )
-    .await
+    let mut args = vec!["api", "graphql", "-F", "owner={owner}", "-F", "repo={repo}"];
+    for var in vars {
+        args.extend(["-F", var]);
+    }
+    args.extend(["-f", &query]);
+    run_gh(Some(dir), &args, timeout).await
 }
 
 /// The local branch a pull request's checkout is on — [`OpenPr::head`].
@@ -1347,7 +1486,7 @@ async fn commit_stats(
     number: u64,
 ) -> Option<std::collections::HashMap<String, CommitStat>> {
     let number = format!("number={number}");
-    let out = repo_graphql(dir, COMMIT_STATS_QUERY, &number, STATS_TIMEOUT).await?;
+    let out = repo_graphql(dir, COMMIT_STATS_QUERY, &[&number], STATS_TIMEOUT).await?;
     parse_commit_stats(&out)
 }
 
@@ -1474,17 +1613,14 @@ fn commits_newest_first(v: &serde_json::Value) -> Vec<PrCommit> {
     out
 }
 
-/// Every check of a `statusCheckRollup`, failed first, then running,
+/// Every standing check of a `statusCheckRollup` ([`latest_runs`]), failed first, then running,
 /// passed and skipped, each group in GitHub's order.
 fn check_list(rollup: &[serde_json::Value]) -> Vec<PrCheck> {
-    let mut out: Vec<PrCheck> = rollup
-        .iter()
+    let mut out: Vec<PrCheck> = latest_runs(rollup)
+        .into_iter()
         .map(|entry| {
             let word = check_word(entry);
-            let name = match str_at(entry, "name") {
-                name if !name.is_empty() => name,
-                _ => str_at(entry, "context"),
-            };
+            let name = check_name(entry);
             let url = ["detailsUrl", "targetUrl"]
                 .iter()
                 .map(|key| str_at(entry, key))
@@ -1833,6 +1969,124 @@ mod tests {
         )
         .expect("parsed");
         assert_eq!(bare.health, Health::default());
+    }
+
+    /// A workflow started twice on one head commit leaves both runs in the
+    /// rollup: the first's cancelled jobs and failed gate beside the
+    /// second's passes (riplo-os#1321). Only the run that started last
+    /// counts, per workflow and name; a same-named job in another
+    /// workflow is another check, and a commit status is keyed by its
+    /// context.
+    #[test]
+    fn a_superseded_run_does_not_fail_the_checks() {
+        let run = |workflow: &str, name: &str, conclusion: &str, started: &str| {
+            serde_json::json!({"__typename":"CheckRun","name":name,"workflowName":workflow,
+                "status":"COMPLETED","conclusion":conclusion,"startedAt":started})
+        };
+        let rollup = [
+            run(
+                "Verify app",
+                "MCP checks",
+                "CANCELLED",
+                "2026-10-06T16:54:36Z",
+            ),
+            run(
+                "Verify app",
+                "All checks passed",
+                "FAILURE",
+                "2026-10-06T16:54:59Z",
+            ),
+            run(
+                "Verify app",
+                "MCP checks",
+                "SUCCESS",
+                "2026-10-06T16:58:10Z",
+            ),
+            run(
+                "Verify app",
+                "All checks passed",
+                "SUCCESS",
+                "2026-10-06T17:11:36Z",
+            ),
+            run("Checks", "check", "SUCCESS", "2026-10-06T16:52:36Z"),
+            serde_json::json!({"__typename":"StatusContext","context":"Vercel","state":"SUCCESS",
+                "startedAt":"2026-10-06T16:56:20Z"}),
+        ];
+        assert_eq!(checks(&rollup), Checks::Passing);
+        let list = check_list(&rollup);
+        assert_eq!(list.len(), 4, "{list:?}");
+        assert!(list.iter().all(|c| c.state == CheckState::Passed));
+
+        // The later run is the one that stands, failing or not.
+        let regressed = [
+            run("Verify app", "e2e", "SUCCESS", "2026-10-06T16:00:00Z"),
+            run("Verify app", "e2e", "FAILURE", "2026-10-06T17:00:00Z"),
+        ];
+        assert_eq!(checks(&regressed), Checks::Failing);
+
+        // Same job name, different workflow: both stand.
+        let two = [
+            run("Lint", "check", "FAILURE", "2026-10-06T16:00:00Z"),
+            run("Checks", "check", "SUCCESS", "2026-10-06T17:00:00Z"),
+        ];
+        assert_eq!(checks(&two), Checks::Failing);
+    }
+
+    /// GitHub's server-side rollup `state` and per-state counts on a list
+    /// row count superseded runs too, so a failing row's checks are read
+    /// again and folded here. The answer's GraphQL shape names the
+    /// workflow under `checkSuite`; a row it left out keeps GitHub's word.
+    #[test]
+    fn a_failing_list_row_is_folded_again_without_superseded_runs() {
+        let row = |number: u64| OpenPr {
+            number,
+            title: String::new(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            is_draft: false,
+            health: Health {
+                conflicts: false,
+                checks: Checks::Failing,
+            },
+            head: String::new(),
+            mine: false,
+            head_sha: String::new(),
+            meta: PrMeta {
+                checks: Some(CheckTally {
+                    passed: 2,
+                    failed: 2,
+                    pending: 0,
+                }),
+                ..Default::default()
+            },
+        };
+        let mut rows = vec![row(1321), row(7)];
+        let run = |conclusion: &str, started: &str| {
+            format!(
+                r#"{{"__typename":"CheckRun","name":"All checks passed","status":"COMPLETED",
+                "conclusion":"{conclusion}","startedAt":"{started}",
+                "checkSuite":{{"workflowRun":{{"workflow":{{"name":"Verify app"}}}}}}}}"#
+            )
+        };
+        let answer = format!(
+            r#"{{"data":{{"repository":{{"p1321":{{"commits":{{"nodes":[{{"commit":{{
+            "statusCheckRollup":{{"contexts":{{"nodes":[{},{},
+            {{"__typename":"StatusContext","context":"Vercel","state":"SUCCESS","createdAt":"2026-10-06T16:56:20Z"}}
+            ]}}}}}}}}]}}}}}}}}}}"#,
+            run("FAILURE", "2026-10-06T16:54:59Z"),
+            run("SUCCESS", "2026-10-06T17:11:36Z"),
+        );
+        apply_recheck(&answer, &mut rows);
+        assert_eq!(rows[0].health.checks, Checks::Passing);
+        assert_eq!(
+            rows[0].meta.checks,
+            Some(CheckTally {
+                passed: 2,
+                failed: 0,
+                pending: 0
+            })
+        );
+        assert_eq!(rows[1].health.checks, Checks::Failing, "not in the answer");
+        assert!(failing_query(&[1321, 7]).contains("p7: pullRequest(number: 7)"));
     }
 
     /// The rollup folds the way `gh pr checks` folds it: any failure fails

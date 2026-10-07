@@ -162,17 +162,17 @@ impl Drop for Shared {
 /// `refs/pull/N/head`, which no fetch refspec stores, so `@{u}` can't
 /// resolve it: `stored` says whether one can.
 #[derive(Debug)]
-struct Tracking {
+pub(crate) struct Tracking {
     branch: String,
     remote: String,
     merge: String,
     /// `origin/feat`, or `origin/pull/7/head` for an unstored one.
-    name: String,
-    stored: bool,
+    pub(crate) name: String,
+    pub(crate) stored: bool,
 }
 
 /// What `branch` tracks; None when it tracks nothing.
-fn tracking(root: &Path, branch: &str) -> Option<Tracking> {
+pub(crate) fn tracking(root: &Path, branch: &str) -> Option<Tracking> {
     let config = |key: &str| {
         read(
             root,
@@ -205,7 +205,7 @@ fn tracking(root: &Path, branch: &str) -> Option<Tracking> {
     })
 }
 
-fn has_origin(root: &Path) -> bool {
+pub(crate) fn has_origin(root: &Path) -> bool {
     read(root, &["remote"]).is_ok_and(|out| out.lines().any(|r| r == "origin"))
 }
 
@@ -242,7 +242,7 @@ fn measure(
 }
 
 /// Commits `from` has that `tip` lacks, and the other way round.
-fn ahead_behind(root: &Path, from: &str, tip: &str) -> Result<(usize, usize), String> {
+pub(crate) fn ahead_behind(root: &Path, from: &str, tip: &str) -> Result<(usize, usize), String> {
     let range = format!("{from}...{tip}");
     let counts = read(root, &["rev-list", "--left-right", "--count", &range])?;
     let mut nums = counts.split_whitespace().map(str::parse::<usize>);

@@ -559,6 +559,7 @@ pub enum SettingKind {
     PrMergeMethod,
     PrDeleteBranch,
     PrDraft,
+    BaseFetch,
     PrAutofix,
     AutofixPreset,
     AutofixModel,
@@ -700,6 +701,7 @@ impl SettingKind {
             | SettingKind::PrMergeMethod
             | SettingKind::PrDeleteBranch
             | SettingKind::PrDraft => (2026, 10, 4),
+            SettingKind::BaseFetch => (2026, 10, 6),
             SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
             SettingKind::WorktreeContainers => (2026, 10, 5),
             SettingKind::PrAutofix
@@ -1013,6 +1015,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::PrDraft,
                 label: "New PRs as drafts",
                 hint: "A new pull request (^N in the pull requests modal) opens with its Draft box ticked",
+                group: "Pull requests",
+            },
+            SettingSpec {
+                kind: SettingKind::BaseFetch,
+                label: "Fetch base branch",
+                hint: "How often each project's root worktree fetches origin, and fast-forwards when it sits on the base branch with nothing in the way (never while an agent works there). A merge from the pull requests modal fetches at once, whatever this says",
                 group: "Pull requests",
             },
             SettingSpec {
@@ -1631,6 +1639,10 @@ pub struct Config {
     /// The new pull request form opens with its Draft box ticked. Off by
     /// default.
     pub pr_draft: bool,
+    /// **Fetch base branch** (Settings → Review): how often each project's
+    /// root fetches origin and fast-forwards on its base branch — `5m`,
+    /// `15m` or `off` (`crate::base_sync`).
+    pub base_fetch: String,
     /// **When a PR breaks** (Settings → Review): what orion does when one
     /// of your pull requests hits merge conflicts or failing checks —
     /// `off`, `ask` (the AUTOFIX modal) or `auto` (send the agent at once).
@@ -2004,6 +2016,7 @@ impl Default for Config {
             pr_merge_method: MERGE_METHODS[0].into(),
             pr_delete_branch: true,
             pr_draft: false,
+            base_fetch: crate::base_sync::INTERVALS[0].into(),
             pr_autofix: crate::autofix::Mode::Off.as_str().into(),
             autofix_preset: String::new(),
             autofix_model: String::new(),
@@ -3382,6 +3395,9 @@ impl Config {
             }
             SettingKind::PrDeleteBranch => on_off(self.pr_delete_branch).into(),
             SettingKind::PrDraft => on_off(self.pr_draft).into(),
+            SettingKind::BaseFetch => {
+                cycle_choice(&self.base_fetch, crate::base_sync::INTERVALS, 0).into()
+            }
             SettingKind::PrAutofix => self.autofix_mode().as_str().into(),
             SettingKind::AutofixPreset => blank_as(&self.autofix_preset, BUILT_IN),
             SettingKind::AutofixModel => blank_as(&self.autofix_model, DEFAULT_CHOICE),
@@ -3581,6 +3597,10 @@ impl Config {
             }
             SettingKind::PrDraft => {
                 self.pr_draft = !self.pr_draft;
+            }
+            SettingKind::BaseFetch => {
+                self.base_fetch =
+                    cycle_choice(&self.base_fetch, crate::base_sync::INTERVALS, step).into();
             }
             SettingKind::PrAutofix => {
                 self.pr_autofix = cycle_choice(&self.pr_autofix, AUTOFIX_MODES, step).into();

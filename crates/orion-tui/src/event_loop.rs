@@ -378,6 +378,9 @@ async fn main_loop(
     // A PULL's or a PUSH's git lands here.
     let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<crate::git_sync::Answer>();
     app.git_sync.tx = Some(sync_tx);
+    // A BASE SYNC's fetch and fast-forward land here.
+    let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
+    app.base_sync.tx = Some(base_tx);
     // BACKGROUND READS for the worktree views: the git and the disk behind
     // `g`, `f`, `F` and `b` run on the blocking pool and land here.
     let (views_tx, mut views_rx) =
@@ -487,6 +490,9 @@ async fn main_loop(
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
                 crate::autofix::tick(&mut app);
+                // BASE SYNC: the most overdue project's root fetched, and
+                // fast-forwarded when it sits on the base branch.
+                crate::base_sync::tick(&mut app);
                 // The selected project's open issues, on the same beat, so
                 // `i` paints rows that are at most a couple of minutes old.
                 crate::issues::refresh_selected(&mut app);
@@ -811,6 +817,11 @@ async fn main_loop(
             answer = sync_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::git_sync::land(&mut app, answer);
+                }
+            }
+            answer = base_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::base_sync::land(&mut app, answer);
                 }
             }
             answer = views_rx.recv() => {
@@ -8553,6 +8564,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.diff_start = cfg.diff_start();
     app.diff_one_at_a_time = cfg.diff_one_at_a_time();
     app.autofix_mode = cfg.autofix_mode();
+    app.base_sync.every = crate::base_sync::interval(&cfg.base_fetch);
     // Turned off, the readout goes at once; the poll stops with it.
     app.spotify_enabled = cfg.spotify;
     if !cfg.spotify && app.spotify.take().is_some() {

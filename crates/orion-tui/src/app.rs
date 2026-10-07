@@ -4596,6 +4596,9 @@ pub struct App {
     /// The PULLs and PUSHes running, and where their answers go
     /// (`crate::git_sync`).
     pub git_sync: crate::git_sync::Shared,
+    /// BASE SYNC: each project's root fetched, and fast-forwarded on its
+    /// base branch, on the **Fetch base branch** beat (`crate::base_sync`).
+    pub base_sync: crate::base_sync::Shared,
     /// Latest daemon metrics reading (daemon + per-session process trees),
     /// for the footer's memory/session readout. Refreshed on a slow poll;
     /// the metrics modal shares the same replies at a faster cadence.
@@ -4838,6 +4841,7 @@ impl App {
             deleting: std::collections::HashSet::new(),
             branch_switch: Default::default(),
             git_sync: Default::default(),
+            base_sync: Default::default(),
             last_metrics: None,
             client_rss_bytes: 0,
             splash_epoch: std::time::Instant::now(),

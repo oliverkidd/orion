@@ -1711,7 +1711,13 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             project,
             ticket,
             result,
-        } => land_done(app, &project, ticket, result, "merge"),
+        } => {
+            // Origin's base just moved: bring the project's root after it.
+            if result.is_ok() {
+                crate::base_sync::request_now(app, &project);
+            }
+            land_done(app, &project, ticket, result, "merge")
+        }
         Answer::Closed {
             project,
             ticket,
