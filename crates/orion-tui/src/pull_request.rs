@@ -1202,6 +1202,13 @@ pub struct PrDetail {
     /// login, or a team's name.
     #[serde(default)]
     pub review_requests: Vec<String>,
+    /// When it was opened (`createdAt`, RFC 3339) — the age the page's
+    /// sentence ends on. Empty in a cache written before it was asked.
+    #[serde(default)]
+    pub created_at: String,
+    /// Its labels, in GitHub's colours, at the sentence's right end.
+    #[serde(default)]
+    pub labels: Vec<PrLabel>,
 }
 
 impl PrDetail {
@@ -1389,12 +1396,10 @@ pub struct CheckCounts {
 }
 
 impl CheckCounts {
-    pub fn of(checks: &[PrCheck]) -> Self {
-        let mut out = Self {
-            total: checks.len(),
-            ..Self::default()
-        };
+    pub fn of<'a>(checks: impl IntoIterator<Item = &'a PrCheck>) -> Self {
+        let mut out = Self::default();
         for check in checks {
+            out.total += 1;
             match check.state {
                 CheckState::Failed => out.failed += 1,
                 CheckState::Running => out.running += 1,
@@ -1532,7 +1537,7 @@ fn apply_commit_stats(
 /// The fields [`detail`] asks `gh pr view` for.
 pub(crate) const DETAIL_FIELDS: &str = "number,url,title,state,isDraft,mergeable,\
      statusCheckRollup,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,\
-     body,comments,reviews,files,commits,reviewDecision,reviewRequests";
+     body,comments,reviews,files,commits,reviewDecision,reviewRequests,createdAt,labels";
 
 fn parse_detail(json: &str) -> Option<PrDetail> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
@@ -1564,6 +1569,15 @@ fn parse_detail(json: &str) -> Option<PrDetail> {
                     .map(|key| str_at(r, key))
                     .find(|name| !name.is_empty())
             })
+            .collect(),
+        created_at: str_at(&v, "createdAt"),
+        labels: arr_at(&v, "labels")
+            .iter()
+            .map(|l| PrLabel {
+                name: str_at(l, "name"),
+                color: str_at(l, "color"),
+            })
+            .filter(|l| !l.name.is_empty())
             .collect(),
     })
 }

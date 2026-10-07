@@ -84,6 +84,15 @@ pub fn ago_label(delta_ms: i64) -> String {
     }
 }
 
+/// [`ago_label`] for a column of ages, `delta_secs` ago: `3d`, `21m`,
+/// `now` — the word `ago` left to the column's header.
+pub fn ago_short(delta_secs: i64) -> String {
+    match ago_label(delta_secs.max(0).saturating_mul(1000)).as_str() {
+        "just now" => "now".into(),
+        label => label.trim_end_matches(" ago").to_string(),
+    }
+}
+
 pub(crate) fn store_path() -> PathBuf {
     #[cfg(test)]
     {

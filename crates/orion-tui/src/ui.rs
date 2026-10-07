@@ -3494,6 +3494,85 @@ pub(crate) fn panel_block(title: &str, focused: bool, th: Theme) -> Block<'_> {
     }
 }
 
+/// [`panel_block`] with a title of styled spans — the PULL REQUEST PAGE's
+/// state, number and title — rather than one word: the spans keep their
+/// own colours, focused or not, and the border's colour says which panel
+/// has the keys.
+pub(crate) fn panel_block_spans(
+    title: Vec<Span<'static>>,
+    focused: bool,
+    th: Theme,
+) -> Block<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(title);
+    spans.push(Span::raw(" "));
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { th.accent } else { th.dim }))
+        .title(Line::from(spans))
+}
+
+/// The cells [`border_tail`] takes on the top border for `tail`: a cell
+/// of air, the tail and two cells after it when there is one, the `↗`, a
+/// cell of air.
+pub(crate) fn border_tail_width(tail: &[Span]) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let w: usize = tail.iter().map(|s| s.content.width()).sum();
+    let gap = if w > 0 { 2 } else { 0 };
+    (1 + w + gap + 1 + 1) as u16
+}
+
+/// The right end of a reading pane's top border: `tail` — the PULL
+/// REQUEST PAGE's `+106 −4` — then the `↗` that opens it in the browser,
+/// pinned right over the corner's neighbours once the block has drawn.
+/// The `↗` is the BUTTON (`HitTarget::ModalBrowser`): its rect comes back
+/// for the modal to hit-test, and `hovered` lights it in the accent,
+/// underlined. Nothing is drawn, and `Rect::default()` comes back, when
+/// the frame is too narrow to hold it a cell clear of `title_w`.
+pub(crate) fn border_tail(
+    f: &mut Frame,
+    frame: Rect,
+    tail: Vec<Span<'static>>,
+    title_w: u16,
+    hovered: bool,
+    th: Theme,
+) -> Rect {
+    let w = border_tail_width(&tail);
+    if frame.height == 0 || frame.width < 1 + title_w + 1 + w + 1 {
+        return Rect::default();
+    }
+    let x = frame.x + frame.width - 1 - w;
+    let button = if hovered {
+        Style::default()
+            .fg(th.accent)
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(th.muted)
+    };
+    let mut spans = vec![Span::raw(" ")];
+    if !tail.is_empty() {
+        spans.extend(tail);
+        spans.push(Span::raw("  "));
+    }
+    spans.extend([Span::styled("↗", button), Span::raw(" ")]);
+    f.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect {
+            x,
+            y: frame.y,
+            width: w,
+            height: 1,
+        },
+    );
+    Rect {
+        x: x + w - 2,
+        y: frame.y,
+        width: 1,
+        height: 1,
+    }
+}
+
 /// The `↗ open in browser` BUTTON's label, spaces and all.
 pub(crate) const BROWSER_BUTTON: &str = " ↗ open in browser ";
 
@@ -3816,31 +3895,10 @@ pub(crate) fn render_row(
     render_button(f, area, vec![spans], selected, focused, th, 0, th.accent);
 }
 
-/// [`render_row`] for an entry several lines tall — a title over its meta
-/// line: the selection fill and the `▌` marker run down every line.
-pub(crate) fn render_row_lines(
-    f: &mut Frame,
-    area: Rect,
-    lines: Vec<Vec<Span>>,
-    selected: bool,
-    focused: bool,
-    th: Theme,
-) {
-    render_button(f, area, lines, selected, focused, th, 0, th.accent);
-}
-
 /// `parts` joined by a faint ` · `, as many as fit in `budget` from the
-/// left, under a two-cell indent that lines them up with the title.
-pub(crate) fn fit_parts(
-    parts: Vec<Vec<Span<'static>>>,
-    budget: usize,
-    th: Theme,
-) -> Vec<Span<'static>> {
-    fit_parts_at(parts, budget, th).0
-}
-
-/// [`fit_parts`], with the column (from the spans' start) and width of
-/// each part that fit — what a click on one of them hit-tests.
+/// left, under a two-cell indent that lines them up with the title; and
+/// the column (from the spans' start) and width of each part that fit —
+/// what a click on one of them hit-tests.
 pub(crate) fn fit_parts_at(
     parts: Vec<Vec<Span<'static>>>,
     budget: usize,
@@ -3958,42 +4016,13 @@ fn render_button<'a>(
 /// that knows how wide the prose wrapped. The tab labels and the listed
 /// rows go into the hit map ahead of the pane, for the mouse.
 fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
+    use unicode_width::UnicodeWidthStr;
     let th = app.theme;
     let Some(pr) = app.previewed_pr() else {
         return;
     };
     let detail = app.pr_detail.get(&pr.url).cloned();
     let failed = app.pr_detail_failed.contains(&pr.url);
-
-    let left = vec![
-        Span::styled(" · ".to_string(), Style::default().fg(th.dim)),
-        Span::styled(format!("#{}", pr.number), Style::default().fg(th.muted)),
-    ];
-    // The right-hand tag is the pane's state word, the same slot the PTY
-    // view uses for "exited" / "scroll N" / "INPUT". A loaded PR needs none:
-    // its state is the first thing under its title.
-    let right = match (&detail, failed) {
-        (Some(_), _) => None,
-        (None, true) => Some(Span::styled(
-            "unavailable".to_string(),
-            Style::default().fg(th.err).add_modifier(Modifier::BOLD),
-        )),
-        (None, false) => Some(Span::styled(
-            "loading…".to_string(),
-            Style::default().fg(th.dim),
-        )),
-    };
-    let inner = titled_frame(f, area, "PULL REQUEST", left, right, focused, th);
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(1),
-        ..inner
-    };
-    // Nothing in this pane is a PTY, so the link/file scanners have nothing
-    // to find — clear them or ⌥click would still hit last frame's hits.
-    app.term_links = Vec::new();
-    app.term_file_links = Vec::new();
-
     let title = pr
         .label
         .strip_prefix(&format!("#{}", pr.number))
@@ -4010,6 +4039,41 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         diff_key: key_hint(app, Action::GitDiff),
         now: orion_core::clock::now_secs() as i64,
     };
+
+    // The header says what the modal's border does — where it stands, the
+    // number and the title — with what it changes at the right; until the
+    // body lands the right-hand tag is the pane's state word instead, the
+    // slot the PTY view uses for "exited" / "scroll N" / "INPUT".
+    let (head, counts) = crate::pr_preview::border(&input, false, th);
+    let right = match (&detail, failed) {
+        (Some(_), _) => counts,
+        (None, true) => vec![Span::styled(
+            "unavailable".to_string(),
+            Style::default().fg(th.err).add_modifier(Modifier::BOLD),
+        )],
+        (None, false) => vec![Span::styled(
+            "loading…".to_string(),
+            Style::default().fg(th.dim),
+        )],
+    };
+    let right_w: usize = right.iter().map(|s| s.content.width()).sum();
+    const NAME: &str = "PULL REQUEST";
+    let mut left = vec![Span::styled(" · ".to_string(), Style::default().fg(th.dim))];
+    left.extend(head);
+    // `  PULL REQUEST` before it and the tag, a cell of air each side, after.
+    let room = (area.width as usize).saturating_sub(2 + NAME.len() + right_w + 3);
+    let left = crate::pr_preview::fit(left, room).spans;
+    let inner = titled_frame(f, area, NAME, left, right, focused, th);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    // Nothing in this pane is a PTY, so the link/file scanners have nothing
+    // to find — clear them or ⌥click would still hit last frame's hits.
+    app.term_links = Vec::new();
+    app.term_file_links = Vec::new();
+
     let page = crate::pr_preview::page(&input, &app.pr_tabs, focused, inner.width as usize, th);
     let mut tabs = std::mem::take(&mut app.pr_tabs);
     let drawn = crate::pr_preview::draw(f, inner, &page, &mut tabs, app.pr_preview_scroll);
@@ -4042,7 +4106,7 @@ fn draw_issue_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         Span::styled(" · ".to_string(), Style::default().fg(th.dim)),
         Span::styled(format!("#{}", issue.number), Style::default().fg(th.muted)),
     ];
-    let inner = titled_frame(f, area, "ISSUE", left, None, focused, th);
+    let inner = titled_frame(f, area, "ISSUE", left, Vec::new(), focused, th);
     let inner = Rect {
         x: inner.x + 1,
         width: inner.width.saturating_sub(1),
@@ -4089,7 +4153,7 @@ fn draw_cloud_session(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         Span::styled(" · ".to_string(), Style::default().fg(th.dim)),
         Span::styled(cloud.name.clone(), Style::default().fg(th.muted)),
     ];
-    let inner = titled_frame(f, area, "CLAUDE CLOUD", left, None, focused, th);
+    let inner = titled_frame(f, area, "CLAUDE CLOUD", left, Vec::new(), focused, th);
     let inner = Rect {
         x: inner.x + 1,
         width: inner.width.saturating_sub(1),
@@ -4173,7 +4237,15 @@ fn terminal_frame(
     focused: bool,
     th: Theme,
 ) -> Rect {
-    titled_frame(f, area, "TERMINAL", left, right, focused, th)
+    titled_frame(
+        f,
+        area,
+        "TERMINAL",
+        left,
+        right.into_iter().collect(),
+        focused,
+        th,
+    )
 }
 
 /// The same frame under another name, for the pane's other tenants — the
@@ -4184,7 +4256,7 @@ fn titled_frame(
     area: Rect,
     title: &str,
     left: Vec<Span<'static>>,
-    right: Option<Span<'static>>,
+    right: Vec<Span<'static>>,
     focused: bool,
     th: Theme,
 ) -> Rect {
@@ -4198,10 +4270,11 @@ fn titled_frame(
         let mut spans = vec![Span::styled(format!("  {title}"), header_style)];
         spans.extend(left);
         f.render_widget(Paragraph::new(Line::from(spans)), r);
-        if let Some(tag) = right {
+        if !right.is_empty() {
+            let mut tag = right;
+            tag.push(Span::raw(" "));
             f.render_widget(
-                Paragraph::new(Line::from(vec![tag, Span::raw(" ")]))
-                    .alignment(ratatui::layout::Alignment::Right),
+                Paragraph::new(Line::from(tag)).alignment(ratatui::layout::Alignment::Right),
                 r,
             );
         }
@@ -5068,9 +5141,35 @@ pub(crate) fn layout_sections(
     prev: usize,
     area: Rect,
 ) -> (usize, Vec<(ListEntry, Rect)>) {
+    lay_out_sections(entries, row_h, false, cursor_row, prev, area)
+}
+
+/// [`layout_sections`] with a blank line over every header but the
+/// first, so the sections stand apart as the main page's bands do. The
+/// header's rect takes the blank: its text goes on the rect's last line.
+pub(crate) fn layout_sections_spaced(
+    entries: &[ListEntry],
+    row_h: impl Fn(usize) -> u16,
+    cursor_row: usize,
+    prev: usize,
+    area: Rect,
+) -> (usize, Vec<(ListEntry, Rect)>) {
+    lay_out_sections(entries, row_h, true, cursor_row, prev, area)
+}
+
+fn lay_out_sections(
+    entries: &[ListEntry],
+    row_h: impl Fn(usize) -> u16,
+    spaced: bool,
+    cursor_row: usize,
+    prev: usize,
+    area: Rect,
+) -> (usize, Vec<(ListEntry, Rect)>) {
     let heights: Vec<u16> = entries
         .iter()
-        .map(|e| match e {
+        .enumerate()
+        .map(|(i, e)| match e {
+            ListEntry::Header { .. } if spaced && i > 0 => HEADER_H + 1,
             ListEntry::Header { .. } => HEADER_H,
             ListEntry::Row(v) => row_h(*v),
         })
@@ -5086,6 +5185,50 @@ pub(crate) fn layout_sections(
     let (start, drawn) = stacked_rows(&heights, first, cursor, prev, area);
     let drawn = drawn.into_iter().map(|(i, r)| (entries[i], r)).collect();
     (start, drawn)
+}
+
+/// A rule that names what is under it, in the shape a worktree band's rule
+/// takes: ` ── Name ──────── right ── `, exactly `width` cells. The name in
+/// `name_color`, bold; `right` (a count, a tally) at the right end, left
+/// off when the width cannot hold it beside the name; the dashes in the
+/// edge gray.
+pub(crate) fn section_rule(
+    name: &str,
+    name_color: Color,
+    right: Vec<Span<'static>>,
+    width: usize,
+    th: Theme,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let edge = Style::default().fg(th.edge);
+    let name = truncate(name, width.saturating_sub(8).max(1));
+    let used = 4 + name.width() + 1;
+    let right_w: usize = right.iter().map(|s| s.content.width()).sum();
+    // ` right ── `, when there is room for it and two dashes before it.
+    let tail_w = if right_w > 0 && used + 2 + 1 + right_w + 4 <= width {
+        1 + right_w + 4
+    } else {
+        0
+    };
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("──", edge),
+        Span::raw(" "),
+        Span::styled(
+            name,
+            Style::default().fg(name_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled("─".repeat(width.saturating_sub(used + tail_w.max(1))), edge),
+    ];
+    if tail_w > 0 {
+        spans.push(Span::raw(" "));
+        spans.extend(right);
+        spans.extend([Span::raw(" "), Span::styled("──", edge), Span::raw(" ")]);
+    } else {
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
 }
 
 /// Which row a click at `pos` lands on, by the rects the last draw laid
@@ -5191,6 +5334,27 @@ pub fn truncate(s: &str, max: usize) -> String {
         out.push('…');
         out
     }
+}
+
+/// `text` cut to `max` cells from the left, keeping its end — a path's
+/// file name, a branch's last words — behind a `…`.
+pub(crate) fn truncate_left(text: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut used = 1;
+    for ch in text.chars().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > max {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out.into_iter().rev().collect()
 }
 
 #[cfg(test)]

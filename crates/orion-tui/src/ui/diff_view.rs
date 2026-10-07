@@ -25,8 +25,8 @@
 
 use super::{
     below_first_row, centered_rect_pct, empty_list_row, fuzzy_highlight_spans, panel_block,
-    render_button, render_row, row_rect, search_line, truncate, visible_positions, NO_MATCHES,
-    SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    render_button, render_row, row_rect, search_line, truncate, truncate_left, visible_positions,
+    NO_MATCHES, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 use crate::app::{App, DiffFocus, DiffView, Overlay};
 use crate::commit_list::{CommitList, Row, Showing};
@@ -773,26 +773,6 @@ fn path_tail(path: &str, positions: &[usize], max: usize) -> (String, Vec<usize>
         .map(|p| p - cut + 1)
         .collect();
     (shown, moved)
-}
-
-/// `text` cut to `max` cells from the left, keeping its end — a path's
-/// file name — behind a `…`.
-fn truncate_left(text: &str, max: usize) -> String {
-    if text.width() <= max {
-        return text.to_string();
-    }
-    let mut out: Vec<char> = Vec::new();
-    let mut used = 1;
-    for ch in text.chars().rev() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > max {
-            break;
-        }
-        used += w;
-        out.push(ch);
-    }
-    out.push('…');
-    out.into_iter().rev().collect()
 }
 
 #[cfg(test)]
