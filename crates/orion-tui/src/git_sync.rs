@@ -542,7 +542,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
 }
 
 /// `⌂ main` or `⎇ feat`: the checkout as its band's rule names it.
-fn label(w: &Worktree) -> String {
+pub(crate) fn label(w: &Worktree) -> String {
     let mark = if w.is_main { '⌂' } else { '⎇' };
     format!("{mark} {}", w.branch)
 }

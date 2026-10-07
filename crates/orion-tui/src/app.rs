@@ -4378,6 +4378,9 @@ pub struct App {
     /// Stacks modal's row reads until the Ack or Error. The DAEMON polls
     /// again before it acks, so the listing that follows shows the result.
     pub stack_pending: HashMap<String, (orion_core::compose::StackVerb, u64)>,
+    /// Checkouts whose run was sent a `^C` by `⌘⇧S`: the next press kills
+    /// it, and says so.
+    pub runs_stopping: std::collections::HashSet<WorktreeId>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -4788,6 +4791,7 @@ impl App {
             stacks: None,
             stacks_error: None,
             stack_pending: HashMap::new(),
+            runs_stopping: Default::default(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
             attention_walk: None,
@@ -5900,13 +5904,28 @@ impl App {
 
     /// [`App::visible_worktrees`], as indices into `tree.worktrees`.
     fn build_visible_worktrees(&self) -> Vec<usize> {
-        let Some(project) = self.selected_project() else {
-            return vec![];
-        };
+        match self.selected_project() {
+            Some(project) => self.worktree_order(&project.id),
+            None => vec![],
+        }
+    }
+
+    /// `project`'s checkouts in the order its BANDS stand on the grid —
+    /// the root first, then the most recently worked in — whichever
+    /// project is selected; the STACKS modal lists every project's so.
+    pub fn worktrees_in_band_order(&self, project: &ProjectId) -> Vec<&Worktree> {
+        self.worktree_order(project)
+            .into_iter()
+            .map(|i| &self.tree.worktrees[i])
+            .collect()
+    }
+
+    /// [`App::worktrees_in_band_order`], as indices into `tree.worktrees`.
+    fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
         let now = now_ms();
         let worktrees = &self.tree.worktrees;
         let mut rows: Vec<usize> = (0..worktrees.len())
-            .filter(|&i| worktrees[i].project_id == project.id)
+            .filter(|&i| &worktrees[i].project_id == project)
             .collect();
         // Rolled up once for every checkout rather than re-walked per
         // comparison the sort makes (`worktree_recencies`).

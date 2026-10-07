@@ -2983,7 +2983,7 @@ pub(crate) fn tab_hit(hits: &[(u16, u16)], x: u16) -> Option<usize> {
 }
 
 /// The rule under a tab strip, the modal's inner width.
-fn strip_rule(width: u16, th: Theme) -> Line<'static> {
+pub(crate) fn strip_rule(width: u16, th: Theme) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width as usize),
         Style::default().fg(th.muted),

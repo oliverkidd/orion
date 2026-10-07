@@ -111,7 +111,7 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `autofix_model` | string | `""` | Review | **Autofix model**: the autofix agent's model, from the default agent's list (the Agents tab's **Agent**); empty, or a model that agent no longer offers, is its own default. |
 | `autofix_effort` | string | `""` | Review | **Autofix effort**: the same for its effort, fitted to the model. |
 | `card_line_changes` | bool | `false` | — (retired) | Through 0.37, **Card line counts** (Settings → Appearance): on, each GRID card followed its checkout's changed-file count with the lines behind it. Every card does now — `↳ feat +3 files +120 -45`, the added in the DIFF VIEWER's green and the removed in its red, counted as the DIFF VIEWER shows them (tracked files against HEAD, staged or not, and every line of an untracked file as added; a binary file, or an untracked one over 1 MiB, adds nothing) by one `git diff --numstat` beside each `git status` the file count already runs; on a narrow card the word `files` goes first, then the lines, before the branch gives up a letter — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `projects` | object | `{}` | Project | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Project** tab — `{"projects": {"/Users/me/src/app": {"run_command": "npm run dev", "open_command": "open http://localhost:3000"}}}`. Two rows: **Run command** (`run_command`, string, default `""`) is the RUN COMMAND **Run** (a card's or the project tab's right-click menu) starts in *that project's* worktrees — the same shell line a `.orion.json` `run` would carry, and the way to set one without committing a file; while it is set, **Run** runs it and never opens the file, and empty (shown as `.orion.json`) hands the decision back to the checkout's PROJECT FILE, so a project that has one needs nothing here. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer puts `.orion.json` back. The DAEMON reads it fresh at each **Run**. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same precedence over the file's `open` and the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. The tab edits the selected project and names it on its first line; with no project in the tree its rows read `n/a`. A project with no entry reads as the defaults (an empty command in each row), and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty `run_command` or `open_command` is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
+| `projects` | object | `{}` | Project | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Project** tab — `{"projects": {"/Users/me/src/app": {"run_command": "npm run dev", "open_command": "open http://localhost:3000"}}}`. Two rows: **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees — the same shell line a `.orion.json` `run` would carry, and the way to set one without committing a file; while it is set, **Start stack** runs it and never opens the file, and empty (shown as `.orion.json`) hands the decision back to the checkout's PROJECT FILE, so a project that has one needs nothing here. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer puts `.orion.json` back. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same precedence over the file's `open` and the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. The tab edits the selected project and names it on its first line; with no project in the tree its rows read `n/a`. A project with no entry reads as the defaults (an empty command in each row), and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty `run_command` or `open_command` is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
 | `hide_root_worktree` | bool | `false` | — (retired) | Through 0.27 one switch for every project (**Hide root worktree**, Settings → Experimental), then through 0.35 the fallback for a project whose `projects` entry had no **Hide root worktree** row of its own: on, that project's ROOT WORKTREE was left out of everything the grid launched into. The root is always listed now — a launch that must not land in the shared checkout cuts a fresh worktree instead (**+ new worktree** in the QUICK PROMPT's WORKTREE PICKER, `⌘.`) — so this build never reads the key, here or inside an entry, and no tab edits it; both are still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `hide_projects` | bool | `false` | — (retired) | Through 0.37, **Projects panel** (Settings → Appearance): on, the Projects panel of the old three-panel layout started collapsed to its rail. The GRID has no panels, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `hide_worktrees` | bool | `false` | — (retired) | Through 0.37, **Worktrees panel**: the same switch for the Worktrees panel. Never read, no row, loaded and written back as stored. |
@@ -616,17 +616,21 @@ The PROJECT FILE tells orion how a repository is run. Commit it at the repo root
 
 Both keys are optional shell command lines, and both run in the selected worktree's checkout:
 
-- **`run`** — the RUN COMMAND. **Run** in a card's right-click menu (or the project tab's) starts it;
-  the same row, now **Stop run**, stops it. The DAEMON runs it in a RUN TERMINAL: your login shell
+- **`run`** — the RUN COMMAND: how a worktree's stack starts. `⌘⇧S` on the grid, or **Start stack** in
+  a card's right-click menu (or the project tab's), starts it and moves the pane onto it; the same key,
+  or the row now **Stop stack**, stops it. The DAEMON runs it in a RUN TERMINAL: your login shell
   (`$SHELL -l -i -c`, the wrapper an agent launch uses, so `npm`, `bun` or `mise` resolve the way they
   do typed) running that line and nothing else. Its process is the worktree's RUNNING state — it is a
   terminal card in the worktree's band, its `▶` lit while the process lives, showing the run's last
   lines like any terminal card. Like every session it outlives
-  the TUI and every client sees it, and the idle reaper never takes it. Stopping kills the whole process
-  tree and removes the row. A command that exits on its own leaves its row behind, dimmed; attaching it
-  replays how the run ended, and nothing but **Run** runs it again — not an attach, not the prewarm
-  sweep. There is one run per worktree: a second client's **Run** on a worktree already running never
-  starts another.
+  the TUI and every client sees it, and the idle reaper never takes it. Stopping sends the run a `^C`,
+  as you would at a terminal, so its own trap winds down what it started — a compose stack, a dev
+  server — in the pane; a second stop, or two minutes without it exiting, kills the whole process tree
+  and removes the row. A command that exits on its own, or on its `^C`, leaves its row behind, dimmed;
+  attaching it replays how the run ended, and nothing but **Start stack** runs it again — not an
+  attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
+  already running never starts another. With no run command anywhere, a worktree whose checkout has a
+  compose stack runs `docker compose start` on it in the same terminal instead.
 - **`open`** — the OPEN COMMAND. `⌘O` → **Open command** on a worktree fires it once, from the TUI
   rather than the DAEMON, since what it opens — a browser tab, an editor — belongs on the machine you
   are sitting at. It runs through `$SHELL -c` with its output discarded, and orion does not wait for
@@ -634,7 +638,7 @@ Both keys are optional shell command lines, and both run in the selected worktre
   right-click menu has **Open** too, and **Open checkout in editor** can be given a key of its own in
   Settings → Hotkeys.
 
-The file is read fresh at every press, so an edit applies on the next **Run** or **Open command**. Orion looks
+The file is read fresh at every press, so an edit applies on the next **Start stack** or **Open command**. Orion looks
 in the worktree's own checkout first, so a branch can carry commands of its own, and falls back to the
 project's main checkout, so a worktree cut before the file was committed still runs. The first file found
 is the whole answer: a worktree's file with no `open` does not borrow the main checkout's. A missing
@@ -644,7 +648,7 @@ keys are ignored.
 Both commands have a second home: **Run command** and **Open command** on the SETTINGS OVERLAY's
 Project tab (`s`), which keep them in `config.json` under the project's `projects` entry instead of in
 the repository — for a project you would rather not commit a file to, or one whose commands are yours
-alone. Set, the row is what **Run** runs, or `Shift+Enter` opens, in every worktree of that project, and the
+alone. Set, the row is what **Start stack** runs, or `Shift+Enter` opens, in every worktree of that project, and the
 file is not consulted for that command; empty, the file decides as above. They are one project's
 settings, so each project can run and open its own way, and the footer names both places when neither
 has the command. See `projects` in [Every setting](#every-setting).

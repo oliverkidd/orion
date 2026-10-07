@@ -50,6 +50,11 @@ impl StackWatch {
         self.last.lock().unwrap().event()
     }
 
+    /// The stacks the last poll found; None while docker isn't answering.
+    pub fn stacks(&self) -> Option<Vec<Stack>> {
+        self.last.lock().unwrap().stacks.clone()
+    }
+
     /// Ask the poller for a fresh listing now — after a verb changed one.
     pub fn poke(&self) {
         self.poke.notify_one();

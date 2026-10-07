@@ -159,13 +159,14 @@
   checkout. See [Configuration](configuration.md#worktree-hooks).
 - **A worktree runs its own project — the PROJECT FILE.** A committed `.orion.json` names a `run` and
   an `open` command; the Project tab of the SETTINGS OVERLAY can hold either instead, per project in
-  `config.json`, and wins over the file while it is set. **Run** in a card's or the project tab's
-  right-click menu has the DAEMON start `run` in a RUN TERMINAL — a terminal row
+  `config.json`, and wins over the file while it is set. `⌘⇧S`, or **Start stack** in a card's or the
+  project tab's right-click menu, has the DAEMON start `run` in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
-  card's `▶`; **Stop run** kills the process tree and drops the row. The idle reaper and the prewarm
+  card's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down in view, and
+  kills the process tree and drops the row only on a second stop or after two minutes. The idle reaper and the prewarm
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
-  the ending instead of respawning — a command starts only when you pick **Run**. `⌘O` → **Open command** runs `open`
+  the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#the-project-file-orionjson).
 - **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree. Claude's picker can also dispatch a one-shot Cloud task as

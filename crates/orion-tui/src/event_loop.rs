@@ -4118,6 +4118,11 @@ fn dispatch_action(
         Action::Usage => crate::usage::open(app),
         Action::Stacks => crate::stacks::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
+        Action::ToggleStack => {
+            if let Some(id) = crate::git_sync::target(app) {
+                toggle_stack_in(app, &id, out);
+            }
+        }
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
         // the first column. Landing on the pane takes the input lock:
@@ -4263,18 +4268,13 @@ fn dispatch_action(
                     open_prompt(app, PromptKind::RenameProject { id });
                 }
             }
-            // Nothing on the Worktrees panel is renamed, so `r` is RUN
-            // there: the checkout's `.orion.json` RUN COMMAND, started or
-            // stopped. The KEY COMBO DISPLAY says which, not "Rename".
+            // Nothing on the Worktrees panel is renamed, so `r` is `⌘⇧S`
+            // there: the checkout's stack, started or stopped. The KEY
+            // COMBO DISPLAY says which, not "Rename".
             Focus::Worktrees => {
-                let running = app
+                let does = app
                     .selected_worktree()
-                    .is_some_and(|w| app.worktree_running(&w.id));
-                let does = if running {
-                    "Stop the run"
-                } else {
-                    "Run worktree"
-                };
+                    .map_or("Start stack", |w| crate::stacks::menu_label(app, &w.id));
                 crate::key_combo::note(app, &[*chord], Some(does));
                 toggle_run(app, out);
             }
@@ -5347,32 +5347,81 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
     if app.selected_worktree_pr().is_some() {
         return;
     }
-    let Some(w) = app.selected_worktree().cloned() else {
+    let Some(id) = app.selected_worktree().map(|w| w.id.clone()) else {
         return;
     };
-    toggle_run_in(app, &w, out);
+    toggle_stack_in(app, &id, out);
 }
 
-/// Ask the DAEMON to start `worktree`'s run, or to stop it while it runs.
-fn toggle_run_in(app: &mut App, worktree: &orion_core::Worktree, out: &mut Vec<ClientRequest>) {
-    if app.is_placeholder_worktree(&worktree.id) {
+/// `⌘⇧S`, a menu's **Start stack** / **Stop stack**, `Enter` in STACKS:
+/// start `worktree`'s stack, or stop it.
+///
+/// Starting runs its RUN COMMAND in its RUN TERMINAL (the DAEMON falls
+/// back to `docker compose start` on the checkout's stack when none is
+/// set), and the pane follows it there to watch it boot. Stopping sends
+/// that run a `^C`, so its own trap winds the stack down in view — a
+/// second press kills it — and a stack started outside orion, with no
+/// run to interrupt, gets `docker compose stop`.
+pub(crate) fn toggle_stack_in(
+    app: &mut App,
+    worktree: &orion_core::WorktreeId,
+    out: &mut Vec<ClientRequest>,
+) {
+    if app.is_placeholder_worktree(worktree)
+        || !app.tree.worktrees.iter().any(|w| &w.id == worktree)
+    {
         return;
     }
-    let start = !app.worktree_running(&worktree.id);
-    let id = worktree.id.clone();
-    send(app, out, |req_id| {
-        if start {
-            ClientRequest::StartRun {
-                req_id,
-                worktree: id,
-            }
+    let id = worktree.clone();
+    // A run that has since ended, here or from another client, is no
+    // longer being stopped.
+    let ended: Vec<_> = app
+        .runs_stopping
+        .iter()
+        .filter(|w| !app.worktree_running(w))
+        .cloned()
+        .collect();
+    for w in ended {
+        app.runs_stopping.remove(&w);
+    }
+    if app.worktree_running(&id) {
+        let again = !app.runs_stopping.insert(id.clone());
+        let key = crate::hints::key_or(
+            &app.keymap,
+            crate::keymap::Action::ToggleStack,
+            "Stop stack",
+        );
+        app.flash = Some(crate::flash::Flash::note(if again {
+            "killing the run".to_string()
         } else {
-            ClientRequest::StopRun {
-                req_id,
-                worktree: id,
-            }
-        }
-    });
+            format!("stopping — it winds down in its terminal; {key} again kills it")
+        }));
+        send(app, out, |req_id| ClientRequest::StopRun {
+            req_id,
+            worktree: id,
+        });
+        return;
+    }
+    let up = app
+        .stack_of(&id)
+        .filter(|s| s.state() == orion_core::compose::StackState::Running)
+        .map(|s| s.project.clone());
+    if let Some(project) = up {
+        crate::stacks::send(app, out, &project, orion_core::compose::StackVerb::Stop);
+        return;
+    }
+    send_with(
+        app,
+        out,
+        PendingIntent::AttachCreated {
+            focus: false,
+            placeholder: None,
+        },
+        |req_id| ClientRequest::StartRun {
+            req_id,
+            worktree: id,
+        },
+    );
 }
 
 /// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
@@ -6931,11 +6980,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         return items;
     };
     items.push(MenuItem::new(
-        if app.worktree_running(&w.id) {
-            "Stop run"
-        } else {
-            "Run"
-        },
+        crate::stacks::menu_label(app, &w.id),
         MenuAction::ToggleRun(w.id.clone()),
     ));
     items.push(MenuItem::new(
@@ -7170,11 +7215,7 @@ pub(crate) fn menu_quick_return(menu: &ContextMenu) -> Option<crate::quick_promp
 
 /// A checkout's context menu: what a right-click on an EMPTY BAND opens.
 fn worktree_menu_items(app: &App, w: &orion_core::Worktree) -> Vec<MenuItem> {
-    let run = if app.worktree_running(&w.id) {
-        "Stop run"
-    } else {
-        "Run"
-    };
+    let run = crate::stacks::menu_label(app, &w.id);
     let mut items = vec![
         MenuItem::new("New agent", MenuAction::NewAgent(w.id.clone())),
         MenuItem::new("New terminal", MenuAction::NewTerminal(w.id.clone())),
@@ -9835,11 +9876,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 delete_link(app, &row);
             }
         }
-        MenuAction::ToggleRun(id) => {
-            if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
-                toggle_run_in(app, &w, out);
-            }
-        }
+        MenuAction::ToggleRun(id) => toggle_stack_in(app, &id, out),
         MenuAction::OpenWorktree(id) => {
             if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
                 open_worktree(app, &w);
@@ -29724,20 +29761,26 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.status_anim_active());
     }
 
-    /// `⇧S` lists every stack — the selected project's first, the cursor
-    /// on the selected worktree's — and Enter starts a stopped one; its
-    /// row says so until the Ack.
+    /// `⇧S` has a tab per project — the selected one's first, on the
+    /// selected worktree — listing every checkout in its bands' order,
+    /// with a stack or without; then a tab for the stacks orion can't
+    /// place. Enter on a checkout starts it as `⌘⇧S` does, its run; on a
+    /// stack alone, by compose, its row saying so until the Ack.
     #[test]
-    fn stacks_modal_lists_every_stack_and_enter_toggles_one() {
+    fn stacks_modal_has_a_tab_per_project_and_one_for_the_rest() {
+        use crate::stacks::TabId;
         use orion_core::compose::StackVerb;
         let mut app = App::new();
         seed_tree(&mut app);
+        seed_feat_worktree(&mut app, "w2", "feat");
+        seed_other_project(&mut app);
         let mut out = Vec::new();
         list_stacks(
             &mut app,
             vec![
                 a_stack("aaa-elsewhere", "/opt/elsewhere", 4, 4),
                 a_stack("demo", "/tmp/demo", 0, 3),
+                a_stack("secret", "/tmp/secret", 2, 2),
             ],
         );
         let chord = crate::keymap::KeyChord::parse("shift+s").unwrap();
@@ -29746,29 +29789,47 @@ diff --git a/src/c.rs b/src/c.rs
             Some(crate::keymap::Action::Stacks)
         );
         out.extend(run_action(&mut app, crate::keymap::Action::Stacks));
-        let rows = crate::stacks::rows(&app);
-        assert_eq!(rows[0].stack.project, "demo", "this project's first");
-        assert_eq!(rows[0].place, "main · demo");
-        assert_eq!(rows[1].place, "/opt/elsewhere");
+        let tabs = crate::stacks::tabs(&app);
+        let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["demo", "secret 1", "Outside orion 1"]);
+        let places: Vec<&str> = tabs[0].rows.iter().map(|r| r.place.as_str()).collect();
+        assert_eq!(places, ["⌂ main", "⎇ feat"], "every checkout, root first");
+        assert!(tabs[0].rows[1].stack.is_none());
+        assert_eq!(tabs[2].id, TabId::Outside);
+        assert_eq!(tabs[2].rows[0].place, "/opt/elsewhere");
 
         let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Stacks · 1 running"), "{text}");
-        assert!(text.contains("4/4 up"), "{text}");
+        assert!(text.contains("Stacks · 2 running"), "{text}");
+        assert!(text.contains("Outside orion"), "{text}");
+        assert!(text.contains("0/3"), "{text}");
 
+        // A checkout: its run, the pane to follow it.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let run = out.iter().find_map(|r| match r {
+            ClientRequest::StartRun { req_id, worktree } if worktree.0 == "w1" => Some(*req_id),
+            _ => None,
+        });
+        let run = run.unwrap_or_else(|| panic!("Enter starts the checkout's run: {out:?}"));
+        assert!(matches!(
+            app.pending.get(&run),
+            Some(PendingIntent::AttachCreated { focus: false, .. })
+        ));
+        assert!(stack_actions(&out).is_empty());
+
+        // A stack alone, on the last tab: by compose.
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         let sent = stack_actions(&out);
         assert_eq!(sent.len(), 1);
         let (req_id, project, verb) = sent[0].clone();
-        assert_eq!((project.as_str(), verb), ("demo", StackVerb::Start));
+        assert_eq!((project.as_str(), verb), ("aaa-elsewhere", StackVerb::Stop));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("starting…"));
+        assert!(buffer_text(&terminal).contains("stopping…"));
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert_eq!(stack_actions(&out).len(), 1, "not twice while it runs");
-
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 3, 3)]);
-        assert!(app.stack_pending.contains_key("demo"), "until its Ack");
         hse(
             &mut app,
             ServerEvent::Ack {
@@ -29779,6 +29840,75 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.stack_pending.is_empty());
         press(&mut app, KeyCode::Char('S'), KeyModifiers::SHIFT, &mut out);
         assert!(app.overlay.is_none(), "⇧S closes it again");
+    }
+
+    /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run,
+    /// the pane following — and stops it: a ^C to the run (the flash says
+    /// a second press kills it), or compose for a stack orion didn't start.
+    #[test]
+    fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
+        use orion_core::compose::StackVerb;
+        use orion_core::{Entity, TerminalId, TerminalTab};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        let chord = crate::keymap::KeyChord::parse("cmd+shift+s").unwrap();
+        assert_eq!(
+            app.keymap.lookup(crate::keymap::Scope::Global, &chord),
+            Some(crate::keymap::Action::ToggleStack)
+        );
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(
+            out.iter().any(
+                |r| matches!(r, ClientRequest::StartRun { worktree, .. } if worktree.0 == "w1")
+            ),
+            "{out:?}"
+        );
+
+        let run = |alive| TerminalTab {
+            id: TerminalId("run1".into()),
+            worktree_id: orion_core::WorktreeId("w1".into()),
+            name: "run".into(),
+            sort_order: 0,
+            alive,
+            run_command: Some("just start".into()),
+        };
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(run(true)),
+            },
+        );
+        out.clear();
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StopRun { .. }]),
+            "{out:?}"
+        );
+        let flash = app.flash.as_deref().unwrap_or_default().to_string();
+        assert!(flash.contains("again kills it"), "{flash}");
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(app.flash.as_deref().unwrap_or_default().contains("killing"));
+
+        // The run gone, a stack still up that orion didn't start: compose.
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(run(false)),
+            },
+        );
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
+        assert_eq!(
+            crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
+            "Stop stack"
+        );
+        out.clear();
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        let sent: Vec<_> = stack_actions(&out)
+            .into_iter()
+            .map(|(_, p, v)| (p, v))
+            .collect();
+        assert_eq!(sent, [("demo".to_string(), StackVerb::Stop)]);
     }
 
     /// ⌘W asks first: Esc changes its mind, Enter takes the stack down
@@ -29906,7 +30036,7 @@ diff --git a/src/c.rs b/src/c.rs
         };
         assert_eq!(
             view.selected.as_deref(),
-            Some(format!("stack-{first:02}").as_str())
+            Some(format!("\tstack-{first:02}").as_str())
         );
     }
 
