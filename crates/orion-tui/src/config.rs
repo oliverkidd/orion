@@ -1483,7 +1483,8 @@ pub struct Config {
     /// on it the PR is attached to each of its Linear issues through the
     /// API — the link does not depend on the branch name carrying an issue
     /// ID, and Linear keeps one attachment per pull request, so attaching
-    /// twice never duplicates.
+    /// twice never duplicates. Issues linked to a worktree by hand (`⌘.`
+    /// in the LINEAR VIEW) are attached whatever this says.
     pub linear_auto_attach: bool,
     /// FIRST-RUN ONBOARDING has been finished or skipped. Local-only so a
     /// shared `config.json` does not skip the wizard on a new machine.

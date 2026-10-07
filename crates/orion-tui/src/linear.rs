@@ -9,7 +9,10 @@
 //! request to the issues you mark (`attachmentLinkGitHubPR`) — and the
 //! other way round, `⌘U` here flips to that modal as a PR PICK, Enter on
 //! a pull request attaching it to the issues marked here. Both ends run
-//! the one ATTACH ([`attach_issues`]). `⌘S` on
+//! the one ATTACH ([`attach_issues`]). `⌘.` links the marked issues to a
+//! worktree instead ([`WorktreePick`]): the pull request its branch opens
+//! later is attached to them as a ⌘L launch's is, or the one open on it
+//! now there and then. `⌘S` on
 //! an issue lists its team's workflow states in the reading pane's place
 //! ([`StatusPick`]) — read with the issues, so the list is up at once —
 //! and Enter moves the issue to one (`issueUpdate`), the row saying so
@@ -153,6 +156,17 @@ pub struct StatusPick {
     pub issue_id: String,
     pub identifier: String,
     pub states: Vec<LinearState>,
+    pub selected: usize,
+}
+
+/// `⌘.`: the project's worktrees, in the reading pane's place, for the
+/// marked issues (else the one under the cursor) to wait on. The pull
+/// request the picked one's branch opens is attached to them
+/// ([`link_worktree`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreePick {
+    pub issues: Vec<LinearIssue>,
+    pub branches: Vec<String>,
     pub selected: usize,
 }
 
@@ -320,6 +334,8 @@ pub struct LinearView {
     pub mode: LinearMode,
     /// The status picker, while it is up: every key but Esc is its own.
     pub status_pick: Option<StatusPick>,
+    /// The worktree picker, while it is up: every key but Esc is its own.
+    pub worktree_pick: Option<WorktreePick>,
     /// Which list shows: `My issues` or `Other issues`.
     pub tab: LinearTab,
     /// The tab strip's labels' screen x-ranges and its row, for the click.
@@ -354,6 +370,7 @@ impl LinearView {
             marked: BTreeSet::new(),
             mode,
             status_pick: None,
+            worktree_pick: None,
             tab: LinearTab::Mine,
             tab_hits: Vec::new(),
             tab_row: Rect::default(),
@@ -552,15 +569,16 @@ impl KeySource {
     }
 }
 
-/// Branch → Linear issues, so a pull request cut from a ⌘L launch can be
-/// attached once GitHub lists it.
+/// Branch → Linear issues, so a pull request cut from a ⌘L launch, or
+/// from a worktree the issues were linked to (`⌘.`), can be attached once
+/// GitHub lists it.
 #[derive(Debug, Clone, Default)]
 pub struct LinkStore {
     path: Option<PathBuf>,
     links: HashMap<String, PendingLink>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct PendingLink {
     issue_ids: Vec<String>,
     identifiers: Vec<String>,
@@ -578,18 +596,28 @@ impl LinkStore {
         }
     }
 
+    /// Adds `issues` to what `branch`'s pull request attaches to, after
+    /// any already waiting on it.
     pub fn remember(&mut self, branch: &str, issues: &[LinearIssue]) {
         if branch.is_empty() || issues.is_empty() {
             return;
         }
-        self.links.insert(
-            branch.to_string(),
-            PendingLink {
-                issue_ids: issues.iter().map(|i| i.id.clone()).collect(),
-                identifiers: issues.iter().map(|i| i.identifier.clone()).collect(),
-            },
-        );
+        let link = self.links.entry(branch.to_string()).or_default();
+        for issue in issues {
+            if !link.issue_ids.contains(&issue.id) {
+                link.issue_ids.push(issue.id.clone());
+                link.identifiers.push(issue.identifier.clone());
+            }
+        }
         self.persist();
+    }
+
+    /// The identifiers waiting on `branch`'s pull request.
+    pub fn pending(&self, branch: &str) -> &[String] {
+        self.links
+            .get(branch)
+            .map(|l| l.identifiers.as_slice())
+            .unwrap_or_default()
     }
 
     pub(crate) fn take(&mut self, branch: &str) -> Option<PendingLink> {
@@ -835,15 +863,15 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
 }
 
 /// When a new pull request appears on a remembered branch, attach it.
+/// **Link PRs to Linear** decides only whether a ⌘L launch remembers its
+/// branch ([`remember_submit`]): a worktree linked by hand (`⌘.`) is
+/// attached either way.
 pub(crate) fn attach_new_prs(
     app: &mut App,
     project: &ProjectId,
     previous: Option<&[crate::pull_request::OpenPr]>,
     fresh: &[crate::pull_request::OpenPr],
 ) {
-    if !crate::config::Config::load().linear_auto_attach {
-        return;
-    }
     let dir = app
         .tree
         .projects
@@ -943,9 +971,14 @@ pub(crate) mod keys {
     /// in the PULL REQUESTS MODAL. That modal's own hotkey (`⌘U`, `^V`
     /// its twin), as the modal's way here is this one's (`⌘L`).
     pub const ATTACH: Key = Key::new(&["cmd+u", "ctrl+v"], "attach to PR");
-    /// The status picker's own.
+    /// The WORKTREE PICK: the marked issues wait on the pull request a
+    /// worktree's branch opens. The grid's **Select worktree** chord
+    /// (`⌘.`, `^T` its twin), as picking a worktree is everywhere.
+    pub const WORKTREE: Key = Key::new(&["cmd+.", "ctrl+t"], "link to worktree");
+    /// The status and worktree pickers' own.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const SET: Key = Key::new(&["enter"], "set status");
+    pub const LINK: Key = Key::new(&["enter"], "link");
     /// `My issues` ⇄ `Other issues`: plain or with ⇧, as the PULL
     /// REQUESTS MODAL's tab keys are.
     pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
@@ -953,7 +986,8 @@ pub(crate) mod keys {
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, PICK, SET, TABS, FILTER,
+        MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, WORKTREE, PICK, SET, LINK, TABS,
+        FILTER,
     ];
 }
 
@@ -978,6 +1012,13 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "cancel"),
         ];
     }
+    if view.worktree_pick.is_some() {
+        return vec![
+            keys::LINK.hint().kept(),
+            keys::PICK.hint(),
+            Hint::new("Esc", "cancel"),
+        ];
+    }
     if view.filter_pick.is_some() {
         return crate::list_filter::hints();
     }
@@ -988,6 +1029,7 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::TABS.hint(),
             keys::FILTER.hint(),
             keys::ATTACH.hint(),
+            keys::WORKTREE.hint(),
             keys::STATUS.hint(),
             keys::PRESET.hint(),
             keys::BROWSER.hint(),
@@ -1126,6 +1168,97 @@ fn set_status(app: &mut App) {
     });
 }
 
+/// `⌘.` while browsing: the project's worktrees — every one but the root,
+/// whose branch opens no pull request — for the issues `Enter` would
+/// launch on.
+fn open_worktree_pick(app: &mut App) {
+    if !matches!(&app.overlay, Some(Overlay::Linear(v)) if v.mode == LinearMode::Browse) {
+        return;
+    }
+    let issues = picked(app);
+    if issues.is_empty() {
+        return;
+    }
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let mut worktrees: Vec<&orion_core::Worktree> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| w.project_id == view.project && !w.is_main && !w.branch.is_empty())
+        .collect();
+    worktrees.sort_by_key(|w| w.sort_order);
+    let branches: Vec<String> = worktrees.iter().map(|w| w.branch.clone()).collect();
+    if branches.is_empty() {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "{} has no worktree to link to",
+            view.project_name
+        )));
+        return;
+    }
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.filter_pick = None;
+        view.worktree_pick = Some(WorktreePick {
+            issues,
+            branches,
+            selected: 0,
+        });
+    }
+}
+
+/// Keys while the worktree picker is up.
+fn handle_worktree_pick_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(pick) = &mut view.worktree_pick else {
+        return;
+    };
+    let n = pick.branches.len();
+    match key.code {
+        KeyCode::Esc => view.worktree_pick = None,
+        KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, n),
+        KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, n),
+        _ if keys::LINK.matches(&key) => link_worktree(app),
+        _ => {}
+    }
+    app.dirty = true;
+}
+
+/// Enter in the worktree picker. A branch with a pull request open now is
+/// attached at once ([`attach_issues`]); otherwise the issues wait in the
+/// [`LinkStore`] for the one it opens, which [`attach_new_prs`] attaches
+/// as OPEN PRS first lists it — the ⌘L launch's own path.
+fn link_worktree(app: &mut App) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(pick) = view.worktree_pick.take() else {
+        return;
+    };
+    let Some(branch) = pick.branches.get(pick.selected) else {
+        return;
+    };
+    // Spent, as a ⌘U attach spends them.
+    view.marked.clear();
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    let open = app
+        .open_prs
+        .get(&project)
+        .and_then(|o| o.list.iter().find(|pr| &pr.head == branch))
+        .map(|pr| (pr.url.clone(), pr.number));
+    if let Some((url, number)) = open {
+        attach_issues(app, dir, url, number, &pick.issues);
+        return;
+    }
+    app.linear_links.remember(branch, &pick.issues);
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "{} will attach to the PR {branch} opens",
+        ids_of(&pick.issues)
+    )));
+}
+
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return false;
@@ -1138,6 +1271,10 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.status_pick.is_some()) {
         handle_pick_key(app, key);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.worktree_pick.is_some()) {
+        handle_worktree_pick_key(app, key);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.filter_pick.is_some()) {
@@ -1173,6 +1310,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::STATUS.matches(&key) => open_status_pick(app),
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
+        _ if keys::WORKTREE.matches(&key) => open_worktree_pick(app),
         _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
         _ => {
             if view.query.handle_key(&key).changed() {
@@ -1685,7 +1823,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else {
         head
     };
-    let side_up = view.status_pick.is_some() || view.filter_pick.is_some();
+    let side_up =
+        view.status_pick.is_some() || view.worktree_pick.is_some() || view.filter_pick.is_some();
     let list_focused = list_focused && !side_up;
     let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
@@ -1813,6 +1952,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let mut filter_pick = view.filter_pick;
     if let Some(pick) = &view.status_pick {
         draw_status_pick(f, body_inner, pick, th);
+    } else if let Some(pick) = &view.worktree_pick {
+        draw_worktree_pick(f, body_inner, pick, &app.linear_links, th);
     } else if let Some(pick) = &mut filter_pick {
         let facets = pick_facets(&issues, view.tab, th);
         pick.clamp(&facets);
@@ -1983,32 +2124,81 @@ fn short_date(stamp: &str, now: i64) -> Option<String> {
 /// The status picker in the reading pane's place: what it is for, then a
 /// row per state, the cursor's lit and the kind of each dim beside it.
 fn draw_status_pick(f: &mut Frame, area: Rect, pick: &StatusPick, th: Theme) {
+    let rows = pick.states.iter().map(|state| {
+        vec![
+            Span::raw(state.name.clone()),
+            Span::styled(format!("  {}", state.kind), Style::default().fg(th.dim)),
+        ]
+    });
+    draw_side_pick(
+        f,
+        area,
+        format!("Move {} to…", pick.identifier),
+        rows,
+        pick.selected,
+        th,
+    );
+}
+
+fn draw_worktree_pick(
+    f: &mut Frame,
+    area: Rect,
+    pick: &WorktreePick,
+    links: &LinkStore,
+    th: Theme,
+) {
+    let rows = pick.branches.iter().map(|branch| {
+        let mut spans = vec![Span::raw(branch.clone())];
+        let waiting = links.pending(branch);
+        if !waiting.is_empty() {
+            spans.push(Span::styled(
+                format!("  {} waiting", waiting.join(", ")),
+                Style::default().fg(th.dim),
+            ));
+        }
+        spans
+    });
+    draw_side_pick(
+        f,
+        area,
+        format!("Attach {} to the PR opened from…", ids_of(&pick.issues)),
+        rows,
+        pick.selected,
+        th,
+    );
+}
+
+/// A picker in the reading pane's place: `heading` in bold, then `rows`
+/// under a blank line, scrolled to keep `selected` in view.
+fn draw_side_pick<'a>(
+    f: &mut Frame,
+    area: Rect,
+    heading: String,
+    rows: impl Iterator<Item = Vec<Span<'a>>>,
+    selected: usize,
+    th: Theme,
+) {
     if let Some(row) = row_rect(area, 0) {
         f.render_widget(
             Paragraph::new(Span::styled(
-                format!("Move {} to…", pick.identifier),
+                heading,
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             row,
         );
     }
-    // The states start under the heading and a blank row.
     const HEAD_ROWS: u16 = 2;
-    let rows = Rect {
+    let list = Rect {
         y: area.y.saturating_add(HEAD_ROWS),
         height: area.height.saturating_sub(HEAD_ROWS),
         ..area
     };
-    let start = window_start(pick.selected, rows.height as usize);
-    for (i, state) in pick.states.iter().enumerate().skip(start) {
-        let Some(row) = row_rect(rows, i - start) else {
+    let start = window_start(selected, list.height as usize);
+    for (i, spans) in rows.enumerate().skip(start) {
+        let Some(row) = row_rect(list, i - start) else {
             break;
         };
-        let spans = vec![
-            Span::raw(state.name.clone()),
-            Span::styled(format!("  {}", state.kind), Style::default().fg(th.dim)),
-        ];
-        render_row(f, row, spans, i == pick.selected, true, th);
+        render_row(f, row, spans, i == selected, true, th);
     }
 }
 
@@ -3153,6 +3343,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn link_store_adds_to_what_a_branch_waits_on() {
+        let mut store = LinkStore::default();
+        store.remember("feat", &[issue("1", "ENG-1", "a")]);
+        store.remember(
+            "feat",
+            &[issue("1", "ENG-1", "a"), issue("2", "ENG-2", "b")],
+        );
+        assert_eq!(store.pending("feat"), ["ENG-1", "ENG-2"]);
+        assert!(store.pending("other").is_empty());
+        assert_eq!(store.take("feat").unwrap().issue_ids, ["1", "2"]);
+    }
+
+    #[test]
     fn link_store_remembers_and_takes() {
         let mut store = LinkStore::default();
         store.remember("eng-12-fix", &[issue("abc", "ENG-12", "Fix")]);
@@ -3419,6 +3622,117 @@ pub(crate) mod tests {
             assert!(view.marked.is_empty(), "the batch is spent");
             assert_eq!(view.selected, 2, "the cursor where it was");
         }
+    }
+
+    /// `paired` with a root worktree and two more: `branch-41`, whose
+    /// pull request is open, and `feature-x`, which has none yet.
+    fn paired_with_worktrees() -> (
+        App,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+    ) {
+        let (mut app, dir, rx) = paired();
+        for (n, branch, is_main) in [
+            (0, "dev", true),
+            (2, "feature-x", false),
+            (1, "branch-41", false),
+        ] {
+            app.tree.worktrees.push(orion_core::Worktree {
+                id: orion_core::WorktreeId(format!("w{n}")),
+                project_id: ProjectId("p1".into()),
+                path: dir.path().join(branch),
+                branch: branch.into(),
+                is_main,
+                sort_order: n,
+            });
+        }
+        (app, dir, rx)
+    }
+
+    /// `⌘.` lists the project's worktrees but the root, and Enter on one
+    /// with no pull request leaves the marked issues waiting on its
+    /// branch, nothing asked of Linear yet — until OPEN PRS first lists a
+    /// pull request from it, which is attached to them as a ⌘L launch's
+    /// would be.
+    #[test]
+    fn cmd_period_links_the_marked_issues_to_a_worktree_without_a_pr() {
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        browse_marked(&mut app);
+        assert!(hints(the_view(&app))
+            .iter()
+            .any(|h| h.does == "link to worktree"));
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SUPER),
+        );
+        let view = the_view(&app);
+        let pick = view.worktree_pick.as_ref().expect("the worktree picker");
+        assert_eq!(pick.branches, ["branch-41", "feature-x"]);
+        crate::hints::assert_hints_from(&hints(view), keys::ALL);
+        let screen = shot(&mut app, 140, 40);
+        assert!(
+            screen.contains("Attach ENG-1, ENG-3 to the PR opened from…"),
+            "{screen}"
+        );
+
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Enter));
+        let view = the_view(&app);
+        assert!(view.worktree_pick.is_none());
+        assert!(view.marked.is_empty(), "the batch is spent");
+        assert_eq!(app.linear_links.pending("feature-x"), ["ENG-1", "ENG-3"]);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("ENG-1, ENG-3 will attach to the PR feature-x opens")
+        );
+        assert!(rx.try_recv().is_err(), "nothing asked of Linear yet");
+
+        let project = ProjectId("p1".into());
+        let previous = app.open_prs[&project].list.clone();
+        let mut fresh = previous.clone();
+        let mut opened = open_pr(43, "Feature X");
+        opened.head = "feature-x".into();
+        fresh.insert(0, opened);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})),
+            || {
+                rt.block_on(async {
+                    attach_new_prs(&mut app, &project, Some(&previous), &fresh);
+                    for _ in 0..2 {
+                        let answer = rx.recv().await.expect("an answer");
+                        land_answer(&mut app, answer);
+                    }
+                });
+                graphql_sent()
+            },
+        );
+        let mut sent = sent;
+        sent.sort_by_key(|v| v["issueId"].as_str().unwrap_or_default().to_string());
+        assert_eq!(sent, [attached("1", 43), attached("3", 43)]);
+        assert!(app.linear_links.pending("feature-x").is_empty(), "taken");
+    }
+
+    /// A worktree whose pull request is open already has nothing to wait
+    /// for: Enter (`^T` the twin of `⌘.`) attaches it there and then.
+    #[test]
+    fn ctrl_t_on_a_worktree_with_an_open_pr_attaches_at_once() {
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        browse_marked(&mut app);
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        let sent = attach_through(&mut app, &mut rx, |app| press(app, plain(KeyCode::Enter)));
+        assert_eq!(sent, [attached("1", 41), attached("3", 41)]);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("attached PR #41 to ENG-1, ENG-3")
+        );
+        assert!(app.linear_links.pending("branch-41").is_empty());
     }
 
     /// Esc backs out of the PR PICK one step at a time — off the page,
