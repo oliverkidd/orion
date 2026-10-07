@@ -176,14 +176,27 @@ pub struct CommitListing {
     pub uncommitted: Option<Stat>,
 }
 
+/// The lines of every counted file of `files`, together; None when none
+/// was counted.
+fn summed_lines(files: &[DiffFile]) -> Option<LineChanges> {
+    files
+        .iter()
+        .filter_map(|f| f.lines)
+        .reduce(|a, b| LineChanges {
+            added: a.added + b.added,
+            removed: a.removed + b.removed,
+        })
+}
+
 /// Read the COMMIT LIST for the checkout at `root`, whose uncommitted
-/// changes `git status` found to be `uncommitted`: the base, the merge-base,
-/// the first page of commits and the uncommitted row's counts.
+/// changes `git status` found to be `uncommitted` — each already counted
+/// (`git_diff::count_file_lines`): the base, the merge-base, the first page
+/// of commits and the uncommitted row's counts, the files' own summed.
 pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> CommitListing {
     let mut listing = CommitListing {
         uncommitted: (!uncommitted.is_empty()).then(|| Stat {
             files: uncommitted.len(),
-            lines: crate::git_diff::line_changes(root, uncommitted),
+            lines: summed_lines(uncommitted),
         }),
         ..CommitListing::default()
     };
@@ -895,21 +908,37 @@ impl CommitList {
         }
     }
 
-    fn together_head(&self, rows: &[Row], now_ms: i64) -> Vec<Head> {
-        let ranges = self.ranges(rows);
+    /// What the diff pane reads, as its border names it: the commit's
+    /// subject, the uncommitted changes, or what was ticked to be read
+    /// together.
+    pub fn reading_title(&self, showing: &Showing) -> Option<String> {
+        match showing {
+            Showing::Row(Row::Commit(i)) => self.commits.get(*i).map(|c| c.subject.clone()),
+            Showing::Row(Row::Uncommitted) => Some("Uncommitted changes".to_string()),
+            Showing::Row(Row::Older) => None,
+            Showing::Together(rows) => Some(self.together_title(rows)),
+        }
+    }
+
+    fn together_title(&self, rows: &[Row]) -> String {
         let commits = rows.iter().filter(|r| matches!(r, Row::Commit(_))).count();
-        let dirty = rows.contains(&Row::Uncommitted);
-        let whole = self.all_ticked();
         let base = self.base.as_deref().unwrap_or("its base");
-        let mut title = if whole {
+        let mut title = if self.all_ticked() {
             format!("The whole branch since {base}")
         } else {
             format!("{commits} commits together")
         };
-        if dirty {
+        if rows.contains(&Row::Uncommitted) {
             title.push_str(" and the uncommitted changes");
         }
-        let mut head = vec![Head::Title(title)];
+        title
+    }
+
+    fn together_head(&self, rows: &[Row], now_ms: i64) -> Vec<Head> {
+        let ranges = self.ranges(rows);
+        let commits = rows.iter().filter(|r| matches!(r, Row::Commit(_))).count();
+        let whole = self.all_ticked();
+        let mut head = vec![Head::Title(self.together_title(rows))];
         if whole {
             let noun = if self.total == 1 { "commit" } else { "commits" };
             head.push(Head::Meta(format!(
@@ -1125,7 +1154,6 @@ pub fn land_scope(
             .map(|showing| list.head(&showing, now))
             .unwrap_or_default();
     }
-    view.header_read = false;
     // A diff read under the last scope must never land under this one's
     // name: a fresh id drops it, and the cache was of that scope too.
     view.id = crate::view_jobs::ticket();
@@ -1477,7 +1505,8 @@ mod tests {
         commit(&repo, "b.txt", "1\n", "add b");
         std::fs::write(repo.join("a.txt"), "1\n").unwrap();
         std::fs::write(repo.join("new.txt"), "x\ny\nz\n").unwrap();
-        let dirty = crate::git_diff::changed_files(&repo).unwrap();
+        let mut dirty = crate::git_diff::changed_files(&repo).unwrap();
+        crate::git_diff::count_file_lines(&repo, true, &mut dirty);
 
         let listing = read(&repo, "", &dirty);
         assert_eq!(listing.base.as_deref(), Some("origin/main"));
@@ -1967,20 +1996,20 @@ mod tests {
         assert_eq!(view.head[0], Head::Title("move base, add b".into()));
         assert_eq!(view.head[3], Head::Prose("- the body".into()));
         assert!(view.diff.contains("+beta"), "{}", view.diff);
-        assert_eq!(view.scroll, 0, "the first file opens on the message");
+        assert_eq!(view.scroll, 0);
 
-        // The next file of the same commit opens past the message, which
-        // is a scroll up.
+        // The next file opens at its own first line too: the message is
+        // not drawn over the diff.
         view.select(1);
         crate::git_diff::load_selected_diff(&mut view);
         assert!(view.diff.contains("rename from base.txt"), "{}", view.diff);
-        assert_eq!(view.scroll, view.head_rows());
+        assert_eq!(view.scroll, 0);
         assert_eq!(view.doc.facts.status, Some("renamed"));
 
         select(&mut view, Row::Commit(1));
         assert_eq!(paths(&view), ["a.txt"]);
         assert!(view.diff.contains("+alpha"));
-        assert_eq!(view.scroll, 0, "a new commit opens on its message");
+        assert_eq!(view.scroll, 0, "a new commit opens at the top");
     }
 
     /// ONE AT A TIME through a real branch: each step's own files under
@@ -2061,6 +2090,7 @@ mod tests {
                     path: p.to_string(),
                     orig_path: None,
                     xy: ['M', ' '],
+                    lines: None,
                 })
                 .collect(),
             head: None,

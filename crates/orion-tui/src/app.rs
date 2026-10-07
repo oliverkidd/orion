@@ -240,8 +240,16 @@ pub enum HitTarget {
     PrPageRow(usize),
 }
 
-/// Default outer width of the diff modal's file-list panel.
-pub const DEFAULT_DIFF_FILES_W: u16 = 34;
+/// Default outer width of the diff modal's left column — its commits over
+/// its files — room for a commit's subject on one row and each file's
+/// path beside its counts. A modal under twice this keeps it to half.
+pub const DEFAULT_DIFF_FILES_W: u16 = 68;
+/// What [`DEFAULT_DIFF_FILES_W`] was before the column doubled. Every UI
+/// blob saved since remembers it as if it had been dragged there, so a
+/// restored 34 is read as never dragged.
+pub const OLD_DEFAULT_DIFF_FILES_W: u16 = 34;
+/// Default outer width of the TREE BROWSER's tree.
+pub const DEFAULT_TREE_FILES_W: u16 = 34;
 /// The diff modal's file list can't be dragged narrower than this.
 pub const MIN_DIFF_FILES_W: u16 = 16;
 /// How long the settings overlay remembers its tab / row / strip-vs-list
@@ -1283,8 +1291,13 @@ pub struct DiffView {
     /// Full modal rect, written back during draw; bounds the file-panel
     /// splitter drag and hit-tests its border.
     pub area: Rect,
-    /// Outer width of the file-list panel; drag the panel border to resize.
+    /// Outer width of the left column as the reader wants it: dragged
+    /// there, or [`DEFAULT_DIFF_FILES_W`] while never dragged — which the
+    /// draw holds to half a narrow modal, every frame, so a wider terminal
+    /// gets it back.
     pub files_width: u16,
+    /// The left column's width as last drawn: where its border is.
+    pub column_w: u16,
     /// In-progress drag of the files/diff border: `boundary_x - grab column`
     /// at mouse-down, so the border tracks the pointer instead of jumping
     /// to it.
@@ -1348,13 +1361,11 @@ pub struct DiffView {
     pub scope: crate::git_diff::DiffScope,
     /// The panel with the keys.
     pub focus: DiffFocus,
-    /// The REVIEW HEAD over each file's diff: a commit's message, what was
+    /// The REVIEW HEAD for each file's diff: a commit's message, what was
     /// ticked, a pull request's title; empty over the uncommitted changes.
+    /// A view with no COMMIT LIST — a pull request's — names its pane after
+    /// the head's title (`ui::diff_view`).
     pub head: Vec<crate::diff_doc::Head>,
-    /// Whether this scope has shown a file yet: the first opens at the top,
-    /// on the head; every later one at its own first line, the head a
-    /// scroll up.
-    pub header_read: bool,
     /// ✓ marks taken under a row that is not on screen — a commit's, the
     /// branch's — kept for as long as the modal is up and brought back
     /// with their row. The uncommitted changes' are on disk instead.
@@ -1424,40 +1435,24 @@ impl DiffView {
         }
     }
 
-    /// Put `diff` on screen as the diff of `path`, read for the pane under
-    /// the REVIEW HEAD (`diff_doc`). `keep_scroll` is a re-read of the file
-    /// already showing: the reader's place is kept. Under a head the first
-    /// file opens on it and every later one past it (`header_read`).
+    /// Put `diff` on screen as the diff of `path`, read for the pane
+    /// (`diff_doc`). The REVIEW HEAD is not drawn over it: what the pane
+    /// reads is named on its border (`ui::diff_view`), so the code starts on
+    /// its first row. `keep_scroll` is a re-read of the file already
+    /// showing: the reader's place is kept.
     pub fn show_diff(&mut self, path: Option<&str>, diff: String, keep_scroll: bool) {
-        self.doc = std::sync::Arc::new(crate::diff_doc::DiffDoc::build(&self.head, path, &diff));
+        self.doc = std::sync::Arc::new(crate::diff_doc::DiffDoc::build(&[], path, &diff));
         self.diff = diff;
         self.shown = path.map(str::to_string);
         if !keep_scroll {
-            self.scroll = if self.header_read {
-                self.head_rows()
-            } else {
-                0
-            };
-        }
-        if path.is_some() {
-            self.header_read = true;
+            self.scroll = 0;
         }
     }
 
-    /// A new REVIEW HEAD over the diff on screen — a tick changed what it
+    /// A new REVIEW HEAD for the diff on screen — a tick changed what it
     /// says, not which file is up.
     pub fn set_head(&mut self, head: Vec<crate::diff_doc::Head>) {
-        self.doc = std::sync::Arc::new(self.doc.with_head(&head));
         self.head = head;
-    }
-
-    /// The rows the REVIEW HEAD takes above the diff, its rule included —
-    /// counted at the pane's width once it has been drawn.
-    pub fn head_rows(&self) -> usize {
-        match self.view_width {
-            0 => self.doc.head_lines,
-            width => self.doc.head_rows(width),
-        }
     }
 
     /// What the diff pane says for a scope with no file in it.
@@ -1493,6 +1488,7 @@ impl DiffView {
             diff_area: Rect::default(),
             area: Rect::default(),
             files_width: DEFAULT_DIFF_FILES_W,
+            column_w: 0,
             files_drag: None,
             head_ok,
             prefetched: None,
@@ -1510,7 +1506,6 @@ impl DiffView {
             scope: crate::git_diff::DiffScope::Uncommitted,
             focus: DiffFocus::Files,
             head: Vec::new(),
-            header_read: false,
             scope_marks: HashMap::new(),
             back: None,
             open_one_at_a_time: false,
@@ -1537,7 +1532,7 @@ impl DiffView {
     /// Screen x of the files/diff boundary — the column where the diff panel
     /// starts.
     pub fn splitter_x(&self) -> u16 {
-        self.area.x + self.files_width
+        self.area.x + self.column_w
     }
 
     /// Move the files/diff boundary to `boundary_x`, clamped so the file list
@@ -6980,6 +6975,7 @@ mod tests {
                 path: p.into(),
                 orig_path: None,
                 xy: ['M', ' '],
+                lines: None,
             })
             .to_vec();
         let mut v = DiffView::new("/nonexistent-review".into(), "main".into(), files, true);

@@ -24,6 +24,9 @@ pub struct DiffFile {
     pub orig_path: Option<String>,
     /// The two porcelain status columns, e.g. ['M',' '], [' ','M'], ['?','?'].
     pub xy: [char; 2],
+    /// The file's own lines added and removed, as the DIFF VIEWER's list
+    /// prints them on its right; None until counted, and for a binary file.
+    pub lines: Option<LineChanges>,
 }
 
 impl DiffFile {
@@ -162,6 +165,7 @@ pub fn parse_status_z(bytes: &[u8]) -> Vec<DiffFile> {
             path,
             orig_path,
             xy: [x, y],
+            lines: None,
         });
     }
     files
@@ -180,7 +184,9 @@ pub fn scope_files(root: &Path, scope: &DiffScope) -> Result<Vec<DiffFile>, Stri
                 Some(from) => from.clone(),
                 None => empty_tree(root).ok_or("git hash-object failed")?,
             };
-            name_status(root, &from, Some(sha))
+            let mut files = name_status(root, &from, Some(sha))?;
+            count_range_lines(root, &from, Some(sha), &mut files);
+            Ok(files)
         }
         DiffScope::Ranges(ranges) => {
             let mut files: Vec<DiffFile> = Vec::new();
@@ -194,9 +200,19 @@ pub fn scope_files(root: &Path, scope: &DiffScope) -> Result<Vec<DiffFile>, Stri
                             .filter(DiffFile::is_untracked),
                     );
                 }
+                count_range_lines(root, &from, range.to.as_deref(), &mut found);
                 for file in found {
                     match files.iter_mut().find(|f| f.path == file.path) {
-                        Some(seen) => seen.xy[0] = combined_status(seen.xy[0], file.xy[0]),
+                        Some(seen) => {
+                            seen.xy[0] = combined_status(seen.xy[0], file.xy[0]);
+                            seen.lines = match (seen.lines, file.lines) {
+                                (Some(a), Some(b)) => Some(LineChanges {
+                                    added: a.added + b.added,
+                                    removed: a.removed + b.removed,
+                                }),
+                                (a, b) => a.or(b),
+                            };
+                        }
                         None => files.push(file),
                     }
                 }
@@ -259,6 +275,7 @@ pub fn parse_name_status_z(bytes: &[u8]) -> Vec<DiffFile> {
             path,
             orig_path,
             xy: [code, ' '],
+            lines: None,
         });
     }
     files
@@ -351,24 +368,42 @@ pub fn parse_numstat_z(bytes: &[u8]) -> LineChanges {
 fn count_numstat_z(bytes: &[u8]) -> (usize, LineChanges) {
     let mut files = 0;
     let mut total = LineChanges::default();
+    for (_, lines) in numstat_records_z(bytes) {
+        files += 1;
+        let lines = lines.unwrap_or_default();
+        total.added += lines.added;
+        total.removed += lines.removed;
+    }
+    (files, total)
+}
+
+/// Each record of `git diff --numstat -z`: the file's path — a rename's or
+/// a copy's new one — and its lines, None for a binary file (`-\t-`).
+fn numstat_records_z(bytes: &[u8]) -> impl Iterator<Item = (String, Option<LineChanges>)> + '_ {
     let mut fields = bytes.split(|b| *b == 0);
-    while let Some(field) = fields.next() {
-        let field = String::from_utf8_lossy(field);
+    std::iter::from_fn(move || loop {
+        let field = String::from_utf8_lossy(fields.next()?);
         let mut parts = field.splitn(3, '\t');
         let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
-        files += 1;
-        total.added += added.parse::<u64>().unwrap_or(0);
-        total.removed += removed.parse::<u64>().unwrap_or(0);
-        if path.is_empty() {
-            // A rename: its two paths are the next two fields.
+        let path = if path.is_empty() {
+            // A rename: its two paths are the next two fields, old then new.
             fields.next();
-            fields.next();
-        }
-    }
-    (files, total)
+            fields
+                .next()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_default()
+        } else {
+            path.to_string()
+        };
+        let lines = match (added.parse(), removed.parse()) {
+            (Ok(added), Ok(removed)) => Some(LineChanges { added, removed }),
+            _ => None,
+        };
+        return Some((path, lines));
+    })
 }
 
 /// Every line of the untracked `files`, read from disk within the caps
@@ -376,21 +411,77 @@ fn count_numstat_z(bytes: &[u8]) -> (usize, LineChanges) {
 /// nothing, as it adds no text lines to the diff.
 fn untracked_lines(root: &Path, files: &[DiffFile]) -> u64 {
     let mut budget = UNTRACKED_READ_BUDGET;
-    let mut lines = 0;
-    for file in files.iter().filter(|f| f.is_untracked()) {
-        let path = root.join(&file.path);
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > UNTRACKED_FILE_CAP || meta.len() > budget {
-            continue;
-        }
-        budget -= meta.len();
-        if let Ok(bytes) = std::fs::read(&path) {
-            lines += count_lines(&bytes);
-        }
+    files
+        .iter()
+        .filter(|f| f.is_untracked())
+        .filter_map(|file| untracked_file_lines(root, &file.path, &mut budget))
+        .sum()
+}
+
+/// One untracked file's lines, read from disk if it fits the caps above
+/// and what is left of `budget`.
+fn untracked_file_lines(root: &Path, path: &str, budget: &mut u64) -> Option<u64> {
+    let path = root.join(path);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > UNTRACKED_FILE_CAP || meta.len() > *budget {
+        return None;
     }
-    lines
+    *budget -= meta.len();
+    std::fs::read(&path).ok().map(|bytes| count_lines(&bytes))
+}
+
+/// Give each of a checkout's uncommitted `files` (`changed_files`) its own
+/// line counts: tracked ones from one `git diff --numstat` against HEAD —
+/// or git's empty tree on a checkout with no commit yet — untracked ones
+/// read from disk. `head_ok`: the checkout has a commit.
+pub fn count_file_lines(root: &Path, head_ok: bool, files: &mut [DiffFile]) {
+    if files.is_empty() {
+        return;
+    }
+    let base = if head_ok {
+        Some("HEAD".to_string())
+    } else {
+        empty_tree(root)
+    };
+    if let Some(base) = base {
+        count_range_lines(root, &base, None, files);
+    }
+}
+
+/// Give `files` — what `git diff from [to]` changed, and with no `to` the
+/// untracked files beside it — their own line counts.
+fn count_range_lines(root: &Path, from: &str, to: Option<&str>, files: &mut [DiffFile]) {
+    let mut args = vec![
+        "diff",
+        "--numstat",
+        "-z",
+        "-M",
+        "--no-color",
+        "--no-ext-diff",
+        from,
+    ];
+    args.extend(to);
+    args.push("--");
+    let counted = match run_git(root, &args) {
+        Ok(output) if output.status.success() => numstat_by_path(&output.stdout),
+        _ => std::collections::HashMap::new(),
+    };
+    let mut budget = UNTRACKED_READ_BUDGET;
+    for file in files {
+        file.lines = if file.is_untracked() {
+            untracked_file_lines(root, &file.path, &mut budget)
+                .map(|added| LineChanges { added, removed: 0 })
+        } else {
+            counted.get(&file.path).copied()
+        };
+    }
+}
+
+/// `git diff --numstat -z`'s records by path, a binary file left out.
+fn numstat_by_path(bytes: &[u8]) -> std::collections::HashMap<String, LineChanges> {
+    numstat_records_z(bytes)
+        .filter_map(|(path, lines)| Some((path, lines?)))
+        .collect()
 }
 
 /// A file's lines as `git diff --numstat` counts them: every newline, plus
@@ -607,8 +698,9 @@ pub fn cap_lines(text: &str, max: usize, already_cut: bool) -> String {
 /// its file's diff as it is now, one `git diff` per mark, and the pruned
 /// set written back. Off the loop for a view with BACKGROUND READS.
 pub fn read_listing(root: &Path) -> Result<crate::view_jobs::DiffListing, String> {
-    let files = changed_files(root)?;
+    let mut files = changed_files(root)?;
     let head = head_oid(root);
+    count_file_lines(root, head.is_some(), &mut files);
     let head_key = head.clone().unwrap_or_default();
     let stored = crate::review::load_marks(root, &head_key);
     let reviewed: std::collections::HashMap<String, u64> = files
@@ -833,6 +925,7 @@ mod tests {
             path: path.into(),
             orig_path: None,
             xy: [' ', 'M'],
+            lines: None,
         }
     }
 
@@ -1041,6 +1134,9 @@ mod tests {
         let files = scope_files(&repo, &commit).unwrap();
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["second.txt", "tracked.txt"]);
+        let lines = |added, removed| Some(LineChanges { added, removed });
+        assert_eq!(files[0].lines, lines(1, 0), "each file its own counts");
+        assert_eq!(files[1].lines, lines(1, 1));
         let diff = scoped_diff(&repo, &commit, &files[1], true);
         assert!(
             diff.contains("-old line") && diff.contains("+new line"),
@@ -1065,6 +1161,11 @@ mod tests {
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["second.txt", "tracked.txt", "wip.txt"]);
         assert!(files[2].is_untracked());
+        assert_eq!(
+            files[2].lines,
+            lines(1, 0),
+            "an untracked file read from disk"
+        );
         assert!(scoped_diff(&repo, &branch, &files[2], true).contains("+wip"));
     }
 
@@ -1347,6 +1448,46 @@ mod tests {
             }
         );
         assert!(parse_numstat_z(b"").is_empty());
+    }
+
+    #[test]
+    fn numstat_by_path_keys_renames_by_their_new_path_and_skips_binaries() {
+        let raw =
+            b"3\t1\tsrc/a.rs\x00-\t-\tlogo.png\x0010\t2\t\x00old.rs\x00new.rs\x000\t4\tgone.rs\x00";
+        let counted = numstat_by_path(raw);
+        let lines = |added, removed| Some(LineChanges { added, removed });
+        assert_eq!(counted.get("src/a.rs").copied(), lines(3, 1));
+        assert_eq!(counted.get("new.rs").copied(), lines(10, 2));
+        assert_eq!(counted.get("gone.rs").copied(), lines(0, 4));
+        assert_eq!(counted.get("logo.png"), None, "a binary file");
+        assert_eq!(counted.len(), 3);
+    }
+
+    /// The uncommitted changes' own counts, the way the listing reads them:
+    /// a staged edit and an unstaged one against HEAD, an untracked file
+    /// from disk.
+    #[test]
+    fn read_listing_counts_each_uncommitted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_repo(&dir);
+        std::fs::write(repo.join("tracked.txt"), "new line\nmore\n").unwrap();
+        std::fs::write(repo.join("wip.txt"), "a\nb\nc\n").unwrap();
+        let files = read_listing(&repo).unwrap().files;
+        let of = |path: &str| files.iter().find(|f| f.path == path).unwrap().lines;
+        assert_eq!(
+            of("tracked.txt"),
+            Some(LineChanges {
+                added: 2,
+                removed: 1
+            })
+        );
+        assert_eq!(
+            of("wip.txt"),
+            Some(LineChanges {
+                added: 3,
+                removed: 0
+            })
+        );
     }
 
     #[test]

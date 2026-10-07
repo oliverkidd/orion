@@ -5179,6 +5179,31 @@ fn fmt_mem(bytes: u64) -> String {
     }
 }
 
+/// [`truncate`] by terminal cells rather than chars, for a row whose text
+/// a wide glyph (an emoji, CJK) must not push past what is pinned to its
+/// right. What it keeps is a prefix of `s`, so char positions into `s`
+/// still hold for it (`visible_positions`).
+pub(crate) fn truncate_cells(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 1;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > max {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    if max > 0 {
+        out.push('…');
+    }
+    out
+}
+
 /// Clip `s` to `max` chars, spending the last one on `…` when it had to
 /// cut. Counts chars, not columns — wide glyphs are the caller's problem.
 /// The one clipper for every row, title and grep hit, so they all cut the

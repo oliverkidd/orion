@@ -3082,6 +3082,7 @@ mod tests {
             path: "a.txt".into(),
             orig_path: None,
             xy: [' ', 'M'],
+            lines: None,
         }];
         land_answer(
             &mut app,

@@ -1,36 +1,38 @@
 //! The DIFF VIEWER (`⌘E`) on screen.
 //!
 //! A left column and the diff beside it, the diff taking the modal's whole
-//! height — on a 150-column terminal a 34-column column and a diff a
-//! hundred wide: every row of height goes to the code, which wraps, rather
-//! than to a strip of commits stacked over it. A column nobody has dragged
-//! keeps to two fifths of a narrow modal. The column is the COMMIT LIST
-//! over the changed files, in reading order: what is on screen, its files,
-//! the selected file's diff. A pull request's view has no commit list, and
-//! the files take the column.
+//! height. The column is [`crate::app::DEFAULT_DIFF_FILES_W`] wide until
+//! dragged, room for a commit's subject
+//! on one row and a file's path beside its counts; it keeps to half of a
+//! narrow modal. The column is the COMMIT LIST over the changed files, in
+//! reading order: what is on screen, its files, the selected file's diff. A
+//! pull request's view has no commit list, and the files take the column.
 //!
-//! - **The COMMIT LIST** gives each row a box: `[✓]` ticked, `[ ]` not. A
-//!   commit's subject wraps under its box, and its short sha, age and
-//!   counts sit on the row under it. Rows whose changes are in the diff on
-//!   screen are bold. The panel's bottom edge says how many are ticked and
-//!   how they are read.
+//! - **The COMMIT LIST** is one row per commit: its box — `[✓]` ticked,
+//!   `[ ]` not — and its subject, cut at the end, then its short sha, age
+//!   and `+A −R` in columns on the right. Rows whose changes are in the
+//!   diff on screen are bold. The panel's bottom edge says how many are
+//!   ticked and how they are read.
+//! - **The files** read the same way: status, ✓, the path cut at its end
+//!   so it reads from its root, and the file's own `+A −R` on the right.
 //! - **The diff** is a `diff_doc::DiffDoc`: wrapped, numbered, syntax
-//!   coloured, its file's facts (`added · +20 −0`) on the top edge, and
-//!   what it shows — a commit's message, `commit 2 of 3`, the ticked
-//!   commits — heading it. One dim line at its foot explains what is on
-//!   screen and how to change it.
+//!   coloured, starting on the pane's first row. Its border names what it
+//!   is read as part of — the commit, the ticked, the uncommitted changes,
+//!   a pull request — and the file's `+A −R` (`2 of 3` stepping);
+//!   the file itself is the Files list's cursor. One dim line at its foot
+//!   explains what is on screen and how to change it.
 //! - **The keys** are on the modal's bottom border, for the panel that has
 //!   them — which wears the accent — from [`diff_keys`], the table the key
 //!   handler matches.
 
 use super::{
     below_first_row, centered_rect_pct, empty_list_row, fuzzy_highlight_spans, panel_block,
-    render_button, render_row, row_rect, search_line, truncate, visible_positions, NO_MATCHES,
+    render_row, row_rect, search_line, truncate, truncate_cells, visible_positions, NO_MATCHES,
     SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 use crate::app::{App, DiffFocus, DiffView, Overlay};
+use crate::bundle::plural;
 use crate::commit_list::{CommitList, Row, Showing};
-use crate::diff_doc::wrap_words;
 use crate::theme::Theme;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -234,12 +236,12 @@ pub(crate) fn diff_explanation(view: &DiffView) -> String {
 }
 
 /// The left column's width: what the reader dragged it to — or, never
-/// dragged, the default, but no more than two fifths of a narrow modal, so
-/// the diff keeps the room it wraps in.
+/// dragged, the default, but no more than half a narrow modal, so the diff
+/// keeps the room it wraps in.
 fn column_width(view: &DiffView, area: Rect) -> u16 {
     let mut want = view.files_width;
     if want == crate::app::DEFAULT_DIFF_FILES_W {
-        want = want.min(area.width * 2 / 5);
+        want = want.min(area.width / 2);
     }
     // Cap first, floor second: on a tiny screen the column keeps its
     // minimum and SPLIT_PANE_LAYOUT_MIN squeezes the diff pane instead.
@@ -262,11 +264,10 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
     // The column: the COMMIT LIST as tall as its rows, up to a little
     // under half; the files below it.
     let now = crate::app::now_ms();
-    let inner_w = col_w.saturating_sub(2);
     let heights = view
         .commits
         .as_ref()
-        .map(|list| entry_heights(list, inner_w))
+        .map(|list| vec![1; list.row_count()])
         .unwrap_or_default();
     let commits_h = match &view.commits {
         None => 0,
@@ -313,7 +314,7 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
         v.files_scroll.top = files_top;
         v.diff_area = diff_a;
         v.area = area;
-        v.files_width = col_w;
+        v.column_w = col_w;
         if let Some(list) = &mut v.commits {
             match commit_draw {
                 Some((top, hits)) => {
@@ -328,27 +329,6 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
             }
         }
     }
-}
-
-/// How many lines each COMMIT LIST row takes at `inner_w`.
-fn entry_heights(list: &CommitList, inner_w: u16) -> Vec<usize> {
-    if !list.loaded {
-        return vec![1];
-    }
-    let text_w = text_width(inner_w);
-    (0..list.row_count())
-        .map(|i| match list.row(i) {
-            Some(Row::Commit(c)) => wrap_words(&list.commits[c].subject, text_w).len() + 1,
-            Some(Row::Uncommitted) => wrap_words("Uncommitted changes", text_w).len() + 1,
-            _ => 1,
-        })
-        .collect()
-}
-
-/// The cells a row's words get: the panel's inner width less the cursor's
-/// `▌` and the `[✓] ` box.
-fn text_width(inner_w: u16) -> usize {
-    usize::from(inner_w).saturating_sub(1 + 4).max(1)
 }
 
 /// The COMMIT LIST panel. Returns the first row drawn and each drawn row's
@@ -403,57 +383,80 @@ fn draw_commits(
         return (0, Vec::new());
     }
     let top = list.window_top(heights, usize::from(inner.height));
-    let text_w = text_width(inner.width);
+    let columns = CommitColumns::of(list, now);
     let mut hits = Vec::new();
-    let mut y = inner.y;
-    for i in top..list.row_count() {
-        let Some(row) = list.row(i) else {
+    for (n, i) in (top..list.row_count()).enumerate() {
+        let (Some(row), Some(rect)) = (list.row(i), row_rect(inner, n)) else {
             break;
         };
-        let h = heights.get(i).copied().unwrap_or(1) as u16;
-        let bottom = inner.y + inner.height;
-        if y >= bottom {
-            break;
-        }
-        let rect = Rect {
-            x: inner.x,
-            y,
-            width: inner.width,
-            height: h.min(bottom - y),
-        };
-        let lines = entry_lines(list, row, text_w, now, th);
-        render_button(
-            f,
-            rect,
-            lines,
-            i == list.selected,
-            focused,
-            th,
-            0,
-            th.accent,
-        );
+        let spans = entry_line(list, row, &columns, row_width(inner), now, th);
+        render_row(f, rect, spans, i == list.selected, focused, th);
         hits.push((rect, i));
-        y += h;
     }
     (top, hits)
 }
 
-/// One COMMIT LIST row's lines: its box and its subject wrapped under it,
-/// then its short sha, age and counts.
-fn entry_lines(
+/// The right-hand columns of the COMMIT LIST's rows, each as wide as its
+/// widest entry so they read straight down: short sha (or the uncommitted
+/// row's file count), age, lines added, lines removed.
+struct CommitColumns {
+    who: usize,
+    age: usize,
+    counts: CountColumns,
+}
+
+impl CommitColumns {
+    fn of(list: &CommitList, now: i64) -> Self {
+        let files = list.uncommitted.map(|s| plural(s.files, "file").width());
+        let who = list
+            .commits
+            .iter()
+            .map(|c| c.short.width())
+            .chain(files)
+            .max()
+            .unwrap_or(0);
+        let age = list
+            .commits
+            .iter()
+            .map(|c| short_age(&c.ago(now)).width())
+            .max()
+            .unwrap_or(0);
+        let stats = list
+            .commits
+            .iter()
+            .map(|c| c.stat)
+            .chain([list.uncommitted]);
+        let counts = CountColumns::of(stats.map(|s| s.and_then(|s| s.lines)));
+        Self { who, age, counts }
+    }
+}
+
+/// `3h ago` as the COMMIT LIST's age column prints it: `3h`.
+fn short_age(ago: &str) -> &str {
+    ago.strip_suffix(" ago").unwrap_or(ago)
+}
+
+/// The fewest cells a COMMIT LIST row keeps for its subject before the
+/// sha and age give theirs up to it, the counts staying.
+const MIN_SUBJECT_W: usize = 16;
+
+/// One COMMIT LIST row: its box and its subject, cut at the end to fit,
+/// then the sha, age and counts in their columns on the right.
+fn entry_line(
     list: &CommitList,
     row: Row,
-    text_w: usize,
+    columns: &CommitColumns,
+    width: usize,
     now: i64,
     th: Theme,
-) -> Vec<Vec<Span<'static>>> {
+) -> Vec<Span<'static>> {
     let dim = Style::default().fg(th.dim);
     if row == Row::Older {
         let text = match list.paging {
             Some(_) => "reading older commits…".to_string(),
             None => format!("… {} older commits", list.total - list.commits.len()),
         };
-        return vec![vec![Span::styled(truncate(&text, text_w + 4), dim)]];
+        return vec![Span::styled(truncate(&text, width), dim)];
     }
     let ticked = list.ticked.contains(&row);
     let any_ticked = !list.ticked.is_empty();
@@ -471,103 +474,130 @@ fn entry_lines(
     } else if any_ticked && !ticked {
         words = words.fg(th.muted);
     }
-    let (subject, stat, meta) = match row {
+    let (subject, who, age, lines) = match row {
         Row::Commit(i) => {
             let c = &list.commits[i];
-            let mut meta = vec![c.short.clone(), c.ago(now)];
-            if !c.author.is_empty() {
-                meta.insert(1, c.author.clone());
-            }
-            (c.subject.clone(), c.stat, meta)
+            let age = short_age(&c.ago(now)).to_string();
+            let who = Span::styled(c.short.clone(), Style::default().fg(th.accent));
+            (c.subject.as_str(), who, age, c.stat.and_then(|s| s.lines))
         }
-        _ => (
-            "Uncommitted changes".to_string(),
-            list.uncommitted,
-            Vec::new(),
-        ),
+        _ => {
+            let stat = list.uncommitted;
+            let files = stat.map(|s| plural(s.files, "file")).unwrap_or_default();
+            let lines = stat.and_then(|s| s.lines);
+            (
+                "Uncommitted changes",
+                Span::styled(files, dim),
+                String::new(),
+                lines,
+            )
+        }
     };
-    let mut lines: Vec<Vec<Span<'static>>> = wrap_words(&subject, text_w)
-        .into_iter()
-        .enumerate()
-        .map(|(n, text)| {
-            let lead = if n == 0 {
-                Span::styled(mark, mark_style)
-            } else {
-                Span::raw("    ")
-            };
-            vec![lead, Span::styled(text, words)]
-        })
-        .collect();
-    lines.push(meta_line(meta, stat, text_w, th));
-    lines
+    let counts = columns.counts.spans(lines, th);
+    // Padded by chars: sha, age and `N files` are one cell to a char.
+    let mut right = vec![
+        Span::styled(format!("{:<w$}", who.content, w = columns.who), who.style),
+        Span::styled(format!(" {age:>w$}  ", w = columns.age), dim),
+    ];
+    right.extend(counts.iter().cloned());
+    let room = |right: &[Span]| left_room(width, spans_width(right)).saturating_sub(mark.width());
+    if room(&right) < MIN_SUBJECT_W {
+        right = counts;
+    }
+    let subject = truncate_cells(subject, room(&right));
+    let left = vec![Span::styled(mark, mark_style), Span::styled(subject, words)];
+    pin_right(left, right, width)
 }
 
-/// The row under a commit's subject: short sha, author, age, then `+A −R`
-/// — the author, then the age, given up to keep the counts on a narrow
-/// column, and the counts last.
-fn meta_line(
-    mut meta: Vec<String>,
-    stat: Option<crate::commit_list::Stat>,
-    width: usize,
-    th: Theme,
-) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(th.dim);
-    let counts: Vec<Span<'static>> = match stat.and_then(|s| s.lines.map(|l| (s.files, l))) {
-        Some((files, lines)) => {
-            let mut spans = Vec::new();
-            if meta.is_empty() {
-                let noun = if files == 1 { "file" } else { "files" };
-                spans.push(Span::styled(format!("{files} {noun} "), dim));
-            }
-            spans.push(Span::styled(
-                format!("+{}", lines.added),
-                Style::default().fg(th.added),
-            ));
-            spans.push(Span::styled(
-                format!(" −{}", lines.removed),
-                Style::default().fg(th.removed),
-            ));
-            spans
-        }
-        None => Vec::new(),
-    };
-    let counts_w: usize = counts.iter().map(|s| s.content.width()).sum();
-    let fits = |meta: &[String]| {
-        let text = meta.join(" · ").width();
-        let gap = if text > 0 && counts_w > 0 { 3 } else { 0 };
-        text + gap + counts_w <= width
-    };
-    // The author goes first, then the age; the sha stays.
-    while meta.len() > 1 && !fits(&meta) {
-        let drop = if meta.len() == 3 { 1 } else { meta.len() - 1 };
-        meta.remove(drop);
-    }
-    let mut spans = vec![Span::raw("    ")];
-    let mut used = 0;
-    for (n, part) in meta.iter().enumerate() {
-        if n > 0 {
-            spans.push(Span::styled(" · ", dim));
-            used += 3;
-        }
-        let style = if n == 0 {
-            Style::default().fg(th.accent)
-        } else {
-            dim
-        };
-        let part = truncate(part, width.saturating_sub(used));
-        used += part.width();
-        spans.push(Span::styled(part, style));
-    }
-    if counts_w > 0 && used + 3 + counts_w <= width {
-        if used > 0 {
-            spans.push(Span::styled(" · ", dim));
-        }
-        spans.extend(counts);
-    } else if used == 0 {
-        spans.extend(counts);
-    }
-    spans
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
 }
+
+/// A list row's own width: its rect's, less the cursor's `▌`.
+fn row_width(rect: Rect) -> usize {
+    usize::from(rect.width).saturating_sub(1)
+}
+
+/// The cells a row of `width` leaves its left side beside `right_w` pinned
+/// to its right edge, one cell kept between them.
+fn left_room(width: usize, right_w: usize) -> usize {
+    width.saturating_sub(right_w + usize::from(right_w > 0))
+}
+
+/// `left` padded out so `right` ends on the row's last cell of `width`.
+fn pin_right<'a>(mut left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Vec<Span<'a>> {
+    let gap = width.saturating_sub(spans_width(&left) + spans_width(&right));
+    left.push(Span::raw(" ".repeat(gap)));
+    left.extend(right);
+    left
+}
+
+/// A list's `+A −R` column pair, each as wide as its widest entry, so the
+/// counts of every row line up on the right edge.
+struct CountColumns {
+    added: usize,
+    removed: usize,
+}
+
+impl CountColumns {
+    fn of(lines: impl Iterator<Item = Option<crate::git_diff::LineChanges>>) -> Self {
+        let mut cols = Self {
+            added: 0,
+            removed: 0,
+        };
+        // The sign and every digit are a cell each.
+        let cells = |n: u64| 1 + n.checked_ilog10().map_or(1, |d| d as usize + 1);
+        for l in lines.flatten() {
+            cols.added = cols.added.max(cells(l.added));
+            cols.removed = cols.removed.max(cells(l.removed));
+        }
+        cols
+    }
+
+    /// No row of the list was counted: no columns at all.
+    fn is_empty(&self) -> bool {
+        self.added == 0
+    }
+
+    /// The cells the pair takes, its trailing space included.
+    fn width(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            self.added + self.removed + 2
+        }
+    }
+
+    /// `+A −R ` padded to the columns — blank for a row not counted (yet),
+    /// nothing at all for a list with no counts.
+    fn spans(&self, lines: Option<crate::git_diff::LineChanges>, th: Theme) -> Vec<Span<'static>> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let Some(l) = lines else {
+            return vec![Span::raw(" ".repeat(self.width()))];
+        };
+        vec![
+            Span::styled(
+                format!("{:>w$}", format!("+{}", l.added), w = self.added),
+                count_style(l.added, th.added, th),
+            ),
+            Span::styled(
+                format!(" {:>w$} ", format!("−{}", l.removed), w = self.removed),
+                count_style(l.removed, th.removed, th),
+            ),
+        ]
+    }
+}
+
+/// A `+A` or `−R` count in its colour — dim when nothing went that way.
+fn count_style(n: u64, color: ratatui::style::Color, th: Theme) -> Style {
+    Style::default().fg(if n == 0 { th.dim } else { color })
+}
+
+/// A file row's gutter ahead of its path: the two-letter status code and
+/// a space, then the ✓ (or its blank) and a space.
+const GUTTER_W: usize = 5;
 
 /// The changed-file list — flat paths, or the directory tree (`Ctrl+t`) —
 /// under its always-live filter. Returns the rows' rect and the first row
@@ -625,6 +655,11 @@ fn draw_files(
         };
         vec![status, mark]
     };
+    // Each file's `+A −R` pinned to the row's right edge; the path gets
+    // what is left, cut at its end so it reads from its root.
+    let counts = CountColumns::of(view.files.iter().map(|f| f.lines));
+    let row_w = row_width(list_inner);
+    let text_w = left_room(row_w, counts.width()).saturating_sub(GUTTER_W);
     match &view.tree {
         None => {
             for (row, (i, m)) in view.matches.iter().enumerate().skip(start).enumerate() {
@@ -632,13 +667,12 @@ fn draw_files(
                     break;
                 };
                 let file = &view.files[m.file];
-                let budget = (list_inner.width as usize).saturating_sub(5);
                 let mut spans = gutter(Some(file), view.reviewed.contains_key(&file.path));
-                let (shown, positions) = path_tail(&file.path, &m.positions, budget);
-                let used = shown.chars().count();
-                spans.extend(fuzzy_highlight_spans(&shown, &positions, th));
+                let shown = truncate_cells(&file.path, text_w);
+                let positions = visible_positions(&m.positions, &shown, &file.path);
+                spans.extend(fuzzy_highlight_spans(&shown, positions, th));
                 if let Some(orig) = &file.orig_path {
-                    let rest = budget.saturating_sub(used);
+                    let rest = text_w.saturating_sub(shown.width());
                     if rest > 3 {
                         spans.push(Span::styled(
                             truncate(&format!(" ← {orig}"), rest),
@@ -646,6 +680,7 @@ fn draw_files(
                         ));
                     }
                 }
+                let spans = pin_right(spans, counts.spans(file.lines, th), row_w);
                 render_row(f, row_area, spans, i == view.selected, focused, th);
             }
         }
@@ -668,9 +703,8 @@ fn draw_files(
                 } else {
                     "▸ "
                 };
-                let budget =
-                    (list_inner.width as usize).saturating_sub(5 + indent.chars().count() + 2);
-                let shown = truncate(&node.name, budget);
+                let budget = text_w.saturating_sub(indent.chars().count() + 2);
+                let shown = truncate_cells(&node.name, budget);
                 let mut spans = gutter(file, done[r.node]);
                 spans.push(Span::raw(indent));
                 spans.push(Span::styled(marker, Style::default().fg(th.accent)));
@@ -680,6 +714,8 @@ fn draw_files(
                     let positions = visible_positions(&r.positions, &shown, &node.name);
                     spans.extend(fuzzy_highlight_spans(&shown, positions, th));
                 }
+                let lines = file.and_then(|f| f.lines);
+                let spans = pin_right(spans, counts.spans(lines, th), row_w);
                 render_row(f, row_area, spans, i == tree.selected, focused, th);
             }
         }
@@ -687,54 +723,74 @@ fn draw_files(
     (list_inner, start)
 }
 
-/// The reading pane: the selected file's diff under the REVIEW HEAD — or,
-/// on a tree directory's row, what changed under it — wrapped at its
-/// width, its explanation at its foot. Returns the diff's own rect and the
-/// scroll it was drawn at, clamped.
+/// What the reading pane reads, as its border names it — the commit on
+/// screen, what was ticked, the uncommitted changes, a pull request — and,
+/// stepping through the ticked one at a time, its place among them.
+fn reading(view: &DiffView) -> (String, Option<(usize, usize)>) {
+    if let Some(list) = &view.commits {
+        let title = list
+            .showing()
+            .and_then(|showing| list.reading_title(&showing));
+        return (
+            title.unwrap_or_else(|| view.branch.clone()),
+            list.step_place(),
+        );
+    }
+    let title = view.head.iter().find_map(|line| match line {
+        crate::diff_doc::Head::Title(title) => Some(title.clone()),
+        _ => None,
+    });
+    (title.unwrap_or_else(|| view.branch.clone()), None)
+}
+
+/// The reading pane: the selected file's diff — or, on a tree directory's
+/// row, what changed under it — wrapped at its width, its explanation at
+/// its foot. The file itself is the Files list's cursor; the border says
+/// what it is read as part of, and the file's `+A −R` on the right.
+/// Returns the diff's own rect and the scroll it was drawn at, clamped.
 fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, usize) {
     let focused = view.focus == DiffFocus::Diff;
-    // The file's path, a tree directory's, or — with neither — what the
-    // viewer is of: the branch, the pull request.
-    let sel_path = match view.selected_dir() {
-        Some(dir) => format!("{dir}/"),
-        None => view.selected_path().unwrap_or(&view.branch).to_string(),
-    };
-    let reviewed = view.reviewed.contains_key(&sel_path);
+    let (title, place) = reading(view);
     let facts = &view.doc.facts;
-    // The file's facts on the top edge's right: what happened to it and
-    // how many lines each way.
-    let mut what: Vec<String> = Vec::new();
-    if let Some(status) = facts.status {
-        what.push(match &facts.from {
-            Some(from) => format!("{status} from {from}"),
-            None => status.to_string(),
-        });
+    let facts_style = Style::default().fg(if focused { th.accent } else { th.muted });
+    let mut right: Vec<Span> = Vec::new();
+    if let Some((k, n)) = place {
+        right.push(Span::styled(format!("{k} of {n}"), facts_style));
     }
-    if facts.added + facts.removed > 0 {
-        what.push(format!("+{} −{}", facts.added, facts.removed));
-    }
-    let what = what.join(" · ");
-    let room = (area.width as usize).saturating_sub(6);
-    let what = if what.width() + 12 <= room {
-        what
+    // A change with no lines to count — a binary file, a mode change, a
+    // pure rename — says what it is instead.
+    let what = if facts.added + facts.removed > 0 {
+        vec![
+            Span::styled(
+                format!("+{}", facts.added),
+                count_style(facts.added as u64, th.added, th),
+            ),
+            Span::styled(
+                format!(" −{}", facts.removed),
+                count_style(facts.removed as u64, th.removed, th),
+            ),
+        ]
     } else {
-        String::new()
+        facts
+            .status
+            .map(|status| vec![Span::styled(status, facts_style)])
+            .unwrap_or_default()
     };
-    let mut title = sel_path.clone();
-    if reviewed {
-        title.push_str(" ✓");
+    if !right.is_empty() && !what.is_empty() {
+        right.push(Span::styled(" · ", Style::default().fg(th.dim)));
     }
-    let title_room = room.saturating_sub(if what.is_empty() { 0 } else { what.width() + 3 });
-    let title = truncate_left(&title, title_room);
+    right.extend(what);
+    let right_w = spans_width(&right);
+    // The border's corners and the spaces around each title.
+    let room =
+        usize::from(area.width).saturating_sub(6 + if right_w > 0 { right_w + 3 } else { 0 });
+    let title = truncate_cells(&title, room);
     let mut block = panel_block(&title, focused, th);
-    if !what.is_empty() {
-        block = block.title_top(
-            Line::from(Span::styled(
-                format!(" {what} "),
-                Style::default().fg(if focused { th.accent } else { th.muted }),
-            ))
-            .right_aligned(),
-        );
+    if right_w > 0 {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(right);
+        spans.push(Span::raw(" "));
+        block = block.title_top(Line::from(spans).right_aligned());
     }
     let inner = block.inner(area);
     // The explanation at the foot, right above the keys.
@@ -756,43 +812,6 @@ fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, us
     f.render_widget(Paragraph::new(rows), body);
     crate::hints::draw_explain(f, explain_row, &explain, th);
     (body, scroll)
-}
-
-/// `path` cut to `max` columns from the left — its file name kept, behind
-/// a `…` — with the filter's matched positions moved to match.
-fn path_tail(path: &str, positions: &[usize], max: usize) -> (String, Vec<usize>) {
-    let len = path.chars().count();
-    if len <= max {
-        return (path.to_string(), positions.to_vec());
-    }
-    let cut = len - max.saturating_sub(1);
-    let shown = std::iter::once('…').chain(path.chars().skip(cut)).collect();
-    let moved = positions
-        .iter()
-        .filter(|&&p| p >= cut)
-        .map(|p| p - cut + 1)
-        .collect();
-    (shown, moved)
-}
-
-/// `text` cut to `max` cells from the left, keeping its end — a path's
-/// file name — behind a `…`.
-fn truncate_left(text: &str, max: usize) -> String {
-    if text.width() <= max {
-        return text.to_string();
-    }
-    let mut out: Vec<char> = Vec::new();
-    let mut used = 1;
-    for ch in text.chars().rev() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > max {
-            break;
-        }
-        used += w;
-        out.push(ch);
-    }
-    out.push('…');
-    out.into_iter().rev().collect()
 }
 
 #[cfg(test)]
@@ -829,6 +848,7 @@ mod tests {
             path: "src/retry.rs".into(),
             orig_path: None,
             xy: ['M', ' '],
+            lines: None,
         };
         let mut view = DiffView::new(
             "/nonexistent-orion-diff-test".into(),
@@ -884,8 +904,7 @@ mod tests {
 
     /// Nothing the viewer draws runs off its pane: at a wide terminal and
     /// a narrow one, the 400-character line wraps inside the diff, every
-    /// row of it within the frame, and the commit list's subjects wrap
-    /// under their boxes.
+    /// row of it within the frame.
     #[test]
     fn everything_wraps_inside_the_modal() {
         for (width, height) in [(150, 42), (100, 30), (72, 30)] {
@@ -914,11 +933,8 @@ mod tests {
                 let edge = usize::from(pane.x + pane.width - 1);
                 assert_eq!(chars.get(edge), Some(&'│'), "{width}: {line}");
             }
-            assert!(text.contains("[ ] Uncommitted changes"), "{text}");
-            assert!(
-                text.contains("commit 1 of 2 · Add a retry helper"),
-                "{text}"
-            );
+            assert!(text.contains("[ ] Uncommitted"), "{text}");
+            assert!(text.contains("╭ Uncommitted changes ─"), "{text}");
         }
     }
 
@@ -1003,16 +1019,96 @@ mod tests {
         assert_eq!(v.line_on_screen(), 1, "past the end: the first line");
     }
 
+    /// A file row keeps its path's start, cut at the end, with its counts
+    /// pinned to the right edge in columns every row shares; the commit
+    /// rows the same, a subject cut rather than wrapped.
     #[test]
-    fn a_long_path_keeps_its_file_name() {
-        assert_eq!(
-            truncate_left("crates/orion-tui/src/retry.rs", 12),
-            "…rc/retry.rs"
+    fn rows_keep_their_start_and_pin_their_counts_right() {
+        let mut v = view();
+        let counted = |added, removed| Some(LineChanges { added, removed });
+        v.files = vec![
+            DiffFile {
+                path: "crates/orion-core/src/webhooks/dispatcher_with_backpressure.rs".into(),
+                orig_path: None,
+                xy: ['M', ' '],
+                lines: counted(22, 12),
+            },
+            DiffFile {
+                path: "src/retry.rs".into(),
+                orig_path: None,
+                xy: ['A', ' '],
+                lines: counted(124, 0),
+            },
+        ];
+        v.recompute_matches();
+        let (text, app) = screen(v, 150, 42);
+        let Some(Overlay::Diff(v)) = &app.overlay else {
+            panic!("the viewer is up");
+        };
+        let default = crate::app::DEFAULT_DIFF_FILES_W;
+        assert_eq!(v.column_w, default, "the column's default\n{text}");
+        let row = |needle: &str| {
+            let line = text
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}\n{text}"));
+            // The left column only, borders included.
+            line.chars()
+                .skip(usize::from(v.area.x))
+                .take(usize::from(default))
+                .collect::<String>()
+        };
+        let long = row("crates/orion-core/src/webhooks/dispatch");
+        assert!(
+            long.contains("│▌M    crates/orion-core/src/webhooks/dispatcher_with"),
+            "{long}"
         );
-        assert_eq!(truncate_left("a.rs", 12), "a.rs");
-        let (shown, positions) = path_tail(".claude/settings.local.json", &[0, 8, 26], 20);
-        assert_eq!(shown, "…settings.local.json");
-        assert_eq!(positions, [1, 19], "the matches that are still in sight");
-        assert_eq!(path_tail("a.rs", &[0], 20), ("a.rs".to_string(), vec![0]));
+        assert!(long.contains("…"), "cut at the end: {long}");
+        assert!(long.ends_with(" +22 −12 │"), "{long}");
+        assert!(
+            row("src/retry.rs").ends_with("+124  −0 │"),
+            "the columns line up"
+        );
+        let commit = row("Point the notes at the retry helper");
+        assert!(
+            commit.contains("[ ] Point the notes at the retry helper"),
+            "{commit}"
+        );
+        assert!(commit.contains("…"), "a long subject is cut: {commit}");
+        assert!(commit.contains("… abc1def "), "{commit}");
+        assert!(commit.ends_with("  +20 −1 │"), "{commit}");
+        assert!(
+            row("[ ] Uncommitted changes").ends_with("2 files         +124 −0 │"),
+            "{text}"
+        );
+    }
+
+    /// The diff pane's border names what is read and the file's counts;
+    /// the commit's message is not drawn over the code.
+    #[test]
+    fn the_border_names_the_commit_and_the_counts() {
+        let mut v = view();
+        v.commits.as_mut().unwrap().select(3);
+        let (text, _) = screen(v, 150, 42);
+        let top = text
+            .lines()
+            .find(|l| l.contains("Add a retry helper with exponential backoff ─"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(top.contains(" +1 −1 ╮"), "{top}");
+        assert!(
+            !text.contains("abc2def · Dana"),
+            "no meta line over the diff\n{text}"
+        );
+        assert!(
+            !text.contains("The webhook dispatcher drops events"),
+            "no body over the diff\n{text}"
+        );
+        // Stepping through the ticked, the place joins the counts.
+        let mut v = view();
+        let list = v.commits.as_mut().unwrap();
+        list.ticked.extend([Row::Commit(0), Row::Commit(2)]);
+        list.toggle_mode();
+        let (text, _) = screen(v, 150, 42);
+        assert!(text.contains("of 2 · +1 −1 ╮"), "{text}");
     }
 }
