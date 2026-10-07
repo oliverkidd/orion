@@ -1530,16 +1530,15 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     let task = expand_template(cfg.linear_template(), &issues);
     let taken = app.project_branches(&project);
     let batch = LinearBatch { issues, task };
-    // The project's root, as an issue's box starts; the box's WORKTREE
-    // PICKER offers a fresh worktree first (`LinearBatch::branch`).
-    let target = app
-        .root_worktree(&project)
-        .map(QuickTarget::Worktree)
-        .unwrap_or_else(|| QuickTarget::NewWorktree {
-            project,
-            branch: batch.branch(&taken),
-            existing: false,
-        });
+    // A fresh worktree named after the batch (`LinearBatch::branch`),
+    // never the project's root checkout: a batch of issues is a branch of
+    // its own, and its pull request is what `remember_submit` links back.
+    // The box's WORKTREE PICKER can still aim it at a checkout on purpose.
+    let target = QuickTarget::NewWorktree {
+        project,
+        branch: batch.branch(&taken),
+        existing: false,
+    };
     Some(QuickLaunch::from_config(target, &cfg).with_linear(Some(batch)))
 }
 
@@ -3260,7 +3259,9 @@ pub(crate) mod tests {
 
     /// Typing in a Linear box never drops the issues: the text goes first
     /// and the marked issues follow in full, under the preset made from
-    /// the box's own picker — which goes straight onto the box on save.
+    /// the box's own picker — which goes straight onto the box on save,
+    /// its prefix written in. The box cuts a fresh worktree, never the
+    /// project's root checkout (`dev` here).
     #[test]
     fn a_typed_task_keeps_the_issues_under_a_preset_made_on_the_spot() {
         let (mut app, dir, _rx) = paired();
@@ -3300,19 +3301,40 @@ pub(crate) mod tests {
                 "{}",
                 prompt.title
             );
+            assert!(
+                prompt.title.contains("new worktree"),
+                "a fresh worktree, not dev: {}",
+                prompt.title
+            );
+            assert_eq!(
+                prompt.input.as_str(),
+                "Plan first.\n\n",
+                "the prefix is in the box"
+            );
             for c in "go".chars() {
                 press(&mut app, plain(KeyCode::Char(c)));
             }
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("the box, got {:?}", app.overlay);
+            };
+            let crate::app::PromptKind::QuickPrompt(launch) = &prompt.kind else {
+                panic!("a quick prompt, got {:?}", prompt.kind);
+            };
+            let starting_prompt = launch.compose(prompt.input.as_str().trim());
             let mut out = Vec::new();
             crate::event_loop::handle_overlay_key(&mut app, plain(KeyCode::Enter), &mut out);
-            let [ClientRequest::CreateAgent {
-                starting_prompt, ..
-            }] = out.as_slice()
-            else {
-                panic!("one CreateAgent, got {out:?}");
-            };
+            assert!(
+                matches!(
+                    out.as_slice(),
+                    [ClientRequest::CreateWorktree {
+                        existing: false,
+                        ..
+                    }]
+                ),
+                "the worktree is cut first, the launch riding it: {out:?}"
+            );
             assert_eq!(
-                starting_prompt.as_deref(),
+                Some(starting_prompt.as_str()),
                 Some(
                     "Plan first.\n\ngo\n\nThe Linear issues, in full — everything you need is here, no Linear access required:\n\n\
                      ### ENG-1: Login\nIn Progress · https://linear.app/x/issue/ENG-1\n\n(no description)\n\n\
