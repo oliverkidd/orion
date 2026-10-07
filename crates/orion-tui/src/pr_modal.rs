@@ -81,9 +81,9 @@ use crate::quick_prompt::{ModalUnder, QuickLaunch};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, layout_sections, list_header,
-    panel_block, render_row_lines, row_rect, search_line_lit, sections, truncate,
-    visible_positions, ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    centered_rect_pct, empty_list_row, fuzzy_highlight_styled, layout_sections_spaced, panel_block,
+    row_rect, search_line_lit, sections, truncate, ListEntry, SPLIT_MODAL_PCT,
+    SPLIT_PANE_LAYOUT_MIN,
 };
 
 /// A list younger than this is what opening the modal shows, with no
@@ -1278,140 +1278,169 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
 
 // ---- drawing ----
 
-/// A row's first line: its state glyph — `●` open, `○` a draft, red for
-/// one in trouble — then [`row_spans`].
-fn title_spans(pr: &OpenPr, positions: &[usize], budget: usize, th: Theme) -> Vec<Span<'static>> {
-    let glyph = if pr.is_draft { "○ " } else { "● " };
-    let color = match (pr.trouble(), pr.is_draft) {
-        (Some(_), _) => th.err,
-        (None, true) => th.faint,
-        (None, false) => th.ok,
-    };
-    let mut spans = vec![Span::styled(glyph, Style::default().fg(color))];
-    spans.extend(row_spans(pr, positions, budget.saturating_sub(2), th));
-    spans
+/// The right end of a list row: the trouble's word or `draft`, else the
+/// checks' mark and the review's, in a column this wide…
+const STATUS_W: usize = 9;
+/// …then two cells, then how long ago it was opened, at least this wide.
+const AGE_W: usize = 3;
+
+/// How long ago `pr` was opened, as its row's last column says it: `3d`,
+/// `21m`, `now` — empty for a row the list said nothing about.
+fn age_of(pr: &OpenPr, now: i64) -> String {
+    crate::pull_request::rfc3339_secs(&pr.meta.created_at)
+        .map(|at| crate::hosts::ago_short(now - at))
+        .unwrap_or_default()
 }
 
-/// A row's second line, dim, its parts joined by ` · `: who opened it
-/// (left out under `Yours`), how long ago, the checks as `passed/total`
-/// (`✓` all passed, `◐` some still running, `✗` some failed), the review
-/// decision, the comment count, and its labels in their GitHub colours.
-/// What does not fit drops from the right — the labels first. Empty for a
-/// row with nothing to say (the slim query's, an old cache's).
-fn meta_spans(pr: &OpenPr, budget: usize, now: i64, th: Theme) -> Vec<Span<'static>> {
-    const MS_PER_SEC: i64 = 1000;
-    let meta = &pr.meta;
-    let dim = Style::default().fg(th.dim);
-    let mut parts: Vec<Vec<Span<'static>>> = Vec::new();
-    if pr.section() != PrSection::Yours && !meta.author.is_empty() {
-        parts.push(vec![Span::styled(meta.author.clone(), dim)]);
-    }
-    if let Some(at) = crate::pull_request::rfc3339_secs(&meta.created_at) {
-        let ago = crate::hosts::ago_label((now - at).max(0) * MS_PER_SEC);
-        if !ago.is_empty() {
-            parts.push(vec![Span::styled(ago, dim)]);
+/// The columns every row of the list lines up on: the widest `#42`, so
+/// the titles start in one column, and the widest age.
+struct RowCols {
+    number: usize,
+    age: usize,
+}
+
+impl RowCols {
+    fn of(rows: &[OpenPr], now: i64) -> Self {
+        RowCols {
+            number: rows
+                .iter()
+                .map(|pr| pr.number.to_string().len() + 1)
+                .max()
+                .unwrap_or(0),
+            age: rows
+                .iter()
+                .map(|pr| age_of(pr, now).chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(AGE_W),
         }
     }
-    if let Some(checks) = meta.checks {
-        let (glyph, color) = match pr.checks() {
-            Checks::Failing => ("✗", th.err),
-            Checks::Pending => ("◐", th.warn),
-            _ => ("✓", th.ok),
-        };
-        parts.push(vec![
-            Span::styled(format!("{glyph} "), Style::default().fg(color)),
-            Span::styled(format!("{}/{}", checks.passed, checks.total()), dim),
-        ]);
-    }
-    let review = match meta.review {
-        Review::Approved => Some(("✓ approved", th.ok)),
-        Review::Changes => Some(("✗ changes", th.err)),
-        Review::Required => Some(("○ review", th.muted)),
-        Review::None => None,
-    };
-    if let Some((word, color)) = review {
-        parts.push(vec![Span::styled(word, Style::default().fg(color))]);
-    }
-    if meta.comments > 0 {
-        let noun = if meta.comments == 1 {
-            "comment"
-        } else {
-            "comments"
-        };
-        parts.push(vec![Span::styled(format!("{} {noun}", meta.comments), dim)]);
-    }
-    for label in &meta.labels {
-        let color = crate::theme::hex(&label.color).unwrap_or(th.muted);
-        parts.push(vec![Span::styled(
-            label.name.clone(),
-            Style::default().fg(color),
-        )]);
-    }
-    crate::ui::fit_parts(parts, budget, th)
 }
 
-/// One list row's spans: `#42` dim, the title in the group row's color
-/// (`pr_row::look` — dimmed for a draft, red for a pull request GitHub
-/// says cannot merge), and the badge pinned right — the trouble's word,
-/// else `draft` — so a row reads the way its group row does. The chars
-/// the filter matched (`positions`, into the row's `#42 title`) are lit.
-fn row_spans(pr: &OpenPr, positions: &[usize], budget: usize, th: Theme) -> Vec<Span<'static>> {
+/// One list row on one line, the main page's LIST row's shape: the
+/// cursor's `▌` — `cursor_focus` is whether the list has the keys, on the
+/// cursor's row — or two cells of air, the state dot — `●` open, `○` a
+/// draft, red for one GitHub says cannot merge — `#42` in a column as wide
+/// as the list's widest, the title (faint for a draft), and at the right
+/// end the trouble's word or `draft` in `pr_row::look`'s colours, else
+/// the checks' mark and the review's (`✓ ○`), then how long ago it was
+/// opened. The title gives way to all of it. The chars the filter matched
+/// (`positions`, into the row's `#42 title`) are lit.
+fn row_line(
+    pr: &OpenPr,
+    positions: &[usize],
+    cursor_focus: Option<bool>,
+    cols: &RowCols,
+    width: usize,
+    now: i64,
+    th: Theme,
+) -> Line<'static> {
+    let mark = match cursor_focus {
+        Some(true) => Span::styled("▌ ", Style::default().fg(th.accent)),
+        Some(false) => Span::styled("▌ ", Style::default().fg(th.dim)),
+        None => Span::raw("  "),
+    };
     let trouble = pr.trouble();
-    let look = crate::pr_row::look(pr.standing(), trouble, th);
+    let (dot, dot_color) = match (trouble, pr.is_draft) {
+        (Some(_), _) => ("● ", th.err),
+        (None, true) => ("○ ", th.faint),
+        (None, false) => ("● ", th.ok),
+    };
+    let number = format!("#{}", pr.number);
+    let number_w = number.chars().count();
+    // The positions split where the number ends: the title's own count
+    // from its first char, past the space.
+    let split = positions.partition_point(|&p| p < number_w);
+    let title_positions: Vec<usize> = positions[split..]
+        .iter()
+        .filter_map(|p| p.checked_sub(number_w + 1))
+        .collect();
+    let mut spans = vec![mark, Span::styled(dot, Style::default().fg(dot_color))];
+    spans.extend(fuzzy_highlight_styled(
+        &number,
+        &positions[..split],
+        Style::default().fg(th.dim),
+        th,
+    ));
+    spans.push(Span::raw(" ".repeat(cols.number + 2 - number_w)));
+    let lead = 2 + 2 + cols.number + 2;
+    let right_w = STATUS_W + 2 + cols.age + 1;
+    // The status column goes before the title shortens past MIN_TEXT_W.
+    let status = width >= lead + crate::pr_preview::MIN_TEXT_W + 1 + right_w;
+    let room = width.saturating_sub(lead + 1 + if status { right_w } else { cols.age + 1 });
+    let title = truncate(&pr.title, room);
+    let shown = title.chars().count();
+    let lit: Vec<usize> = title_positions.into_iter().filter(|&p| p < shown).collect();
+    let title_color = if pr.is_draft && trouble.is_none() {
+        th.faint
+    } else {
+        th.text
+    };
+    spans.extend(fuzzy_highlight_styled(
+        &title,
+        &lit,
+        Style::default().fg(title_color),
+        th,
+    ));
+    let used = lead + shown;
+    let age = age_of(pr, now);
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if status {
+        right.extend(status_spans(pr, th));
+        right.push(Span::raw("  "));
+    }
+    right.push(Span::styled(
+        format!("{age:>w$}", w = cols.age),
+        Style::default().fg(th.dim),
+    ));
+    let right_w: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(used + right_w + 1)),
+    ));
+    spans.extend(right);
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// A row's status column, [`STATUS_W`] wide and right-aligned: the
+/// trouble's word or `draft` in `pr_row::look`'s colours, else the checks'
+/// mark and the review's — `✓ ○` — a blank where either has nothing to say.
+fn status_spans(pr: &OpenPr, th: Theme) -> Vec<Span<'static>> {
+    /// The two marks and the cell between them.
+    const MARKS_W: usize = 3;
+    let trouble = pr.trouble();
     let badge = match trouble {
         Some(trouble) => Some(trouble.badge()),
         None => pr.is_draft.then(|| pr.badge()),
     };
-    let badge_w = badge.map_or(0, |b| b.chars().count());
-    let text_budget = budget.saturating_sub(if badge_w > 0 { badge_w + 2 } else { 0 });
-    let full = pr.label();
-    let label = truncate(&full, text_budget);
-    let positions = visible_positions(positions, &label, &full);
-    let number = format!("#{} ", pr.number);
-    // A row with no title is its number alone.
-    let title = label.strip_prefix(&number).unwrap_or_default().to_string();
-    let number_w = number.chars().count();
-    let used = number_w + title.chars().count();
-    let number_color = if trouble.is_some() {
-        look.label
-    } else {
-        th.dim
-    };
-    // The positions split where the number ends: the title's own count
-    // from its first char.
-    let split = positions.partition_point(|&p| p < number_w);
-    let title_positions: Vec<usize> = positions[split..].iter().map(|p| p - number_w).collect();
-    let mut spans = fuzzy_highlight_styled(
-        &number,
-        &positions[..split],
-        Style::default().fg(number_color),
-        th,
-    );
-    spans.extend(fuzzy_highlight_styled(
-        &title,
-        &title_positions,
-        Style::default().fg(look.label),
-        th,
-    ));
-    if let Some(badge) = badge {
-        if used + badge_w < budget {
-            spans.push(Span::raw(" ".repeat(budget - used - badge_w)));
-            spans.push(Span::styled(badge, Style::default().fg(look.badge)));
-        }
+    if let Some(word) = badge {
+        let look = crate::pr_row::look(pr.standing(), trouble, th);
+        return vec![Span::styled(
+            format!("{word:>STATUS_W$}"),
+            Style::default().fg(look.badge),
+        )];
     }
-    spans
-}
-
-/// Whether [`meta_spans`] has anything to say about a row — it takes a
-/// second line — without building it: rows off screen never are.
-fn has_meta(pr: &OpenPr) -> bool {
-    let meta = &pr.meta;
-    (pr.section() != PrSection::Yours && !meta.author.is_empty())
-        || !meta.created_at.is_empty()
-        || meta.checks.is_some()
-        || meta.review != Review::None
-        || meta.comments > 0
-        || !meta.labels.is_empty()
+    let checks = pr.meta.checks.map(|_| match pr.checks() {
+        Checks::Failing => ("✗", th.err),
+        Checks::Pending => ("◐", th.warn),
+        _ => ("✓", th.ok),
+    });
+    let review = match pr.meta.review {
+        Review::Approved => Some(("✓", th.ok)),
+        Review::Changes => Some(("✗", th.err)),
+        Review::Required => Some(("○", th.muted)),
+        Review::None => None,
+    };
+    let mark = |glyph: Option<(&'static str, ratatui::style::Color)>| match glyph {
+        Some((g, color)) => Span::styled(g, Style::default().fg(color)),
+        None => Span::raw(" "),
+    };
+    vec![
+        Span::raw(" ".repeat(STATUS_W - MARKS_W)),
+        mark(checks),
+        Span::raw(" "),
+        mark(review),
+    ]
 }
 
 /// What a draw records for the mouse and the next draw — the modal, the
@@ -1497,17 +1526,40 @@ pub(crate) fn draw(
     let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
-    // The always-live filter on the list's first line, the rows under it;
-    // its `key:value` tokens lit.
-    if let Some(query_area) = row_rect(list_inner, 0) {
-        let placeholder = format!(
-            "type to filter… {} by label, author, checks",
-            keys::FILTER.label()
-        );
-        let line = search_line_lit(&view.query, &placeholder, query_area, th, &parsed.spans);
-        f.render_widget(Paragraph::new(line), query_area);
+    // The always-live filter on a row of its own, a blank line either side
+    // of it and two cells in, as the rows' text is; its `key:value` tokens
+    // lit, and what `⌘F` narrows by at its right end while there is room.
+    if let Some(query_area) = row_rect(list_inner, 1) {
+        let hint = format!("{} label · author · checks", keys::FILTER.label());
+        let hint_w = hint.chars().count() as u16;
+        let typed = view.query.chars().count() as u16;
+        let show_hint = query_area.width >= 2 + typed.max(16) + 2 + hint_w + 2;
+        let field = Rect {
+            x: query_area.x + 2,
+            width: query_area
+                .width
+                .saturating_sub(2 + if show_hint { hint_w + 4 } else { 1 }),
+            ..query_area
+        };
+        let line = search_line_lit(&view.query, "type to filter…", field, th, &parsed.spans);
+        f.render_widget(Paragraph::new(line), field);
+        if show_hint {
+            let at = Rect {
+                x: query_area.x + query_area.width - 2 - hint_w,
+                width: hint_w,
+                ..query_area
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(hint, Style::default().fg(th.faint))),
+                at,
+            );
+        }
     }
-    let mut rows_area = crate::ui::below_first_row(list_inner);
+    let mut rows_area = Rect {
+        y: list_inner.y + 3.min(list_inner.height),
+        height: list_inner.height.saturating_sub(3),
+        ..list_inner
+    };
     // A list GitHub could not be asked for says so on a row of its own
     // under the filter, never only in a title a narrow list would cut:
     // rows that stopped refreshing look exactly like current ones (#106).
@@ -1519,7 +1571,10 @@ pub(crate) fn draw(
             format!("couldn't refresh ({retry} retries)")
         };
         if let Some(note_area) = row_rect(rows_area, 0) {
-            let note = Span::styled(note, Style::default().fg(th.warn));
+            let note = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(note, Style::default().fg(th.warn)),
+            ]);
             f.render_widget(Paragraph::new(note), note_area);
         }
         rows_area = crate::ui::below_first_row(rows_area);
@@ -1533,30 +1588,52 @@ pub(crate) fn draw(
     } else if visible.is_empty() {
         empty_list_row(f, rows_area, "no pull requests match", th);
     }
-    // Sections — yours, waiting on your review, the rest — once there is
-    // more than one; a row two lines tall when it has a meta line.
+    // Sections — yours, waiting on your review, the rest — each under a
+    // rule the way the main page's checkouts sit under their bands, a blank
+    // line between them; a row one line, the main page's LIST row's shape.
     let keys: Vec<PrSection> = visible.iter().map(|(i, _)| rows[*i].section()).collect();
-    let entries = sections(&keys, false);
-    let row_h = |v: usize| if has_meta(&rows[visible[v].0]) { 2 } else { 1 };
+    let entries = sections(&keys, true);
     let (list_start, drawn) =
-        layout_sections(&entries, row_h, cursor_row, view.list_start, rows_area);
-    let budget = (rows_area.width as usize).saturating_sub(2);
+        layout_sections_spaced(&entries, |_| 1, cursor_row, view.list_start, rows_area);
+    let width = rows_area.width as usize;
     let now = orion_core::clock::now_secs() as i64;
+    let cols = RowCols::of(&rows, now);
     let mut row_rects = Vec::with_capacity(drawn.len());
     for (entry, rect) in drawn {
         match entry {
             ListEntry::Header { first, count } => {
-                let line = Line::from(list_header(keys[first].name(), count, None, th));
-                f.render_widget(Paragraph::new(line), rect);
+                let rule = crate::ui::section_rule(
+                    keys[first].name(),
+                    th.muted,
+                    vec![Span::styled(count.to_string(), Style::default().fg(th.dim))],
+                    width,
+                    th,
+                );
+                let at = Rect {
+                    y: rect.y + rect.height - 1,
+                    height: 1,
+                    ..rect
+                };
+                f.render_widget(Paragraph::new(rule), at);
             }
             ListEntry::Row(v) => {
                 let (index, positions) = &visible[v];
                 let pr = &rows[*index];
-                let mut lines = vec![title_spans(pr, positions, budget, th)];
-                if rect.height > 1 {
-                    lines.push(meta_spans(pr, budget, now, th));
+                let on = Some(*index) == cursor;
+                let line = row_line(
+                    pr,
+                    positions,
+                    on.then_some(list_focused),
+                    &cols,
+                    width,
+                    now,
+                    th,
+                );
+                let mut row = Paragraph::new(line);
+                if on && list_focused {
+                    row = row.style(Style::default().bg(th.focus_tint));
                 }
-                render_row_lines(f, rect, lines, Some(*index) == cursor, list_focused, th);
+                f.render_widget(row, rect);
                 row_rects.push((pr.url.clone(), rect));
             }
         }
@@ -1602,28 +1679,43 @@ pub(crate) fn draw(
 
     // ---- right: the reading side, the PULL REQUEST PAGE ----
     let current = cursor.and_then(|i| rows.get(i));
-    // The frame names the number; the headline inside carries the title.
-    let body_title = match current {
-        Some(pr) => format!("Pull request #{}", pr.number),
-        None => "Pull request".to_string(),
+    let input = current.map(|pr| crate::pr_preview::PageInput {
+        number: pr.number,
+        title: &pr.title,
+        detail: app.pr_detail.get(&pr.url),
+        failed: app.pr_detail_failed.contains(&pr.url),
+        posting: app.pr_comment_inflight.contains(&pr.url),
+        browser_key: keys::BROWSER.label(),
+        diff_key: keys::DIFF.label(),
+        now,
+    });
+    // The frame says where it stands, the number and the title — the page
+    // under it starts on the sentence — and at its right end what it
+    // changes, then the `↗` that opens it in the browser.
+    let (head, tail) = match &input {
+        Some(input) => crate::pr_preview::border(input, page_focused, th),
+        None => (
+            vec![Span::styled("Pull request", Style::default().fg(th.muted))],
+            Vec::new(),
+        ),
     };
-    let block = panel_block(&body_title, page_focused, th);
+    let tail_w = if current.is_some() {
+        crate::ui::border_tail_width(&tail)
+    } else {
+        0
+    };
+    // The corners, a cell of air either side of the title, the tail, and a
+    // cell between the two.
+    let room = (body_a.width as usize).saturating_sub(2 + 2 + tail_w as usize + 1);
+    let head = crate::pr_preview::fit(head, room).spans;
+    let head_w: usize = head.iter().map(|s| s.content.chars().count()).sum();
+    let block = crate::ui::panel_block_spans(head, page_focused, th);
     let body_inner = block.inner(body_a);
     f.render_widget(block, body_a);
     let mut tabs = view.tabs.clone();
-    let drawn = current.map(|pr| {
-        let input = crate::pr_preview::PageInput {
-            number: pr.number,
-            title: &pr.title,
-            detail: app.pr_detail.get(&pr.url),
-            failed: app.pr_detail_failed.contains(&pr.url),
-            posting: app.pr_comment_inflight.contains(&pr.url),
-            browser_key: keys::BROWSER.label(),
-            diff_key: keys::DIFF.label(),
-            now: orion_core::clock::now_secs() as i64,
-        };
+    let drawn = input.as_ref().map(|input| {
         let page =
-            crate::pr_preview::page(&input, &tabs, page_focused, body_inner.width as usize, th);
+            crate::pr_preview::page(input, &tabs, page_focused, body_inner.width as usize, th);
         crate::pr_preview::draw(f, body_inner, &page, &mut tabs, view.scroll)
     });
     // Where the body is read to, on the bottom border, once it scrolls.
@@ -1645,13 +1737,14 @@ pub(crate) fn draw(
             },
         );
     }
-    // The `↗ open in browser` button over the top border, once the block
-    // has drawn it — only with a row to open.
+    // The counts and the `↗` over the top border, once the block has
+    // drawn it — only with a row to open.
     let browser_area = match current {
-        Some(_) => crate::ui::browser_button(
+        Some(_) => crate::ui::border_tail(
             f,
             body_a,
-            (body_title.chars().count() + 2) as u16,
+            tail,
+            (head_w + 2) as u16,
             app.hover_crumb == Some(HitTarget::ModalBrowser),
             th,
         ),
@@ -2535,8 +2628,8 @@ mod tests {
 
     /// The list reads like the group — a draft and a pull request GitHub
     /// says cannot merge wear their badge — and the pane reads the row
-    /// under the cursor: its headline while the body is on its way, the
-    /// body once it lands.
+    /// under the cursor: its number and title on the border while the body
+    /// is on its way, where it stands and what it changes once it lands.
     #[test]
     fn it_draws_the_rows_and_reads_the_one_under_the_cursor() {
         let mut failing = pr(40, "Bump deps", false);
@@ -2551,10 +2644,10 @@ mod tests {
         open(&mut app);
         let before = screen(&mut app, 120, 30);
         assert!(before.contains("Pull requests — demo (3)"), "{before}");
-        assert!(before.contains("#42 Fix login"), "{before}");
+        assert!(before.contains("● #42  Fix login"), "{before}");
         assert!(before.contains("failing"), "{before}");
         assert!(before.contains("draft"), "{before}");
-        assert!(before.contains("Pull request #42"), "{before}");
+        assert!(before.contains("╮╭ #42 Fix login ─"), "{before}");
         assert!(before.contains("reading it…"), "{before}");
         assert!(view(&app).list_area.height > 0, "rects written back");
 
@@ -2563,6 +2656,8 @@ mod tests {
             detail(42, "Fix login"),
         );
         let after = screen(&mut app, 120, 30);
+        assert!(after.contains("╭ ● Open  #42 Fix login ─"), "{after}");
+        assert!(after.contains("─ +3 −1  ↗ ╮"), "{after}");
         assert!(after.contains("Stops the login bounce."), "{after}");
         assert!(!after.contains("reading it…"), "{after}");
 
@@ -2618,7 +2713,7 @@ mod tests {
         open(&mut app);
         let shot = screen(&mut app, 140, 34);
         assert!(
-            shot.contains("Description   Changes 2   Commits 1   ✗ Checks 0/1   Reviews"),
+            shot.contains("Description   Changes 2   Commits 1   Checks ✗ 0/1   Reviews"),
             "{shot}"
         );
         assert!(shot.contains("Stops the login bounce."), "{shot}");
@@ -2632,7 +2727,12 @@ mod tests {
         assert_eq!(view(&app).tabs.tab, PrTab::Changes);
         assert!(view(&app).query.is_empty(), "the filter never saw them");
         let shot = screen(&mut app, 140, 34);
-        assert!(shot.contains("▌M src/login.rs  +2 −1"), "{shot}");
+        let row = shot
+            .lines()
+            .find(|l| l.contains("src/login.rs"))
+            .unwrap_or_default();
+        assert!(row.contains("│▌ M  src/login.rs"), "{shot}");
+        assert!(row.contains(" +2 −1 │"), "{row:?}");
         assert!(
             hints(view(&app)).iter().any(|h| h.does == "diff the file"),
             "{shot}"
@@ -2753,12 +2853,12 @@ mod tests {
         assert!(answered.contains("no open pull requests"), "{answered}");
     }
 
-    /// `⌘O` and a click on the reading pane's `↗ open in browser` button run
-    /// one open: the footer names where the browser went either way (INPUT
-    /// PARITY), and the modal stays up. The button is drawn pinned right on
-    /// the pane's top border, its rect written back for the click; the
-    /// pointer resting on it is what `hover_crumb` holds, and a cell to its
-    /// left is the frame's.
+    /// `⌘O` and a click on the reading pane's `↗` button run one open: the
+    /// footer names where the browser went either way (INPUT PARITY), and
+    /// the modal stays up. The button is drawn pinned right on the pane's
+    /// top border, after what the pull request changes, its rect written
+    /// back for the click; the pointer resting on it is what `hover_crumb`
+    /// holds, and a cell to its left is the frame's.
     #[test]
     fn o_and_the_browser_button_open_the_pull_request_the_same_way() {
         let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
@@ -2768,10 +2868,10 @@ mod tests {
             DIR.into(),
         )));
         let shot = screen(&mut app, 120, 40);
-        assert!(shot.contains("↗ open in browser"), "{shot}");
+        assert!(shot.contains("─ ↗ ╮"), "{shot}");
         let button = view(&app).browser_area;
         assert!(button.width > 0, "the button's rect is written back");
-        let at = Position::new(button.x + 1, button.y);
+        let at = Position::new(button.x, button.y);
         assert_eq!(
             crate::ui::browser_button_under(&app, at),
             Some(HitTarget::ModalBrowser)
@@ -2950,8 +3050,9 @@ mod tests {
         type_str(&mut app, "login");
         screen(&mut app, 120, 40);
         let list = view(&app).list_area;
-        // The second visible row: the second match, whichever it is.
-        let at = Position::new(list.x + 1, list.y + 1);
+        // The second visible row, under the section's rule: the second
+        // match, whichever it is.
+        let at = Position::new(list.x + 1, list.y + 2);
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: at.x,
@@ -2992,17 +3093,18 @@ mod tests {
             handle_mouse(app, click, at, &mut out);
         };
 
+        // The section's rule, then the rows.
         let opened = crate::event_loop::take_opened;
-        click_at(&mut app, 1);
+        click_at(&mut app, 2);
         assert_eq!(selected_pr(&app).unwrap().number, 41);
         assert!(opened().is_empty(), "one click only selects");
-        click_at(&mut app, 0);
+        click_at(&mut app, 1);
         assert_eq!(selected_pr(&app).unwrap().number, 42);
         assert!(
             opened().is_empty(),
             "a click on another row is a single click"
         );
-        click_at(&mut app, 0);
+        click_at(&mut app, 1);
         assert_eq!(
             opened(),
             ["https://github.com/o/r/pull/42"],
@@ -3012,7 +3114,7 @@ mod tests {
             matches!(app.overlay, Some(Overlay::PullRequests(_))),
             "the modal stays up"
         );
-        click_at(&mut app, 0);
+        click_at(&mut app, 1);
         assert!(
             opened().is_empty(),
             "a double-click is spent: the third click starts over"
@@ -3113,19 +3215,23 @@ mod tests {
         );
     }
 
-    /// No button on a frame too narrow to hold it clear of the title, and
-    /// none with no pull request to open — and no stale rect either way.
+    /// On a narrow frame the title gives way to the button, never the
+    /// other way round; with no pull request to open there is no button,
+    /// and no stale rect.
     #[test]
-    fn the_browser_button_is_left_off_a_narrow_frame_and_an_empty_list() {
-        let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+    fn the_title_gives_way_to_the_browser_button_and_an_empty_list_has_none() {
+        let title = "A title long enough to crowd a narrow frame";
+        let (mut app, project) = app_with(vec![pr(42, title, false)], true);
         app.overlay = Some(Overlay::PullRequests(PullRequestsView::new(
             project,
             "demo".into(),
             DIR.into(),
         )));
         let shot = screen(&mut app, 60, 20);
-        assert!(!shot.contains("open in browser"), "{shot}");
-        assert_eq!(view(&app).browser_area, Rect::default());
+        let top = shot.lines().find(|l| l.contains('╭')).unwrap_or_default();
+        assert!(top.contains("#42 A title") && top.contains("…"), "{shot}");
+        assert!(top.contains(" ↗ ╮"), "{shot}");
+        assert!(view(&app).browser_area.width > 0);
 
         let (mut app, project) = app_with(vec![], true);
         app.overlay = Some(Overlay::PullRequests(PullRequestsView::new(
@@ -3134,7 +3240,7 @@ mod tests {
             DIR.into(),
         )));
         let shot = screen(&mut app, 120, 40);
-        assert!(!shot.contains("open in browser"), "{shot}");
+        assert!(!shot.contains("↗"), "{shot}");
         assert_eq!(view(&app).browser_area, Rect::default());
     }
 
@@ -3166,12 +3272,12 @@ mod tests {
     }
 
     /// The list gathers into sections — yours, the ones waiting on your
-    /// review, everyone else's — each under a header with its count, and
-    /// each row reads its meta under its title: author (not on your own),
-    /// age, checks, review, comments, labels. ↓ walks the rows in that
-    /// order and never lands on a header.
+    /// review, everyone else's — each under a rule with its count, a blank
+    /// line between them, and each row is one line: the dot, the number in
+    /// its column, the title, the checks' and the review's marks, the age.
+    /// ↓ walks the rows in that order and never lands on a header.
     #[test]
-    fn rows_gather_into_sections_with_a_meta_line_under_each() {
+    fn rows_gather_into_sections_one_line_each() {
         let mut asked = rich(41, "Speed up the grid", "jacobrvl", false);
         asked.meta.review_requested = true;
         let (mut app, _) = app_with(
@@ -3188,19 +3294,31 @@ mod tests {
             shot.find(needle)
                 .unwrap_or_else(|| panic!("{needle} missing from\n{shot}"))
         };
-        assert!(at("YOURS 1") < at("● #42 My fix"), "{shot}");
-        assert!(at("● #42 My fix") < at("REVIEW REQUESTED 1"), "{shot}");
+        assert!(at(" ── Yours ─") < at("● #42  My fix"), "{shot}");
+        assert!(at("● #42  My fix") < at(" ── Review requested ─"), "{shot}");
         assert!(
-            at("REVIEW REQUESTED 1") < at("● #41 Speed up the grid"),
+            at(" ── Review requested ─") < at("● #41  Speed up the grid"),
             "{shot}"
         );
-        assert!(at("● #41 Speed up the grid") < at("OTHERS 1"), "{shot}");
-        assert!(at("OTHERS 1") < at("● #43 Others' work"), "{shot}");
         assert!(
-            shot.contains("1h ago · ◐ 27/29 · ✓ approved · 5 comments · analytics"),
-            "your own row leaves your name off\n{shot}"
+            at("● #41  Speed up the grid") < at(" ── Others ─"),
+            "{shot}"
         );
-        assert!(shot.contains("sam · 1h ago"), "{shot}");
+        assert!(at(" ── Others ─") < at("● #43  Others' work"), "{shot}");
+        let row = shot
+            .lines()
+            .find(|l| l.contains("#42  My fix"))
+            .unwrap_or_default();
+        assert!(row.contains("◐ ✓   1h │"), "checks, review, age: {row:?}");
+        let lines: Vec<&str> = shot.lines().collect();
+        let others = lines
+            .iter()
+            .position(|l| l.contains("── Others ─"))
+            .unwrap();
+        assert!(
+            lines[others - 1].contains("│                "),
+            "a blank line over a section: {shot}"
+        );
 
         // The cursor opens on the first row shown, and ↓ walks the
         // sections' order.
@@ -3211,18 +3329,18 @@ mod tests {
         assert_eq!(selected_pr(&app).unwrap().number, 43);
     }
 
-    /// A list that is all one section shows no header at all: there is
-    /// nothing to tell apart.
+    /// A list that is all one section still sits under its rule, as a
+    /// checkout's sessions sit under their band however many there are.
     #[test]
-    fn one_section_alone_has_no_header() {
+    fn one_section_alone_keeps_its_rule() {
         let (mut app, _) = app_with(
             vec![rich(43, "A", "sam", false), rich(44, "B", "kim", false)],
             true,
         );
         open(&mut app);
         let shot = screen(&mut app, 160, 40);
-        assert!(!shot.contains("OTHERS"), "{shot}");
-        assert!(shot.contains("#43 A"), "{shot}");
+        assert!(shot.contains(" ── Others ─"), "{shot}");
+        assert!(shot.contains("#43  A"), "{shot}");
     }
 
     /// `key:value` tokens in the filter narrow by a facet — label, author,
@@ -3317,10 +3435,10 @@ mod tests {
         );
     }
 
-    /// A click anywhere on a two-line row — its meta line too — selects
-    /// it; a click on a section header selects nothing.
+    /// A click on a row selects it; a click on a section's rule, or the
+    /// blank line over it, selects nothing.
     #[test]
-    fn a_click_on_a_rows_second_line_selects_it() {
+    fn a_click_selects_a_row_and_never_a_rule() {
         let (mut app, _) = app_with(
             vec![
                 rich(43, "Others' work", "sam", false),
@@ -3341,18 +3459,24 @@ mod tests {
             };
             handle_mouse(app, ev, at, &mut Vec::new());
         };
-        // YOURS, #42 (2 lines), OTHERS, #43 (2 lines).
+        // Yours, #42, a blank, Others, #43.
         assert_eq!(selected_pr(&app).unwrap().number, 42);
-        click(&mut app, list.y + 5);
+        click(&mut app, list.y + 4);
         assert_eq!(selected_pr(&app).unwrap().number, 43);
         click(&mut app, list.y);
-        assert_eq!(selected_pr(&app).unwrap().number, 43, "a header is no row");
+        assert_eq!(selected_pr(&app).unwrap().number, 43, "a rule is no row");
         click(&mut app, list.y + 2);
+        assert_eq!(
+            selected_pr(&app).unwrap().number,
+            43,
+            "nor the blank over it"
+        );
+        click(&mut app, list.y + 1);
         assert_eq!(selected_pr(&app).unwrap().number, 42);
     }
 
-    /// However narrow the list, no row's line runs past the pane: the meta
-    /// drops its parts from the right instead.
+    /// However narrow the list, no row's line runs past it: the title gives
+    /// way first, then the status column — the cursor's row as any other.
     #[test]
     fn no_row_runs_past_a_narrow_list() {
         let (mut app, _) = app_with(
@@ -3368,19 +3492,20 @@ mod tests {
             true,
         );
         open(&mut app);
+        let now = orion_core::clock::now_secs() as i64;
+        let rows = rows(&app, &view(&app).project).to_vec();
+        let cols = RowCols::of(&rows, now);
+        for width in (MIN_LIST_W as usize - 2)..=120 {
+            for pr in &rows {
+                for cursor in [None, Some(true), Some(false)] {
+                    let line = row_line(pr, &[], cursor, &cols, width, now, app.theme);
+                    let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+                    assert!(w <= width, "row {w} > {width}: {line:?}");
+                }
+            }
+        }
         for w in [60u16, 80, 100, 160] {
             screen(&mut app, w, 30);
-            let v = view(&app);
-            let budget = (v.list_area.width as usize).saturating_sub(2);
-            let rows = rows(&app, &v.project).to_vec();
-            for pr in &rows {
-                let meta = meta_spans(pr, budget, orion_core::clock::now_secs() as i64, app.theme);
-                let w_meta: usize = meta.iter().map(|s| s.content.chars().count()).sum();
-                assert!(w_meta <= budget, "meta {w_meta} > {budget} at {w}");
-                let title = title_spans(pr, &[], budget, app.theme);
-                let w_title: usize = title.iter().map(|s| s.content.chars().count()).sum();
-                assert!(w_title <= budget, "title {w_title} > {budget} at {w}");
-            }
         }
     }
 }

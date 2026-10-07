@@ -4643,8 +4643,19 @@ mod tests {
             assert_eq!(app.pr_tabs.tab, PrTab::Changes);
             let screen = screen_text(&draw_tall(&mut app));
             assert!(screen.contains("Changes 2"), "{screen}");
-            assert!(screen.contains("✗ Checks 0/1"), "{screen}");
-            assert!(screen.contains("▌M src/nav.rs  +3 −1"), "{screen}");
+            assert!(screen.contains("Checks ✗ 0/1"), "{screen}");
+            assert!(
+                screen.contains("PULL REQUEST · ● Open  #9 Polish the nav"),
+                "{screen}"
+            );
+            let row = screen
+                .lines()
+                .find(|l| l.contains("src/nav.rs"))
+                .unwrap_or_default();
+            assert!(
+                row.contains("▌ M  src/nav.rs") && row.contains("+3 −1"),
+                "{screen}"
+            );
             assert!(
                 footer_text(&app).starts_with(
                     "Esc back to the grid · Tab/⇧Tab tabs · Enter diff the file · ↑↓ pick"

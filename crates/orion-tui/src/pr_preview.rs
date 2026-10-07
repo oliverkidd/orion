@@ -35,8 +35,7 @@
 
 use crate::markdown::{self, Breaks};
 use crate::pull_request::{
-    CheckCounts, CheckState, PrCheck, PrComment, PrDetail, Standing, Trouble, REVIEW_REQUESTED,
-    STATE_OPEN,
+    CheckCounts, CheckState, PrCheck, PrComment, PrDetail, PrFile, REVIEW_REQUESTED, STATE_OPEN,
 };
 use crate::theme::Theme;
 use ratatui::layout::Rect;
@@ -51,6 +50,10 @@ pub(crate) const INDENT: &str = " ";
 /// Narrowest the body wraps to: below this, wrapping yields a word per line
 /// and overflowing the pane reads better than that.
 pub(crate) const MIN_BODY_W: usize = 20;
+/// The fewest cells a row's title, path or name keeps before the columns
+/// beside it give way — the PULL REQUESTS MODAL's rows and the page's
+/// listings alike.
+pub(crate) const MIN_TEXT_W: usize = 12;
 
 /// Wrap `text` to `width` columns on word boundaries, honoring the hard
 /// line breaks already in it. A word longer than the whole width (a URL, a
@@ -441,9 +444,10 @@ pub struct PageInput<'a> {
 /// `[from, to)`.
 type TabSpot = (u16, u16, u16, PrTab);
 
-/// One part of a listed row: its styled runs, the indent its first line
-/// is led by, and the one its wrapped lines hang from.
-type RowPart<'a> = (Vec<(String, Style)>, &'a str, &'a str);
+/// Where the body's text starts: two cells in, the first of them the row
+/// cursor's `▌` on a listing, so prose, rows and the rules over them line
+/// up as the main page's list does under its bands.
+const BODY: &str = "  ";
 
 /// The page laid out for one width: the fixed head, the active tab's
 /// body, and where the tabs and the listed rows landed.
@@ -456,23 +460,28 @@ pub struct Page {
 }
 
 /// Lay the page out for `width` columns. `focused` is whether the surface
-/// holding it has the keys — the row cursor wears the accent then, and
-/// a dim mark otherwise, as a list's does.
+/// holding it has the keys — the row cursor and the active tab's rule
+/// wear the accent then, and a quieter mark otherwise, as a list's do.
+///
+/// The head is what the frame's own border ([`border`]) leaves to say: the
+/// sentence — who, from where into where, how much, how long ago — and
+/// the tabs, underlined.
 pub fn page(input: &PageInput, tabs: &PrTabs, focused: bool, width: usize, th: Theme) -> Page {
     let width = width.max(1);
-    let mut head = headline(input, width, th);
-    head.push(Line::from(""));
+    let mut head = vec![Line::from("")];
+    if let Some(detail) = input.detail {
+        head.push(sentence(detail, input.now, width, th));
+        head.push(Line::from(""));
+    }
     let (rows, hits) = tab_row(input, tabs.tab, width, th);
     let first_row = head.len() as u16;
+    let last_row = first_row + (rows.len() as u16).saturating_sub(1);
     head.extend(rows);
-    let tabs_at = hits
+    let tabs_at: Vec<TabSpot> = hits
         .into_iter()
         .map(|(row, from, to, tab)| (first_row + row, from, to, tab))
         .collect();
-    head.push(Line::from(Span::styled(
-        "─".repeat(width),
-        Style::default().fg(th.dim),
-    )));
+    head.push(tab_rule(&tabs_at, tabs.tab, last_row, focused, width, th));
     let (body, spans) = body(input, tabs, focused, width, th);
     Page {
         head,
@@ -482,116 +491,209 @@ pub fn page(input: &PageInput, tabs: &PrTabs, focused: bool, width: usize, th: T
     }
 }
 
-/// The number and title, wrapped, and — once the body has landed — where
-/// it stands: the state word, what blocks the merge, who, where, and how
-/// much it changes.
-fn headline(input: &PageInput, width: usize, th: Theme) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(th.dim);
+/// The page's top border, for the surface that frames it to draw: where
+/// the pull request stands — `● Open`, `○ Draft`, a red `● Conflicts`
+/// while it is open and cannot merge, the merged purple `● Merged`, a
+/// faint `● Closed` — then `#42` and the title; and, for the border's
+/// right end, what it changes: `+106 −4`. The state and the counts wait
+/// for the body; the number and the title are there from the first paint.
+/// `focused` lights the number in the accent, as the border it sits on is.
+pub fn border(
+    input: &PageInput,
+    focused: bool,
+    th: Theme,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    let mut left = Vec::new();
+    if let Some(d) = input.detail {
+        let (word, color) = state_word(d, th);
+        left.push(Span::styled(
+            word,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        left.push(Span::raw("  "));
+    }
     let title = input.detail.map_or(input.title, |d| d.title.as_str());
-    let mut out = flow_lines(
-        &[
-            (format!("#{}", input.number), dim),
-            (
-                format!(" {title}"),
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+    left.push(Span::styled(
+        format!("#{} ", input.number),
+        Style::default().fg(if focused { th.accent } else { th.dim }),
+    ));
+    left.push(Span::styled(
+        title.to_string(),
+        Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+    ));
+    let right = input.detail.map_or_else(Vec::new, |d| {
+        vec![
+            Span::styled(format!("+{}", d.additions), Style::default().fg(th.added)),
+            Span::styled(
+                format!(" −{}", d.deletions),
+                Style::default().fg(th.removed),
             ),
-        ],
-        width,
-        INDENT,
-        INDENT,
-    );
-    let Some(detail) = input.detail else {
-        return out;
-    };
-    // The state word is the one the rows wear (`Standing::label`), spelled
-    // out in full: `ready for review` here as in the `/` PALETTE, where the
-    // sidebar's badge cuts it to `ready`. A state `gh` might add later is
-    // shown as it came, dim, rather than guessed at. The checks have a tab
-    // of their own; a conflict has none, so it is said here, in the row's
-    // red, while the pull request is still open.
-    let state = match (detail.state.as_str(), detail.is_draft) {
-        (STATE_OPEN, true) => (Standing::Draft.label(), th.dim),
-        (STATE_OPEN, false) => (Standing::Open.label(), th.muted),
-        ("MERGED", _) => (Standing::Merged.label(), th.merged),
-        ("CLOSED", _) => (Standing::Closed.label(), th.faint),
-        _ => (detail.state.as_str(), th.dim),
-    };
-    let mut meta = vec![(
-        state.0.to_string(),
-        Style::default().fg(state.1).add_modifier(Modifier::BOLD),
-    )];
-    if detail.is_open() && detail.health.conflicts {
-        meta.push((
-            format!(" · {}", Trouble::Conflicts.label()),
-            Style::default().fg(th.err).add_modifier(Modifier::BOLD),
-        ));
-    }
-    if !detail.author.is_empty() {
-        meta.push((
-            format!(" · {}", detail.author),
-            Style::default().fg(th.muted),
-        ));
-    }
-    if !detail.head.is_empty() {
-        meta.push((format!(" · {} ← {}", detail.base, detail.head), dim));
-    }
-    meta.push((" · ".to_string(), dim));
-    meta.push((
-        format!("+{}", detail.additions),
-        Style::default().fg(th.added),
-    ));
-    meta.push((
-        format!(" −{}", detail.deletions),
-        Style::default().fg(th.removed),
-    ));
-    out.extend(flow_lines(&meta, width, INDENT, INDENT));
-    out
+        ]
+    });
+    (left, right)
 }
 
-/// One tab's label as styled runs: its mark (`✗` crimson, `✓` green, the
-/// gold `◐` while a check still runs, a muted `○` while a review is still
-/// owed), its name, and its count — `…` while the body is on its way.
-fn tab_label(tab: PrTab, input: &PageInput, th: Theme) -> (Option<(&'static str, Color)>, String) {
-    let Some(d) = input.detail else {
-        let count = if input.failed || !tab.lists() {
-            ""
-        } else {
-            " …"
+/// Where a pull request stands, as its border says it. A state `gh` might
+/// add later is shown as it came, dim, rather than guessed at.
+fn state_word(d: &PrDetail, th: Theme) -> (String, Color) {
+    match (d.state.as_str(), d.is_draft) {
+        (STATE_OPEN, _) if d.health.conflicts => ("● Conflicts".into(), th.err),
+        (STATE_OPEN, true) => ("○ Draft".into(), th.muted),
+        (STATE_OPEN, false) => ("● Open".into(), th.ok),
+        ("MERGED", _) => ("● Merged".into(), th.merged),
+        ("CLOSED", _) => ("● Closed".into(), th.faint),
+        (other, _) => (format!("● {}", other.to_lowercase()), th.dim),
+    }
+}
+
+/// Styled runs' width in cells.
+fn runs_w(runs: &[(String, Style)]) -> usize {
+    runs.iter().map(|(t, _)| t.width()).sum()
+}
+
+/// Spans' width in cells.
+fn spans_w(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
+}
+
+/// The line under the border, compact: who opened it, from which branch
+/// into which, how many commits, how long ago — `webdevcody · feat/links →
+/// main · 2 commits · 3d ago` — and its labels at the right end in their
+/// GitHub colours. Always one line: the head branch gives way first, cut
+/// from its left, then the age, then the labels, then the end of the line.
+fn sentence(d: &PrDetail, now: i64, width: usize, th: Theme) -> Line<'static> {
+    const MIN_HEAD: usize = 8;
+    let dim = Style::default().fg(th.dim);
+    let muted = Style::default().fg(th.muted);
+    let sep = || (" · ".to_string(), Style::default().fg(th.faint));
+    let age = crate::pull_request::rfc3339_secs(&d.created_at)
+        .map(|at| crate::hosts::ago_label((now - at).max(0).saturating_mul(1000)))
+        .filter(|a| !a.is_empty());
+    let commits = d.commits.len();
+    let build = |head: &str, with_age: bool| {
+        let mut runs: Vec<(String, Style)> = Vec::new();
+        let part = |runs: &mut Vec<(String, Style)>, more: Vec<(String, Style)>| {
+            if !runs.is_empty() {
+                runs.push(sep());
+            }
+            runs.extend(more);
         };
-        return (None, format!("{}{count}", tab.name()));
+        if !d.author.is_empty() {
+            let who = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
+            part(&mut runs, vec![(d.author.clone(), who)]);
+        }
+        if !d.head.is_empty() {
+            part(
+                &mut runs,
+                vec![
+                    (head.to_string(), muted),
+                    (" → ".to_string(), dim),
+                    (d.base.clone(), muted),
+                ],
+            );
+        }
+        if commits > 0 {
+            let noun = if commits == 1 { "commit" } else { "commits" };
+            part(&mut runs, vec![(format!("{commits} {noun}"), dim)]);
+        }
+        if let (true, Some(age)) = (with_age, &age) {
+            part(&mut runs, vec![(age.clone(), dim)]);
+        }
+        runs
     };
-    match tab {
-        PrTab::Description => (None, tab.name().to_string()),
-        PrTab::Changes => (None, format!("Changes {}", d.changed_files)),
-        PrTab::Commits => (None, format!("Commits {}", d.commits.len())),
-        PrTab::Checks => {
-            let n = CheckCounts::of(&d.checks);
-            if n.total == 0 {
-                (None, "Checks".into())
-            } else if n.failed > 0 {
-                (Some(("✗", th.err)), format!("Checks {}/{}", n.ok, n.total))
-            } else if n.running > 0 {
-                (Some(("◐", th.warn)), format!("Checks {}/{}", n.ok, n.total))
-            } else {
-                (Some(("✓", th.ok)), "Checks".into())
+    let mut labels: Vec<Span<'static>> = Vec::new();
+    for label in &d.labels {
+        if !labels.is_empty() {
+            labels.push(Span::raw("  "));
+        }
+        let color = crate::theme::hex(&label.color).unwrap_or(th.muted);
+        labels.push(Span::styled(label.name.clone(), Style::default().fg(color)));
+    }
+    // The indent before it, a cell of air after it.
+    let room = width.saturating_sub(INDENT.width() + 1);
+    let labels_w = if labels.is_empty() {
+        0
+    } else {
+        spans_w(&labels) + 2
+    };
+    let avail = |with_labels: bool| room.saturating_sub(if with_labels { labels_w } else { 0 });
+    let shortened = |with_age: bool, with_labels: bool| {
+        let full = build(&d.head, with_age);
+        match runs_w(&full).checked_sub(avail(with_labels)) {
+            None | Some(0) => full,
+            Some(over) => {
+                let keep = d.head.width().saturating_sub(over).max(MIN_HEAD);
+                build(&crate::ui::truncate_left(&d.head, keep), with_age)
             }
         }
-        PrTab::Reviews => match d.review_decision.as_str() {
-            "APPROVED" => (Some(("✓", th.ok)), "Reviews".into()),
-            "CHANGES_REQUESTED" => (Some(("✗", th.err)), "Reviews".into()),
-            "REVIEW_REQUIRED" => (Some(("○", th.muted)), "Reviews".into()),
-            _ => {
-                let n = d
-                    .comments
-                    .iter()
-                    .filter(|c| !c.review_state.is_empty())
-                    .count();
-                match n {
-                    0 => (None, "Reviews".into()),
-                    n => (None, format!("Reviews {n}")),
-                }
-            }
-        },
+    };
+    let has_labels = !labels.is_empty();
+    let (runs, with_labels) = [(true, true), (false, true), (true, false), (false, false)]
+        .into_iter()
+        .filter(|(_, l)| has_labels || !*l)
+        .map(|(age, l)| (shortened(age, l), l))
+        .find(|(runs, l)| runs_w(runs) <= avail(*l))
+        .unwrap_or_else(|| (shortened(false, false), false));
+    let text: Vec<Span<'static>> = runs
+        .into_iter()
+        .map(|(t, style)| Span::styled(t, style))
+        .collect();
+    let mut spans = vec![Span::raw(INDENT)];
+    spans.extend(fit(text, avail(with_labels)).spans);
+    if with_labels {
+        let used = spans_w(&spans);
+        let at = width.saturating_sub(1 + spans_w(&labels));
+        spans.push(Span::raw(" ".repeat(at.saturating_sub(used))));
+        spans.extend(labels);
+    }
+    Line::from(spans)
+}
+
+/// One tab's label: its name, then a count beside it — dim, `…` while the
+/// body is on its way — or, on Checks and Reviews, the verdict in its
+/// colour: the checks' tally (`✗ 1/3` crimson, `◐ 1/2` gold, `✓ 3/3`
+/// green) and the review decision (`✓ Approved`, `✗ Changes requested`,
+/// the gold `○ Review required`, or a muted `· Reviewed` for reviews that
+/// came to no decision).
+fn tab_label(
+    tab: PrTab,
+    input: &PageInput,
+    th: Theme,
+) -> (&'static str, Option<String>, Option<(String, Color)>) {
+    let name = tab.name();
+    let Some(d) = input.detail else {
+        let count = (!input.failed && tab.lists()).then(|| "…".to_string());
+        return (name, count, None);
+    };
+    match tab {
+        PrTab::Description => (name, None, None),
+        PrTab::Changes => (name, Some(d.changed_files.to_string()), None),
+        PrTab::Commits => (name, Some(d.commits.len().to_string()), None),
+        PrTab::Checks => {
+            let n = CheckCounts::of(&d.checks);
+            let verdict = (n.total > 0).then(|| {
+                let (mark, color) = if n.failed > 0 {
+                    ("✗", th.err)
+                } else if n.running > 0 {
+                    ("◐", th.warn)
+                } else {
+                    ("✓", th.ok)
+                };
+                (format!("{mark} {}/{}", n.ok, n.total), color)
+            });
+            (name, None, verdict)
+        }
+        PrTab::Reviews => {
+            let reviewed = d.comments.iter().any(|c| !c.review_state.is_empty());
+            let verdict = match d.review_decision.as_str() {
+                "APPROVED" => Some(("✓ Approved", th.ok)),
+                "CHANGES_REQUESTED" => Some(("✗ Changes requested", th.err)),
+                "REVIEW_REQUIRED" => Some(("○ Review required", th.warn)),
+                _ if reviewed => Some(("· Reviewed", th.muted)),
+                _ => None,
+            };
+            (name, None, verdict.map(|(t, c)| (t.to_string(), c)))
+        }
     }
 }
 
@@ -599,64 +701,163 @@ fn tab_label(tab: PrTab, input: &PageInput, th: Theme) -> (Option<(&'static str,
 pub fn tab_texts(input: &PageInput, th: Theme) -> Vec<String> {
     PrTab::ALL
         .iter()
-        .map(|tab| match tab_label(*tab, input, th) {
-            (Some((mark, _)), text) => format!("{mark} {text}"),
-            (None, text) => text,
+        .map(|tab| {
+            let (name, count, verdict) = tab_label(*tab, input, th);
+            let mut text = name.to_string();
+            for more in count.into_iter().chain(verdict.map(|(v, _)| v)) {
+                text.push(' ');
+                text.push_str(&more);
+            }
+            text
         })
         .collect()
 }
 
-/// The row of tabs, wrapped onto as many rows as the width needs, the
-/// active one lit — and where each label landed: `(row, from, to, tab)`.
+/// The row of tabs, three cells apart and wrapped onto as many rows as
+/// the width needs — the one on show in bold — and where each label
+/// landed: `(row, from, to, tab)`. A label too wide for a row of its own
+/// keeps only its verdict's mark.
 fn tab_row(
     input: &PageInput,
     active: PrTab,
     width: usize,
     th: Theme,
 ) -> (Vec<Line<'static>>, Vec<TabSpot>) {
+    const GAP: usize = 3;
+    let indent = INDENT.width();
     let mut rows: Vec<Vec<Span<'static>>> = vec![vec![Span::raw(INDENT)]];
     let mut hits = Vec::new();
-    let mut x = INDENT.width();
+    let mut x = indent;
     for tab in PrTab::ALL {
-        let (mark, text) = tab_label(tab, input, th);
-        let on = tab == active;
-        let base = if on {
-            Style::default()
-                .fg(th.accent)
-                .bg(th.sel_bg)
-                .add_modifier(Modifier::BOLD)
+        let (name, count, verdict) = tab_label(tab, input, th);
+        let name_style = if tab == active {
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(th.muted)
         };
-        let mut spans = vec![Span::styled(" ", base)];
-        if let Some((mark, color)) = mark {
-            spans.push(Span::styled(format!("{mark} "), base.fg(color)));
-        }
-        // The count is quieter than the name, unless the tab is lit.
-        match text.split_once(' ').filter(|_| !on) {
-            Some((name, count)) => {
-                spans.push(Span::styled(name.to_string(), base));
-                spans.push(Span::styled(format!(" {count}"), base.fg(th.dim)));
+        let label = |verdict: Option<&(String, Color)>| {
+            let mut spans = vec![Span::styled(name, name_style)];
+            if let Some(count) = &count {
+                spans.push(Span::styled(
+                    format!(" {count}"),
+                    Style::default().fg(th.dim),
+                ));
             }
-            None => spans.push(Span::styled(text, base)),
+            if let Some((text, color)) = verdict {
+                spans.push(Span::styled(
+                    format!(" {text}"),
+                    Style::default().fg(*color),
+                ));
+            }
+            spans
+        };
+        let mut spans = label(verdict.as_ref());
+        if spans_w(&spans) + indent > width {
+            let mark = verdict.as_ref().map(|(text, color)| {
+                (
+                    text.split(' ').next().unwrap_or_default().to_string(),
+                    *color,
+                )
+            });
+            spans = label(mark.as_ref());
         }
-        spans.push(Span::styled(" ", base));
-        let w: usize = spans.iter().map(|s| s.content.width()).sum();
-        if x > INDENT.width() && x + 1 + w > width {
+        let w = spans_w(&spans);
+        if x > indent && x + GAP + w > width {
             rows.push(vec![Span::raw(INDENT)]);
-            x = INDENT.width();
-        } else if x > INDENT.width() {
+            x = indent;
+        } else if x > indent {
             if let Some(row) = rows.last_mut() {
-                row.push(Span::raw(" "));
+                row.push(Span::raw(" ".repeat(GAP)));
             }
-            x += 1;
+            x += GAP;
         }
         let row = rows.len() - 1;
         hits.push((row as u16, x as u16, (x + w) as u16, tab));
         rows[row].extend(spans);
         x += w;
     }
-    (rows.into_iter().map(Line::from).collect(), hits)
+    let lines = rows.into_iter().map(|spans| fit(spans, width)).collect();
+    (lines, hits)
+}
+
+/// The rule under the tabs, drawn heavier under the one on show — in the
+/// accent while the page has the keys, muted otherwise — when that tab is
+/// on the last row of them; plain across otherwise.
+fn tab_rule(
+    spots: &[TabSpot],
+    active: PrTab,
+    last_row: u16,
+    focused: bool,
+    width: usize,
+    th: Theme,
+) -> Line<'static> {
+    let edge = Style::default().fg(th.edge);
+    let Some(&(_, from, to, _)) = spots
+        .iter()
+        .find(|(row, .., tab)| *tab == active && *row == last_row)
+    else {
+        return Line::from(Span::styled("─".repeat(width), edge));
+    };
+    let from = usize::from(from).saturating_sub(1).min(width);
+    let to = (usize::from(to) + 1).clamp(from, width);
+    let lit = Style::default().fg(if focused { th.accent } else { th.muted });
+    Line::from(vec![
+        Span::styled("─".repeat(from), edge),
+        Span::styled("━".repeat(to - from), lit),
+        Span::styled("─".repeat(width - to), edge),
+    ])
+}
+
+/// `left`, then `right` pinned to the line's end a cell clear of it, the
+/// whole exactly `width` cells: the left gives way — cut, with an
+/// ellipsis — when the two do not fit.
+fn columns(
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let right_w = spans_w(&right);
+    let room = width.saturating_sub(right_w + 1);
+    let mut spans = fit(left, room.saturating_sub(1)).spans;
+    let used = spans_w(&spans);
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(used + right_w + 1)),
+    ));
+    spans.extend(right);
+    spans.push(Span::raw(" "));
+    spans
+}
+
+/// `text` right-aligned in a column `w` cells wide.
+fn right_in(text: &str, w: usize, style: Style) -> Span<'static> {
+    Span::styled(format!("{text:>w$}"), style)
+}
+
+/// The checks in the Checks tab's order: grouped by the workflow they ran
+/// in — a group per workflow, in the order GitHub listed them, the group
+/// with the worst check first — failed first within each. The order its
+/// rows are walked and acted on in ([`row_act`]). A check from no workflow
+/// (a commit status, an app's run) groups under `Other`, or under `Checks`
+/// when nothing ran in a workflow at all.
+pub(crate) fn checks_in_order(d: &PrDetail) -> Vec<(String, Vec<&PrCheck>)> {
+    let mut groups: Vec<(String, Vec<&PrCheck>)> = Vec::new();
+    for check in &d.checks {
+        match groups.iter_mut().find(|(wf, _)| *wf == check.workflow) {
+            Some((_, rows)) => rows.push(check),
+            None => groups.push((check.workflow.clone(), vec![check])),
+        }
+    }
+    for (_, rows) in &mut groups {
+        rows.sort_by_key(|c| c.state);
+    }
+    groups.sort_by_key(|(_, rows)| rows.first().map(|c| c.state));
+    let only = groups.len() == 1;
+    for (wf, _) in &mut groups {
+        if wf.is_empty() {
+            *wf = if only { "Checks" } else { "Other" }.to_string();
+        }
+    }
+    groups
 }
 
 /// The active tab's body, and each listed row's span in it.
@@ -668,15 +869,10 @@ fn body(
     th: Theme,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let dim = Style::default().fg(th.dim);
-    let body_w = width.saturating_sub(INDENT.len() + 1).max(MIN_BODY_W);
+    let body_w = width.saturating_sub(BODY.len() + 1).max(MIN_BODY_W);
     let say = |text: &str| -> Vec<Line<'static>> {
         let mut out = vec![Line::from("")];
-        out.extend(flow_lines(
-            &[(text.to_string(), dim)],
-            width,
-            INDENT,
-            INDENT,
-        ));
+        out.extend(flow_lines(&[(text.to_string(), dim)], width, BODY, BODY));
         out
     };
     let Some(detail) = input.detail else {
@@ -691,7 +887,7 @@ fn body(
         return (say(&text), Vec::new());
     };
     let mut listed = Listing {
-        lines: Vec::new(),
+        lines: vec![Line::from("")],
         spans: Vec::new(),
         cursor: tabs.row(),
         focused,
@@ -701,46 +897,56 @@ fn body(
     match tabs.tab {
         PrTab::Description => {
             let mut out = vec![Line::from("")];
-            out.extend(description(detail, width, body_w, th));
+            out.extend(description(detail, input.now, width, body_w, th));
             if input.posting {
                 out.push(Line::from(""));
                 out.push(Line::from(Span::styled(
-                    format!("{INDENT}── posting your comment… ──"),
+                    format!("{BODY}── posting your comment… ──"),
                     dim,
                 )));
             }
             return (out, Vec::new());
         }
-        PrTab::Reviews => return (reviews(detail, width, body_w, th), Vec::new()),
+        PrTab::Reviews => return (reviews(detail, input.now, width, body_w, th), Vec::new()),
         PrTab::Changes if detail.files.is_empty() => return (say("no files changed"), Vec::new()),
         PrTab::Commits if detail.commits.is_empty() => return (say("no commits"), Vec::new()),
         PrTab::Checks if detail.checks.is_empty() => {
             return (say("no checks ran on its head commit"), Vec::new())
         }
         PrTab::Changes => {
-            listed.lines.push(Line::from(""));
-            for file in &detail.files {
-                let color = crate::ui::change_color([file.status(), ' '], th);
-                let mut runs = vec![
-                    (file.status().to_string(), Style::default().fg(color)),
-                    (format!(" {}", file.path), Style::default().fg(th.text)),
-                ];
-                if file.additions > 0 {
-                    runs.push((
-                        format!("  +{}", file.additions),
-                        Style::default().fg(th.added),
-                    ));
-                }
-                if file.deletions > 0 {
-                    let gap = if file.additions > 0 { " " } else { "  " };
-                    runs.push((
-                        format!("{gap}−{}", file.deletions),
-                        Style::default().fg(th.removed),
-                    ));
-                }
-                listed.row(vec![(runs, INDENT, "   ")]);
-            }
             let total = detail.changed_files as usize;
+            let noun = if total == 1 { "file" } else { "files" };
+            listed.lines.push(crate::ui::section_rule(
+                &format!("{total} {noun}"),
+                th.muted,
+                vec![
+                    Span::styled(
+                        format!("+{}", detail.additions),
+                        Style::default().fg(th.added),
+                    ),
+                    Span::styled(
+                        format!(" −{}", detail.deletions),
+                        Style::default().fg(th.removed),
+                    ),
+                ],
+                width,
+                th,
+            ));
+            let add_w = detail
+                .files
+                .iter()
+                .map(|f| count_w(f.additions))
+                .max()
+                .unwrap_or(0);
+            let del_w = detail
+                .files
+                .iter()
+                .map(|f| count_w(f.deletions))
+                .max()
+                .unwrap_or(0);
+            for file in &detail.files {
+                listed.row(file_row(file, (add_w, del_w), width, th));
+            }
             if detail.files.len() < total {
                 listed.lines.push(Line::from(""));
                 listed.lines.extend(flow_lines(
@@ -753,149 +959,248 @@ fn body(
                         dim,
                     )],
                     width,
-                    INDENT,
-                    INDENT,
+                    BODY,
+                    BODY,
                 ));
             }
         }
         PrTab::Commits => {
-            listed.lines.push(Line::from(""));
+            let mut authors: Vec<&str> = Vec::new();
+            for c in &detail.commits {
+                if !c.author.is_empty() && !authors.contains(&c.author.as_str()) {
+                    authors.push(&c.author);
+                }
+            }
+            let n = detail.commits.len();
+            let right = match authors.as_slice() {
+                [] => Vec::new(),
+                [one] => vec![Span::styled(one.to_string(), dim)],
+                many => vec![Span::styled(format!("{} authors", many.len()), dim)],
+            };
+            let noun = if n == 1 { "commit" } else { "commits" };
+            listed.lines.push(crate::ui::section_rule(
+                &format!("{n} {noun}"),
+                th.muted,
+                right,
+                width,
+                th,
+            ));
+            let cols = CommitCols {
+                who: if authors.len() > 1 {
+                    authors.iter().map(|a| a.width()).max().unwrap_or(0).min(16)
+                } else {
+                    0
+                },
+                add: detail
+                    .commits
+                    .iter()
+                    .map(|c| c.additions.map_or(0, count_w))
+                    .max()
+                    .unwrap_or(0),
+                del: detail
+                    .commits
+                    .iter()
+                    .map(|c| c.deletions.map_or(0, count_w))
+                    .max()
+                    .unwrap_or(0),
+                age: detail
+                    .commits
+                    .iter()
+                    .map(|c| commit_age(c, input.now).width())
+                    .max()
+                    .unwrap_or(0),
+            };
             for commit in &detail.commits {
-                let age = crate::pull_request::rfc3339_secs(&commit.at)
-                    .map(|at| crate::hosts::ago_label((input.now - at).saturating_mul(1000)))
-                    .unwrap_or_default();
-                let who = [commit.author.as_str(), age.as_str()]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                // Who and when hang under the subject, past the sha.
-                let hang = format!("{INDENT}{}", " ".repeat(commit.short().width() + 1));
-                let mut parts = vec![(
-                    vec![
-                        (commit.short().to_string(), Style::default().fg(th.muted)),
-                        (format!(" {}", commit.subject), Style::default().fg(th.text)),
-                    ],
-                    INDENT,
-                    hang.as_str(),
-                )];
-                // Who and when, then how big it is: `+12 −3 · 4 files`.
-                let mut meta = Vec::new();
-                if !who.is_empty() {
-                    meta.push((who, dim));
-                }
-                meta.extend(commit_size(commit, !meta.is_empty(), th));
-                if !meta.is_empty() {
-                    parts.push((meta, hang.as_str(), hang.as_str()));
-                }
-                listed.row(parts);
+                listed.row(commit_row(commit, &cols, input.now, width, th));
             }
         }
         PrTab::Checks => {
-            listed.lines.push(Line::from(""));
-            for check in &detail.checks {
-                listed.row(vec![(check_runs(check, input.now, th), INDENT, "   ")]);
+            for (i, (workflow, checks)) in checks_in_order(detail).into_iter().enumerate() {
+                if i > 0 {
+                    listed.lines.push(Line::from(""));
+                }
+                let n = CheckCounts::of(checks.iter().copied());
+                let tally = if n.failed > 0 {
+                    th.err
+                } else if n.running > 0 {
+                    th.warn
+                } else {
+                    th.dim
+                };
+                listed.lines.push(crate::ui::section_rule(
+                    &workflow,
+                    th.muted,
+                    vec![Span::styled(
+                        format!("{}/{}", n.ok, n.total),
+                        Style::default().fg(tally),
+                    )],
+                    width,
+                    th,
+                ));
+                for check in checks {
+                    listed.row(check_row(check, input.now, width, th));
+                }
             }
         }
     }
     (listed.lines, listed.spans)
 }
 
-/// A listing tab's lines as they are built: each row's lines, the cursor's
-/// dressed as a list's selected row is.
-struct Listing {
-    lines: Vec<Line<'static>>,
-    spans: Vec<(usize, usize)>,
-    cursor: usize,
-    focused: bool,
+/// The cells `+12` (or `−3`) takes; nothing for a zero, which is left out.
+fn count_w(n: u64) -> usize {
+    if n == 0 {
+        0
+    } else {
+        1 + n.to_string().len()
+    }
+}
+
+/// A count for a column: `+12`, or nothing for a zero.
+fn count_text(sign: char, n: u64) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!("{sign}{n}")
+    }
+}
+
+/// A Changes row: its status letter in the diff's colour, the path — its
+/// folders dim, its file name bright, cut from the left so the name
+/// stays — and its `+`/`−` in columns as wide as the tab's widest.
+fn file_row(
+    file: &PrFile,
+    (add_w, del_w): (usize, usize),
     width: usize,
     th: Theme,
-}
-
-impl Listing {
-    /// One row: each part flowed from its lead with its hanging indent,
-    /// the whole row under the selection's fill and `▌` when it is the
-    /// cursor's.
-    fn row(&mut self, parts: Vec<RowPart>) {
-        let index = self.spans.len();
-        let selected = index == self.cursor;
-        let first = self.lines.len();
-        for (runs, lead, cont) in parts {
-            for mut spans in flow(&runs, self.width, lead, cont) {
-                if selected {
-                    let th = self.th;
-                    let mark = if self.focused { th.accent } else { th.dim };
-                    spans[0] = Span::styled(
-                        format!("▌{}", &spans[0].content[1..]),
-                        Style::default().fg(mark).bg(th.sel_bg),
-                    );
-                    for span in spans.iter_mut().skip(1) {
-                        // Dim text would sink into the fill: lift it.
-                        if span.style.fg == Some(th.dim) {
-                            span.style.fg = Some(th.muted);
-                        }
-                        span.style = span.style.bg(th.sel_bg);
-                        if self.focused {
-                            span.style = span.style.add_modifier(Modifier::BOLD);
-                        }
-                    }
-                    // The fill runs the whole width, as a list's bar does.
-                    let used: usize = spans.iter().map(|s| s.content.width()).sum();
-                    let fill = Style::default().bg(th.sel_bg);
-                    spans.push(Span::styled(
-                        " ".repeat(self.width.saturating_sub(used)),
-                        fill,
-                    ));
-                    self.lines.push(Line::from(spans));
-                } else {
-                    self.lines.push(Line::from(spans));
-                }
-            }
-        }
-        self.spans.push((first, self.lines.len() - first));
-    }
-}
-
-/// A commit's size on its Commits row: `+12` green, `−3` red and how many
-/// files, `gap` putting space before it when something leads; nothing
-/// for a commit GitHub gave no counts for.
-fn commit_size(
-    commit: &crate::pull_request::PrCommit,
-    gap: bool,
-    th: Theme,
-) -> Vec<(String, Style)> {
-    let (Some(added), Some(removed)) = (commit.additions, commit.deletions) else {
-        return Vec::new();
+) -> Vec<Span<'static>> {
+    let status = file.status();
+    let color = crate::ui::change_color([status, ' '], th);
+    let counts = add_w + 1 + del_w;
+    let lead = BODY.len() + 1 + 2;
+    // The counts go before the path shortens past [`MIN_TEXT_W`]; the path
+    // keeps clear of them and of the cell of air `columns` leaves.
+    let counts = if width >= lead + MIN_TEXT_W + counts + 2 {
+        counts
+    } else {
+        0
     };
-    let lead = if gap { "  " } else { "" };
-    let mut runs = vec![
-        (format!("{lead}+{added}"), Style::default().fg(th.ok)),
-        (format!(" −{removed}"), Style::default().fg(th.err)),
+    let room = width.saturating_sub(lead + if counts > 0 { counts + 2 } else { 2 });
+    let path = crate::ui::truncate_left(&file.path, room);
+    let (dir, name) = match path.rfind('/') {
+        Some(i) => path.split_at(i + 1),
+        None => ("", path.as_str()),
+    };
+    let name_color = if status == 'D' { th.muted } else { th.text };
+    let left = vec![
+        Span::raw(BODY),
+        Span::styled(status.to_string(), Style::default().fg(color)),
+        Span::raw("  "),
+        Span::styled(dir.to_string(), Style::default().fg(th.dim)),
+        Span::styled(name.to_string(), Style::default().fg(name_color)),
     ];
-    if let Some(files) = commit.files {
-        let noun = if files == 1 { "file" } else { "files" };
-        runs.push((format!(" · {files} {noun}"), Style::default().fg(th.dim)));
-    }
-    runs
+    let right = if counts > 0 {
+        vec![
+            right_in(
+                &count_text('+', file.additions),
+                add_w,
+                Style::default().fg(th.added),
+            ),
+            Span::raw(" "),
+            right_in(
+                &count_text('−', file.deletions),
+                del_w,
+                Style::default().fg(th.removed),
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
+    columns(left, right, width)
 }
 
-/// One check's row: its mark, its name, the workflow it ran in, and how
-/// long it ran — or that it is still running, or was skipped.
-fn check_runs(check: &PrCheck, now: i64, th: Theme) -> Vec<(String, Style)> {
+/// The Commits tab's column widths: the author (only when more than one
+/// wrote them), the counts and the age.
+struct CommitCols {
+    who: usize,
+    add: usize,
+    del: usize,
+    age: usize,
+}
+
+/// How long ago a commit was authored, for its column.
+fn commit_age(commit: &crate::pull_request::PrCommit, now: i64) -> String {
+    crate::pull_request::rfc3339_secs(&commit.at)
+        .map(|at| crate::hosts::ago_short(now - at))
+        .unwrap_or_default()
+}
+
+/// A Commits row on one line: the short sha, the subject, and in columns
+/// at the right the author (when more than one wrote them), what it adds
+/// and removes, and how long ago — the author going first, then the
+/// counts, before the subject shortens past [`MIN_TEXT_W`].
+fn commit_row(
+    commit: &crate::pull_request::PrCommit,
+    cols: &CommitCols,
+    now: i64,
+    width: usize,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    let lead = BODY.len() + commit.short().width() + 2;
+    let counts_w = if cols.add + cols.del > 0 {
+        cols.add + 1 + cols.del + 2
+    } else {
+        0
+    };
+    let who_w = if cols.who > 0 { cols.who + 2 } else { 0 };
+    let fits = |right: usize| width >= lead + MIN_TEXT_W + right + 2;
+    let (who_w, counts_w) = if fits(who_w + counts_w + cols.age) {
+        (who_w, counts_w)
+    } else if fits(counts_w + cols.age) {
+        (0, counts_w)
+    } else {
+        (0, 0)
+    };
+    let left = vec![
+        Span::raw(BODY),
+        Span::styled(commit.short().to_string(), Style::default().fg(th.muted)),
+        Span::raw("  "),
+        Span::styled(commit.subject.clone(), Style::default().fg(th.text)),
+    ];
     let dim = Style::default().fg(th.dim);
+    let mut right = Vec::new();
+    if who_w > 0 {
+        let who = crate::ui::truncate(&commit.author, cols.who);
+        right.push(Span::styled(format!("{who:<w$}  ", w = cols.who), dim));
+    }
+    if counts_w > 0 {
+        let add = commit
+            .additions
+            .map(|n| count_text('+', n))
+            .unwrap_or_default();
+        let del = commit
+            .deletions
+            .map(|n| count_text('−', n))
+            .unwrap_or_default();
+        right.push(right_in(&add, cols.add, Style::default().fg(th.added)));
+        right.push(Span::raw(" "));
+        right.push(right_in(&del, cols.del, Style::default().fg(th.removed)));
+        right.push(Span::raw("  "));
+    }
+    right.push(right_in(&commit_age(commit, now), cols.age, dim));
+    columns(left, right, width)
+}
+
+/// A Checks row: its mark, its name, and at the right end how it went —
+/// how long it ran, `running 2m`, or what GitHub called a failure that was
+/// not a plain one (`timed out · 15m`) — in the mark's colour when it
+/// failed or still runs.
+fn check_row(check: &PrCheck, now: i64, width: usize, th: Theme) -> Vec<Span<'static>> {
     let (mark, color) = match check.state {
         CheckState::Failed => ("✗", th.err),
         CheckState::Running => ("◐", th.warn),
         CheckState::Passed => ("✓", th.ok),
         CheckState::Skipped => ("–", th.dim),
     };
-    let mut runs = vec![
-        (mark.to_string(), Style::default().fg(color)),
-        (format!(" {}", check.name), Style::default().fg(th.text)),
-    ];
-    if !check.workflow.is_empty() && check.workflow != check.name {
-        runs.push((format!(" · {}", check.workflow), dim));
-    }
     let word = check.word.to_lowercase().replace('_', " ");
     let tail = match (check.state, check.duration(now)) {
         (CheckState::Running, Some(so_far)) => format!("running {so_far}"),
@@ -906,110 +1211,165 @@ fn check_runs(check: &PrCheck, now: i64, th: Theme) -> Vec<(String, Style)> {
         (CheckState::Failed, None) => word,
         (CheckState::Passed, None) => String::new(),
     };
-    if !tail.is_empty() {
-        runs.push((format!(" · {tail}"), dim));
-    }
-    runs
+    let tail_color = match check.state {
+        CheckState::Failed => th.err,
+        CheckState::Running => th.warn,
+        _ => th.dim,
+    };
+    let name_color = if check.state == CheckState::Skipped {
+        th.dim
+    } else {
+        th.text
+    };
+    let left = vec![
+        Span::raw(BODY),
+        Span::styled(mark, Style::default().fg(color)),
+        Span::styled(format!(" {}", check.name), Style::default().fg(name_color)),
+    ];
+    // The tail gives way before the name shortens past [`MIN_TEXT_W`].
+    let tail_fits = width >= BODY.len() + 2 + MIN_TEXT_W + tail.width() + 2;
+    let right = if tail.is_empty() || !tail_fits {
+        Vec::new()
+    } else {
+        vec![Span::styled(tail, Style::default().fg(tail_color))]
+    };
+    columns(left, right, width)
 }
 
-/// The Description tab: the body as markdown, then the conversation.
-fn description(detail: &PrDetail, width: usize, body_w: usize, th: Theme) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(th.dim);
+/// A listing tab's lines as they are built: each row's line, the cursor's
+/// dressed as the main page's list dresses its own.
+struct Listing {
+    lines: Vec<Line<'static>>,
+    spans: Vec<(usize, usize)>,
+    cursor: usize,
+    focused: bool,
+    width: usize,
+    th: Theme,
+}
+
+impl Listing {
+    /// One row — a line laid out to the width, led by [`BODY`] — the
+    /// cursor's wearing `▌` in the accent and the FOCUSED PANEL TINT
+    /// across the line while the page has the keys, a dim `▌` otherwise.
+    fn row(&mut self, mut spans: Vec<Span<'static>>) {
+        let index = self.spans.len();
+        let first = self.lines.len();
+        if index == self.cursor {
+            let th = self.th;
+            let mark = if self.focused { th.accent } else { th.dim };
+            if let Some(lead) = spans.first_mut() {
+                *lead = Span::styled("▌ ", Style::default().fg(mark));
+            }
+            if self.focused {
+                let used = spans_w(&spans);
+                spans.push(Span::raw(" ".repeat(self.width.saturating_sub(used))));
+                for span in &mut spans {
+                    span.style = span.style.bg(th.focus_tint);
+                }
+            }
+        }
+        self.lines.push(Line::from(spans));
+        self.spans.push((first, self.lines.len() - first));
+    }
+}
+
+/// The Description tab: the body as markdown, then the conversation under
+/// a rule of its own.
+fn description(
+    detail: &PrDetail,
+    now: i64,
+    width: usize,
+    body_w: usize,
+    th: Theme,
+) -> Vec<Line<'static>> {
     let muted = Style::default().fg(th.muted);
     let mut out: Vec<Line<'static>> = Vec::new();
     if detail.body.trim().is_empty() {
         out.push(Line::from(Span::styled(
-            format!("{INDENT}(no description)"),
-            dim,
+            format!("{BODY}(no description)"),
+            Style::default().fg(th.dim),
         )));
     } else {
         out.extend(markdown::indent(
             markdown::render(detail.body.trim_end(), body_w, Breaks::Hard, muted, th),
-            INDENT,
+            BODY,
         ));
     }
     if !detail.comments.is_empty() {
         out.push(Line::from(""));
-        out.push(rule_line(
-            &format!(
-                "{} comment{}",
-                detail.comments.len(),
-                if detail.comments.len() == 1 { "" } else { "s" }
-            ),
+        out.push(crate::ui::section_rule(
+            "Conversation",
+            th.muted,
+            vec![Span::styled(
+                detail.comments.len().to_string(),
+                Style::default().fg(th.dim),
+            )],
             width,
             th,
         ));
         for c in &detail.comments {
             out.push(Line::from(""));
-            out.extend(comment_lines(c, width, body_w, th));
+            out.extend(comment_lines(c, now, width, body_w, th));
         }
     }
     out
 }
 
-/// `── 2 comments ──`, wrapped like everything else.
-fn rule_line(what: &str, width: usize, th: Theme) -> Line<'static> {
-    flow_lines(
-        &[(format!("── {what} ──"), Style::default().fg(th.dim))],
-        width,
-        INDENT,
-        INDENT,
-    )
-    .into_iter()
-    .next()
-    .unwrap_or_default()
-}
-
-/// The Reviews tab: GitHub's decision, each reviewer's latest word — and
-/// who has been asked and not answered — then the reviews themselves.
-fn reviews(detail: &PrDetail, width: usize, body_w: usize, th: Theme) -> Vec<Line<'static>> {
+/// The Reviews tab: GitHub's decision on a rule, each reviewer's latest
+/// word in a column under it — and who has been asked and not answered —
+/// then the reviews themselves under a rule of their own.
+fn reviews(
+    detail: &PrDetail,
+    now: i64,
+    width: usize,
+    body_w: usize,
+    th: Theme,
+) -> Vec<Line<'static>> {
     let dim = Style::default().fg(th.dim);
-    let bold = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
     let mut out = vec![Line::from("")];
-    let decision = match detail.review_decision.as_str() {
-        "APPROVED" => Some(("✓ Approved", bold(th.ok))),
-        "CHANGES_REQUESTED" => Some(("✗ Changes requested", bold(th.err))),
-        "REVIEW_REQUIRED" => Some(("○ Review required", bold(th.muted))),
-        _ => None,
-    };
     let reviewers = detail.reviewers();
-    match decision {
-        Some((text, style)) => {
-            out.extend(flow_lines(&[(text.into(), style)], width, INDENT, INDENT))
-        }
-        None if reviewers.is_empty() => {
-            out.extend(flow_lines(
-                &[("No reviews yet".into(), dim)],
-                width,
-                INDENT,
-                INDENT,
-            ));
-        }
-        None => {}
+    let decision = match detail.review_decision.as_str() {
+        "APPROVED" => ("Approved", th.ok),
+        "CHANGES_REQUESTED" => ("Changes requested", th.err),
+        "REVIEW_REQUIRED" => ("Review required", th.warn),
+        _ => ("Reviewers", th.muted),
+    };
+    let count = match reviewers.len() {
+        0 => Vec::new(),
+        1 => vec![Span::styled("1 reviewer", dim)],
+        n => vec![Span::styled(format!("{n} reviewers"), dim)],
+    };
+    out.push(crate::ui::section_rule(
+        decision.0, decision.1, count, width, th,
+    ));
+    if reviewers.is_empty() {
+        out.push(Line::from(Span::styled(
+            format!("{BODY}No reviews yet"),
+            dim,
+        )));
     }
-    if !reviewers.is_empty() {
-        if decision.is_some() {
-            out.push(Line::from(""));
-        }
-        for (who, state) in &reviewers {
-            let (mark, word, color) = match state.as_str() {
-                "APPROVED" => ("✓", "approved", th.ok),
-                "CHANGES_REQUESTED" => ("✗", "changes requested", th.err),
-                "DISMISSED" => ("–", "dismissed", th.dim),
-                REVIEW_REQUESTED => ("○", "review requested", th.muted),
-                _ => ("·", "commented", th.dim),
-            };
-            out.extend(flow_lines(
-                &[
-                    (mark.to_string(), Style::default().fg(color)),
-                    (format!(" {who}"), Style::default().fg(th.muted)),
-                    (format!(" · {word}"), dim),
-                ],
-                width,
-                INDENT,
-                "   ",
-            ));
-        }
+    let who_w = reviewers
+        .iter()
+        .map(|(who, _)| who.width())
+        .max()
+        .unwrap_or(0)
+        .min(24);
+    for (who, state) in &reviewers {
+        let (mark, word, color) = match state.as_str() {
+            "APPROVED" => ("✓", "approved", th.ok),
+            "CHANGES_REQUESTED" => ("✗", "changes requested", th.err),
+            "DISMISSED" => ("–", "dismissed", th.dim),
+            REVIEW_REQUESTED => ("○", "review requested", th.muted),
+            _ => ("·", "commented", th.dim),
+        };
+        let who = crate::ui::truncate(who, who_w);
+        let spans = vec![
+            Span::raw(BODY),
+            Span::styled(mark, Style::default().fg(color)),
+            Span::styled(format!(" {who:<who_w$}  "), Style::default().fg(th.text)),
+            Span::styled(word, Style::default().fg(color)),
+        ];
+        out.push(fit(spans, width));
     }
     let said: Vec<&PrComment> = detail
         .comments
@@ -1018,57 +1378,69 @@ fn reviews(detail: &PrDetail, width: usize, body_w: usize, th: Theme) -> Vec<Lin
         .collect();
     if !said.is_empty() {
         out.push(Line::from(""));
-        out.push(rule_line(
-            &format!(
-                "{} review{}",
-                said.len(),
-                if said.len() == 1 { "" } else { "s" }
-            ),
+        out.push(crate::ui::section_rule(
+            "Reviews",
+            th.muted,
+            vec![Span::styled(said.len().to_string(), dim)],
             width,
             th,
         ));
         for c in said {
             out.push(Line::from(""));
-            out.extend(comment_lines(c, width, body_w, th));
+            out.extend(comment_lines(c, now, width, body_w, th));
         }
     }
     out
 }
 
-/// One comment: an attribution row, then its body rendered as markdown.
-fn comment_lines(c: &PrComment, width: usize, body_w: usize, th: Theme) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(th.dim);
-    let mut head = vec![(c.author.clone(), Style::default().fg(th.muted))];
-    // A verdict is the whole point of a review row — it goes loud, in the
-    // color its mark wears on the Reviews tab: green for an approval, the
-    // needs-you crimson for requested changes, a dismissal muted.
+/// One comment: who said it, bold, and their verdict when it came as a
+/// review — loud, in the colour its mark wears on the Reviews tab — with
+/// how long ago at the right end; then its body rendered as markdown.
+fn comment_lines(
+    c: &PrComment,
+    now: i64,
+    width: usize,
+    body_w: usize,
+    th: Theme,
+) -> Vec<Line<'static>> {
+    let mut left = vec![
+        Span::raw(BODY),
+        Span::styled(
+            c.author.clone(),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        ),
+    ];
     if let Some(verdict) = c.verdict() {
         let color = match verdict {
             "approved" => th.ok,
             "changes requested" => th.err,
             _ => th.muted,
         };
-        head.push((
-            format!(" {verdict}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        left.push(Span::styled(
+            format!("  {verdict}"),
+            Style::default().fg(color),
         ));
     }
-    if let Some(day) = c.at.split('T').next().filter(|d| !d.is_empty()) {
-        head.push((format!(" · {day}"), dim));
-    }
-    let mut out = flow_lines(&head, width, INDENT, INDENT);
+    let age = crate::pull_request::rfc3339_secs(&c.at)
+        .map(|at| crate::hosts::ago_short(now - at))
+        .unwrap_or_default();
+    let mut out = vec![Line::from(columns(
+        left,
+        vec![Span::styled(age, Style::default().fg(th.dim))],
+        width,
+    ))];
     if c.body.trim().is_empty() {
         return out;
     }
     out.extend(markdown::indent(
         markdown::render(
             c.body.trim_end(),
-            body_w.saturating_sub(2),
+            body_w,
             Breaks::Hard,
             Style::default().fg(th.muted),
             th,
         ),
-        &format!("{INDENT}  "),
+        BODY,
     ));
     out
 }
@@ -1184,10 +1556,14 @@ pub fn row_act(detail: &PrDetail, tabs: &PrTabs) -> Option<RowAct> {
             sha: c.sha.clone(),
             subject: c.subject.clone(),
         }),
-        PrTab::Checks => detail.checks.get(row).map(|c| RowAct::Check {
-            name: c.name.clone(),
-            url: c.url.clone(),
-        }),
+        PrTab::Checks => checks_in_order(detail)
+            .into_iter()
+            .flat_map(|(_, checks)| checks)
+            .nth(row)
+            .map(|c| RowAct::Check {
+                name: c.name.clone(),
+                url: c.url.clone(),
+            }),
         PrTab::Description | PrTab::Reviews => None,
     }
 }
@@ -1313,7 +1689,7 @@ pub(crate) fn click_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pull_request::{PrCommit, PrFile};
+    use crate::pull_request::{PrCommit, PrLabel};
 
     #[test]
     fn wrap_breaks_on_words_and_keeps_hard_breaks() {
@@ -1462,31 +1838,83 @@ mod tests {
         tabs
     }
 
-    /// The head reads number and title, where it stands, then the tabs —
-    /// counts beside them, a verdict's mark before Checks and Reviews —
-    /// over the Description: the body, then the conversation.
+    /// The border says where it stands, the number and the title, and what
+    /// it changes; the page under it leads with the sentence — who, from
+    /// where into where, how many commits, how long ago, the labels at its
+    /// right end — then the tabs, the verdict after Checks and Reviews,
+    /// over the Description: the body, then the conversation on its rule.
     #[test]
-    fn the_page_leads_with_the_headline_and_the_tabs_then_the_description() {
-        let d = full();
+    fn the_border_and_the_sentence_say_where_it_stands_then_the_tabs() {
+        let mut d = full();
+        d.created_at = "2026-09-30T04:00:00Z".into();
+        d.labels = vec![PrLabel {
+            name: "ui".into(),
+            color: "1d76db".into(),
+        }];
         let th = Theme::default();
+        let (left, right) = border(&input(Some(&d)), false, th);
+        assert_eq!(text(&[Line::from(left)]), "● Open  #42 Attach links");
+        assert_eq!(text(&[Line::from(right)]), "+106 −4");
         let page = page(&input(Some(&d)), &PrTabs::default(), true, 100, th);
         let head = text(&page.head);
-        assert!(head.starts_with(" #42 Attach links"), "{head}");
+        let sentence = head.lines().nth(1).unwrap_or_default();
         assert!(
-            head.contains("ready for review · webdevcody · main ← feat/links · +106 −4"),
+            sentence.starts_with(" webdevcody · feat/links → main · 2 commits · 3d ago"),
             "{head}"
         );
         assert!(
-            head.contains(" Description   Changes 2   Commits 2   ✗ Checks 1/3   ✗ Reviews "),
+            sentence.ends_with("ui"),
+            "the labels at the end: {sentence:?}"
+        );
+        assert_eq!(
+            sentence.chars().count(),
+            99,
+            "a cell of air after: {sentence:?}"
+        );
+        assert!(
+            head.contains(
+                " Description   Changes 2   Commits 2   Checks ✗ 1/3   Reviews ✗ Changes requested"
+            ),
             "{head}"
         );
         let body = text(&page.body);
         assert!(body.contains("Makes the row."), "{body}");
-        assert!(body.contains("── 1 comment ──"), "{body}");
+        assert!(body.contains(" ── Conversation ─"), "{body}");
+        assert!(body.contains("  kate  changes requested"), "{body}");
+        // Before the body lands the border has the number and the title only.
+        let (left, right) = border(&input(None), true, th);
+        assert_eq!(text(&[Line::from(left)]), "#42 Attach links");
+        assert!(right.is_empty());
+    }
+
+    /// A sentence too long for the line gives the head branch up first, cut
+    /// from its left, then the age, then the labels: always one line.
+    #[test]
+    fn the_sentence_keeps_to_one_line() {
+        let mut d = full();
+        d.head = "feat/a-branch-name-long-enough-to-crowd-the-line".into();
+        d.created_at = "2026-09-30T04:00:00Z".into();
+        d.labels = vec![PrLabel {
+            name: "enhancement".into(),
+            color: "a2eeef".into(),
+        }];
+        let th = Theme::default();
+        let line = |w| text(&[sentence(&d, NOW, w, th)]);
+        let roomy = line(120);
         assert!(
-            body.contains("kate changes requested · 2026-09-03"),
-            "{body}"
+            roomy.contains(&d.head) && roomy.contains("3d ago"),
+            "{roomy}"
         );
+        let cut = line(80);
+        assert!(
+            cut.contains("…") && cut.contains("crowd-the-line → main"),
+            "{cut}"
+        );
+        assert!(cut.contains("enhancement"), "{cut}");
+        for w in 1..=120 {
+            assert!(line(w).chars().count() <= w.max(1), "{w}: {:?}", line(w));
+        }
+        assert!(!line(40).contains("enhancement"), "{}", line(40));
     }
 
     /// The labels from `gh`'s JSON: counts, and the checks' and reviews'
@@ -1520,29 +1948,31 @@ mod tests {
                 "Description",
                 "Changes 2",
                 "Commits 2",
-                "✗ Checks 1/3",
-                "✗ Reviews"
+                "Checks ✗ 1/3",
+                "Reviews ✗ Changes requested"
             ]
         );
         d.checks.remove(0);
         d.review_decision = "REVIEW_REQUIRED".into();
         assert_eq!(
             tab_texts(&input(Some(&d)), th)[3..],
-            ["◐ Checks 1/2", "○ Reviews"]
+            ["Checks ◐ 1/2", "Reviews ○ Review required"]
         );
         d.checks.remove(0);
         d.review_decision = "APPROVED".into();
         assert_eq!(
             tab_texts(&input(Some(&d)), th)[3..],
-            ["✓ Checks", "✓ Reviews"]
+            ["Checks ✓ 1/1", "Reviews ✓ Approved"]
         );
         d.checks.clear();
         d.review_decision.clear();
         assert_eq!(
             tab_texts(&input(Some(&d)), th)[3..],
-            ["Checks", "Reviews 1"],
-            "no checks, one review and no decision"
+            ["Checks", "Reviews · Reviewed"],
+            "no checks, a review and no decision"
         );
+        d.comments.clear();
+        assert_eq!(tab_texts(&input(Some(&d)), th)[4], "Reviews", "no reviews");
         // The marks wear the verdict's color.
         let d = full();
         let page = page(&input(Some(&d)), &PrTabs::default(), true, 100, th);
@@ -1550,31 +1980,46 @@ mod tests {
             .head
             .iter()
             .flat_map(|l| l.spans.iter())
-            .find(|s| s.content.starts_with('✗'))
+            .find(|s| s.content.contains('✗'))
             .expect("a ✗");
         assert_eq!(cross.style.fg, Some(th.err));
     }
 
-    /// Changes lists each file with its status and its + and −; Commits
-    /// newest first with sha, subject, author and age; Checks failed
-    /// first with how long each ran; Reviews the decision, who stands
-    /// where, then the reviews.
+    /// Changes lists each file with its status and its + and − in columns
+    /// under a rule with the whole diff's; Commits newest first, one line
+    /// each — sha, subject, counts, age — under a rule naming who wrote
+    /// them; Checks under a rule per workflow, failed first, how long each
+    /// ran at the right; Reviews the decision on its rule, who stands where,
+    /// then the reviews.
     #[test]
     fn each_tab_lists_its_own() {
         let d = full();
         let th = Theme::default();
         let body = |tab| text(&page(&input(Some(&d)), &on(tab), true, 100, th).body);
         let changes = body(PrTab::Changes);
-        assert!(changes.contains("▌M src/app.rs  +100 −4"), "{changes}");
-        assert!(changes.contains(" A src/links.rs  +6"), "{changes}");
+        assert!(changes.contains(" ── 2 files ─"), "{changes}");
+        assert!(changes.contains("+106 −4 ── "), "{changes}");
+        assert!(changes.contains("▌ M  src/app.rs"), "{changes}");
+        assert!(changes.contains("+100 −4 \n"), "{changes}");
+        assert!(changes.contains("  A  src/links.rs"), "{changes}");
+        let links = changes
+            .lines()
+            .find(|l| l.contains("src/links.rs"))
+            .unwrap();
+        assert!(links.ends_with(" +6    "), "a zero is left out: {links:?}");
         let commits = body(PrTab::Commits);
-        assert!(commits.contains("▌bbbbbbb Dedupe the PR row"), "{commits}");
+        assert!(commits.contains(" ── 2 commits ─"), "{commits}");
         assert!(
-            commits.contains("webdevcody · 1d ago  +12 −3 · 1 file"),
-            "{commits}"
+            commits.contains("─ webdevcody ── "),
+            "one author, on the rule: {commits}"
         );
         assert!(
-            commits.trim_end().ends_with("webdevcody · 2d ago"),
+            commits.contains("▌ bbbbbbb  Dedupe the PR row"),
+            "{commits}"
+        );
+        assert!(commits.contains("+12 −3  1d \n"), "{commits}");
+        assert!(
+            commits.trim_end().ends_with("2d"),
             "no counts: none drawn — {commits}"
         );
         assert!(
@@ -1582,14 +2027,68 @@ mod tests {
             "newest first"
         );
         let checks = body(PrTab::Checks);
-        assert!(checks.contains("▌✗ test · CI · 3m 12s"), "{checks}");
-        assert!(checks.contains(" ◐ lint · CI · running"), "{checks}");
-        assert!(checks.contains(" ✓ build · CI · 3m 12s"), "{checks}");
+        assert!(checks.contains(" ── CI ─"), "{checks}");
+        assert!(checks.contains(" 1/3 ── "), "{checks}");
+        assert!(checks.contains("▌ ✗ test"), "{checks}");
+        assert!(checks.contains("3m 12s \n"), "{checks}");
+        assert!(checks.contains("  ◐ lint"), "{checks}");
+        assert!(checks.contains("running"), "{checks}");
+        assert!(checks.contains("  ✓ build"), "{checks}");
         let reviews = body(PrTab::Reviews);
-        assert!(reviews.contains("✗ Changes requested"), "{reviews}");
-        assert!(reviews.contains("✗ kate · changes requested"), "{reviews}");
-        assert!(reviews.contains("── 1 review ──"), "{reviews}");
+        assert!(reviews.contains(" ── Changes requested ─"), "{reviews}");
+        assert!(reviews.contains("  ✗ kate  changes requested"), "{reviews}");
+        assert!(reviews.contains(" ── Reviews ─"), "{reviews}");
         assert!(reviews.contains("one nit"), "{reviews}");
+    }
+
+    /// Checks group by the workflow they ran in, the group with the worst
+    /// check first, a check from no workflow under `Other` — and the row
+    /// cursor walks them, and acts on them, in that order.
+    #[test]
+    fn checks_group_by_workflow_worst_first() {
+        let mut d = full();
+        for (name, workflow, state) in [
+            ("pages", "Docs", CheckState::Passed),
+            ("vercel", "", CheckState::Passed),
+        ] {
+            d.checks.push(PrCheck {
+                name: name.into(),
+                workflow: workflow.into(),
+                state,
+                word: "SUCCESS".into(),
+                started: String::new(),
+                completed: String::new(),
+                url: format!("https://ci/{name}"),
+            });
+        }
+        d.checks.rotate_left(3);
+        let groups: Vec<(String, Vec<&str>)> = checks_in_order(&d)
+            .into_iter()
+            .map(|(wf, checks)| (wf, checks.iter().map(|c| c.name.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("CI".to_string(), vec!["test", "lint", "build"]),
+                ("Docs".to_string(), vec!["pages"]),
+                ("Other".to_string(), vec!["vercel"]),
+            ]
+        );
+        let mut tabs = on(PrTab::Checks);
+        tabs.select(3);
+        assert_eq!(
+            row_act(&d, &tabs),
+            Some(RowAct::Check {
+                name: "pages".into(),
+                url: "https://ci/pages".into()
+            })
+        );
+        let out = text(&page(&input(Some(&d)), &tabs, true, 80, Theme::default()).body);
+        assert!(out.contains("▌ ✓ pages"), "{out}");
+        assert!(
+            out.find("── CI").unwrap() < out.find("── Docs").unwrap(),
+            "{out}"
+        );
     }
 
     /// A list GitHub cut short says so, and names the key that reads the
@@ -1635,19 +2134,25 @@ mod tests {
         assert!(out.contains("no checks ran"), "{out}");
     }
 
-    /// The conflict is said in the state line, in red, while the pull
-    /// request is open; a merged one is past it.
+    /// The border's state word: open, a draft, a conflict in red while it
+    /// is open — a merged one is past it — merged and closed.
     #[test]
-    fn the_state_line_names_a_conflict() {
+    fn the_border_names_where_it_stands() {
         let th = Theme::default();
+        let state = |d: &PrDetail| {
+            let (left, _) = border(&input(Some(d)), false, th);
+            (left[0].content.to_string(), left[0].style.fg)
+        };
         let mut d = detail("", vec![]);
+        assert_eq!(state(&d), ("● Open".into(), Some(th.ok)));
+        d.is_draft = true;
+        assert_eq!(state(&d), ("○ Draft".into(), Some(th.muted)));
         d.health.conflicts = true;
-        let head = page(&input(Some(&d)), &PrTabs::default(), true, 200, th).head;
-        assert!(text(&head).contains("ready for review · merge conflicts · webdevcody"));
+        assert_eq!(state(&d), ("● Conflicts".into(), Some(th.err)));
         d.state = "MERGED".into();
-        let head = text(&page(&input(Some(&d)), &PrTabs::default(), true, 200, th).head);
-        assert!(head.contains(" merged · webdevcody"), "{head}");
-        assert!(!head.contains("conflicts"), "{head}");
+        assert_eq!(state(&d), ("● Merged".into(), Some(th.merged)));
+        d.state = "CLOSED".into();
+        assert_eq!(state(&d), ("● Closed".into(), Some(th.faint)));
     }
 
     /// Every rendered row has to fit the pane — head, tabs and every tab's
@@ -1683,7 +2188,11 @@ mod tests {
             .map(|(row, ..)| *row)
             .collect::<std::collections::BTreeSet<_>>();
         assert!(tab_rows.len() > 1, "{:?}", narrow.tabs);
-        assert!(text(&narrow.head).contains("✗ Reviews"));
+        assert!(
+            text(&narrow.head).contains("Reviews ✗"),
+            "{}",
+            text(&narrow.head)
+        );
     }
 
     /// The tabs step round both ends; a listing tab's rows are walked by
@@ -1803,8 +2312,12 @@ mod tests {
             (screen, drawn.unwrap())
         };
         let (screen, first) = redraw(&mut tabs, 0);
-        assert!(screen.starts_with(" #42 Attach links"), "{screen}");
-        assert_eq!(first.lines, 1 + 32);
+        let sentence = " webdevcody · feat/links → main · 2 commits";
+        assert!(
+            screen.lines().nth(1).unwrap().starts_with(sentence),
+            "{screen}"
+        );
+        assert_eq!(first.lines, 2 + 32, "the blank, the rule, the rows");
         assert!(first.body.y > 3, "the head sits above the body");
         let (rect, tab) = tabs.tab_hits[1];
         assert_eq!(tab, PrTab::Changes);
@@ -1819,16 +2332,16 @@ mod tests {
         );
         assert_eq!(
             tabs.row_hits[0].0.y,
-            first.body.y + 1,
-            "row 0 under the blank"
+            first.body.y + 2,
+            "row 0 under the blank and the rule"
         );
 
         tabs.select(25);
         let (screen, followed) = redraw(&mut tabs, 0);
         assert!(followed.scroll > 0, "scrolled to the cursor");
-        assert!(screen.contains("▌M src/f23.rs"), "{screen}");
+        assert!(screen.contains("▌ M  src/f23.rs"), "{screen}");
         assert!(
-            screen.starts_with(" #42 Attach links"),
+            screen.lines().nth(1).unwrap().starts_with(sentence),
             "the head stays: {screen}"
         );
         assert!(tabs.row_hits.iter().any(|(_, row)| *row == 25));
