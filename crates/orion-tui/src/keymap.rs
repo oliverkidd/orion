@@ -205,6 +205,9 @@ pub enum Action {
     /// the pane — or stop it.
     ToggleStack,
     StopAllStacks,
+    /// Delete every linked worktree, in every project, with no live
+    /// session and no uncommitted changes, behind one confirm.
+    CleanUnusedWorktrees,
     Help,
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
@@ -894,6 +897,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         label: "Stop all stacks",
         hint: "Stop every running docker compose stack on this machine — containers and data are kept",
         group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::CleanUnusedWorktrees,
+        id: "clean_unused_worktrees",
+        label: "Clean unused worktrees",
+        hint: "List every worktree, in every project, with no agent or terminal and no uncommitted changes, grouped by project and all ticked; Enter deletes the ticked ones. b deletes their merged and pushed branches too; a branch with unpushed commits is always kept, and the main checkout is never deleted",
+        group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
     },

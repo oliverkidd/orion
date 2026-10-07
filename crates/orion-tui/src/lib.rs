@@ -8,6 +8,7 @@ pub mod branch_switch;
 pub mod bundle;
 pub mod claude_accounts;
 pub mod claude_catalogue;
+pub mod clean_worktrees;
 pub mod clipboard_image;
 pub mod commit_list;
 pub mod completion;

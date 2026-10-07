@@ -2603,6 +2603,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::Stacks(view) => crate::stacks::draw(f, app, &view, th),
+        Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
