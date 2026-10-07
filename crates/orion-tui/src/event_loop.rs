@@ -40064,6 +40064,36 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
+    /// Lines pasted into a new item's field are an item each in the
+    /// field's group, bullets and closing `;` off, the field open again.
+    #[test]
+    fn lines_pasted_into_the_field_are_an_item_each() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::todos::store::with_dir(dir.path().to_path_buf(), || {
+            crate::todos::with_now(todo_clock(6), || {
+                let mut out = Vec::new();
+                let mut app = todos_with(TWO_EMAILS);
+                press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+                assert!(paste_into_overlay(
+                    &mut app,
+                    "deck folders;\n  ◦ speaker notes;\n  ◦ slide.set-layout;\n"
+                ));
+                let file = todo_file(&app);
+                let emails = file.groups[0].id;
+                for text in ["deck folders", "speaker notes", "slide.set-layout"] {
+                    let item = file.items.iter().find(|i| i.text == text);
+                    assert_eq!(item.map(|i| i.group), Some(emails), "{text}");
+                }
+                assert_eq!(file.items.len(), 6);
+                assert_eq!(app.flash.as_deref(), Some("added 3 items"));
+                assert!(todo_view(&app)
+                    .input
+                    .as_ref()
+                    .is_some_and(|(_, i)| i.as_str().is_empty()));
+            });
+        });
+    }
+
     /// An item's chips: the agent sent at it while its session is there,
     /// its Linear issue — in the state the LINEAR VIEW last read it in —
     /// and how many days it has carried over.
