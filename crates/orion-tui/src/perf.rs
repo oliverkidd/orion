@@ -162,6 +162,7 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::Metrics(_)) => "Metrics",
         Some(Overlay::Usage(_)) => "Usage",
         Some(Overlay::Stacks(_)) => "Stacks",
+        Some(Overlay::CleanWorktrees(_)) => "CleanWorktrees",
         Some(Overlay::Hosts(_)) => "Hosts",
         Some(Overlay::AgentPresets(_)) => "AgentPresets",
         Some(Overlay::AgentPresetEditor(_)) => "AgentPresetEditor",

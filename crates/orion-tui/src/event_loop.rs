@@ -378,6 +378,10 @@ async fn main_loop(
     // A PULL's or a PUSH's git lands here.
     let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<crate::git_sync::Answer>();
     app.git_sync.tx = Some(sync_tx);
+    // **Clean unused worktrees**' `git status` checks land here.
+    let (clean_tx, mut clean_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::clean_worktrees::Answer>();
+    app.clean_worktrees.tx = Some(clean_tx);
     // A BASE SYNC's fetch and fast-forward land here.
     let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
     app.base_sync.tx = Some(base_tx);
@@ -823,6 +827,11 @@ async fn main_loop(
             answer = sync_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::git_sync::land(&mut app, answer);
+                }
+            }
+            answer = clean_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::clean_worktrees::land(&mut app, answer);
                 }
             }
             answer = base_rx.recv() => {
@@ -3776,6 +3785,7 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Metrics(_)
         | Overlay::Usage(_)
         | Overlay::Skills(_)
+        | Overlay::CleanWorktrees(_)
         | Overlay::ProjectPicker(_) => true,
         // A take-down waiting on its answer: Esc cancels that first.
         Overlay::Stacks(view) => view.confirm.is_none(),
@@ -4133,6 +4143,7 @@ fn dispatch_action(
         Action::Usage => crate::usage::open(app),
         Action::Stacks => crate::stacks::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
+        Action::CleanUnusedWorktrees => crate::clean_worktrees::start(app),
         Action::ToggleStack => {
             if let Some(id) = crate::git_sync::target(app) {
                 toggle_stack_in(app, &id, out);
@@ -7511,6 +7522,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::Stacks(_) => crate::stacks::handle_key(app, key, out),
+        Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
@@ -9455,16 +9467,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             run_pending_action(app, *first, out);
             delete_worktree_and_settle(app, worktree, out);
         }
-        PendingAction::DeleteAllWorktrees(ids) => {
-            // Each delete is its own request with its own optimistic
-            // removal + rollback, so one failure restores only its rows.
-            // One reconcile at the end: the cursor settles on a survivor.
-            let before = selection_snapshot(app);
-            for id in ids {
-                delete_worktree(app, id, false, out);
-            }
-            reconcile_selection(app, before, out);
-        }
+        PendingAction::DeleteAllWorktrees(ids) => delete_worktrees(app, ids, out),
         PendingAction::ForceDeleteWorktrees(ids) => {
             let before = selection_snapshot(app);
             for id in ids {
@@ -9557,6 +9560,18 @@ fn close_terminal(app: &mut App, id: TerminalId, out: &mut Vec<ClientRequest>) {
 fn delete_worktree_and_settle(app: &mut App, id: WorktreeId, out: &mut Vec<ClientRequest>) {
     let before = selection_snapshot(app);
     delete_worktree(app, id, false, out);
+    reconcile_selection(app, before, out);
+}
+
+/// Unforced deletes of several worktrees at once. Each is its own request
+/// with its own optimistic removal + rollback, so one failure restores
+/// only its rows; one reconcile at the end settles the cursor on a
+/// survivor.
+pub(crate) fn delete_worktrees(app: &mut App, ids: Vec<WorktreeId>, out: &mut Vec<ClientRequest>) {
+    let before = selection_snapshot(app);
+    for id in ids {
+        delete_worktree(app, id, false, out);
+    }
     reconcile_selection(app, before, out);
 }
 
@@ -12342,6 +12357,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::stacks::handle_mouse(app, mouse, mouse_pos, out);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::CleanWorktrees(_))) {
+        crate::clean_worktrees::handle_mouse(app, mouse, mouse_pos);
+        return;
+    }
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         crate::pr_modal::handle_mouse(app, mouse, mouse_pos, out);
         return;
@@ -13314,6 +13333,9 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             app.dirty = true;
         }
         ServerEvent::EntityRemoved { id } => {
+            if let orion_core::EntityId::Worktree(w) = &id {
+                crate::clean_worktrees::removed(app, w);
+            }
             let before = selection_snapshot(app);
             apply_removal(app, &id);
             app.prune_term_cache();
@@ -38739,6 +38761,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Metrics(_) => "Metrics",
             Overlay::Usage(_) => "Usage",
             Overlay::Stacks(_) => "Stacks",
+            Overlay::CleanWorktrees(_) => "CleanWorktrees",
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",
@@ -40053,6 +40076,36 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(text.contains("▾ EMAILS"), "{text}");
             assert!(text.contains("Today 29"), "{text}");
             assert!(text.contains("setup templates"), "{text}");
+        });
+    }
+
+    /// Lines pasted into a new item's field are an item each in the
+    /// field's group, bullets and closing `;` off, the field open again.
+    #[test]
+    fn lines_pasted_into_the_field_are_an_item_each() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::todos::store::with_dir(dir.path().to_path_buf(), || {
+            crate::todos::with_now(todo_clock(6), || {
+                let mut out = Vec::new();
+                let mut app = todos_with(TWO_EMAILS);
+                press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+                assert!(paste_into_overlay(
+                    &mut app,
+                    "deck folders;\n  ◦ speaker notes;\n  ◦ slide.set-layout;\n"
+                ));
+                let file = todo_file(&app);
+                let emails = file.groups[0].id;
+                for text in ["deck folders", "speaker notes", "slide.set-layout"] {
+                    let item = file.items.iter().find(|i| i.text == text);
+                    assert_eq!(item.map(|i| i.group), Some(emails), "{text}");
+                }
+                assert_eq!(file.items.len(), 6);
+                assert_eq!(app.flash.as_deref(), Some("added 3 items"));
+                assert!(todo_view(&app)
+                    .input
+                    .as_ref()
+                    .is_some_and(|(_, i)| i.as_str().is_empty()));
+            });
         });
     }
 
