@@ -4567,6 +4567,9 @@ pub struct App {
     /// TODOS whose **Create in Triage** Linear has not answered yet, by
     /// checkout and item: a second one is refused until it has.
     pub todo_creates: std::collections::HashSet<(std::path::PathBuf, u64)>,
+    /// What `⌘X`/`⌘C` last took in the TODOS MODAL: pasted back into it,
+    /// the items themselves go in.
+    pub todo_clip: Option<crate::todos::view::TodoClip>,
     /// The last **Test connection** (Settings → Linear): the checkout
     /// whose key it tried, where that key was found, and what Linear said
     /// — what the row says while that is still the key on show.
@@ -4843,6 +4846,7 @@ impl App {
             todos: HashMap::new(),
             todo_pending: HashMap::new(),
             todo_creates: std::collections::HashSet::new(),
+            todo_clip: None,
             linear_test: None,
             view_jobs: None,
             diff_probe: None,

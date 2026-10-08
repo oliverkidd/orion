@@ -1,10 +1,11 @@
 //! PROJECT TODOS (`⌘I`): a project's own todo list, kept on this machine
 //! only (`store`), in groups that nest and fold, each item with Linear's
-//! priority and sorted by it. Ticking an item strikes it through for the
-//! rest of the day; from the next day on it is in the LOG under the day
-//! it was done, and whatever was not done is simply still there. A list
-//! pasted in as indented Markdown becomes groups and items (`import`).
-//! The modal itself is `view`.
+//! priority and sorted by it — then in the order it was put in, which
+//! `⌥↑`/`⌥↓` change. Ticking an item strikes it through for the rest of
+//! the day; from the next day on it is under DONE BEFORE TODAY, by the
+//! day it was done, and whatever was not done is simply still there. A
+//! list pasted in as indented Markdown becomes groups and items
+//! (`import`). The modal itself is `view`.
 //!
 //! Days are local, never UTC: a tick at 11pm is that day's. "Today" is
 //! read off the clock at every draw ([`today`]), so the list rolls over
@@ -50,23 +51,32 @@ pub fn with_now<T>(at: DateTime<Local>, f: impl FnOnce() -> T) -> T {
     })
 }
 
-/// The todo an agent launch was sent at: which list, which item, and the
-/// URL of the Linear issue it is linked to — the session's context.
+/// The todo an agent launch was sent at: which list, which item — and
+/// the others selected with it — and the URL of the Linear issue it is
+/// linked to, the session's context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoRef {
     pub repo_path: std::path::PathBuf,
     pub item: u64,
+    pub also: Vec<u64>,
     pub issue_url: Option<String>,
 }
 
 /// The DAEMON made the session a launch from the TODOS MODAL asked for:
-/// the item remembers it — its chip, and `Enter`'s way back to it.
+/// each item it was sent at remembers it — its chip, and `Enter`'s way
+/// back to it.
 pub(crate) fn agent_started(app: &mut crate::app::App, todo: TodoRef, agent: &orion_core::AgentId) {
     let Some(file) = app.todos.get_mut(&todo.repo_path) else {
         return;
     };
-    if let Some(item) = file.item_mut(todo.item) {
-        item.agent = Some(agent.0.clone());
+    let mut changed = false;
+    for id in std::iter::once(todo.item).chain(todo.also) {
+        if let Some(item) = file.item_mut(id) {
+            item.agent = Some(agent.0.clone());
+            changed = true;
+        }
+    }
+    if changed {
         store::save(file);
         app.dirty = true;
     }
@@ -87,15 +97,27 @@ impl Item {
         self.done_on() == Some(today)
     }
 
-    /// On the Today tab: still open, or ticked today.
+    /// In the groups: still open, or ticked today.
     pub fn on_today(&self, today: NaiveDate) -> bool {
         self.done.is_none() || self.done_today(today)
+    }
+
+    /// Sorted with the open items: open — or ticked today while the modal
+    /// is up (`held`), which leaves it where it stood until the modal goes.
+    pub fn sorts_open(&self, held: &[u64], today: NaiveDate) -> bool {
+        self.done.is_none() || (held.contains(&self.id) && self.done_today(today))
     }
 
     /// Whole days an open item has carried over: 0 for one written today.
     pub fn age(&self, today: NaiveDate) -> i64 {
         (today - self.created).num_days().max(0)
     }
+}
+
+/// One step of [`TodoFile::move_items`]: past an item, or into a group.
+enum Shift {
+    Swap(u64),
+    Into(u64),
 }
 
 /// How many priorities there are: Linear's four and none.
@@ -149,22 +171,22 @@ impl TodoFile {
         self.groups.iter().filter(move |g| g.parent == parent)
     }
 
-    /// A group's items on the Today tab, in the order they are drawn: the
-    /// open ones by priority, urgent first, each priority in the order
-    /// they were written down; then the ones ticked today, in the order
-    /// they were ticked.
-    pub fn today_items(&self, group: u64, today: NaiveDate) -> Vec<&Item> {
+    /// A group's items in the order they are drawn: the open ones by
+    /// priority, urgent first, each priority in the order they stand in
+    /// the list; then the ones ticked today, in the order they were
+    /// ticked — all but those `held` where they stood.
+    pub fn today_items(&self, group: u64, today: NaiveDate, held: &[u64]) -> Vec<&Item> {
         let mut open: Vec<&Item> = self
             .items
             .iter()
-            .filter(|i| i.group == group && i.done.is_none())
+            .filter(|i| i.group == group && i.sorts_open(held, today))
             .collect();
-        // Stable: equal priorities keep the order they were made in.
+        // Stable: equal priorities keep the order they stand in.
         open.sort_by_key(|i| crate::linear::priority_rank(i.priority));
         let mut done: Vec<&Item> = self
             .items
             .iter()
-            .filter(|i| i.group == group && i.done_today(today))
+            .filter(|i| i.group == group && i.done_today(today) && !i.sorts_open(held, today))
             .collect();
         done.sort_by_key(|i| i.done);
         open.extend(done);
@@ -211,7 +233,7 @@ impl TodoFile {
         days
     }
 
-    /// Every open item, the Today tab's badge.
+    /// Every open item, the count on the project's tab.
     pub fn open_count(&self) -> usize {
         self.items.iter().filter(|i| i.done.is_none()).count()
     }
@@ -219,17 +241,54 @@ impl TodoFile {
     /// The names from the top down to `group`: `["MCP fixes", "storyline
     /// prompt"]`.
     pub fn path(&self, group: u64) -> Vec<&str> {
-        let mut names = Vec::new();
-        let mut at = self.group(group);
-        while let Some(g) = at {
-            if names.len() > MAX_DEPTH {
-                break;
-            }
-            names.push(g.name.as_str());
-            at = g.parent.and_then(|p| self.group(p));
-        }
+        let mut names: Vec<&str> = self
+            .ancestors(group)
+            .into_iter()
+            .filter_map(|g| self.group(g).map(|g| g.name.as_str()))
+            .collect();
         names.reverse();
         names
+    }
+
+    /// `group` and every group it is in, innermost first.
+    pub fn ancestors(&self, group: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut at = self.group(group);
+        while let Some(g) = at {
+            if out.len() > MAX_DEPTH {
+                break;
+            }
+            out.push(g.id);
+            at = g.parent.and_then(|p| self.group(p));
+        }
+        out
+    }
+
+    /// `group` unfolded, and every group it is in: what lands in it is
+    /// in sight.
+    pub fn reveal(&mut self, group: u64) {
+        for id in self.ancestors(group) {
+            if let Some(g) = self.group_mut(id) {
+                g.collapsed = false;
+            }
+        }
+    }
+
+    /// `group` while it is still there, else the [`TodoFile::inbox`].
+    pub fn group_or_inbox(&mut self, group: Option<u64>) -> u64 {
+        match group.filter(|g| self.group(*g).is_some()) {
+            Some(group) => group,
+            None => self.inbox(),
+        }
+    }
+
+    /// Where `group`'s first item stands in [`TodoFile::items`] — the end
+    /// when it has none.
+    fn group_start(&self, group: u64) -> usize {
+        self.items
+            .iter()
+            .position(|i| i.group == group)
+            .unwrap_or(self.items.len())
     }
 
     /// [`TodoFile::path`] as a line reads it: `MCP fixes › storyline prompt`.
@@ -259,8 +318,9 @@ impl TodoFile {
             .count()
     }
 
-    /// The LOG: every day before `today` that something was ticked on,
-    /// the most recent first, each with its items, the latest tick first.
+    /// DONE BEFORE TODAY: every day before `today` that something was
+    /// ticked on, the most recent first, each with its items, the latest
+    /// tick first.
     pub fn log_days(&self, today: NaiveDate) -> Vec<(NaiveDate, Vec<&Item>)> {
         let mut done: Vec<&Item> = self
             .items
@@ -277,6 +337,134 @@ impl TodoFile {
             }
         }
         days
+    }
+
+    /// Every group in the order the list draws them: each one, then the
+    /// groups under it, then its next sibling.
+    pub fn groups_in_order(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        self.add_in_order(None, &mut out, 0);
+        out
+    }
+
+    fn add_in_order(&self, parent: Option<u64>, out: &mut Vec<u64>, depth: usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        for group in self.subgroups(parent) {
+            out.push(group.id);
+            self.add_in_order(Some(group.id), out, depth + 1);
+        }
+    }
+
+    /// Where `item` stands in [`TodoFile::items`].
+    fn index_of(&self, item: u64) -> Option<usize> {
+        self.items.iter().position(|i| i.id == item)
+    }
+
+    /// A new open item right after `after`: in its group, at its
+    /// priority, so it is drawn under it.
+    pub fn insert_after(&mut self, after: u64, text: &str, today: NaiveDate) -> Option<u64> {
+        let (group, priority) = self.item(after).map(|i| (i.group, i.priority))?;
+        let id = self.add_item(group, text, today);
+        let mut item = self.items.pop()?;
+        item.priority = priority;
+        let at = self.index_of(after).map_or(self.items.len(), |i| i + 1);
+        self.items.insert(at, item);
+        Some(id)
+    }
+
+    /// `items` put into `group`: right after `after`, else before the
+    /// group's first item — the top of each priority — in their order.
+    pub fn place(&mut self, items: Vec<Item>, group: u64, after: Option<u64>) {
+        let at = match after.and_then(|a| self.index_of(a)) {
+            Some(i) => i + 1,
+            None => self.group_start(group),
+        };
+        for (n, mut item) in items.into_iter().enumerate() {
+            item.group = group;
+            self.items.insert(at + n, item);
+        }
+    }
+
+    /// `⌥↑`/`⌥↓`: `ids` — in the order they are drawn — each one place up
+    /// or down among the open items: past the one beside it in its group
+    /// at its priority, else out of the group, onto the end of the one
+    /// drawn before it (or the start of the one after). Nothing moves when
+    /// the one leading the way has nowhere to go. The groups moved into.
+    pub fn move_items(
+        &mut self,
+        ids: &[u64],
+        up: bool,
+        held: &[u64],
+        today: NaiveDate,
+    ) -> Option<Vec<u64>> {
+        let order: Vec<u64> = if up {
+            ids.to_vec()
+        } else {
+            ids.iter().rev().copied().collect()
+        };
+        let lead = *order.first()?;
+        // The lead's step, worked out once: the guard and its own move.
+        let mut first = Some(self.shift_target(lead, up, held, today)?);
+        let mut entered = Vec::new();
+        for id in order {
+            let shift = first
+                .take()
+                .or_else(|| self.shift_target(id, up, held, today));
+            let (Some(shift), Some(at)) = (shift, self.index_of(id)) else {
+                continue;
+            };
+            match shift {
+                Shift::Swap(other) => {
+                    if let Some(b) = self.index_of(other) {
+                        self.items.swap(at, b);
+                    }
+                }
+                Shift::Into(group) => {
+                    let mut item = self.items.remove(at);
+                    item.group = group;
+                    let to = if up {
+                        self.items.len()
+                    } else {
+                        self.group_start(group)
+                    };
+                    self.items.insert(to, item);
+                    entered.push(group);
+                }
+            }
+        }
+        Some(entered)
+    }
+
+    /// Where one step up or down takes `item`, if anywhere.
+    fn shift_target(&self, item: u64, up: bool, held: &[u64], today: NaiveDate) -> Option<Shift> {
+        let me = self.item(item).filter(|i| i.sorts_open(held, today))?;
+        let band: Vec<u64> = self
+            .items
+            .iter()
+            .filter(|i| {
+                i.group == me.group && i.priority == me.priority && i.sorts_open(held, today)
+            })
+            .map(|i| i.id)
+            .collect();
+        let at = band.iter().position(|id| *id == item)?;
+        let beside = if up {
+            at.checked_sub(1)
+        } else {
+            Some(at + 1).filter(|i| *i < band.len())
+        };
+        if let Some(other) = beside {
+            return Some(Shift::Swap(band[other]));
+        }
+        let groups = self.groups_in_order();
+        let here = groups.iter().position(|g| *g == me.group)?;
+        let next = if up {
+            here.checked_sub(1)
+        } else {
+            Some(here + 1)
+        };
+        next.and_then(|i| groups.get(i)).map(|g| Shift::Into(*g))
     }
 
     /// A new group named `name` under `parent`, after its siblings.
@@ -431,7 +619,7 @@ mod tests {
         file.toggle(b, at(6, 9));
         file.toggle(a, at(6, 10));
         assert_eq!(
-            texts(&file.today_items(g, day(6))),
+            texts(&file.today_items(g, day(6), &[])),
             [
                 "urgent",
                 "high",
@@ -488,7 +676,7 @@ mod tests {
         assert_eq!(file.counts(g, day(6)).done_today, 1);
 
         assert!(!item(&file, done).on_today(day(7)));
-        assert_eq!(texts(&file.today_items(g, day(7))), ["still open"]);
+        assert_eq!(texts(&file.today_items(g, day(7), &[])), ["still open"]);
         let log = file.log_days(day(7));
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].0, day(6));
@@ -499,7 +687,7 @@ mod tests {
         // Unticked from the log, it is open again.
         file.toggle(done, at(7, 9));
         assert_eq!(
-            texts(&file.today_items(g, day(7))),
+            texts(&file.today_items(g, day(7), &[])),
             ["ship it", "still open"]
         );
     }
@@ -557,7 +745,7 @@ mod tests {
             .find(|g| g.name == "Emails")
             .unwrap()
             .id;
-        assert_eq!(file.today_items(emails, day(6)).len(), 6);
+        assert_eq!(file.today_items(emails, day(6), &[]).len(), 6);
         assert!(file
             .items
             .iter()
@@ -595,6 +783,121 @@ mod tests {
         assert_eq!(file.import(&nodes, day(6)), 29);
         assert_eq!(file.import(&nodes, day(6)), 0);
         assert_eq!(file.items.len(), 29);
+    }
+
+    /// An item ticked while the modal is up stays where it stood, struck
+    /// through, until the modal lets it go.
+    #[test]
+    fn a_held_tick_stays_in_place() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let g = file.add_group(None, "G");
+        let a = file.add_item(g, "a", day(6));
+        file.add_item(g, "b", day(6));
+        file.toggle(a, at(6, 9));
+        assert_eq!(texts(&file.today_items(g, day(6), &[a])), ["a", "b"]);
+        assert_eq!(texts(&file.today_items(g, day(6), &[])), ["b", "a"]);
+    }
+
+    /// A new item after another is drawn right under it: same group,
+    /// same priority.
+    #[test]
+    fn an_item_inserted_after_another_is_drawn_under_it() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let g = file.add_group(None, "G");
+        let a = file.add_item(g, "a", day(6));
+        file.add_item(g, "b", day(6));
+        file.item_mut(a).unwrap().priority = 2;
+        let c = file.insert_after(a, "c", day(6)).unwrap();
+        assert_eq!(file.item(c).unwrap().priority, 2);
+        assert_eq!(texts(&file.today_items(g, day(6), &[])), ["a", "c", "b"]);
+        let d = file.insert_after(c, "d", day(6)).unwrap();
+        file.item_mut(a).unwrap().priority = 0;
+        file.item_mut(c).unwrap().priority = 0;
+        file.item_mut(d).unwrap().priority = 0;
+        assert_eq!(
+            texts(&file.today_items(g, day(6), &[])),
+            ["a", "c", "d", "b"]
+        );
+    }
+
+    /// `⌥↑`/`⌥↓` step an item past its neighbour at its priority, then out
+    /// of its group: onto the end of the group drawn before, or the start
+    /// of the one after — a nested group drawn between them included.
+    #[test]
+    fn items_move_within_their_priority_then_across_groups() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let top = file.add_group(None, "A");
+        let a1 = file.add_item(top, "a1", day(6));
+        let sub = file.add_group(Some(top), "A sub");
+        let s1 = file.add_item(sub, "s1", day(6));
+        let next = file.add_group(None, "B");
+        file.add_item(next, "b1", day(6));
+        let b2 = file.add_item(next, "b2", day(6));
+        let urgent = file.add_item(next, "urgent", day(6));
+        file.item_mut(urgent).unwrap().priority = 1;
+        assert_eq!(file.groups_in_order(), [top, sub, next]);
+
+        // b2 past b1, at its priority; then b2 is top of its band.
+        assert!(file.move_items(&[b2], true, &[], day(6)).is_some());
+        assert_eq!(
+            texts(&file.today_items(next, day(6), &[])),
+            ["urgent", "b2", "b1"]
+        );
+        // Past the band's top, out into the nested group drawn above.
+        assert_eq!(file.move_items(&[b2], true, &[], day(6)), Some(vec![sub]));
+        assert_eq!(texts(&file.today_items(sub, day(6), &[])), ["s1", "b2"]);
+        // Both up off the nested group's top: the end of A, in order.
+        assert_eq!(
+            file.move_items(&[s1, b2], true, &[], day(6)),
+            Some(vec![top, top])
+        );
+        assert_eq!(
+            texts(&file.today_items(top, day(6), &[])),
+            ["a1", "s1", "b2"]
+        );
+        // The first group's top has nowhere to go: nothing moves.
+        assert!(file.move_items(&[a1, s1], true, &[], day(6)).is_none());
+        assert_eq!(
+            texts(&file.today_items(top, day(6), &[])),
+            ["a1", "s1", "b2"]
+        );
+        // Down off A's end, into the start of its nested group — then
+        // the start of B, under its urgent item.
+        assert!(file.move_items(&[s1, b2], false, &[], day(6)).is_some());
+        assert_eq!(texts(&file.today_items(sub, day(6), &[])), ["s1", "b2"]);
+        assert!(file.move_items(&[s1, b2], false, &[], day(6)).is_some());
+        assert_eq!(
+            texts(&file.today_items(next, day(6), &[])),
+            ["urgent", "s1", "b2", "b1"]
+        );
+    }
+
+    /// Pasted items go after the one named, in their order — or to the
+    /// top of the group.
+    #[test]
+    fn placed_items_land_after_the_one_named() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let g = file.add_group(None, "G");
+        let h = file.add_group(None, "H");
+        let a = file.add_item(g, "a", day(6));
+        file.add_item(g, "b", day(6));
+        let x = file.add_item(h, "x", day(6));
+        let y = file.add_item(h, "y", day(6));
+        let moved: Vec<Item> = [x, y]
+            .iter()
+            .map(|id| file.item(*id).unwrap().clone())
+            .collect();
+        file.delete_item(x);
+        file.delete_item(y);
+        file.place(moved.clone(), g, Some(a));
+        assert_eq!(
+            texts(&file.today_items(g, day(6), &[])),
+            ["a", "x", "y", "b"]
+        );
+        file.delete_item(x);
+        file.delete_item(y);
+        file.place(moved, h, None);
+        assert_eq!(texts(&file.today_items(h, day(6), &[])), ["x", "y"]);
     }
 
     /// Deleting a group takes everything under it.

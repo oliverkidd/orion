@@ -738,7 +738,8 @@ rebindable (`pull_requests`).
 
 `⌘I` (`^Q` where the terminal sends no ⌘) opens the TODOS MODAL: every open PROJECT's own todo
 list, a tab each along the top in the projects' order, opened on the selected project's tab
-(`⇧←`/`⇧→` or a click for another; each comes back as it was left while the modal is up). Each
+(`←`/`→`, `Tab` or a click for another, `⌘1`–`⌘9` straight to one; each comes back as it was left
+while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, sorted by it inside its
 group. The list is this machine's alone — one file per checkout under orion's data folder
 (`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the
@@ -746,23 +747,32 @@ checkout's path, the path written inside it — and is never written into the re
 stays clean. Every change is saved at once; a file that will not read is moved aside to
 `<name>.corrupt-<time>.json`, the footer saying so, rather than written over.
 
-**Today** is the groups. A top-level group is a section: its name in capitals, a rule across, and its
+The list is the groups. A top-level group is a section: its name in capitals, a rule across, and its
 open items at each priority (`U`rgent, `H`igh, `M`edium, `L`ow — the letters the Linear issues modal
 uses too), how many are open and how many were ticked today, nested groups and folded headers counted
 in. A group under it says only how many are open. Under each header is a line per item — more when
 its text is long enough to wrap: its box, its priority letter, the text, and on the right the agent
-sent at it, the Linear issue it is linked to and how many days it has carried over (`2d`). The tab
-row's right end says what was ticked today and this week, with a bar for each day from Monday.
-`Space` ticks an item: it strikes through and sinks to the bottom of its group for the rest of the
-day, and from the next day on it is in the **Log** (`⇧→`), under the day it was done, where `Space`
-unticks it back onto Today. Nothing unfinished goes anywhere — it is simply still there tomorrow, a
-day older. Days are local: a tick at 11pm is that day's.
+sent at it, the Linear issue it is linked to and how many days it has carried over (`2d`). The
+project row's right end says what was ticked today and this week, with a bar for each day from
+Monday. `Space` ticks an item: it strikes through where it stands — the cursor stays on it — and
+sinks to the bottom of its group once the modal closes, for the rest of the day. From the next day
+on it is under **DONE BEFORE TODAY**, a folded section below the groups (`Space` opens it), under
+the day it was done, where `Space` unticks it back into its group. Nothing unfinished goes anywhere
+— it is simply still there tomorrow, a day older. Days are local: a tick at 11pm is that day's.
+
+Open items sort by priority, then in the order you put them: `⌥↑`/`⌥↓` move one past the next at
+its priority, and past the end of its group onto the end of the group above (or the start of the one
+below). `⇧↑`/`⇧↓` select a run of items, across groups too, and ticking, `⌘P`, moving, deleting,
+`Enter` and cut/copy then act on them all. `⌘X` cuts and `⌘C` copies: the clipboard gets their text,
+a line each, and that text pasted back into the modal — any project's tab — puts the items
+themselves after the cursor, priority and links kept.
 
 A row is edited where it stands: typing on an item or a group header adds to its end, and `⌫` opens
 it with its last character gone; `Enter` saves, `↑`/`↓` save and move on, `Esc` puts it back.
-`⌘N` types a new item into the cursor's group (so does typing on `+ new item`) — `Enter` adds it and
-opens the next, `Esc` stops — `⌘⇧N` a new group beside it, `⌘1`–`⌘4` set the priority (the item's
-own again takes it off) and `⌘⌫` deletes, a group with items in it only after a second press.
+`⌘N` types a new item right under the cursor's, at its priority (from a header or `+ new item`, at
+the group's end) — `Enter` adds it and opens the next under it, `Esc` stops; the field wraps as you
+type — `⌘⇧N` a new group beside it, `⌘P` picks the priority (`1`–`4` urgent to low, `0` none) and
+`⌘⌫` deletes, a group with items in it only after a second press.
 `⌘↑`/`⌘↓` jump from group to group. `⌘F` opens the filter, which keeps the matching items under
 their headers.
 
