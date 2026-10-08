@@ -964,7 +964,10 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     }
 }
 
-/// Remember a ⌘L launch's branch so the PR it opens can be attached.
+/// Remember a ⌘L launch's branch so the PR it opens can be attached. A
+/// launch aimed at the root checkout remembers nothing: its branch (`dev`)
+/// opens only the release pull request into `main`, and that one must not
+/// be linked to the issues ([`root_branch`]).
 pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
     let Some(batch) = &launch.linear else {
         return;
@@ -978,14 +981,29 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
             .tree
             .worktrees
             .iter()
-            .find(|w| &w.id == id)
+            .find(|w| &w.id == id && !w.is_main)
             .map(|w| w.branch.clone())
             .unwrap_or_default(),
     };
     app.linear_links.remember(&branch, &batch.issues);
 }
 
-/// When a new pull request appears on a remembered branch, attach it.
+/// The branch `project`'s root checkout is on — the long-lived one feature
+/// branches merge into (`dev`). A pull request from it is a release (`dev`
+/// → `main`): linked to the issues, it would hold them back, since Linear
+/// moves an issue on a merge only once none of its pull requests is left
+/// open, and its own merge would move them again after the release had.
+fn root_branch<'a>(app: &'a App, project: &ProjectId) -> Option<&'a str> {
+    app.tree
+        .worktrees
+        .iter()
+        .find(|w| &w.project_id == project && w.is_main && !w.branch.is_empty())
+        .map(|w| w.branch.as_str())
+}
+
+/// When a new pull request appears on a remembered branch, attach it —
+/// never one from the root checkout's branch ([`root_branch`]), whatever
+/// is remembered for it.
 /// **Link PRs to Linear** decides only whether a ⌘L launch remembers its
 /// branch ([`remember_submit`]): a worktree linked by hand (`⌘.`) is
 /// attached either way.
@@ -1004,9 +1022,10 @@ pub(crate) fn attach_new_prs(
     let Some(dir) = dir else {
         return;
     };
+    let root = root_branch(app, project).map(str::to_string);
     for pr in fresh {
         let was = previous.is_some_and(|was| was.iter().any(|old| old.url == pr.url));
-        if was {
+        if was || root.as_deref() == Some(pr.head.as_str()) {
             continue;
         }
         let Some(link) = app.linear_links.take(&pr.head) else {
@@ -3992,6 +4011,43 @@ pub(crate) mod tests {
         sent.sort_by_key(|v| v["issueId"].as_str().unwrap_or_default().to_string());
         assert_eq!(sent, [attached("1", 43), attached("3", 43)]);
         assert!(app.linear_links.pending("feature-x").is_empty(), "taken");
+    }
+
+    /// A pull request from the root checkout's branch is the release
+    /// (`dev` → `main`): it never takes the issues, even ones remembered
+    /// for that branch, while a feature branch's in the same answer does.
+    #[test]
+    fn a_release_pr_from_the_root_branch_is_never_attached() {
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        app.linear_links
+            .remember("dev", &[issue("1", "ENG-1", "Login")]);
+        app.linear_links
+            .remember("feature-x", &[issue("3", "ENG-3", "Signup")]);
+        let project = ProjectId("p1".into());
+        let previous = app.open_prs[&project].list.clone();
+        let mut fresh = previous.clone();
+        for (number, head) in [(43, "feature-x"), (44, "dev")] {
+            let mut opened = open_pr(number, head);
+            opened.head = head.into();
+            fresh.insert(0, opened);
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})),
+            || {
+                rt.block_on(async {
+                    attach_new_prs(&mut app, &project, Some(&previous), &fresh);
+                    let answer = rx.recv().await.expect("an answer");
+                    land_answer(&mut app, answer);
+                    assert!(rx.try_recv().is_err(), "one attach, not two");
+                });
+                graphql_sent()
+            },
+        );
+        assert_eq!(sent, [attached("3", 43)]);
     }
 
     /// A worktree whose pull request is open already has nothing to wait
