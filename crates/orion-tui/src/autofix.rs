@@ -7,15 +7,18 @@
 //!   the `gh` user opened (`OpenPr::mine`) that is in trouble is *watched*,
 //!   and its body (`PrDetail`, the one place check names live) is asked
 //!   for. [`land_detail`] reads each body that lands. Checks still running
-//!   beside a failed one are waited out — re-asked every
-//!   [`RECHECK`], up to [`SETTLE_LIMIT`] — so one agent sees every failure
-//!   at once; conflicts alone are acted on straight away.
+//!   beside a failed one are waited out, up to [`SETTLE_LIMIT`], so one
+//!   agent sees every failure at once; conflicts alone are acted on
+//!   straight away. The open-PR list is the clock: the body is asked for
+//!   again the moment the PR's row moves (a check finishes, a push), with
+//!   [`RECHECK`] only as the fallback for a row that sits still.
 //! * **Once per breakage.** What broke is a [`Fingerprint`] — the head
 //!   commit, the conflicts and the failing checks' names — and a per-PR
 //!   ledger (`Record`, kept in the PR cache) remembers the last one sent or
 //!   dismissed: nothing asks again until a push or a different failure. A
-//!   live `autofix-<n>` session on the PR holds the next ask back until it
-//!   is done, and a PR already being asked about is not asked about twice.
+//!   session at work in a checkout of the PR's branch — any, not only an
+//!   `autofix-<n>` — holds the ask back until it is done, and a PR already
+//!   being asked about is not asked about twice.
 //! * **Asking.** **When a PR breaks** (`Config::pr_autofix`): `ask` queues
 //!   the AUTOFIX MODAL — the issues as a checklist, the detected ones
 //!   ticked, and a note — which opens only on a free screen ([`tick`]: no
@@ -54,7 +57,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// How often a watched pull request's checks are read again while some
-/// are still running.
+/// are still running and its row has not moved — the fallback; a row that
+/// moves has them read at once ([`note_list`]).
 pub const RECHECK: Duration = Duration::from_secs(60);
 /// How long running checks are waited out before acting on the failures
 /// already in.
@@ -321,6 +325,24 @@ pub struct Watch {
     pub first_seen: Instant,
     /// When its body is next asked for; None while an ask is out.
     pub next_fetch: Option<Instant>,
+    /// Its row as the open list last showed it ([`RowState`]).
+    pub row: RowState,
+    /// The row moved while an ask was out: the answer may predate it, so
+    /// the next one goes at once.
+    pub moved: bool,
+}
+
+/// What of a pull request's row says its checks or commit changed: the
+/// head commit, its health, and GitHub's tally of passed, failed and
+/// running checks.
+pub type RowState = (
+    String,
+    crate::pull_request::Health,
+    Option<crate::pull_request::CheckTally>,
+);
+
+fn row_state(pr: &OpenPr) -> RowState {
+    (pr.head_sha.clone(), pr.health, pr.meta.checks)
 }
 
 /// The app's AUTOFIX state (`App::autofix`).
@@ -344,10 +366,13 @@ impl State {
         self.ledger.entry(url.to_string()).or_default()
     }
 
-    /// Re-read `url`'s body after [`RECHECK`].
+    /// Re-read `url`'s body after [`RECHECK`] — or at once when its row
+    /// moved while this answer was out.
     fn recheck_later(&mut self, url: &str) {
         if let Some(w) = self.watching.get_mut(url) {
-            w.next_fetch = Some(Instant::now() + RECHECK);
+            let wait = if w.moved { Duration::ZERO } else { RECHECK };
+            w.moved = false;
+            w.next_fetch = Some(Instant::now() + wait);
         }
     }
 
@@ -367,8 +392,9 @@ fn asking(app: &App, url: &str) -> bool {
 // ---- detection ----
 
 /// A project's open-PR list landed: watch each of the user's PRs in
-/// trouble that this breakage has not been handled for, and forget the
-/// attempts — and any waiting ask — of each one that has gone green.
+/// trouble that this breakage has not been handled for, read a watched
+/// one's body again now that its row moved, and forget the attempts — and
+/// any waiting ask — of each one that has gone green.
 pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
     for pr in list.iter().filter(|pr| pr.mine) {
         if pr.trouble().is_none() {
@@ -384,10 +410,18 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
             app.autofix.forget(&pr.url);
             continue;
         }
-        if app.autofix_mode == Mode::Off
-            || app.autofix.watching.contains_key(&pr.url)
-            || asking(app, &pr.url)
-        {
+        if let Some(watch) = app.autofix.watching.get_mut(&pr.url) {
+            let row = row_state(pr);
+            if watch.row != row {
+                watch.row = row;
+                match &mut watch.next_fetch {
+                    Some(at) => *at = Instant::now(),
+                    None => watch.moved = true,
+                }
+            }
+            continue;
+        }
+        if app.autofix_mode == Mode::Off || asking(app, &pr.url) {
             continue;
         }
         let handled = app
@@ -399,19 +433,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         if handled {
             continue;
         }
-        let Some(dir) = repo_dir(app, project) else {
-            continue;
-        };
-        app.autofix.watching.insert(
-            pr.url.clone(),
-            Watch {
-                project: project.clone(),
-                number: pr.number,
-                dir,
-                first_seen: Instant::now(),
-                next_fetch: Some(Instant::now()),
-            },
-        );
+        watch(app, project, pr, Instant::now());
     }
     // PRs that left the list were merged or closed.
     let open: HashSet<&str> = list.iter().map(|pr| pr.url.as_str()).collect();
@@ -432,6 +454,25 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
     for url in gone {
         app.autofix.forget(&url);
     }
+}
+
+/// Watch `pr`, its body asked for at `next_fetch`.
+fn watch(app: &mut App, project: &ProjectId, pr: &OpenPr, next_fetch: Instant) {
+    let Some(dir) = repo_dir(app, project) else {
+        return;
+    };
+    app.autofix.watching.insert(
+        pr.url.clone(),
+        Watch {
+            project: project.clone(),
+            number: pr.number,
+            dir,
+            first_seen: Instant::now(),
+            next_fetch: Some(next_fetch),
+            row: row_state(pr),
+            moved: false,
+        },
+    );
 }
 
 /// The project's repo path — where `gh` reads it from, as the open-PR list
@@ -491,7 +532,7 @@ pub fn land_detail(
     let settling = diagnosis.running
         && !diagnosis.conflicts_only()
         && watch.first_seen.elapsed() < SETTLE_LIMIT;
-    if settling || fixer_busy(app, &pr) {
+    if settling || branch_busy(app, &watch.project, &pr) {
         app.autofix.recheck_later(url);
         return;
     }
@@ -569,29 +610,30 @@ pub fn agent_name(number: u64) -> String {
     format!("autofix-{number}")
 }
 
-/// An autofix agent is still at work (or waiting on the user) in a
-/// checkout of `pr`'s branch.
-fn fixer_busy(app: &App, pr: &OpenPr) -> bool {
-    let name = agent_name(pr.number);
+/// A session is at work (or waiting on the user) in one of `project`'s
+/// checkouts of `pr`'s branch — someone is already on it, so an autofix
+/// agent would only be a second pair of hands on the same branch. An
+/// autofix agent counts from the moment it is sent, before its first turn.
+fn branch_busy(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
+    let fixer = agent_name(pr.number);
     app.tree.agents.iter().any(|agent| {
         !agent.archived
-            && agent.name == name
-            && matches!(
-                agent.status,
-                AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
-            )
-            && app
-                .tree
-                .worktrees
-                .iter()
-                .any(|w| w.id == agent.worktree_id && w.branch == pr.head)
+            && match agent.status {
+                AgentStatus::Running | AgentStatus::NeedsFeedback => true,
+                AgentStatus::Fresh => agent.name == fixer,
+                _ => false,
+            }
+            && app.tree.worktrees.iter().any(|w| {
+                w.id == agent.worktree_id && &w.project_id == project && w.branch == pr.head
+            })
     })
 }
 
 /// The git beat: raise the oldest queued ask that still stands once the
 /// screen is free — no modal up, and no terminal pane taking keys, where an
 /// Enter meant for the agent would send this instead. Asks left over from
-/// before autofix was switched off are dropped.
+/// before autofix was switched off are dropped, and one whose branch a
+/// session has started work on since goes back to being watched.
 pub fn tick(app: &mut App) {
     if app.autofix_mode == Mode::Off {
         app.autofix.queue.clear();
@@ -606,11 +648,16 @@ pub fn tick(app: &mut App) {
             .ledger
             .get(&form.pr.url)
             .and_then(|r| r.handled.as_ref());
-        if handled != Some(&form.fingerprint()) {
-            app.overlay = Some(Overlay::Autofix(Box::new(form)));
-            app.dirty = true;
-            return;
+        if handled == Some(&form.fingerprint()) {
+            continue;
         }
+        if branch_busy(app, &form.project, &form.pr) {
+            watch(app, &form.project, &form.pr, Instant::now() + RECHECK);
+            continue;
+        }
+        app.overlay = Some(Overlay::Autofix(Box::new(form)));
+        app.dirty = true;
+        return;
     }
 }
 
@@ -1705,5 +1752,123 @@ mod tests {
         ] {
             assert!(shot.contains(text), "{text} missing:\n{shot}");
         }
+    }
+
+    /// A session on `feat` (the PR's branch) in a checkout of project `p`.
+    fn session_on_branch(app: &mut App, name: &str, status: AgentStatus) {
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: orion_core::WorktreeId("feat".into()),
+            project_id: ProjectId("p".into()),
+            path: "/tmp/repo-feat".into(),
+            branch: "feat".into(),
+            is_main: false,
+            sort_order: 1,
+        });
+        app.tree.agents.push(orion_core::Agent {
+            id: orion_core::AgentId(name.into()),
+            worktree_id: orion_core::WorktreeId("feat".into()),
+            name: name.into(),
+            status,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: orion_core::AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: None,
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: true,
+            issue_url: None,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        });
+    }
+
+    /// The open list is the clock: a check finishing moves the row, and the
+    /// body is read again on that beat rather than a minute later.
+    #[test]
+    fn a_settling_pr_is_read_again_as_soon_as_its_row_moves() {
+        let tally = |failed, pending| {
+            Some(crate::pull_request::CheckTally {
+                passed: 0,
+                failed,
+                pending,
+            })
+        };
+        let row = |pending| OpenPr {
+            meta: crate::pull_request::PrMeta {
+                checks: tally(1, pending),
+                ..Default::default()
+            },
+            ..broken(false, true)
+        };
+        let mut app = app_with(vec![row(1)], Mode::Ask);
+        listed(&mut app);
+        assert_eq!(due_fetches(&mut app).len(), 1);
+        let running = detail(
+            false,
+            vec![
+                check("unit", "", CheckState::Failed),
+                check("e2e", "", CheckState::Running),
+            ],
+        );
+        landed(&mut app, &running);
+        assert!(due_fetches(&mut app).is_empty(), "settling");
+
+        listed(&mut app);
+        assert!(due_fetches(&mut app).is_empty(), "the row sat still");
+
+        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![row(0)];
+        listed(&mut app);
+        assert_eq!(due_fetches(&mut app).len(), 1, "the e2e run finished");
+
+        // Moving while that read is out: the next goes at once, whatever
+        // the answer.
+        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![row(1)];
+        listed(&mut app);
+        landed(&mut app, &running);
+        assert_eq!(due_fetches(&mut app).len(), 1);
+    }
+
+    /// Anyone at work on the PR's branch holds the ask back, not only an
+    /// autofix agent — and an idle session does not.
+    #[test]
+    fn a_session_at_work_on_the_branch_holds_the_ask_back() {
+        for (status, held) in [
+            (AgentStatus::Running, true),
+            (AgentStatus::NeedsFeedback, true),
+            (AgentStatus::Finished, false),
+            (AgentStatus::Fresh, false),
+        ] {
+            let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+            session_on_branch(&mut app, "mine", status);
+            listed(&mut app);
+            landed(&mut app, &detail(true, Vec::new()));
+            assert_eq!(app.autofix.queue.is_empty(), held, "{status:?}");
+            assert_eq!(app.autofix.watching.contains_key(&pr().url), held);
+        }
+        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+        session_on_branch(&mut app, &agent_name(7), AgentStatus::Fresh);
+        listed(&mut app);
+        landed(&mut app, &detail(true, Vec::new()));
+        assert!(app.autofix.queue.is_empty(), "an autofix agent just sent");
+    }
+
+    /// A session that starts on the branch while the ask waits for a free
+    /// screen takes it off the queue, back to being watched.
+    #[test]
+    fn a_queued_ask_steps_aside_for_a_session_that_started_on_the_branch() {
+        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+        listed(&mut app);
+        landed(&mut app, &detail(true, Vec::new()));
+        assert_eq!(app.autofix.queue.len(), 1);
+        session_on_branch(&mut app, "mine", AgentStatus::Running);
+        tick(&mut app);
+        assert!(app.overlay.is_none());
+        assert!(app.autofix.queue.is_empty());
+        assert!(app.autofix.watching.contains_key(&pr().url));
     }
 }
