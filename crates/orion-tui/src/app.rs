@@ -4436,15 +4436,23 @@ pub struct App {
     pub open_prs_failed: std::collections::HashSet<ProjectId>,
     /// Bodies and conversations of the pull requests the cursor has rested
     /// on, keyed by URL. A second API call on top of the list, so it is
-    /// fetched only for the row actually being read and kept for the whole
-    /// session — a pull request's description doesn't change while you read
-    /// it, and its comments ride the list's own refresh.
+    /// fetched only for the row actually being read (and, while the PULL
+    /// REQUESTS MODAL is up, for your own pull requests ahead of it), and
+    /// read again once it is older than `event_loop::PR_DETAIL_FRESH` —
+    /// the description holds still, but the checks don't (`pr_detail_at`).
     pub pr_detail: HashMap<String, PrDetail>,
     /// Pull requests whose detail is in flight, and ones `gh` couldn't
     /// answer for — the pane says "couldn't reach gh" rather than spinning
     /// on a request that already came back empty.
     pub pr_detail_inflight: std::collections::HashSet<String>,
     pub pr_detail_failed: std::collections::HashSet<String>,
+    /// When `gh` last answered (or refused) each pull request's detail,
+    /// this session. A page older than `event_loop::PR_DETAIL_FRESH` is
+    /// read again the next time a cursor rests on it — its checks run on
+    /// their own clock, not the list's — and a refusal that old is asked
+    /// again rather than kept. No entry (a body put there by hand, or by
+    /// the cache, which marks it `pr_detail_stale` instead) never ages.
+    pub pr_detail_at: HashMap<String, std::time::Instant>,
     /// Debounced detail fetch: the pull request under the cursor and when
     /// its lookup is due. Re-armed on every move, so walking a list of a
     /// hundred rows fetches only the ones actually paused on.
@@ -4808,6 +4816,7 @@ impl App {
             pr_detail: HashMap::new(),
             pr_detail_inflight: std::collections::HashSet::new(),
             pr_detail_failed: std::collections::HashSet::new(),
+            pr_detail_at: HashMap::new(),
             pending_pr_detail: None,
             pr_refresh_requested: false,
             pr_preview_scroll: 0,
@@ -6379,6 +6388,52 @@ impl App {
     pub fn pr_detail_delay(&self) -> Option<std::time::Duration> {
         let (_, at) = self.pending_pr_detail.as_ref()?;
         Some(at.saturating_duration_since(std::time::Instant::now()))
+    }
+
+    /// The PULL REQUESTS MODAL's prefetch (`pr_modal::Prefetch`): when it
+    /// next has a page to ask for. None when it has none, or enough are
+    /// already in flight — a landing re-runs the loop, which asks again.
+    pub fn pr_prefetch_delay(&self) -> Option<std::time::Duration> {
+        crate::pr_modal::prefetch_delay(self)
+    }
+
+    /// Whether `url`'s page was read from `gh` within
+    /// `event_loop::PR_DETAIL_FRESH` and nothing has said it is behind
+    /// since — what a cursor resting on it shows without asking again.
+    pub fn pr_detail_fresh(&self, url: &str) -> bool {
+        self.pr_detail.contains_key(url)
+            && !self.pr_detail_stale.contains(url)
+            && self.pr_detail_recent(url)
+    }
+
+    /// Whether resting a cursor on `url` should ask `gh` for its page:
+    /// not while one is in flight, nor while a fresh one is here
+    /// ([`Self::pr_detail_fresh`]) or `gh` refused it moments ago.
+    pub fn pr_detail_owed(&self, url: &str) -> bool {
+        if self.pr_detail_inflight.contains(url) {
+            return false;
+        }
+        if self.pr_detail_failed.contains(url) {
+            return !self.pr_detail_recent(url);
+        }
+        !self.pr_detail_fresh(url)
+    }
+
+    /// Whether `url`'s page has never been read from `gh` this session —
+    /// missing, or only the cache's copy — and isn't being read now: what
+    /// the modal's background prefetch fills in, ignoring age.
+    pub fn pr_detail_unread(&self, url: &str) -> bool {
+        !self.pr_detail_inflight.contains(url)
+            && !self.pr_detail_failed.contains(url)
+            && (!self.pr_detail.contains_key(url) || self.pr_detail_stale.contains(url))
+    }
+
+    /// `gh`'s last word on `url` came within `PR_DETAIL_FRESH`, or there
+    /// is no record of when it came.
+    fn pr_detail_recent(&self, url: &str) -> bool {
+        self.pr_detail_at
+            .get(url)
+            .is_none_or(|at| at.elapsed() < crate::event_loop::PR_DETAIL_FRESH)
     }
 
     /// The same for the ISSUES MODAL's debounced comments fetch.

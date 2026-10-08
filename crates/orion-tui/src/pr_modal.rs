@@ -60,6 +60,11 @@
 //! underneath. The reading side is the PULL REQUEST PAGE the pane shows
 //! (`pr_preview`) — fetched on the pane's debounce into the same
 //! `App::pr_detail`, so a pull request read in one is read in the other.
+//! A page is read again once it is older than `event_loop::PR_DETAIL_FRESH`
+//! — on the cursor's next rest, and on the list's beat while the cursor
+//! stays — so its checks keep up with CI. Opening the modal reads every one
+//! of your own pull requests' pages at once, and the rest one at a time
+//! behind them ([`Prefetch`]), so walking the list finds them read.
 //! From the list its tabs are walked with `⇧←`/`⇧→` and a listing's rows
 //! with `⇧↑`/`⇧↓`, without moving the keys.
 
@@ -101,6 +106,36 @@ pub(crate) const LIST_PCT: u16 = 38;
 pub(crate) const MIN_LIST_W: u16 = 24;
 /// Lines one wheel notch scrolls the reading pane.
 pub(crate) const WHEEL_LINES: i32 = 3;
+/// How many pages the prefetch lets be in flight at once, counting the
+/// cursor's own: enough that a handful of your pull requests land
+/// together, few enough not to stampede `gh`.
+pub(crate) const PREFETCH_PARALLEL: usize = 3;
+/// The gap between the prefetch's asks for the pull requests that aren't
+/// yours: the list fills in underneath without a burst.
+pub(crate) const PREFETCH_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The pages the modal reads ahead of the cursor. `soon` holds your own
+/// pull requests, asked for the moment there is room in flight; `later`
+/// the rest, one per [`PREFETCH_GAP`]. Each is checked again as it is
+/// taken, so one the cursor read meanwhile costs nothing. It lives on the
+/// view, so closing the modal drops whatever was still queued.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prefetch {
+    pub soon: std::collections::VecDeque<PendingPrDetail>,
+    pub later: std::collections::VecDeque<PendingPrDetail>,
+    /// When the next of `later` may go; None until one has.
+    pub next: Option<std::time::Instant>,
+}
+
+impl Prefetch {
+    fn is_empty(&self) -> bool {
+        self.soon.is_empty() && self.later.is_empty()
+    }
+
+    fn holds(&self, url: &str) -> bool {
+        self.soon.iter().chain(&self.later).any(|p| p.url == url)
+    }
+}
 
 /// Which panel of the modal has the keys — the one wearing the accent.
 /// `Tab` and `⇧Tab` hand them across, as the DIFF VIEWER's panels do.
@@ -217,6 +252,8 @@ pub struct PullRequestsView {
     /// choose a pull request for its marked issues; None opened on its
     /// own.
     pub pick: Option<PrPick>,
+    /// The pages read ahead of the cursor.
+    pub prefetch: Prefetch,
 }
 
 impl PullRequestsView {
@@ -244,6 +281,7 @@ impl PullRequestsView {
             focus: PrFocus::List,
             form: None,
             pick: None,
+            prefetch: Prefetch::default(),
         }
     }
 
@@ -306,7 +344,99 @@ fn show(app: &mut App, mut view: PullRequestsView) {
         request_list(app, &project);
     }
     schedule_detail(app);
+    queue_prefetch(app, true);
     app.dirty = true;
+}
+
+/// Queue the list's pages for the prefetch, in the order the list shows
+/// them. Opening (`opening`) asks for each of yours that isn't fresh —
+/// what you came to look at — and every other one this session hasn't
+/// read; a list landing later queues only what is still unread, so the
+/// beat never turns into a sweep of every page.
+fn queue_prefetch(app: &mut App, opening: bool) {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return;
+    };
+    let list = rows(app, &view.project);
+    let mut soon = Vec::new();
+    let mut later = Vec::new();
+    for (i, _) in visible_rows("", list) {
+        let pr = &list[i];
+        if view.prefetch.holds(&pr.url) {
+            continue;
+        }
+        let pending = PendingPrDetail {
+            url: pr.url.clone(),
+            number: pr.number,
+            dir: view.dir.clone(),
+        };
+        let unread = app.pr_detail_unread(&pr.url);
+        if pr.mine && (unread || opening && app.pr_detail_owed(&pr.url)) {
+            soon.push(pending);
+        } else if unread {
+            later.push(pending);
+        }
+    }
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
+    view.prefetch.soon.extend(soon);
+    view.prefetch.later.extend(later);
+}
+
+/// When the prefetch next has a page to ask for: now for one of yours,
+/// at the gap for the rest, never while [`PREFETCH_PARALLEL`] are in
+/// flight (a landing runs the loop again, which asks again).
+pub(crate) fn prefetch_delay(app: &App) -> Option<std::time::Duration> {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return None;
+    };
+    let queue = &view.prefetch;
+    if queue.is_empty() || app.pr_detail_inflight.len() >= PREFETCH_PARALLEL {
+        return None;
+    }
+    if !queue.soon.is_empty() {
+        return Some(std::time::Duration::ZERO);
+    }
+    let wait = queue
+        .next
+        .map(|next| next.saturating_duration_since(std::time::Instant::now()));
+    Some(wait.unwrap_or_default())
+}
+
+/// The pages due now, taken off the queue: as many of yours as there is
+/// room for in flight, then one of the rest if its gap has passed. A
+/// page read since it was queued is dropped, not asked for again.
+pub(crate) fn take_prefetch(app: &mut App) -> Vec<PendingPrDetail> {
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return Vec::new();
+    };
+    let mut queue = std::mem::take(&mut view.prefetch);
+    let mut room = PREFETCH_PARALLEL.saturating_sub(app.pr_detail_inflight.len());
+    let mut due = Vec::new();
+    while room > 0 {
+        let Some(pending) = queue.soon.pop_front() else {
+            break;
+        };
+        if app.pr_detail_owed(&pending.url) {
+            due.push(pending);
+            room -= 1;
+        }
+    }
+    let now = std::time::Instant::now();
+    if room > 0 && queue.soon.is_empty() && queue.next.is_none_or(|next| now >= next) {
+        while let Some(pending) = queue.later.pop_front() {
+            if app.pr_detail_unread(&pending.url) {
+                due.push(pending);
+                queue.next = Some(now + PREFETCH_GAP);
+                break;
+            }
+        }
+    }
+    if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
+        view.prefetch = queue;
+    }
+    due
 }
 
 /// Esc out of the PR PICK: the LINEAR VIEW back as it was, marks and
@@ -500,7 +630,7 @@ fn autofix(app: &mut App) {
     let Some(pr) = selected_pr(app) else {
         return;
     };
-    let fresh = !app.pr_detail_stale.contains(&pr.url);
+    let fresh = app.pr_detail_fresh(&pr.url);
     if let (true, Some(detail)) = (fresh, app.pr_detail.get(&pr.url).cloned()) {
         crate::autofix::open_for(app, project, pr, &detail);
         return;
@@ -531,16 +661,14 @@ fn selected_url(app: &App) -> Option<String> {
     selected_pr(app).map(|pr| pr.url)
 }
 
-/// The detail fetch a pull request is owed, if any: none for one already
-/// read, in flight, or known unanswerable — except a body the cache
-/// hydrated (`pr_detail_stale`), which shows at once and is fetched fresh
-/// over the top, as the pane's is.
+/// The detail fetch a pull request is owed, if any (`App::pr_detail_owed`):
+/// none for one read within `PR_DETAIL_FRESH`, in flight, or refused
+/// moments ago. A body the cache hydrated (`pr_detail_stale`), or one read
+/// longer ago, shows at once and is fetched fresh over the top, as the
+/// pane's is.
 fn pending_for(app: &App, url: String, number: u64, dir: PathBuf) -> Option<PendingPrDetail> {
-    let fresh = app.pr_detail.contains_key(&url) && !app.pr_detail_stale.contains(&url);
-    if fresh || app.pr_detail_inflight.contains(&url) || app.pr_detail_failed.contains(&url) {
-        return None;
-    }
-    Some(PendingPrDetail { url, number, dir })
+    app.pr_detail_owed(&url)
+        .then_some(PendingPrDetail { url, number, dir })
 }
 
 /// Arm (or disarm) the debounced fetch of the row under the modal's
@@ -597,7 +725,13 @@ pub(crate) fn list_changed(app: &mut App) {
         view.scroll = 0;
         view.tabs.rewind();
         schedule_detail(app);
+    } else if app.pending_pr_detail.is_none() {
+        // Still on the same pull request: the list's beat reads its page
+        // again once it has aged out, so checks running under the reader
+        // catch up on their own.
+        schedule_detail(app);
     }
+    queue_prefetch(app, false);
     app.dirty = true;
 }
 
@@ -1980,7 +2114,10 @@ mod tests {
         );
         open(&mut app);
         handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
+        // The loop fired #41's fetch: in flight, nothing armed.
         app.pending_pr_detail = None;
+        app.pr_detail_inflight
+            .insert("https://github.com/o/r/pull/41".into());
         app.open_prs.get_mut(&project).unwrap().list = vec![
             pr(43, "New", false),
             pr(42, "Fix login", false),
@@ -3507,5 +3644,144 @@ mod tests {
         for w in [60u16, 80, 100, 160] {
             screen(&mut app, w, 30);
         }
+    }
+
+    fn url(number: u64) -> String {
+        format!("https://github.com/o/r/pull/{number}")
+    }
+
+    fn mine(number: u64, title: &str) -> OpenPr {
+        OpenPr {
+            mine: true,
+            ..pr(number, title, false)
+        }
+    }
+
+    /// An instant `PR_DETAIL_FRESH` and a bit ago: a page read then has
+    /// aged out.
+    fn aged() -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(crate::event_loop::PR_DETAIL_FRESH + std::time::Duration::from_secs(1))
+            .expect("machine up for a minute")
+    }
+
+    fn read_at(app: &mut App, number: u64, at: std::time::Instant) {
+        app.pr_detail.insert(url(number), detail(number, "read"));
+        app.pr_detail_at.insert(url(number), at);
+    }
+
+    fn urls<'a>(due: impl IntoIterator<Item = &'a PendingPrDetail>) -> Vec<String> {
+        due.into_iter().map(|p| p.url.clone()).collect()
+    }
+
+    /// A page read moments ago shows as it is; one read longer ago than
+    /// `PR_DETAIL_FRESH` is read again when the cursor rests on it — the
+    /// Checks tab must not say `pending` until `⌘R` forces it.
+    #[test]
+    fn a_page_older_than_the_window_is_read_again_on_the_next_rest() {
+        let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+        read_at(&mut app, 42, std::time::Instant::now());
+        open(&mut app);
+        assert_eq!(pending_url(&app), None, "fresh: shown as it is");
+
+        app.overlay = None;
+        read_at(&mut app, 42, aged());
+        open(&mut app);
+        assert_eq!(
+            pending_url(&app),
+            Some(url(42).as_str()),
+            "aged: asked again"
+        );
+    }
+
+    /// The list's beat, landing while the cursor stays on a pull request,
+    /// reads its page again once that page has aged — checks running under
+    /// the reader catch up without a key.
+    #[test]
+    fn the_lists_beat_reads_the_cursors_aged_page_again() {
+        let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+        read_at(&mut app, 42, std::time::Instant::now());
+        open(&mut app);
+        list_changed(&mut app);
+        assert_eq!(pending_url(&app), None, "still fresh");
+
+        app.pr_detail_at.insert(url(42), aged());
+        list_changed(&mut app);
+        assert_eq!(pending_url(&app), Some(url(42).as_str()));
+    }
+
+    /// A refusal is kept for the window — no hammering a `gh` that just
+    /// failed — and asked again after it, rather than for the session.
+    #[test]
+    fn a_refusal_is_asked_again_once_it_ages() {
+        let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+        app.pr_detail_failed.insert(url(42));
+        app.pr_detail_at.insert(url(42), std::time::Instant::now());
+        assert!(!app.pr_detail_owed(&url(42)));
+        app.pr_detail_at.insert(url(42), aged());
+        assert!(app.pr_detail_owed(&url(42)));
+    }
+
+    /// Opening the modal reads every one of your pull requests that isn't
+    /// fresh at once, up to `PREFETCH_PARALLEL` in flight, and the others
+    /// this session hasn't read one per `PREFETCH_GAP` behind them. Pages
+    /// already read — fresh, or someone else's however old — wait for the
+    /// cursor.
+    #[test]
+    fn opening_reads_yours_at_once_and_the_rest_one_at_a_time() {
+        let (mut app, _) = app_with(
+            vec![
+                mine(50, "Mine, unread"),
+                mine(49, "Mine, aged"),
+                mine(48, "Mine, fresh"),
+                pr(47, "Theirs, unread", false),
+                pr(46, "Theirs, aged", false),
+                pr(45, "Theirs, unread too", false),
+            ],
+            true,
+        );
+        read_at(&mut app, 49, aged());
+        read_at(&mut app, 48, std::time::Instant::now());
+        read_at(&mut app, 46, aged());
+        open(&mut app);
+        let queue = &view(&app).prefetch;
+        assert_eq!(urls(&queue.soon), [url(50), url(49)]);
+        assert_eq!(urls(&queue.later), [url(47), url(45)]);
+        assert_eq!(prefetch_delay(&app), Some(std::time::Duration::ZERO));
+
+        let due = take_prefetch(&mut app);
+        assert_eq!(
+            urls(&due),
+            [url(50), url(49), url(47)],
+            "yours, then one of theirs"
+        );
+        for p in &due {
+            app.pr_detail_inflight.insert(p.url.clone());
+        }
+        assert_eq!(
+            prefetch_delay(&app),
+            None,
+            "three in flight: wait for a landing"
+        );
+
+        app.pr_detail_inflight.clear();
+        let gap = prefetch_delay(&app).expect("one still queued");
+        assert!(gap > std::time::Duration::ZERO, "theirs wait out the gap");
+        assert!(take_prefetch(&mut app).is_empty(), "not before the gap");
+    }
+
+    /// A page the cursor read while it sat in the queue is dropped when
+    /// its turn comes, and closing the modal drops the queue with it.
+    #[test]
+    fn the_prefetch_skips_what_was_read_meanwhile_and_dies_with_the_modal() {
+        let (mut app, _) = app_with(vec![mine(50, "Mine"), mine(49, "Also mine")], true);
+        open(&mut app);
+        read_at(&mut app, 50, std::time::Instant::now());
+        assert_eq!(urls(&take_prefetch(&mut app)), [url(49)]);
+
+        open(&mut app);
+        close(&mut app);
+        assert_eq!(prefetch_delay(&app), None);
+        assert!(take_prefetch(&mut app).is_empty());
     }
 }
