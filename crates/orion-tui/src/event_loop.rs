@@ -197,9 +197,16 @@ pub(crate) const OPEN_PRS_SWEEP_REFRESH: Duration = Duration::from_secs(5 * 60);
 /// How long the Worktrees cursor must rest on an open-PR row before its
 /// description and conversation are fetched. Long enough that arrowing
 /// through a hundred rows spends nothing, short enough that stopping to
-/// read one feels immediate. Answers are cached for the session, so this is
-/// paid at most once per pull request.
+/// read one feels immediate. Answers are kept for [`PR_DETAIL_FRESH`], so
+/// this is paid at most once a window per pull request.
 pub(crate) const PR_DETAIL_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// How long a pull request's page — its checks above all — is shown as
+/// read before a cursor resting on it asks again. The body barely moves,
+/// but the Checks tab is a live thing: a page read while CI ran would
+/// otherwise say `pending` until `⌘R` forced it. The PULL REQUESTS
+/// MODAL's own row is read again on this window while it stays on it.
+pub(crate) const PR_DETAIL_FRESH: Duration = Duration::from_secs(30);
 
 /// While the metrics modal is open, how often a fresh memory reading is
 /// requested from the daemon.
@@ -778,6 +785,12 @@ async fn main_loop(
             _ = tokio::time::sleep(app.pr_detail_delay().unwrap_or(Duration::MAX)),
                 if app.pr_detail_delay().is_some() => {
                 lookup_pr_detail(&mut app, &detail_tx);
+            }
+            // The PULL REQUESTS MODAL's prefetch: your pull requests at
+            // once, the rest one at a time behind them.
+            _ = tokio::time::sleep(app.pr_prefetch_delay().unwrap_or(Duration::MAX)),
+                if app.pr_prefetch_delay().is_some() => {
+                prefetch_pr_details(&mut app, &detail_tx);
             }
             answer = detail_rx.recv() => {
                 if let Some((url, detail)) = answer {
@@ -1718,6 +1731,7 @@ fn forget_retired_prs(app: &mut App) {
     app.pr_detail.retain(|url, _| live.contains(url));
     app.pr_detail_stale.retain(|url| live.contains(url));
     app.pr_detail_failed.retain(|url| live.contains(url));
+    app.pr_detail_at.retain(|url, _| live.contains(url));
     app.pr_cache_dirty |= app.pr_detail.len() != before;
 }
 
@@ -1801,8 +1815,8 @@ fn prune_pull_requests_to_tree(app: &mut App) {
 /// reading (`App::previewed_pr`) — the Worktrees cursor's open-PR row or the
 /// Sessions cursor's PR ROW. Called wherever the Worktrees cursor moves, and
 /// from `note_preview_change` whenever the previewed URL changes for any
-/// other reason. A PR already fetched, already in flight, or already known
-/// to be unanswerable arms nothing — the pane has something to show either
+/// other reason. A PR fetched within `PR_DETAIL_FRESH`, already in flight,
+/// or refused moments ago arms nothing (`App::pr_detail_owed`) — the pane has something to show either
 /// way, and re-asking would spend an API call on a row the user is only
 /// passing through. A body the cache hydrated (`pr_detail_stale`) is the
 /// one exception: the pane shows it at once, and the rest that would have
@@ -1817,8 +1831,7 @@ fn schedule_pr_detail(app: &mut App) {
     }
     let pending = app.previewed_pr().and_then(|pr| {
         let url = pr.url;
-        let fresh = app.pr_detail.contains_key(&url) && !app.pr_detail_stale.contains(&url);
-        if fresh || app.pr_detail_inflight.contains(&url) || app.pr_detail_failed.contains(&url) {
+        if !app.pr_detail_owed(&url) {
             return None;
         }
         // Either row lives in the selected project's repo; `gh pr view`
@@ -1862,12 +1875,32 @@ fn lookup_pr_detail(
     let Some((pending, _)) = app.pending_pr_detail.take() else {
         return;
     };
+    // The modal's prefetch got there first; its answer lands for both.
+    if app.pr_detail_inflight.contains(&pending.url) {
+        return;
+    }
     if !pending.dir.is_dir() {
+        app.pr_detail_at
+            .insert(pending.url.clone(), std::time::Instant::now());
         app.pr_detail_failed.insert(pending.url);
         app.dirty = true;
         return;
     }
     spawn_pr_detail(app, detail_tx, pending.url, pending.number, pending.dir);
+}
+
+/// Fire what the PULL REQUESTS MODAL's prefetch has due
+/// (`pr_modal::take_prefetch`). A checkout that has gone is skipped: the
+/// cursor's own fetch is the one that says so.
+fn prefetch_pr_details(
+    app: &mut App,
+    detail_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<crate::pull_request::PrDetail>)>,
+) {
+    for pending in crate::pr_modal::take_prefetch(app) {
+        if pending.dir.is_dir() {
+            spawn_pr_detail(app, detail_tx, pending.url, pending.number, pending.dir);
+        }
+    }
 }
 
 /// Ask `gh pr view` for one pull request's body, off the loop, marked in
@@ -1901,6 +1934,8 @@ fn land_pr_detail(
     out: &mut Vec<ClientRequest>,
 ) {
     app.pr_detail_inflight.remove(&url);
+    app.pr_detail_at
+        .insert(url.clone(), std::time::Instant::now());
     // A watched pull request's checks, for AUTOFIX.
     crate::autofix::land_detail(app, &url, detail.as_ref(), out);
     match detail {
@@ -1910,6 +1945,7 @@ fn land_pr_detail(
             let changed = app.pr_detail.get(&url) != Some(&detail);
             app.pr_detail.insert(url.clone(), detail);
             app.pr_detail_stale.remove(&url);
+            app.pr_detail_failed.remove(&url);
             app.pr_cache_dirty |= changed;
             crate::pr_actions::detail_landed(app, &url);
             if retired {
