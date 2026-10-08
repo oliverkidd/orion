@@ -25,11 +25,6 @@ pub const UNDECODABLE_FRAME_HINT: &str = "orion and its daemon are different bui
 /// Max IPC frame size (length prefix sanity bound).
 pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
 
-/// Cloud tasks ultimately cross an OS argv boundary (twice: the login
-/// shell's `-c` string and Claude's own argv). Leave ample room for shell
-/// quoting expansion and the rest of the environment on every platform.
-pub const MAX_CLOUD_PROMPT_BYTES: usize = 16 * 1024;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionRef {
     Agent(AgentId),
@@ -318,8 +313,7 @@ pub enum ClientRequest {
     /// (`claude -p <message> --cloud <id>`). Fire-and-forget by nature: the
     /// CLI acknowledges the send and returns, and the reply only ever
     /// appears in the session's page in the browser. Rejected for rows
-    /// without a `cloud_session_id`, and bounded by
-    /// [`MAX_CLOUD_PROMPT_BYTES`] like the launch task.
+    /// without a `cloud_session_id`, and checked like the launch task.
     SendCloudMessage {
         req_id: u64,
         id: AgentId,

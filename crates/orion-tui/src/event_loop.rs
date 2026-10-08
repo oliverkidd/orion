@@ -21,7 +21,7 @@ use crossterm::event::{
 use futures::StreamExt;
 use orion_core::{
     AgentId, AgentKind, ClientRequest, EntityId, ProjectId, ServerEvent, SessionRef, TerminalId,
-    WorktreeId, MAX_CLOUD_PROMPT_BYTES,
+    WorktreeId,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -9195,7 +9195,7 @@ fn toggle_hide_draft_prs(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 /// Open `kind`'s prompt and send it straight on, empty — Enter on the box
 /// untouched. A `skip_task` AGENT PRESET launches this way, so it gets the
-/// same sizing, compose and refused-create reopen as a task typed into it.
+/// same checks, compose and refused-create reopen as a task typed into it.
 pub(crate) fn submit_prompt_now(app: &mut App, kind: PromptKind, out: &mut Vec<ClientRequest>) {
     open_prompt(app, kind);
     if let Some(Overlay::Prompt(prompt)) = app.overlay.take() {
@@ -9216,11 +9216,12 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
     // dialog open on validation so the user can correct it in place (the
     // QUICK PROMPT opts out of the empty half of that — see below).
     if prompt.is_multiline() {
-        // The cloud prompts and a preset's task share the bounds (the text
-        // crosses the same argv), not the wording.
+        // The cloud prompts and a preset's task share the checks (the text
+        // crosses the same argv), not the wording. No length cap: the OS's
+        // ARG_MAX is the only one, and the daemon's spawn reports it.
         let (needs, what) = match &prompt.kind {
             // A preset's task is optional: its prefix and postfix make a
-            // first prompt on their own, sized below all the same.
+            // first prompt on their own.
             PromptKind::AgentPresetTask { .. } => (None, "task"),
             // An empty quick prompt starts the CLI with no first prompt
             // (`QuickLaunch::launches_empty`, below). Only its cloud box
@@ -9244,25 +9245,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             Some(needs.to_string())
         } else if value.contains('\0') {
             Some(format!("{what} cannot contain NUL bytes"))
-        } else if value.len() > MAX_CLOUD_PROMPT_BYTES {
-            Some(format!(
-                "{what} is too long (max {} KiB)",
-                MAX_CLOUD_PROMPT_BYTES / 1024
-            ))
-        } else if let Some(composed) = match &prompt.kind {
-            // The wrapped text crosses the same argv as the task alone, so
-            // it gets the same ceiling — a long prefix, or a LINEAR box's
-            // issues, can push a valid task over it.
-            PromptKind::AgentPresetTask { preset, .. } => Some(preset.compose(&value)),
-            PromptKind::QuickPrompt(launch) => Some(launch.compose(&value)),
-            _ => None,
-        } {
-            (composed.len() > MAX_CLOUD_PROMPT_BYTES).then(|| {
-                format!(
-                    "the composed first prompt is too long (max {} KiB)",
-                    MAX_CLOUD_PROMPT_BYTES / 1024
-                )
-            })
         } else {
             None
         };
@@ -20912,19 +20894,6 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(
                 app.flash.as_deref(),
                 Some("Claude Cloud task cannot contain NUL bytes")
-            );
-            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.is_multiline()));
-
-            let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
-                unreachable!()
-            };
-            prompt
-                .input
-                .set_text("x".repeat(MAX_CLOUD_PROMPT_BYTES + 1));
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("Claude Cloud task is too long (max 16 KiB)")
             );
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.is_multiline()));
         });

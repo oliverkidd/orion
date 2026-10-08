@@ -15,7 +15,6 @@ use orion_core::project_file::{self, ProjectCommand};
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, PrewarmInfo,
     Project, ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
-    MAX_CLOUD_PROMPT_BYTES,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2088,7 +2087,14 @@ impl Daemon {
             .current_dir(&worktree.path)
             .output()
             .await
-            .context("run claude -p --cloud")?;
+            .map_err(|err| {
+                let what = if crate::pty::is_argv_too_long(&err) {
+                    crate::pty::ARGV_TOO_LONG
+                } else {
+                    "run claude -p --cloud"
+                };
+                anyhow::Error::new(err).context(what)
+            })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.trim().lines().last().unwrap_or("").to_string();
@@ -3614,7 +3620,7 @@ fn push_system_prompt(
 }
 
 /// Validate an AGENT PRESET's composed starting prompt before it becomes the
-/// CLI's positional argument. Same bounds as a cloud task — it crosses the
+/// CLI's positional argument. Same rules as a cloud task — it crosses the
 /// same login-shell `-c` string and argv — with its own wording.
 fn validate_starting_prompt(raw: &str) -> Result<String> {
     let text = raw.trim().to_string();
@@ -3624,12 +3630,6 @@ fn validate_starting_prompt(raw: &str) -> Result<String> {
     if text.contains('\0') {
         bail!("starting prompt cannot contain NUL bytes");
     }
-    if text.len() > MAX_CLOUD_PROMPT_BYTES {
-        bail!(
-            "starting prompt is too long (max {} KiB)",
-            MAX_CLOUD_PROMPT_BYTES / 1024
-        );
-    }
     Ok(text)
 }
 
@@ -3638,12 +3638,13 @@ fn validate_starting_prompt(raw: &str) -> Result<String> {
 pub(crate) const CLOUD_ROW_NO_LOCAL_SESSION: &str =
     "this session runs in Claude Cloud — open it in the browser";
 
-/// Trim and bounds-check text handed to the Claude CLI as one argv item —
-/// a Cloud task on create, a message queued on an existing session. Both
-/// ride the login shell's `-c` string as well as Claude's argv: quoting
-/// stops injection, but a NUL would truncate the command and an unbounded
-/// string would blow the argv limit, so both are rejected here rather than
-/// at the shell.
+/// Trim and check text handed to the Claude CLI as one argv item — a Cloud
+/// task on create, a message queued on an existing session. Both ride the
+/// login shell's `-c` string as well as Claude's argv: quoting stops
+/// injection, but a NUL would truncate the command, so it is rejected here
+/// rather than at the shell. Length is the OS's call alone (`ARG_MAX`, about
+/// 1 MiB on macOS): a launch over it is refused at the spawn with
+/// [`crate::pty::ARGV_TOO_LONG`].
 fn validate_cloud_text(raw: &str, what: &str) -> Result<String> {
     let text = raw.trim().to_string();
     if text.is_empty() {
@@ -3651,12 +3652,6 @@ fn validate_cloud_text(raw: &str, what: &str) -> Result<String> {
     }
     if text.contains('\0') {
         bail!("Claude Cloud {what} cannot contain NUL bytes");
-    }
-    if text.len() > MAX_CLOUD_PROMPT_BYTES {
-        bail!(
-            "Claude Cloud {what} is too long (max {} KiB)",
-            MAX_CLOUD_PROMPT_BYTES / 1024
-        );
     }
     Ok(text)
 }
@@ -4940,7 +4935,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_text_is_trimmed_and_bounded() {
+    fn cloud_text_is_trimmed_and_checked() {
         assert_eq!(
             validate_cloud_text("  fix auth  ", "task").unwrap(),
             "fix auth"
@@ -4955,8 +4950,8 @@ mod tests {
         }
         // A NUL would truncate the login shell's -c string.
         assert!(validate_cloud_text("fix\0auth", "task").is_err());
-        assert!(validate_cloud_text(&"x".repeat(MAX_CLOUD_PROMPT_BYTES), "task").is_ok());
-        assert!(validate_cloud_text(&"x".repeat(MAX_CLOUD_PROMPT_BYTES + 1), "task").is_err());
+        // No length cap of orion's own: the OS's ARG_MAX is the only one.
+        assert!(validate_cloud_text(&"x".repeat(512 * 1024), "task").is_ok());
         // The label rides into the message the user sees.
         let err = validate_cloud_text("", "message").unwrap_err().to_string();
         assert!(err.contains("message"), "{err}");
@@ -5594,25 +5589,6 @@ mod tests {
             .unwrap_err();
         assert!(nul.to_string().contains("NUL"));
 
-        let too_long = daemon
-            .create_agent(CreateAgentSpec {
-                mode: Default::default(),
-                worktree: worktree.clone(),
-                name: "cloud".into(),
-                kind: AgentKind::Claude,
-                custom_harness: None,
-                model: None,
-                effort: None,
-                auto_title: false,
-                cloud_prompt: Some("x".repeat(MAX_CLOUD_PROMPT_BYTES + 1)),
-                starting_prompt: None,
-                pr_url: None,
-                issue_url: None,
-            })
-            .await
-            .unwrap_err();
-        assert!(too_long.to_string().contains("too long"));
-
         let wrong_kind = daemon
             .create_agent(CreateAgentSpec {
                 mode: Default::default(),
@@ -5870,11 +5846,6 @@ mod tests {
         for (kind, starting, needle) in [
             (AgentKind::Claude, " \n ", "is empty"),
             (AgentKind::Codex, "fix\0auth", "NUL"),
-            (
-                AgentKind::Cursor,
-                &*"x".repeat(MAX_CLOUD_PROMPT_BYTES + 1),
-                "too long",
-            ),
         ] {
             let err = daemon
                 .create_agent(spec(kind, None, Some(starting)))

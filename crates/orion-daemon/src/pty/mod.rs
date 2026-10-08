@@ -248,6 +248,47 @@ pub struct SpawnSpec {
     pub rows: u16,
 }
 
+/// What a launch says when its command line is over the OS's `ARG_MAX`
+/// (about 1 MiB on macOS, 128 KiB for one argument on Linux). In practice
+/// that is a prompt: orion puts no cap of its own on one, so this is where
+/// a prompt too long to launch is caught.
+pub(crate) const ARGV_TOO_LONG: &str = "the prompt is too long for this system's command line";
+
+/// Whether `err` is the OS refusing an exec for its argv and environment.
+pub(crate) fn is_argv_too_long(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(nix::errno::Errno::E2BIG as i32)
+}
+
+/// Whether `cmd`'s exec fits the OS's ceiling on a new process's argv and
+/// environment: `ARG_MAX` over every string, its NUL and its pointer, and
+/// on Linux 32 pages for any one string as well. An unreadable limit fits.
+fn exec_fits(cmd: &CommandBuilder) -> bool {
+    use nix::unistd::{sysconf, SysconfVar};
+    let limit = |var| {
+        sysconf(var)
+            .ok()
+            .flatten()
+            .map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX))
+    };
+    let arg_max = limit(SysconfVar::ARG_MAX);
+    #[cfg(target_os = "linux")]
+    let max_one = limit(SysconfVar::PAGE_SIZE).saturating_mul(32);
+    #[cfg(not(target_os = "linux"))]
+    let max_one = usize::MAX;
+    let strings = cmd.get_argv().iter().map(|arg| arg.len()).chain(
+        cmd.iter_full_env_as_str()
+            .map(|(name, value)| name.len() + 1 + value.len()),
+    );
+    let mut total = 0usize;
+    for len in strings {
+        if len + 1 > max_one {
+            return false;
+        }
+        total += len + 1 + std::mem::size_of::<usize>();
+    }
+    total <= arg_max
+}
+
 impl PtySession {
     /// Spawn the child in a fresh PTY and start its reader thread + pump task.
     pub fn spawn(sref: SessionRef, spec: SpawnSpec) -> Result<Arc<Self>> {
@@ -273,6 +314,12 @@ impl PtySession {
         }
         for (k, v) in &spec.env {
             cmd.env(k, v);
+        }
+        // Measured up front: portable-pty closes every inherited fd before
+        // the exec, std's error pipe with them, so an E2BIG from the exec
+        // never comes back — the pane would just die blank.
+        if !exec_fits(&cmd) {
+            anyhow::bail!(ARGV_TOO_LONG);
         }
 
         let child = pair
@@ -753,6 +800,32 @@ mod tests {
             with_modes(None, 8, b"tail".to_vec(), modes),
             (8, b"tail".to_vec())
         );
+    }
+
+    /// A command line over the OS's ceiling is refused before the spawn,
+    /// and the refusal names the prompt; one well inside it is not.
+    #[test]
+    fn an_argv_over_the_os_limit_says_the_prompt_is_too_long() {
+        let spec = |arg: String| SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), arg],
+            cwd: std::env::temp_dir(),
+            env: vec![],
+            scrub_env: &[],
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+        };
+        let err = PtySession::spawn(
+            SessionRef::Agent(AgentId::generate()),
+            spec("x".repeat(4 << 20)),
+        )
+        .err()
+        .expect("a 4 MiB argument is over every OS's ARG_MAX");
+        assert_eq!(err.to_string(), ARGV_TOO_LONG);
+
+        let mut fits = CommandBuilder::new("/bin/sh");
+        fits.args(["-c", &"x".repeat(64 * 1024)]);
+        assert!(exec_fits(&fits), "64 KiB, four times the old 16 KiB cap");
     }
 
     /// A child that turned bracketed paste on and has since printed more

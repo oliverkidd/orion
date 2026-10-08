@@ -14,7 +14,7 @@ tracing = { workspace = true }
 portable-pty = { workspace = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
 axum = "0.8"
-nix = { version = "0.31", features = ["process", "fs", "signal", "term"] }
+nix = { version = "0.31", features = ["feature", "process", "fs", "signal", "term"] }
 tokio-util = "0.7"
 rand = "0.10"
 subtle = "2"
