@@ -2768,12 +2768,11 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 let node = &view.nodes[r.node];
                 let indent = "  ".repeat(node.depth);
                 // Directories fold; a live filter forces them all open.
-                let marker = if !node.is_dir {
-                    "  "
-                } else if !view.filter.is_empty() || view.expanded[r.node] {
-                    "▾ "
+                let marker = if node.is_dir {
+                    let open = !view.filter.is_empty() || view.expanded[r.node];
+                    format!("{} ", fold_mark(open))
                 } else {
-                    "▸ "
+                    "  ".to_string()
                 };
                 let budget = (list_inner.width as usize).saturating_sub(indent.chars().count() + 3);
                 let shown = truncate(&node.name, budget);
@@ -4183,6 +4182,9 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     for (rect, row) in &tabs.row_hits {
         app.hits.push((*rect, HitTarget::PrPageRow(*row)));
     }
+    for (rect, key) in &tabs.fold_hits {
+        app.hits.push((*rect, HitTarget::PrPageFold(*key)));
+    }
     app.pr_tabs = tabs;
     app.hits.push((inner, HitTarget::TerminalPane));
     app.term_area = drawn.body;
@@ -5338,6 +5340,17 @@ pub(crate) fn row_hit(rects: &[(usize, Rect)], pos: Position) -> Option<usize> {
         .iter()
         .find(|(_, rect)| rect.contains(pos))
         .map(|(row, _)| *row)
+}
+
+/// The FOLD MARK on everything that folds — a todo group, a directory in
+/// a tree, a band's archived drawer, a `<details>` in a GitHub body: `▾`
+/// open, `▸` shut. A click on it turns it.
+pub(crate) const fn fold_mark(open: bool) -> &'static str {
+    if open {
+        "▾"
+    } else {
+        "▸"
+    }
 }
 
 /// The first entry to draw of a list whose entries are `heights` rows

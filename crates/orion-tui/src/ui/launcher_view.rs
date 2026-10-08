@@ -1327,7 +1327,7 @@ fn draw_drawer(
     if let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_head(inset)) {
         let hit = HitTarget::LauncherDrawer(index);
         let hovered = app.hover_crumb.as_ref() == Some(&hit);
-        let fold = if band.drawer_open { "▾" } else { "▸" };
+        let fold = crate::ui::fold_mark(band.drawer_open);
         let mut spans = vec![Span::styled(
             format!("{fold} {} archived", band.archived.len()),
             Style::default().fg(if hovered { th.accent } else { th.dim }),

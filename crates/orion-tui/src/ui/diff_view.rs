@@ -633,12 +633,11 @@ fn draw_files(
                 let node = &tree.nodes[r.node];
                 let file = tree.file_of[r.node].map(|f| &view.files[f]);
                 let indent = "  ".repeat(node.depth);
-                let marker = if !node.is_dir {
-                    "  "
-                } else if tree.is_open(r.node, !view.filter.is_empty()) {
-                    "▾ "
+                let marker = if node.is_dir {
+                    let open = tree.is_open(r.node, !view.filter.is_empty());
+                    format!("{} ", crate::ui::fold_mark(open))
                 } else {
-                    "▸ "
+                    "  ".to_string()
                 };
                 let budget = text_w.saturating_sub(indent.chars().count() + 2);
                 let shown = truncate_cells(&node.name, budget);

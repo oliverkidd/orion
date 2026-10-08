@@ -4712,9 +4712,30 @@ mod tests {
             );
             assert_eq!(
                 app.pr_diff_at,
-                Some((url, "src/nav.rs".to_string())),
+                Some((url.clone(), "src/nav.rs".to_string())),
                 "a click on a row is Enter on it"
             );
+
+            // A `<details>` in the description: a click on its summary
+            // opens it.
+            if let Some(d) = app.pr_detail.get_mut(&url) {
+                d.body =
+                    "<details>\n<summary>More</summary>\n\nTucked away.\n\n</details>\n".into();
+            }
+            app.pr_tabs.switch(PrTab::Description);
+            let screen = screen_text(&draw_tall(&mut app));
+            assert!(screen.contains("▸ More"), "{screen}");
+            assert!(!screen.contains("Tucked away."), "{screen}");
+            let (fold, _) = app.pr_tabs.fold_hits[0];
+            mouse(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                fold.x + 3,
+                fold.y,
+            );
+            let screen = screen_text(&draw_tall(&mut app));
+            assert!(screen.contains("▾ More"), "{screen}");
+            assert!(screen.contains("Tucked away."), "{screen}");
         });
     }
 

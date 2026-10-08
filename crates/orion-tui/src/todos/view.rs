@@ -2667,7 +2667,7 @@ fn header_spans(
     } else {
         vec![open]
     };
-    let fold = if g.collapsed { "▸ " } else { "▾ " };
+    let fold = format!("{} ", crate::ui::fold_mark(!g.collapsed));
     let left = vec![
         indent(depth),
         Span::styled(
@@ -2952,7 +2952,7 @@ fn done_header(view: &TodoView, count: usize, budget: usize, th: Theme) -> Vec<S
     let open = view.show_done || !view.query.trim().is_empty();
     let left = vec![
         Span::styled(
-            if open { "▾ " } else { "▸ " },
+            format!("{} ", crate::ui::fold_mark(open)),
             Style::default().fg(th.muted),
         ),
         Span::styled(

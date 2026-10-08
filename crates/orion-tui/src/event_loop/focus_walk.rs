@@ -114,7 +114,8 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             HitTarget::TerminalPane
             | HitTarget::CloudSessionLink
             | HitTarget::PrPageTab(_)
-            | HitTarget::PrPageRow(_),
+            | HitTarget::PrPageRow(_)
+            | HitTarget::PrPageFold(_),
         ) => enter_terminal_pane(app, out),
         // The crumb is a button out of a full-screen session, not
         // somewhere focus lives: its own handler is what moves focus. So

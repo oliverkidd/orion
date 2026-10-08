@@ -238,6 +238,9 @@ pub enum HitTarget {
     /// place in the tab: a click is Enter on it. Registered ahead of the
     /// pane, so it wins.
     PrPageRow(usize),
+    /// A `<details>` summary on that page's description or comments: a
+    /// click opens or shuts it. Registered ahead of the pane, so it wins.
+    PrPageFold(crate::markdown::FoldKey),
 }
 
 /// Default outer width of the diff modal's left column — its commits over

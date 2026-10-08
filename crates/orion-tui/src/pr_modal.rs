@@ -1203,6 +1203,12 @@ pub(crate) fn handle_mouse(
         .iter()
         .find(|(rect, _)| rect.contains(mouse_pos))
         .map(|(_, row)| *row);
+    let on_fold = view
+        .tabs
+        .fold_hits
+        .iter()
+        .find(|(rect, _)| rect.contains(mouse_pos))
+        .map(|(_, key)| *key);
     match mouse.kind {
         MouseEventKind::ScrollUp if over_body => view.scroll_by(-WHEEL_LINES),
         MouseEventKind::ScrollDown if over_body => view.scroll_by(WHEEL_LINES),
@@ -1223,6 +1229,13 @@ pub(crate) fn handle_mouse(
                 view.tabs.select(row);
             }
             act_on_row(app, out);
+        }
+        // A `<details>` summary opens or shuts, as on github.com.
+        MouseEventKind::Down(MouseButton::Left) if on_fold.is_some() => {
+            view.focus = PrFocus::Page;
+            if let Some(key) = on_fold {
+                view.tabs.folds.toggle(key);
+            }
         }
         // A click on the page hands it the keys.
         MouseEventKind::Down(MouseButton::Left) if over_body => view.focus = PrFocus::Page,
@@ -1791,6 +1804,7 @@ pub(crate) fn draw(
             v.browser_area = Rect::default();
             v.tabs.tab_hits.clear();
             v.tabs.row_hits.clear();
+            v.tabs.fold_hits.clear();
             v.filter_pick = Some(pick);
         }
         return;
@@ -2938,6 +2952,61 @@ mod tests {
         );
         let shot = screen(&mut app, 140, 34);
         assert!(shot.contains("Changes …"), "#41 still loading: {shot}");
+    }
+
+    /// A `<details>` in a comment — Cubic's prompt for AI agents — opens
+    /// on a click on its summary and shuts on another, as on github.com,
+    /// and is shut again on another pull request.
+    #[test]
+    fn a_click_on_a_details_summary_opens_and_shuts_it() {
+        use crate::pull_request::PrComment;
+        let (mut app, _) = app_with(
+            vec![pr(42, "Fix login", false), pr(41, "Spike", false)],
+            true,
+        );
+        let mut d = detail(42, "Fix login");
+        d.comments = vec![PrComment {
+            author: "cubic-dev-ai".into(),
+            at: String::new(),
+            review_state: String::new(),
+            body: "2 issues found\n\n<details>\n<summary>Prompt for AI agents</summary>\n\n```text\nCheck the token expiry\n```\n\n</details>\n".into(),
+        }];
+        app.pr_detail
+            .insert("https://github.com/o/r/pull/42".into(), d);
+        open(&mut app);
+        let shut = screen(&mut app, 140, 34);
+        assert!(shut.contains("▸ Prompt for AI agents"), "{shut}");
+        assert!(!shut.contains("Check the token expiry"), "{shut}");
+
+        let click = |at: Position| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut out = Vec::new();
+        let (rect, _) = view(&app).tabs.fold_hits[0];
+        let at = Position::new(rect.x + 4, rect.y);
+        handle_mouse(&mut app, click(at), at, &mut out);
+        let opened = screen(&mut app, 140, 34);
+        assert!(opened.contains("▾ Prompt for AI agents"), "{opened}");
+        assert!(opened.contains("Check the token expiry"), "{opened}");
+        assert_eq!(view(&app).focus, PrFocus::Page);
+
+        let (rect, _) = view(&app).tabs.fold_hits[0];
+        let at = Position::new(rect.x + 4, rect.y);
+        handle_mouse(&mut app, click(at), at, &mut out);
+        let again = screen(&mut app, 140, 34);
+        assert!(!again.contains("Check the token expiry"), "{again}");
+
+        handle_mouse(&mut app, click(at), at, &mut out);
+        assert!(!view(&app).tabs.folds.flipped(1).is_empty());
+        handle_key(&mut app, key(KeyCode::BackTab), &mut out);
+        handle_key(&mut app, key(KeyCode::Down), &mut out);
+        assert!(
+            view(&app).tabs.folds.flipped(1).is_empty(),
+            "another pull request starts shut"
+        );
     }
 
     /// An empty list says whether GitHub is still being asked or has said

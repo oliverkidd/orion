@@ -33,7 +33,7 @@
 //! module) under GitHub's comment rule that a newline is a line break;
 //! [`wrap`] stays for the plain text the panels wrap elsewhere.
 
-use crate::markdown::{self, Breaks};
+use crate::markdown::{self, FoldKey, Folds};
 use crate::pull_request::{
     CheckCounts, CheckState, PrCheck, PrComment, PrDetail, PrFile, REVIEW_REQUESTED, STATE_OPEN,
 };
@@ -299,6 +299,10 @@ pub struct PrTabs {
     /// and every listed row's visible rect by row.
     pub tab_hits: Vec<(Rect, PrTab)>,
     pub row_hits: Vec<(Rect, usize)>,
+    /// The `<details>` turned in the description and the comments, and
+    /// as of the last draw each summary's visible rect, for the mouse.
+    pub folds: Folds,
+    pub fold_hits: Vec<(Rect, FoldKey)>,
     /// As of the last draw, for paging: each listed row's first line and
     /// line count in the body, and the body's height.
     spans: Vec<(usize, usize)>,
@@ -336,11 +340,12 @@ impl PrTabs {
         self.follow = true;
     }
 
-    /// Another pull request: every tab's rows back to the top. The tab
-    /// stays what it was.
+    /// Another pull request: every tab's rows back to the top, and every
+    /// `<details>` shut again. The tab stays what it was.
     pub fn rewind(&mut self) {
         self.rows = [0; 5];
         self.follow = false;
+        self.folds.clear();
     }
 
     /// `nav` over the page: on a tab that lists things it moves the row
@@ -457,7 +462,12 @@ pub struct Page {
     pub body: Vec<Line<'static>>,
     /// Each listed row's first line in the body and its line count.
     spans: Vec<(usize, usize)>,
+    folds: Vec<FoldSpot>,
 }
+
+/// A `<details>` summary on the page: the body lines it took, and which
+/// one it is.
+type FoldSpot = (std::ops::Range<usize>, FoldKey);
 
 /// Lay the page out for `width` columns. `focused` is whether the surface
 /// holding it has the keys — the row cursor and the active tab's rule
@@ -482,12 +492,13 @@ pub fn page(input: &PageInput, tabs: &PrTabs, focused: bool, width: usize, th: T
         .map(|(row, from, to, tab)| (first_row + row, from, to, tab))
         .collect();
     head.push(tab_rule(&tabs_at, tabs.tab, last_row, focused, width, th));
-    let (body, spans) = body(input, tabs, focused, width, th);
+    let (body, spans, folds) = body(input, tabs, focused, width, th);
     Page {
         head,
         tabs: tabs_at,
         body,
         spans,
+        folds,
     }
 }
 
@@ -867,7 +878,7 @@ fn body(
     focused: bool,
     width: usize,
     th: Theme,
-) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Vec<FoldSpot>) {
     let dim = Style::default().fg(th.dim);
     let body_w = width.saturating_sub(BODY.len() + 1).max(MIN_BODY_W);
     let say = |text: &str| -> Vec<Line<'static>> {
@@ -884,7 +895,7 @@ fn body(
         } else {
             "reading it…".to_string()
         };
-        return (say(&text), Vec::new());
+        return (say(&text), Vec::new(), Vec::new());
     };
     let mut listed = Listing {
         lines: vec![Line::from("")],
@@ -894,24 +905,42 @@ fn body(
         width,
         th,
     };
+    let mut prose = Prose {
+        lines: vec![Line::from("")],
+        spots: Vec::new(),
+        folds: &tabs.folds,
+        body_w,
+        width,
+        th,
+    };
     match tabs.tab {
         PrTab::Description => {
-            let mut out = vec![Line::from("")];
-            out.extend(description(detail, input.now, width, body_w, th));
+            description(&mut prose, detail, input.now);
             if input.posting {
-                out.push(Line::from(""));
-                out.push(Line::from(Span::styled(
+                prose.lines.push(Line::from(""));
+                prose.lines.push(Line::from(Span::styled(
                     format!("{BODY}── posting your comment… ──"),
                     dim,
                 )));
             }
-            return (out, Vec::new());
+            return (prose.lines, Vec::new(), prose.spots);
         }
-        PrTab::Reviews => return (reviews(detail, input.now, width, body_w, th), Vec::new()),
-        PrTab::Changes if detail.files.is_empty() => return (say("no files changed"), Vec::new()),
-        PrTab::Commits if detail.commits.is_empty() => return (say("no commits"), Vec::new()),
+        PrTab::Reviews => {
+            reviews(&mut prose, detail, input.now);
+            return (prose.lines, Vec::new(), prose.spots);
+        }
+        PrTab::Changes if detail.files.is_empty() => {
+            return (say("no files changed"), Vec::new(), Vec::new())
+        }
+        PrTab::Commits if detail.commits.is_empty() => {
+            return (say("no commits"), Vec::new(), Vec::new())
+        }
         PrTab::Checks if detail.checks.is_empty() => {
-            return (say("no checks ran on its head commit"), Vec::new())
+            return (
+                say("no checks ran on its head commit"),
+                Vec::new(),
+                Vec::new(),
+            )
         }
         PrTab::Changes => {
             let total = detail.changed_files as usize;
@@ -1033,7 +1062,7 @@ fn body(
             }
         }
     }
-    (listed.lines, listed.spans)
+    (listed.lines, listed.spans, Vec::new())
 }
 
 /// The cells `+12` (or `−3`) takes; nothing for a zero, which is left out.
@@ -1257,60 +1286,80 @@ impl Listing {
     }
 }
 
+/// The prose tabs' lines as they are built, and where the summaries of
+/// the `<details>` in their GitHub bodies landed — the description is
+/// body 0, `comments[i]` body `i + 1`, so a comment's FOLDS stay its own
+/// on either tab.
+struct Prose<'a> {
+    lines: Vec<Line<'static>>,
+    spots: Vec<FoldSpot>,
+    folds: &'a Folds,
+    body_w: usize,
+    width: usize,
+    th: Theme,
+}
+
+impl Prose<'_> {
+    /// GitHub markdown behind the inset, its `<details>` as the reader
+    /// left them.
+    fn github(&mut self, text: &str, body: usize) {
+        let (lines, folds) = markdown::render_folding(
+            text,
+            self.body_w,
+            Style::default().fg(self.th.muted),
+            self.th,
+            &self.folds.flipped(body),
+        );
+        let at = self.lines.len();
+        self.spots.extend(folds.into_iter().map(|f| {
+            let key = FoldKey {
+                body,
+                index: f.index,
+            };
+            (f.rows.start + at..f.rows.end + at, key)
+        }));
+        self.lines.extend(markdown::indent(lines, BODY));
+    }
+}
+
 /// The Description tab: the body as markdown, then the conversation under
 /// a rule of its own.
-fn description(
-    detail: &PrDetail,
-    now: i64,
-    width: usize,
-    body_w: usize,
-    th: Theme,
-) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(th.muted);
-    let mut out: Vec<Line<'static>> = Vec::new();
+fn description(p: &mut Prose, detail: &PrDetail, now: i64) {
+    let th = p.th;
     if detail.body.trim().is_empty() {
-        out.push(Line::from(Span::styled(
+        p.lines.push(Line::from(Span::styled(
             format!("{BODY}(no description)"),
             Style::default().fg(th.dim),
         )));
     } else {
-        out.extend(markdown::indent(
-            markdown::render(detail.body.trim_end(), body_w, Breaks::Hard, muted, th),
-            BODY,
-        ));
+        p.github(detail.body.trim_end(), 0);
     }
     if !detail.comments.is_empty() {
-        out.push(Line::from(""));
-        out.push(crate::ui::section_rule(
+        p.lines.push(Line::from(""));
+        p.lines.push(crate::ui::section_rule(
             "Conversation",
             th.muted,
             vec![Span::styled(
                 detail.comments.len().to_string(),
                 Style::default().fg(th.dim),
             )],
-            width,
+            p.width,
             th,
         ));
-        for c in &detail.comments {
-            out.push(Line::from(""));
-            out.extend(comment_lines(c, now, width, body_w, th));
+        for (i, c) in detail.comments.iter().enumerate() {
+            p.lines.push(Line::from(""));
+            comment_lines(p, c, i + 1, now);
         }
     }
-    out
 }
 
 /// The Reviews tab: GitHub's decision on a rule, each reviewer's latest
 /// word in a column under it — and who has been asked and not answered —
 /// then the reviews themselves under a rule of their own.
-fn reviews(
-    detail: &PrDetail,
-    now: i64,
-    width: usize,
-    body_w: usize,
-    th: Theme,
-) -> Vec<Line<'static>> {
+fn reviews(p: &mut Prose, detail: &PrDetail, now: i64) {
+    let (th, width) = (p.th, p.width);
     let dim = Style::default().fg(th.dim);
-    let mut out = vec![Line::from("")];
+    let out = &mut p.lines;
     let reviewers = detail.reviewers();
     let decision = match detail.review_decision.as_str() {
         "APPROVED" => ("Approved", th.ok),
@@ -1355,10 +1404,11 @@ fn reviews(
         ];
         out.push(fit(spans, width));
     }
-    let said: Vec<&PrComment> = detail
+    let said: Vec<(usize, &PrComment)> = detail
         .comments
         .iter()
-        .filter(|c| !c.review_state.is_empty())
+        .enumerate()
+        .filter(|(_, c)| !c.review_state.is_empty())
         .collect();
     if !said.is_empty() {
         out.push(Line::from(""));
@@ -1369,24 +1419,19 @@ fn reviews(
             width,
             th,
         ));
-        for c in said {
-            out.push(Line::from(""));
-            out.extend(comment_lines(c, now, width, body_w, th));
+        for (i, c) in said {
+            p.lines.push(Line::from(""));
+            comment_lines(p, c, i + 1, now);
         }
     }
-    out
 }
 
 /// One comment: who said it, bold, and their verdict when it came as a
 /// review — loud, in the colour its mark wears on the Reviews tab — with
-/// how long ago at the right end; then its body rendered as markdown.
-fn comment_lines(
-    c: &PrComment,
-    now: i64,
-    width: usize,
-    body_w: usize,
-    th: Theme,
-) -> Vec<Line<'static>> {
+/// how long ago at the right end; then its body rendered as markdown —
+/// `body` on the page, for its FOLDS.
+fn comment_lines(p: &mut Prose, c: &PrComment, body: usize, now: i64) {
+    let (th, width) = (p.th, p.width);
     let mut left = vec![
         Span::raw(BODY),
         Span::styled(
@@ -1408,25 +1453,14 @@ fn comment_lines(
     let age = crate::pull_request::rfc3339_secs(&c.at)
         .map(|at| crate::hosts::ago_short(now - at))
         .unwrap_or_default();
-    let mut out = vec![Line::from(columns(
+    p.lines.push(Line::from(columns(
         left,
         vec![Span::styled(age, Style::default().fg(th.dim))],
         width,
-    ))];
-    if c.body.trim().is_empty() {
-        return out;
+    )));
+    if !c.body.trim().is_empty() {
+        p.github(c.body.trim_end(), body);
     }
-    out.extend(markdown::indent(
-        markdown::render(
-            c.body.trim_end(),
-            body_w,
-            Breaks::Hard,
-            Style::default().fg(th.muted),
-            th,
-        ),
-        BODY,
-    ));
-    out
 }
 
 // ---- drawing ----
@@ -1442,8 +1476,9 @@ pub struct Drawn {
 
 /// Draw `page` into `area`: the head fixed at the top, the body under it
 /// from `scroll` — clamped, and moved just far enough to show the row
-/// cursor when it has just moved. Records on `tabs` where the tabs and
-/// the visible rows landed, for the mouse, and what paging needs.
+/// cursor when it has just moved. Records on `tabs` where the tabs, the
+/// visible rows and the `<details>` summaries landed, for the mouse, and
+/// what paging needs.
 pub fn draw(f: &mut Frame, area: Rect, page: &Page, tabs: &mut PrTabs, scroll: u16) -> Drawn {
     let head_h = (page.head.len() as u16).min(area.height);
     f.render_widget(
@@ -1491,25 +1526,27 @@ pub fn draw(f: &mut Frame, area: Rect, page: &Page, tabs: &mut PrTabs, scroll: u
             )
         })
         .collect();
+    // The part of body lines `first..end` on screen, if any.
+    let on_screen = |first: usize, end: usize| {
+        let from = first.max(top);
+        let to = end.min(top + usize::from(body.height));
+        (from < to).then(|| Rect {
+            x: body.x,
+            y: body.y + (from - top) as u16,
+            width: body.width,
+            height: (to - from) as u16,
+        })
+    };
     tabs.row_hits = page
         .spans
         .iter()
         .enumerate()
-        .filter_map(|(row, &(first, n))| {
-            let from = first.max(top);
-            let to = (first + n).min(top + usize::from(body.height));
-            (from < to).then(|| {
-                (
-                    Rect {
-                        x: body.x,
-                        y: body.y + (from - top) as u16,
-                        width: body.width,
-                        height: (to - from) as u16,
-                    },
-                    row,
-                )
-            })
-        })
+        .filter_map(|(row, &(first, n))| on_screen(first, first + n).map(|rect| (rect, row)))
+        .collect();
+    tabs.fold_hits = page
+        .folds
+        .iter()
+        .filter_map(|(rows, key)| on_screen(rows.start, rows.end).map(|rect| (rect, *key)))
         .collect();
     tabs.spans = page.spans.clone();
     tabs.view_h = body.height;
@@ -1650,6 +1687,13 @@ pub(crate) fn click_tab(app: &mut crate::app::App, tab: PrTab) {
     if app.pr_tabs.switch(tab) {
         app.pr_preview_scroll = 0;
     }
+    app.dirty = true;
+}
+
+/// A click on a `<details>` summary in the pane: it opens, or shuts — as
+/// a click on one does on github.com.
+pub(crate) fn click_fold(app: &mut crate::app::App, key: FoldKey) {
+    app.pr_tabs.folds.toggle(key);
     app.dirty = true;
 }
 

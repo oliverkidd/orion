@@ -12750,6 +12750,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     enter_terminal_pane(app, out);
                     crate::pr_preview::click_row(app, row, out);
                 }
+                Some(HitTarget::PrPageFold(key)) => {
+                    enter_terminal_pane(app, out);
+                    crate::pr_preview::click_fold(app, key);
+                }
                 Some(HitTarget::TerminalPane) => {
                     // A click into the pane is deliberate — it is Enter on
                     // the pane (`enter_terminal_pane`): FOCUS, the input
@@ -12891,7 +12895,12 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             }
             let in_term = matches!(
                 over,
-                Some(HitTarget::TerminalPane | HitTarget::PrPageTab(_) | HitTarget::PrPageRow(_))
+                Some(
+                    HitTarget::TerminalPane
+                        | HitTarget::PrPageTab(_)
+                        | HitTarget::PrPageRow(_)
+                        | HitTarget::PrPageFold(_)
+                )
             ) || app.collapsed;
             if in_term && app.reading_url().is_some() {
                 // The pane is showing a pull request or an issue, not a

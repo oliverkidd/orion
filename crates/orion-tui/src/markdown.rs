@@ -62,8 +62,9 @@ pub enum Breaks {
     /// pull request body typed into the browser, where a list without
     /// markers reads as a list only if its rows stay rows. The body is
     /// read as github.com shows it, too: its HTML is drawn rather than
-    /// printed, `<details>` stays shut on its summary, and a link is its
-    /// text — the address is the browser's business.
+    /// printed, `<details>` stays shut on its summary until the reader
+    /// opens it ([`render_folding`]), and a link is its text — the
+    /// address is the browser's business.
     Hard,
 }
 
@@ -88,6 +89,33 @@ pub fn render_with_wraps(
     base: Style,
     th: Theme,
 ) -> (Vec<Line<'static>>, Vec<Wrap>) {
+    let (lines, wraps, _) = lay_out(text, width, breaks, base, th, &[]);
+    (lines, wraps)
+}
+
+/// A GitHub body ([`Breaks::Hard`]) with its FOLDS as the reader left
+/// them: `flipped` names, by place in the body, the `<details>` turned
+/// from how they came — shut, or open for `<details open>`. Beside the
+/// lines, where each summary on show landed, for a click to turn it.
+pub fn render_folding(
+    text: &str,
+    width: usize,
+    base: Style,
+    th: Theme,
+    flipped: &[usize],
+) -> (Vec<Line<'static>>, Vec<Fold>) {
+    let (lines, _, folds) = lay_out(text, width, Breaks::Hard, base, th, flipped);
+    (lines, folds)
+}
+
+fn lay_out(
+    text: &str,
+    width: usize,
+    breaks: Breaks,
+    base: Style,
+    th: Theme,
+    flipped: &[usize],
+) -> (Vec<Line<'static>>, Vec<Wrap>, Vec<Fold>) {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -95,10 +123,56 @@ pub fn render_with_wraps(
     opts.insert(Options::ENABLE_GFM);
     opts.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let mut r = Renderer::new(width, breaks, base, th);
+    r.flipped = flipped.to_vec();
     for event in Parser::new_ext(text, opts) {
         r.event(event);
     }
     r.finish()
+}
+
+/// A FOLD: a `<details>` whose summary is on show, by its place in the
+/// body — the first one 0, nested ones counted too, shown or not — and
+/// the rows its summary took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fold {
+    pub index: usize,
+    pub rows: std::ops::Range<usize>,
+}
+
+/// Which FOLDS a reader turned on a page of GitHub bodies — the
+/// description and each comment, told apart by `FoldKey::body` — so a
+/// `<details>` opened stays open as the page is drawn again. The page
+/// holds one, and forgets it for another pull request or issue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Folds(std::collections::BTreeSet<FoldKey>);
+
+/// One `<details>` on a page: the body it is in, and its place there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FoldKey {
+    pub body: usize,
+    pub index: usize,
+}
+
+impl Folds {
+    /// Turn it: open if it was shut, shut if it was open.
+    pub fn toggle(&mut self, key: FoldKey) {
+        if !self.0.remove(&key) {
+            self.0.insert(key);
+        }
+    }
+
+    /// The ones turned in `body`, for [`render_folding`].
+    pub fn flipped(&self, body: usize) -> Vec<usize> {
+        self.0
+            .iter()
+            .filter(|k| k.body == body)
+            .map(|k| k.index)
+            .collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 /// A document flowed for one width, kept on its view between draws so a
@@ -253,6 +327,10 @@ struct Renderer {
     images: Vec<usize>,
     /// GITHUB HTML: what is open, so the body draws as github.com does.
     html: HtmlState,
+    /// FOLDS turned from how they came, by place in the body.
+    flipped: Vec<usize>,
+    /// Where each summary on show landed.
+    folds: Vec<Fold>,
 }
 
 /// GITHUB HTML's place in the body: the tags left open, an unfinished tag
@@ -263,11 +341,14 @@ struct HtmlState {
     pending: String,
     /// Inside `<!-- … -->`.
     comment: bool,
-    /// Open `<details>`, outermost first.
-    details: usize,
-    /// Inside the outermost `<details>`'s `<summary>` — the one row a
-    /// shut `<details>` shows.
-    summary: bool,
+    /// Open `<details>`, outermost first: each one's place in the body
+    /// and whether it is open.
+    details: Vec<(usize, bool)>,
+    /// How many `<details>` have begun: the next one's place.
+    seen: usize,
+    /// Inside the `<summary>` of `details[i]` — the one row a shut
+    /// `<details>` shows.
+    summary: Option<usize>,
     /// `<ul>`/`<ol>` and `<li>` opened by HTML, so a stray close tag can't
     /// pop a markdown list's gutter.
     lists: Vec<bool>,
@@ -303,10 +384,12 @@ impl Renderer {
             links: Vec::new(),
             images: Vec::new(),
             html: HtmlState::default(),
+            flipped: Vec::new(),
+            folds: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> (Vec<Line<'static>>, Vec<Wrap>) {
+    fn finish(mut self) -> (Vec<Line<'static>>, Vec<Wrap>, Vec<Fold>) {
         self.flush_inline();
         while self
             .out
@@ -324,7 +407,7 @@ impl Renderer {
                 };
             }
         }
-        (self.out, wraps)
+        (self.out, wraps, self.folds)
     }
 
     // ---- styles ----
@@ -964,7 +1047,10 @@ impl Renderer {
 
     /// Is the renderer inside a shut `<details>`, past its summary?
     fn collapsed(&self) -> bool {
-        self.html.details > 0 && !(self.html.summary && self.html.details == 1)
+        match self.html.details.iter().position(|&(_, open)| !open) {
+            None => false,
+            Some(shut) => self.html.summary != Some(shut),
+        }
     }
 
     /// One HTML event: its tags acted on, its text flowed as prose.
@@ -1042,36 +1128,70 @@ impl Renderer {
         let attrs = &body[name_end..];
 
         // `<details>` is counted even while hidden, so the right
-        // `</details>` opens the body back up.
+        // `</details>` opens the body back up — and each keeps its place
+        // in the body whatever is open around it, so a FOLD turned is
+        // still the same one on the next draw.
         match (name.as_str(), close) {
             ("details", false) => {
                 if !self.collapsed() {
                     self.html_block();
                 }
-                self.html.details += 1;
+                let index = self.html.seen;
+                self.html.seen += 1;
+                let open = attr(attrs, "open").is_some() != self.flipped.contains(&index);
+                self.html.details.push((index, open));
                 return;
             }
             ("details", true) => {
-                self.html.details = self.html.details.saturating_sub(1);
-                if self.html.details == 0 {
-                    self.html.summary = false;
+                if self.html.details.pop().is_none() {
+                    return;
+                }
+                if self
+                    .html
+                    .summary
+                    .is_some_and(|at| at >= self.html.details.len())
+                {
+                    self.html.summary = None;
+                }
+                if !self.collapsed() {
+                    self.html_block();
                     self.need_blank = true;
                 }
                 return;
             }
-            ("summary", false) if self.html.details == 1 => {
-                self.html.summary = true;
+            // The summary of a `<details>` on show: its own row, bold
+            // behind the FOLD MARK.
+            ("summary", false)
+                if self.html.summary.is_none()
+                    && self
+                        .html
+                        .details
+                        .split_last()
+                        .is_some_and(|(_, outer)| outer.iter().all(|&(_, open)| open)) =>
+            {
+                let at = self.html.details.len() - 1;
+                self.html.summary = Some(at);
                 self.html_block();
                 let style = Style::default().fg(self.th.dim);
-                self.push_text("▸", style);
+                self.push_text(crate::ui::fold_mark(self.html.details[at].1), style);
                 self.space = true;
                 self.bold += 1;
                 return;
             }
-            ("summary", true) if self.html.summary => {
+            ("summary", true) if self.html.summary.is_some() => {
                 self.bold = self.bold.saturating_sub(1);
+                self.settle_blank();
+                let first = self.out.len();
                 self.flush_inline();
-                self.html.summary = false;
+                if let Some(&(index, _)) =
+                    self.html.summary.and_then(|at| self.html.details.get(at))
+                {
+                    self.folds.push(Fold {
+                        index,
+                        rows: first..self.out.len(),
+                    });
+                }
+                self.html.summary = None;
                 return;
             }
             _ => {}
@@ -1981,6 +2101,88 @@ mod tests {
                 "app     │ Oct 6 & on"
             ]
         );
+    }
+
+    fn folding(text: &str, flipped: &[usize]) -> (Vec<String>, Vec<Fold>) {
+        let (out, folds) = render_folding(text, 60, Style::default(), th(), flipped);
+        (plain(&out), folds)
+    }
+
+    /// A `<details>` opens when the reader turns it, and says where its
+    /// summary landed so a click can; `<details open>` comes open, and a
+    /// nested one keeps its place whether its parent shows it or not.
+    #[test]
+    fn a_github_details_opens_when_turned() {
+        // Cubic's review: the prompt behind a summary, shut until turned.
+        let cubic = "32 issues found\n\n<details>\n<summary>Prompt for AI agents</summary>\n\n```text\nFix the bug\n```\n\n</details>\n\nReply with feedback.\n";
+        let (shut, folds) = folding(cubic, &[]);
+        assert_eq!(
+            shut,
+            [
+                "32 issues found",
+                "",
+                "▸ Prompt for AI agents",
+                "",
+                "Reply with feedback."
+            ]
+        );
+        assert_eq!(
+            folds,
+            [Fold {
+                index: 0,
+                rows: 2..3
+            }]
+        );
+        let (open, folds) = folding(cubic, &[0]);
+        assert_eq!(
+            open,
+            [
+                "32 issues found",
+                "",
+                "▾ Prompt for AI agents",
+                "",
+                " Fix the bug",
+                "",
+                "Reply with feedback."
+            ]
+        );
+        assert_eq!(
+            folds,
+            [Fold {
+                index: 0,
+                rows: 2..3
+            }]
+        );
+
+        // `open` on the tag: shown until turned shut.
+        let given = "<details open>\n<summary>Notes</summary>\n\nSeen.\n\n</details>\n";
+        assert_eq!(folding(given, &[]).0, ["▾ Notes", "", "Seen."]);
+        assert_eq!(folding(given, &[0]).0, ["▸ Notes"]);
+
+        // Nested: the inner one is 1 even while the outer hides it.
+        let nested = "<details>\n<summary>Outer</summary>\n\n<details>\n<summary>Inner</summary>\n\nDeep.\n\n</details>\n\n</details>\n\n<details>\n<summary>After</summary>\n\nLast.\n\n</details>\n";
+        let (lines, folds) = folding(nested, &[]);
+        assert_eq!(lines, ["▸ Outer", "", "▸ After"]);
+        assert_eq!(folds.iter().map(|f| f.index).collect::<Vec<_>>(), [0, 2]);
+        let (lines, folds) = folding(nested, &[0]);
+        assert_eq!(lines, ["▾ Outer", "", "▸ Inner", "", "▸ After"]);
+        assert_eq!(folds.iter().map(|f| f.index).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(
+            folding(nested, &[0, 1, 2]).0,
+            [
+                "▾ Outer",
+                "",
+                "▾ Inner",
+                "",
+                "Deep.",
+                "",
+                "▾ After",
+                "",
+                "Last."
+            ]
+        );
+        // The inner one turned alone stays out of sight behind the outer.
+        assert_eq!(folding(nested, &[1]).0, ["▸ Outer", "", "▸ After"]);
     }
 
     #[test]
