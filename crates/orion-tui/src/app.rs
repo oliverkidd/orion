@@ -2970,13 +2970,22 @@ pub fn is_active_status(s: AgentStatus) -> bool {
     matches!(s, AgentStatus::Running | AgentStatus::NeedsFeedback)
 }
 
-/// Epoch ms of the last interaction with a session — the stamp the sessions
-/// list sorts on and renders as "23m ago". A working session counts as
-/// interacting *now*: it is producing output as you look at it, so it holds
-/// the top of the list however long the turn has taken. 0 = never run.
-pub fn last_interaction_ms(a: &Agent, now: i64) -> i64 {
+/// The stamp the recency sorts order a session on: its last interaction,
+/// epoch ms, 0 = never run. A working session counts as interacting *now*
+/// — it is producing output as you look at it, so it holds the top of the
+/// list however long the turn has taken — and "now" is [`i64::MAX`], not
+/// the clock: newer than any stamp, whenever the sort runs.
+///
+/// Never the clock. A sort read off the clock re-orders rows with nothing
+/// in the tree changed, and every panel cursor is an index into its rows.
+/// A session finishing in the same millisecond the client handled it tied
+/// a working one at `now`, the raw stamps broke the tie the finished way,
+/// the cursor was re-seated there — and the next frame's clock broke it
+/// the other way under the cursor, which snapped to the project whose
+/// session had just finished.
+pub fn last_interaction_ms(a: &Agent) -> i64 {
     if is_active_status(a.status) {
-        now
+        i64::MAX
     } else {
         a.status_changed_at
     }
@@ -2994,20 +3003,9 @@ pub fn last_interaction_ms(a: &Agent, now: i64) -> i64 {
 /// first prompt is created `running`, stamped as it is created). Only live
 /// turns are ordered that way; for every other row the last key is the
 /// first one again, so nothing else moves.
-pub fn recency_key(
-    a: &Agent,
-    now: i64,
-) -> (
-    std::cmp::Reverse<i64>,
-    std::cmp::Reverse<bool>,
-    std::cmp::Reverse<i64>,
-) {
+pub fn recency_key(a: &Agent) -> (std::cmp::Reverse<i64>, std::cmp::Reverse<i64>) {
     (
-        std::cmp::Reverse(last_interaction_ms(a, now)),
-        // A live turn holds the tie it shares with a row stamped in that
-        // same millisecond: its own stamp is older by design (the clock
-        // above stands in for it), so the stamps below cannot decide it.
-        std::cmp::Reverse(is_active_status(a.status)),
+        std::cmp::Reverse(last_interaction_ms(a)),
         std::cmp::Reverse(a.status_changed_at),
     )
 }
@@ -3028,16 +3026,16 @@ pub struct Recency {
 }
 
 impl Recency {
-    fn of<'a>(agents: impl Iterator<Item = &'a Agent>, now: i64) -> Recency {
-        agents.fold(Recency::default(), |r, a| Recency {
-            interacted: r.interacted.max(last_interaction_ms(a, now)),
-            stamped: r.stamped.max(a.status_changed_at),
+    fn of<'a>(agents: impl Iterator<Item = &'a Agent>) -> Recency {
+        agents.fold(Recency::default(), |mut r, a| {
+            r.absorb(a);
+            r
         })
     }
 
     /// Fold one more session in, for the one-pass rollups below.
-    fn absorb(&mut self, a: &Agent, now: i64) {
-        self.interacted = self.interacted.max(last_interaction_ms(a, now));
+    fn absorb(&mut self, a: &Agent) {
+        self.interacted = self.interacted.max(last_interaction_ms(a));
         self.stamped = self.stamped.max(a.status_changed_at);
     }
 }
@@ -3051,13 +3049,10 @@ impl Recency {
 /// thousands of id comparisons per sort. The sorts run several times per
 /// frame and twice per turn of the event loop, which is enough to starve
 /// the keyboard. One pass here, one hash lookup per comparison there.
-pub fn worktree_recencies(tree: &Tree, now: i64) -> HashMap<&WorktreeId, Recency> {
+pub fn worktree_recencies(tree: &Tree) -> HashMap<&WorktreeId, Recency> {
     let mut by_worktree: HashMap<&WorktreeId, Recency> = HashMap::new();
     for a in &tree.agents {
-        by_worktree
-            .entry(&a.worktree_id)
-            .or_default()
-            .absorb(a, now);
+        by_worktree.entry(&a.worktree_id).or_default().absorb(a);
     }
     by_worktree
 }
@@ -3065,7 +3060,7 @@ pub fn worktree_recencies(tree: &Tree, now: i64) -> HashMap<&WorktreeId, Recency
 /// The same for every project, on the same one-pass footing — and with
 /// the checkout→project map hashed too, where [`project_recency`] walks a
 /// `Vec` of the project's checkouts once per session.
-pub fn project_recencies(tree: &Tree, now: i64) -> HashMap<&ProjectId, Recency> {
+pub fn project_recencies(tree: &Tree) -> HashMap<&ProjectId, Recency> {
     let owner: HashMap<&WorktreeId, &ProjectId> = tree
         .worktrees
         .iter()
@@ -3076,21 +3071,18 @@ pub fn project_recencies(tree: &Tree, now: i64) -> HashMap<&ProjectId, Recency> 
         let Some(project) = owner.get(&a.worktree_id) else {
             continue;
         };
-        by_project.entry(project).or_default().absorb(a, now);
+        by_project.entry(project).or_default().absorb(a);
     }
     by_project
 }
 
 /// When a worktree last saw a turn: the newest stamp of any session in it.
-pub fn worktree_recency(tree: &Tree, worktree_id: &WorktreeId, now: i64) -> Recency {
-    Recency::of(
-        tree.agents.iter().filter(|a| &a.worktree_id == worktree_id),
-        now,
-    )
+pub fn worktree_recency(tree: &Tree, worktree_id: &WorktreeId) -> Recency {
+    Recency::of(tree.agents.iter().filter(|a| &a.worktree_id == worktree_id))
 }
 
 /// The same over every worktree of a project.
-pub fn project_recency(tree: &Tree, project_id: &ProjectId, now: i64) -> Recency {
+pub fn project_recency(tree: &Tree, project_id: &ProjectId) -> Recency {
     let wt_ids: Vec<&WorktreeId> = tree
         .worktrees
         .iter()
@@ -3101,7 +3093,6 @@ pub fn project_recency(tree: &Tree, project_id: &ProjectId, now: i64) -> Recency
         tree.agents
             .iter()
             .filter(|a| wt_ids.contains(&&a.worktree_id)),
-        now,
     )
 }
 
@@ -5604,7 +5595,6 @@ impl App {
     }
 
     fn build_project_rows(&self) -> Vec<usize> {
-        let now = now_ms();
         let mut rows: Vec<usize> = self
             .tree
             .projects
@@ -5614,7 +5604,7 @@ impl App {
             .collect();
         // One pass for every project rather than one per comparison the
         // sort makes (`project_recencies`).
-        let recencies = project_recencies(&self.tree, now);
+        let recencies = project_recencies(&self.tree);
         rows.sort_by_key(|i| {
             // The raw stamp breaks the tie every project with a session
             // mid-turn shares, so the project just launched into leads —
@@ -5970,14 +5960,13 @@ impl App {
 
     /// [`App::worktrees_in_band_order`], as indices into `tree.worktrees`.
     fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
-        let now = now_ms();
         let worktrees = &self.tree.worktrees;
         let mut rows: Vec<usize> = (0..worktrees.len())
             .filter(|&i| &worktrees[i].project_id == project)
             .collect();
         // Rolled up once for every checkout rather than re-walked per
         // comparison the sort makes (`worktree_recencies`).
-        let recencies = worktree_recencies(&self.tree, now);
+        let recencies = worktree_recencies(&self.tree);
         rows.sort_by_key(|&i| {
             let w = &worktrees[i];
             // The raw stamp breaks the tie every checkout with a session
@@ -6297,7 +6286,6 @@ impl App {
     /// builder does not pay for `selected_worktree` to find it again
     /// ([`App::visible_session_rows`]).
     fn sessions_in(&self, wt: &WorktreeId) -> Vec<Agent> {
-        let now = now_ms();
         // Stable throughout, so ties — never-run rows especially, which all
         // stamp 0 — keep tree order instead of shuffling between frames.
         let mut rows: Vec<Agent> = self
@@ -6307,7 +6295,7 @@ impl App {
             .filter(|a| &a.worktree_id == wt && !a.archived)
             .cloned()
             .collect();
-        rows.sort_by_key(|a| recency_key(a, now));
+        rows.sort_by_key(recency_key);
         // A stable pass over the top of it: the session just launched
         // leads the list from the moment its row arrives, rather than
         // sitting under the working ones until its own turn starts.
@@ -7172,7 +7160,6 @@ mod tests {
     fn the_one_pass_rollups_agree_with_the_per_row_stamps() {
         use orion_core::AgentKind;
 
-        let now = 10_000;
         let mut tree = Tree::default();
         for p in 0..3 {
             tree.projects.push(Project {
@@ -7226,21 +7213,21 @@ mod tests {
             });
         }
 
-        let by_worktree = worktree_recencies(&tree, now);
+        let by_worktree = worktree_recencies(&tree);
         for w in &tree.worktrees {
             assert_eq!(
                 by_worktree.get(&w.id).copied().unwrap_or_default(),
-                worktree_recency(&tree, &w.id, now),
+                worktree_recency(&tree, &w.id),
                 "checkout {:?}",
                 w.id
             );
         }
 
-        let by_project = project_recencies(&tree, now);
+        let by_project = project_recencies(&tree);
         for p in &tree.projects {
             assert_eq!(
                 by_project.get(&p.id).copied().unwrap_or_default(),
-                project_recency(&tree, &p.id, now),
+                project_recency(&tree, &p.id),
                 "project {:?}",
                 p.id
             );

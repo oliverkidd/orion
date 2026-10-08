@@ -24897,6 +24897,80 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(app.sel_project, 1, "still on \"two\"");
     }
 
+    /// A session in another project finishing must never move the cursor
+    /// off the project the user is working in. The row sorts used to read
+    /// the clock — a working session counted as `now` — so a finish the
+    /// client handled in the same millisecond it was stamped tied the
+    /// working project, the raw stamps put the finished one first, and the
+    /// cursor was re-seated by id onto its new row. The next frame's clock
+    /// undid the tie under the cursor, which then sat on the project that
+    /// had just finished. A stamp a few ms past the client's clock, and a
+    /// sleep past it, stand in for that millisecond here.
+    #[test]
+    fn a_finish_elsewhere_never_moves_the_project_cursor() {
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app); // p1 "demo" / w1 / a1
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: project("p2", "two", 1),
+            },
+        );
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: wt_entity("w2", "p2", "main", true),
+            },
+        );
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: agent_stamped("a2", "w2", 0),
+            },
+        );
+        let now = crate::app::now_ms();
+        let flip = |agent: &str, status: AgentStatus, changed_at: i64| ServerEvent::StatusChanged {
+            agent: AgentId(agent.into()),
+            status,
+            changed_at,
+            unseen: false,
+        };
+        // Both mid-turn; the user is in "demo".
+        hse(&mut app, flip("a1", AgentStatus::Running, now - 60_000));
+        hse(&mut app, flip("a2", AgentStatus::Running, now - 30_000));
+        let demo = |app: &App| app.selected_project().map(|p| p.name.clone());
+        app.sel_project = app
+            .project_rows()
+            .iter()
+            .position(|&i| app.tree.projects[i].id.0 == "p1")
+            .unwrap();
+        assert_eq!(demo(&app).as_deref(), Some("demo"));
+
+        // "two" finishes, stamped just past the clock this client handles
+        // it at...
+        let stamp = crate::app::now_ms() + 5;
+        hse(&mut app, flip("a2", AgentStatus::Finished, stamp));
+        assert_eq!(demo(&app).as_deref(), Some("demo"));
+        // ...and a frame later the clock has passed it, nothing else moved.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            demo(&app).as_deref(),
+            Some("demo"),
+            "the cursor stays on the project being worked in"
+        );
+        let names: Vec<String> = app
+            .project_rows()
+            .into_iter()
+            .map(|i| app.tree.projects[i].name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["demo", "two"],
+            "a working project outranks any finish"
+        );
+    }
+
     /// Worktrees sort most-recently-interacted first below the root
     /// checkout, which stays the first row no matter what; the cursor
     /// follows its row across the re-sort.

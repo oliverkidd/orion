@@ -2668,9 +2668,8 @@ fn show_worktree_picker(app: &mut App, back: QuickReturn, keep: Option<PickerKee
         .iter()
         .filter(|w| w.project_id == project && !app.is_placeholder_worktree(&w.id))
         .collect();
-    let now = crate::app::now_ms();
     checkouts.sort_by_key(|w| {
-        let r = crate::app::worktree_recency(&app.tree, &w.id, now);
+        let r = crate::app::worktree_recency(&app.tree, &w.id);
         (
             Reverse(w.is_main),
             Reverse(r.interacted),

@@ -95,10 +95,9 @@ pub fn rows(app: &App) -> Vec<LauncherRow> {
         .iter()
         .filter_map(|agent| row_of(app, agent, scope.as_ref(), Some(want_archived)))
         .collect();
-    let now = crate::app::now_ms();
     rows.sort_by(|a, b| {
-        crate::app::recency_key(&a.agent, now)
-            .cmp(&crate::app::recency_key(&b.agent, now))
+        crate::app::recency_key(&a.agent)
+            .cmp(&crate::app::recency_key(&b.agent))
             .then_with(|| b.agent.id.cmp(&a.agent.id))
     });
     // A stable pass over the top of it, so the launch just fired is the
@@ -1617,7 +1616,6 @@ fn attention(status: Option<AgentStatus>) -> u8 {
 /// running, then the rest most recently worked in first, so the project
 /// to look at is the one the eye lands on at the top.
 pub fn project_cards(app: &App) -> Vec<ProjectCard> {
-    let now = crate::app::now_ms();
     let mut cards: Vec<ProjectCard> = app
         .tree
         .projects
@@ -1628,7 +1626,7 @@ pub fn project_cards(app: &App) -> Vec<ProjectCard> {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 status: crate::app::rollup(sessions.iter().map(|a| a.status)),
-                recency: crate::app::project_recency(&app.tree, &p.id, now),
+                recency: crate::app::project_recency(&app.tree, &p.id),
                 sessions,
             }
         })
@@ -1653,10 +1651,9 @@ pub fn project_cards(app: &App) -> Vec<ProjectCard> {
 /// `recency_key`, so the first is the session the grid opens on.
 fn project_sessions(app: &App, project: &ProjectId) -> Vec<Agent> {
     let mut out: Vec<Agent> = project_agents(app, project).cloned().collect();
-    let now = crate::app::now_ms();
     out.sort_by(|a, b| {
-        crate::app::recency_key(a, now)
-            .cmp(&crate::app::recency_key(b, now))
+        crate::app::recency_key(a)
+            .cmp(&crate::app::recency_key(b))
             .then_with(|| b.id.cmp(&a.id))
     });
     out.sort_by_key(|a| std::cmp::Reverse(attention(Some(a.status))));
