@@ -54,7 +54,7 @@ impl RowPr {
     /// (`conflicts`, `failing`), else the state (`ready`, `draft`,
     /// `merged`, `closed`) — the sidebar's words.
     pub fn badge(&self) -> &'static str {
-        self.trouble.map_or(self.standing.badge(), |t| t.badge())
+        self.standing.word(self.trouble)
     }
 }
 

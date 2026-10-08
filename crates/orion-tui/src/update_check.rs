@@ -133,6 +133,19 @@ pub fn newer_than(published: &str, running: &str) -> Option<String> {
     (p > r).then(|| format!("{}.{}.{}", p.0, p.1, p.2))
 }
 
+/// Whether upgrading from `running` to `published` restarts the DAEMON,
+/// and every session in it, by the release numbering: a release that
+/// changes the daemon's code is a minor one (x.Y.0) and a major is never a
+/// patch, so a jump that moves only the patch number keeps the daemon
+/// running. A version that doesn't parse — a dev build's, say — reads as a
+/// restart, the side a warning should err on.
+pub fn restarts_daemon(published: &str, running: &str) -> bool {
+    match (parse_version(published), parse_version(running)) {
+        (Some(p), Some(r)) => (p.0, p.1) != (r.0, r.1),
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +199,17 @@ mod tests {
             "a dev build ahead of the last release"
         );
         assert_eq!(newer_than("garbage", "0.21.0"), None);
+    }
+
+    #[test]
+    fn only_a_patch_jump_keeps_the_daemon() {
+        assert!(!restarts_daemon("0.22.3", "0.22.0"), "patches only");
+        assert!(restarts_daemon("0.23.0", "0.22.4"), "a minor changed it");
+        assert!(restarts_daemon("0.23.1", "0.22.0"), "across a minor");
+        assert!(restarts_daemon("1.0.0", "0.22.0"), "a major");
+        assert!(
+            restarts_daemon("0.22.1", "dev"),
+            "unknown errs on a restart"
+        );
     }
 }

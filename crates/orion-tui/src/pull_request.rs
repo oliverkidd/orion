@@ -57,6 +57,18 @@ pub enum Standing {
 }
 
 impl Standing {
+    /// Still taking work: open or a draft.
+    pub fn is_open(self) -> bool {
+        matches!(self, Standing::Open | Standing::Draft)
+    }
+
+    /// The word a PR ROW's badge says: the trouble's while there is one
+    /// (`conflicts`, `failing`), else the state's (`ready`, `draft`,
+    /// `merged`, `closed`).
+    pub fn word(self, trouble: Option<Trouble>) -> &'static str {
+        trouble.map_or(self.badge(), |t| t.badge())
+    }
+
     pub fn of(state: &str, is_draft: bool) -> Self {
         match state {
             STATE_MERGED => Standing::Merged,

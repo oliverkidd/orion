@@ -41,7 +41,7 @@ pub struct Look {
 /// a person — and applies only while the pull request is open: a merged or
 /// closed one is past resolving.
 pub fn look(standing: Standing, trouble: Option<Trouble>, th: Theme) -> Look {
-    if trouble.is_some() && matches!(standing, Standing::Open | Standing::Draft) {
+    if trouble.is_some() && standing.is_open() {
         return Look {
             glyph: th.err,
             label: th.muted,

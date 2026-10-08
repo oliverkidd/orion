@@ -214,7 +214,7 @@ pub enum HitTarget {
     FooterHome,
     /// The footer's `⇡ v…` and HOME's upgrade line: **Upgrade orion**.
     FooterUpgrade,
-    /// One of the footer's SPOTIFY READOUT buttons (`⏮ ⏸ ⏭`): a click
+    /// One of the footer's SPOTIFY READOUT buttons (`⏮  ⏸ ⏭`): a click
     /// sends Spotify that command (`event_loop::press_spotify`).
     FooterSpotify(crate::spotify::Button),
     /// A part of the footer's breadcrumb: a click goes back down onto the
@@ -813,17 +813,27 @@ pub enum PendingAction {
     Restart,
     /// **Upgrade orion** (`⌘⇧G`): quit into `orion upgrade`, then
     /// start the TUI again on the new binary (`App::upgrade`).
-    Upgrade,
+    /// `restarts_daemon` is whether the release changes the daemon, which
+    /// takes every session down with it (`update_check::restarts_daemon`):
+    /// a red warning when it does, a green go-ahead when it doesn't.
+    Upgrade {
+        restarts_daemon: bool,
+    },
 }
 
 impl PendingAction {
     /// Whether the dialog asks about losing something — the red frame
-    /// every confirm wears but **Add account**'s question and a PULL's,
-    /// which lose nothing either way.
+    /// every confirm wears but **Add account**'s question, a PULL's, and an
+    /// upgrade that leaves the daemon running, which lose nothing either
+    /// way.
     pub fn destructive(&self) -> bool {
         !matches!(
             self,
-            PendingAction::AddClaudeAccount(_) | PendingAction::PullWorktree(_)
+            PendingAction::AddClaudeAccount(_)
+                | PendingAction::PullWorktree(_)
+                | PendingAction::Upgrade {
+                    restarts_daemon: false
+                }
         )
     }
 
@@ -5163,7 +5173,8 @@ impl App {
     /// are hidden (collapsed, editor modal, splash) or animations are
     /// switched off. A merged checkout only shows while its project is
     /// selected, so only those keep the clock running; a FLASH saying what
-    /// it waits on turns the footer's spinner. The one-shots run out on the
+    /// it waits on turns the footer's spinner, and a Spotify track playing
+    /// sweeps the footer's readout. The one-shots run out on the
     /// clock, so an idle app with everything read repaints nothing.
     pub fn status_anim_active(&self) -> bool {
         let now = now_ms();
@@ -5180,7 +5191,8 @@ impl App {
                 .flash
                 .as_ref()
                 .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
-                || self.update_available.is_some())
+                || self.update_available.is_some()
+                || self.spotify.as_ref().is_some_and(|np| np.playing))
     }
 
     /// Whether `agent`'s dot is the turning WORKING SPINNER: a session

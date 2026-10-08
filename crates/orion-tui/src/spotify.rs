@@ -1,6 +1,7 @@
 //! The FOOTER's SPOTIFY READOUT: what the Spotify desktop app is playing,
-//! `♪ Midnight City · M83  ⏮ ⏸ ⏭`, just left of the memory readout, with
-//! its three glyphs for buttons.
+//! `♪ Midnight City · M83  ⏮  ⏸ ⏭`, just left of the memory readout, with
+//! its three glyphs for buttons. While a track plays its title and the
+//! pause button shimmer green; paused, they sit grey.
 //!
 //! It talks to the app on this Mac over AppleScript (`osascript`), the way
 //! the media keys reach it — no Spotify login, no Web API, no developer
@@ -207,6 +208,17 @@ const GAP: &str = "  ";
 /// Between title and artist.
 const SEP: &str = " · ";
 
+/// The spaces before `button`'s glyph. `⏮` and `⏭` draw two cells wide in
+/// Ghostty, spilling into the space after them, where `⏸` and `▶` keep to
+/// one — so `⏮` takes two, and the toggle sits centred between them.
+fn before(button: Button) -> &'static str {
+    match button {
+        Button::Previous => "",
+        Button::PlayPause => "  ",
+        Button::Next => " ",
+    }
+}
+
 /// The readout as [`readout`] lays it out.
 pub struct Readout {
     pub spans: Vec<Span<'static>>,
@@ -224,11 +236,17 @@ pub struct Readout {
 /// title alone; under [`MIN_TITLE`] title cells it is `None`, nothing
 /// drawn. The button under the pointer (`hovered`) lifts as the footer's
 /// other buttons do (`ui::footer::footer_button_style`).
+///
+/// Playing, the title and the pause button are the upgrade's green
+/// (`ui::footer::upgrade_ramp`), one band sweeping the title and then the
+/// button at `sweep`'s phase — still when it is `None`, as with
+/// animations off. Paused, both are dim.
 pub fn readout(
     np: &NowPlaying,
     max: usize,
     th: crate::theme::Theme,
     hovered: Option<Button>,
+    sweep: Option<usize>,
 ) -> Option<Readout> {
     use crate::branch_switch::{cells, fit};
     let toggle = if np.playing { "⏸" } else { "▶" };
@@ -237,8 +255,8 @@ pub fn readout(
         (Button::PlayPause, toggle),
         (Button::Next, "⏭"),
     ];
-    // Three glyphs a space apart.
-    let buttons_w = glyphs.iter().map(|(_, g)| cells(g)).sum::<usize>() + 2;
+    let buttons_w = glyphs.iter().map(|(_, g)| cells(g)).sum::<usize>()
+        + glyphs.iter().map(|(b, _)| before(*b).len()).sum::<usize>();
     let room = max.checked_sub(cells(LEAD) + cells(GAP) + buttons_w)?;
     if room < MIN_TITLE {
         return None;
@@ -271,12 +289,15 @@ pub fn readout(
     };
 
     let dim = Style::default().fg(th.dim);
-    let words = if np.playing {
-        Style::default().fg(th.text)
-    } else {
-        dim
-    };
-    let mut spans = vec![Span::styled(LEAD, dim), Span::styled(title, words)];
+    let ramp = crate::ui::footer::upgrade_ramp(th);
+    // The band's cells: the title's, then the pause button's just after.
+    let title_len = title.chars().count();
+    let mut spans = vec![Span::styled(LEAD, dim)];
+    match (np.playing, sweep) {
+        (true, Some(phase)) => spans.extend(crate::ui::sweep_spans(&title, dim, ramp, phase)),
+        (true, None) => spans.push(Span::styled(title, dim.fg(ramp[0]))),
+        (false, _) => spans.push(Span::styled(title, dim)),
+    }
     if let Some(artist) = artist {
         spans.push(Span::styled(SEP, dim));
         spans.push(Span::styled(artist, dim));
@@ -284,11 +305,24 @@ pub fn readout(
     spans.push(Span::raw(GAP));
     let mut x: u16 = spans.iter().map(|s| s.width() as u16).sum();
     let buttons = glyphs.map(|(button, glyph)| {
-        if button != Button::Previous {
-            spans.push(Span::raw(" "));
-            x += 1;
-        }
-        let style = crate::ui::footer::footer_button_style(th, hovered == Some(button));
+        let gap = before(button);
+        spans.push(Span::raw(gap));
+        x += gap.len() as u16;
+        let lit = hovered == Some(button);
+        let style = match (button, np.playing) {
+            (Button::PlayPause, true) => {
+                let green = match sweep {
+                    Some(phase) => crate::ui::sweep_style(dim, ramp, phase, title_len, title_len),
+                    None => dim.fg(ramp[0]),
+                };
+                if lit {
+                    green.add_modifier(ratatui::style::Modifier::UNDERLINED)
+                } else {
+                    green
+                }
+            }
+            _ => crate::ui::footer::footer_button_style(th, lit),
+        };
         let w = cells(glyph) as u16;
         spans.push(Span::styled(glyph, style));
         x += w;
@@ -364,9 +398,9 @@ mod tests {
             spans,
             width,
             buttons: cols,
-        } = readout(&np, 60, th, None).unwrap();
+        } = readout(&np, 60, th, None, None).unwrap();
         let line = text(&spans);
-        assert_eq!(line, "♪ Midnight City · M83  ⏮ ⏸ ⏭");
+        assert_eq!(line, "♪ Midnight City · M83  ⏮  ⏸ ⏭");
         assert_eq!(usize::from(width), line.chars().count());
         let order: Vec<Button> = cols.iter().map(|(b, _)| *b).collect();
         assert_eq!(order, [Button::Previous, Button::PlayPause, Button::Next]);
@@ -386,30 +420,70 @@ mod tests {
             spans,
             buttons: cols,
             ..
-        } = readout(&paused, 60, th, None).unwrap();
+        } = readout(&paused, 60, th, None, None).unwrap();
         let line = text(&spans);
-        assert_eq!(line, "♪ Midnight City · M83  ⏮ ▶ ⏭");
+        assert_eq!(line, "♪ Midnight City · M83  ⏮  ▶ ⏭");
         assert_eq!(
             line.chars().nth(cols[1].1.start as usize),
             Some('▶'),
             "paused shows play"
         );
         assert_eq!(spans[1].style.fg, Some(th.dim), "and dims the title");
-        let spans = readout(&np, 60, th, None).unwrap().spans;
-        assert_eq!(spans[1].style.fg, Some(th.text), "playing, it is text");
+        let toggle = spans.iter().find(|s| s.content == "▶").unwrap();
+        assert_eq!(toggle.style.fg, Some(th.dim), "and the button");
+        let spans = readout(&np, 60, th, None, None).unwrap().spans;
+        let green = crate::ui::footer::upgrade_ramp(th)[0];
+        assert_eq!(spans[1].style.fg, Some(green), "playing, it is green");
+        let toggle = spans.iter().find(|s| s.content == "⏸").unwrap();
+        assert_eq!(toggle.style.fg, Some(green), "and so is the button");
     }
 
     #[test]
     fn the_hovered_button_underlines() {
         let th = crate::theme::Theme::default();
         let np = track(true, "Midnight City", "M83");
-        let spans = readout(&np, 60, th, Some(Button::Next)).unwrap().spans;
+        let spans = readout(&np, 60, th, Some(Button::Next), None)
+            .unwrap()
+            .spans;
         let lit: Vec<&str> = spans
             .iter()
             .filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(lit, ["⏭"]);
+    }
+
+    /// Playing, one green band sweeps the title and then the pause button
+    /// — the text never changes under it, and the artist stays dim.
+    #[test]
+    fn a_playing_track_sweeps_its_title_then_the_button() {
+        let th = crate::theme::Theme::default();
+        let ramp = crate::ui::footer::upgrade_ramp(th);
+        let np = track(true, "Midnight City", "M83");
+        let title_len = "Midnight City".chars().count();
+        for phase in 0..title_len + 8 {
+            let spans = readout(&np, 60, th, None, Some(phase)).unwrap().spans;
+            assert_eq!(text(&spans), "♪ Midnight City · M83  ⏮  ⏸ ⏭");
+            let fg = |s: &str| spans.iter().find(|sp| sp.content == s).unwrap().style.fg;
+            assert_eq!(fg("M83"), Some(th.dim));
+            let head = phase % (title_len + 4);
+            let toggle = match head.checked_sub(title_len) {
+                Some(0) => ramp[2],
+                Some(1) => ramp[1],
+                _ => ramp[0],
+            };
+            assert_eq!(fg("⏸"), Some(toggle), "phase {phase}");
+        }
+        let lit = readout(&np, 60, th, None, Some(0)).unwrap().spans;
+        assert_eq!(lit[1].content, "M");
+        assert_eq!(
+            lit[1].style.fg,
+            Some(ramp[2]),
+            "the band starts on the title"
+        );
+        let paused = track(false, "Midnight City", "M83");
+        let spans = readout(&paused, 60, th, None, Some(0)).unwrap().spans;
+        assert_eq!(spans[1].style.fg, Some(th.dim), "paused, nothing sweeps");
     }
 
     /// Narrowing: the artist shortens, then the title to twelve, then the
@@ -419,29 +493,29 @@ mod tests {
     fn the_readout_gives_way_artist_first() {
         let th = crate::theme::Theme::default();
         let np = track(true, "Midnight City Remastered", "Anthony Gonzalez");
-        let line = |max| readout(&np, max, th, None).map(|r| text(&r.spans));
-        let full = "♪ Midnight City Remastered · Anthony Gonzalez  ⏮ ⏸ ⏭";
+        let line = |max| readout(&np, max, th, None, None).map(|r| text(&r.spans));
+        let full = "♪ Midnight City Remastered · Anthony Gonzalez  ⏮  ⏸ ⏭";
         let full_w = full.chars().count();
         assert_eq!(line(full_w).as_deref(), Some(full));
         assert_eq!(
             line(full_w - 6).as_deref(),
-            Some("♪ Midnight City Remastered · Anthony G…  ⏮ ⏸ ⏭"),
+            Some("♪ Midnight City Remastered · Anthony G…  ⏮  ⏸ ⏭"),
             "the artist shortens first"
         );
-        // 9 fixed + 12 title + 3 + 4 artist.
+        // 10 fixed + 12 title + 3 + 4 artist.
         assert_eq!(
-            line(28).as_deref(),
-            Some("♪ Midnight Ci… · Ant…  ⏮ ⏸ ⏭"),
+            line(29).as_deref(),
+            Some("♪ Midnight Ci… · Ant…  ⏮  ⏸ ⏭"),
             "then the title, down to twelve"
         );
         assert_eq!(
-            line(27).as_deref(),
-            Some("♪ Midnight City Rem…  ⏮ ⏸ ⏭"),
+            line(28).as_deref(),
+            Some("♪ Midnight City Rem…  ⏮  ⏸ ⏭"),
             "then the artist goes"
         );
-        assert_eq!(line(17).as_deref(), Some("♪ Midnigh…  ⏮ ⏸ ⏭"));
-        assert_eq!(line(16), None, "under eight title characters, nothing");
-        for max in 17..=full_w {
+        assert_eq!(line(18).as_deref(), Some("♪ Midnigh…  ⏮  ⏸ ⏭"));
+        assert_eq!(line(17), None, "under eight title characters, nothing");
+        for max in 18..=full_w {
             let w = line(max).unwrap().chars().count();
             assert!(w <= max, "{w} cells in a budget of {max}");
         }
@@ -455,22 +529,22 @@ mod tests {
         use crate::branch_switch::cells;
         let th = crate::theme::Theme::default();
         let np = track(true, "夜に駆ける 🎵 YOASOBI 夜に駆ける", "YOASOBI");
-        for max in 17..=60 {
+        for max in 18..=60 {
             let Some(Readout {
                 spans,
                 width,
                 buttons: cols,
-            }) = readout(&np, max, th, None)
+            }) = readout(&np, max, th, None, None)
             else {
                 panic!("{max} cells fit a readout");
             };
             let line = text(&spans);
             assert_eq!(usize::from(width), cells(&line), "{line}");
             assert!(usize::from(width) <= max, "{width} > {max}: {line}");
-            assert!(line.ends_with("⏮ ⏸ ⏭"), "{line}");
+            assert!(line.ends_with("⏮  ⏸ ⏭"), "{line}");
             let (_, next) = &cols[2];
             assert_eq!(next.end, width, "⏭ is the last cell: {line}");
         }
-        assert!(readout(&np, 16, th, None).is_none());
+        assert!(readout(&np, 17, th, None, None).is_none());
     }
 }

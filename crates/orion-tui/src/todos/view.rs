@@ -99,7 +99,7 @@ fn clip_key(text: &str) -> String {
 /// A chip on an item's line that a click acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chip {
-    /// `● agent`: jump to the session.
+    /// `◐ agent` (the session's STATUS MARK): jump to the session.
     Agent,
     /// `◑ RIP-412`: open the issue in the browser.
     Linear,
@@ -2793,11 +2793,16 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
     left.push(Span::raw(" "));
 
     let mut parts: Vec<(Option<Chip>, Vec<Span<'static>>)> = Vec::new();
+    // The session's STATUS MARK, turning while it works, as on every
+    // other row that names a session.
     if let Some(agent) = live_agent(app, item) {
         let color = crate::ui::status_color(Some(agent.status), agent.unseen, th);
         parts.push((
             Some(Chip::Agent),
-            vec![Span::styled("● agent", Style::default().fg(color))],
+            vec![
+                crate::ui::status_dot(Some(agent.status), agent.unseen, app.spin_phase(), th),
+                Span::styled("agent", Style::default().fg(color)),
+            ],
         ));
     }
     if let Some(id) = &item.linear {

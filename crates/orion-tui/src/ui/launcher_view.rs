@@ -3218,8 +3218,9 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
         }
     }
     // The checkout everything in the pane belongs to, as the band's rule
-    // names it — its SCOPE MARK and branch, and its pull request's number —
-    // so the pane and the grid say the same thing the same way.
+    // names it — its SCOPE MARK and branch, and its pull request as
+    // `↗ #42 ready` — so the pane and the grid say the same thing the same
+    // way.
     let checkout = at
         .and_then(|at| bands.get(at.band))
         .map(|b| {
@@ -3227,7 +3228,7 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
                 b.worktree.clone(),
                 b.is_main,
                 b.branch.clone(),
-                b.pr.as_ref().map(|pr| pr.number),
+                b.pr.clone(),
             )
         })
         .or_else(|| {
@@ -3245,12 +3246,24 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
                 Style::default().fg(th.muted),
             ),
         ];
-        if let Some(number) = pr {
-            spans.push(Span::styled("  ↗ ", Style::default().fg(th.muted)));
+        if let Some(pr) = pr {
+            let look = crate::pr_row::look(pr.standing, pr.trouble, th);
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("↗ ", Style::default().fg(look.glyph)));
             spans.push(Span::styled(
-                format!("#{number}"),
-                Style::default().fg(th.muted),
+                format!("#{}", pr.number),
+                Style::default().fg(look.label),
             ));
+            // The word goes before the number does: only when it fits.
+            let word = format!(" {}", pr.badge());
+            let used: usize = tabs.iter().map(PaneTab::width).sum::<usize>()
+                + spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>();
+            if used + word.chars().count() <= room {
+                spans.push(Span::styled(word, Style::default().fg(look.badge)));
+            }
         }
         tabs.push(PaneTab::plain(spans));
     }

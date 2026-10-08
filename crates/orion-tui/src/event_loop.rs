@@ -6757,16 +6757,33 @@ fn note_update_answer(app: &mut App, answer: crate::update_check::Answer) {
 }
 
 fn confirm_upgrade(version: &str) -> ConfirmDialog {
-    ConfirmDialog {
-        title: "Upgrade orion".into(),
-        // Sized to the longest line, never wrapped: keep each under 52.
-        message: format!(
+    let restarts_daemon = crate::update_check::restarts_daemon(version, env!("CARGO_PKG_VERSION"));
+    // Sized to the longest line, never wrapped: keep each under 52.
+    let message = if restarts_daemon {
+        format!(
             "Install v{version} and restart orion on it?\n\
-             If it changes the daemon, that restarts too:\n\
-             agents resume, and mid-turn ones carry on;\n\
-             terminals start a new shell."
-        ),
-        action: PendingAction::Upgrade,
+             \n\
+             ⚠ This release changes the daemon, so upgrading\n\
+             restarts it and interrupts every session:\n\
+             agents resume and mid-turn ones carry on,\n\
+             but terminals start a new shell."
+        )
+    } else {
+        format!(
+            "Install v{version} and reopen orion on it?\n\
+             \n\
+             ✓ Safe to upgrade now: the daemon is unchanged,\n\
+             so every agent and terminal keeps running."
+        )
+    };
+    ConfirmDialog {
+        title: if restarts_daemon {
+            "Upgrade orion · restarts the daemon".into()
+        } else {
+            "Upgrade orion · nothing interrupted".into()
+        },
+        message,
+        action: PendingAction::Upgrade { restarts_daemon },
         area: ratatui::layout::Rect::default(),
     }
 }
@@ -9565,7 +9582,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             app.restart = true;
             app.should_quit = true;
         }
-        PendingAction::Upgrade => {
+        PendingAction::Upgrade { .. } => {
             app.upgrade = true;
             app.should_quit = true;
         }
@@ -19416,7 +19433,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.flash.is_none());
         assert!(matches!(
             &app.overlay,
-            Some(Overlay::Confirm(c)) if matches!(c.action, PendingAction::Upgrade)
+            Some(Overlay::Confirm(c)) if matches!(c.action, PendingAction::Upgrade { .. })
         ));
 
         // Without a checker (the e2e tests) it answers from what it knows.
@@ -19427,6 +19444,38 @@ diff --git a/src/c.rs b/src/c.rs
             .as_deref()
             .unwrap()
             .contains("is the latest release"));
+    }
+
+    /// The upgrade confirm says up front whether the release interrupts
+    /// anything: a patch leaves the daemon running and asks in green, a
+    /// minor restarts it and warns in red.
+    #[test]
+    fn upgrade_confirm_warns_only_when_the_daemon_changes() {
+        let (major, minor, patch) =
+            crate::update_check::parse_version(env!("CARGO_PKG_VERSION")).unwrap();
+
+        let clean = confirm_upgrade(&format!("{major}.{minor}.{}", patch + 1));
+        assert!(matches!(
+            clean.action,
+            PendingAction::Upgrade {
+                restarts_daemon: false
+            }
+        ));
+        assert!(!clean.action.destructive(), "a go-ahead, not a warning");
+        assert!(clean.message.contains("keeps running"));
+
+        let breaking = confirm_upgrade(&format!("{major}.{}.0", minor + 1));
+        assert!(matches!(
+            breaking.action,
+            PendingAction::Upgrade {
+                restarts_daemon: true
+            }
+        ));
+        assert!(breaking.action.destructive(), "worn in red");
+        assert!(breaking.message.contains("interrupts every session"));
+        for line in clean.message.lines().chain(breaking.message.lines()) {
+            assert!(line.chars().count() < 52, "wraps: {line}");
+        }
     }
 
     /// A newer published release rides the nameplate as `⇡ vX.Y.Z` and
@@ -19732,7 +19781,7 @@ diff --git a/src/c.rs b/src/c.rs
         let row = footer_row(&terminal);
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight City · M83  ⏮ ⏸ ⏭  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
             "left of the usage readout:\n{row}"
         );
 
@@ -19870,7 +19919,7 @@ diff --git a/src/c.rs b/src/c.rs
         // title keeps what is left.
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight C…  ⏮ ⏸ ⏭  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
             "{row}"
         );
     }
@@ -40210,13 +40259,13 @@ diff --git a/src/c.rs b/src/c.rs
             app.todos.insert("/tmp/demo".into(), file);
             run_action(&mut app, crate::keymap::Action::Todos);
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("● agent"), "{text}");
+            assert!(text.contains("○ agent"), "{text}");
             assert!(text.contains("◑ RIP-412 In Progress"), "{text}");
             assert!(text.contains("2d"), "{text}");
             // The session gone, its chip goes with it.
             app.tree.agents.clear();
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(!text.contains("● agent"), "{text}");
+            assert!(!text.contains("○ agent"), "{text}");
         });
     }
 
@@ -40704,8 +40753,8 @@ diff --git a/src/c.rs b/src/c.rs
             app.overlay = None;
             press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
             let terminal = draw_todos(&mut app);
-            assert!(buffer_text(&terminal).contains("● agent"));
-            let (x, y) = find_cell(&terminal, "● agent");
+            assert!(buffer_text(&terminal).contains("○ agent"));
+            let (x, y) = find_cell(&terminal, "○ agent");
             click(&mut app, x, y, &mut out);
             assert!(app.overlay.is_none(), "the chip jumps to the session");
 

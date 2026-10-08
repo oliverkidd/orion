@@ -1412,9 +1412,11 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
 
 // ---- drawing ----
 
-/// The right end of a list row: the trouble's word or `draft`, else the
-/// checks' mark and the review's, in a column this wide…
-const STATUS_W: usize = 9;
+/// The right end of a list row: the checks' mark and the review's in
+/// this many cells, the cell of air after them included…
+const MARKS_W: usize = 4;
+/// …then the state word, `conflicts` the widest, in a column this wide…
+const WORD_W: usize = 9;
 /// …then two cells, then how long ago it was opened, at least this wide.
 const AGE_W: usize = 3;
 
@@ -1453,11 +1455,10 @@ impl RowCols {
 
 /// One list row on one line, the main page's LIST row's shape: the
 /// cursor's `▌` — `cursor_focus` is whether the list has the keys, on the
-/// cursor's row — or two cells of air, the state dot — `●` open, `○` a
-/// draft, red for one GitHub says cannot merge — `#42` in a column as wide
-/// as the list's widest, the title (faint for a draft), and at the right
-/// end the trouble's word or `draft` in `pr_row::look`'s colours, else
-/// the checks' mark and the review's (`✓ ○`), then how long ago it was
+/// cursor's row — or two cells of air, the BAND's pull request arrow `↗`
+/// in `pr_row::look`'s colours, `#42` in a column as wide as the list's
+/// widest, the title (faint for a draft), and at the right end the status
+/// column ([`status_spans`]: `✓ ○ ready`), then how long ago it was
 /// opened. The title gives way to all of it. The chars the filter matched
 /// (`positions`, into the row's `#42 title`) are lit.
 fn row_line(
@@ -1475,11 +1476,7 @@ fn row_line(
         None => Span::raw("  "),
     };
     let trouble = pr.trouble();
-    let (dot, dot_color) = match (trouble, pr.is_draft) {
-        (Some(_), _) => ("● ", th.err),
-        (None, true) => ("○ ", th.faint),
-        (None, false) => ("● ", th.ok),
-    };
+    let look = crate::pr_row::look(pr.standing(), trouble, th);
     let number = format!("#{}", pr.number);
     let number_w = number.chars().count();
     // The positions split where the number ends: the title's own count
@@ -1489,7 +1486,7 @@ fn row_line(
         .iter()
         .filter_map(|p| p.checked_sub(number_w + 1))
         .collect();
-    let mut spans = vec![mark, Span::styled(dot, Style::default().fg(dot_color))];
+    let mut spans = vec![mark, Span::styled("↗ ", Style::default().fg(look.glyph))];
     spans.extend(fuzzy_highlight_styled(
         &number,
         &positions[..split],
@@ -1498,10 +1495,18 @@ fn row_line(
     ));
     spans.push(Span::raw(" ".repeat(cols.number + 2 - number_w)));
     let lead = 2 + 2 + cols.number + 2;
-    let right_w = STATUS_W + 2 + cols.age + 1;
-    // The status column goes before the title shortens past MIN_TEXT_W.
-    let status = width >= lead + crate::pr_preview::MIN_TEXT_W + 1 + right_w;
-    let room = width.saturating_sub(lead + 1 + if status { right_w } else { cols.age + 1 });
+    // The status column gives way before the title shortens past
+    // MIN_TEXT_W: the checks' and review's marks first, then the word.
+    let fits = |status_w: usize| {
+        width > lead + crate::pr_preview::MIN_TEXT_W + 1 + status_w + 2 + cols.age
+    };
+    let status = if fits(MARKS_W + WORD_W) {
+        Some(true)
+    } else {
+        fits(WORD_W).then_some(false)
+    };
+    let status_w = status.map_or(0, |marks| WORD_W + 2 + if marks { MARKS_W } else { 0 });
+    let room = width.saturating_sub(lead + 1 + status_w + cols.age + 1);
     let title = truncate(&pr.title, room);
     let shown = title.chars().count();
     let lit: Vec<usize> = title_positions.into_iter().filter(|&p| p < shown).collect();
@@ -1519,8 +1524,8 @@ fn row_line(
     let used = lead + shown;
     let age = age_of(pr, now);
     let mut right: Vec<Span<'static>> = Vec::new();
-    if status {
-        right.extend(status_spans(pr, th));
+    if let Some(marks) = status {
+        right.extend(status_spans(pr, marks, th));
         right.push(Span::raw("  "));
     }
     right.push(Span::styled(
@@ -1536,24 +1541,15 @@ fn row_line(
     Line::from(spans)
 }
 
-/// A row's status column, [`STATUS_W`] wide and right-aligned: the
-/// trouble's word or `draft` in `pr_row::look`'s colours, else the checks'
-/// mark and the review's — `✓ ○` — a blank where either has nothing to say.
-fn status_spans(pr: &OpenPr, th: Theme) -> Vec<Span<'static>> {
-    /// The two marks and the cell between them.
-    const MARKS_W: usize = 3;
+/// A row's status column: the checks' mark and the review's — `✓ ○`, a
+/// blank where either has nothing to say — when `marks`, then the state
+/// word the BAND puts after `#42`, [`WORD_W`] wide: the trouble's
+/// (`conflicts`, `failing`), else `ready` or `draft`, in `pr_row::look`'s
+/// colours.
+fn status_spans(pr: &OpenPr, marks: bool, th: Theme) -> Vec<Span<'static>> {
     let trouble = pr.trouble();
-    let badge = match trouble {
-        Some(trouble) => Some(trouble.badge()),
-        None => pr.is_draft.then(|| pr.badge()),
-    };
-    if let Some(word) = badge {
-        let look = crate::pr_row::look(pr.standing(), trouble, th);
-        return vec![Span::styled(
-            format!("{word:>STATUS_W$}"),
-            Style::default().fg(look.badge),
-        )];
-    }
+    let word = pr.standing().word(trouble);
+    let look = crate::pr_row::look(pr.standing(), trouble, th);
     let checks = pr.meta.checks.map(|_| match pr.checks() {
         Checks::Failing => ("✗", th.err),
         Checks::Pending => ("◐", th.warn),
@@ -1569,11 +1565,16 @@ fn status_spans(pr: &OpenPr, th: Theme) -> Vec<Span<'static>> {
         Some((g, color)) => Span::styled(g, Style::default().fg(color)),
         None => Span::raw(" "),
     };
+    let word = Span::styled(format!("{word:<WORD_W$}"), Style::default().fg(look.badge));
+    if !marks {
+        return vec![word];
+    }
     vec![
-        Span::raw(" ".repeat(STATUS_W - MARKS_W)),
         mark(checks),
         Span::raw(" "),
         mark(review),
+        Span::raw(" "),
+        word,
     ]
 }
 
@@ -2781,7 +2782,8 @@ mod tests {
         open(&mut app);
         let before = screen(&mut app, 120, 30);
         assert!(before.contains("Pull requests — demo (3)"), "{before}");
-        assert!(before.contains("● #42  Fix login"), "{before}");
+        assert!(before.contains("↗ #42  Fix login"), "{before}");
+        assert!(before.contains("ready"), "{before}");
         assert!(before.contains("failing"), "{before}");
         assert!(before.contains("draft"), "{before}");
         assert!(before.contains("╮╭ #42 Fix login ─"), "{before}");
@@ -3431,22 +3433,25 @@ mod tests {
             shot.find(needle)
                 .unwrap_or_else(|| panic!("{needle} missing from\n{shot}"))
         };
-        assert!(at(" ── Yours ─") < at("● #42  My fix"), "{shot}");
-        assert!(at("● #42  My fix") < at(" ── Review requested ─"), "{shot}");
+        assert!(at(" ── Yours ─") < at("↗ #42  My fix"), "{shot}");
+        assert!(at("↗ #42  My fix") < at(" ── Review requested ─"), "{shot}");
         assert!(
-            at(" ── Review requested ─") < at("● #41  Speed up the grid"),
+            at(" ── Review requested ─") < at("↗ #41  Speed up the grid"),
             "{shot}"
         );
         assert!(
-            at("● #41  Speed up the grid") < at(" ── Others ─"),
+            at("↗ #41  Speed up the grid") < at(" ── Others ─"),
             "{shot}"
         );
-        assert!(at(" ── Others ─") < at("● #43  Others' work"), "{shot}");
+        assert!(at(" ── Others ─") < at("↗ #43  Others' work"), "{shot}");
         let row = shot
             .lines()
             .find(|l| l.contains("#42  My fix"))
             .unwrap_or_default();
-        assert!(row.contains("◐ ✓   1h │"), "checks, review, age: {row:?}");
+        assert!(
+            row.contains("◐ ✓ ready       1h │"),
+            "checks, review, word, age: {row:?}"
+        );
         let lines: Vec<&str> = shot.lines().collect();
         let others = lines
             .iter()
