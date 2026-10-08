@@ -1137,8 +1137,12 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // A CLAUDE ACCOUNTS add asks a question that loses nothing
             // either way, so its frame and answers wear the accent, not
             // the red; a removal's third answer sends the dir to the Trash.
+            // An upgrade that leaves the daemon running is a go-ahead,
+            // so it wears the upgrade's green.
             let tone = if confirm.action.destructive() {
                 th.err
+            } else if matches!(confirm.action, crate::app::PendingAction::Upgrade { .. }) {
+                th.ok
             } else {
                 th.accent
             };
@@ -3730,7 +3734,13 @@ const SWEEP_GAP: usize = 4;
 /// The shade cell `index` of a `len`-cell sweeping run takes at `phase`.
 /// Split out of [`sweep_spans`] so the `/` palette can sweep a row's leaf
 /// segment on the same band while the rest of the row keeps its own styling.
-fn sweep_style(base: Style, ramp: [Color; 3], phase: usize, index: usize, len: usize) -> Style {
+pub(crate) fn sweep_style(
+    base: Style,
+    ramp: [Color; 3],
+    phase: usize,
+    index: usize,
+    len: usize,
+) -> Style {
     let head = phase % (len + SWEEP_GAP);
     match head.checked_sub(index) {
         Some(0) => base.fg(ramp[2]).add_modifier(Modifier::BOLD),
@@ -3835,6 +3845,88 @@ pub(crate) fn change_color(xy: [char; 2], th: Theme) -> Color {
         ('R', _) | ('C', _) => th.muted,
         _ => th.modified,
     }
+}
+
+/// A list's `+A −R` column pair, each as wide as its widest entry, so the
+/// counts of every row line up on the right edge — the DIFF VIEWER's file
+/// list and COMMIT LIST, and the PULL REQUEST PAGE's Changes.
+pub(crate) struct CountColumns {
+    added: usize,
+    removed: usize,
+}
+
+impl CountColumns {
+    pub(crate) fn of(lines: impl Iterator<Item = Option<crate::git_diff::LineChanges>>) -> Self {
+        let mut cols = Self {
+            added: 0,
+            removed: 0,
+        };
+        // The sign and every digit are a cell each.
+        let cells = |n: u64| 1 + n.checked_ilog10().map_or(1, |d| d as usize + 1);
+        for l in lines.flatten() {
+            cols.added = cols.added.max(cells(l.added));
+            cols.removed = cols.removed.max(cells(l.removed));
+        }
+        cols
+    }
+
+    /// No row of the list was counted: no columns at all.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.added == 0
+    }
+
+    /// The cells the pair takes, its trailing space included.
+    pub(crate) fn width(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            self.added + self.removed + 2
+        }
+    }
+
+    /// `+A −R ` padded to the columns — blank for a row not counted (yet),
+    /// nothing at all for a list with no counts.
+    pub(crate) fn spans(
+        &self,
+        lines: Option<crate::git_diff::LineChanges>,
+        th: Theme,
+    ) -> Vec<Span<'static>> {
+        let mut spans = self.cells(lines, th);
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans
+    }
+
+    /// [`spans`](Self::spans) without the trailing space, for a row that
+    /// keeps its own margin.
+    pub(crate) fn cells(
+        &self,
+        lines: Option<crate::git_diff::LineChanges>,
+        th: Theme,
+    ) -> Vec<Span<'static>> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let Some(l) = lines else {
+            return vec![Span::raw(" ".repeat(self.width() - 1))];
+        };
+        vec![
+            Span::styled(
+                format!("{:>w$}", format!("+{}", l.added), w = self.added),
+                count_style(l.added, th.added, th),
+            ),
+            Span::styled(
+                format!(" {:>w$}", format!("−{}", l.removed), w = self.removed),
+                count_style(l.removed, th.removed, th),
+            ),
+        ]
+    }
+}
+
+/// A `+A` or `−R` count in its colour — dim when nothing went that way.
+pub(crate) fn count_style(n: u64, color: Color, th: Theme) -> Style {
+    Style::default().fg(if n == 0 { th.dim } else { color })
 }
 
 /// Whether a session in `status` wants a human: needs you, crashed, or

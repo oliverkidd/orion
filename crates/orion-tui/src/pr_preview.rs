@@ -932,20 +932,10 @@ fn body(
                 width,
                 th,
             ));
-            let add_w = detail
-                .files
-                .iter()
-                .map(|f| count_w(f.additions))
-                .max()
-                .unwrap_or(0);
-            let del_w = detail
-                .files
-                .iter()
-                .map(|f| count_w(f.deletions))
-                .max()
-                .unwrap_or(0);
+            let counts =
+                crate::ui::CountColumns::of(detail.files.iter().map(|f| Some(file_lines(f))));
             for file in &detail.files {
-                listed.row(file_row(file, (add_w, del_w), width, th));
+                listed.row(file_row(file, &counts, width, th));
             }
             if detail.files.len() < total {
                 listed.lines.push(Line::from(""));
@@ -1064,58 +1054,52 @@ fn count_text(sign: char, n: u64) -> String {
     }
 }
 
-/// A Changes row: its status letter in the diff's colour, the path — its
+/// A Changes row as the DIFF VIEWER lists a committed file: its
+/// two-letter status code (`M `) in the diff's colour, the path — its
 /// folders dim, its file name bright, cut from the left so the name
-/// stays — and its `+`/`−` in columns as wide as the tab's widest.
+/// stays — and its `+A −R` in the viewer's columns, a zero dim.
 fn file_row(
     file: &PrFile,
-    (add_w, del_w): (usize, usize),
+    counts: &crate::ui::CountColumns,
     width: usize,
     th: Theme,
 ) -> Vec<Span<'static>> {
-    let status = file.status();
-    let color = crate::ui::change_color([status, ' '], th);
-    let counts = add_w + 1 + del_w;
-    let lead = BODY.len() + 1 + 2;
+    let xy = [file.status(), ' '];
+    let color = crate::ui::change_color(xy, th);
+    let lead = BODY.len() + 3;
     // The counts go before the path shortens past [`MIN_TEXT_W`]; the path
     // keeps clear of them and of the cell of air `columns` leaves.
-    let counts = if width >= lead + MIN_TEXT_W + counts + 2 {
-        counts
+    let counts_w = counts.width().saturating_sub(1);
+    let right = if width >= lead + MIN_TEXT_W + counts_w + 2 {
+        counts.cells(Some(file_lines(file)), th)
     } else {
-        0
+        Vec::new()
     };
-    let room = width.saturating_sub(lead + if counts > 0 { counts + 2 } else { 2 });
+    let room = width.saturating_sub(lead + if right.is_empty() { 2 } else { counts_w + 2 });
     let path = crate::ui::truncate_left(&file.path, room);
     let (dir, name) = match path.rfind('/') {
         Some(i) => path.split_at(i + 1),
         None => ("", path.as_str()),
     };
-    let name_color = if status == 'D' { th.muted } else { th.text };
+    let name_color = if xy[0] == 'D' { th.muted } else { th.text };
     let left = vec![
         Span::raw(BODY),
-        Span::styled(status.to_string(), Style::default().fg(color)),
-        Span::raw("  "),
+        Span::styled(
+            format!("{} ", xy.iter().collect::<String>()),
+            Style::default().fg(color),
+        ),
         Span::styled(dir.to_string(), Style::default().fg(th.dim)),
         Span::styled(name.to_string(), Style::default().fg(name_color)),
     ];
-    let right = if counts > 0 {
-        vec![
-            right_in(
-                &count_text('+', file.additions),
-                add_w,
-                Style::default().fg(th.added),
-            ),
-            Span::raw(" "),
-            right_in(
-                &count_text('−', file.deletions),
-                del_w,
-                Style::default().fg(th.removed),
-            ),
-        ]
-    } else {
-        Vec::new()
-    };
     columns(left, right, width)
+}
+
+/// A changed file's counts as the DIFF VIEWER keeps them.
+fn file_lines(file: &PrFile) -> crate::git_diff::LineChanges {
+    crate::git_diff::LineChanges {
+        added: file.additions,
+        removed: file.deletions,
+    }
 }
 
 /// The Commits tab's column widths: the author (only when more than one
@@ -2006,7 +1990,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("src/links.rs"))
             .unwrap();
-        assert!(links.ends_with(" +6    "), "a zero is left out: {links:?}");
+        assert!(
+            links.ends_with(" +6 −0 "),
+            "a zero is kept, dim, as the DIFF VIEWER keeps it: {links:?}"
+        );
         let commits = body(PrTab::Commits);
         assert!(commits.contains(" ── 2 commits ─"), "{commits}");
         assert!(

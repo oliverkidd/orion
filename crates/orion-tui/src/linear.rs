@@ -101,6 +101,67 @@ pub struct LinearIssue {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+    /// The GitHub pull requests Linear has on the issue — its GitHub
+    /// integration's, or ones orion attached — as Linear last heard of
+    /// them, open, merged or closed.
+    #[serde(default)]
+    pub prs: Vec<IssuePr>,
+}
+
+/// A pull request on a Linear issue, from the attachment's metadata:
+/// enough for the work column to say where it stands without asking
+/// GitHub ([`IssueWork`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IssuePr {
+    pub number: u64,
+    pub url: String,
+    /// The head branch; empty when Linear didn't say.
+    #[serde(default)]
+    pub branch: String,
+    /// `open`, `merged` or `closed`, as Linear spells it.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub conflicts: bool,
+}
+
+impl IssuePr {
+    /// A GitHub pull request attachment's node (`{ url metadata }`);
+    /// `None` for any other kind of attachment.
+    fn from_json(node: &serde_json::Value) -> Option<Self> {
+        let url = node.get("url")?.as_str()?;
+        let meta = node.get("metadata")?;
+        let from_url = url
+            .strip_prefix("https://github.com/")?
+            .split("/pull/")
+            .nth(1)?
+            .split(['/', '#', '?'])
+            .next()?
+            .parse::<u64>()
+            .ok();
+        let number = meta.get("number").and_then(|n| n.as_u64()).or(from_url)?;
+        let text = |key: &str| {
+            meta.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let flag = |key: &str| meta.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        Some(IssuePr {
+            number,
+            url: url.to_string(),
+            branch: text("branch"),
+            state: text("status"),
+            draft: flag("draft"),
+            conflicts: flag("hasConflicts"),
+        })
+    }
+
+    fn standing(&self) -> crate::pull_request::Standing {
+        crate::pull_request::Standing::of(&self.state.to_ascii_uppercase(), self.draft)
+    }
 }
 
 /// A label or a project: its name and Linear's hex colour for it.
@@ -572,7 +633,8 @@ impl KeySource {
 /// Branch → Linear issues, so a pull request cut from a ⌘L launch, or
 /// from a worktree the issues were linked to (`⌘.`), can be attached once
 /// GitHub lists it. A link outlives its attach (`attached`): the LINEAR
-/// VIEW still shows the issue as picked up by that branch ([`IssueWork`]).
+/// VIEW still finds the issue's worktree and pull request by that branch
+/// ([`IssueWork`]).
 #[derive(Debug, Clone, Default)]
 pub struct LinkStore {
     path: Option<PathBuf>,
@@ -671,19 +733,46 @@ impl LinkStore {
     }
 }
 
-/// What orion has going on one issue: the branch it was linked to (`⌘.`,
-/// a ⌘L launch) or whose name carries its identifier (`fix/eng-12-…`),
-/// the loudest of that worktree's sessions, and the branch's open pull
-/// request — the work column on a row, the right end of the page's border.
+/// What is going on with one issue, as the work column on a row and the
+/// right end of the page's border say it: the pull request that has it,
+/// wherever it was opened, and the orion worktree on it with its
+/// sessions' mark — a PR row with a worktree shows both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueWork {
-    pub branch: String,
+    /// The branch of the orion worktree on the issue; `None` when no
+    /// checkout is, as for a pull request opened outside orion.
+    pub branch: Option<String>,
     /// The sessions' rollup and whether a finish there is unread; `None`
-    /// with no session on the branch.
+    /// with no session on the worktree.
     pub session: Option<(orion_core::entities::AgentStatus, bool)>,
-    /// The open pull request's number and colour — crimson in trouble,
-    /// faint a draft, green otherwise.
-    pub pr: Option<(u64, ratatui::style::Color)>,
+    pub pr: Option<WorkPr>,
+}
+
+/// The pull request in [`IssueWork`], as a PR ROW paints it
+/// ([`crate::pr_row::look`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkPr {
+    pub number: u64,
+    pub standing: crate::pull_request::Standing,
+    pub trouble: Option<crate::pull_request::Trouble>,
+}
+
+impl WorkPr {
+    /// `ready`, `draft`, `merged`, `closed`, or the trouble's word.
+    fn word(self) -> &'static str {
+        self.standing.word(self.trouble)
+    }
+
+    /// Open before merged before closed, then the newest.
+    fn rank(self) -> (u8, std::cmp::Reverse<u64>) {
+        use crate::pull_request::Standing;
+        let state = match self.standing {
+            Standing::Open | Standing::Draft => 0,
+            Standing::Merged => 1,
+            Standing::Closed => 2,
+        };
+        (state, std::cmp::Reverse(self.number))
+    }
 }
 
 /// Whether `branch` names the issue `identifier` (`ENG-12`): the
@@ -702,36 +791,43 @@ fn names_issue(branch: &str, identifier: &str) -> bool {
     })
 }
 
-/// [`IssueWork`] for `issue` in `project`: a linked branch first — one
-/// with a checkout before one without — else a checkout whose branch
-/// names the issue; `None` when nothing has picked it up.
-pub(crate) fn work_of(
-    app: &App,
-    project: &ProjectId,
-    issue: &LinearIssue,
-    th: Theme,
-) -> Option<IssueWork> {
+/// [`IssueWork`] for `issue` in `project`; `None` when nothing has it.
+///
+/// The worktree is a checkout on a branch the issue was linked to (`⌘.`, a
+/// ⌘L launch), else one whose branch names it (`fix/eng-12-…`), else one
+/// on an attached pull request's branch. A link whose checkout is gone
+/// shows no worktree, but still finds its pull request.
+///
+/// The pull request is the best of those Linear has on the issue and the
+/// project's open ones on its branches — open before merged before closed.
+/// An open one in orion's list speaks for itself, failing checks and all;
+/// Linear's metadata says the rest. One from the root checkout's branch
+/// (the `dev` → `main` release) is never the issue's ([`root_branch`]).
+pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Option<IssueWork> {
+    use crate::pull_request::Trouble;
     use orion_core::entities::Worktree;
     let worktrees: Vec<&Worktree> = app
         .tree
         .worktrees
         .iter()
-        .filter(|w| &w.project_id == project)
+        .filter(|w| &w.project_id == project && !w.is_main)
         .collect();
     let checkout = |branch: &str| worktrees.iter().copied().find(|w| w.branch == branch);
+    let root = root_branch(app, project);
+    let not_root = |branch: &str| root != Some(branch);
+    let attached: Vec<&IssuePr> = issue.prs.iter().filter(|p| not_root(&p.branch)).collect();
     let linked = app.linear_links.branches_of(&issue.id);
-    let branch: String = linked
+    let worktree = linked
         .iter()
-        .find(|b| checkout(b).is_some())
-        .or(linked.first())
-        .map(|b| b.to_string())
+        .find_map(|b| checkout(b))
         .or_else(|| {
             worktrees
                 .iter()
-                .find(|w| !w.is_main && names_issue(&w.branch, &issue.identifier))
-                .map(|w| w.branch.clone())
-        })?;
-    let session = checkout(&branch).and_then(|wt| {
+                .copied()
+                .find(|w| names_issue(&w.branch, &issue.identifier))
+        })
+        .or_else(|| attached.iter().find_map(|p| checkout(&p.branch)));
+    let session = worktree.and_then(|wt| {
         let agents: Vec<_> = app
             .tree
             .agents
@@ -741,22 +837,42 @@ pub(crate) fn work_of(
         let status = crate::app::rollup(agents.iter().map(|a| a.status))?;
         Some((status, agents.iter().any(|a| a.unseen)))
     });
-    let pr = app
+    let open = app
         .open_prs
         .get(project)
-        .and_then(|o| o.list.iter().find(|pr| pr.head == branch))
-        .map(|pr| {
-            let color = if pr.trouble().is_some() {
-                th.err
-            } else if pr.is_draft {
-                th.faint
-            } else {
-                th.ok
-            };
-            (pr.number, color)
+        .map(|o| o.list.as_slice())
+        .unwrap_or_default();
+    let ours = |head: &str| {
+        not_root(head)
+            && (worktree.is_some_and(|w| w.branch == head)
+                || linked.contains(&head)
+                || names_issue(head, &issue.identifier))
+    };
+    let live = open
+        .iter()
+        .filter(|pr| ours(&pr.head) || attached.iter().any(|p| p.url == pr.url))
+        .map(|pr| WorkPr {
+            number: pr.number,
+            standing: pr.standing(),
+            trouble: pr.trouble(),
         });
+    let from_linear = attached
+        .iter()
+        .filter(|p| !open.iter().any(|pr| pr.url == p.url))
+        .map(|p| {
+            let standing = p.standing();
+            WorkPr {
+                number: p.number,
+                standing,
+                trouble: (standing.is_open() && p.conflicts).then_some(Trouble::Conflicts),
+            }
+        });
+    let pr = live.chain(from_linear).min_by_key(|p| p.rank());
+    if worktree.is_none() && pr.is_none() {
+        return None;
+    }
     Some(IssueWork {
-        branch,
+        branch: worktree.map(|w| w.branch.clone()),
         session,
         pr,
     })
@@ -2029,21 +2145,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     }
     let budget = (rows_area.width as usize).saturating_sub(2);
     let now = orion_core::clock::now_secs() as i64;
-    // What orion has going on each issue, for the rows' work column and
-    // the page's border.
+    // What is going on with each issue, for the rows' work column and the
+    // page's border.
     let works: HashMap<usize, Option<IssueWork>> = visible
         .iter()
-        .map(|(i, _)| (*i, work_of(app, &view.project, &issues[*i], th)))
-        .chain(cursor.map(|c| (c, work_of(app, &view.project, &issues[c], th))))
+        .map(|(i, _)| (*i, work_of(app, &view.project, &issues[*i])))
+        .chain(cursor.map(|c| (c, work_of(app, &view.project, &issues[c]))))
         .collect();
-    let pr_w = works.values().flatten().next().map(|_| {
-        works
-            .values()
-            .flatten()
-            .filter_map(|w| w.pr.map(|(n, _)| n.to_string().len() + 1))
-            .max()
-            .unwrap_or(0)
-    });
+    let widths = WorkWidths::of(works.values().flatten());
     let spin = app.spin_phase();
     // A header over each status, a line per issue.
     let keys: Vec<&str> = visible
@@ -2069,7 +2178,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
                 let marked = view.marked.contains(&issue.id);
                 let work = WorkColumn {
                     work: works.get(index).cloned().flatten(),
-                    pr_w,
+                    widths,
                     spin,
                 };
                 let line = title_spans(issue, positions, marked, budget, &work, th);
@@ -2281,28 +2390,24 @@ fn title_spans(
     spans
 }
 
-/// [`IssueWork`] on the page's border: ` ⎇ eng-12-fix… ● #42 `, the
-/// branch cut to [`BORDER_BRANCH_W`].
+/// [`IssueWork`] on the page's border, the row's marks with the branch
+/// spelled out: ` ◐ ⎇ eng-12-fix… ↗ #42 ready `, the branch cut to
+/// [`BORDER_BRANCH_W`].
 fn border_work_spans(work: &IssueWork, spin: Option<usize>, th: Theme) -> Vec<Span<'static>> {
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::styled("⎇ ", Style::default().fg(th.accent)),
-        Span::styled(
-            truncate(&work.branch, BORDER_BRANCH_W),
-            Style::default().fg(th.muted),
-        ),
-    ];
+    let mut spans = vec![Span::raw(" ")];
     if let Some((status, unseen)) = work.session {
-        spans.push(Span::raw(" "));
         spans.push(crate::ui::status_dot(Some(status), unseen, spin, th));
-    } else {
-        spans.push(Span::raw(" "));
     }
-    if let Some((number, color)) = work.pr {
+    spans.push(scope_span(work, th));
+    if let Some(branch) = &work.branch {
         spans.push(Span::styled(
-            format!("#{number} "),
-            Style::default().fg(color),
+            format!("{} ", truncate(branch, BORDER_BRANCH_W)),
+            Style::default().fg(th.muted),
         ));
+    }
+    if let Some(pr) = work.pr {
+        spans.extend(pr_spans(pr, 0, 0, th));
+        spans.push(Span::raw(" "));
     }
     spans
 }
@@ -2310,15 +2415,72 @@ fn border_work_spans(work: &IssueWork, spin: Option<usize>, th: Theme) -> Vec<Sp
 /// The most of a branch's name the page's border shows.
 const BORDER_BRANCH_W: usize = 24;
 
-/// The work column at a row's right end, the PULL REQUESTS MODAL's status
-/// column's counterpart: `⎇` for a branch that picked the issue up, its
-/// sessions' STATUS MARK, then the open pull request's `#42` in a column
-/// as wide as the list's widest. Blank on a row nothing picked up, and no
-/// column at all on a list where nothing was.
+/// Where the work is, as the launcher's band marks a checkout: `⎇` for an
+/// orion worktree, `⇢` for a pull request opened outside orion, dim both.
+fn scope_span(work: &IssueWork, th: Theme) -> Span<'static> {
+    let glyph = match (&work.branch, work.pr) {
+        (Some(_), _) => "⎇ ",
+        (None, Some(_)) => "⇢ ",
+        (None, None) => "  ",
+    };
+    Span::styled(glyph, Style::default().fg(th.dim))
+}
+
+/// A pull request as the band draws one ([`crate::pr_row::look`]): `↗ `,
+/// `#42` right-aligned to `num_w` and the state word padded to `word_w`.
+fn pr_spans(pr: WorkPr, num_w: usize, word_w: usize, th: Theme) -> Vec<Span<'static>> {
+    let look = crate::pr_row::look(pr.standing, pr.trouble, th);
+    vec![
+        Span::styled("↗ ", Style::default().fg(look.glyph)),
+        Span::styled(
+            format!("{:>num_w$}", format!("#{}", pr.number)),
+            Style::default().fg(look.label),
+        ),
+        Span::styled(
+            format!(" {:<word_w$}", pr.word()),
+            Style::default().fg(look.badge),
+        ),
+    ]
+}
+
+/// How wide the work column's pull request runs on a list: the widest
+/// `#42` and state word; both 0 when no row has a pull request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WorkWidths {
+    num: usize,
+    word: usize,
+}
+
+impl WorkWidths {
+    /// `None` when no row has work: the list has no column at all.
+    fn of<'a>(works: impl Iterator<Item = &'a IssueWork>) -> Option<Self> {
+        works.fold(None, |widths, work| {
+            let mut widths = widths.unwrap_or(WorkWidths::default());
+            if let Some(pr) = work.pr {
+                widths.num = widths.num.max(pr.number.to_string().len() + 1);
+                widths.word = widths.word.max(pr.word().len());
+            }
+            Some(widths)
+        })
+    }
+
+    /// The cells a row's `↗ #42 ready` takes: 0 on a list without one.
+    fn pr(self) -> usize {
+        if self.num == 0 {
+            return 0;
+        }
+        "↗ ".chars().count() + self.num + 1 + self.word
+    }
+}
+
+/// The work column at a row's right end: the sessions' STATUS MARK, where
+/// the work is ([`scope_span`]), then the pull request as the band draws
+/// it, its number and word in columns as wide as the list's widest. A row
+/// with a pull request and an orion worktree shows both. Blank on a row
+/// nothing has, and no column at all on a list where nothing does.
 pub(crate) struct WorkColumn {
     work: Option<IssueWork>,
-    /// The widest `#42` on the list, `None` when no row has work.
-    pr_w: Option<usize>,
+    widths: Option<WorkWidths>,
     spin: Option<usize>,
 }
 
@@ -2327,19 +2489,21 @@ impl WorkColumn {
     pub(crate) fn none() -> Self {
         WorkColumn {
             work: None,
-            pr_w: None,
+            widths: None,
             spin: None,
         }
     }
 
-    /// The cells the column takes, the space before it included.
+    /// The cells the column takes, the space before it and after it
+    /// included.
     fn width(&self) -> usize {
-        // ` ⎇ ● ` and the number with a space before it.
-        self.pr_w.map_or(0, |w| 6 + if w > 0 { w + 1 } else { 0 })
+        // ` ● ⎇ `, then `↗ #42 ready ` when the list has a pull request.
+        self.widths
+            .map_or(0, |w| 6 + if w.pr() > 0 { w.pr() + 1 } else { 0 })
     }
 
     fn spans(&self, th: Theme) -> Vec<Span<'static>> {
-        let Some(pr_w) = self.pr_w else {
+        let Some(widths) = self.widths else {
             return Vec::new();
         };
         let Some(work) = &self.work else {
@@ -2347,22 +2511,20 @@ impl WorkColumn {
         };
         let mut spans = vec![
             Span::raw(" "),
-            Span::styled("⎇ ", Style::default().fg(th.accent)),
             match work.session {
                 Some((status, unseen)) => {
                     crate::ui::status_dot(Some(status), unseen, self.spin, th)
                 }
                 None => Span::raw("  "),
             },
+            scope_span(work, th),
         ];
-        if pr_w > 0 {
-            spans.push(match work.pr {
-                Some((number, color)) => Span::styled(
-                    format!(" {:>pr_w$}", format!("#{number}")),
-                    Style::default().fg(color),
-                ),
-                None => Span::raw(" ".repeat(pr_w + 1)),
-            });
+        if widths.pr() > 0 {
+            match work.pr {
+                Some(pr) => spans.extend(pr_spans(pr, widths.num, widths.word, th)),
+                None => spans.push(Span::raw(" ".repeat(widths.pr()))),
+            }
+            spans.push(Span::raw(" "));
         }
         spans.push(Span::raw(" "));
         spans
@@ -2629,12 +2791,14 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 // ---- Linear HTTP (key never on argv) ----
 
 /// What each listed issue is read with: the row and its meta line, the
-/// reading pane, and its team's workflow states for `⌘S` — the same
-/// fields whoever's issues are asked for.
+/// reading pane, its team's workflow states for `⌘S`, and the pull
+/// requests attached to it for the work column — the same fields whoever's
+/// issues are asked for.
 const ISSUE_FIELDS: &str = "id identifier title url description priority createdAt updatedAt \
     state { name type color } labels { nodes { name color } } project { name color } \
     assignee { displayName } \
-    team { id states { nodes { id name type position color } } }";
+    team { id states { nodes { id name type position color } } } \
+    attachments(first: 10) { nodes { url metadata } }";
 
 /// How many of the configured user's issues one ask lists.
 const MINE_LIMIT: usize = 100;
@@ -3256,6 +3420,13 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        prs: value
+            .pointer("/attachments/nodes")
+            .and_then(|n| n.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(IssuePr::from_json)
+            .collect(),
     })
 }
 
@@ -3488,6 +3659,7 @@ pub(crate) mod tests {
             mine: true,
             created_at: String::new(),
             updated_at: String::new(),
+            prs: Vec::new(),
         }
     }
 
@@ -4748,38 +4920,25 @@ pub(crate) mod tests {
         assert!(!names_issue("main", "ENG-12"));
     }
 
-    /// An issue a worktree picked up — linked with `⌘.`, or named in its
-    /// branch — wears `⎇`, the sessions' mark and the open pull request on
-    /// its row, and the branch on the page's border; links outlive their
-    /// attach.
-    #[test]
-    fn picked_up_issues_show_their_branch_session_and_pull_request() {
-        let mut app = view_on(vec![
-            rich("1", "ENG-1", "Linked by hand", ("Todo", "unstarted"), 2),
-            rich(
-                "2",
-                "ENG-2",
-                "Named by its branch",
-                ("Todo", "unstarted"),
-                3,
-            ),
-            rich("3", "ENG-3", "Nobody's", ("Todo", "unstarted"), 3),
-        ]);
-        for (n, branch) in [(1, "solar-lemur"), (2, "fix/eng-2-thing")] {
-            app.tree.worktrees.push(orion_core::Worktree {
-                id: orion_core::WorktreeId(format!("w{n}")),
-                project_id: ProjectId("p1".into()),
-                path: PathBuf::from(format!("/wt/{n}")),
-                branch: branch.into(),
-                is_main: false,
-                sort_order: n,
-            });
-        }
+    /// A worktree in project `p1` on `branch`, as `w{n}`.
+    fn worktree_on(app: &mut App, n: usize, branch: &str, is_main: bool) {
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: orion_core::WorktreeId(format!("w{n}")),
+            project_id: ProjectId("p1".into()),
+            path: PathBuf::from(format!("/wt/{n}")),
+            branch: branch.into(),
+            is_main,
+            sort_order: n as i64,
+        });
+    }
+
+    /// A session in the worktree `w{n}`.
+    fn agent_in(app: &mut App, n: usize, status: orion_core::AgentStatus) {
         app.tree.agents.push(orion_core::Agent {
-            id: orion_core::AgentId("a".into()),
-            worktree_id: orion_core::WorktreeId("w1".into()),
+            id: orion_core::AgentId(format!("a{n}")),
+            worktree_id: orion_core::WorktreeId(format!("w{n}")),
             name: "a".into(),
-            status: orion_core::AgentStatus::NeedsFeedback,
+            status,
             archived: false,
             archived_at: 0,
             unseen: false,
@@ -4796,37 +4955,204 @@ pub(crate) mod tests {
             recent_prompts: Vec::new(),
             usage_limit: None,
         });
+    }
+
+    /// A pull request Linear has on an issue, from `repo`.
+    fn attached_pr(repo: &str, number: u64, branch: &str, state: &str) -> IssuePr {
+        IssuePr {
+            number,
+            url: format!("https://github.com/o/{repo}/pull/{number}"),
+            branch: branch.into(),
+            state: state.into(),
+            draft: false,
+            conflicts: false,
+        }
+    }
+
+    /// The project's open pull requests, as `gh` last listed them.
+    fn open_list(app: &mut App, list: Vec<crate::pull_request::OpenPr>) {
+        let now = std::time::Instant::now();
+        app.open_prs.insert(
+            ProjectId("p1".into()),
+            crate::app::OpenPrs {
+                list,
+                at: now,
+                due: now,
+                step: std::time::Duration::from_secs(60),
+            },
+        );
+    }
+
+    /// The row on `screen` that holds `needle`.
+    fn line_with(screen: &str, needle: &str) -> String {
+        screen
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle:?} on\n{screen}"))
+            .to_string()
+    }
+
+    /// An issue a worktree picked up — linked with `⌘.`, or named in its
+    /// branch — wears its sessions' mark and `⎇` on its row, and the branch
+    /// on the page's border; links outlive their attach.
+    #[test]
+    fn picked_up_issues_show_their_session_and_worktree() {
+        let mut app = view_on(vec![
+            rich("1", "ENG-1", "Linked by hand", ("Todo", "unstarted"), 2),
+            rich(
+                "2",
+                "ENG-2",
+                "Named by its branch",
+                ("Todo", "unstarted"),
+                3,
+            ),
+            rich("3", "ENG-3", "Nobody's", ("Todo", "unstarted"), 3),
+        ]);
+        worktree_on(&mut app, 1, "solar-lemur", false);
+        worktree_on(&mut app, 2, "fix/eng-2-thing", false);
+        agent_in(&mut app, 1, orion_core::AgentStatus::NeedsFeedback);
         app.linear_links
             .remember("solar-lemur", &[issue("1", "ENG-1", "Linked by hand")]);
         assert!(app.linear_links.take("solar-lemur").is_some());
-        let th = app.theme;
         let project = ProjectId("p1".into());
         let list = rows(&app, &project).to_vec();
-        let work = |i: usize| work_of(&app, &project, &list[i], th);
+        let work = |i: usize| work_of(&app, &project, &list[i]);
         let linked = work(0).expect("linked by hand, kept after its attach");
-        assert_eq!(linked.branch, "solar-lemur");
+        assert_eq!(linked.branch.as_deref(), Some("solar-lemur"));
         assert_eq!(
             linked.session.map(|(s, _)| s),
             Some(orion_core::AgentStatus::NeedsFeedback)
         );
-        assert_eq!(work(1).expect("named").branch, "fix/eng-2-thing");
+        assert_eq!(
+            work(1).expect("named").branch.as_deref(),
+            Some("fix/eng-2-thing")
+        );
         assert_eq!(work(1).unwrap().session, None);
         assert_eq!(work(2), None);
 
         let screen = shot(&mut app, 220, 40);
-        let row = |needle: &str| {
-            screen
-                .lines()
-                .find(|l| l.contains(needle))
-                .unwrap()
-                .to_string()
-        };
-        assert!(row("ENG-1 Linked by hand").contains("⎇ ●"), "{screen}");
+        let row = |needle: &str| line_with(&screen, needle);
+        assert!(row("ENG-1 Linked by hand").contains("● ⎇"), "{screen}");
         assert!(row("ENG-2 Named").contains('⎇'), "{screen}");
         assert!(!row("ENG-3 Nobody's").contains('⎇'), "{screen}");
         assert!(
-            row("ENG-1 ─").contains("⎇ solar-lemur"),
+            row("ENG-1 ─").contains("● ⎇ solar-lemur"),
             "the border\n{screen}"
+        );
+    }
+
+    /// The pull request that has an issue shows wherever it was opened:
+    /// orion's own beside the worktree's working agent, one Linear has
+    /// from outside orion behind `⇢`, a merged one once it has left the
+    /// open list, and one whose worktree is gone. The release pull request
+    /// from the root checkout's branch is never an issue's.
+    #[test]
+    fn an_issues_pull_request_shows_wherever_it_was_opened() {
+        let mut ours = rich("1", "ENG-1", "Ours", ("In Review", "started"), 2);
+        ours.prs = vec![attached_pr("r", 42, "fix/eng-1-login", "open")];
+        let mut outside = rich("2", "ENG-2", "Outside", ("In Review", "started"), 2);
+        outside.prs = vec![IssuePr {
+            conflicts: true,
+            ..attached_pr("other", 305, "ana/chevron-rows", "open")
+        }];
+        let mut landed = rich("3", "ENG-3", "Landed", ("In Review", "started"), 2);
+        landed.prs = vec![
+            attached_pr("r", 1354, "dev", "open"),
+            attached_pr("r", 290, "eng-3-old", "closed"),
+            attached_pr("r", 301, "eng-3-scopes", "merged"),
+        ];
+        let mut release = rich("4", "ENG-4", "Release only", ("Todo", "unstarted"), 2);
+        release.prs = vec![attached_pr("r", 1354, "dev", "open")];
+        let gone = rich("5", "ENG-5", "Gone", ("Todo", "unstarted"), 2);
+        let mut app = view_on(vec![ours, outside, landed, release, gone]);
+        worktree_on(&mut app, 0, "dev", true);
+        worktree_on(&mut app, 1, "fix/eng-1-login", false);
+        agent_in(&mut app, 1, orion_core::AgentStatus::Running);
+        app.linear_links
+            .remember("gone-branch", &[issue("5", "ENG-5", "Gone")]);
+        let pr_on = |number: u64, head: &str| crate::pull_request::OpenPr {
+            url: format!("https://github.com/o/r/pull/{number}"),
+            head: head.into(),
+            ..open_pr(number, "x")
+        };
+        open_list(
+            &mut app,
+            vec![
+                pr_on(42, "fix/eng-1-login"),
+                pr_on(50, "gone-branch"),
+                pr_on(1354, "dev"),
+            ],
+        );
+        use crate::pull_request::{Standing, Trouble};
+        let project = ProjectId("p1".into());
+        let list = rows(&app, &project).to_vec();
+        let work = |ident: &str| {
+            let issue = list.iter().find(|i| i.identifier == ident).unwrap();
+            work_of(&app, &project, issue)
+        };
+        let ours = work("ENG-1").unwrap();
+        assert_eq!(ours.branch.as_deref(), Some("fix/eng-1-login"));
+        assert_eq!(
+            ours.session.map(|(s, _)| s),
+            Some(orion_core::AgentStatus::Running)
+        );
+        assert_eq!(
+            ours.pr.map(|p| (p.number, p.standing)),
+            Some((42, Standing::Open))
+        );
+        let outside = work("ENG-2").unwrap();
+        assert_eq!(outside.branch, None);
+        assert_eq!(outside.pr.and_then(|p| p.trouble), Some(Trouble::Conflicts));
+        assert_eq!(
+            work("ENG-3").unwrap().pr.map(|p| (p.number, p.standing)),
+            Some((301, Standing::Merged)),
+            "merged beats closed; the release is nobody's"
+        );
+        assert_eq!(work("ENG-4"), None, "the release pull request alone");
+        let gone = work("ENG-5").unwrap();
+        assert_eq!(gone.branch, None, "the link's checkout is gone");
+        assert_eq!(gone.pr.map(|p| p.number), Some(50));
+
+        let screen = shot(&mut app, 220, 40);
+        let row = |needle: &str| line_with(&screen, needle);
+        assert!(row("ENG-1 Ours").contains("◐ ⎇ ↗  #42 ready"), "{screen}");
+        assert!(
+            row("ENG-2 Outside").contains("⇢ ↗ #305 conflicts"),
+            "{screen}"
+        );
+        assert!(row("ENG-3 Landed").contains("⇢ ↗ #301 merged"), "{screen}");
+        assert!(!row("ENG-4 Release").contains('↗'), "{screen}");
+        assert!(row("ENG-5 Gone").contains("⇢ ↗  #50 ready"), "{screen}");
+    }
+
+    /// A GitHub pull request attachment reads from Linear's metadata; any
+    /// other attachment is skipped.
+    #[test]
+    fn pull_requests_read_from_linears_attachments() {
+        let issue = issue_from(&serde_json::json!({
+            "id": "1", "identifier": "ENG-1", "url": "u",
+            "attachments": { "nodes": [
+                { "url": "https://github.com/o/r/pull/1358", "metadata": {
+                    "number": 1358, "branch": "fix/eng-1", "status": "open",
+                    "draft": true, "hasConflicts": false } },
+                { "url": "https://www.figma.com/file/abc", "metadata": {} },
+            ] },
+        }))
+        .unwrap();
+        assert_eq!(
+            issue.prs,
+            [IssuePr {
+                number: 1358,
+                url: "https://github.com/o/r/pull/1358".into(),
+                branch: "fix/eng-1".into(),
+                state: "open".into(),
+                draft: true,
+                conflicts: false,
+            }]
+        );
+        assert_eq!(
+            issue.prs[0].standing(),
+            crate::pull_request::Standing::Draft
         );
     }
 

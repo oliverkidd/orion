@@ -117,6 +117,7 @@ fn crumb(app: &App) -> Vec<CrumbSeg> {
         if let Some(session) = app.selected_session_row() {
             // A link's crumb is its pull request's number, or its display
             // label — never the raw URL, which would eat the bar.
+            let mut badge = None;
             let (mark, name, style) = match &session {
                 SessionRow::Agent(a) => {
                     let (mark, style) = super::launcher_view::session_crumb(app, a);
@@ -127,19 +128,34 @@ fn crumb(app: &App) -> Vec<CrumbSeg> {
                     t.name.clone(),
                     Style::default().fg(th.text),
                 ),
-                SessionRow::Link(link) => (
-                    Span::styled("↗ ", Style::default().fg(th.muted)),
-                    match link.pull_request() {
-                        Some(pr) => format!("#{}", pr.number),
-                        None => link.label(),
-                    },
-                    Style::default().fg(th.text),
-                ),
+                SessionRow::Link(link) => match link.pull_request() {
+                    // A pull request in `pr_row::look`'s colours, its
+                    // state word after the number as the BAND has it.
+                    Some(pr) => {
+                        let look = crate::pr_row::look(pr.standing(), pr.trouble(), th);
+                        badge = Some(Span::styled(
+                            format!(" {}", pr.standing().word(pr.trouble())),
+                            Style::default().fg(look.badge),
+                        ));
+                        (
+                            Span::styled("↗ ", Style::default().fg(look.glyph)),
+                            format!("#{}", pr.number),
+                            Style::default().fg(look.label),
+                        )
+                    }
+                    None => (
+                        Span::styled("↗ ", Style::default().fg(th.muted)),
+                        link.label(),
+                        Style::default().fg(th.text),
+                    ),
+                },
             };
             segs.push(gap());
+            let mut spans = vec![mark, Span::styled(truncate(&name, 24), style)];
+            spans.extend(badge);
             segs.push(CrumbSeg {
                 part: Some(CrumbPart::Session),
-                spans: vec![mark, Span::styled(truncate(&name, 24), style)],
+                spans,
             });
         }
     }
@@ -545,10 +561,10 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         _ => None,
     };
     let spot_max = (area.width / 3).min(area.width.saturating_sub(right_w + 2));
-    let spot = app
-        .spotify
-        .as_ref()
-        .and_then(|np| crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover));
+    let spot_sweep = app.animations.then(|| app.sweep_phase());
+    let spot = app.spotify.as_ref().and_then(|np| {
+        crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover, spot_sweep)
+    });
     let spot_w = spot.as_ref().map_or(0, |r| r.width);
     let left = Rect {
         width: area

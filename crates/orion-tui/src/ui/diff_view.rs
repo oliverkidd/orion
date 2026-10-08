@@ -26,9 +26,9 @@
 //!   handler matches.
 
 use super::{
-    below_first_row, centered_rect_pct, empty_list_row, fuzzy_highlight_spans, panel_block,
-    render_row, row_rect, search_line, truncate, truncate_cells, visible_positions, NO_MATCHES,
-    SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    below_first_row, centered_rect_pct, count_style, empty_list_row, fuzzy_highlight_spans,
+    panel_block, render_row, row_rect, search_line, truncate, truncate_cells, visible_positions,
+    CountColumns, NO_MATCHES, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 use crate::app::{App, DiffFocus, DiffView, Overlay};
 use crate::bundle::plural;
@@ -530,69 +530,6 @@ fn pin_right<'a>(mut left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) ->
     left.push(Span::raw(" ".repeat(gap)));
     left.extend(right);
     left
-}
-
-/// A list's `+A −R` column pair, each as wide as its widest entry, so the
-/// counts of every row line up on the right edge.
-struct CountColumns {
-    added: usize,
-    removed: usize,
-}
-
-impl CountColumns {
-    fn of(lines: impl Iterator<Item = Option<crate::git_diff::LineChanges>>) -> Self {
-        let mut cols = Self {
-            added: 0,
-            removed: 0,
-        };
-        // The sign and every digit are a cell each.
-        let cells = |n: u64| 1 + n.checked_ilog10().map_or(1, |d| d as usize + 1);
-        for l in lines.flatten() {
-            cols.added = cols.added.max(cells(l.added));
-            cols.removed = cols.removed.max(cells(l.removed));
-        }
-        cols
-    }
-
-    /// No row of the list was counted: no columns at all.
-    fn is_empty(&self) -> bool {
-        self.added == 0
-    }
-
-    /// The cells the pair takes, its trailing space included.
-    fn width(&self) -> usize {
-        if self.is_empty() {
-            0
-        } else {
-            self.added + self.removed + 2
-        }
-    }
-
-    /// `+A −R ` padded to the columns — blank for a row not counted (yet),
-    /// nothing at all for a list with no counts.
-    fn spans(&self, lines: Option<crate::git_diff::LineChanges>, th: Theme) -> Vec<Span<'static>> {
-        if self.is_empty() {
-            return Vec::new();
-        }
-        let Some(l) = lines else {
-            return vec![Span::raw(" ".repeat(self.width()))];
-        };
-        vec![
-            Span::styled(
-                format!("{:>w$}", format!("+{}", l.added), w = self.added),
-                count_style(l.added, th.added, th),
-            ),
-            Span::styled(
-                format!(" {:>w$} ", format!("−{}", l.removed), w = self.removed),
-                count_style(l.removed, th.removed, th),
-            ),
-        ]
-    }
-}
-
-/// A `+A` or `−R` count in its colour — dim when nothing went that way.
-fn count_style(n: u64, color: ratatui::style::Color, th: Theme) -> Style {
-    Style::default().fg(if n == 0 { th.dim } else { color })
 }
 
 /// A file row's gutter ahead of its path: the two-letter status code and

@@ -923,7 +923,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::Spotify,
                 label: "Spotify in footer",
-                hint: "Show what Spotify is playing, with ⏮ ⏸ ⏭ buttons (macOS)",
+                hint: "Show what Spotify is playing, with ⏮  ⏸ ⏭ buttons (macOS)",
                 group: "",
             },
             SettingSpec {
@@ -1579,7 +1579,7 @@ pub struct Config {
     /// fewer repaints on constrained machines.
     pub animations: bool,
     /// SPOTIFY IN FOOTER: the footer's readout of what the Spotify desktop
-    /// app is playing, `♪ Midnight City · M83  ⏮ ⏸ ⏭`, its glyphs buttons
+    /// app is playing, `♪ Midnight City · M83  ⏮  ⏸ ⏭`, its glyphs buttons
     /// (`crate::spotify`). macOS only, asked over AppleScript; on by
     /// default, and nothing shows while Spotify is closed. Off, the poll
     /// stops too.
