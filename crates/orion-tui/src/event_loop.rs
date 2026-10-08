@@ -19831,7 +19831,7 @@ diff --git a/src/c.rs b/src/c.rs
         // Paused, the glyph is play.
         app.spotify = Some(midnight_city(false));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert_eq!(cell(&terminal).symbol(), "▶");
+        assert_eq!(cell(&terminal).symbol(), "⏵");
     }
 
     /// A poll that set out before a click lands after it without undoing

@@ -64,7 +64,7 @@ pub enum Button {
     /// `⏮`: back a track — or, more than a few seconds in, back to the
     /// start of this one, as the media key does.
     Previous,
-    /// `⏸` while playing, `▶` while paused.
+    /// `⏸` while playing, `⏵` while paused.
     PlayPause,
     /// `⏭`.
     Next,
@@ -209,7 +209,7 @@ const GAP: &str = "  ";
 const SEP: &str = " · ";
 
 /// The spaces before `button`'s glyph. `⏮` and `⏭` draw two cells wide in
-/// Ghostty, spilling into the space after them, where `⏸` and `▶` keep to
+/// Ghostty, spilling into the space after them, where `⏸` and `⏵` keep to
 /// one — so `⏮` takes two, and the toggle sits centred between them.
 fn before(button: Button) -> &'static str {
     match button {
@@ -249,7 +249,7 @@ pub fn readout(
     sweep: Option<usize>,
 ) -> Option<Readout> {
     use crate::branch_switch::{cells, fit};
-    let toggle = if np.playing { "⏸" } else { "▶" };
+    let toggle = if np.playing { "⏸" } else { "⏵" };
     let glyphs = [
         (Button::Previous, "⏮"),
         (Button::PlayPause, toggle),
@@ -422,14 +422,14 @@ mod tests {
             ..
         } = readout(&paused, 60, th, None, None).unwrap();
         let line = text(&spans);
-        assert_eq!(line, "♪ Midnight City · M83  ⏮  ▶ ⏭");
+        assert_eq!(line, "♪ Midnight City · M83  ⏮  ⏵ ⏭");
         assert_eq!(
             line.chars().nth(cols[1].1.start as usize),
-            Some('▶'),
+            Some('⏵'),
             "paused shows play"
         );
         assert_eq!(spans[1].style.fg, Some(th.dim), "and dims the title");
-        let toggle = spans.iter().find(|s| s.content == "▶").unwrap();
+        let toggle = spans.iter().find(|s| s.content == "⏵").unwrap();
         assert_eq!(toggle.style.fg, Some(th.dim), "and the button");
         let spans = readout(&np, 60, th, None, None).unwrap().spans;
         let green = crate::ui::footer::upgrade_ramp(th)[0];
