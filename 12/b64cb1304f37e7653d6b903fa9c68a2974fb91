@@ -1,0 +1,21 @@
+crates/orion-tui/src/event_loop.rs
+  s_10267d98792e35::t_c3b7ffb877db9a 19834
+crates/orion-tui/src/spotify.rs
+  s_10267d98792e35::t_fc7738511b94af 67,212,252,425,428,432
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "12b64cb1304f37e7653d6b903fa9c68a2974fb91",
+  "prompts": {},
+  "sessions": {
+    "s_10267d98792e35": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c968d7b4-2636-4e58-ba3c-9babe098a4a5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
