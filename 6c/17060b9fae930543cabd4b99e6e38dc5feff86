@@ -1,0 +1,20 @@
+crates/orion-tui/src/linear.rs
+  s_fad58d9d3f2b7c::t_d8ca8a3e858f1f 4016-4052
+  s_fad58d9d3f2b7c::t_4cbc1b03584c8e 967-970,984,991-1006,1025,1028
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6c17060b9fae930543cabd4b99e6e38dc5feff86",
+  "prompts": {},
+  "sessions": {
+    "s_fad58d9d3f2b7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d310f7ec-d142-4749-a8df-0861c6f490b5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
