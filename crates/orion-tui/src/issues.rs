@@ -19,10 +19,16 @@
 //! the text, so nothing typed is lost.
 //!
 //! `⌘I` edits the issue itself, in place: the reading pane becomes a form
-//! on its title and description ([`IssueEditor`]), and Enter sends both
-//! as one `gh issue edit` off the loop. The form holds until GitHub
-//! answers, so a refusal shows `gh`'s reason over text that is still
-//! there; a save that took lands on the row at once, and the list is
+//! on its title and description ([`IssueEditor`]), and Enter sends what
+//! changed as one `gh issue edit` off the loop — after reading the issue
+//! again, so a description someone changed on GitHub since the form
+//! opened is never overwritten: the form comes back over GitHub's new
+//! text with what was typed still in it, and says so ([`save`]) — or,
+//! when the form has gone meanwhile, the typing is kept for the next
+//! `⌘I` on the issue ([`EditDraft`]). The
+//! form holds until GitHub answers, so a refusal shows `gh`'s reason over
+//! text that is still there; a save that took lands on the row at once —
+//! laid over any list asked before it ([`NewerText`]) — and the list is
 //! re-asked underneath so the row is GitHub's copy.
 //!
 //! The list's filter is live from the moment the modal opens, as the
@@ -67,6 +73,7 @@ use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
 use crate::app::{clamp_selection, window_start, App, HitTarget, Overlay};
+use crate::fetch::{Asked, Ticket};
 use crate::markdown::{self, Breaks};
 use crate::pr_preview::fit;
 use crate::pull_request::{gh, login, str_at, web_url};
@@ -199,6 +206,11 @@ pub struct IssueComment {
 pub struct IssueDetail {
     pub url: String,
     pub comments: Vec<IssueComment>,
+    /// RFC 3339, when GitHub last saw the issue change as of this read:
+    /// a list row stamped later means the conversation has moved on.
+    /// Empty when `gh` didn't say.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// What `gh issue list` last said about a project, kept for the session so
@@ -229,15 +241,21 @@ pub struct PendingIssueDetail {
     pub dir: PathBuf,
 }
 
-/// A finished `gh` call, back on the loop. `None` is "couldn't ask".
+/// A finished `gh` call, back on the loop. `None` is "couldn't ask". A
+/// list and a conversation carry the ticket of the fetch that asked —
+/// which project or issue, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssuesAnswer {
     List {
-        project: ProjectId,
+        ticket: Ticket<ProjectId>,
         list: Option<Vec<Issue>>,
     },
+    /// One issue's conversation; the ticket's key is its URL. The rest is
+    /// what asking again takes, should a fresh read be owed.
     Detail {
-        url: String,
+        ticket: Ticket<String>,
+        number: u64,
+        dir: PathBuf,
         detail: Option<IssueDetail>,
     },
     /// `gh issue comment` finished; `posted` false is "couldn't post". The
@@ -249,14 +267,80 @@ pub enum IssuesAnswer {
         text: String,
         posted: bool,
     },
-    /// `gh issue edit` finished: the text GitHub now holds, or why it
-    /// refused — the first line `gh` printed.
+    /// A save finished ([`save`]): what was sent — the fields the form
+    /// changed — and how it went.
     Edited {
         project: ProjectId,
         url: String,
         number: u64,
-        outcome: Result<IssueText, String>,
+        sent: IssueEdit,
+        outcome: EditOutcome,
     },
+}
+
+/// How a save went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditOutcome {
+    /// GitHub took it: the issue's text as it now stands.
+    Saved(IssueText),
+    /// Nothing was sent: a field the form changed had been changed on
+    /// GitHub since the form opened. GitHub's text as it now stands.
+    Changed(IssueText),
+    /// `gh` refused, or couldn't be asked: the first line it printed.
+    Refused(String),
+}
+
+/// The fields a save sends: only the ones the form changed, so a save
+/// never writes back a field it only carried.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueEdit {
+    pub title: Option<String>,
+    pub body: Option<String>,
+}
+
+impl IssueEdit {
+    /// What `edited` changes from `original`.
+    pub fn between(original: &IssueText, edited: &IssueText) -> Self {
+        Self {
+            title: (edited.title != original.title).then(|| edited.title.clone()),
+            body: (edited.body != original.body).then(|| edited.body.clone()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.body.is_none()
+    }
+
+    /// `base` with these fields over it.
+    pub fn over(&self, base: &IssueText) -> IssueText {
+        IssueText {
+            title: self.title.clone().unwrap_or_else(|| base.title.clone()),
+            body: self.body.clone().unwrap_or_else(|| base.body.clone()),
+        }
+    }
+}
+
+/// What a save that went nowhere had typed, kept for its issue when the
+/// form that sent it is gone (`App::issue_edit_drafts`): the next `⌘I` on
+/// the issue opens on it, so a refusal or a conflict never costs what was
+/// typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditDraft {
+    /// The fields the form had changed, as typed.
+    pub typed: IssueEdit,
+    /// Why it wasn't saved, for the form's frame.
+    pub notice: String,
+}
+
+/// An issue's text orion knows is newer than its project's list
+/// (`App::issue_edits`): a save GitHub took, or GitHub's copy read before
+/// one, and when that was. A list asked before `asked` gets it laid over
+/// its row; one asked after it is GitHub's copy, and retires it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewerText {
+    pub project: ProjectId,
+    pub asked: Asked,
+    pub text: IssueText,
 }
 
 /// The modal's own state. The rows live on the [`App`] (`issues`, keyed by
@@ -412,6 +496,37 @@ impl IssueEditor {
         }
     }
 
+    /// The form again after a save went nowhere — the issue changed on
+    /// GitHub since it opened, or `gh` refused: opened now on GitHub's
+    /// `current` text, with the fields the user changed (`sent`) still
+    /// holding what they typed, so nothing is lost and Enter sends theirs
+    /// over GitHub's knowingly; `notice` on the frame says why.
+    pub fn reloaded(
+        url: String,
+        number: u64,
+        current: IssueText,
+        sent: &IssueEdit,
+        notice: String,
+    ) -> Self {
+        let typed = sent.over(&current);
+        Self {
+            url,
+            number,
+            title: TextInput::with_text(typed.title),
+            body: TextInput::multiline_with_text(typed.body),
+            field: if sent.title.is_some() && sent.body.is_none() {
+                EditField::Title
+            } else {
+                EditField::Body
+            },
+            original: current,
+            saving: false,
+            notice: Some(notice),
+            title_area: Rect::default(),
+            body_area: Rect::default(),
+        }
+    }
+
     /// What Enter would send: the title trimmed, the description as typed.
     pub fn text(&self) -> IssueText {
         IssueText {
@@ -469,7 +584,7 @@ pub async fn detail(dir: &Path, number: u64) -> Option<IssueDetail> {
     let number = number.to_string();
     let out = gh(
         Some(dir),
-        &["issue", "view", &number, "--json", "url,comments"],
+        &["issue", "view", &number, "--json", "url,comments,updatedAt"],
         TIMEOUT,
     )
     .await?;
@@ -525,29 +640,111 @@ async fn comment_via(
     tokio::time::timeout(TIMEOUT, run).await.unwrap_or(false)
 }
 
-/// Send one issue a new title and description, as the `gh` user. Unlike
-/// the reads this wants `gh`'s complaint, not just its silence: the first
-/// line it printed is what the form shows when GitHub refuses. The
-/// description goes down stdin (`--body-file -`) as a comment's does; the
-/// title rides argv as `--title=…`, one token, so one opening with `-`
-/// can't read as a flag either.
-pub async fn edit(dir: &Path, number: u64, text: &IssueText) -> Result<(), String> {
-    edit_via("gh", dir, number, text).await
+/// What the form tells the user when a save found the issue changed on
+/// GitHub since it opened — short, on the frame's foot.
+const CHANGED_NOTICE: &str = "changed on GitHub since you opened it — Enter saves yours over it";
+
+/// Save the form: send `edit` — the fields it changed from `original`,
+/// what it opened on — but only once a fresh read says GitHub still holds
+/// `original` for each of them. When one was changed there meanwhile,
+/// nothing is sent ([`EditOutcome::Changed`]), so a save never overwrites
+/// text someone else wrote after the form opened. Text equal but for line
+/// endings and trailing whitespace counts as unchanged.
+pub async fn save(dir: &Path, number: u64, original: &IssueText, edit: &IssueEdit) -> EditOutcome {
+    save_via("gh", dir, number, original, edit).await
 }
 
-/// [`edit`] through `program`: `gh` in the app, a script on disk in the
-/// tests, since the real thing would edit.
+/// [`save`] through `program`: `gh` in the app, a script on disk in the
+/// tests.
+async fn save_via(
+    program: impl AsRef<std::ffi::OsStr> + Clone,
+    dir: &Path,
+    number: u64,
+    original: &IssueText,
+    edit: &IssueEdit,
+) -> EditOutcome {
+    let current = match read_text_via(program.clone(), dir, number).await {
+        Ok(current) => current,
+        Err(why) => return EditOutcome::Refused(why),
+    };
+    // Changed there, and not to what was typed here.
+    let moved = |sent: &Option<String>, was: &str, now: &str| {
+        sent.as_deref()
+            .is_some_and(|sent| !same_text(was, now) && !same_text(sent, now))
+    };
+    if moved(&edit.title, &original.title, &current.title)
+        || moved(&edit.body, &original.body, &current.body)
+    {
+        return EditOutcome::Changed(current);
+    }
+    match edit_via(program, dir, number, edit).await {
+        Ok(()) => EditOutcome::Saved(edit.over(&current)),
+        Err(why) => EditOutcome::Refused(why),
+    }
+}
+
+/// Whether two texts say the same, past CRLF line endings and trailing
+/// whitespace GitHub may have normalised on the way through.
+fn same_text(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
+    norm(a) == norm(b)
+}
+
+/// Read one issue's title and description as GitHub holds them now, or
+/// why `gh` couldn't.
+async fn read_text_via(
+    program: impl AsRef<std::ffi::OsStr>,
+    dir: &Path,
+    number: u64,
+) -> Result<IssueText, String> {
+    let number = number.to_string();
+    let out = tokio::process::Command::new(program)
+        .args(["issue", "view", &number, "--json", "title,body"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .current_dir(dir)
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(TIMEOUT, out).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return Err(format!("couldn't run gh: {e}")),
+        Err(_) => return Err("gh timed out".into()),
+    };
+    if !out.status.success() {
+        return Err(complaint(&out.stderr));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| "couldn't read the issue back from gh".to_string())?;
+    Ok(IssueText {
+        title: str_at(&v, "title"),
+        body: str_at(&v, "body"),
+    })
+}
+
+/// Send one issue the fields of `edit`, as the `gh` user — a title, a
+/// description, or both; never one it doesn't carry. Unlike the reads
+/// this wants `gh`'s complaint, not just its silence: the first line it
+/// printed is what the form shows when GitHub refuses. The description
+/// goes down stdin (`--body-file -`) as a comment's does; the title rides
+/// argv as `--title=…`, one token, so one opening with `-` can't read as
+/// a flag either.
 async fn edit_via(
     program: impl AsRef<std::ffi::OsStr>,
     dir: &Path,
     number: u64,
-    text: &IssueText,
+    edit: &IssueEdit,
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
-    let number = number.to_string();
-    let title = format!("--title={}", text.title);
+    let mut args = vec!["issue".to_string(), "edit".into(), number.to_string()];
+    if let Some(title) = &edit.title {
+        args.push(format!("--title={title}"));
+    }
+    if edit.body.is_some() {
+        args.extend(["--body-file".into(), "-".into()]);
+    }
     let mut child = tokio::process::Command::new(program)
-        .args(["issue", "edit", &number, &title, "--body-file", "-"])
+        .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -558,7 +755,8 @@ async fn edit_via(
     let Some(mut stdin) = child.stdin.take() else {
         return Err("couldn't feed gh".into());
     };
-    let body = text.body.clone();
+    // No description to send: stdin closes empty, and `gh` never reads it.
+    let body = edit.body.clone().unwrap_or_default();
     let feed = async move {
         stdin.write_all(body.as_bytes()).await?;
         stdin.shutdown().await
@@ -626,6 +824,7 @@ fn parse_list(json: &str) -> Option<Vec<Issue>> {
 
 fn parse_detail(json: &str) -> Option<IssueDetail> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let updated_at = str_at(&v, "updatedAt");
     let url = web_url(&v)?;
     let mut comments: Vec<IssueComment> = v
         .get("comments")
@@ -642,7 +841,11 @@ fn parse_detail(json: &str) -> Option<IssueDetail> {
         .unwrap_or_default();
     // RFC 3339 UTC stamps sort lexicographically into chronological order.
     comments.sort_by(|a, b| a.at.cmp(&b.at));
-    Some(IssueDetail { url, comments })
+    Some(IssueDetail {
+        url,
+        comments,
+        updated_at,
+    })
 }
 
 /// `2026-09-10` out of an RFC 3339 stamp; empty when there is none.
@@ -730,7 +933,21 @@ pub(crate) fn reopen(app: &mut App, mut view: IssuesView) {
 /// left to the backoff — the checkout can come back. Without the loop's
 /// sender installed (the unit tests) nothing is asked.
 fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
-    if app.issues_inflight.contains(&project) {
+    ask_list(app, project, dir, false);
+}
+
+/// [`request_list`] for a list that must answer from after now — `⌘R`,
+/// `Shift+R`, a save that just landed: one already in flight was asked
+/// before, so it is marked owed and a fresh one follows it.
+fn request_list_fresh(app: &mut App, project: ProjectId, dir: PathBuf) {
+    ask_list(app, project, dir, true);
+}
+
+fn ask_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
+    if app.issues_flights.in_flight(&project) {
+        if fresh {
+            app.issues_flights.want_fresh(&project);
+        }
         return;
     }
     if !dir.is_dir() {
@@ -741,11 +958,22 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
     let Some(tx) = app.issues_tx.clone() else {
         return;
     };
-    app.issues_inflight.insert(project.clone());
+    let Some(ticket) = app.issues_flights.begin(project, std::time::Instant::now()) else {
+        return;
+    };
     tokio::spawn(async move {
         let list = list(&dir).await;
-        let _ = tx.send(IssuesAnswer::List { project, list });
+        let _ = tx.send(IssuesAnswer::List { ticket, list });
     });
+}
+
+/// The checkout `gh` runs from for `project`'s issues.
+fn project_dir(app: &App, project: &ProjectId) -> Option<PathBuf> {
+    app.tree
+        .projects
+        .iter()
+        .find(|p| &p.id == project)
+        .map(|p| p.repo_path.clone())
 }
 
 // ---- prefetching ----
@@ -792,7 +1020,7 @@ pub(crate) fn reload_selected(app: &mut App) {
         return;
     };
     app.issues_failed.remove(&project);
-    request_list(app, project, dir);
+    request_list_fresh(app, project, dir);
 }
 
 fn ask_selected_if_due(app: &mut App) {
@@ -834,7 +1062,7 @@ pub(crate) fn sweep_target(app: &App) -> Option<(ProjectId, PathBuf)> {
     app.project_rows()
         .into_iter()
         .map(|i| &app.tree.projects[i])
-        .filter(|p| Some(&p.id) != selected.as_ref() && !app.issues_inflight.contains(&p.id))
+        .filter(|p| Some(&p.id) != selected.as_ref() && !app.issues_flights.in_flight(&p.id))
         .find(|p| match app.issues_due.get(&p.id) {
             Some(beat) => {
                 let listed_recently = app
@@ -852,7 +1080,7 @@ pub(crate) fn sweep_target(app: &App) -> Option<(ProjectId, PathBuf)> {
 /// answer is in flight, not before the timer the last answer armed, and
 /// always for a project never asked about.
 pub(crate) fn prefetch_due(app: &App, project: &ProjectId) -> bool {
-    if app.issues_inflight.contains(project) {
+    if app.issues_flights.in_flight(project) {
         return false;
     }
     match app.issues_due.get(project) {
@@ -893,16 +1121,14 @@ fn arm_beat(app: &mut App, project: &ProjectId, found: bool) {
 
 /// Arm (or disarm) the debounced comments fetch for the issue in focus
 /// ([`issue_in_focus`]: the modal's row, or the PROJECT ISSUES GROUP row
-/// under the Worktrees cursor). An issue already fetched, in flight, or
-/// known unanswerable arms nothing. Landing on a row rewinds the reading
-/// pane.
+/// under the Worktrees cursor), when its page wants reading
+/// ([`detail_due`]). One in flight arms nothing. Landing on a row rewinds
+/// the reading pane.
 pub(crate) fn schedule_detail(app: &mut App) {
+    let now = std::time::Instant::now();
     let pending = issue_in_focus(app).and_then(|(issue, dir)| {
         let url = issue.url.clone();
-        if app.issue_detail.contains_key(&url)
-            || app.issue_detail_inflight.contains(&url)
-            || app.issue_detail_failed.contains(&url)
-        {
+        if app.issue_detail_flights.in_flight(&url) || !detail_due(app, &issue, now) {
             return None;
         }
         Some(PendingIssueDetail {
@@ -914,13 +1140,43 @@ pub(crate) fn schedule_detail(app: &mut App) {
     app.pending_issue_detail = pending.map(|p| (p, std::time::Instant::now() + DETAIL_DEBOUNCE));
 }
 
+/// Whether a visit should read `issue`'s conversation: never read; read
+/// longer ago than [`FRESH`]; or the list row says the issue changed after
+/// the page was read (a comment someone else left). A read that failed is
+/// tried again once it is as old, not given up on for the session.
+fn detail_due(app: &App, issue: &Issue, now: std::time::Instant) -> bool {
+    let Some(&at) = app.issue_detail_at.get(&issue.url) else {
+        return true;
+    };
+    if now >= at + FRESH {
+        return true;
+    }
+    if app.issue_detail_failed.contains(&issue.url) {
+        return false;
+    }
+    match app.issue_detail.get(&issue.url) {
+        None => true,
+        // RFC 3339 UTC stamps compare as text.
+        Some(page) => !page.updated_at.is_empty() && issue.updated_at > page.updated_at,
+    }
+}
+
 /// Fire the debounced fetch. Disarms first, so a `gh` that never answers
 /// can't re-fire on every loop turn.
 pub(crate) fn lookup_detail(app: &mut App) {
     let Some((pending, _)) = app.pending_issue_detail.take() else {
         return;
     };
+    ask_detail(app, pending);
+}
+
+/// Read one issue's conversation off the loop, unless a read is already
+/// running for it. A checkout that isn't on disk is a failed read noted
+/// without spending a process.
+fn ask_detail(app: &mut App, pending: PendingIssueDetail) {
     if !pending.dir.is_dir() {
+        app.issue_detail_at
+            .insert(pending.url.clone(), std::time::Instant::now());
         app.issue_detail_failed.insert(pending.url);
         app.dirty = true;
         return;
@@ -928,11 +1184,21 @@ pub(crate) fn lookup_detail(app: &mut App) {
     let Some(tx) = app.issues_tx.clone() else {
         return;
     };
-    app.issue_detail_inflight.insert(pending.url.clone());
+    let Some(ticket) = app
+        .issue_detail_flights
+        .begin(pending.url.clone(), std::time::Instant::now())
+    else {
+        return;
+    };
+    // Asked again: the pane says it is reading, not that the last read
+    // failed.
+    app.issue_detail_failed.remove(&pending.url);
     tokio::spawn(async move {
         let detail = detail(&pending.dir, pending.number).await;
         let _ = tx.send(IssuesAnswer::Detail {
-            url: pending.url,
+            ticket,
+            number: pending.number,
+            dir: pending.dir,
             detail,
         });
     });
@@ -940,18 +1206,24 @@ pub(crate) fn lookup_detail(app: &mut App) {
 
 /// A `gh` answer landed. A list replaces the project's rows — keeping the
 /// cursor on the issue it was on, by URL, so a refresh that retired a row
-/// above it does not slide the selection — and a failed list keeps the
-/// last good one, or says so when there is none; either way the next
-/// background ask is armed off it. Comments replace whatever the pane
-/// showed for the URL; a failed fetch is remembered so the pane says so
-/// instead of spinning.
+/// above it does not slide the selection, and with any text known newer
+/// than the list laid over its row ([`NewerText`]) — and a failed list
+/// keeps the last good one, or says so when there is none; either way the
+/// next background ask is armed off it. Comments replace whatever the
+/// pane showed for the URL; a failed fetch keeps any page there was and
+/// is remembered, so the pane says so instead of spinning. An answer
+/// whose fetch owes a fresh one starts it.
 pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
     match answer {
-        IssuesAnswer::List { project, list } => {
-            app.issues_inflight.remove(&project);
+        IssuesAnswer::List { ticket, list } => {
+            let Some(landed) = app.issues_flights.land(&ticket) else {
+                return;
+            };
+            let project = ticket.key.clone();
             arm_beat(app, &project, list.as_ref().is_some_and(|l| !l.is_empty()));
             match list {
-                Some(list) => {
+                Some(mut list) => {
+                    lay_newer_text(app, &project, ticket.asked(), &mut list);
                     let cursor_url = match &app.overlay {
                         Some(Overlay::Issues(view)) if view.project == project => app
                             .issues
@@ -984,20 +1256,38 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                 }
                 None => {
                     if !app.issues.contains_key(&project) {
-                        app.issues_failed.insert(project);
+                        app.issues_failed.insert(project.clone());
                     }
                 }
             }
+            if landed.owed {
+                if let Some(dir) = project_dir(app, &project) {
+                    request_list(app, project, dir);
+                }
+            }
         }
-        IssuesAnswer::Detail { url, detail } => {
-            app.issue_detail_inflight.remove(&url);
+        IssuesAnswer::Detail {
+            ticket,
+            number,
+            dir,
+            detail,
+        } => {
+            let Some(landed) = app.issue_detail_flights.land(&ticket) else {
+                return;
+            };
+            let url = ticket.key.clone();
+            app.issue_detail_at.insert(url.clone(), ticket.at);
             match detail {
                 Some(detail) => {
-                    app.issue_detail.insert(url, detail);
+                    app.issue_detail_failed.remove(&url);
+                    app.issue_detail.insert(url.clone(), detail);
                 }
                 None => {
-                    app.issue_detail_failed.insert(url);
+                    app.issue_detail_failed.insert(url.clone());
                 }
+            }
+            if landed.owed {
+                ask_detail(app, PendingIssueDetail { url, number, dir });
             }
         }
         IssuesAnswer::Comment {
@@ -1009,11 +1299,15 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
             app.issue_comment_inflight.remove(&issue.url);
             if posted {
                 // The conversation the pane has is one comment short now:
-                // forget it, and the cursor resting on the row reads it
-                // again, with the new comment in.
+                // forget it, and read it again with the new comment in —
+                // after the read already running, if one is, since that
+                // was asked before the comment landed.
                 app.issue_detail.remove(&issue.url);
                 app.issue_detail_failed.remove(&issue.url);
-                schedule_detail(app);
+                app.issue_detail_at.remove(&issue.url);
+                if !app.issue_detail_flights.want_fresh(&issue.url) {
+                    schedule_detail(app);
+                }
             } else {
                 app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't post the comment on #{} — is gh logged in?",
@@ -1031,19 +1325,15 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
             project,
             url,
             number,
+            sent,
             outcome,
         } => match outcome {
-            Ok(text) => {
+            EditOutcome::Saved(text) => {
                 // The row the pane reads from carries the new text at
-                // once; the refresh underneath makes it GitHub's copy.
-                if let Some(row) = app
-                    .issues
-                    .get_mut(&project)
-                    .and_then(|l| l.list.iter_mut().find(|i| i.url == url))
-                {
-                    row.title = text.title;
-                    row.body = text.body;
-                }
+                // once, over any list asked before now; the refresh
+                // underneath makes it GitHub's copy.
+                note_newer_text(app, &project, &url, text);
+                app.issue_edit_drafts.remove(&url);
                 if let Some(Overlay::Issues(view)) = &mut app.overlay {
                     if view
                         .editor
@@ -1053,38 +1343,121 @@ pub(crate) fn land_answer(app: &mut App, answer: IssuesAnswer) {
                         view.editor = None;
                     }
                 }
-                if let Some(dir) = app
-                    .tree
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project)
-                    .map(|p| p.repo_path.clone())
-                {
-                    request_list(app, project, dir);
+                if let Some(dir) = project_dir(app, &project) {
+                    request_list_fresh(app, project, dir);
                 }
             }
-            Err(why) => {
-                // The form that sent it shows why and keeps the text; one
-                // that has since gone gets the footer.
-                let mut told = false;
-                if let Some(Overlay::Issues(view)) = &mut app.overlay {
-                    if let Some(editor) = &mut view.editor {
-                        if editor.saving && editor.url == url {
-                            editor.saving = false;
-                            editor.notice = Some(why.clone());
-                            told = true;
-                        }
+            EditOutcome::Changed(current) => {
+                // Nothing was sent. The row shows GitHub's text now, and
+                // the form that sent it comes back over it with what was
+                // typed still in it; a form since gone leaves the typing
+                // as a draft for the next `⌘I` on the issue.
+                note_newer_text(app, &project, &url, current.clone());
+                let why = format!("#{number} changed on GitHub since you opened it");
+                if form_holding(app, &url) {
+                    if let Some(Overlay::Issues(view)) = &mut app.overlay {
+                        view.editor = Some(Box::new(IssueEditor::reloaded(
+                            url,
+                            number,
+                            current,
+                            &sent,
+                            CHANGED_NOTICE.into(),
+                        )));
                     }
+                    app.flash = Some(crate::flash::Flash::failed(why));
+                } else {
+                    let kept = keep_draft(app, url, sent, CHANGED_NOTICE.into());
+                    app.flash = Some(crate::flash::Flash::failed(kept_said(why, kept)));
                 }
-                if !told {
-                    app.flash = Some(crate::flash::Flash::failed(format!(
-                        "couldn't update issue #{number}: {why}"
-                    )));
+            }
+            EditOutcome::Refused(why) => {
+                // The form that sent it shows why and keeps the text; one
+                // that has since gone leaves the typing as a draft, and the
+                // footer says so.
+                if form_holding(app, &url) {
+                    if let Some(Overlay::Issues(IssuesView {
+                        editor: Some(editor),
+                        ..
+                    })) = &mut app.overlay
+                    {
+                        editor.saving = false;
+                        editor.notice = Some(why);
+                    }
+                } else {
+                    let said = format!("couldn't update issue #{number}: {why}");
+                    let kept = keep_draft(app, url, sent, why);
+                    app.flash = Some(crate::flash::Flash::failed(kept_said(said, kept)));
                 }
             }
         },
     }
     app.dirty = true;
+}
+
+/// Whether the form that sent `url`'s save is still up and waiting on it.
+fn form_holding(app: &App, url: &str) -> bool {
+    matches!(
+        &app.overlay,
+        Some(Overlay::Issues(IssuesView { editor: Some(e), .. })) if e.saving && e.url == url
+    )
+}
+
+/// Keep what a save whose form is gone had typed, for the next `⌘I` on
+/// the issue ([`open_editor`]). A save that sent nothing typed has
+/// nothing to keep. True when it kept something.
+fn keep_draft(app: &mut App, url: String, typed: IssueEdit, notice: String) -> bool {
+    if typed.is_empty() {
+        return false;
+    }
+    app.issue_edit_drafts
+        .insert(url, EditDraft { typed, notice });
+    true
+}
+
+/// The footer's word on a save whose form is gone: `said`, and that the
+/// typing waits on the next `⌘I` when it was kept.
+fn kept_said(said: String, kept: bool) -> String {
+    if kept {
+        format!("{said} — your edit is kept")
+    } else {
+        said
+    }
+}
+
+/// Keep `text` as newer than any list of `project` asked before now, and
+/// put it on its row at once.
+fn note_newer_text(app: &mut App, project: &ProjectId, url: &str, text: IssueText) {
+    if let Some(row) = app
+        .issues
+        .get_mut(project)
+        .and_then(|l| l.list.iter_mut().find(|i| i.url == url))
+    {
+        row.title = text.title.clone();
+        row.body = text.body.clone();
+    }
+    app.issue_edits.insert(
+        url.to_string(),
+        NewerText {
+            project: project.clone(),
+            asked: Asked::At(crate::fetch::now()),
+            text,
+        },
+    );
+}
+
+/// A list of `project` asked at `asked` landed: text known newer than it
+/// is laid over its rows, so a list in flight when a save landed can't put
+/// the old text back; text it is newer than is GitHub's copy now, and
+/// retired.
+fn lay_newer_text(app: &mut App, project: &ProjectId, asked: Asked, list: &mut [Issue]) {
+    app.issue_edits
+        .retain(|_, newer| &newer.project != project || newer.asked > asked);
+    for row in list.iter_mut() {
+        if let Some(newer) = app.issue_edits.get(&row.url) {
+            row.title = newer.text.title.clone();
+            row.body = newer.text.body.clone();
+        }
+    }
 }
 
 // ---- commenting ----
@@ -1158,9 +1531,11 @@ fn refresh(app: &mut App) {
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
     app.issues_failed.remove(&project);
-    request_list(app, project, dir);
+    request_list_fresh(app, project, dir);
     if let Some((issue, dir)) = selected_issue(app) {
-        if !app.issue_detail_inflight.contains(&issue.url) {
+        // A read already running was asked before the refresh: it owes a
+        // fresh one.
+        if !app.issue_detail_flights.want_fresh(&issue.url) {
             app.issue_detail_failed.remove(&issue.url);
             app.pending_issue_detail = Some((
                 PendingIssueDetail {
@@ -1277,22 +1652,38 @@ fn clear_query(app: &mut App) {
 // ---- editing ----
 
 /// `⌘I`: turn the reading pane into the editor for the issue under the
-/// cursor, prefilled from the row. A list with no rows has nothing to
-/// edit.
+/// cursor, prefilled from the row — or, when a save from a form since
+/// gone went nowhere, from what it had typed over the row's text, saying
+/// why it wasn't saved. The draft is the form's from here: Esc drops it,
+/// as it drops any edit. A list with no rows has nothing to edit.
 fn open_editor(app: &mut App) {
     let Some((issue, _)) = selected_issue(app) else {
         return;
     };
+    let editor = match app.issue_edit_drafts.remove(&issue.url) {
+        Some(draft) => IssueEditor::reloaded(
+            issue.url.clone(),
+            issue.number,
+            IssueText {
+                title: issue.title.clone(),
+                body: issue.body.clone(),
+            },
+            &draft.typed,
+            draft.notice,
+        ),
+        None => IssueEditor::new(&issue),
+    };
     if let Some(Overlay::Issues(view)) = &mut app.overlay {
-        view.editor = Some(Box::new(IssueEditor::new(&issue)));
+        view.editor = Some(Box::new(editor));
     }
 }
 
 /// Enter in the editor: a blank title is refused on the spot, an
 /// unchanged form closes without a call, and anything else goes to
-/// `gh issue edit` off the loop with the form held until the answer
-/// lands. Without the loop's sender installed (the unit tests) nothing
-/// is sent and the form stays as it is.
+/// GitHub off the loop ([`save`]) — the fields it changed, and only while
+/// GitHub still holds what the form opened on — with the form held until
+/// the answer lands. Without the loop's sender installed (the unit tests)
+/// nothing is sent and the form stays as it is.
 fn save_editor(app: &mut App) {
     let Some(Overlay::Issues(view)) = &mut app.overlay else {
         return;
@@ -1323,12 +1714,15 @@ fn save_editor(app: &mut App) {
     editor.saving = true;
     editor.notice = None;
     let (url, number) = (editor.url.clone(), editor.number);
+    let original = editor.original.clone();
+    let sent = IssueEdit::between(&original, &text);
     tokio::spawn(async move {
-        let outcome = edit(&dir, number, &text).await.map(|()| text);
+        let outcome = save(&dir, number, &original, &sent).await;
         let _ = tx.send(IssuesAnswer::Edited {
             project,
             url,
             number,
+            sent,
             outcome,
         });
     });
@@ -1821,7 +2215,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &IssuesView, th: Theme, b
         .get(&view.project)
         .map(|l| l.list.clone())
         .unwrap_or_default();
-    let inflight = app.issues_inflight.contains(&view.project);
+    let inflight = app.issues_flights.in_flight(&view.project);
     let failed = app.issues_failed.contains(&view.project);
     // The rows the filter leaves, and where the cursor sits among them.
     let visible = visible_rows(&view.query, &rows);
@@ -2060,6 +2454,38 @@ fn draw_editor(
     (title_area, body_area, body_view, foot_w)
 }
 
+/// Land a list of `project` as if a fetch begun now had answered it —
+/// for tests, which have no loop to run one. A fetch already running is
+/// superseded.
+#[cfg(test)]
+pub(crate) fn land_list(app: &mut App, project: ProjectId, list: Option<Vec<Issue>>) {
+    app.issues_flights.cancel(&project);
+    let ticket = app
+        .issues_flights
+        .begin(project, std::time::Instant::now())
+        .expect("nothing running");
+    land_answer(app, IssuesAnswer::List { ticket, list });
+}
+
+/// Land a conversation for `url` as if a read begun now had answered it.
+#[cfg(test)]
+pub(crate) fn land_detail(app: &mut App, url: &str, detail: Option<IssueDetail>) {
+    app.issue_detail_flights.cancel(&url.to_string());
+    let ticket = app
+        .issue_detail_flights
+        .begin(url.to_string(), std::time::Instant::now())
+        .expect("nothing running");
+    land_answer(
+        app,
+        IssuesAnswer::Detail {
+            ticket,
+            number: 0,
+            dir: PathBuf::new(),
+            detail,
+        },
+    );
+}
+
 /// Test-only accessors: nothing in the app reads these any more.
 #[cfg(test)]
 impl IssueEditor {
@@ -2189,6 +2615,7 @@ mod tests {
                 at: "2026-09-11T08:00:00Z".into(),
                 body: "same here".into(),
             }],
+            updated_at: String::new(),
         };
         let read = text(&lines(
             &i,
@@ -2204,6 +2631,7 @@ mod tests {
         let quiet = IssueDetail {
             url: i.url.clone(),
             comments: vec![],
+            updated_at: String::new(),
         };
         let none = text(&lines(&i, Some(&quiet), false, false, 60, Theme::default()));
         assert!(none.contains("── no comments ──"), "{none}");
@@ -2254,6 +2682,7 @@ mod tests {
         let quiet = IssueDetail {
             url: i.url.clone(),
             comments: vec![],
+            updated_at: String::new(),
         };
         let posting = text(&lines(&i, Some(&quiet), false, true, 60, Theme::default()));
         assert!(posting.contains("── no comments ──"), "{posting}");
@@ -2284,13 +2713,7 @@ mod tests {
             "no rows: the modal stays"
         );
         assert_eq!(app.flash, None);
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(vec![issue(15, "a"), issue(14, "Fix login redirect")]),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(14, "Fix login redirect")]));
         select(&mut app, 1);
         handle_key(&mut app, c, &mut Vec::new());
         let Some(Overlay::Prompt(prompt)) = &app.overlay else {
@@ -2317,13 +2740,7 @@ mod tests {
     fn posting_puts_the_modal_back_and_a_missing_checkout_returns_the_box() {
         let mut app = App::new();
         let project = ProjectId("p1".into());
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(vec![issue(15, "a"), issue(14, "b")]),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(14, "b")]));
         let mut view = IssuesView::new(project.clone(), "demo".into(), std::env::temp_dir());
         view.selected = 1;
         let fourteen = issue(14, "b").launch_ref();
@@ -2362,24 +2779,13 @@ mod tests {
         let project = ProjectId("p1".into());
         let view = IssuesView::new(project.clone(), "demo".into(), "/tmp/demo".into());
         app.overlay = Some(Overlay::Issues(view.clone()));
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(vec![issue(15, "a")]),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(vec![issue(15, "a")]));
         let fifteen = issue(15, "a");
-        land_answer(
-            &mut app,
-            IssuesAnswer::Detail {
-                url: fifteen.url.clone(),
-                detail: Some(IssueDetail {
+        land_detail(&mut app, &fifteen.url, Some(IssueDetail {
                     url: fifteen.url.clone(),
                     comments: vec![],
-                }),
-            },
-        );
+                    updated_at: String::new(),
+                }));
         app.pending_issue_detail = None;
         let answer = |posted: bool| IssuesAnswer::Comment {
             view: view.clone(),
@@ -2443,6 +2849,7 @@ mod tests {
                 at: "2026-09-11T08:00:00Z".into(),
                 body: "a".repeat(200),
             }],
+            updated_at: String::new(),
         };
         for w in [24usize, 40, 80] {
             for line in lines(&i, Some(&detail), false, false, w, Theme::default()) {
@@ -2463,44 +2870,20 @@ mod tests {
             "demo".into(),
             "/tmp/demo".into(),
         )));
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(vec![issue(15, "a"), issue(14, "b"), issue(13, "c")]),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(14, "b"), issue(13, "c")]));
         select(&mut app, 2);
         assert!(matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 2));
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(vec![issue(15, "a"), issue(13, "c")]),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(13, "c")]));
         assert!(
             matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1),
             "#13 moved up a row and the cursor followed"
         );
         // A failed refresh keeps the rows; a failed first ask says so.
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: None,
-            },
-        );
+        land_list(&mut app, project.clone(), None);
         assert_eq!(app.issues[&project].list.len(), 2);
         assert!(!app.issues_failed.contains(&project));
         let other = ProjectId("p2".into());
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: other.clone(),
-                list: None,
-            },
-        );
+        land_list(&mut app, other.clone(), None);
         assert!(app.issues_failed.contains(&other));
     }
 
@@ -2571,9 +2954,9 @@ mod tests {
         assert_eq!(target(&app), None, "its own, longer backoff holds it");
         app.issues_due.get_mut(&p2).unwrap().due = now;
 
-        app.issues_inflight.insert(p2.clone());
+        app.issues_flights.begin(p2.clone(), std::time::Instant::now());
         assert_eq!(target(&app), None, "already in flight");
-        app.issues_inflight.clear();
+        app.issues_flights.clear();
         assert_eq!(target(&app), Some(p2.clone()));
 
         app.issues_due.remove(&p1);
@@ -2628,14 +3011,7 @@ mod tests {
         let mut app = App::new();
         let project = ProjectId("p1".into());
         fn land(app: &mut App, project: &ProjectId, list: Option<Vec<Issue>>) {
-            app.issues_inflight.insert(project.clone());
-            land_answer(
-                app,
-                IssuesAnswer::List {
-                    project: project.clone(),
-                    list,
-                },
-            );
+            land_list(app, project.clone(), list);
         }
         let before = std::time::Instant::now();
         land(&mut app, &project, Some(vec![issue(15, "a")]));
@@ -2657,7 +3033,7 @@ mod tests {
 
         app.issues_due.get_mut(&project).unwrap().due = std::time::Instant::now();
         assert!(prefetch_due(&app, &project), "the timer ran out");
-        app.issues_inflight.insert(project.clone());
+        app.issues_flights.begin(project.clone(), std::time::Instant::now());
         assert!(!prefetch_due(&app, &project), "never while in flight");
     }
 
@@ -2668,13 +3044,7 @@ mod tests {
         let mut app = App::new();
         let project = ProjectId("p1".into());
         assert!(!is_fresh(&app, &project), "nothing landed");
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(vec![]),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(vec![]));
         assert!(is_fresh(&app, &project), "an empty answer is an answer");
         app.issues.get_mut(&project).unwrap().at = std::time::Instant::now()
             .checked_sub(FRESH + std::time::Duration::from_secs(1))
@@ -2688,26 +3058,14 @@ mod tests {
     fn comments_land_by_url_and_a_miss_is_remembered() {
         let mut app = App::new();
         let url = "https://github.com/o/r/issues/15".to_string();
-        app.issue_detail_inflight.insert(url.clone());
-        land_answer(
-            &mut app,
-            IssuesAnswer::Detail {
-                url: url.clone(),
-                detail: None,
-            },
-        );
+        land_detail(&mut app, &url, None);
         assert!(app.issue_detail_failed.contains(&url));
-        assert!(!app.issue_detail_inflight.contains(&url));
-        land_answer(
-            &mut app,
-            IssuesAnswer::Detail {
-                url: url.clone(),
-                detail: Some(IssueDetail {
+        assert!(!app.issue_detail_flights.in_flight(&url));
+        land_detail(&mut app, &url, Some(IssueDetail {
                     url: url.clone(),
                     comments: vec![],
-                }),
-            },
-        );
+                    updated_at: String::new(),
+                }));
         assert!(app.issue_detail.contains_key(&url));
     }
 
@@ -2723,13 +3081,7 @@ mod tests {
             "demo".into(),
             "/tmp/demo".into(),
         )));
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project: project.clone(),
-                list: Some(rows),
-            },
-        );
+        land_list(&mut app, project.clone(), Some(rows));
         (app, project)
     }
 
@@ -2996,7 +3348,8 @@ mod tests {
                 project: project.clone(),
                 url: url.clone(),
                 number: 15,
-                outcome: Err("HTTP 403: forbidden".into()),
+                sent: IssueEdit::default(),
+                outcome: EditOutcome::Refused("HTTP 403: forbidden".into()),
             },
         );
         let e = editor(&app).expect("the form stays");
@@ -3016,7 +3369,8 @@ mod tests {
                 project: project.clone(),
                 url: url.clone(),
                 number: 15,
-                outcome: Ok(IssueText {
+                sent: IssueEdit::default(),
+                outcome: EditOutcome::Saved(IssueText {
                     title: "Fix the login redirect".into(),
                     body: "Bounces to /.".into(),
                 }),
@@ -3040,7 +3394,8 @@ mod tests {
                 project: project.clone(),
                 url,
                 number: 15,
-                outcome: Err("late".into()),
+                sent: IssueEdit::default(),
+                outcome: EditOutcome::Refused("late".into()),
             },
         );
         let e = editor(&app).expect("still editing");
@@ -3049,6 +3404,227 @@ mod tests {
             app.flash.as_deref(),
             Some("couldn't update issue #15: late")
         );
+    }
+
+    /// A save that lands is laid over a list asked before it — one in
+    /// flight when GitHub took the save — and a list asked after it is
+    /// GitHub's copy, which retires it.
+    #[test]
+    fn a_saved_edit_outlives_an_older_list_and_a_newer_one_retires_it() {
+        let (mut app, project) = modal_with(vec![issue(15, "Fix login redirect")]);
+        let url = issue(15, "").url;
+        let older = app
+            .issues_flights
+            .begin(project.clone(), std::time::Instant::now())
+            .expect("nothing running");
+        land_answer(
+            &mut app,
+            IssuesAnswer::Edited {
+                project: project.clone(),
+                url: url.clone(),
+                number: 15,
+                sent: IssueEdit {
+                    title: Some("Fix the login redirect".into()),
+                    body: None,
+                },
+                outcome: EditOutcome::Saved(IssueText {
+                    title: "Fix the login redirect".into(),
+                    body: "Login bounces back to /.".into(),
+                }),
+            },
+        );
+        land_answer(
+            &mut app,
+            IssuesAnswer::List {
+                ticket: older,
+                list: Some(vec![issue(15, "Fix login redirect")]),
+            },
+        );
+        assert_eq!(
+            app.issues[&project].list[0].title, "Fix the login redirect",
+            "a list asked before the save can't put the old title back"
+        );
+        assert!(app.issue_edits.contains_key(&url));
+
+        // Asked after the save: GitHub's copy, retitled by someone since.
+        land_list(&mut app, project.clone(), Some(vec![issue(15, "Login loops")]));
+        assert_eq!(app.issues[&project].list[0].title, "Login loops");
+        assert!(app.issue_edits.is_empty(), "the newer list retired it");
+    }
+
+    /// A save reads the issue first. A field changed on GitHub since the
+    /// form opened sends nothing; otherwise only the changed fields go —
+    /// no `--title` for a description, no description down stdin for a
+    /// title — and line endings or trailing spaces GitHub normalised are
+    /// no conflict.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_save_sends_only_what_changed_and_never_over_newer_text() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nd=\"$(dirname \"$0\")\"\n\
+             if [ \"$2\" = view ]; then cat \"$d/current\"; exit 0; fi\n\
+             printf '%s\\n' \"$@\" > \"$d/args\"\ncat > \"$d/body\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let on_github = |title: &str, body: &str| {
+            let json = serde_json::json!({ "title": title, "body": body });
+            std::fs::write(dir.path().join("current"), json.to_string()).unwrap();
+            let _ = std::fs::remove_file(dir.path().join("args"));
+            let _ = std::fs::remove_file(dir.path().join("body"));
+        };
+        let sent = |file: &str| std::fs::read_to_string(dir.path().join(file)).ok();
+        let original = IssueText {
+            title: "Fix login".into(),
+            body: "Bounces to /.".into(),
+        };
+        let body_only = IssueEdit {
+            title: None,
+            body: Some("Bounces to / after SSO.".into()),
+        };
+
+        on_github("Fix login", "Bounces to /. Seen on Safari too.");
+        assert_eq!(
+            save_via(&gh, dir.path(), 15, &original, &body_only).await,
+            EditOutcome::Changed(IssueText {
+                title: "Fix login".into(),
+                body: "Bounces to /. Seen on Safari too.".into(),
+            })
+        );
+        assert_eq!(sent("args"), None, "nothing was sent");
+
+        on_github("Fix login", "Bounces to /.");
+        assert_eq!(
+            save_via(&gh, dir.path(), 15, &original, &body_only).await,
+            EditOutcome::Saved(IssueText {
+                title: "Fix login".into(),
+                body: "Bounces to / after SSO.".into(),
+            })
+        );
+        assert_eq!(
+            sent("args").as_deref(),
+            Some("issue\nedit\n15\n--body-file\n-\n"),
+            "no --title for a description"
+        );
+        assert_eq!(sent("body").as_deref(), Some("Bounces to / after SSO."));
+
+        let title_only = IssueEdit {
+            title: Some("Fix the login redirect".into()),
+            body: None,
+        };
+        // GitHub's copy differs only by a CRLF and a trailing space.
+        on_github("Fix login", "Bounces to /.\r\n ");
+        assert_eq!(
+            save_via(&gh, dir.path(), 15, &original, &title_only).await,
+            EditOutcome::Saved(IssueText {
+                title: "Fix the login redirect".into(),
+                body: "Bounces to /.\r\n ".into(),
+            })
+        );
+        assert_eq!(
+            sent("args").as_deref(),
+            Some("issue\nedit\n15\n--title=Fix the login redirect\n"),
+            "no --body-file for a title"
+        );
+        assert_eq!(sent("body").as_deref(), Some(""), "nothing down stdin");
+
+        on_github("Fix login ", "Bounces to /.\r\n");
+        assert!(matches!(
+            save_via(&gh, dir.path(), 15, &original, &body_only).await,
+            EditOutcome::Saved(_)
+        ));
+    }
+
+    /// A save GitHub had moved on from brings the form back over GitHub's
+    /// text with what was typed still in it. With the form gone by the
+    /// answer, the typing is kept and the next `⌘I` opens on it.
+    #[test]
+    fn a_changed_save_keeps_what_was_typed_form_or_no_form() {
+        let (mut app, project) = modal_with(vec![issue(15, "Fix login redirect")]);
+        let url = issue(15, "").url;
+        let edit = key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        let typed = IssueEdit {
+            title: None,
+            body: Some("Mine".into()),
+        };
+        let changed = |body: &str| IssuesAnswer::Edited {
+            project: project.clone(),
+            url: url.clone(),
+            number: 15,
+            sent: typed.clone(),
+            outcome: EditOutcome::Changed(IssueText {
+                title: "Fix login redirect".into(),
+                body: body.into(),
+            }),
+        };
+
+        handle_key(&mut app, edit, &mut Vec::new());
+        editor_mut(&mut app).body.set_text("Mine");
+        editor_mut(&mut app).saving = true;
+        land_answer(&mut app, changed("Theirs"));
+        let e = editor(&app).expect("the form comes back");
+        assert!(!e.saving);
+        assert_eq!(e.body.as_str(), "Mine", "the typing is kept");
+        assert_eq!(e.original.body, "Theirs", "Enter now saves over theirs");
+        assert_eq!(e.notice.as_deref(), Some(CHANGED_NOTICE));
+        assert_eq!(app.issues[&project].list[0].body, "Theirs");
+
+        // Put away while GitHub is asked again.
+        editor_mut(&mut app).saving = true;
+        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE), &mut Vec::new());
+        assert!(editor(&app).is_none());
+        land_answer(&mut app, changed("Theirs, again"));
+        assert!(editor(&app).is_none(), "no form pops up unasked");
+        assert!(
+            app.flash.as_deref().is_some_and(|f| f.contains("your edit is kept")),
+            "{:?}",
+            app.flash
+        );
+        handle_key(&mut app, edit, &mut Vec::new());
+        let e = editor(&app).expect("editing");
+        assert_eq!(e.body.as_str(), "Mine", "the draft is back");
+        assert_eq!(e.original.body, "Theirs, again");
+        assert_eq!(e.notice.as_deref(), Some(CHANGED_NOTICE));
+        assert!(app.issue_edit_drafts.is_empty(), "the form holds it now");
+    }
+
+    /// A visit reads the conversation again once the page is older than
+    /// `FRESH`, or sooner when the list says the issue changed after the
+    /// page was read; a failed read waits as long, then is tried again.
+    #[test]
+    fn a_page_is_read_again_when_stale_or_behind_the_list() {
+        let mut app = App::new();
+        let fifteen = issue(15, "a");
+        assert!(detail_due(&app, &fifteen, std::time::Instant::now()), "never read");
+        land_detail(
+            &mut app,
+            &fifteen.url,
+            Some(IssueDetail {
+                url: fifteen.url.clone(),
+                comments: vec![],
+                updated_at: fifteen.updated_at.clone(),
+            }),
+        );
+        // Measured from the stamp the read was asked under, not the clock:
+        // `fetch` stamps can run a hair ahead of `Instant::now()`.
+        let at = app.issue_detail_at[&fifteen.url];
+        assert!(!detail_due(&app, &fifteen, at), "just read");
+        assert!(detail_due(&app, &fifteen, at + FRESH), "older than FRESH");
+        let commented = Issue {
+            updated_at: "2026-09-12T08:00:00Z".into(),
+            ..fifteen.clone()
+        };
+        assert!(detail_due(&app, &commented, at), "the list moved on");
+
+        land_detail(&mut app, &fifteen.url, None);
+        let at = app.issue_detail_at[&fifteen.url];
+        assert!(!detail_due(&app, &commented, at), "a failure backs off");
+        assert!(detail_due(&app, &commented, at + FRESH), "then is retried");
+        assert!(app.issue_detail.contains_key(&fifteen.url), "the page stays");
     }
 
     /// The title rides argv as one `--title=` token and the description
@@ -3070,9 +3646,9 @@ mod tests {
             "gh",
             "printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\ncat > \"$(dirname \"$0\")/body\"",
         );
-        let text = IssueText {
-            title: "-- starts like a flag".into(),
-            body: format!("-- so does this\n{}", "x".repeat(200_000)),
+        let text = IssueEdit {
+            title: Some("-- starts like a flag".into()),
+            body: Some(format!("-- so does this\n{}", "x".repeat(200_000))),
         };
         assert_eq!(edit_via(&records, dir.path(), 15, &text).await, Ok(()));
         assert_eq!(
@@ -3081,7 +3657,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("body")).unwrap(),
-            text.body
+            text.body.clone().unwrap()
         );
 
         let refuses = script(
@@ -3372,16 +3948,10 @@ mod tests {
         type_str(&mut app, "login");
         select(&mut app, 2);
         assert_eq!(cursor_number(&app), Some(13));
-        land_answer(
-            &mut app,
-            IssuesAnswer::List {
-                project,
-                list: Some(vec![
+        land_list(&mut app, project, Some(vec![
                     issue(15, "Fix login redirect"),
                     issue(14, "Docs pass"),
-                ]),
-            },
-        );
+                ]));
         assert_eq!(
             cursor_number(&app),
             Some(15),

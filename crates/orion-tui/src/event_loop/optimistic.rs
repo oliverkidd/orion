@@ -16,6 +16,14 @@
 //! then changes nothing. The request rides a `PendingIntent::Undo` holding
 //! the row as it was: an Error puts it back (and flashes why, like every
 //! other refusal), an Ack drops it.
+//!
+//! Putting back takes back only what the keypress changed, and only where
+//! nothing newer has replaced it since (`fetch` rule 5): a refused rename
+//! restores the name and leaves the status the DAEMON has sent meanwhile;
+//! a refused archive restores `archived`, and the fields that came with
+//! it, only while they still show the archive. A refused delete puts back
+//! the row as the DAEMON last sent it while it was down (`App::deleting`),
+//! not as it was on the keypress.
 
 use super::{handle_server_event, reconcile_selection_inner, selection_snapshot, send_with};
 use crate::app::{App, PendingIntent, Undo};
@@ -30,15 +38,20 @@ fn upsert(
     out: &mut Vec<ClientRequest>,
     make: impl FnOnce(u64) -> ClientRequest,
 ) {
+    let shown = Box::new(entity.clone());
     handle_server_event(app, ServerEvent::EntityUpserted { entity }, out);
-    let undo = PendingIntent::Undo(Undo::Restore(Box::new(before)));
+    let undo = PendingIntent::Undo(Undo::Restore {
+        before: Box::new(before),
+        shown,
+    });
     send_with(app, out, undo, make);
 }
 
 /// Take the row `id` down, and send `make`'s request with the row and where
 /// it sat to put back if it is refused. Until the DAEMON answers, an upsert
 /// of that row — one already on its way when the delete was asked for — is
-/// ignored (`App::deleting`), so the row cannot flicker back.
+/// kept aside rather than shown (`App::deleting`, [`hold`]), so the row
+/// cannot flicker back.
 fn remove(
     app: &mut App,
     id: EntityId,
@@ -47,7 +60,7 @@ fn remove(
     out: &mut Vec<ClientRequest>,
     make: impl FnOnce(u64) -> ClientRequest,
 ) {
-    app.deleting.insert(id.clone());
+    app.deleting.insert(id.clone(), entity.clone());
     handle_server_event(app, ServerEvent::EntityRemoved { id }, out);
     let undo = PendingIntent::Undo(Undo::Reinsert {
         index,
@@ -216,9 +229,34 @@ fn id_of(entity: &Entity) -> EntityId {
 
 /// Is this upsert for a row that was deleted here and whose delete the
 /// DAEMON has not answered yet? Then it was on its way before the delete
-/// was, and showing it would bring the row back for a frame.
+/// was, and showing it would bring the row back for a frame — [`hold`] it.
 pub(super) fn is_deleting(app: &App, entity: &Entity) -> bool {
-    !app.deleting.is_empty() && app.deleting.contains(&id_of(entity))
+    !app.deleting.is_empty() && app.deleting.contains_key(&id_of(entity))
+}
+
+/// Keep an upsert of a row being deleted as its latest version, out of
+/// sight: should the DAEMON refuse the delete, this is the row that comes
+/// back.
+pub(super) fn hold(app: &mut App, entity: Entity) {
+    if let Some(latest) = app.deleting.get_mut(&id_of(&entity)) {
+        *latest = entity;
+    }
+}
+
+/// A status flip for an agent being deleted: kept on its latest version
+/// (see [`hold`]), since the row it would change is down.
+pub(super) fn hold_status(
+    app: &mut App,
+    agent: &AgentId,
+    status: orion_core::AgentStatus,
+    changed_at: i64,
+    unseen: bool,
+) {
+    if let Some(Entity::Agent(a)) = app.deleting.get_mut(&EntityId::Agent(agent.clone())) {
+        a.status = status;
+        a.status_changed_at = changed_at;
+        a.unseen = unseen;
+    }
 }
 
 /// The DAEMON did it: the row as it was is no longer needed.
@@ -228,19 +266,64 @@ pub(super) fn settled(app: &mut App, undo: Undo) {
     }
 }
 
-/// The DAEMON refused: the row goes back to what — and where — it was.
+/// `now` back to `before` when the keypress changed it (`before` differs
+/// from `shown`) and nothing has changed it since (`now` still is
+/// `shown`). True when it put it back.
+fn put_back<T: PartialEq + Clone>(now: &mut T, before: &T, shown: &T) -> bool {
+    if before == shown || now != shown {
+        return false;
+    }
+    *now = before.clone();
+    true
+}
+
+/// The row as it is now with the keypress's own changes taken back — the
+/// fields `before` and `shown` differ in, where the row still shows
+/// `shown`'s. None when there is nothing to take back: the row is gone,
+/// or every field the keypress changed has been changed again since.
+fn taken_back(app: &App, before: &Entity, shown: &Entity) -> Option<Entity> {
+    match (before, shown) {
+        (Entity::Agent(before), Entity::Agent(shown)) => {
+            let mut now = app.tree.agents.iter().find(|a| a.id == shown.id)?.clone();
+            // `|`, not `||`: every field is looked at.
+            let changed = put_back(&mut now.name, &before.name, &shown.name)
+                | put_back(&mut now.archived, &before.archived, &shown.archived)
+                | put_back(&mut now.alive, &before.alive, &shown.alive)
+                | put_back(&mut now.archived_at, &before.archived_at, &shown.archived_at);
+            changed.then_some(Entity::Agent(now))
+        }
+        (Entity::Terminal(before), Entity::Terminal(shown)) => {
+            let mut now = app.tree.terminals.iter().find(|t| t.id == shown.id)?.clone();
+            put_back(&mut now.name, &before.name, &shown.name).then_some(Entity::Terminal(now))
+        }
+        (Entity::Project(before), Entity::Project(shown)) => {
+            let mut now = app.tree.projects.iter().find(|p| p.id == shown.id)?.clone();
+            put_back(&mut now.name, &before.name, &shown.name).then_some(Entity::Project(now))
+        }
+        _ => None,
+    }
+}
+
+/// The DAEMON refused: what the keypress changed goes back — a renamed or
+/// (un)archived row's changed fields where nothing newer has replaced
+/// them, a deleted row in its old place as the DAEMON last had it.
 pub(super) fn undo(app: &mut App, undo: Undo, out: &mut Vec<ClientRequest>) {
     // Where the user is, by id, before the row goes back: the reinsert
     // re-sorts the lists under row-index cursors ahead of the upsert's
     // own snapshot, which would record wherever that left them.
     let before = selection_snapshot(app);
     let entity = match undo {
-        Undo::Restore(entity) => *entity,
+        Undo::Restore { before, shown } => match taken_back(app, &before, &shown) {
+            Some(entity) => entity,
+            None => return,
+        },
         Undo::Reinsert { index, entity } => {
-            app.deleting.remove(&id_of(&entity));
+            // The latest version the DAEMON sent while the row was down,
+            // else the row as it was on the keypress.
+            let entity = app.deleting.remove(&id_of(&entity)).unwrap_or(*entity);
             // In its old place, so the list reads as it did; the upsert
             // below then finds the row and only refreshes it.
-            match &*entity {
+            match &entity {
                 Entity::Agent(a) => {
                     let at = index.min(app.tree.agents.len());
                     app.tree.agents.insert(at, a.clone());
@@ -251,7 +334,7 @@ pub(super) fn undo(app: &mut App, undo: Undo, out: &mut Vec<ClientRequest>) {
                 }
                 _ => {}
             }
-            *entity
+            entity
         }
     };
     handle_server_event(app, ServerEvent::EntityUpserted { entity }, out);
@@ -314,6 +397,105 @@ mod tests {
         );
         assert_eq!(agent_name(&app, "a1"), Some(was), "the refusal undid it");
         assert_eq!(app.flash.as_deref(), Some("name is taken"));
+    }
+
+    /// A refusal takes back only its own change: a name the DAEMON sent
+    /// since the rename stays.
+    #[test]
+    fn a_refused_rename_leaves_a_newer_name() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        rename_agent(&mut app, AgentId("a1".into()), "fix login".into(), &mut out);
+        let mut since = app.tree.agents[0].clone();
+        since.name = "renamed elsewhere".into();
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(since),
+            },
+        );
+        hse(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req_id_of(&out)),
+                message: "name is taken".into(),
+            },
+        );
+        assert_eq!(
+            agent_name(&app, "a1").as_deref(),
+            Some("renamed elsewhere")
+        );
+    }
+
+    /// A refused archive puts back what the keypress changed and the
+    /// DAEMON hasn't since — `archived`, `alive` — but not a field the
+    /// DAEMON has sent a value of its own for: that is newer.
+    #[test]
+    fn a_refused_archive_leaves_what_the_daemon_sent_since() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut out = Vec::new();
+        set_archived(&mut app, AgentId("a1".into()), true, &mut out);
+        let mut since = app.tree.agents[0].clone();
+        since.archived_at = 777;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(since),
+            },
+        );
+        hse(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req_id_of(&out)),
+                message: "busy".into(),
+            },
+        );
+        let a1 = &app.tree.agents[0];
+        assert!(!a1.archived, "the archive is taken back");
+        assert!(a1.alive, "and the row it took down");
+        assert_eq!(a1.archived_at, 777, "the DAEMON's word since stays");
+    }
+
+    /// A refused delete puts back the row as the DAEMON last sent it while
+    /// it was down — the upsert and the status flip held meanwhile — not
+    /// as it was on the keypress.
+    #[test]
+    fn a_refused_delete_puts_back_the_latest_row() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut since = app.tree.agents[0].clone();
+        let mut out = Vec::new();
+        delete_agent(&mut app, AgentId("a1".into()), &mut out);
+        since.name = "renamed meanwhile".into();
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(since),
+            },
+        );
+        hse(
+            &mut app,
+            ServerEvent::StatusChanged {
+                agent: AgentId("a1".into()),
+                status: orion_core::AgentStatus::NeedsFeedback,
+                changed_at: 42,
+                unseen: false,
+            },
+        );
+        assert!(agent_name(&app, "a1").is_none(), "still down");
+        hse(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req_id_of(&out)),
+                message: "database is locked".into(),
+            },
+        );
+        let a1 = app.tree.agents.iter().find(|a| a.id.0 == "a1").expect("back");
+        assert_eq!(a1.name, "renamed meanwhile");
+        assert_eq!(a1.status, orion_core::AgentStatus::NeedsFeedback);
+        assert_eq!(a1.status_changed_at, 42);
     }
 
     /// An empty name is refused by the DAEMON, in its words: nothing is

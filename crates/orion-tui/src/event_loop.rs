@@ -442,7 +442,8 @@ async fn main_loop(
     app.vim_tx = Some(vim_tx);
     // CLAUDE ACCOUNTS: who each is signed in as, read off the loop
     // (`claude_accounts::request_refresh`); a name that changed lands here.
-    let (accounts_tx, mut accounts_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (accounts_tx, mut accounts_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(crate::fetch::Ticket<()>, bool)>();
     app.accounts_tx = Some(accounts_tx);
     // The INPUT LATENCY PROBE (`ORION_PERF_LOG`); None outside a
     // measurement run.
@@ -709,10 +710,10 @@ async fn main_loop(
                     handle_vim_event(&mut app, ev);
                 }
             }
-            changed = accounts_rx.recv() => {
+            answer = accounts_rx.recv() => {
                 // Never None: `app.accounts_tx` keeps a sender alive.
-                if changed.is_some() {
-                    app.dirty = true;
+                if let Some((ticket, changed)) = answer {
+                    crate::claude_accounts::land_refresh(&mut app, ticket, changed);
                 }
             }
             answer = pr_rx.recv() => {
@@ -723,25 +724,19 @@ async fn main_loop(
             }
             answer = git_rx.recv() => {
                 // Never None: `git_tx` lives as long as the loop.
-                if let Some((worktree, files, lines, ahead)) = answer {
-                    let count = files.as_ref().map(Vec::len);
-                    note_worktree_lines(&mut app, &worktree, lines);
-                    note_worktree_ahead(&mut app, &worktree, ahead);
-                    keep_changed_files(&mut app, &worktree, files);
-                    land_git_changes(&mut app, worktree, count);
-                    // The selection moved on while this one was being read:
-                    // ask for where it is now, rather than wait a poll.
-                    if app.git_changes_stale() {
+                if let Some((ticket, files, lines, ahead)) = answer {
+                    // The selection moved on while this one was being read,
+                    // or a pull landed meanwhile: ask for where it is now,
+                    // rather than wait a poll.
+                    if land_git_read(&mut app, &ticket, files, lines, ahead) {
                         request_git_changes(&mut app, &git_tx);
                     }
                 }
             }
             answer = sweep_git_rx.recv() => {
                 // Never None: `sweep_git_tx` lives as long as the loop.
-                if let Some((worktree, count, lines, ahead)) = answer {
-                    note_worktree_lines(&mut app, &worktree, lines);
-                    note_worktree_ahead(&mut app, &worktree, ahead);
-                    land_swept_changes(&mut app, worktree, count);
+                if let Some((ticket, count, lines, ahead)) = answer {
+                    land_sweep_read(&mut app, &ticket, count, lines, ahead);
                 }
             }
             answer = prs_rx.recv() => {
@@ -1016,9 +1011,10 @@ async fn main_loop(
 /// every worktree switch — a late frame on the one keypress that should
 /// feel instant — and on every poll, a hitch under the user's typing.
 /// Skipped while one is in flight (a repaint must never stack processes);
-/// the answer arrives on `git_tx` and lands in `land_git_changes`.
+/// the answer arrives on `git_tx`, with the ticket saying when it was
+/// asked, and lands in [`land_git_read`].
 fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSender<ChangedFiles>) {
-    if app.git_changes_inflight.is_some() {
+    if !app.git_reads.is_empty() {
         return;
     }
     let Some((id, path)) = app
@@ -1027,19 +1023,21 @@ fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSende
     else {
         return;
     };
-    app.git_changes_inflight = Some(id.clone());
+    let Some(ticket) = app.git_reads.begin(id, std::time::Instant::now()) else {
+        return;
+    };
     let git_tx = git_tx.clone();
     tokio::task::spawn_blocking(move || {
         let (files, lines, ahead) = read_checkout(&path);
-        let _ = git_tx.send((id, files, lines, ahead));
+        let _ = git_tx.send((ticket, files, lines, ahead));
     });
 }
 
 /// What the badge's `git status` found in a checkout, the lines behind it
 /// and its commits ahead of and behind its base; None when git could not
-/// say.
+/// say. The ticket names the checkout and when it was asked.
 type ChangedFiles = (
-    WorktreeId,
+    crate::fetch::Ticket<WorktreeId>,
     Option<Vec<crate::git_diff::DiffFile>>,
     Option<crate::git_diff::LineChanges>,
     Option<(usize, usize)>,
@@ -1048,7 +1046,7 @@ type ChangedFiles = (
 /// The sweep's answer for one checkout: its changed-file count, its line
 /// counts and its commits ahead and behind.
 type SweptChanges = (
-    WorktreeId,
+    crate::fetch::Ticket<WorktreeId>,
     Option<usize>,
     Option<crate::git_diff::LineChanges>,
     Option<(usize, usize)>,
@@ -1083,15 +1081,69 @@ fn line_changes_of(
     files.and_then(|files| crate::git_diff::line_changes(path, files))
 }
 
-/// Record the line counts a read found in `worktree`, for its cards; None
-/// (unreadable) or nothing changed by the line drops what was there. A
-/// change redraws.
+/// Whether a read of `ticket`'s checkout is the newest asked yet, and so
+/// may set its counts: one asked before the read already taken — the
+/// other reader's, landing late — is dropped (`fetch` rule 1). A read
+/// taken stamps the checkout with its asked time.
+fn take_read(app: &mut App, ticket: &crate::fetch::Ticket<WorktreeId>) -> bool {
+    if app
+        .worktree_read_at
+        .get(&ticket.key)
+        .is_some_and(|&taken| ticket.at < taken)
+    {
+        return false;
+    }
+    app.worktree_read_at.insert(ticket.key.clone(), ticket.at);
+    true
+}
+
+/// The selected checkout's read landed: its counts are noted — unless
+/// its flight was cancelled (the branch switched under it) or a read of
+/// the checkout asked after it has already landed. True when it should
+/// be asked for again at once: the selection moved on while it ran, or a
+/// PULL or PUSH landed meanwhile and owes a read from after it
+/// ([`reread_checkouts`]).
+fn land_git_read(
+    app: &mut App,
+    ticket: &crate::fetch::Ticket<WorktreeId>,
+    files: Option<Vec<crate::git_diff::DiffFile>>,
+    lines: Option<crate::git_diff::LineChanges>,
+    ahead: Option<(usize, usize)>,
+) -> bool {
+    let Some(landed) = app.git_reads.land(ticket) else {
+        return app.git_changes_stale();
+    };
+    if take_read(app, ticket) {
+        let worktree = ticket.key.clone();
+        let count = files.as_ref().map(Vec::len);
+        note_worktree_lines(app, &worktree, lines);
+        note_worktree_ahead(app, &worktree, ahead);
+        keep_changed_files(app, &worktree, files);
+        land_git_changes(app, worktree, count);
+    } else {
+        // A sweep read asked after this one already landed: its count
+        // stands, but this read is still the selected checkout's own, so
+        // the badge is pointed at it rather than left waiting a poll.
+        land_git_changes(app, ticket.key.clone(), None);
+    }
+    if landed.owed {
+        owe_read(app, &ticket.key);
+    }
+    app.git_changes_stale()
+}
+
+/// Record the line counts a read found in `worktree`, for its cards;
+/// nothing changed by the line drops what was there, and None (git
+/// couldn't say) keeps it — one failed read is no news. A change redraws.
 fn note_worktree_lines(
     app: &mut App,
     worktree: &WorktreeId,
     lines: Option<crate::git_diff::LineChanges>,
 ) {
-    let lines = lines.filter(|l| !l.is_empty());
+    let Some(lines) = lines else {
+        return;
+    };
+    let lines = Some(lines).filter(|l| !l.is_empty());
     let before = match lines {
         Some(l) => app.worktree_lines.insert(worktree.clone(), l),
         None => app.worktree_lines.remove(worktree),
@@ -1102,10 +1154,14 @@ fn note_worktree_lines(
 }
 
 /// Record how far a read found `worktree` from its base, for its band's
-/// rule; None (unreadable) or level with it drops what was there. A change
+/// rule; level with it drops what was there, and None (git couldn't say)
+/// keeps it, so one failed read never blanks a band's `⇡⇣`. A change
 /// redraws.
 fn note_worktree_ahead(app: &mut App, worktree: &WorktreeId, ahead: Option<(usize, usize)>) {
-    let ahead = ahead.filter(|&(a, b)| a > 0 || b > 0);
+    let Some(ahead) = ahead else {
+        return;
+    };
+    let ahead = Some(ahead).filter(|&(a, b)| a > 0 || b > 0);
     let before = match ahead {
         Some(ab) => app.worktree_ahead.insert(worktree.clone(), ab),
         None => app.worktree_ahead.remove(worktree),
@@ -1137,10 +1193,11 @@ fn keep_changed_files(
 
 /// Record a checkout's changed-file count. Stored whichever checkout it is
 /// for — `App::selected_worktree_changes` shows it only while that one is
-/// selected — and a value change redraws.
+/// selected — and a value change redraws. A read that couldn't count
+/// shows the last count there was.
 fn land_git_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
-    app.git_changes_inflight = None;
     note_worktree_changes(app, worktree.clone(), count);
+    let count = app.worktree_changes.get(&worktree).and_then(|(c, _)| *c);
     let next = Some((worktree, count));
     if app.git_changes != next {
         app.git_changes = next;
@@ -1150,11 +1207,14 @@ fn land_git_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
 
 /// Record what a `git status` found in `worktree` for the cards that print
 /// it, stamped now so the sweep knows how old it is; a changed count
-/// redraws.
+/// redraws. None (git couldn't say) keeps the last count, and still
+/// stamps it, so the sweep moves on rather than retrying it every tick.
 fn note_worktree_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
     let now = std::time::Instant::now();
-    let before = app.worktree_changes.insert(worktree, (count, now));
-    if before.map(|(was, _)| was) != Some(count) {
+    let was = app.worktree_changes.get(&worktree).map(|(c, _)| *c);
+    let count = count.or(was.flatten());
+    app.worktree_changes.insert(worktree, (count, now));
+    if was != Some(count) {
         app.dirty = true;
     }
 }
@@ -1163,19 +1223,21 @@ fn note_worktree_changes(app: &mut App, worktree: WorktreeId, count: Option<usiz
 /// grid has a card for, off the loop, so every card can print its own and
 /// not only the one under the cursor (`request_git_changes` keeps that one
 /// fresh on every tick). One process per tick at most, and none while the
-/// last is still out; the answer lands in `land_swept_changes`.
+/// last is still out; the answer lands in [`land_sweep_read`].
 fn sweep_git_changes(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<SweptChanges>) {
-    if app.worktree_changes_inflight.is_some() {
+    if !app.sweep_reads.is_empty() {
         return;
     }
     let Some((id, path)) = changes_sweep_target(app) else {
         return;
     };
-    app.worktree_changes_inflight = Some(id.clone());
+    let Some(ticket) = app.sweep_reads.begin(id, std::time::Instant::now()) else {
+        return;
+    };
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
         let (files, lines, ahead) = read_checkout(&path);
-        let _ = tx.send((id, files.map(|f| f.len()), lines, ahead));
+        let _ = tx.send((ticket, files.map(|f| f.len()), lines, ahead));
     });
 }
 
@@ -1201,13 +1263,30 @@ fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
         .map(|w| (w.id.clone(), w.path.clone()))
 }
 
-/// What a PULL or a PUSH moved, read again soon: the selected checkout's
-/// own read on the next frame, and `ids` put ahead of every other in the
-/// sweep's queue — stamped just older than the oldest read there is,
-/// since [`changes_sweep_target`] takes the oldest first — with their
-/// counts kept on screen meanwhile.
+/// What a PULL, a PUSH or a base sync moved, read again soon, against a
+/// base resolved afresh (`commit_list::forget_base`). A read of one of
+/// `ids` already running was asked before the move landed: it is marked
+/// owed, so a read from after the move follows it ([`owe_read`] once it
+/// lands). The rest are owed now — with their counts kept on screen
+/// meanwhile.
 pub(crate) fn reread_checkouts(app: &mut App, ids: &std::collections::HashSet<WorktreeId>) {
-    if app.selected_worktree().is_some_and(|w| ids.contains(&w.id)) {
+    for w in app.tree.worktrees.iter().filter(|w| ids.contains(&w.id)) {
+        crate::commit_list::forget_base(&w.path);
+    }
+    for id in ids {
+        let running = app.git_reads.want_fresh(id) | app.sweep_reads.want_fresh(id);
+        if !running {
+            owe_read(app, id);
+        }
+    }
+}
+
+/// Have `worktree` read again soon: the selected checkout's own read on
+/// the next frame, any other put ahead of every one in the sweep's queue —
+/// stamped just older than the oldest read there is, since
+/// [`changes_sweep_target`] takes the oldest first.
+fn owe_read(app: &mut App, worktree: &WorktreeId) {
+    if app.selected_worktree().is_some_and(|w| &w.id == worktree) {
         app.git_changes = None;
     }
     let Some(oldest) = app.worktree_changes.values().map(|(_, at)| *at).min() else {
@@ -1216,17 +1295,49 @@ pub(crate) fn reread_checkouts(app: &mut App, ids: &std::collections::HashSet<Wo
     let first = oldest
         .checked_sub(Duration::from_millis(1))
         .unwrap_or(oldest);
-    for (id, (_, at)) in app.worktree_changes.iter_mut() {
-        if ids.contains(id) {
-            *at = first;
-        }
+    if let Some((_, at)) = app.worktree_changes.get_mut(worktree) {
+        *at = first;
     }
 }
 
-/// Land the sweep's count: it frees the slot and feeds the cards only —
-/// the selected checkout's `git_changes` is its own reads' to set.
+/// A checkout's branch changed under its readings: a read running there
+/// answers for the old branch, so it is dropped when it lands, and the
+/// base its `⇡⇣` is measured against is resolved afresh.
+pub(crate) fn forget_checkout_reads(app: &mut App, worktree: &WorktreeId) {
+    app.git_reads.cancel(worktree);
+    app.sweep_reads.cancel(worktree);
+    if let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == worktree) {
+        crate::commit_list::forget_base(&w.path);
+    }
+}
+
+/// The sweep's read landed: its counts feed the cards — unless its flight
+/// was cancelled or a newer read of the checkout already landed — and a
+/// PULL or PUSH that landed while it ran puts the checkout first in the
+/// queue again.
+fn land_sweep_read(
+    app: &mut App,
+    ticket: &crate::fetch::Ticket<WorktreeId>,
+    count: Option<usize>,
+    lines: Option<crate::git_diff::LineChanges>,
+    ahead: Option<(usize, usize)>,
+) {
+    let Some(landed) = app.sweep_reads.land(ticket) else {
+        return;
+    };
+    if take_read(app, ticket) {
+        note_worktree_lines(app, &ticket.key, lines);
+        note_worktree_ahead(app, &ticket.key, ahead);
+        land_swept_changes(app, ticket.key.clone(), count);
+    }
+    if landed.owed {
+        owe_read(app, &ticket.key);
+    }
+}
+
+/// Land the sweep's count: it feeds the cards only — the selected
+/// checkout's `git_changes` is its own reads' to set.
 fn land_swept_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
-    app.worktree_changes_inflight = None;
     note_worktree_changes(app, worktree, count);
 }
 
@@ -13139,6 +13250,9 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 a.unseen = unseen;
                 app.dirty = true;
             }
+            // A row deleted here and not yet answered keeps the flip for a
+            // refusal to put back.
+            optimistic::hold_status(app, &agent, status, changed_at, unseen);
             // The first turn in a session we just launched: its own stamp
             // leads the list from here, so the launch stops having to.
             if status != orion_core::AgentStatus::Fresh
@@ -13306,9 +13420,11 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             app.dirty = true;
         }
         // A straggler for a row deleted here a moment ago: the DAEMON sent
-        // it before it got to the delete, and the row stays down.
+        // it before it got to the delete, and the row stays down — kept as
+        // the version a refused delete puts back.
         ServerEvent::EntityUpserted { entity } if optimistic::is_deleting(app, &entity) => {
-            tracing::debug!(?entity, "upsert of a row being deleted — ignored");
+            tracing::debug!(?entity, "upsert of a row being deleted — held");
+            optimistic::hold(app, entity);
         }
         ServerEvent::EntityUpserted { entity } => {
             // A checkout cut for a PR SESSION takes over its stand-in row
@@ -13669,6 +13785,7 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
                 app.pull_requests.remove(&w.id);
                 app.pr_recheck.remove(&w.id);
                 app.worktree_ahead.remove(&w.id);
+                forget_checkout_reads(app, &w.id);
             }
             upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id)
         }
@@ -26058,12 +26175,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn a_count_for_another_checkout_keeps_the_badge_quiet() {
         let mut app = App::new();
         seed_tree(&mut app); // w1 selected
-        app.git_changes_inflight = Some(WorktreeId("w2".into()));
         land_git_changes(&mut app, WorktreeId("w2".into()), Some(5));
-        assert!(
-            app.git_changes_inflight.is_none(),
-            "the answer frees the slot"
-        );
         assert_eq!(
             app.selected_worktree_changes(),
             None,
@@ -26076,6 +26188,82 @@ diff --git a/src/c.rs b/src/c.rs
         land_git_changes(&mut app, WorktreeId("w1".into()), Some(3));
         assert_eq!(app.selected_worktree_changes(), Some(3));
         assert!(!app.git_changes_stale());
+    }
+
+    /// The two readers feed the same counts, so the one asked later wins
+    /// whichever lands last: a sweep read from before the selected
+    /// checkout's own read is dropped when it lands after it.
+    #[test]
+    fn an_older_sweep_read_is_dropped_after_a_newer_one() {
+        use crate::git_diff::LineChanges;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let now = std::time::Instant::now();
+        let swept = app.sweep_reads.begin(w1.clone(), now).expect("idle");
+        let read = app.git_reads.begin(w1.clone(), now).expect("idle");
+        assert!(swept.at < read.at);
+        let lines = LineChanges {
+            added: 5,
+            removed: 1,
+        };
+        land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((2, 0)));
+        land_sweep_read(
+            &mut app,
+            &swept,
+            Some(7),
+            Some(LineChanges {
+                added: 9,
+                removed: 9,
+            }),
+            Some((0, 4)),
+        );
+        assert_eq!(app.worktree_ahead.get(&w1), Some(&(2, 0)));
+        assert_eq!(app.worktree_lines(&w1), Some(lines));
+        assert_eq!(app.worktree_changes[&w1].0, Some(0));
+        assert!(app.sweep_reads.is_empty(), "its slot is free all the same");
+    }
+
+    /// A read git couldn't answer is no news: the band keeps its `⇡⇣`,
+    /// its line counts and its changed-file count.
+    #[test]
+    fn a_failed_read_keeps_the_last_counts() {
+        use crate::git_diff::LineChanges;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let lines = LineChanges {
+            added: 3,
+            removed: 2,
+        };
+        let read = app.git_reads.begin(w1.clone(), std::time::Instant::now()).expect("idle");
+        land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((4, 1)));
+        let read = app.git_reads.begin(w1.clone(), std::time::Instant::now()).expect("idle");
+        land_git_read(&mut app, &read, None, None, None);
+        assert_eq!(app.worktree_ahead.get(&w1), Some(&(4, 1)));
+        assert_eq!(app.worktree_lines(&w1), Some(lines));
+        assert_eq!(app.selected_worktree_changes(), Some(0));
+    }
+
+    /// A checkout switched to another branch while a read of it ran: the
+    /// read answers for the old branch, and is dropped when it lands.
+    #[test]
+    fn a_read_from_before_a_branch_switch_is_dropped() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let read = app.git_reads.begin(w1.clone(), std::time::Instant::now()).expect("idle");
+        let mut switched = app.tree.worktrees[0].clone();
+        switched.branch = "feat".into();
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: orion_core::Entity::Worktree(switched),
+            },
+        );
+        assert!(!app.git_reads.in_flight(&w1), "cancelled");
+        land_git_read(&mut app, &read, None, None, Some((5, 0)));
+        assert_eq!(app.worktree_ahead.get(&w1), None, "the old branch's ⇡5");
     }
 
     #[test]
@@ -33800,13 +33988,7 @@ diff --git a/src/c.rs b/src/c.rs
             labels: vec![],
             body: String::new(),
         };
-        crate::issues::land_answer(
-            &mut app,
-            crate::issues::IssuesAnswer::List {
-                project,
-                list: Some(vec![issue(15), issue(14)]),
-            },
-        );
+        crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         let on_row =
             |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
@@ -33886,11 +34068,7 @@ diff --git a/src/c.rs b/src/c.rs
                     "demo".into(),
                     "/tmp/demo".into(),
                 )));
-                crate::issues::land_answer(
-                    &mut app,
-                    crate::issues::IssuesAnswer::List {
-                        project,
-                        list: Some(vec![crate::issues::Issue {
+                crate::issues::land_list(&mut app, project, Some(vec![crate::issues::Issue {
                             number: 15,
                             url: "https://github.com/o/r/issues/15".into(),
                             title: "Login fails".into(),
@@ -33899,9 +34077,7 @@ diff --git a/src/c.rs b/src/c.rs
                             updated_at: "2026-09-11T12:00:00Z".into(),
                             labels: vec![],
                             body: String::new(),
-                        }]),
-                    },
-                );
+                        }]));
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 if fresh {
                     pick_fresh_worktree(&mut app, &mut out);
@@ -33958,13 +34134,7 @@ diff --git a/src/c.rs b/src/c.rs
                 labels: vec![],
                 body: String::new(),
             };
-            crate::issues::land_answer(
-                &mut app,
-                crate::issues::IssuesAnswer::List {
-                    project,
-                    list: Some(vec![issue(15), issue(14)]),
-                },
-            );
+            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             let on_row =
                 |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
@@ -34097,13 +34267,7 @@ diff --git a/src/c.rs b/src/c.rs
                 labels: vec![],
                 body: String::new(),
             };
-            crate::issues::land_answer(
-                &mut app,
-                crate::issues::IssuesAnswer::List {
-                    project,
-                    list: Some(vec![issue(15), issue(14)]),
-                },
-            );
+            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             let on_row =
                 |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
@@ -34260,11 +34424,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "demo".into(),
                 "/tmp/demo".into(),
             )));
-            crate::issues::land_answer(
-                &mut app,
-                crate::issues::IssuesAnswer::List {
-                    project,
-                    list: Some(vec![crate::issues::Issue {
+            crate::issues::land_list(&mut app, project, Some(vec![crate::issues::Issue {
                         number: 15,
                         url: "https://github.com/o/r/issues/15".into(),
                         title: "Fix login redirect".into(),
@@ -34273,9 +34433,7 @@ diff --git a/src/c.rs b/src/c.rs
                         updated_at: "2026-09-11T12:00:00Z".into(),
                         labels: vec![],
                         body: String::new(),
-                    }]),
-                },
-            );
+                    }]));
             let fresh = |app: &App| match &app.overlay {
                 Some(Overlay::AgentPresets(v)) => v.is_new_worktree(),
                 other => panic!("expected the preset picker, got {other:?}"),

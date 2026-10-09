@@ -1275,6 +1275,7 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             app.worktree_changes.remove(&worktree);
             app.worktree_lines.remove(&worktree);
             app.worktree_ahead.remove(&worktree);
+            crate::event_loop::forget_checkout_reads(app, &worktree);
             app.pull_requests.remove(&worktree);
             app.pr_recheck.remove(&worktree);
             if view_for(app, &worktree).is_some() {

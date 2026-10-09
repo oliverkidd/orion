@@ -81,8 +81,12 @@ pub struct Found {
 /// What lands on `App::clean_worktrees.tx`.
 #[derive(Debug)]
 pub enum Answer {
-    /// The check: the checkouts git found clean, of those asked about.
-    Checked { found: Vec<Found> },
+    /// The check: the checkouts git found clean, of those asked about, and
+    /// the ticket of the open that asked.
+    Checked {
+        ticket: crate::fetch::Ticket<()>,
+        found: Vec<Found>,
+    },
     /// A branch delete after its checkout went; `Err` says why it didn't.
     BranchDeleted {
         branch: String,
@@ -101,6 +105,10 @@ pub struct Shared {
     pub branch_after: HashMap<WorktreeId, (PathBuf, String)>,
     /// Branches deleted since the last Enter, for the flash.
     pub branches_deleted: usize,
+    /// The check in flight, at most one: each open starts its own and
+    /// drops the one before, so a slow check from an earlier open can't
+    /// fill this open's modal with the rows it read then.
+    pub checks: crate::fetch::Flights<()>,
 }
 
 /// "1 branch" / "3 branches".
@@ -320,13 +328,19 @@ pub(crate) fn start(app: &mut App) {
         ..CleanView::default()
     }));
     let base = crate::config::Config::load().worktree_base_branch;
+    let checks = &mut app.clean_worktrees.checks;
+    checks.clear();
+    let Some(ticket) = checks.begin((), std::time::Instant::now()) else {
+        return;
+    };
     let Some(tx) = app.clean_worktrees.tx.clone() else {
         let found = check(candidates, &base);
-        land(app, Answer::Checked { found });
+        land(app, Answer::Checked { ticket, found });
         return;
     };
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(Answer::Checked {
+            ticket,
             found: check(candidates, &base),
         });
     });
@@ -337,7 +351,11 @@ pub(crate) fn start(app: &mut App) {
 pub(crate) fn land(app: &mut App, answer: Answer) {
     app.dirty = true;
     match answer {
-        Answer::Checked { found } => {
+        Answer::Checked { ticket, found } => {
+            // An earlier open's check: this modal asked again since.
+            if app.clean_worktrees.checks.land(&ticket).is_none() {
+                return;
+            }
             // A session started in one while git was reading keeps it.
             let still_idle: Vec<Worktree> = idle(app).into_iter().cloned().collect();
             let order: HashMap<ProjectId, usize> = app
@@ -781,8 +799,19 @@ mod tests {
             checking: 3,
             ..CleanView::default()
         }));
-        land(&mut app, Answer::Checked { found });
+        let answer = checked(&mut app, found);
+        land(&mut app, answer);
         app
+    }
+
+    /// The answer to a check begun now.
+    fn checked(app: &mut App, found: Vec<Found>) -> Answer {
+        let ticket = app
+            .clean_worktrees
+            .checks
+            .begin((), std::time::Instant::now())
+            .expect("no check running");
+        Answer::Checked { ticket, found }
     }
 
     fn three() -> Vec<Found> {
@@ -827,6 +856,27 @@ mod tests {
         assert_eq!(v.cursor, 1);
     }
 
+    /// Opened twice before the first check answered: the first open's
+    /// answer is dropped, and only the second's fills the modal.
+    #[test]
+    fn a_check_from_an_earlier_open_is_dropped() {
+        let mut app = app();
+        app.overlay = Some(Overlay::CleanWorktrees(CleanView {
+            checking: 3,
+            ..CleanView::default()
+        }));
+        let first = checked(&mut app, three());
+        // The second open starts its own check over the first (`start`).
+        app.clean_worktrees.checks.clear();
+        let second = checked(&mut app, vec![found("idle1", BranchState::Merged)]);
+        land(&mut app, first);
+        assert_eq!(view(&app).checking, 3, "still waiting on its own");
+        assert!(view(&app).rows.is_empty());
+        land(&mut app, second);
+        let names: Vec<&str> = view(&app).rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["idle-one"]);
+    }
+
     #[test]
     fn dirty_checkouts_and_ones_that_got_a_session_are_left_out() {
         let mut app = app();
@@ -836,15 +886,14 @@ mod tests {
         }));
         app.tree.agents.push(agent("a3", "idle2", false));
         // `old` is absent: git found changes in it.
-        land(
+        let answer = checked(
             &mut app,
-            Answer::Checked {
-                found: vec![
-                    found("idle2", BranchState::Pushed),
-                    found("idle1", BranchState::Merged),
-                ],
-            },
+            vec![
+                found("idle2", BranchState::Pushed),
+                found("idle1", BranchState::Merged),
+            ],
         );
+        land(&mut app, answer);
         let names: Vec<&str> = view(&app).rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["idle-one"]);
     }
