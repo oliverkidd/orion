@@ -35,7 +35,7 @@
 
 use crate::markdown::{self, FoldKey, Folds};
 use crate::pull_request::{
-    CheckCounts, CheckState, PrCheck, PrComment, PrDetail, PrFile, REVIEW_REQUESTED, STATE_OPEN,
+    CheckCounts, CheckState, PrCheck, PrComment, PrDetail, PrFile, Standing, REVIEW_REQUESTED,
 };
 use crate::theme::Theme;
 use ratatui::layout::Rect;
@@ -433,6 +433,11 @@ pub struct PageInput<'a> {
     pub number: u64,
     pub title: &'a str,
     pub detail: Option<&'a PrDetail>,
+    /// Where it stands, as `App::prs` says — the border's state word —
+    /// and, when the page is the cache's copy no live answer has replaced
+    /// yet, the dim word beside it ([`freshness`]).
+    pub status: Option<crate::pr_store::PrStatus>,
+    pub freshness: Option<&'static str>,
     /// `gh` couldn't read it: the page says so rather than "reading it…".
     pub failed: bool,
     /// A comment of yours is on its way (the modal's COMMENT BOX).
@@ -515,15 +520,25 @@ pub fn border(
     th: Theme,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let mut left = Vec::new();
-    if let Some(d) = input.detail {
-        let (word, color) = state_word(d, th);
+    if input.detail.is_some() {
+        let status = input.status.clone().unwrap_or_default();
+        let (word, color) = state_word(&status, th);
         left.push(Span::styled(
             word,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
+        if let Some(fresh) = input.freshness {
+            left.push(Span::styled(
+                format!(" {fresh}"),
+                Style::default().fg(th.dim),
+            ));
+        }
         left.push(Span::raw("  "));
     }
+    // The newest answer's title, as the row beside it shows it; the
+    // page's, then the row's own, while none has been observed.
     let title = input.detail.map_or(input.title, |d| d.title.as_str());
+    let title = input.status.as_ref().map_or(title, |s| s.title_or(title));
     left.push(Span::styled(
         format!("#{} ", input.number),
         Style::default().fg(if focused { th.accent } else { th.dim }),
@@ -544,17 +559,36 @@ pub fn border(
     (left, right)
 }
 
-/// Where a pull request stands, as its border says it. A state `gh` might
-/// add later is shown as it came, dim, rather than guessed at.
-fn state_word(d: &PrDetail, th: Theme) -> (String, Color) {
-    match (d.state.as_str(), d.is_draft) {
-        (STATE_OPEN, _) if d.health.conflicts => ("● Conflicts".into(), th.err),
-        (STATE_OPEN, true) => ("○ Draft".into(), th.muted),
-        (STATE_OPEN, false) => ("● Open".into(), th.ok),
-        ("MERGED", _) => ("● Merged".into(), th.merged),
-        ("CLOSED", _) => ("● Closed".into(), th.faint),
-        (other, _) => (format!("● {}", other.to_lowercase()), th.dim),
+/// Where a pull request stands, as its border says it — `App::prs`'s
+/// word, the one its list row and badge draw.
+fn state_word(status: &crate::pr_store::PrStatus, th: Theme) -> (String, Color) {
+    match status.standing {
+        Standing::Open | Standing::Draft if status.health.conflicts => {
+            ("● Conflicts".into(), th.err)
+        }
+        Standing::Draft => ("○ Draft".into(), th.muted),
+        Standing::Open => ("● Open".into(), th.ok),
+        Standing::Merged => ("● Merged".into(), th.merged),
+        Standing::Closed => ("● Closed".into(), th.faint),
     }
+}
+
+/// The dim word beside the border's state while the page on screen is
+/// the copy the cache hydrated (`pr_cache`) and no live answer has
+/// replaced it: `updating…` while a read is on its way, else `cached` —
+/// so a state word the last launch left is never passed off as current.
+/// A page read live this session says nothing, however old.
+pub fn freshness(app: &crate::app::App, url: &str) -> Option<&'static str> {
+    let from_cache = app.pr_detail_stale.contains(url)
+        && (!app.pr_detail_at.contains_key(url) || app.pr_detail_failed.contains(url));
+    if !from_cache || !app.pr_detail.contains_key(url) {
+        return None;
+    }
+    Some(if app.pr_detail_inflight.in_flight(&url.to_string()) {
+        "updating…"
+    } else {
+        "cached"
+    })
 }
 
 /// Styled runs' width in cells.
@@ -1751,9 +1785,9 @@ mod tests {
             number: 42,
             url: "https://github.com/o/r/pull/42".into(),
             title: "Attach links".into(),
-            state: "OPEN".into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: "OPEN".into(),
+            answered_draft: false,
+            answered: Default::default(),
             author: "webdevcody".into(),
             base: "main".into(),
             head: "feat/links".into(),
@@ -1839,6 +1873,16 @@ mod tests {
             number: 42,
             title: "Attach links",
             detail,
+            status: detail.map(|d| {
+                let mut prs = crate::pr_store::PrStore::default();
+                prs.observe(
+                    &d.url,
+                    crate::pr_store::PrObservation::of_detail(d),
+                    crate::fetch::Asked::Cached,
+                );
+                prs.status_or_open(&d.url)
+            }),
+            freshness: None,
             failed: false,
             posting: false,
             browser_key: "Enter".into(),
@@ -2176,13 +2220,13 @@ mod tests {
         };
         let mut d = detail("", vec![]);
         assert_eq!(state(&d), ("● Open".into(), Some(th.ok)));
-        d.is_draft = true;
+        d.answered_draft = true;
         assert_eq!(state(&d), ("○ Draft".into(), Some(th.muted)));
-        d.health.conflicts = true;
+        d.answered.conflicts = Some(true);
         assert_eq!(state(&d), ("● Conflicts".into(), Some(th.err)));
-        d.state = "MERGED".into();
+        d.answered_state = "MERGED".into();
         assert_eq!(state(&d), ("● Merged".into(), Some(th.merged)));
-        d.state = "CLOSED".into();
+        d.answered_state = "CLOSED".into();
         assert_eq!(state(&d), ("● Closed".into(), Some(th.faint)));
     }
 

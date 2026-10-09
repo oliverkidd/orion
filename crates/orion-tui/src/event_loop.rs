@@ -346,16 +346,12 @@ async fn main_loop(
     let (sweep_git_tx, mut sweep_git_rx) = tokio::sync::mpsc::unbounded_channel::<SweptChanges>();
     // Pull-request lookups run off the loop (they hit the network); answers
     // come back here and land in `app.pull_requests`.
-    let (pr_tx, mut pr_rx) = tokio::sync::mpsc::unbounded_channel::<(WorktreeId, Lookup)>();
+    let (pr_tx, mut pr_rx) = tokio::sync::mpsc::unbounded_channel::<LookupLanded>();
     // The selected project's open-pull-request list, on the same off-loop
     // footing. `None` is "couldn't ask", which keeps the last good list.
-    let (prs_tx, mut prs_rx) = tokio::sync::mpsc::unbounded_channel::<(
-        orion_core::ProjectId,
-        Option<Vec<crate::pull_request::OpenPr>>,
-    )>();
+    let (prs_tx, mut prs_rx) = tokio::sync::mpsc::unbounded_channel::<ListLanded>();
     // One pull request's body and conversation, for the preview pane.
-    let (detail_tx, mut detail_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, Option<crate::pull_request::PrDetail>)>();
+    let (detail_tx, mut detail_rx) = tokio::sync::mpsc::unbounded_channel::<DetailLanded>();
     // A whole `gh pr diff`, which opens the diff modal when it lands — or
     // refreshes the one already open on the cached copy.
     let (prdiff_tx, mut prdiff_rx) = tokio::sync::mpsc::unbounded_channel::<PrDiffAnswer>();
@@ -442,7 +438,8 @@ async fn main_loop(
     app.vim_tx = Some(vim_tx);
     // CLAUDE ACCOUNTS: who each is signed in as, read off the loop
     // (`claude_accounts::request_refresh`); a name that changed lands here.
-    let (accounts_tx, mut accounts_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (accounts_tx, mut accounts_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(crate::fetch::Ticket<()>, bool)>();
     app.accounts_tx = Some(accounts_tx);
     // The INPUT LATENCY PROBE (`ORION_PERF_LOG`); None outside a
     // measurement run.
@@ -709,45 +706,39 @@ async fn main_loop(
                     handle_vim_event(&mut app, ev);
                 }
             }
-            changed = accounts_rx.recv() => {
+            answer = accounts_rx.recv() => {
                 // Never None: `app.accounts_tx` keeps a sender alive.
-                if changed.is_some() {
-                    app.dirty = true;
+                if let Some((ticket, changed)) = answer {
+                    crate::claude_accounts::land_refresh(&mut app, ticket, changed);
                 }
             }
             answer = pr_rx.recv() => {
                 // Never None: `pr_tx` lives as long as the loop.
-                if let Some((worktree, answer)) = answer {
-                    land_pull_request(&mut app, worktree, answer);
+                if let Some(answer) = answer {
+                    land_lookup(&mut app, answer, &mut out);
                 }
             }
             answer = git_rx.recv() => {
                 // Never None: `git_tx` lives as long as the loop.
-                if let Some((worktree, files, lines, ahead)) = answer {
-                    let count = files.as_ref().map(Vec::len);
-                    note_worktree_lines(&mut app, &worktree, lines);
-                    note_worktree_ahead(&mut app, &worktree, ahead);
-                    keep_changed_files(&mut app, &worktree, files);
-                    land_git_changes(&mut app, worktree, count);
-                    // The selection moved on while this one was being read:
-                    // ask for where it is now, rather than wait a poll.
-                    if app.git_changes_stale() {
+                if let Some((ticket, files, lines, ahead)) = answer {
+                    // The selection moved on while this one was being read,
+                    // or a pull landed meanwhile: ask for where it is now,
+                    // rather than wait a poll.
+                    if land_git_read(&mut app, &ticket, files, lines, ahead) {
                         request_git_changes(&mut app, &git_tx);
                     }
                 }
             }
             answer = sweep_git_rx.recv() => {
                 // Never None: `sweep_git_tx` lives as long as the loop.
-                if let Some((worktree, count, lines, ahead)) = answer {
-                    note_worktree_lines(&mut app, &worktree, lines);
-                    note_worktree_ahead(&mut app, &worktree, ahead);
-                    land_swept_changes(&mut app, worktree, count);
+                if let Some((ticket, count, lines, ahead)) = answer {
+                    land_sweep_read(&mut app, &ticket, count, lines, ahead);
                 }
             }
             answer = prs_rx.recv() => {
                 // Never None: `prs_tx` lives as long as the loop.
-                if let Some((project, list)) = answer {
-                    note_open_prs_answer(&mut app, project, list, &mut out);
+                if let Some(answer) = answer {
+                    land_open_prs(&mut app, &prs_tx, answer, &mut out);
                     refresh_palette(&mut app);
                 }
             }
@@ -797,8 +788,8 @@ async fn main_loop(
                 prefetch_pr_details(&mut app, &detail_tx);
             }
             answer = detail_rx.recv() => {
-                if let Some((url, detail)) = answer {
-                    land_pr_detail(&mut app, url, detail, &mut out);
+                if let Some(answer) = answer {
+                    land_detail(&mut app, &detail_tx, answer, &mut out);
                 }
             }
             answer = prdiff_rx.recv() => {
@@ -1016,9 +1007,10 @@ async fn main_loop(
 /// every worktree switch — a late frame on the one keypress that should
 /// feel instant — and on every poll, a hitch under the user's typing.
 /// Skipped while one is in flight (a repaint must never stack processes);
-/// the answer arrives on `git_tx` and lands in `land_git_changes`.
+/// the answer arrives on `git_tx`, with the ticket saying when it was
+/// asked, and lands in [`land_git_read`].
 fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSender<ChangedFiles>) {
-    if app.git_changes_inflight.is_some() {
+    if !app.git_reads.is_empty() {
         return;
     }
     let Some((id, path)) = app
@@ -1027,19 +1019,21 @@ fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSende
     else {
         return;
     };
-    app.git_changes_inflight = Some(id.clone());
+    let Some(ticket) = app.git_reads.begin(id, std::time::Instant::now()) else {
+        return;
+    };
     let git_tx = git_tx.clone();
     tokio::task::spawn_blocking(move || {
         let (files, lines, ahead) = read_checkout(&path);
-        let _ = git_tx.send((id, files, lines, ahead));
+        let _ = git_tx.send((ticket, files, lines, ahead));
     });
 }
 
 /// What the badge's `git status` found in a checkout, the lines behind it
 /// and its commits ahead of and behind its base; None when git could not
-/// say.
+/// say. The ticket names the checkout and when it was asked.
 type ChangedFiles = (
-    WorktreeId,
+    crate::fetch::Ticket<WorktreeId>,
     Option<Vec<crate::git_diff::DiffFile>>,
     Option<crate::git_diff::LineChanges>,
     Option<(usize, usize)>,
@@ -1048,7 +1042,7 @@ type ChangedFiles = (
 /// The sweep's answer for one checkout: its changed-file count, its line
 /// counts and its commits ahead and behind.
 type SweptChanges = (
-    WorktreeId,
+    crate::fetch::Ticket<WorktreeId>,
     Option<usize>,
     Option<crate::git_diff::LineChanges>,
     Option<(usize, usize)>,
@@ -1083,15 +1077,69 @@ fn line_changes_of(
     files.and_then(|files| crate::git_diff::line_changes(path, files))
 }
 
-/// Record the line counts a read found in `worktree`, for its cards; None
-/// (unreadable) or nothing changed by the line drops what was there. A
-/// change redraws.
+/// Whether a read of `ticket`'s checkout is the newest asked yet, and so
+/// may set its counts: one asked before the read already taken — the
+/// other reader's, landing late — is dropped (`fetch` rule 1). A read
+/// taken stamps the checkout with its asked time.
+fn take_read(app: &mut App, ticket: &crate::fetch::Ticket<WorktreeId>) -> bool {
+    if app
+        .worktree_read_at
+        .get(&ticket.key)
+        .is_some_and(|&taken| ticket.at < taken)
+    {
+        return false;
+    }
+    app.worktree_read_at.insert(ticket.key.clone(), ticket.at);
+    true
+}
+
+/// The selected checkout's read landed: its counts are noted — unless
+/// its flight was cancelled (the branch switched under it) or a read of
+/// the checkout asked after it has already landed. True when it should
+/// be asked for again at once: the selection moved on while it ran, or a
+/// PULL or PUSH landed meanwhile and owes a read from after it
+/// ([`reread_checkouts`]).
+fn land_git_read(
+    app: &mut App,
+    ticket: &crate::fetch::Ticket<WorktreeId>,
+    files: Option<Vec<crate::git_diff::DiffFile>>,
+    lines: Option<crate::git_diff::LineChanges>,
+    ahead: Option<(usize, usize)>,
+) -> bool {
+    let Some(landed) = app.git_reads.land(ticket) else {
+        return app.git_changes_stale();
+    };
+    if take_read(app, ticket) {
+        let worktree = ticket.key.clone();
+        let count = files.as_ref().map(Vec::len);
+        note_worktree_lines(app, &worktree, lines);
+        note_worktree_ahead(app, &worktree, ahead);
+        keep_changed_files(app, &worktree, files);
+        land_git_changes(app, worktree, count);
+    } else {
+        // A sweep read asked after this one already landed: its count
+        // stands, but this read is still the selected checkout's own, so
+        // the badge is pointed at it rather than left waiting a poll.
+        land_git_changes(app, ticket.key.clone(), None);
+    }
+    if landed.owed {
+        owe_read(app, &ticket.key);
+    }
+    app.git_changes_stale()
+}
+
+/// Record the line counts a read found in `worktree`, for its cards;
+/// nothing changed by the line drops what was there, and None (git
+/// couldn't say) keeps it — one failed read is no news. A change redraws.
 fn note_worktree_lines(
     app: &mut App,
     worktree: &WorktreeId,
     lines: Option<crate::git_diff::LineChanges>,
 ) {
-    let lines = lines.filter(|l| !l.is_empty());
+    let Some(lines) = lines else {
+        return;
+    };
+    let lines = Some(lines).filter(|l| !l.is_empty());
     let before = match lines {
         Some(l) => app.worktree_lines.insert(worktree.clone(), l),
         None => app.worktree_lines.remove(worktree),
@@ -1102,10 +1150,14 @@ fn note_worktree_lines(
 }
 
 /// Record how far a read found `worktree` from its base, for its band's
-/// rule; None (unreadable) or level with it drops what was there. A change
+/// rule; level with it drops what was there, and None (git couldn't say)
+/// keeps it, so one failed read never blanks a band's `⇡⇣`. A change
 /// redraws.
 fn note_worktree_ahead(app: &mut App, worktree: &WorktreeId, ahead: Option<(usize, usize)>) {
-    let ahead = ahead.filter(|&(a, b)| a > 0 || b > 0);
+    let Some(ahead) = ahead else {
+        return;
+    };
+    let ahead = Some(ahead).filter(|&(a, b)| a > 0 || b > 0);
     let before = match ahead {
         Some(ab) => app.worktree_ahead.insert(worktree.clone(), ab),
         None => app.worktree_ahead.remove(worktree),
@@ -1137,10 +1189,11 @@ fn keep_changed_files(
 
 /// Record a checkout's changed-file count. Stored whichever checkout it is
 /// for — `App::selected_worktree_changes` shows it only while that one is
-/// selected — and a value change redraws.
+/// selected — and a value change redraws. A read that couldn't count
+/// shows the last count there was.
 fn land_git_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
-    app.git_changes_inflight = None;
     note_worktree_changes(app, worktree.clone(), count);
+    let count = app.worktree_changes.get(&worktree).and_then(|(c, _)| *c);
     let next = Some((worktree, count));
     if app.git_changes != next {
         app.git_changes = next;
@@ -1150,11 +1203,14 @@ fn land_git_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
 
 /// Record what a `git status` found in `worktree` for the cards that print
 /// it, stamped now so the sweep knows how old it is; a changed count
-/// redraws.
+/// redraws. None (git couldn't say) keeps the last count, and still
+/// stamps it, so the sweep moves on rather than retrying it every tick.
 fn note_worktree_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
     let now = std::time::Instant::now();
-    let before = app.worktree_changes.insert(worktree, (count, now));
-    if before.map(|(was, _)| was) != Some(count) {
+    let was = app.worktree_changes.get(&worktree).map(|(c, _)| *c);
+    let count = count.or(was.flatten());
+    app.worktree_changes.insert(worktree, (count, now));
+    if was != Some(count) {
         app.dirty = true;
     }
 }
@@ -1163,19 +1219,21 @@ fn note_worktree_changes(app: &mut App, worktree: WorktreeId, count: Option<usiz
 /// grid has a card for, off the loop, so every card can print its own and
 /// not only the one under the cursor (`request_git_changes` keeps that one
 /// fresh on every tick). One process per tick at most, and none while the
-/// last is still out; the answer lands in `land_swept_changes`.
+/// last is still out; the answer lands in [`land_sweep_read`].
 fn sweep_git_changes(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<SweptChanges>) {
-    if app.worktree_changes_inflight.is_some() {
+    if !app.sweep_reads.is_empty() {
         return;
     }
     let Some((id, path)) = changes_sweep_target(app) else {
         return;
     };
-    app.worktree_changes_inflight = Some(id.clone());
+    let Some(ticket) = app.sweep_reads.begin(id, std::time::Instant::now()) else {
+        return;
+    };
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
         let (files, lines, ahead) = read_checkout(&path);
-        let _ = tx.send((id, files.map(|f| f.len()), lines, ahead));
+        let _ = tx.send((ticket, files.map(|f| f.len()), lines, ahead));
     });
 }
 
@@ -1201,13 +1259,30 @@ fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
         .map(|w| (w.id.clone(), w.path.clone()))
 }
 
-/// What a PULL or a PUSH moved, read again soon: the selected checkout's
-/// own read on the next frame, and `ids` put ahead of every other in the
-/// sweep's queue — stamped just older than the oldest read there is,
-/// since [`changes_sweep_target`] takes the oldest first — with their
-/// counts kept on screen meanwhile.
+/// What a PULL, a PUSH or a base sync moved, read again soon, against a
+/// base resolved afresh (`commit_list::forget_base`). A read of one of
+/// `ids` already running was asked before the move landed: it is marked
+/// owed, so a read from after the move follows it ([`owe_read`] once it
+/// lands). The rest are owed now — with their counts kept on screen
+/// meanwhile.
 pub(crate) fn reread_checkouts(app: &mut App, ids: &std::collections::HashSet<WorktreeId>) {
-    if app.selected_worktree().is_some_and(|w| ids.contains(&w.id)) {
+    for w in app.tree.worktrees.iter().filter(|w| ids.contains(&w.id)) {
+        crate::commit_list::forget_base(&w.path);
+    }
+    for id in ids {
+        let running = app.git_reads.want_fresh(id) | app.sweep_reads.want_fresh(id);
+        if !running {
+            owe_read(app, id);
+        }
+    }
+}
+
+/// Have `worktree` read again soon: the selected checkout's own read on
+/// the next frame, any other put ahead of every one in the sweep's queue —
+/// stamped just older than the oldest read there is, since
+/// [`changes_sweep_target`] takes the oldest first.
+fn owe_read(app: &mut App, worktree: &WorktreeId) {
+    if app.selected_worktree().is_some_and(|w| &w.id == worktree) {
         app.git_changes = None;
     }
     let Some(oldest) = app.worktree_changes.values().map(|(_, at)| *at).min() else {
@@ -1216,17 +1291,49 @@ pub(crate) fn reread_checkouts(app: &mut App, ids: &std::collections::HashSet<Wo
     let first = oldest
         .checked_sub(Duration::from_millis(1))
         .unwrap_or(oldest);
-    for (id, (_, at)) in app.worktree_changes.iter_mut() {
-        if ids.contains(id) {
-            *at = first;
-        }
+    if let Some((_, at)) = app.worktree_changes.get_mut(worktree) {
+        *at = first;
     }
 }
 
-/// Land the sweep's count: it frees the slot and feeds the cards only —
-/// the selected checkout's `git_changes` is its own reads' to set.
+/// A checkout's branch changed under its readings: a read running there
+/// answers for the old branch, so it is dropped when it lands, and the
+/// base its `⇡⇣` is measured against is resolved afresh.
+pub(crate) fn forget_checkout_reads(app: &mut App, worktree: &WorktreeId) {
+    app.git_reads.cancel(worktree);
+    app.sweep_reads.cancel(worktree);
+    if let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == worktree) {
+        crate::commit_list::forget_base(&w.path);
+    }
+}
+
+/// The sweep's read landed: its counts feed the cards — unless its flight
+/// was cancelled or a newer read of the checkout already landed — and a
+/// PULL or PUSH that landed while it ran puts the checkout first in the
+/// queue again.
+fn land_sweep_read(
+    app: &mut App,
+    ticket: &crate::fetch::Ticket<WorktreeId>,
+    count: Option<usize>,
+    lines: Option<crate::git_diff::LineChanges>,
+    ahead: Option<(usize, usize)>,
+) {
+    let Some(landed) = app.sweep_reads.land(ticket) else {
+        return;
+    };
+    if take_read(app, ticket) {
+        note_worktree_lines(app, &ticket.key, lines);
+        note_worktree_ahead(app, &ticket.key, ahead);
+        land_swept_changes(app, ticket.key.clone(), count);
+    }
+    if landed.owed {
+        owe_read(app, &ticket.key);
+    }
+}
+
+/// Land the sweep's count: it feeds the cards only — the selected
+/// checkout's `git_changes` is its own reads' to set.
 fn land_swept_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
-    app.worktree_changes_inflight = None;
     note_worktree_changes(app, worktree, count);
 }
 
@@ -1244,14 +1351,38 @@ fn refresh_git_changes(app: &mut App) {
     land_git_changes(app, id, count);
 }
 
+/// A checkout's lookup back on the loop: its ticket (which checkout, and
+/// when it was asked), the branch the checkout was on when it was asked,
+/// and what `gh` said.
+pub(crate) struct LookupLanded {
+    ticket: crate::fetch::Ticket<WorktreeId>,
+    branch: String,
+    answer: Lookup,
+}
+
+/// A project's open list back on the loop: its ticket, the repo it was
+/// asked from (for an owed re-ask), and the answer — `None` is "couldn't
+/// ask", which keeps the last good list.
+pub(crate) struct ListLanded {
+    ticket: crate::fetch::Ticket<ProjectId>,
+    dir: std::path::PathBuf,
+    answer: Option<crate::pull_request::ListAnswer>,
+}
+
+/// One pull request's page back on the loop: its ticket (keyed by URL),
+/// what it was asked with (for an owed re-ask), and the page.
+pub(crate) struct DetailLanded {
+    ticket: crate::fetch::Ticket<String>,
+    number: u64,
+    dir: std::path::PathBuf,
+    detail: Option<crate::pull_request::PrDetail>,
+}
+
 /// Ask `gh` for the selected worktree's pull request, off the loop. Skipped
 /// while one is in flight — a repaint must never stack `gh` processes — and
 /// until the timer the last answer armed expires. The reply arrives on
 /// `pr_tx`.
-fn lookup_pull_request(
-    app: &mut App,
-    pr_tx: &tokio::sync::mpsc::UnboundedSender<(WorktreeId, Lookup)>,
-) {
+fn lookup_pull_request(app: &mut App, pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>) {
     let Some((id, path)) = app
         .selected_worktree()
         .map(|w| (w.id.clone(), w.path.clone()))
@@ -1269,11 +1400,36 @@ fn lookup_pull_request(
         app.dirty |= app.pull_requests.insert(id, None) != Some(None);
         return;
     }
-    app.pr_inflight.insert(id.clone());
+    spawn_pull_request(app, pr_tx, id, path);
+}
+
+/// Start one checkout's lookup, its ticket stamped now and the branch it
+/// is on beside it, so an answer about a branch switched away from since
+/// is dropped (`land_lookup`).
+fn spawn_pull_request(
+    app: &mut App,
+    pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>,
+    id: WorktreeId,
+    path: std::path::PathBuf,
+) {
+    let branch = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| w.id == id)
+        .map(|w| w.branch.clone())
+        .unwrap_or_default();
+    let Some(ticket) = app.pr_inflight.begin(id, crate::fetch::now()) else {
+        return;
+    };
     let pr_tx = pr_tx.clone();
     tokio::spawn(async move {
-        let pr = crate::pull_request::lookup(&path).await;
-        let _ = pr_tx.send((id, pr));
+        let answer = crate::pull_request::lookup(&path).await;
+        let _ = pr_tx.send(LookupLanded {
+            ticket,
+            branch,
+            answer,
+        });
     });
 }
 
@@ -1284,19 +1440,11 @@ fn lookup_pull_request(
 /// expired gets this tick, the next one waits for the next tick, so a
 /// project of thirty checkouts fills in over a minute at startup and then
 /// idles on `PR_SWEEP_REFRESH`. The reply lands on `pr_tx` like any other.
-fn sweep_pull_request(
-    app: &mut App,
-    pr_tx: &tokio::sync::mpsc::UnboundedSender<(WorktreeId, Lookup)>,
-) {
+fn sweep_pull_request(app: &mut App, pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>) {
     let Some((id, path)) = sweep_target(app) else {
         return;
     };
-    app.pr_inflight.insert(id.clone());
-    let pr_tx = pr_tx.clone();
-    tokio::spawn(async move {
-        let pr = crate::pull_request::lookup(&path).await;
-        let _ = pr_tx.send((id, pr));
-    });
+    spawn_pull_request(app, pr_tx, id, path);
 }
 
 /// The checkout the sweep should spend this tick on: the first of the
@@ -1370,13 +1518,70 @@ fn note_pr_answer(app: &mut App, worktree: &WorktreeId, found: bool) {
         .insert(worktree.clone(), (std::time::Instant::now() + step, step));
 }
 
-/// A branch lookup landed. The row takes a found pull request, or clears on
-/// a definite "no pull request"; a call that never reached GitHub leaves it
-/// as it was — this run's last answer, or the one the cache hydrated — and
-/// only backs off the next attempt (`note_pr_answer`). A row that changed
-/// goes to the cache at the next flush.
+/// A branch lookup landed. One whose flight was cancelled — the checkout
+/// was switched to another branch, `branch_switch` or a daemon upsert
+/// cleared its row — is dropped, and so is one asked while the checkout
+/// was on a branch it has left since (a switch made outside orion): its
+/// pull request is the old branch's, and the row would bring it back. An
+/// owed lookup is asked on the next tick.
+fn land_lookup(app: &mut App, landed: LookupLanded, out: &mut Vec<ClientRequest>) {
+    let Some(flight) = app.pr_inflight.land(&landed.ticket) else {
+        return;
+    };
+    let worktree = landed.ticket.key.clone();
+    let branch = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree)
+        .map(|w| w.branch.as_str());
+    if branch != Some(landed.branch.as_str()) {
+        app.pr_recheck.remove(&worktree);
+        return;
+    }
+    let url = match &landed.answer {
+        Lookup::Found(pr) => Some(pr.url.clone()),
+        Lookup::Absent | Lookup::Unavailable => None,
+    };
+    land_pull_request_at(app, worktree, landed.answer, landed.ticket.asked());
+    // A checkout's own lookup that says merged or closed retires the row
+    // from the open lists now, as a page does, rather than leaving it
+    // there reading `merged` until the next list.
+    if let Some(url) = url.filter(|url| !app.prs.status_or_open(url).is_open()) {
+        drop_retired_pr(app, &url, out);
+    }
+    // The answer just armed the next lookup's timer; a fresh one asked
+    // for meanwhile goes on the next tick instead.
+    if flight.owed {
+        app.pr_recheck.remove(&landed.ticket.key);
+    }
+}
+
+/// [`land_pull_request_at`] for an answer asked just now — the tests'
+/// way in, with no flight to land.
+#[cfg(test)]
 fn land_pull_request(app: &mut App, worktree: WorktreeId, answer: Lookup) {
-    app.pr_inflight.remove(&worktree);
+    land_pull_request_at(
+        app,
+        worktree,
+        answer,
+        crate::fetch::Asked::At(crate::fetch::now()),
+    );
+}
+
+/// A branch lookup's answer, asked at `asked`. The row takes a found pull
+/// request, or clears on a definite "no pull request"; a call that never
+/// reached GitHub leaves it as it was — this run's last answer, or the one
+/// the cache hydrated — and only backs off the next attempt
+/// (`note_pr_answer`). What it says of the pull request's state goes to
+/// `prs` under that stamp. A row that changed goes to the cache at the
+/// next flush.
+fn land_pull_request_at(
+    app: &mut App,
+    worktree: WorktreeId,
+    answer: Lookup,
+    asked: crate::fetch::Asked,
+) {
     let row = match answer {
         Lookup::Found(pr) => Some(Some(pr)),
         Lookup::Absent => Some(None),
@@ -1386,20 +1591,28 @@ fn land_pull_request(app: &mut App, worktree: WorktreeId, answer: Lookup) {
     let Some(row) = row else {
         return;
     };
-    let changed = app.pull_requests.get(&worktree) != Some(&row);
-    // A merge seen to happen — the last answer was anything but merged, this
-    // one is — starts the row's ONE-SHOT SWEEP. No last answer at all is a
-    // checkout met for the first time: whenever that merged, it wasn't now.
-    let is_merged = |pr: &Option<crate::pull_request::PullRequest>| {
+    let mut changed = app.pull_requests.get(&worktree) != Some(&row);
+    // A merge seen to happen — the row was anything but merged, and now
+    // `prs` says it is — starts the row's ONE-SHOT SWEEP. No last answer at
+    // all is a checkout met for the first time: whenever that merged, it
+    // wasn't now.
+    let is_merged = |app: &App, pr: &Option<crate::pull_request::PullRequest>| {
         pr.as_ref()
-            .is_some_and(|pr| pr.standing() == crate::pull_request::Standing::Merged)
+            .and_then(|pr| app.prs.status(&pr.url))
+            .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged)
     };
-    let landed = is_merged(&row)
-        && app
-            .pull_requests
-            .get(&worktree)
-            .is_some_and(|last| !is_merged(last));
-    if landed {
+    let was = app
+        .pull_requests
+        .get(&worktree)
+        .map(|last| is_merged(app, last));
+    if let Some(pr) = &row {
+        changed |= app.prs.observe(
+            &pr.url,
+            crate::pr_store::PrObservation::of_lookup(pr),
+            asked,
+        );
+    }
+    if was == Some(false) && is_merged(app, &row) {
         app.note_merge_landed(worktree.clone());
     }
     app.pull_requests.insert(worktree, row);
@@ -1414,10 +1627,7 @@ fn land_pull_request(app: &mut App, worktree: WorktreeId, answer: Lookup) {
 /// timer the last answer armed. The reply arrives on `prs_tx`.
 fn lookup_open_prs(
     app: &mut App,
-    prs_tx: &tokio::sync::mpsc::UnboundedSender<(
-        orion_core::ProjectId,
-        Option<Vec<crate::pull_request::OpenPr>>,
-    )>,
+    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
     out: &mut Vec<ClientRequest>,
 ) {
     let Some((id, path)) = app
@@ -1436,12 +1646,56 @@ fn lookup_open_prs(
         note_open_prs_answer(app, id, None, out);
         return;
     }
-    app.open_prs_inflight.insert(id.clone());
+    spawn_open_prs(app, prs_tx, id, path);
+}
+
+/// Start one project's list, its ticket stamped now. Nothing when one is
+/// already running: a beat has nothing to add to it, and a refresh asked
+/// for marks it owed instead (`pr_modal::request_list`).
+fn spawn_open_prs(
+    app: &mut App,
+    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
+    id: ProjectId,
+    dir: std::path::PathBuf,
+) {
+    let Some(ticket) = app.open_prs_inflight.begin(id, crate::fetch::now()) else {
+        return;
+    };
     let prs_tx = prs_tx.clone();
     tokio::spawn(async move {
-        let list = crate::pull_request::list(&path).await;
-        let _ = prs_tx.send((id, list));
+        let answer = crate::pull_request::list(&dir).await;
+        let _ = prs_tx.send(ListLanded {
+            ticket,
+            dir,
+            answer,
+        });
     });
+}
+
+/// A list landed. One whose flight was superseded is dropped; the rest
+/// land under their ticket's stamp (`note_open_prs_answer_at`). A fresh
+/// list asked for while this one ran (`⌘R`, a merge from the modal)
+/// starts now: this answer may predate what it was asked after.
+fn land_open_prs(
+    app: &mut App,
+    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
+    landed: ListLanded,
+    out: &mut Vec<ClientRequest>,
+) {
+    let Some(flight) = app.open_prs_inflight.land(&landed.ticket) else {
+        return;
+    };
+    let project = landed.ticket.key.clone();
+    note_open_prs_answer_at(
+        app,
+        project.clone(),
+        landed.answer,
+        landed.ticket.asked(),
+        out,
+    );
+    if flight.owed && landed.dir.is_dir() {
+        spawn_open_prs(app, prs_tx, project, landed.dir);
+    }
 }
 
 /// Ask `gh` for the open list of one project the cursor is *not* on, off
@@ -1454,10 +1708,7 @@ fn lookup_open_prs(
 /// on its faster beat.
 fn sweep_open_prs(
     app: &mut App,
-    prs_tx: &tokio::sync::mpsc::UnboundedSender<(
-        orion_core::ProjectId,
-        Option<Vec<crate::pull_request::OpenPr>>,
-    )>,
+    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
     out: &mut Vec<ClientRequest>,
 ) {
     let Some((id, path)) = open_prs_sweep_target(app) else {
@@ -1469,12 +1720,7 @@ fn sweep_open_prs(
         note_open_prs_answer(app, id, None, out);
         return;
     }
-    app.open_prs_inflight.insert(id.clone());
-    let prs_tx = prs_tx.clone();
-    tokio::spawn(async move {
-        let list = crate::pull_request::list(&path).await;
-        let _ = prs_tx.send((id, list));
-    });
+    spawn_open_prs(app, prs_tx, id, path);
 }
 
 /// The project the sweep should spend this tick on, if any: the first
@@ -1486,7 +1732,7 @@ fn open_prs_sweep_target(app: &App) -> Option<(ProjectId, std::path::PathBuf)> {
     app.project_rows()
         .into_iter()
         .map(|i| &app.tree.projects[i])
-        .filter(|p| Some(&p.id) != selected.as_ref() && !app.open_prs_inflight.contains(&p.id))
+        .filter(|p| Some(&p.id) != selected.as_ref() && !app.open_prs_inflight.in_flight(&p.id))
         .find(|p| match app.open_prs.get(&p.id) {
             Some(open) => now >= open.at + open.step.max(OPEN_PRS_SWEEP_REFRESH),
             None => true,
@@ -1503,10 +1749,34 @@ fn open_prs_sweep_target(app: &App) -> Option<(ProjectId, std::path::PathBuf)> {
 /// network round trip is no reason to blank the group. It is noted,
 /// though (`App::open_prs_failed`), so a call that keeps failing shows as
 /// a list that `couldn't refresh` rather than a current one.
+///
+/// This is the answer asked just now, from the full query: a list that
+/// was never asked (a repo not on disk) and the tests' rows.
 fn note_open_prs_answer(
     app: &mut App,
     project: orion_core::ProjectId,
     list: Option<Vec<crate::pull_request::OpenPr>>,
+    out: &mut Vec<ClientRequest>,
+) {
+    let answer = list.map(|rows| crate::pull_request::ListAnswer {
+        rows,
+        ..Default::default()
+    });
+    let asked = crate::fetch::Asked::At(crate::fetch::now());
+    note_open_prs_answer_at(app, project, answer, asked, out);
+}
+
+/// [`note_open_prs_answer`] for an answer asked at `asked`. Every row's
+/// state, draft flag, conflicts and checks go to `prs` under that stamp
+/// first, and the list then drops any row `prs` says has merged or closed
+/// since — a page asked after this list was asked said so, and a list
+/// already on its way must not bring the row back. A slim answer carries
+/// each row's meta line over from the last list (`carry_meta`).
+fn note_open_prs_answer_at(
+    app: &mut App,
+    project: orion_core::ProjectId,
+    answer: Option<crate::pull_request::ListAnswer>,
+    asked: crate::fetch::Asked,
     out: &mut Vec<ClientRequest>,
 ) {
     // Which pull request the cursor is resting on, before the list under it
@@ -1517,7 +1787,22 @@ fn note_open_prs_answer(
     // just opened from its branch (or back out, once that merges), and
     // the cursor goes with it — a checkout is never lost to a re-list.
     let checkout = app.selected_worktree().map(|w| w.id.clone());
-    app.open_prs_inflight.remove(&project);
+    let mut status_changed = false;
+    let list = answer.map(|answer| {
+        let mut rows = answer.rows;
+        for row in &rows {
+            let cut = answer.cut.contains(&row.url);
+            status_changed |= app.prs.observe_list_row(row, cut, asked);
+        }
+        if answer.slim {
+            carry_meta(
+                &mut rows,
+                app.open_prs.get(&project).map(|o| o.list.as_slice()),
+            );
+        }
+        rows.retain(|row| app.prs.status_or_open(&row.url).is_open());
+        rows
+    });
     let failed = list.is_none();
     if failed != app.open_prs_failed.contains(&project) {
         app.dirty = true;
@@ -1557,8 +1842,8 @@ fn note_open_prs_answer(
     // Drafts sink to the bottom of the group here, on the one path every
     // answer lands through; the cursor reconcile below follows its PR by
     // URL, so the reorder never moves the selection off it.
-    crate::pull_request::drafts_last(&mut list);
-    let changed = previous.map(|o| &o.list) != Some(&list);
+    crate::pull_request::drafts_last(&mut list, &app.prs);
+    let changed = previous.map(|o| &o.list) != Some(&list) || status_changed;
     app.dirty |= changed;
     app.pr_cache_dirty |= changed;
     reask_checkouts_whose_pr_left(app, &left);
@@ -1603,10 +1888,34 @@ fn note_open_prs_answer(
 }
 
 /// What a pull request's row says that its page says too: the draft, the
-/// title, the conflict and the checks' verdict. A change in any is news
-/// the page read before it has not caught up to.
-fn row_status(row: &crate::pull_request::OpenPr) -> (bool, &str, crate::pull_request::Health) {
-    (row.is_draft, row.title.as_str(), row.health)
+/// title, the conflict, the checks' verdict and the head commit — what the
+/// row observes into `prs`. A change in any is news the page read before
+/// it has not caught up to.
+fn row_status(row: &crate::pull_request::OpenPr) -> crate::pr_store::PrObservation {
+    crate::pr_store::PrObservation::of_list_row(row)
+}
+
+/// A slim list's rows ([`crate::pull_request::ListAnswer::slim`]) take
+/// the meta line — author, age, review, labels, the tally, and whether you
+/// are asked to review, which is the row's section — from the same pull
+/// request's row in the last list, by URL. The slim query never asked for
+/// any of it, so an empty meta there is "not asked", and taking it at its
+/// word would move the row between sections, and its meta line in and out,
+/// on every beat GitHub balks at the full query. Carried after the rows
+/// were observed, so a carried tally is the meta line's alone and never
+/// the checks' verdict.
+fn carry_meta(
+    rows: &mut [crate::pull_request::OpenPr],
+    previous: Option<&[crate::pull_request::OpenPr]>,
+) {
+    let Some(previous) = previous else {
+        return;
+    };
+    for row in rows {
+        if let Some(was) = previous.iter().find(|was| was.url == row.url) {
+            row.meta = was.meta.clone();
+        }
+    }
 }
 
 /// The list answer moved a pull request's row on — its draft, title or
@@ -1641,6 +1950,11 @@ fn stale_details_behind(
     if behind.is_empty() {
         return;
     }
+    // A page already being read may have been asked before the row moved:
+    // it is owed a fresh read once it lands, and stays stale till then.
+    for url in &behind {
+        app.pr_detail_inflight.want_fresh(url);
+    }
     app.pr_detail_stale.extend(behind.iter().cloned());
     if crate::pr_modal::is_up(app) {
         crate::pr_modal::schedule_detail(app);
@@ -1661,6 +1975,8 @@ fn stale_details_behind(
 /// *closed* and repaints the row purple, so the one is made to follow the
 /// other within seconds instead of minutes. A checkout whose PR is already
 /// known merged or closed has nothing left to learn and is left on its beat.
+/// One whose lookup is running is owed another: that one may have been
+/// asked before the merge.
 fn reask_checkouts_whose_pr_left(app: &mut App, left: &[String]) {
     if left.is_empty() {
         return;
@@ -1670,10 +1986,12 @@ fn reask_checkouts_whose_pr_left(app: &mut App, left: &[String]) {
         .iter()
         .filter_map(|(wt, pr)| {
             let pr = pr.as_ref()?;
-            (pr.is_open() && left.contains(&pr.url)).then(|| wt.clone())
+            let open = app.prs.status_or_open(&pr.url).is_open();
+            (open && left.contains(&pr.url)).then(|| wt.clone())
         })
         .collect();
     for wt in due {
+        app.pr_inflight.want_fresh(&wt);
         app.pr_recheck.remove(&wt);
     }
 }
@@ -1739,38 +2057,32 @@ fn forget_retired_prs(app: &mut App) {
     app.pr_detail_failed.retain(|url| live.contains(url));
     app.pr_detail_at.retain(|url, _| live.contains(url));
     app.pr_cache_dirty |= app.pr_detail.len() != before;
+    // Their facts too, once no list still on its way could need them.
+    app.prs.prune(&live, std::time::Instant::now());
 }
 
-/// Carry the state GitHub just gave for one pull request over to the
-/// checkout row that shows the same one, ahead of that row's own
-/// `PR_REFRESH` beat. The PR ROW keeps a merged or closed pull request
-/// rather than retiring it, so what changes here is its badge — `ready` to
+/// A page just turned pull request `url` merged in `prs` (`was_merged`
+/// is what `prs` said before it landed). The checkout rows that show the
+/// same pull request draw from `prs` too, so their badge — `ready` to
 /// `merged` the moment the pane learns it, not up to fifteen seconds later
-/// — and, on the Sessions panel, its look.
-fn adopt_pr_state(app: &mut App, detail: &crate::pull_request::PrDetail) {
+/// — has already moved; what is left is the ONE-SHOT SWEEP, the same
+/// seen-to-happen merge `land_pull_request_at` stamps, learned a beat
+/// earlier.
+fn adopt_pr_state(app: &mut App, url: &str, was_merged: bool) {
     use crate::pull_request::Standing;
-    // Checkouts whose row turns merged right here: the same seen-to-happen
-    // merge `land_pull_request` stamps, learned a beat earlier.
-    let mut landed = Vec::new();
-    for (worktree, pr) in app.pull_requests.iter_mut() {
-        let Some(pr) = pr else { continue };
-        if pr.url != detail.url {
-            continue;
-        }
-        if pr.state != detail.state || pr.is_draft != detail.is_draft || pr.health != detail.health
-        {
-            let was_merged = pr.standing() == Standing::Merged;
-            pr.state = detail.state.clone();
-            pr.is_draft = detail.is_draft;
-            // The pane's answer is the newer one: a conflict resolved (or
-            // found) since the row's own lookup turns the row on the spot.
-            pr.health = detail.health;
-            if !was_merged && pr.standing() == Standing::Merged {
-                landed.push(worktree.clone());
-            }
-            app.dirty = true;
-        }
+    let merged = app
+        .prs
+        .status(url)
+        .is_some_and(|s| s.standing == Standing::Merged);
+    if was_merged || !merged {
+        return;
     }
+    let landed: Vec<WorktreeId> = app
+        .pull_requests
+        .iter()
+        .filter(|(_, pr)| pr.as_ref().is_some_and(|pr| pr.url == url))
+        .map(|(worktree, _)| worktree.clone())
+        .collect();
     for worktree in landed {
         app.note_merge_landed(worktree);
     }
@@ -1778,9 +2090,10 @@ fn adopt_pr_state(app: &mut App, detail: &crate::pull_request::PrDetail) {
 
 /// Retire one pull request from every project's list ahead of the next
 /// list lookup, because GitHub has just told us — in the detail fetched
-/// for the row the cursor is resting on — that it is merged or closed.
-/// The list refresh would catch it within the minute anyway; this is for
-/// the case where the user is looking straight at it.
+/// for the row the cursor is resting on, or a checkout's own lookup —
+/// that it is merged or closed. The list refresh would catch it within
+/// the minute anyway; this is for the case where the user is looking
+/// straight at it.
 fn drop_retired_pr(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
     let cursor = app.selected_worktree_pr().cloned();
     let mut removed = false;
@@ -1874,15 +2187,12 @@ fn note_preview_change(app: &mut App, before: Option<String>) {
 
 /// Fire the debounced fetch. Disarms first, so a `gh` that never answers
 /// can't re-fire on every loop turn.
-fn lookup_pr_detail(
-    app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<crate::pull_request::PrDetail>)>,
-) {
+fn lookup_pr_detail(app: &mut App, detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>) {
     let Some((pending, _)) = app.pending_pr_detail.take() else {
         return;
     };
     // The modal's prefetch got there first; its answer lands for both.
-    if app.pr_detail_inflight.contains(&pending.url) {
+    if app.pr_detail_inflight.in_flight(&pending.url) {
         return;
     }
     if !pending.dir.is_dir() {
@@ -1900,7 +2210,7 @@ fn lookup_pr_detail(
 /// cursor's own fetch is the one that says so.
 fn prefetch_pr_details(
     app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<crate::pull_request::PrDetail>)>,
+    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
 ) {
     for pending in crate::pr_modal::take_prefetch(app) {
         if pending.dir.is_dir() {
@@ -1910,52 +2220,102 @@ fn prefetch_pr_details(
 }
 
 /// Ask `gh pr view` for one pull request's body, off the loop, marked in
-/// flight until it lands in `land_pr_detail`.
+/// flight until it lands in `land_detail`. Nothing when one is already
+/// running for it: that one's answer lands for both.
 fn spawn_pr_detail(
     app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<(String, Option<crate::pull_request::PrDetail>)>,
+    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
     url: String,
     number: u64,
     dir: std::path::PathBuf,
 ) {
-    app.pr_detail_inflight.insert(url.clone());
+    let Some(ticket) = app.pr_detail_inflight.begin(url, crate::fetch::now()) else {
+        return;
+    };
     let detail_tx = detail_tx.clone();
     tokio::spawn(async move {
         let detail = crate::pull_request::detail(&dir, number).await;
-        let _ = detail_tx.send((url, detail));
+        let _ = detail_tx.send(DetailLanded {
+            ticket,
+            number,
+            dir,
+            detail,
+        });
     });
 }
 
-/// A body and conversation landed. It replaces whatever the pane was
-/// showing for the URL — most often the copy the cache hydrated — and
-/// GitHub's word on this one pull request is the authoritative one: if it
-/// has been merged or closed since the list was fetched, the row goes now
-/// rather than at the next refresh (`adopt_pr_state`, `drop_retired_pr`).
-/// A fetch that failed leaves a cached copy where it is; stale is still
-/// the best answer there is.
+/// A page landed. One whose flight was superseded is dropped; the rest
+/// land under their ticket's stamp (`land_pr_detail`). When the page was
+/// asked to be read again while this fetch ran — the list said it moved,
+/// a review or `⌘D` changed it — this answer may predate that, so the
+/// page stays stale and a fresh read starts now.
+fn land_detail(
+    app: &mut App,
+    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
+    landed: DetailLanded,
+    out: &mut Vec<ClientRequest>,
+) {
+    let Some(flight) = app.pr_detail_inflight.land(&landed.ticket) else {
+        return;
+    };
+    let url = landed.ticket.key.clone();
+    let asked = landed.ticket.asked();
+    land_pr_detail(app, url.clone(), landed.detail, asked, flight.owed, out);
+    if flight.owed && landed.dir.is_dir() {
+        spawn_pr_detail(app, detail_tx, url, landed.number, landed.dir);
+    }
+}
+
+/// A body and conversation landed, asked at `asked`. It replaces whatever
+/// the pane was showing for the URL — most often the copy the cache
+/// hydrated — and what it says of the state goes to `prs` under that
+/// stamp: if `prs` then says merged or closed, the row goes now rather
+/// than at the next refresh (`adopt_pr_state`, `drop_retired_pr`). With a
+/// fresh read `owed`, the page stays stale until that one lands. A fetch
+/// that failed leaves a cached copy where it is; stale is still the best
+/// answer there is.
 fn land_pr_detail(
     app: &mut App,
     url: String,
     detail: Option<crate::pull_request::PrDetail>,
+    asked: crate::fetch::Asked,
+    owed: bool,
     out: &mut Vec<ClientRequest>,
 ) {
-    app.pr_detail_inflight.remove(&url);
     app.pr_detail_at
         .insert(url.clone(), std::time::Instant::now());
+    let was_merged = app
+        .prs
+        .status(&url)
+        .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged);
+    let mut status_changed = false;
+    if let Some(detail) = &detail {
+        status_changed = app.prs.observe(
+            &url,
+            crate::pr_store::PrObservation::of_detail(detail),
+            asked,
+        );
+    }
     // A watched pull request's checks, for AUTOFIX.
     crate::autofix::land_detail(app, &url, detail.as_ref(), out);
     match detail {
         Some(detail) => {
-            let retired = !detail.is_open();
-            adopt_pr_state(app, &detail);
+            let retired = !app.prs.status_or_open(&url).is_open();
+            adopt_pr_state(app, &url, was_merged);
             let changed = app.pr_detail.get(&url) != Some(&detail);
             app.pr_detail.insert(url.clone(), detail);
-            app.pr_detail_stale.remove(&url);
+            if !owed {
+                app.pr_detail_stale.remove(&url);
+            }
             app.pr_detail_failed.remove(&url);
             app.pr_cache_dirty |= changed;
             crate::pr_actions::detail_landed(app, &url);
             if retired {
                 drop_retired_pr(app, &url, out);
+            } else if status_changed {
+                // The OPEN PRS GROUP's and the palette's rows draw from
+                // `prs`, which this page just moved.
+                refresh_palette(app);
             }
         }
         None => {
@@ -2732,6 +3092,8 @@ fn refresh_pull_requests(app: &mut App) {
     if let Some(open) = app.open_prs.get_mut(&project) {
         open.due = std::time::Instant::now();
     }
+    // A list already on its way was asked before the key: another follows.
+    app.open_prs_inflight.want_fresh(&project);
     schedule_pr_lookup(app);
     schedule_pr_sweep(app);
     refetch_pr_detail(app);
@@ -2745,12 +3107,14 @@ fn refresh_pull_requests(app: &mut App) {
 /// answer is cached or was refused — that is the point — and leaves the
 /// scroll alone: the reader asked for this, so they must not be sent back
 /// to the top. The cached copy stays on screen until the new one lands;
-/// a lookup already in flight is left to land on its own.
+/// a lookup already in flight is followed by a fresh one when it lands.
 fn refetch_pr_detail(app: &mut App) {
     let Some(pr) = app.previewed_pr() else {
         return;
     };
-    if app.pr_detail_inflight.contains(&pr.url) {
+    // One in flight may have been asked before whatever this is for: it
+    // owes a fresh read when it lands.
+    if app.pr_detail_inflight.want_fresh(&pr.url) {
         return;
     }
     let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
@@ -4381,6 +4745,7 @@ fn dispatch_action(
                     &app.tree,
                     crate::config::Config::load().palette_enter_attaches,
                     &app.open_prs,
+                    &app.prs,
                     app.hide_draft_prs,
                 )));
             }
@@ -7372,7 +7737,9 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
                 }
                 // And drafts to hide — or, once hidden, a way back that
                 // doesn't need the list to still hold one.
-                if app.hide_draft_prs || app.all_open_prs().iter().any(|pr| pr.is_draft) {
+                if app.hide_draft_prs
+                    || app.all_open_prs().iter().any(|pr| app.pr_is_draft(&pr.url))
+                {
                     let label = if app.hide_draft_prs {
                         "Show draft PRs"
                     } else {
@@ -13139,6 +13506,9 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 a.unseen = unseen;
                 app.dirty = true;
             }
+            // A row deleted here and not yet answered keeps the flip for a
+            // refusal to put back.
+            optimistic::hold_status(app, &agent, status, changed_at, unseen);
             // The first turn in a session we just launched: its own stamp
             // leads the list from here, so the launch stops having to.
             if status != orion_core::AgentStatus::Fresh
@@ -13306,9 +13676,11 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             app.dirty = true;
         }
         // A straggler for a row deleted here a moment ago: the DAEMON sent
-        // it before it got to the delete, and the row stays down.
+        // it before it got to the delete, and the row stays down — kept as
+        // the version a refused delete puts back.
         ServerEvent::EntityUpserted { entity } if optimistic::is_deleting(app, &entity) => {
-            tracing::debug!(?entity, "upsert of a row being deleted — ignored");
+            tracing::debug!(?entity, "upsert of a row being deleted — held");
+            optimistic::hold(app, entity);
         }
         ServerEvent::EntityUpserted { entity } => {
             // A checkout cut for a PR SESSION takes over its stand-in row
@@ -13668,7 +14040,9 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
             if switched {
                 app.pull_requests.remove(&w.id);
                 app.pr_recheck.remove(&w.id);
+                app.pr_inflight.cancel(&w.id);
                 app.worktree_ahead.remove(&w.id);
+                forget_checkout_reads(app, &w.id);
             }
             upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id)
         }
@@ -13746,6 +14120,7 @@ fn apply_removal(app: &mut App, id: &orion_core::EntityId) {
             app.tree.links.retain(|l| &l.worktree_id != id);
             app.pr_cache_dirty |= app.pull_requests.remove(id).is_some();
             app.pr_recheck.remove(id);
+            app.pr_inflight.cancel(id);
             app.tree.worktrees.retain(|w| &w.id != id);
         }
         EntityId::Agent(id) => app.tree.agents.retain(|a| &a.id != id),
@@ -13812,7 +14187,7 @@ fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback, out: &mut Ve
 /// new entities) so its rows never go stale under the user's cursor.
 fn refresh_palette(app: &mut App) {
     if let Some(Overlay::Palette(palette)) = &mut app.overlay {
-        palette.rebuild(&app.tree, &app.open_prs, app.hide_draft_prs);
+        palette.rebuild(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
     }
 }
 
@@ -15534,8 +15909,8 @@ mod tests {
         assert!(!app.status_anim_active());
 
         let mut merged = a_detail(7, "shipped", vec![]);
-        merged.state = "MERGED".into();
-        adopt_pr_state(&mut app, &merged);
+        merged.answered_state = "MERGED".into();
+        adopt(&mut app, &merged);
         assert!(app.merge_is_fresh(&w1), "open to merged, seen: stamped");
         assert!(app.status_anim_active(), "the merged row sweeps");
         app.animations = false;
@@ -15550,7 +15925,7 @@ mod tests {
         assert!(app.worktree_wears_merge(&w1), "still the merged row");
         assert!(!app.status_anim_active(), "settled: no frames asked for");
         // Hearing the same state again is not a second merge.
-        adopt_pr_state(&mut app, &merged);
+        adopt(&mut app, &merged);
         assert!(!app.merge_is_fresh(&w1));
         app.note_merge_landed(w1.clone());
         assert!(
@@ -15948,8 +16323,8 @@ mod tests {
                         number: *number,
                         title: (*title).into(),
                         url: format!("https://github.com/o/r/pull/{number}"),
-                        is_draft: false,
-                        health: Default::default(),
+                        answered_draft: false,
+                        answered: Default::default(),
                         head: format!("pr-{number}-head"),
                         mine: false,
                         head_sha: String::new(),
@@ -16112,7 +16487,12 @@ mod tests {
 
         // A draft kept out by the setting takes no checkout with it either.
         let pid = app.selected_project().expect("a project").id.clone();
-        app.open_prs.get_mut(&pid).unwrap().list[0].is_draft = true;
+        let first = app.open_prs[&pid].list[0].url.clone();
+        app.prs.observe(
+            &first,
+            crate::pr_store::PrObservation::of_draft(true),
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
         app.hide_draft_prs = true;
         assert_eq!(rows(&app), ["main", "pr-7-head", "feat", "#9"]);
         app.hide_draft_prs = false;
@@ -16146,8 +16526,8 @@ mod tests {
             number: 7,
             title: "Attach links".into(),
             url: pr_url(7),
-            is_draft: false,
-            health: Default::default(),
+            answered_draft: false,
+            answered: Default::default(),
             head: "pr-7-head".into(),
             mine: false,
             head_sha: String::new(),
@@ -16171,7 +16551,12 @@ mod tests {
 
         // A draft hidden by the setting frees its checkout; shown, it
         // takes it back.
-        app.open_prs.get_mut(&pid).unwrap().list[0].is_draft = true;
+        let first = app.open_prs[&pid].list[0].url.clone();
+        app.prs.observe(
+            &first,
+            crate::pr_store::PrObservation::of_draft(true),
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
         assert!(
             !set_hide_draft_prs(&mut app, true),
             "the cursor never left a checkout"
@@ -16208,8 +16593,8 @@ mod tests {
             number: 7,
             title: "Attach links".into(),
             url: "https://github.com/o/r/pull/7".into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_draft: false,
+            answered: Default::default(),
             head: "attach-links".into(),
             mine: false,
             head_sha: String::new(),
@@ -16264,7 +16649,8 @@ mod tests {
         assert!(app.open_prs_lookup_due(&pid));
 
         // An in-flight call is never doubled up on.
-        app.open_prs_inflight.insert(pid.clone());
+        app.open_prs_inflight
+            .begin(pid.clone(), crate::fetch::now());
         assert!(!app.open_prs_lookup_due(&pid));
     }
 
@@ -16548,8 +16934,8 @@ mod tests {
                     number,
                     title: title.into(),
                     url: pr_url(number),
-                    is_draft,
-                    health: Default::default(),
+                    answered_draft: is_draft,
+                    answered: Default::default(),
                     head: format!("pr-{number}-head"),
                     mine: false,
                     head_sha: String::new(),
@@ -16728,8 +17114,8 @@ mod tests {
                     number,
                     title: format!("pull {number}"),
                     url: format!("https://github.com/o/r/pull/{number}"),
-                    is_draft,
-                    health: Default::default(),
+                    answered_draft: is_draft,
+                    answered: Default::default(),
                     head: format!("pr-{number}-head"),
                     mine: false,
                     head_sha: String::new(),
@@ -16791,8 +17177,8 @@ mod tests {
                 number: 11,
                 title: "Brand new".into(),
                 url: pr_url(11),
-                is_draft: false,
-                health: Default::default(),
+                answered_draft: false,
+                answered: Default::default(),
                 head: "brand-new".into(),
                 mine: false,
                 head_sha: String::new(),
@@ -16802,8 +17188,8 @@ mod tests {
                 number: 9,
                 title: "Number lines".into(),
                 url: pr_url(9),
-                is_draft: false,
-                health: Default::default(),
+                answered_draft: false,
+                answered: Default::default(),
                 head: "number-lines".into(),
                 mine: false,
                 head_sha: String::new(),
@@ -16813,8 +17199,8 @@ mod tests {
                 number: 7,
                 title: "Attach links".into(),
                 url: pr_url(7),
-                is_draft: false,
-                health: Default::default(),
+                answered_draft: false,
+                answered: Default::default(),
                 head: "attach-links".into(),
                 mine: false,
                 head_sha: String::new(),
@@ -16850,8 +17236,7 @@ mod tests {
         app.sel_worktree = 1;
 
         let mut merged = a_detail(7, "shipped", vec![]);
-        merged.state = "MERGED".into();
-        assert!(!merged.is_open());
+        merged.answered_state = "MERGED".into();
         app.pr_detail.insert(pr_url(7), merged);
         drop_retired_pr(&mut app, &pr_url(7), &mut Vec::new());
 
@@ -16861,8 +17246,17 @@ mod tests {
 
         // A draft is open, so nothing about it is retired.
         let mut draft = a_detail(9, "still cooking", vec![]);
-        draft.is_draft = true;
-        assert!(draft.is_open(), "a draft is an open pull request");
+        draft.answered_draft = true;
+        let mut prs = crate::pr_store::PrStore::default();
+        prs.observe(
+            &draft.url,
+            crate::pr_store::PrObservation::of_detail(&draft),
+            crate::fetch::Asked::Cached,
+        );
+        assert!(
+            prs.status_or_open(&draft.url).is_open(),
+            "a draft is an open pull request"
+        );
     }
 
     /// The checkout's own PR ROW keeps a merged pull request, so GitHub's
@@ -16879,22 +17273,20 @@ mod tests {
         let pid = app.selected_project().expect("a project").id.clone();
         let wid = orion_core::WorktreeId("w1".into());
         let branch_pr = |app: &App| {
-            app.pull_requests
+            let pr = app
+                .pull_requests
                 .get(&wid)
                 .cloned()
                 .flatten()
-                .expect("the branch's pull request")
+                .expect("the branch's pull request");
+            app.prs.status_or_open(&pr.url)
         };
-        assert_eq!(branch_pr(&app).badge(), "ready");
+        assert_eq!(branch_pr(&app).word(), "ready");
 
         let mut merged = a_detail(7, "shipped", vec![]);
-        merged.state = "MERGED".into();
-        adopt_pr_state(&mut app, &merged);
-        assert_eq!(
-            branch_pr(&app).badge(),
-            "merged",
-            "the row wears the answer"
-        );
+        merged.answered_state = "MERGED".into();
+        adopt(&mut app, &merged);
+        assert_eq!(branch_pr(&app).word(), "merged", "the row wears the answer");
         assert!(app.dirty, "and repaints for it");
         assert_eq!(app.visible_links().len(), 1, "but the row is not retired");
 
@@ -16909,10 +17301,8 @@ mod tests {
 
         // A detail for some other pull request leaves the row alone.
         let other = a_detail(9, "unrelated", vec![]);
-        app.dirty = false;
-        adopt_pr_state(&mut app, &other);
-        assert_eq!(branch_pr(&app).badge(), "merged");
-        assert!(!app.dirty);
+        adopt(&mut app, &other);
+        assert_eq!(branch_pr(&app).word(), "merged");
     }
 
     /// A list refresh that moves a pull request's status on — checks gone red
@@ -16921,7 +17311,7 @@ mod tests {
     /// list that did not move asks nothing, whatever its page says.
     #[test]
     fn a_list_refresh_ahead_of_its_page_reads_the_page_again() {
-        use crate::pull_request::{Checks, Health};
+        use crate::pull_request::{Answered, Checks};
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Attach links")]);
@@ -16939,9 +17329,9 @@ mod tests {
                 .map(|n| {
                     let mut row = a_pr(n, "Attach links", false);
                     if red.contains(&n) {
-                        row.health = Health {
-                            conflicts: false,
-                            checks: Checks::Failing,
+                        row.answered = Answered {
+                            conflicts: Some(false),
+                            checks: Some(Checks::Failing),
                         };
                     }
                     row
@@ -17014,8 +17404,8 @@ mod tests {
             number,
             title: title.into(),
             url: pr_url(number),
-            is_draft,
-            health: Default::default(),
+            answered_draft: is_draft,
+            answered: Default::default(),
             head: format!("pr-{number}-head"),
             mine: false,
             head_sha: String::new(),
@@ -17036,9 +17426,9 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             title: "Attach links".into(),
-            state: "OPEN".into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: "OPEN".into(),
+            answered_draft: false,
+            answered: Default::default(),
             author: "webdevcody".into(),
             base: "main".into(),
             head: "feat/links".into(),
@@ -17069,6 +17459,43 @@ mod tests {
         assert!(text.contains("couldn't read this pull request"), "{text}");
     }
 
+    /// A page landing, as `land_pr_detail` takes it into `prs`: observed
+    /// just now, and the merge it shows stamped (`adopt_pr_state`).
+    fn adopt(app: &mut App, detail: &crate::pull_request::PrDetail) {
+        let was_merged = app
+            .prs
+            .status(&detail.url)
+            .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged);
+        app.dirty |= app.prs.observe(
+            &detail.url,
+            crate::pr_store::PrObservation::of_detail(detail),
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
+        adopt_pr_state(app, &detail.url, was_merged);
+    }
+
+    /// A page fetched and landed, its flight and all.
+    fn land_page(
+        app: &mut App,
+        url: &str,
+        detail: Option<crate::pull_request::PrDetail>,
+        out: &mut Vec<ClientRequest>,
+    ) {
+        let ticket = app
+            .pr_detail_inflight
+            .begin(url.to_string(), crate::fetch::now())
+            .expect("none in flight");
+        let flight = app.pr_detail_inflight.land(&ticket).expect("its own");
+        land_pr_detail(
+            app,
+            url.to_string(),
+            detail,
+            ticket.asked(),
+            flight.owed,
+            out,
+        );
+    }
+
     /// Seed the Sessions panel's PR ROW: the pull request `gh` found on the
     /// seeded worktree's branch.
     fn seed_branch_pr(app: &mut App, number: u64, title: &str) {
@@ -17078,9 +17505,9 @@ mod tests {
                 number,
                 url: format!("https://github.com/o/r/pull/{number}"),
                 title: title.into(),
-                state: crate::pull_request::STATE_OPEN.into(),
-                is_draft: false,
-                health: Default::default(),
+                answered_state: crate::pull_request::STATE_OPEN.into(),
+                answered_draft: false,
+                answered: Default::default(),
                 activity: Vec::new(),
             }),
         );
@@ -18033,9 +18460,9 @@ diff --git a/src/b.rs b/src/b.rs
             number,
             url: pr_url(number),
             title: format!("PR {number}"),
-            state: crate::pull_request::STATE_OPEN.into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: crate::pull_request::STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
             activity: Vec::new(),
         }
     }
@@ -18045,13 +18472,55 @@ diff --git a/src/b.rs b/src/b.rs
             number,
             title: format!("PR {number}"),
             url: pr_url(number),
-            is_draft: false,
-            health: Default::default(),
+            answered_draft: false,
+            answered: Default::default(),
             head: format!("head-{number}"),
             mine: false,
             head_sha: String::new(),
             meta: Default::default(),
         }
+    }
+
+    /// A checkout's own lookup that says merged takes the row out of the
+    /// open list at once, as a page saying so does — not left there
+    /// reading `merged` until the next list.
+    #[test]
+    fn a_lookup_that_says_merged_retires_the_open_row() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_open_prs(&mut app, &[(7, "seven"), (8, "eight")]);
+        let w1 = orion_core::WorktreeId("w1".into());
+        let branch = app
+            .tree
+            .worktrees
+            .iter()
+            .find(|w| w.id == w1)
+            .map(|w| w.branch.clone())
+            .unwrap();
+        let mut merged = cached_pr(7);
+        merged.answered_state = crate::pull_request::STATE_MERGED.into();
+
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
+        let answer = Lookup::Found(merged);
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer,
+            },
+            &mut Vec::new(),
+        );
+
+        let listed: Vec<u64> = app
+            .open_prs
+            .values()
+            .flat_map(|open| open.list.iter().map(|pr| pr.number))
+            .collect();
+        assert_eq!(listed, vec![8], "the merged row left the list");
     }
 
     /// Only a merge seen to happen starts the ONE-SHOT SWEEP: the last
@@ -18062,7 +18531,7 @@ diff --git a/src/b.rs b/src/b.rs
     fn only_a_merge_seen_to_happen_is_stamped() {
         let merged = |number| {
             let mut pr = cached_pr(number);
-            pr.state = crate::pull_request::STATE_MERGED.into();
+            pr.answered_state = crate::pull_request::STATE_MERGED.into();
             pr
         };
         let mut app = App::new();
@@ -18181,9 +18650,27 @@ diff --git a/src/b.rs b/src/b.rs
         seed_branch_pr(&mut app, 7, "Attach links");
         app.pr_cache_dirty = false;
 
-        app.pr_inflight.insert(w1.clone());
-        land_pull_request(&mut app, w1.clone(), Lookup::Unavailable);
-        assert!(!app.pr_inflight.contains(&w1));
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .expect("none in flight");
+        let branch = app
+            .tree
+            .worktrees
+            .iter()
+            .find(|w| w.id == w1)
+            .map(|w| w.branch.clone())
+            .unwrap();
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: Lookup::Unavailable,
+            },
+            &mut Vec::new(),
+        );
+        assert!(!app.pr_inflight.in_flight(&w1));
         assert_eq!(
             app.pull_requests[&w1].as_ref().map(|p| p.number),
             Some(7),
@@ -18239,8 +18726,7 @@ diff --git a/src/b.rs b/src/b.rs
 
         let mut out = Vec::new();
         app.pending_pr_detail = None;
-        app.pr_detail_inflight.insert(url.clone());
-        land_pr_detail(&mut app, url.clone(), None, &mut out);
+        land_page(&mut app, &url, None, &mut out);
         assert_eq!(
             app.pr_detail.get(&url).map(|d| d.body.as_str()),
             Some("from the cache"),
@@ -18248,11 +18734,10 @@ diff --git a/src/b.rs b/src/b.rs
         );
 
         app.pr_detail_failed.clear();
-        app.pr_detail_inflight.insert(url.clone());
         app.pr_cache_dirty = false;
-        land_pr_detail(
+        land_page(
             &mut app,
-            url.clone(),
+            &url,
             Some(a_detail(7, "rewritten", Vec::new())),
             &mut out,
         );
@@ -18261,6 +18746,246 @@ diff --git a/src/b.rs b/src/b.rs
         assert!(app.pr_cache_dirty);
         schedule_pr_detail(&mut app);
         assert!(app.pending_pr_detail.is_none(), "fresh: nothing to ask");
+    }
+
+    /// A page asked after a list said the pull request merged: the list,
+    /// slower, lands after it, and its row is not brought back — the badge
+    /// says merged, as the page did.
+    #[test]
+    fn a_list_asked_before_a_merged_page_does_not_bring_the_row_back() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Number lines")]);
+        let pid = app.selected_project().expect("a project").id.clone();
+        let list_asked = crate::fetch::Asked::At(crate::fetch::now());
+        let mut merged = a_detail(7, "shipped", vec![]);
+        merged.answered_state = "MERGED".into();
+        land_page(&mut app, &pr_url(7), Some(merged), &mut Vec::new());
+        assert_eq!(open_pr_numbers(&app), vec![9], "the page retires it");
+
+        let rows = vec![
+            a_pr(7, "Attach links", false),
+            a_pr(9, "Number lines", false),
+        ];
+        note_open_prs_answer_at(
+            &mut app,
+            pid,
+            Some(crate::pull_request::ListAnswer {
+                rows,
+                ..Default::default()
+            }),
+            list_asked,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            open_pr_numbers(&app),
+            vec![9],
+            "the older list leaves it out"
+        );
+        assert_eq!(app.prs.status_or_open(&pr_url(7)).word(), "merged");
+    }
+
+    /// A list from the slim query never asked for the meta line or who is
+    /// asked to review: each row keeps the last full answer's, stays in its
+    /// section, and the answer is no change to write.
+    #[test]
+    fn a_slim_list_keeps_the_meta_it_did_not_ask_for() {
+        use crate::pull_request::{ListAnswer, PrMeta, PrSection};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let pid = app.selected_project().expect("a project").id.clone();
+        let full = || {
+            let mut row = a_pr(7, "Attach links", false);
+            row.meta = PrMeta {
+                author: "sam".into(),
+                review_requested: true,
+                comments: 3,
+                ..PrMeta::default()
+            };
+            row
+        };
+        note_open_prs_answer(&mut app, pid.clone(), Some(vec![full()]), &mut Vec::new());
+        assert_eq!(app.all_open_prs()[0].section(), PrSection::ReviewRequested);
+        app.pr_cache_dirty = false;
+
+        let slim = vec![a_pr(7, "Attach links", false)];
+        let asked = crate::fetch::Asked::At(crate::fetch::now());
+        note_open_prs_answer_at(
+            &mut app,
+            pid,
+            Some(ListAnswer {
+                rows: slim,
+                slim: true,
+                ..Default::default()
+            }),
+            asked,
+            &mut Vec::new(),
+        );
+        let row = &app.all_open_prs()[0];
+        assert_eq!(row.meta, full().meta, "the last full answer's meta");
+        assert_eq!(row.section(), PrSection::ReviewRequested, "same section");
+        assert!(!app.pr_cache_dirty, "nothing changed");
+    }
+
+    /// A page asked to be read again while its fetch runs — the list says
+    /// the row moved — is owed a fresh read: the answer in flight lands but
+    /// leaves the page stale, and the next read starts at once. A list
+    /// asked for with `⌘R` while one runs is owed the same way.
+    #[tokio::test]
+    async fn a_refresh_asked_mid_fetch_starts_when_the_fetch_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let pid = app.selected_project().expect("a project").id.clone();
+        let url = pr_url(7);
+        let mut out = Vec::new();
+
+        let (detail_tx, _detail_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ticket = app
+            .pr_detail_inflight
+            .begin(url.clone(), crate::fetch::now())
+            .unwrap();
+        app.pr_detail_inflight.want_fresh(&url);
+        app.pr_detail_stale.insert(url.clone());
+        let landed = DetailLanded {
+            ticket,
+            number: 7,
+            dir: dir.path().to_path_buf(),
+            detail: Some(a_detail(7, "body", vec![])),
+        };
+        land_detail(&mut app, &detail_tx, landed, &mut out);
+        assert_eq!(app.pr_detail[&url].body, "body", "the answer lands");
+        assert!(
+            app.pr_detail_stale.contains(&url),
+            "but is not the last word"
+        );
+        assert!(
+            app.pr_detail_inflight.in_flight(&url),
+            "the owed read is out"
+        );
+
+        let (prs_tx, _prs_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ticket = app
+            .open_prs_inflight
+            .begin(pid.clone(), crate::fetch::now())
+            .unwrap();
+        crate::pr_modal::request_list(&mut app, &pid);
+        let landed = ListLanded {
+            ticket,
+            dir: dir.path().to_path_buf(),
+            answer: Some(crate::pull_request::ListAnswer {
+                rows: vec![a_pr(9, "Number lines", false)],
+                ..Default::default()
+            }),
+        };
+        land_open_prs(&mut app, &prs_tx, landed, &mut out);
+        assert_eq!(open_pr_numbers(&app), vec![9], "the answer lands");
+        assert!(
+            app.open_prs_inflight.in_flight(&pid),
+            "the owed list is out"
+        );
+
+        // Nothing asked for meanwhile: nothing more goes out.
+        let ticket = app
+            .open_prs_inflight
+            .begin(ProjectId("p-other".into()), crate::fetch::now())
+            .unwrap();
+        let other = ticket.key.clone();
+        let landed = ListLanded {
+            ticket,
+            dir: dir.path().to_path_buf(),
+            answer: Some(crate::pull_request::ListAnswer {
+                rows: Vec::new(),
+                ..Default::default()
+            }),
+        };
+        land_open_prs(&mut app, &prs_tx, landed, &mut out);
+        assert!(!app.open_prs_inflight.in_flight(&other));
+    }
+
+    /// A lookup asked about a branch the checkout has left answers for the
+    /// old branch, so it is dropped: one a switch cancelled, and one that
+    /// lands after a switch made where nothing cancelled it. One about the
+    /// branch the checkout is on lands.
+    #[test]
+    fn a_lookup_about_a_branch_left_behind_is_dropped() {
+        use orion_core::{Entity, WorktreeId};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let found = |number| Lookup::Found(cached_pr(number));
+
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
+        let mut moved = app
+            .tree
+            .worktrees
+            .iter()
+            .find(|w| w.id == w1)
+            .cloned()
+            .unwrap();
+        moved.branch = "feat".into();
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Worktree(moved),
+            },
+        );
+        assert!(!app.pr_inflight.in_flight(&w1), "the switch cancels it");
+        let branch = "main".to_string();
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: found(7),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.pull_requests.get(&w1), None, "dropped");
+        assert!(app.prs.status(&pr_url(7)).is_none(), "and never observed");
+
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
+        if let Some(w) = app.tree.worktrees.iter_mut().find(|w| w.id == w1) {
+            w.branch = "other".into();
+        }
+        let branch = "feat".to_string();
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: found(8),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.pull_requests.get(&w1), None, "dropped");
+        assert!(app.prs.status(&pr_url(8)).is_none());
+        assert!(
+            app.pr_lookup_due(&w1),
+            "the branch it is on now is asked next"
+        );
+
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
+        let branch = "other".to_string();
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: found(9),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.pull_requests[&w1].as_ref().map(|pr| pr.number), Some(9));
     }
 
     /// The daemon's snapshot is the truth about which checkouts and
@@ -18380,7 +19105,7 @@ diff --git a/src/b.rs b/src/b.rs
         assert_eq!(target(&app), None, "its own, longer backoff holds it");
         app.open_prs.get_mut(&p2).unwrap().step = OPEN_PRS_RECHECK_MIN;
 
-        app.open_prs_inflight.insert(p2.clone());
+        app.open_prs_inflight.begin(p2.clone(), crate::fetch::now());
         assert_eq!(target(&app), None, "already in flight");
         app.open_prs_inflight.clear();
 
@@ -18653,9 +19378,9 @@ diff --git a/src/c.rs b/src/c.rs
                 number: 7,
                 url: url.clone(),
                 title: "Attach links".into(),
-                state: crate::pull_request::STATE_OPEN.into(),
-                is_draft: false,
-                health: Default::default(),
+                answered_state: crate::pull_request::STATE_OPEN.into(),
+                answered_draft: false,
+                answered: Default::default(),
                 activity: Vec::new(),
             }),
         );
@@ -18704,7 +19429,8 @@ diff --git a/src/c.rs b/src/c.rs
 
         // One already in flight is left to land: nothing is stacked on it.
         app.pending_pr_detail = None;
-        app.pr_detail_inflight.insert(url.clone());
+        app.pr_detail_inflight
+            .begin(url.clone(), crate::fetch::now());
         press(
             &mut app,
             KeyCode::Char('r'),
@@ -18938,9 +19664,9 @@ diff --git a/src/c.rs b/src/c.rs
                 number: 7,
                 url: "https://github.com/o/r/pull/7".into(),
                 title: "done".into(),
-                state: crate::pull_request::STATE_OPEN.into(),
-                is_draft: false,
-                health: Default::default(),
+                answered_state: crate::pull_request::STATE_OPEN.into(),
+                answered_draft: false,
+                answered: Default::default(),
                 activity: Vec::new(),
             }),
         );
@@ -18968,9 +19694,9 @@ diff --git a/src/c.rs b/src/c.rs
                 number: 7,
                 url: url.into(),
                 title: "done".into(),
-                state: crate::pull_request::STATE_OPEN.into(),
-                is_draft: false,
-                health: Default::default(),
+                answered_state: crate::pull_request::STATE_OPEN.into(),
+                answered_draft: false,
+                answered: Default::default(),
                 activity: vec!["2024-04-25T19:55:42Z".into()],
             }),
         );
@@ -19005,9 +19731,9 @@ diff --git a/src/c.rs b/src/c.rs
         use orion_core::WorktreeId;
         let mut app = App::new();
         let wt = WorktreeId("w1".into());
-        app.pr_inflight.insert(wt.clone());
+        app.pr_inflight.begin(wt.clone(), crate::fetch::now());
         assert!(!app.pr_lookup_due(&wt));
-        app.pr_inflight.remove(&wt);
+        app.pr_inflight.cancel(&wt);
         assert!(app.pr_lookup_due(&wt));
     }
 
@@ -19117,12 +19843,12 @@ diff --git a/src/c.rs b/src/c.rs
             sweep_target(&mut app).map(|(id, _)| id),
             Some(first.clone())
         );
-        app.pr_inflight.insert(first.clone());
+        app.pr_inflight.begin(first.clone(), crate::fetch::now());
         // Next tick: the other one. Then nothing until a timer expires.
         let (second, _) = sweep_target(&mut app).expect("the other checkout");
         assert_eq!(second, rest[1]);
         assert_ne!(second, first);
-        app.pr_inflight.remove(&second);
+        app.pr_inflight.cancel(&second);
         note_pr_answer(&mut app, &second, true);
         assert!(app.pr_lookup_due(&gone), "not yet reached");
         assert_eq!(
@@ -19151,7 +19877,7 @@ diff --git a/src/c.rs b/src/c.rs
             Some(w3.clone()),
             "not the selected checkout, not the root"
         );
-        app.pr_inflight.insert(w3);
+        app.pr_inflight.begin(w3, crate::fetch::now());
         assert_eq!(
             sweep_target(&mut app),
             None,
@@ -19214,8 +19940,8 @@ diff --git a/src/c.rs b/src/c.rs
 
         // Known merged already: leaving the list says nothing new.
         let mut merged = a_detail(7, "shipped", vec![]);
-        merged.state = "MERGED".into();
-        adopt_pr_state(&mut app, &merged);
+        merged.answered_state = "MERGED".into();
+        adopt(&mut app, &merged);
         note_open_prs_answer(&mut app, pid, Some(vec![]), &mut Vec::new());
         assert!(!app.pr_lookup_due(&wid), "already wearing the merge");
     }
@@ -26058,12 +26784,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn a_count_for_another_checkout_keeps_the_badge_quiet() {
         let mut app = App::new();
         seed_tree(&mut app); // w1 selected
-        app.git_changes_inflight = Some(WorktreeId("w2".into()));
         land_git_changes(&mut app, WorktreeId("w2".into()), Some(5));
-        assert!(
-            app.git_changes_inflight.is_none(),
-            "the answer frees the slot"
-        );
         assert_eq!(
             app.selected_worktree_changes(),
             None,
@@ -26076,6 +26797,91 @@ diff --git a/src/c.rs b/src/c.rs
         land_git_changes(&mut app, WorktreeId("w1".into()), Some(3));
         assert_eq!(app.selected_worktree_changes(), Some(3));
         assert!(!app.git_changes_stale());
+    }
+
+    /// The two readers feed the same counts, so the one asked later wins
+    /// whichever lands last: a sweep read from before the selected
+    /// checkout's own read is dropped when it lands after it.
+    #[test]
+    fn an_older_sweep_read_is_dropped_after_a_newer_one() {
+        use crate::git_diff::LineChanges;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let now = std::time::Instant::now();
+        let swept = app.sweep_reads.begin(w1.clone(), now).expect("idle");
+        let read = app.git_reads.begin(w1.clone(), now).expect("idle");
+        assert!(swept.at < read.at);
+        let lines = LineChanges {
+            added: 5,
+            removed: 1,
+        };
+        land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((2, 0)));
+        land_sweep_read(
+            &mut app,
+            &swept,
+            Some(7),
+            Some(LineChanges {
+                added: 9,
+                removed: 9,
+            }),
+            Some((0, 4)),
+        );
+        assert_eq!(app.worktree_ahead.get(&w1), Some(&(2, 0)));
+        assert_eq!(app.worktree_lines(&w1), Some(lines));
+        assert_eq!(app.worktree_changes[&w1].0, Some(0));
+        assert!(app.sweep_reads.is_empty(), "its slot is free all the same");
+    }
+
+    /// A read git couldn't answer is no news: the band keeps its `⇡⇣`,
+    /// its line counts and its changed-file count.
+    #[test]
+    fn a_failed_read_keeps_the_last_counts() {
+        use crate::git_diff::LineChanges;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let lines = LineChanges {
+            added: 3,
+            removed: 2,
+        };
+        let read = app
+            .git_reads
+            .begin(w1.clone(), std::time::Instant::now())
+            .expect("idle");
+        land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((4, 1)));
+        let read = app
+            .git_reads
+            .begin(w1.clone(), std::time::Instant::now())
+            .expect("idle");
+        land_git_read(&mut app, &read, None, None, None);
+        assert_eq!(app.worktree_ahead.get(&w1), Some(&(4, 1)));
+        assert_eq!(app.worktree_lines(&w1), Some(lines));
+        assert_eq!(app.selected_worktree_changes(), Some(0));
+    }
+
+    /// A checkout switched to another branch while a read of it ran: the
+    /// read answers for the old branch, and is dropped when it lands.
+    #[test]
+    fn a_read_from_before_a_branch_switch_is_dropped() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = WorktreeId("w1".into());
+        let read = app
+            .git_reads
+            .begin(w1.clone(), std::time::Instant::now())
+            .expect("idle");
+        let mut switched = app.tree.worktrees[0].clone();
+        switched.branch = "feat".into();
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: orion_core::Entity::Worktree(switched),
+            },
+        );
+        assert!(!app.git_reads.in_flight(&w1), "cancelled");
+        land_git_read(&mut app, &read, None, None, Some((5, 0)));
+        assert_eq!(app.worktree_ahead.get(&w1), None, "the old branch's ⇡5");
     }
 
     #[test]
@@ -32999,7 +33805,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_other_project(&mut app);
         assert_eq!(app.project_rows().len(), 2, "demo and secret");
 
-        let palette = Palette::new(&app.tree, false, &app.open_prs, false);
+        let palette = Palette::new(&app.tree, false, &app.open_prs, &app.prs, false);
         let texts: Vec<&str> = palette.items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -33059,8 +33865,8 @@ diff --git a/src/c.rs b/src/c.rs
                     number: 3,
                     title: "Hush the logs".into(),
                     url: "https://github.com/o/secret/pull/3".into(),
-                    is_draft: false,
-                    health: Default::default(),
+                    answered_draft: false,
+                    answered: Default::default(),
                     head: "hush".into(),
                     mine: false,
                     head_sha: String::new(),
@@ -33800,13 +34606,7 @@ diff --git a/src/c.rs b/src/c.rs
             labels: vec![],
             body: String::new(),
         };
-        crate::issues::land_answer(
-            &mut app,
-            crate::issues::IssuesAnswer::List {
-                project,
-                list: Some(vec![issue(15), issue(14)]),
-            },
-        );
+        crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         let on_row =
             |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
@@ -33886,21 +34686,19 @@ diff --git a/src/c.rs b/src/c.rs
                     "demo".into(),
                     "/tmp/demo".into(),
                 )));
-                crate::issues::land_answer(
+                crate::issues::land_list(
                     &mut app,
-                    crate::issues::IssuesAnswer::List {
-                        project,
-                        list: Some(vec![crate::issues::Issue {
-                            number: 15,
-                            url: "https://github.com/o/r/issues/15".into(),
-                            title: "Login fails".into(),
-                            author: "webdevcody".into(),
-                            created_at: "2026-09-10T12:00:00Z".into(),
-                            updated_at: "2026-09-11T12:00:00Z".into(),
-                            labels: vec![],
-                            body: String::new(),
-                        }]),
-                    },
+                    project,
+                    Some(vec![crate::issues::Issue {
+                        number: 15,
+                        url: "https://github.com/o/r/issues/15".into(),
+                        title: "Login fails".into(),
+                        author: "webdevcody".into(),
+                        created_at: "2026-09-10T12:00:00Z".into(),
+                        updated_at: "2026-09-11T12:00:00Z".into(),
+                        labels: vec![],
+                        body: String::new(),
+                    }]),
                 );
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 if fresh {
@@ -33958,13 +34756,7 @@ diff --git a/src/c.rs b/src/c.rs
                 labels: vec![],
                 body: String::new(),
             };
-            crate::issues::land_answer(
-                &mut app,
-                crate::issues::IssuesAnswer::List {
-                    project,
-                    list: Some(vec![issue(15), issue(14)]),
-                },
-            );
+            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             let on_row =
                 |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
@@ -34097,13 +34889,7 @@ diff --git a/src/c.rs b/src/c.rs
                 labels: vec![],
                 body: String::new(),
             };
-            crate::issues::land_answer(
-                &mut app,
-                crate::issues::IssuesAnswer::List {
-                    project,
-                    list: Some(vec![issue(15), issue(14)]),
-                },
-            );
+            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             let on_row =
                 |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
@@ -34260,21 +35046,19 @@ diff --git a/src/c.rs b/src/c.rs
                 "demo".into(),
                 "/tmp/demo".into(),
             )));
-            crate::issues::land_answer(
+            crate::issues::land_list(
                 &mut app,
-                crate::issues::IssuesAnswer::List {
-                    project,
-                    list: Some(vec![crate::issues::Issue {
-                        number: 15,
-                        url: "https://github.com/o/r/issues/15".into(),
-                        title: "Fix login redirect".into(),
-                        author: "webdevcody".into(),
-                        created_at: "2026-09-10T12:00:00Z".into(),
-                        updated_at: "2026-09-11T12:00:00Z".into(),
-                        labels: vec![],
-                        body: String::new(),
-                    }]),
-                },
+                project,
+                Some(vec![crate::issues::Issue {
+                    number: 15,
+                    url: "https://github.com/o/r/issues/15".into(),
+                    title: "Fix login redirect".into(),
+                    author: "webdevcody".into(),
+                    created_at: "2026-09-10T12:00:00Z".into(),
+                    updated_at: "2026-09-11T12:00:00Z".into(),
+                    labels: vec![],
+                    body: String::new(),
+                }]),
             );
             let fresh = |app: &App| match &app.overlay {
                 Some(Overlay::AgentPresets(v)) => v.is_new_worktree(),
@@ -40804,8 +41588,7 @@ diff --git a/src/c.rs b/src/c.rs
                 assert!(text.contains("2  High"), "{text}");
                 press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE, &mut out);
                 assert!(todo_view(&app).pick.is_none());
-                let first =
-                    todo_file(&app).shown_items(emails, &[])[0].clone();
+                let first = todo_file(&app).shown_items(emails, &[])[0].clone();
                 assert_eq!((first.text.as_str(), first.priority), ("new one", 2));
                 assert!(matches!(
                     todo_view(&app).cursor,
@@ -41199,7 +41982,12 @@ diff --git a/src/c.rs b/src/c.rs
                 state_color: String::new(),
                 priority: 0,
             };
-            crate::todos::view::land_linked(&mut app, "/tmp/demo".into(), Ok(vec![issue]));
+            crate::todos::view::land_linked(
+                &mut app,
+                "/tmp/demo".into(),
+                crate::fetch::now(),
+                Ok(vec![("RIP-1".into(), issue)]),
+            );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).linked.contains_key("RIP-1"));
 

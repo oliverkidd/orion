@@ -170,24 +170,24 @@ pub(crate) fn row_pr(
     project: &ProjectId,
     branch: &str,
 ) -> Option<RowPr> {
+    // Where it stands is `App::prs`'s word whichever copy named it, so
+    // the band, the card and the list row beside them never disagree.
+    let row = |number: u64, title: &str, url: &str| {
+        let status = app.prs.status_or_open(url);
+        RowPr {
+            number,
+            title: status.title_or(title).to_string(),
+            url: url.to_string(),
+            standing: status.standing,
+            trouble: status.trouble(),
+        }
+    };
     if let Some(Some(pr)) = app.pull_requests.get(worktree) {
-        return Some(RowPr {
-            number: pr.number,
-            title: pr.title.clone(),
-            url: pr.url.clone(),
-            standing: pr.standing(),
-            trouble: pr.trouble(),
-        });
+        return Some(row(pr.number, &pr.title, &pr.url));
     }
     let listed = app.open_prs.get(project)?;
     let pr = listed.list.iter().find(|pr| pr.head == branch)?;
-    Some(RowPr {
-        number: pr.number,
-        title: pr.title.clone(),
-        url: pr.url.clone(),
-        standing: pr.standing(),
-        trouble: pr.trouble(),
-    })
+    Some(row(pr.number, &pr.title, &pr.url))
 }
 
 // ---- the BANDS ----
@@ -2392,12 +2392,17 @@ mod tests {
                 number: 42,
                 url: "https://github.com/o/api/pull/42".into(),
                 title: "Add search".into(),
-                state: crate::pull_request::STATE_MERGED.into(),
-                is_draft: false,
-                health: Default::default(),
+                answered_state: crate::pull_request::STATE_MERGED.into(),
+                answered_draft: false,
+                answered: Default::default(),
                 activity: Vec::new(),
             }),
         );
+        if let Some(Some(pr)) = app.pull_requests.get(&WorktreeId("w2".into())) {
+            let seen = crate::pr_store::PrObservation::of_lookup(pr);
+            let url = pr.url.clone();
+            app.prs.observe(&url, seen, crate::fetch::Asked::Cached);
+        }
         let rows = rows(&app);
         let pr = rows[0].pr.as_ref().expect("a2's checkout has a PR");
         assert_eq!((pr.number, pr.standing), (42, Standing::Merged));
@@ -2414,8 +2419,8 @@ mod tests {
                     number: 7,
                     title: "Tidy".into(),
                     url: "https://github.com/o/web/pull/7".into(),
-                    is_draft: true,
-                    health: Default::default(),
+                    answered_draft: true,
+                    answered: Default::default(),
                     head: "main".into(),
                     mine: false,
                     head_sha: String::new(),
@@ -2425,6 +2430,12 @@ mod tests {
                 due: std::time::Instant::now(),
                 step: std::time::Duration::from_secs(60),
             },
+        );
+        let listed = app.open_prs[&ProjectId("p2".into())].list[0].clone();
+        app.prs.observe(
+            &listed.url,
+            crate::pr_store::PrObservation::of_list_row(&listed),
+            crate::fetch::Asked::Cached,
         );
         let rows = super::rows(&app);
         let pr = rows[0]

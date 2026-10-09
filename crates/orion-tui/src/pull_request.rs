@@ -36,12 +36,6 @@ pub const STATE_OPEN: &str = "OPEN";
 pub const STATE_MERGED: &str = "MERGED";
 pub const STATE_CLOSED: &str = "CLOSED";
 
-/// Whether a `gh` state string is [`STATE_OPEN`]; drafts are open too, so
-/// this alone never says anything about `isDraft`.
-fn state_is_open(state: &str) -> bool {
-    state == STATE_OPEN
-}
-
 /// Where a pull request stands, as a row paints it: the four looks a PR ROW
 /// can take, folded from `gh`'s state string and its draft flag. `Merged`
 /// and `Closed` win over the flag — a pull request closed while still a
@@ -122,19 +116,35 @@ pub enum Checks {
     Failing,
 }
 
-/// What GitHub says stands between a pull request and its merge button:
-/// whether the branch still merges cleanly, and how its checks stand.
-/// Read off every payload — branch row, list row and detail alike — so
-/// the three surfaces go red together, and remembered with the row
-/// (`pr_cache`); a document written before it was asked reads as healthy.
+/// What GitHub says stands between a pull request and its merge button,
+/// as a screen draws it: whether the branch still merges cleanly, and how
+/// its checks stand. Worked out by `App::prs` (`pr_store::PrStatus`) from
+/// the newest answer that knew — never off one copy's own payload, so
+/// every surface goes red together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Health {
-    /// `gh`'s `mergeable` said `CONFLICTING`: the branch no longer merges
-    /// and a person has to resolve it. `MERGEABLE` reads as clean, and so
-    /// does `UNKNOWN` — GitHub computes mergeability lazily, so the first
-    /// ask after a push often says so; the next beat answers.
+    /// The branch no longer merges and a person has to resolve it. While
+    /// GitHub has never said either way this reads as clean; the status
+    /// it comes from says whether that is known.
     pub conflicts: bool,
     pub checks: Checks,
+}
+
+/// What one answer said about a pull request's [`Health`], each part
+/// `None` where it said nothing: `mergeable: UNKNOWN` (GitHub works
+/// mergeability out lazily, so the first ask after a push often says so),
+/// a field the query didn't ask for, a recheck that couldn't read every
+/// check. Kept on the copies (`OpenPr`, `PullRequest`, `PrDetail`) only
+/// to be observed into `App::prs` (`pr_store`), which keeps the last
+/// known value over an unknown one; no screen reads it. A document cached
+/// before the parts could be unknown reads its old `true` / `false` as
+/// known, which is fine: a cached answer loses to the first live one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Answered {
+    /// `CONFLICTING` is `Some(true)`, `MERGEABLE` `Some(false)`.
+    pub conflicts: Option<bool>,
+    pub checks: Option<Checks>,
 }
 
 impl Health {
@@ -279,13 +289,16 @@ pub struct PullRequest {
     pub url: String,
     pub title: String,
     /// `gh`'s state string — [`STATE_OPEN`], [`STATE_MERGED`] or
-    /// [`STATE_CLOSED`].
-    pub state: String,
-    pub is_draft: bool,
-    /// Whether the branch still merges and its checks pass — what turns
-    /// the row red ([`trouble`](Self::trouble)).
-    #[serde(default)]
-    pub health: Health,
+    /// [`STATE_CLOSED`] — as this answer said it. Observed into `App::prs`,
+    /// which screens read; never drawn from here.
+    #[serde(rename = "state")]
+    pub answered_state: String,
+    #[serde(rename = "is_draft")]
+    pub answered_draft: bool,
+    /// Whether the branch still merges and its checks pass, as this
+    /// answer said it — observed into `App::prs` like the state.
+    #[serde(default, rename = "health")]
+    pub answered: Answered,
     /// When somebody *other than you* commented or submitted a review, as
     /// GitHub's RFC 3339 stamps, oldest first. Those sort lexicographically,
     /// so "posted since the mark we stored" is a string compare — orion
@@ -294,22 +307,6 @@ pub struct PullRequest {
 }
 
 impl PullRequest {
-    /// Whether this pull request still accepts work. A draft counts.
-    pub fn is_open(&self) -> bool {
-        state_is_open(&self.state)
-    }
-
-    /// The look the row takes: open, draft, merged or closed.
-    pub fn standing(&self) -> Standing {
-        Standing::of(&self.state, self.is_draft)
-    }
-
-    /// What the row goes red for, while the pull request is still open:
-    /// a merged or closed one is past needing its branch resolved.
-    pub fn trouble(&self) -> Option<Trouble> {
-        self.is_open().then(|| self.health.trouble()).flatten()
-    }
-
     /// The mark to store when the user opens this PR: everything orion
     /// currently knows about has been read. Empty when nobody has posted —
     /// which still beats no mark at all, since every real stamp sorts above
@@ -408,9 +405,9 @@ fn parse(json: &str, viewer: Option<&str>) -> Option<PullRequest> {
         number: v.get("number")?.as_u64()?,
         url,
         title: str_at(&v, "title"),
-        state: state_at(&v),
-        is_draft: bool_at(&v, "isDraft"),
-        health: health(&v),
+        answered_state: state_at(&v),
+        answered_draft: bool_at(&v, "isDraft"),
+        answered: answered(&v),
         activity: activity(&v, viewer),
     })
 }
@@ -447,20 +444,36 @@ fn activity(v: &serde_json::Value, viewer: Option<&str>) -> Vec<String> {
     stamps
 }
 
-/// The pull request's [`Health`] as a payload carries it: `mergeable`, and
-/// the checks in one of two shapes. `gh pr view` hands back every check on
-/// the head commit (`statusCheckRollup`, folded by [`checks`]); a [`list`]
-/// node carries only GitHub's own verdict on them, the rollup's `state`
-/// on its last commit ([`rollup_state`]). Either missing — the caller did
-/// not ask — reads as healthy.
-fn health(v: &serde_json::Value) -> Health {
+/// The pull request's [`Answered`] health as a payload carries it:
+/// `mergeable`, and the checks in one of two shapes. `gh pr view` hands
+/// back every check on the head commit (`statusCheckRollup`, folded by
+/// [`checks`]); a [`list`] node carries only GitHub's own verdict on them,
+/// the rollup's `state` on its last commit ([`rollup_state`]). Either
+/// missing — the caller did not ask — says nothing, and so does a
+/// `mergeable` GitHub has not worked out yet ([`mergeable`]).
+fn answered(v: &serde_json::Value) -> Answered {
     let checks = match v.pointer("/commits/nodes/0/commit/statusCheckRollup") {
-        Some(rollup) => rollup_state(rollup),
-        None => checks(arr_at(v, "statusCheckRollup")),
+        Some(rollup) => Some(rollup_state(rollup)),
+        None => v
+            .get("statusCheckRollup")
+            .map(|_| checks(arr_at(v, "statusCheckRollup"))),
     };
-    Health {
-        conflicts: str_at(v, "mergeable") == "CONFLICTING",
+    Answered {
+        conflicts: mergeable(v),
         checks,
+    }
+}
+
+/// `gh`'s `mergeable`, three ways: `CONFLICTING` is a conflict,
+/// `MERGEABLE` is none, and `UNKNOWN` — GitHub computes mergeability
+/// lazily, so the first ask after a push often says so — or a field left
+/// out is no answer at all. Reading `UNKNOWN` as clean is what painted a
+/// conflicting pull request green until the next beat.
+fn mergeable(v: &serde_json::Value) -> Option<bool> {
+    match str_at(v, "mergeable").as_str() {
+        "CONFLICTING" => Some(true),
+        "MERGEABLE" => Some(false),
+        _ => None,
     }
 }
 
@@ -734,11 +747,14 @@ pub struct OpenPr {
     pub number: u64,
     pub title: String,
     pub url: String,
-    pub is_draft: bool,
-    /// Whether the branch still merges and its checks pass — what turns
-    /// the row red ([`trouble`](Self::trouble)).
-    #[serde(default)]
-    pub health: Health,
+    /// Whether this answer said it is a draft. Observed into `App::prs`,
+    /// which screens read; never drawn from here.
+    #[serde(rename = "is_draft")]
+    pub answered_draft: bool,
+    /// Whether the branch still merges and its checks pass, as this
+    /// answer said it — observed into `App::prs` like the draft flag.
+    #[serde(default, rename = "health")]
+    pub answered: Answered,
     /// The local branch the pull request's checkout is on
     /// ([`checkout_branch`]) — the one a PR SESSION's worktree is cut on,
     /// the one a checkout has to be on to list under this row, and what
@@ -778,34 +794,29 @@ impl OpenPr {
         numbered_label(self.number, &self.title)
     }
 
-    /// Open or draft — every row here is open by construction (`list` asks
-    /// for nothing else), so the only thing left to say is whether it's
-    /// still a draft.
-    pub fn standing(&self) -> Standing {
-        Standing::of(STATE_OPEN, self.is_draft)
-    }
-
-    /// Trailing badge: `ready` or `draft`.
-    pub fn badge(&self) -> &'static str {
-        self.standing().badge()
-    }
-
-    /// What the row goes red for — every row here is open, so the
-    /// health's word is the row's.
-    pub fn trouble(&self) -> Option<Trouble> {
-        self.health.trouble()
-    }
-
-    /// How its checks stand, as the PULL REQUESTS MODAL's row and filter
-    /// say it: GitHub's per-state tally when the list brought one — what
-    /// the row's `27/29` counts — else the rollup's word.
-    pub fn checks(&self) -> Checks {
-        match self.meta.checks {
+    /// The one verdict on its checks this row observes into `App::prs`,
+    /// which every surface — the modal's ✓ / ✗ and `checks:` filter, the
+    /// badge word, the palette, the sidebar — then draws: GitHub's
+    /// per-state tally when the list brought one — what the row's `27/29`
+    /// counts — else the rollup's word, each as [`recheck_failing`] left
+    /// them. `None` when the list did not ask. A row whose recheck could
+    /// not read every check ([`ListAnswer::cut`]) is observed through
+    /// `PrStore::observe_list_row`, which decides whether this stands.
+    pub(crate) fn listed_checks(&self) -> Option<Checks> {
+        let word = self.answered.checks?;
+        Some(match self.meta.checks {
             Some(tally) if tally.failed > 0 => Checks::Failing,
             Some(tally) if tally.pending > 0 => Checks::Pending,
             Some(_) => Checks::Passing,
-            None => self.health.checks,
-        }
+            None => word,
+        })
+    }
+
+    /// Whether either verdict the list carries says failing — the rollup's
+    /// word or the tally — which is what [`recheck_failing`] reads again.
+    fn says_failing(&self) -> bool {
+        self.answered.checks == Some(Checks::Failing)
+            || self.meta.checks.is_some_and(|tally| tally.failed > 0)
     }
 
     /// The PULL REQUESTS MODAL's section for it: yours first, then the
@@ -872,13 +883,17 @@ impl PrLaunch {
 /// list`, whose checks field times out on a busy repo; `gh` still fills
 /// in `{owner}` and `{repo}` from the checkout, the way `gh pr list`
 /// resolves its repo.
-pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
+pub async fn list(dir: &Path) -> Option<ListAnswer> {
     let limit = format!("limit={LIST_LIMIT}");
     match run_repo_graphql(dir, LIST_QUERY, &[&limit], TIMEOUT).await {
         Ok(out) => {
             if let Some(mut rows) = parse_list(&out) {
-                recheck_failing(dir, &mut rows).await;
-                return Some(rows);
+                let cut = recheck_failing(dir, &mut rows).await;
+                return Some(ListAnswer {
+                    rows,
+                    slim: false,
+                    cut,
+                });
             }
         }
         // `gh` could not be run, or timed out: the slim query would fare
@@ -889,8 +904,30 @@ pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
     }
     let out = repo_graphql(dir, LIST_QUERY_SLIM, &[&limit], TIMEOUT).await?;
     let mut rows = parse_list(&out)?;
-    recheck_failing(dir, &mut rows).await;
-    Some(rows)
+    let cut = recheck_failing(dir, &mut rows).await;
+    Some(ListAnswer {
+        rows,
+        slim: true,
+        cut,
+    })
+}
+
+/// What [`list`] got back: the rows, and whether they came from
+/// [`LIST_QUERY_SLIM`] — which never asks for the meta line, nor for who
+/// is asked to review, so a slim row's `meta` (and the section that hangs
+/// off it) is "not asked", not "empty". The caller carries the last full
+/// answer's over by URL rather than let the rows jump sections on every
+/// beat GitHub balks at the full query.
+///
+/// `cut` names, by URL, the rows whose recheck found more checks than one
+/// page holds ([`apply_recheck`]): their verdict is GitHub's rollup word
+/// as listed, which counts superseded runs, and the caller lets it stand
+/// only where nothing better is known (`PrStore::observe_list_row`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListAnswer {
+    pub rows: Vec<OpenPr>,
+    pub slim: bool,
+    pub cut: std::collections::HashSet<String>,
 }
 
 /// How many failing rows one refresh reads the checks of
@@ -899,9 +936,12 @@ pub async fn list(dir: &Path) -> Option<Vec<OpenPr>> {
 const RECHECK_LIMIT: usize = 20;
 
 /// [`FAILING_QUERY`]'s part for one pull request, aliased by its number.
+/// `pageInfo` says whether the hundred contexts were all of them: a fold
+/// of the first page alone could call a pull request green whose failure
+/// is on the second ([`apply_recheck`]).
 const FAILING_PART: &str = "p{n}: pullRequest(number: {n}) { \
     commits(last: 1) { nodes { commit { statusCheckRollup { \
-    contexts(first: 100) { nodes { __typename \
+    contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename \
     ... on CheckRun { name status conclusion startedAt \
     checkSuite { workflowRun { workflow { name } } } } \
     ... on StatusContext { context state createdAt } } } } } } } }";
@@ -926,43 +966,68 @@ fn failing_query(numbers: &[u64]) -> String {
 /// so a cancelled or re-run workflow leaves the row red after its new run
 /// passed. Only `Failing` can be wrong that way — a superseded run is
 /// done, so it never holds a row pending — and failing rows are few, so
-/// they alone are asked about, in one query. A row the answer leaves out
-/// keeps GitHub's word: unsure stays red rather than going quiet.
-async fn recheck_failing(dir: &Path, rows: &mut [OpenPr]) {
+/// they alone are asked about, in one query — a row whose rollup word or
+/// tally says failing, either, since the two count the same runs and the
+/// row draws one verdict from both ([`OpenPr::listed_checks`]). A row the
+/// answer leaves out keeps GitHub's word: unsure stays red rather than
+/// going quiet. The URLs of the rows it could not read in full come back
+/// ([`ListAnswer::cut`]).
+async fn recheck_failing(dir: &Path, rows: &mut [OpenPr]) -> std::collections::HashSet<String> {
     let numbers: Vec<u64> = rows
         .iter()
-        .filter(|pr| pr.health.checks == Checks::Failing)
+        .filter(|pr| pr.says_failing())
         .map(|pr| pr.number)
         .take(RECHECK_LIMIT)
         .collect();
     if numbers.is_empty() {
-        return;
+        return Default::default();
     }
-    if let Some(out) = repo_graphql(dir, &failing_query(&numbers), &[], TIMEOUT).await {
-        apply_recheck(&out, rows);
+    match repo_graphql(dir, &failing_query(&numbers), &[], TIMEOUT).await {
+        Some(out) => apply_recheck(&out, rows),
+        None => Default::default(),
     }
 }
 
-/// Fold a [`failing_query`] answer into the rows it asked about.
-fn apply_recheck(json: &str, rows: &mut [OpenPr]) {
+/// Fold a [`failing_query`] answer into the rows it asked about, and
+/// hand back the URLs of the rows it could not: a row with more contexts
+/// than the page held keeps GitHub's rollup word, unfolded — a fold of
+/// half the list could call it green while its failure is on the next
+/// page. Where `App::prs` already knows a verdict that one stands; where
+/// it knows none, GitHub's word does, so a busy failing pull request seen
+/// for the first time still goes red rather than quiet
+/// (`PrStore::observe_list_row`).
+fn apply_recheck(json: &str, rows: &mut [OpenPr]) -> std::collections::HashSet<String> {
+    let mut cut = std::collections::HashSet::new();
     let Ok(answer) = serde_json::from_str::<serde_json::Value>(json) else {
-        return;
+        return cut;
     };
     for pr in rows.iter_mut() {
         let path = format!(
-            "/data/repository/p{}/commits/nodes/0/commit/statusCheckRollup/contexts/nodes",
+            "/data/repository/p{}/commits/nodes/0/commit/statusCheckRollup/contexts",
             pr.number
         );
-        let Some(contexts) = answer.pointer(&path).and_then(|n| n.as_array()) else {
+        let Some(page) = answer.pointer(&path) else {
             continue;
         };
-        pr.health.checks = checks(contexts);
+        if page
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(|more| more.as_bool())
+            == Some(true)
+        {
+            cut.insert(pr.url.clone());
+            continue;
+        }
+        let Some(contexts) = page.get("nodes").and_then(|n| n.as_array()) else {
+            continue;
+        };
+        pr.answered.checks = Some(checks(contexts));
         // The tally rides on the full query only: a slim row has none to
         // correct, and gains none here.
         if pr.meta.checks.is_some() {
             pr.meta.checks = tally(contexts);
         }
     }
+    cut
 }
 
 /// [`check_tally`] counted off the contexts themselves, superseded runs
@@ -1061,8 +1126,8 @@ pub(crate) fn parse_list(json: &str) -> Option<Vec<OpenPr>> {
                     number: v.get("number")?.as_u64()?,
                     title: str_at(v, "title"),
                     url,
-                    is_draft: bool_at(v, "isDraft"),
-                    health: health(v),
+                    answered_draft: bool_at(v, "isDraft"),
+                    answered: answered(v),
                     head: checkout_branch(v),
                     mine: bool_at(v, "viewerDidAuthor"),
                     head_sha: str_at(v, "headRefOid"),
@@ -1145,11 +1210,15 @@ pub(crate) fn list_answer(nodes: &str) -> String {
 /// Sink the drafts below everything else, keeping `gh`'s newest-first
 /// order within each half. A draft is open, but it is not asking anyone for
 /// anything yet; the rows that want a reviewer come first, and a draft is
-/// told apart by where it sits as much as by its badge. Stable, so the
-/// cursor's PR — followed by URL across every refresh — never swaps places
-/// with a neighbour it did not change relative to.
-pub fn drafts_last(list: &mut [OpenPr]) {
-    list.sort_by_key(|pr| pr.is_draft);
+/// told apart by where it sits as much as by its badge. Which rows are
+/// drafts is the store's word (`App::prs`), the same the badges draw.
+/// Stable, so the cursor's PR — followed by URL across every refresh —
+/// never swaps places with a neighbour it did not change relative to.
+pub fn drafts_last(list: &mut [OpenPr], prs: &crate::pr_store::PrStore) {
+    list.sort_by_key(|pr| {
+        prs.status(&pr.url)
+            .is_some_and(|s| s.standing == Standing::Draft)
+    });
 }
 
 /// How long a `gh pr diff` may run. Diffs are bigger than metadata and
@@ -1170,12 +1239,16 @@ pub struct PrDetail {
     pub number: u64,
     pub url: String,
     pub title: String,
-    pub state: String,
-    pub is_draft: bool,
-    /// Whether the branch still merges and its checks pass — spelled out
-    /// beside the state, and what the row it was fetched for goes red for.
-    #[serde(default)]
-    pub health: Health,
+    /// `gh`'s state string and draft flag as this answer said them.
+    /// Observed into `App::prs`, which screens read; never drawn from here.
+    #[serde(rename = "state")]
+    pub answered_state: String,
+    #[serde(rename = "is_draft")]
+    pub answered_draft: bool,
+    /// Whether the branch still merges and its checks pass, as this
+    /// answer said it — observed into `App::prs` like the state.
+    #[serde(default, rename = "health")]
+    pub answered: Answered,
     pub author: String,
     /// Branch this merges into, and the branch it comes from.
     pub base: String,
@@ -1203,7 +1276,7 @@ pub struct PrDetail {
     #[serde(default)]
     pub commits: Vec<PrCommit>,
     /// Every check on its head commit, failed first — the Checks tab.
-    /// [`Health::checks`] is the same list folded to one word.
+    /// [`Answered::checks`] is the same list folded to one word.
     #[serde(default)]
     pub checks: Vec<PrCheck>,
     /// GitHub's `reviewDecision`: `APPROVED`, `CHANGES_REQUESTED`,
@@ -1246,16 +1319,6 @@ impl PrDetail {
             }
         }
         out
-    }
-
-    /// Whether this pull request still accepts work. A draft counts: it is
-    /// open, just not finished. This is the per-row second opinion on the
-    /// question [`list`] answers in bulk — when the cursor rests on a row
-    /// long enough to fetch its detail, GitHub gets asked about that one
-    /// pull request directly, and a `MERGED` or `CLOSED` answer retires the
-    /// row without waiting for the next list.
-    pub fn is_open(&self) -> bool {
-        state_is_open(&self.state)
     }
 }
 
@@ -1557,9 +1620,9 @@ fn parse_detail(json: &str) -> Option<PrDetail> {
         number: v.get("number")?.as_u64()?,
         url: v.get("url")?.as_str()?.to_string(),
         title: str_at(&v, "title"),
-        state: state_at(&v),
-        is_draft: bool_at(&v, "isDraft"),
-        health: health(&v),
+        answered_state: state_at(&v),
+        answered_draft: bool_at(&v, "isDraft"),
+        answered: answered(&v),
         author: login(v.get("author")),
         base: str_at(&v, "baseRefName"),
         head: str_at(&v, "headRefName"),
@@ -1888,9 +1951,20 @@ fn header_path(rest: &str) -> String {
     }
 }
 
-/// Test-only accessors: nothing in the app reads these any more.
+/// Test-only accessors: nothing in the app reads these — screens read
+/// `App::prs` — but a parse test wants to say what one answer said.
 #[cfg(test)]
 impl PullRequest {
+    /// Whether this answer said the pull request still accepts work.
+    pub fn is_open(&self) -> bool {
+        self.standing().is_open()
+    }
+
+    /// The look this answer alone would give the row.
+    pub fn standing(&self) -> Standing {
+        Standing::of(&self.answered_state, self.answered_draft)
+    }
+
     /// Short word for the row's trailing badge — the same slot the agent
     /// rows use for their CLI kind: `ready`, `draft`, `merged` or `closed`.
     pub fn badge(&self) -> &'static str {
@@ -1901,6 +1975,15 @@ impl PullRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pr_store::{PrObservation, PrStatus, PrStore};
+
+    /// Where one answer alone would say a pull request stands, as a fresh
+    /// `App::prs` works it out.
+    fn status_of(seen: PrObservation) -> PrStatus {
+        let mut prs = PrStore::default();
+        prs.observe("u", seen, crate::fetch::Asked::Cached);
+        prs.status_or_open("u")
+    }
 
     #[test]
     fn commit_stats_parse_by_sha() {
@@ -1963,38 +2046,49 @@ mod tests {
 
     /// GitHub's word on whether the branch still merges (`mergeable`) and
     /// how its checks stand (`statusCheckRollup`, the list's as its rollup
-    /// `state`) rides every payload —
-    /// branch row, list row and detail alike — into the same `Health`, so
-    /// the three surfaces go red together. `UNKNOWN` mergeability, what
-    /// GitHub says while it is still computing, is not a conflict.
+    /// `state`) rides every payload — branch row, list row and detail
+    /// alike — into the same `Answered`, so the three surfaces go red
+    /// together. `UNKNOWN` mergeability, what GitHub says while it is
+    /// still computing, is no answer at all: neither a conflict nor clean.
     #[test]
     fn health_reads_conflicts_and_checks_off_every_payload() {
         let view = r#"{"number":7,"url":"https://github.com/o/r/pull/7","title":"t","state":"OPEN","isDraft":false,"mergeable":"CONFLICTING","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}"#;
         let pr = parse(view, None).expect("parsed");
-        assert!(pr.health.conflicts);
-        assert_eq!(pr.health.checks, Checks::Passing);
-        assert_eq!(pr.trouble(), Some(Trouble::Conflicts));
+        assert_eq!(pr.answered.conflicts, Some(true));
+        assert_eq!(pr.answered.checks, Some(Checks::Passing));
+        assert_eq!(
+            status_of(PrObservation::of_lookup(&pr)).trouble(),
+            Some(Trouble::Conflicts)
+        );
 
         let list = list_answer(
             r#"[{"number":8,"url":"https://github.com/o/r/pull/8","title":"t","isDraft":false,"headRefName":"h","mergeable":"UNKNOWN","commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE"}}}]}}]"#,
         );
         let rows = parse_list(&list).expect("parsed");
-        assert!(!rows[0].health.conflicts, "UNKNOWN is not a conflict");
-        assert_eq!(rows[0].health.checks, Checks::Failing);
-        assert_eq!(rows[0].trouble(), Some(Trouble::FailingChecks));
+        assert_eq!(rows[0].answered.conflicts, None, "UNKNOWN is no answer");
+        assert_eq!(rows[0].answered.checks, Some(Checks::Failing));
+        let status = status_of(PrObservation::of_list_row(&rows[0]));
+        assert_eq!(status.trouble(), Some(Trouble::FailingChecks));
+        assert!(!status.conflicts_known);
 
         let detail = r#"{"number":9,"url":"https://github.com/o/r/pull/9","state":"OPEN","mergeable":"MERGEABLE","statusCheckRollup":[]}"#;
         let d = parse_detail(detail).expect("parsed");
-        assert_eq!(d.health, Health::default());
-        assert_eq!(d.health.trouble(), None);
+        assert_eq!(
+            d.answered,
+            Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Absent)
+            }
+        );
+        assert!(status_of(PrObservation::of_detail(&d)).is_green());
 
-        // Not asked for — an older payload shape — reads as healthy.
+        // Not asked for — an older payload shape — says nothing.
         let bare = parse(
             r#"{"number":1,"url":"https://x.dev/pull/1","state":"OPEN"}"#,
             None,
         )
         .expect("parsed");
-        assert_eq!(bare.health, Health::default());
+        assert_eq!(bare.answered, Answered::default());
     }
 
     /// A workflow started twice on one head commit leaves both runs in the
@@ -2068,10 +2162,10 @@ mod tests {
             number,
             title: String::new(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft: false,
-            health: Health {
-                conflicts: false,
-                checks: Checks::Failing,
+            answered_draft: false,
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Failing),
             },
             head: String::new(),
             mine: false,
@@ -2102,7 +2196,7 @@ mod tests {
             run("SUCCESS", "2026-10-06T17:11:36Z"),
         );
         apply_recheck(&answer, &mut rows);
-        assert_eq!(rows[0].health.checks, Checks::Passing);
+        assert_eq!(rows[0].answered.checks, Some(Checks::Passing));
         assert_eq!(
             rows[0].meta.checks,
             Some(CheckTally {
@@ -2111,8 +2205,108 @@ mod tests {
                 pending: 0
             })
         );
-        assert_eq!(rows[1].health.checks, Checks::Failing, "not in the answer");
+        assert_eq!(
+            rows[1].answered.checks,
+            Some(Checks::Failing),
+            "not in the answer"
+        );
         assert!(failing_query(&[1321, 7]).contains("p7: pullRequest(number: 7)"));
+    }
+
+    /// A recheck whose contexts run past the page it read folds nothing: a
+    /// fold of the first hundred alone could call green a pull request
+    /// whose failure is on the next page. Where a verdict is already known
+    /// it stands; where none is, GitHub's own rollup word does — a busy
+    /// failing pull request seen for the first time stays red rather than
+    /// going quiet.
+    #[test]
+    fn a_truncated_recheck_keeps_the_last_verdict() {
+        let row = |checks: Checks| OpenPr {
+            number: 7,
+            title: String::new(),
+            url: "https://github.com/o/r/pull/7".into(),
+            answered_draft: false,
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(checks),
+            },
+            head: String::new(),
+            mine: false,
+            head_sha: String::new(),
+            meta: PrMeta::default(),
+        };
+        let asked = || crate::fetch::Asked::At(crate::fetch::now());
+        let answer = r#"{"data":{"repository":{"p7":{"commits":{"nodes":[{"commit":{
+            "statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":true},"nodes":[
+            {"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}
+            ]}}}}]}}}}}"#;
+        let mut rows = vec![row(Checks::Failing)];
+        let cut = apply_recheck(answer, &mut rows);
+        let url = rows[0].url.clone();
+        assert!(cut.contains(&url), "half a list is no fold");
+        assert_eq!(
+            rows[0].answered.checks,
+            Some(Checks::Failing),
+            "GitHub's word is kept aside"
+        );
+
+        let mut prs = PrStore::default();
+        prs.observe_list_row(&row(Checks::Pending), false, asked());
+        prs.observe_list_row(&rows[0], true, asked());
+        assert_eq!(
+            prs.status_or_open(&url).health.checks,
+            Checks::Pending,
+            "the last verdict stands"
+        );
+
+        let mut prs = PrStore::default();
+        prs.observe_list_row(&rows[0], true, asked());
+        assert_eq!(
+            prs.status_or_open(&url).health.checks,
+            Checks::Failing,
+            "with none known, GitHub's word"
+        );
+    }
+
+    /// `mergeable: UNKNOWN` — GitHub working it out again after a push —
+    /// answered after a known `CONFLICTING` leaves the conflict known, on a
+    /// list row and on a page alike: unknown never overwrites known.
+    #[test]
+    fn an_unknown_mergeable_keeps_the_known_conflict() {
+        let url = "https://github.com/o/r/pull/8";
+        let list = |mergeable: &str| {
+            let nodes = format!(
+                r#"[{{"number":8,"url":"{url}","isDraft":false,"mergeable":"{mergeable}"}}]"#
+            );
+            parse_list(&list_answer(&nodes)).expect("parsed").remove(0)
+        };
+        let page = |mergeable: &str| {
+            parse_detail(&format!(
+                r#"{{"number":8,"url":"{url}","state":"OPEN","mergeable":"{mergeable}"}}"#
+            ))
+            .expect("parsed")
+        };
+        let asked = || crate::fetch::Asked::At(crate::fetch::now());
+        let mut prs = PrStore::default();
+        prs.observe(
+            url,
+            PrObservation::of_list_row(&list("CONFLICTING")),
+            asked(),
+        );
+        prs.observe(url, PrObservation::of_list_row(&list("UNKNOWN")), asked());
+        let status = prs.status_or_open(url);
+        assert!(status.conflicts_known && status.health.conflicts, "list");
+        assert_eq!(status.trouble(), Some(Trouble::Conflicts));
+
+        let mut prs = PrStore::default();
+        prs.observe(url, PrObservation::of_detail(&page("CONFLICTING")), asked());
+        prs.observe(url, PrObservation::of_detail(&page("UNKNOWN")), asked());
+        assert!(prs.status_or_open(url).health.conflicts, "page");
+        prs.observe(url, PrObservation::of_detail(&page("MERGEABLE")), asked());
+        assert!(
+            !prs.status_or_open(url).health.conflicts,
+            "a known answer still moves it"
+        );
     }
 
     /// The rollup folds the way `gh pr checks` folds it: any failure fails
@@ -2167,8 +2361,9 @@ mod tests {
                 r#"[{{"number":1,"url":"https://github.com/o/r/pull/1","commits":{{"nodes":[{{"commit":{{"statusCheckRollup":{rollup}}}}}]}}}}]"#
             );
             parse_list(&list_answer(&nodes)).expect("parsed")[0]
-                .health
+                .answered
                 .checks
+                .expect("asked")
         };
         assert_eq!(row(r#"{"state":"SUCCESS"}"#), Checks::Passing);
         assert_eq!(row(r#"{"state":"FAILURE"}"#), Checks::Failing);
@@ -2275,17 +2470,22 @@ mod tests {
             None,
         )
         .expect("parsed");
-        assert!(pr.health.conflicts, "the answer is kept as given");
         assert_eq!(
-            pr.trouble(),
+            pr.answered.conflicts,
+            Some(true),
+            "the answer is kept as given"
+        );
+        let trouble = |pr: &PullRequest| status_of(PrObservation::of_lookup(pr)).trouble();
+        assert_eq!(
+            trouble(&pr),
             None,
             "a merged pull request is not in trouble"
         );
-        pr.state = STATE_OPEN.into();
-        assert_eq!(pr.trouble(), Some(Trouble::Conflicts));
-        pr.is_draft = true;
+        pr.answered_state = STATE_OPEN.into();
+        assert_eq!(trouble(&pr), Some(Trouble::Conflicts));
+        pr.answered_draft = true;
         assert_eq!(
-            pr.trouble(),
+            trouble(&pr),
             Some(Trouble::Conflicts),
             "a draft's conflict still needs resolving"
         );
@@ -2347,15 +2547,23 @@ mod tests {
             number,
             title: String::new(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft,
-            health: Default::default(),
+            answered_draft: is_draft,
+            answered: Default::default(),
             head: String::new(),
             mine: false,
             head_sha: String::new(),
             meta: Default::default(),
         };
         let mut list = vec![row(42, true), row(40, false), row(31, true), row(30, false)];
-        drafts_last(&mut list);
+        let mut prs = PrStore::default();
+        for pr in &list {
+            prs.observe(
+                &pr.url,
+                PrObservation::of_list_row(pr),
+                crate::fetch::Asked::Cached,
+            );
+        }
+        drafts_last(&mut list, &prs);
         let numbers: Vec<u64> = list.iter().map(|p| p.number).collect();
         assert_eq!(numbers, [40, 30, 42, 31]);
     }
@@ -2445,8 +2653,9 @@ mod tests {
         .expect("parsed");
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0].label(), "#42 Attach links");
-        assert_eq!(prs[0].badge(), "ready");
-        assert_eq!(prs[1].badge(), "draft");
+        let badge = |pr: &OpenPr| status_of(PrObservation::of_list_row(pr)).word();
+        assert_eq!(badge(&prs[0]), "ready");
+        assert_eq!(badge(&prs[1]), "draft");
         assert_eq!(
             prs[0].head, "attach-links",
             "the branch a PR SESSION runs on"
@@ -2678,7 +2887,7 @@ mod tests {
                 total: 4
             }
         );
-        assert_eq!(d.health.checks, Checks::Failing, "the fold agrees");
+        assert_eq!(d.answered.checks, Some(Checks::Failing), "the fold agrees");
 
         assert_eq!(d.review_decision, "CHANGES_REQUESTED");
         assert_eq!(d.review_requests, ["tidy-dev", "core"]);
@@ -2744,7 +2953,7 @@ mod tests {
     fn a_sparse_detail_payload_still_parses() {
         let d = parse_detail(r#"{"number":1,"url":"https://x.dev/pull/1"}"#).expect("parsed");
         assert_eq!(d.title, "");
-        assert_eq!(d.state, "OPEN");
+        assert_eq!(d.answered_state, "OPEN");
         assert!(d.comments.is_empty());
         assert!(parse_detail("{}").is_none());
     }

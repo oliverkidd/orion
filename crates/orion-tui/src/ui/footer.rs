@@ -132,9 +132,10 @@ fn crumb(app: &App) -> Vec<CrumbSeg> {
                     // A pull request in `pr_row::look`'s colours, its
                     // state word after the number as the BAND has it.
                     Some(pr) => {
-                        let look = crate::pr_row::look(pr.standing(), pr.trouble(), th);
+                        let status = app.prs.status_or_open(&pr.url);
+                        let look = crate::pr_row::look(status.standing, status.trouble(), th);
                         badge = Some(Span::styled(
-                            format!(" {}", pr.standing().word(pr.trouble())),
+                            format!(" {}", status.word()),
                             Style::default().fg(look.badge),
                         ));
                         (

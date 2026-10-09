@@ -1275,8 +1275,12 @@ fn land_switch(app: &mut App, worktree: WorktreeId, request: u64, outcome: Outco
             app.worktree_changes.remove(&worktree);
             app.worktree_lines.remove(&worktree);
             app.worktree_ahead.remove(&worktree);
+            crate::event_loop::forget_checkout_reads(app, &worktree);
             app.pull_requests.remove(&worktree);
             app.pr_recheck.remove(&worktree);
+            // A lookup still out asked about the old branch: its answer
+            // is dropped when it lands.
+            app.pr_inflight.cancel(&worktree);
             if view_for(app, &worktree).is_some() {
                 app.overlay = None;
             }

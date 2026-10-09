@@ -81,6 +81,7 @@ use ratatui::Frame;
 use crate::app::{clamp_selection, App, HitTarget, Overlay, PendingPrDetail, PromptKind};
 use crate::list_filter::{FacetKey, FilterPick, PickFacet, PickValue};
 use crate::pr_preview::{Nav, PrTab};
+use crate::pr_store::{PrStatus, PrStore};
 use crate::pull_request::{Checks, OpenPr, PrSection, Review};
 use crate::quick_prompt::{ModalUnder, QuickLaunch};
 use crate::text_input::TextInput;
@@ -333,7 +334,7 @@ fn show(app: &mut App, mut view: PullRequestsView) {
     let start = app
         .selected_worktree_pr()
         .and_then(|pr| list.iter().position(|row| row.url == pr.url))
-        .or_else(|| visible_rows("", list).first().map(|(i, _)| *i))
+        .or_else(|| visible_rows("", list, &app.prs).first().map(|(i, _)| *i))
         .unwrap_or(0);
     view.selected = clamp_selection(start as i64, list.len());
     view.selected_url = list.get(view.selected).map(|pr| pr.url.clone());
@@ -360,7 +361,7 @@ fn queue_prefetch(app: &mut App, opening: bool) {
     let list = rows(app, &view.project);
     let mut soon = Vec::new();
     let mut later = Vec::new();
-    for (i, _) in visible_rows("", list) {
+    for (i, _) in visible_rows("", list, &app.prs) {
         let pr = &list[i];
         if view.prefetch.holds(&pr.url) {
             continue;
@@ -537,16 +538,20 @@ fn checks_word(checks: Checks) -> &'static str {
     }
 }
 
-/// A row's values for one of the [`FACETS`].
-fn facet_values(pr: &OpenPr, key: &str) -> Vec<String> {
+/// A row's values for one of the [`FACETS`]: its meta line's, and where
+/// it stands as `prs` says — the same checks verdict and state the row's
+/// marks and badge draw, so `checks:failing` finds exactly the rows
+/// wearing a ✗.
+fn facet_values(pr: &OpenPr, key: &str, prs: &PrStore) -> Vec<String> {
     match key {
         "author" => vec![pr.meta.author.clone()],
         "label" => pr.meta.labels.iter().map(|l| l.name.clone()).collect(),
         "review" => vec![pr.meta.review.word().to_string()],
-        "checks" => vec![checks_word(pr.checks()).to_string()],
+        "checks" => vec![checks_word(prs.status_or_open(&pr.url).health.checks).to_string()],
         "is" => {
-            let mut is = vec![if pr.is_draft { "draft" } else { "ready" }.to_string()];
-            if pr.health.conflicts {
+            let status = prs.status_or_open(&pr.url);
+            let mut is = vec![if status.is_draft() { "draft" } else { "ready" }.to_string()];
+            if status.health.conflicts {
                 is.push("conflicts".to_string());
             }
             is
@@ -563,14 +568,14 @@ fn facet_values(pr: &OpenPr, key: &str) -> Vec<String> {
 /// typed, every row in list order, section by section. Worked out afresh
 /// on every call rather than kept — a project's open pull requests are a
 /// handful — so it can never go stale against the list.
-fn visible_rows(query: &str, list: &[OpenPr]) -> Vec<(usize, Vec<usize>)> {
+fn visible_rows(query: &str, list: &[OpenPr], prs: &PrStore) -> Vec<(usize, Vec<usize>)> {
     let parsed = crate::list_filter::parse(query, FACETS);
     let mut rows = crate::list_filter::narrow(
         &parsed,
         FACETS,
         list.len(),
-        |i| list[i].label(),
-        |i, key| facet_values(&list[i], key),
+        |i| prs.label(list[i].number, &list[i].url, &list[i].title),
+        |i, key| facet_values(&list[i], key, prs),
     );
     rows.sort_by_key(|(i, _)| list[*i].section());
     rows
@@ -581,14 +586,14 @@ fn visible_rows(query: &str, list: &[OpenPr]) -> Vec<(usize, Vec<usize>)> {
 /// moved the cursor's pull request under a row the filter hides — and
 /// `selected` clamped onto the list with nothing typed. None with no row
 /// to be on: an empty list, or a filter nothing matches.
-fn cursor_index(view: &PullRequestsView, list: &[OpenPr]) -> Option<usize> {
+fn cursor_index(view: &PullRequestsView, list: &[OpenPr], prs: &PrStore) -> Option<usize> {
     if list.is_empty() {
         return None;
     }
     if !has_query(view) {
         return Some(clamp_selection(view.selected as i64, list.len()));
     }
-    crate::list_filter::cursor_in(&visible_rows(&view.query, list), view.selected)
+    crate::list_filter::cursor_in(&visible_rows(&view.query, list, prs), view.selected)
 }
 
 /// A list that landed within [`FRESH`]: the modal opens on it as it is.
@@ -600,12 +605,14 @@ fn is_fresh(app: &App, project: &ProjectId) -> bool {
 
 /// Ask for the project's open list on the loop's next turn, past its
 /// beat — `Shift+R`'s path (`App::pr_refresh_requested`), which asks for
-/// the selected project, the modal's. A lookup already in flight is left
-/// to land.
+/// the selected project, the modal's. A lookup already in flight may have
+/// been asked before whatever this is for (a merge, a new pull request):
+/// it owes a fresh one, which starts the moment it lands.
 pub(crate) fn request_list(app: &mut App, project: &ProjectId) {
     if let Some(open) = app.open_prs.get_mut(project) {
         open.due = std::time::Instant::now();
     }
+    app.open_prs_inflight.want_fresh(project);
     app.pr_refresh_requested = true;
 }
 
@@ -616,7 +623,7 @@ pub(crate) fn selected_pr(app: &App) -> Option<OpenPr> {
         return None;
     };
     let list = rows(app, &view.project);
-    cursor_index(view, list).and_then(|i| list.get(i).cloned())
+    cursor_index(view, list, &app.prs).and_then(|i| list.get(i).cloned())
 }
 
 /// `⌘G`: the AUTOFIX form for the pull request under the cursor — at
@@ -702,7 +709,7 @@ pub(crate) fn list_changed(app: &mut App) {
     let (index, url) = match found {
         Some(i) => (i, view.selected_url.clone()),
         None => {
-            let visible = visible_rows(&view.query, list);
+            let visible = visible_rows(&view.query, list, &app.prs);
             let row = clamp_selection(view.selected_row as i64, visible.len());
             let i = visible.get(row).map_or_else(
                 || clamp_selection(view.selected as i64, list.len()),
@@ -765,8 +772,8 @@ fn sync_row(app: &mut App) {
         return;
     };
     let list = rows(app, &view.project);
-    let row = cursor_index(view, list).and_then(|c| {
-        visible_rows(&view.query, list)
+    let row = cursor_index(view, list, &app.prs).and_then(|c| {
+        visible_rows(&view.query, list, &app.prs)
             .iter()
             .position(|(i, _)| *i == c)
     });
@@ -782,10 +789,10 @@ fn step(app: &mut App, delta: i64) {
         return;
     };
     let list = rows(app, &view.project);
-    let Some(current) = cursor_index(view, list) else {
+    let Some(current) = cursor_index(view, list, &app.prs) else {
         return;
     };
-    let visible = visible_rows(&view.query, list);
+    let visible = visible_rows(&view.query, list, &app.prs);
     let at = visible.iter().position(|(i, _)| *i == current).unwrap_or(0) as i64;
     let next = clamp_selection(at + delta, visible.len());
     if let Some((index, _)) = visible.get(next) {
@@ -805,9 +812,11 @@ fn query_changed(app: &mut App) {
     };
     let list = rows(app, &view.project);
     let target = if has_query(view) {
-        visible_rows(&view.query, list).first().map(|(i, _)| *i)
+        visible_rows(&view.query, list, &app.prs)
+            .first()
+            .map(|(i, _)| *i)
     } else {
-        cursor_index(view, list)
+        cursor_index(view, list, &app.prs)
     };
     match target {
         Some(index) => select(app, index as i64),
@@ -842,7 +851,8 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 
 /// `⌘R`: ask for the list again now, and the selected pull request's body
 /// over the cached copy. The rows stay until the answer lands, the title
-/// saying `refreshing…` meanwhile.
+/// saying `refreshing…` meanwhile. A body already being read was asked
+/// before the key, so it owes a fresh read when it lands.
 fn refresh(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
@@ -850,7 +860,7 @@ fn refresh(app: &mut App) {
     let (project, dir) = (view.project.clone(), view.dir.clone());
     request_list(app, &project);
     if let Some(pr) = selected_pr(app) {
-        if !app.pr_detail_inflight.contains(&pr.url) {
+        if !app.pr_detail_inflight.want_fresh(&pr.url) {
             app.pr_detail_failed.remove(&pr.url);
             app.pending_pr_detail = Some((
                 PendingPrDetail {
@@ -1108,7 +1118,7 @@ fn filter_pick_key(app: &mut App, key: &KeyEvent) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let facets = pick_facets(rows(app, &view.project), app.theme);
+    let facets = pick_facets(rows(app, &view.project), &app.prs, app.theme);
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
@@ -1123,9 +1133,9 @@ fn filter_pick_key(app: &mut App, key: &KeyEvent) {
 /// The FILTER PICK's facets over the project's rows: who opened them, their
 /// labels (in their GitHub colours), and the fixed words for review,
 /// checks and state — each value with how many rows carry it.
-fn pick_facets(list: &[OpenPr], th: Theme) -> Vec<PickFacet> {
+fn pick_facets(list: &[OpenPr], prs: &PrStore, th: Theme) -> Vec<PickFacet> {
     use crate::list_filter::{by_count, fixed_values, plain_values, tally};
-    let count = |key: &str| tally(list.iter(), |pr| facet_values(pr, key));
+    let count = |key: &str| tally(list.iter(), |pr| facet_values(pr, key, prs));
     let label_colour = |name: &str| {
         list.iter()
             .flat_map(|pr| &pr.meta.labels)
@@ -1473,9 +1483,13 @@ impl RowCols {
 /// widest, the title (faint for a draft), and at the right end the status
 /// column ([`status_spans`]: `✓ ○ ready`), then how long ago it was
 /// opened. The title gives way to all of it. The chars the filter matched
-/// (`positions`, into the row's `#42 title`) are lit.
+/// (`positions`, into the row's `#42 title`) are lit. Where it stands —
+/// the arrow's colour, the badge, the checks' mark — is `stands`, its
+/// `App::prs` status.
+#[allow(clippy::too_many_arguments)]
 fn row_line(
     pr: &OpenPr,
+    stands: &PrStatus,
     positions: &[usize],
     cursor_focus: Option<bool>,
     cols: &RowCols,
@@ -1488,8 +1502,8 @@ fn row_line(
         Some(false) => Span::styled("▌ ", Style::default().fg(th.dim)),
         None => Span::raw("  "),
     };
-    let trouble = pr.trouble();
-    let look = crate::pr_row::look(pr.standing(), trouble, th);
+    let trouble = stands.trouble();
+    let look = crate::pr_row::look(stands.standing, trouble, th);
     let number = format!("#{}", pr.number);
     let number_w = number.chars().count();
     // The positions split where the number ends: the title's own count
@@ -1520,10 +1534,10 @@ fn row_line(
     };
     let status_w = status.map_or(0, |marks| WORD_W + 2 + if marks { MARKS_W } else { 0 });
     let room = width.saturating_sub(lead + 1 + status_w + cols.age + 1);
-    let title = truncate(&pr.title, room);
+    let title = truncate(stands.title_or(&pr.title), room);
     let shown = title.chars().count();
     let lit: Vec<usize> = title_positions.into_iter().filter(|&p| p < shown).collect();
-    let title_color = if pr.is_draft && trouble.is_none() {
+    let title_color = if stands.is_draft() && trouble.is_none() {
         th.faint
     } else {
         th.text
@@ -1538,7 +1552,7 @@ fn row_line(
     let age = age_of(pr, now);
     let mut right: Vec<Span<'static>> = Vec::new();
     if let Some(marks) = status {
-        right.extend(status_spans(pr, marks, th));
+        right.extend(status_spans(pr, stands, marks, th));
         right.push(Span::raw("  "));
     }
     right.push(Span::styled(
@@ -1559,11 +1573,11 @@ fn row_line(
 /// word the BAND puts after `#42`, [`WORD_W`] wide: the trouble's
 /// (`conflicts`, `failing`), else `ready` or `draft`, in `pr_row::look`'s
 /// colours.
-fn status_spans(pr: &OpenPr, marks: bool, th: Theme) -> Vec<Span<'static>> {
-    let trouble = pr.trouble();
-    let word = pr.standing().word(trouble);
-    let look = crate::pr_row::look(pr.standing(), trouble, th);
-    let checks = pr.meta.checks.map(|_| match pr.checks() {
+fn status_spans(pr: &OpenPr, status: &PrStatus, marks: bool, th: Theme) -> Vec<Span<'static>> {
+    let trouble = status.trouble();
+    let word = status.word();
+    let look = crate::pr_row::look(status.standing, trouble, th);
+    let checks = pr.meta.checks.map(|_| match status.health.checks {
         Checks::Failing => ("✗", th.err),
         Checks::Pending => ("◐", th.warn),
         _ => ("✓", th.ok),
@@ -1634,15 +1648,15 @@ pub(crate) fn draw(
     .areas(area);
 
     let rows: Vec<OpenPr> = rows(app, &view.project).to_vec();
-    let inflight = app.open_prs_inflight.contains(&view.project);
+    let inflight = app.open_prs_inflight.in_flight(&view.project);
     let asked = app.open_prs.contains_key(&view.project);
     // The last ask came back with nothing — these rows are the last
     // answer that worked, however old — and no second ask is running yet.
     let stale = app.open_prs_failed.contains(&view.project) && !inflight;
     // The rows the filter leaves, and where the cursor sits among them.
     let parsed = crate::list_filter::parse(&view.query, FACETS);
-    let visible = visible_rows(&view.query, &rows);
-    let cursor = cursor_index(view, &rows);
+    let visible = visible_rows(&view.query, &rows, &app.prs);
+    let cursor = cursor_index(view, &rows, &app.prs);
     let cursor_row = cursor
         .and_then(|c| visible.iter().position(|(i, _)| *i == c))
         .unwrap_or(0);
@@ -1770,6 +1784,7 @@ pub(crate) fn draw(
                 let on = Some(*index) == cursor;
                 let line = row_line(
                     pr,
+                    &app.prs.status_or_open(&pr.url),
                     positions,
                     on.then_some(list_focused),
                     &cols,
@@ -1792,7 +1807,7 @@ pub(crate) fn draw(
         let block = panel_block("Filter", !backdrop, th);
         let inner = block.inner(body_a);
         f.render_widget(block, body_a);
-        let facets = pick_facets(&rows, th);
+        let facets = pick_facets(&rows, &app.prs, th);
         let mut pick = *pick;
         pick.clamp(&facets);
         crate::list_filter::draw_pick(f, inner, &facets, &parsed, &pick, th);
@@ -1832,6 +1847,8 @@ pub(crate) fn draw(
         number: pr.number,
         title: &pr.title,
         detail: app.pr_detail.get(&pr.url),
+        status: app.prs.status(&pr.url),
+        freshness: crate::pr_preview::freshness(app, &pr.url),
         failed: app.pr_detail_failed.contains(&pr.url),
         posting: app.pr_comment_inflight.contains(&pr.url),
         browser_key: keys::BROWSER.label(),
@@ -1930,7 +1947,7 @@ pub(crate) fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pull_request::{Checks, Health, PrDetail, PrLaunch};
+    use crate::pull_request::{Checks, PrDetail, PrLaunch};
     use crate::quick_prompt::QuickTarget;
     use orion_core::WorktreeId;
 
@@ -1941,8 +1958,8 @@ mod tests {
             number,
             title: title.into(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft,
-            health: Health::default(),
+            answered_draft: is_draft,
+            answered: Default::default(),
             head: format!("branch-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -1988,6 +2005,7 @@ mod tests {
             });
         }
         let now = std::time::Instant::now();
+        app.prs = observed(&list);
         app.open_prs.insert(
             project.clone(),
             crate::app::OpenPrs {
@@ -1998,6 +2016,19 @@ mod tests {
             },
         );
         (app, project)
+    }
+
+    /// `App::prs` as it stands once `list` has landed.
+    fn observed(list: &[OpenPr]) -> PrStore {
+        let mut prs = PrStore::default();
+        for pr in list {
+            prs.observe(
+                &pr.url,
+                crate::pr_store::PrObservation::of_list_row(pr),
+                crate::fetch::Asked::Cached,
+            );
+        }
+        prs
     }
 
     /// Config and presets pinned to temp files, so a launch resolves its
@@ -2132,7 +2163,7 @@ mod tests {
         // The loop fired #41's fetch: in flight, nothing armed.
         app.pending_pr_detail = None;
         app.pr_detail_inflight
-            .insert("https://github.com/o/r/pull/41".into());
+            .begin("https://github.com/o/r/pull/41".into(), crate::fetch::now());
         app.open_prs.get_mut(&project).unwrap().list = vec![
             pr(43, "New", false),
             pr(42, "Fix login", false),
@@ -2396,6 +2427,43 @@ mod tests {
             assert_eq!(merge.method, crate::pr_actions::MergeMethod::Merge);
             handle_key(&mut app, key(KeyCode::Esc), &mut out);
             assert!(view(&app).form.is_none());
+        });
+    }
+
+    /// A merge form opened on a page the cache hydrated says what that
+    /// page said; a live page landing while it is open brings the warnings
+    /// up to date — a conflict resolved since is no longer one to resolve.
+    #[test]
+    fn the_merge_forms_warnings_follow_a_fresh_page() {
+        use crate::fetch::Asked;
+        use crate::pr_actions::PrForm;
+        use crate::pr_store::PrObservation;
+        pinned(|| {
+            let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+            let url = "https://github.com/o/r/pull/42".to_string();
+            let mut cached = detail(42, "Fix login");
+            cached.answered.conflicts = Some(true);
+            app.prs
+                .observe(&url, PrObservation::of_detail(&cached), Asked::Cached);
+            app.pr_detail.insert(url.clone(), cached);
+            app.pr_detail_stale.insert(url.clone());
+            open(&mut app);
+            handle_key(&mut app, ctrl('x'), &mut Vec::new());
+            let warnings = |app: &App| match view(app).form.as_deref() {
+                Some(PrForm::Merge(merge)) => merge.warnings.clone(),
+                other => panic!("no merge form: {other:?}"),
+            };
+            let conflicts = "it has conflicts to resolve first".to_string();
+            assert!(warnings(&app).contains(&conflicts), "{:?}", warnings(&app));
+
+            let mut fresh = detail(42, "Fix login");
+            fresh.answered.conflicts = Some(false);
+            let asked = Asked::At(crate::fetch::now());
+            app.prs
+                .observe(&url, PrObservation::of_detail(&fresh), asked);
+            app.pr_detail.insert(url.clone(), fresh);
+            crate::pr_actions::detail_landed(&mut app, &url);
+            assert!(!warnings(&app).contains(&conflicts), "{:?}", warnings(&app));
         });
     }
 
@@ -2763,9 +2831,9 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             title: title.into(),
-            state: crate::pull_request::STATE_OPEN.into(),
-            is_draft: false,
-            health: Health::default(),
+            answered_state: crate::pull_request::STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
             author: "webdevcody".into(),
             base: "main".into(),
             head: format!("branch-{number}"),
@@ -2785,9 +2853,9 @@ mod tests {
     #[test]
     fn it_draws_the_rows_and_reads_the_one_under_the_cursor() {
         let mut failing = pr(40, "Bump deps", false);
-        failing.health = Health {
-            conflicts: false,
-            checks: Checks::Failing,
+        failing.answered = crate::pull_request::Answered {
+            conflicts: Some(false),
+            checks: Some(Checks::Failing),
         };
         let (mut app, _) = app_with(
             vec![pr(42, "Fix login", false), failing, pr(41, "Spike", true)],
@@ -3043,12 +3111,15 @@ mod tests {
             "the rows' hit area starts under the note"
         );
 
-        app.open_prs_inflight.insert(project.clone());
+        let ticket = app
+            .open_prs_inflight
+            .begin(project.clone(), crate::fetch::now())
+            .unwrap();
         // Wide enough for the title to say it in full.
         let retrying = screen(&mut app, 160, 20);
         assert!(!retrying.contains("couldn't refresh"), "{retrying}");
         assert!(retrying.contains("refreshing…"), "{retrying}");
-        app.open_prs_inflight.remove(&project);
+        app.open_prs_inflight.land(&ticket);
 
         app.open_prs.get_mut(&project).unwrap().list = vec![];
         let never = screen(&mut app, 100, 20);
@@ -3271,7 +3342,7 @@ mod tests {
         assert_eq!(view(&app).query.as_str(), "login", "the filter is kept");
         let picked = selected_pr(&app).unwrap();
         let list = rows(&app, &view(&app).project);
-        let visible = visible_rows("login", list);
+        let visible = visible_rows("login", list, &app.prs);
         assert_eq!(picked.number, list[visible[1].0].number);
         assert_ne!(picked.number, 41);
     }
@@ -3475,6 +3546,10 @@ mod tests {
                     pending: 2,
                 }),
             },
+            answered: crate::pull_request::Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Pending),
+            },
             ..pr(number, title, false)
         }
     }
@@ -3560,7 +3635,7 @@ mod tests {
     #[test]
     fn tokens_in_the_filter_narrow_by_facet() {
         let mut failing = rich(40, "Bump deps", "dependabot", false);
-        failing.health.checks = Checks::Failing;
+        failing.answered.checks = Some(Checks::Failing);
         failing.meta.checks = Some(crate::pull_request::CheckTally {
             passed: 27,
             failed: 2,
@@ -3568,10 +3643,11 @@ mod tests {
         });
         failing.meta.labels.clear();
         let mut draft = rich(39, "Spike", "sam", false);
-        draft.is_draft = true;
+        draft.answered_draft = true;
         let list = vec![rich(42, "Fix login", "sam", false), failing, draft];
+        let prs = observed(&list);
         let shown = |query: &str| -> Vec<u64> {
-            visible_rows(query, &list)
+            visible_rows(query, &list, &prs)
                 .iter()
                 .map(|(i, _)| list[*i].number)
                 .collect()
@@ -3603,7 +3679,7 @@ mod tests {
     #[test]
     fn the_filter_pick_writes_tokens_into_the_filter() {
         let mut failing = rich(40, "Bump deps", "dependabot", false);
-        failing.health.checks = Checks::Failing;
+        failing.answered.checks = Some(Checks::Failing);
         failing.meta.checks = Some(crate::pull_request::CheckTally {
             passed: 27,
             failed: 2,
@@ -3709,7 +3785,16 @@ mod tests {
         for width in (MIN_LIST_W as usize - 2)..=120 {
             for pr in &rows {
                 for cursor in [None, Some(true), Some(false)] {
-                    let line = row_line(pr, &[], cursor, &cols, width, now, app.theme);
+                    let line = row_line(
+                        pr,
+                        &app.prs.status_or_open(&pr.url),
+                        &[],
+                        cursor,
+                        &cols,
+                        width,
+                        now,
+                        app.theme,
+                    );
                     let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
                     assert!(w <= width, "row {w} > {width}: {line:?}");
                 }
@@ -3830,7 +3915,8 @@ mod tests {
             "yours, then one of theirs"
         );
         for p in &due {
-            app.pr_detail_inflight.insert(p.url.clone());
+            app.pr_detail_inflight
+                .begin(p.url.clone(), crate::fetch::now());
         }
         assert_eq!(
             prefetch_delay(&app),

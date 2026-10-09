@@ -16,6 +16,7 @@ use crate::app::{
     clamp_selection, last_interaction_ms, project_recency, project_rollup, project_unseen,
     window_start, worktree_recency, worktree_rollup, worktree_unseen, OpenPrs, Tree,
 };
+use crate::pr_store::PrStore;
 use crate::pull_request::{Standing, Trouble};
 use crate::text_input::TextInput;
 use orion_core::{Agent, AgentId, AgentStatus, Project, ProjectId, WorktreeId};
@@ -158,10 +159,11 @@ impl Palette {
         tree: &Tree,
         enter_attaches: bool,
         open_prs: &HashMap<ProjectId, OpenPrs>,
+        prs: &PrStore,
         hide_draft_prs: bool,
     ) -> Self {
         let mut palette = Self {
-            items: build_palette_items(tree, open_prs, hide_draft_prs),
+            items: build_palette_items(tree, open_prs, prs, hide_draft_prs),
             query: TextInput::new(),
             matches: Vec::new(),
             selected: 0,
@@ -182,10 +184,11 @@ impl Palette {
         &mut self,
         tree: &Tree,
         open_prs: &HashMap<ProjectId, OpenPrs>,
+        prs: &PrStore,
         hide_draft_prs: bool,
     ) {
         let keep = self.selected_target().cloned();
-        self.items = build_palette_items(tree, open_prs, hide_draft_prs);
+        self.items = build_palette_items(tree, open_prs, prs, hide_draft_prs);
         self.apply_filter();
         if let Some(target) = keep {
             if let Some(row) = self
@@ -280,7 +283,7 @@ fn attention_rank(items: &[PaletteItem]) -> Vec<usize> {
 /// archived sessions are left out, here as in the palette itself: a
 /// released PTY has nothing left to ask of anyone.
 pub fn attention_sessions(tree: &Tree) -> Vec<AgentId> {
-    let items = build_palette_items(tree, &HashMap::new(), false);
+    let items = build_palette_items(tree, &HashMap::new(), &PrStore::default(), false);
     let rank = attention_rank(&items);
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by_key(|&i| rank[i]);
@@ -312,7 +315,8 @@ fn session_tier(a: &Agent) -> PaletteTier {
 /// and the find-anything tool is for what is still live. Draft pull
 /// requests are left out only while `hide_draft_prs` is on (the PROJECT
 /// OPEN PRS GROUP's rule — the two surfaces show the same rows);
-/// worktrees are never held back.
+/// worktrees are never held back. Where a pull request stands is `prs`'s
+/// word, as every other surface draws it.
 ///
 /// This is the build order — what `matches` falls back to among rows with
 /// the same tier and stamp. The order the user sees is
@@ -320,6 +324,7 @@ fn session_tier(a: &Agent) -> PaletteTier {
 fn build_palette_items(
     tree: &Tree,
     open_prs: &HashMap<ProjectId, OpenPrs>,
+    prs: &PrStore,
     hide_draft_prs: bool,
 ) -> Vec<PaletteItem> {
     let mut items = Vec::new();
@@ -399,7 +404,8 @@ fn build_palette_items(
         };
         let under = format!("{}/", p.name);
         for pr in &open.list {
-            if hide_draft_prs && pr.is_draft {
+            let status = prs.status_or_open(&pr.url);
+            if hide_draft_prs && status.is_draft() {
                 continue;
             }
             items.push(PaletteItem {
@@ -407,7 +413,7 @@ fn build_palette_items(
                     project: p.id.clone(),
                     url: pr.url.clone(),
                 },
-                text: format!("{under}{}", pr.label()),
+                text: format!("{under}{}", prs.label(pr.number, &pr.url, &pr.title)),
                 label_at: under.chars().count(),
                 crumb: crumb(p),
                 stamped: 0,
@@ -415,8 +421,8 @@ fn build_palette_items(
                 unseen: false,
                 tier: PaletteTier::Rest,
                 interacted: 0,
-                standing: Some(pr.standing()),
-                trouble: pr.trouble(),
+                standing: Some(status.standing),
+                trouble: status.trouble(),
             });
         }
     }
@@ -514,7 +520,7 @@ mod tests {
     /// crumb then its own name (`demo/ask`), and the row the cursor starts
     /// on marked `▶`.
     fn rows(tree: &Tree, query: &str) -> Vec<String> {
-        let mut palette = Palette::new(tree, false, &HashMap::new(), false);
+        let mut palette = Palette::new(tree, false, &HashMap::new(), &PrStore::default(), false);
         palette.query = TextInput::from(query);
         palette.apply_filter();
         palette
@@ -578,7 +584,7 @@ mod tests {
     #[test]
     fn a_query_reaches_the_rows_the_overview_leaves_out() {
         let tree = tree();
-        let palette = Palette::new(&tree, false, &HashMap::new(), false);
+        let palette = Palette::new(&tree, false, &HashMap::new(), &PrStore::default(), false);
         assert!(
             palette.matches.iter().all(|m| matches!(
                 palette.items[m.item].target,
@@ -607,7 +613,7 @@ mod tests {
     #[test]
     fn every_visible_row_counts_as_a_hit() {
         let tree = tree();
-        let mut palette = Palette::new(&tree, false, &HashMap::new(), false);
+        let mut palette = Palette::new(&tree, false, &HashMap::new(), &PrStore::default(), false);
         palette.query = TextInput::from("read");
         palette.apply_filter();
         assert_eq!(palette.matches.len(), 2);
@@ -632,6 +638,19 @@ mod tests {
         assert_eq!(ring, ["ask", "unread", "run", "read", "fresh"]);
     }
 
+    /// What `App::prs` would hold once `open_prs` had landed.
+    fn observed(open_prs: &HashMap<ProjectId, OpenPrs>) -> PrStore {
+        let mut prs = PrStore::default();
+        for pr in open_prs.values().flat_map(|open| &open.list) {
+            prs.observe(
+                &pr.url,
+                crate::pr_store::PrObservation::of_list_row(pr),
+                crate::fetch::Asked::Cached,
+            );
+        }
+        prs
+    }
+
     /// `hide_draft_prs` keeps drafts out of `/` exactly as it keeps them
     /// out of the PROJECT OPEN PRS GROUP: the finished pull request is
     /// still a row, the draft is not, and nothing else on the project is
@@ -644,8 +663,8 @@ mod tests {
             number,
             title: title.into(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft,
-            health: Default::default(),
+            answered_draft: is_draft,
+            answered: Default::default(),
             head: format!("pr-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -663,7 +682,7 @@ mod tests {
             },
         );
         let texts = |hide: bool| -> Vec<String> {
-            Palette::new(&tree, false, &open_prs, hide)
+            Palette::new(&tree, false, &open_prs, &observed(&open_prs), hide)
                 .items
                 .iter()
                 .map(|i| i.text.clone())
@@ -700,14 +719,14 @@ mod tests {
     #[test]
     fn pull_request_rows_carry_their_trouble() {
         use crate::app::OpenPrs;
-        use crate::pull_request::{Checks, Health, OpenPr};
+        use crate::pull_request::{Answered, Checks, OpenPr};
         let tree = tree();
-        let pr = |number: u64, health: Health| OpenPr {
+        let pr = |number: u64, health: Answered| OpenPr {
             number,
             title: format!("pr {number}"),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft: false,
-            health,
+            answered_draft: false,
+            answered: health,
             head: format!("pr-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -719,19 +738,19 @@ mod tests {
             ProjectId("p1".into()),
             OpenPrs {
                 list: vec![
-                    pr(7, Health::default()),
+                    pr(7, Answered::default()),
                     pr(
                         8,
-                        Health {
-                            conflicts: true,
-                            checks: Checks::Passing,
+                        Answered {
+                            conflicts: Some(true),
+                            checks: Some(Checks::Passing),
                         },
                     ),
                     pr(
                         9,
-                        Health {
-                            conflicts: false,
-                            checks: Checks::Failing,
+                        Answered {
+                            conflicts: Some(false),
+                            checks: Some(Checks::Failing),
                         },
                     ),
                 ],
@@ -740,7 +759,7 @@ mod tests {
                 step: std::time::Duration::from_secs(1),
             },
         );
-        let palette = Palette::new(&tree, false, &open_prs, false);
+        let palette = Palette::new(&tree, false, &open_prs, &observed(&open_prs), false);
         let troubles: Vec<(&str, Option<Trouble>)> = palette
             .items
             .iter()
@@ -779,8 +798,8 @@ mod tests {
             number,
             title: title.into(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft,
-            health: Default::default(),
+            answered_draft: is_draft,
+            answered: Default::default(),
             head: format!("pr-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -800,7 +819,7 @@ mod tests {
                 step: std::time::Duration::from_secs(1),
             },
         );
-        let palette = Palette::new(&tree, false, &open_prs, false);
+        let palette = Palette::new(&tree, false, &open_prs, &observed(&open_prs), false);
         let standings: Vec<(&str, Option<Standing>)> = palette
             .items
             .iter()

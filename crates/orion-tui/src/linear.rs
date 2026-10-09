@@ -115,7 +115,9 @@ pub struct LinearIssue {
 
 /// A pull request on a Linear issue, from the attachment's metadata:
 /// enough for the work column to say where it stands without asking
-/// GitHub ([`IssueWork`]).
+/// GitHub ([`IssueWork`]) — for a pull request orion has heard nothing of
+/// itself; one `App::prs` knows is drawn from there. Each part Linear
+/// left out is unknown (`None`), never open, merged or clean by default.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct IssuePr {
     pub number: u64,
@@ -125,11 +127,11 @@ pub struct IssuePr {
     pub branch: String,
     /// `open`, `merged` or `closed`, as Linear spells it.
     #[serde(default)]
-    pub state: String,
+    pub state: Option<String>,
     #[serde(default)]
-    pub draft: bool,
+    pub draft: Option<bool>,
     #[serde(default)]
-    pub conflicts: bool,
+    pub conflicts: Option<bool>,
 }
 
 impl IssuePr {
@@ -147,25 +149,25 @@ impl IssuePr {
             .parse::<u64>()
             .ok();
         let number = meta.get("number").and_then(|n| n.as_u64()).or(from_url)?;
-        let text = |key: &str| {
-            meta.get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        let flag = |key: &str| meta.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = |key: &str| meta.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let flag = |key: &str| meta.get(key).and_then(|v| v.as_bool());
         Some(IssuePr {
             number,
             url: url.to_string(),
-            branch: text("branch"),
-            state: text("status"),
+            branch: text("branch").unwrap_or_default(),
+            state: text("status").filter(|state| !state.is_empty()),
             draft: flag("draft"),
             conflicts: flag("hasConflicts"),
         })
     }
 
-    fn standing(&self) -> crate::pull_request::Standing {
-        crate::pull_request::Standing::of(&self.state.to_ascii_uppercase(), self.draft)
+    /// Where Linear's metadata says it stands; `None` when it didn't say.
+    fn standing(&self) -> Option<crate::pull_request::Standing> {
+        let state = self.state.as_ref()?;
+        Some(crate::pull_request::Standing::of(
+            &state.to_ascii_uppercase(),
+            self.draft.unwrap_or(false),
+        ))
     }
 }
 
@@ -483,45 +485,60 @@ pub struct LinearList {
     /// Linear had more of the other issues than one page holds
     /// ([`OTHERS_LIMIT`]): the list says it shows the most recent.
     pub more: bool,
+    /// The same for the configured user's own ([`MINE_LIMIT`]).
+    pub more_mine: bool,
+    /// The issues whose attachments ran past the page asked for: their
+    /// `prs` are some of the pull requests, not all, so a landing list
+    /// keeps the ones already known for them ([`keep_cut_prs`]).
+    pub prs_cut: std::collections::HashSet<String>,
+}
+
+impl LinearList {
+    /// Whether Linear had more of `tab`'s issues than the list holds.
+    fn more_on(&self, tab: LinearTab) -> bool {
+        match tab {
+            LinearTab::Mine => self.more_mine,
+            LinearTab::Others => self.more,
+        }
+    }
 }
 
 /// A finished Linear call, back on the loop.
 #[derive(Debug, Clone)]
 pub enum LinearAnswer {
+    /// The project's lists (the ticket's key), asked from the checkout
+    /// `dir` when the ticket says.
     List {
-        project: ProjectId,
+        ticket: crate::fetch::Ticket<ProjectId>,
+        dir: PathBuf,
         list: Result<LinearList, String>,
     },
-    /// An issue moved to another state — or why not, with the state it
-    /// had, to put back.
+    /// The `⌘S` numbered `seq` moved an issue to `state` — or why not.
     Status {
         project: ProjectId,
         issue_id: String,
         identifier: String,
         state: LinearState,
-        result: Result<(), StatusRefused>,
+        seq: u64,
+        result: Result<(), String>,
     },
-    /// LINEAR AUTO-ATTACH linked a pull request to one issue — silent
-    /// unless Linear refused.
-    Attach { result: Result<(), String> },
-    /// THE ATTACH the user asked for, from either end ([`attach_issues`]):
-    /// the pull request, the identifiers Linear linked it to, and the
-    /// first it refused, with why.
-    Attached {
-        pr_number: u64,
-        attached: Vec<String>,
-        refused: Option<(String, String)>,
-    },
+    /// LINEAR AUTO-ATTACH linked a pull request to a link's issues —
+    /// silent unless Linear refused.
+    Attach(AttachRun),
+    /// THE ATTACH the user asked for, from either end ([`attach_issues`]).
+    Attached(AttachRun),
     /// **Test connection**: who the key in `dir` belongs to.
     Viewer {
         dir: PathBuf,
         result: Result<Viewer, String>,
     },
-    /// The TODOS MODAL's linked issues in the checkout `dir`, as Linear
-    /// has them now ([`request_linked`]).
+    /// The TODOS MODAL's linked issues in the checkout the ticket names,
+    /// as Linear has them now ([`request_linked`]): each with the
+    /// identifier it was asked by, which a team move may since have
+    /// renamed.
     Linked {
-        dir: PathBuf,
-        result: Result<Vec<LinkedIssue>, String>,
+        ticket: crate::fetch::Ticket<PathBuf>,
+        result: Result<Vec<(String, LinkedIssue)>, String>,
     },
     /// **Create in Triage** for `item` found more than one team and no
     /// remembered one: which to file it in is the user's to pick.
@@ -609,14 +626,197 @@ pub struct IssueDraft {
     pub description: String,
 }
 
-/// Why Linear refused to move an issue, and the state it was in before
-/// the row said otherwise — what [`land_answer`] puts back.
+/// One run of attaches: a pull request linked to issues through
+/// `attachmentLinkGitHubPR`, one after another, and what Linear said.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusRefused {
-    pub why: String,
-    pub status: String,
-    pub status_type: String,
-    pub state_color: String,
+pub struct AttachRun {
+    /// The project whose issues they are, when orion knows it.
+    pub project: Option<ProjectId>,
+    /// The pull request's head branch, when orion knows it: what the
+    /// [`LinkStore`] records against the issues.
+    pub branch: Option<String>,
+    pub pr_url: String,
+    pub pr_number: u64,
+    /// The issues Linear linked it to, as `(id, identifier)`.
+    pub attached: Vec<(String, String)>,
+    /// The first issue it refused, by identifier, and why.
+    pub refused: Option<(String, String)>,
+}
+
+impl AttachRun {
+    fn ok(&self) -> bool {
+        self.refused.is_none()
+    }
+
+    fn identifiers(&self) -> String {
+        self.attached
+            .iter()
+            .map(|(_, identifier)| identifier.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// An issue's workflow state as its row says it — what a refused `⌘S`
+/// puts back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowState {
+    status: String,
+    status_type: String,
+    state_color: String,
+}
+
+impl RowState {
+    fn of(issue: &LinearIssue) -> Self {
+        Self {
+            status: issue.status.clone(),
+            status_type: issue.status_type.clone(),
+            state_color: issue.state_color.clone(),
+        }
+    }
+
+    fn from_state(state: &LinearState) -> Self {
+        Self {
+            status: state.name.clone(),
+            status_type: state.kind.clone(),
+            state_color: state.color.clone(),
+        }
+    }
+
+    fn put_on(&self, issue: &mut LinearIssue) {
+        issue.status = self.status.clone();
+        issue.status_type = self.status_type.clone();
+        issue.state_color = self.state_color.clone();
+    }
+}
+
+/// What orion did to issues that a list asked before it may not know of
+/// yet, by issue id: `⌘S` moves and pull requests attached from here.
+/// Each is laid over every list that lands asked before Linear took it —
+/// so a slow list asked before the `⌘S` can't put the old state back —
+/// and is dropped by the first list asked after, which knows it
+/// (`fetch`'s rule 1).
+#[derive(Debug, Default)]
+pub struct LocalEdits {
+    moves: HashMap<String, StatusMove>,
+    attached: HashMap<String, Vec<AttachedPr>>,
+    /// Numbers every `⌘S`, so an answer knows whether a newer one has
+    /// been asked for since.
+    next_seq: u64,
+}
+
+/// The `⌘S` moves on one issue: one sent to Linear at a time, the last
+/// asked for queued behind it.
+#[derive(Debug, Clone)]
+struct StatusMove {
+    project: ProjectId,
+    dir: PathBuf,
+    identifier: String,
+    /// The state the row says: the last `⌘S`'s, numbered `seq`.
+    want: LinearState,
+    seq: u64,
+    /// The `⌘S` out at Linear now, by number; `None` once it answered.
+    sending: Option<u64>,
+    /// The state Linear has, as far as orion knows: the row's before the
+    /// first `⌘S`, then each one Linear took. What a refusal puts back.
+    confirmed: RowState,
+    /// When Linear took the last `⌘S`, with none after it: a list asked
+    /// later knows the move. `None` while one is still to answer.
+    landed: Option<std::time::Instant>,
+}
+
+/// A pull request attached to an issue from here, and when Linear took it.
+#[derive(Debug, Clone)]
+struct AttachedPr {
+    project: ProjectId,
+    pr: IssuePr,
+    at: std::time::Instant,
+}
+
+impl LocalEdits {
+    /// Lay what orion did over `project`'s list asked at `asked`: each
+    /// move or attach Linear had not taken by then put back on its issue,
+    /// the rest forgotten — this list and every one after knows them.
+    fn lay_over(
+        &mut self,
+        project: &ProjectId,
+        asked: std::time::Instant,
+        list: &mut [LinearIssue],
+    ) {
+        self.moves.retain(|issue_id, mv| {
+            if &mv.project != project {
+                return true;
+            }
+            if mv.landed.is_some_and(|landed| asked > landed) {
+                return false;
+            }
+            if let Some(issue) = list.iter_mut().find(|i| &i.id == issue_id) {
+                RowState::from_state(&mv.want).put_on(issue);
+            }
+            true
+        });
+        self.attached.retain(|issue_id, prs| {
+            prs.retain(|a| &a.project != project || a.at >= asked);
+            if let Some(issue) = list.iter_mut().find(|i| &i.id == issue_id) {
+                for a in prs.iter().filter(|a| &a.project == project) {
+                    if !issue.prs.iter().any(|p| p.url == a.pr.url) {
+                        issue.prs.push(a.pr.clone());
+                    }
+                }
+            }
+            !prs.is_empty()
+        });
+    }
+}
+
+/// The TODOS MODAL's asks after its linked issues ([`request_linked`]):
+/// one in flight per checkout, a `⌘R` meanwhile owed, and when what each
+/// chip shows was asked.
+#[derive(Debug, Default)]
+pub struct LinkedAsks {
+    flights: crate::fetch::Flights<PathBuf>,
+    /// When each checkout's last answer was asked: a parked tab shown
+    /// again asks again once that is older than the PULL REQUESTS
+    /// MODAL's `FRESH`.
+    dir_at: HashMap<PathBuf, std::time::Instant>,
+    /// When the state each chip shows was asked, by checkout and
+    /// identifier — by a [`fetch_linked`], or a `⌘S` Linear took. An
+    /// answer asked before it is older news, dropped, so a chip never goes
+    /// back. Per checkout, as each tab keeps its own chips.
+    issue_at: HashMap<(PathBuf, String), std::time::Instant>,
+}
+
+impl LinkedAsks {
+    /// `dir`'s chips were asked after within `FRESH`, or are being asked.
+    pub(crate) fn fresh(&self, dir: &Path) -> bool {
+        self.flights.in_flight(&dir.to_path_buf())
+            || self
+                .dir_at
+                .get(dir)
+                .is_some_and(|at| at.elapsed() < crate::pr_modal::FRESH)
+    }
+
+    /// Take a state of `identifier` asked at `asked` for `dir`'s chip —
+    /// false when it already shows one asked later.
+    pub(crate) fn accept(
+        &mut self,
+        dir: &Path,
+        identifier: &str,
+        asked: std::time::Instant,
+    ) -> bool {
+        let key = (dir.to_path_buf(), identifier.to_string());
+        if self.issue_at.get(&key).is_some_and(|shown| *shown > asked) {
+            return false;
+        }
+        self.issue_at.insert(key, asked);
+        true
+    }
+
+    /// An answer for `dir` asked at `asked` landed.
+    pub(crate) fn answered(&mut self, dir: &Path, asked: std::time::Instant) {
+        let at = self.dir_at.entry(dir.to_path_buf()).or_insert(asked);
+        *at = (*at).max(asked);
+    }
 }
 
 /// The account a key belongs to, as Linear's `viewer` query names it.
@@ -652,14 +852,24 @@ impl KeySource {
     }
 }
 
-/// Branch → Linear issues, so a pull request cut from a ⌘L launch, or
-/// from a worktree the issues were linked to (`⌘.`), can be attached once
-/// GitHub lists it. A link outlives its attach (`attached`): the LINEAR
-/// VIEW still finds the issue's worktree and pull request by that branch
-/// ([`IssueWork`]).
+/// Branch → Linear issues, per project, so a pull request cut from a ⌘L
+/// launch, or from a worktree the issues were linked to (`⌘.`), can be
+/// attached once GitHub lists it. A link outlives its attach: the LINEAR
+/// VIEW still finds the worktree and pull request of every issue ever on
+/// it by that branch ([`IssueWork`]).
+///
+/// Each issue on a link is attached or waiting, on its own. Waiting ones
+/// are spent only when Linear takes them:
+/// [`begin_attach`](Self::begin_attach) marks the link out and
+/// [`finish_attach`](Self::finish_attach) settles it — those Linear took
+/// attached, the rest back to wait for the next list, until
+/// [`ATTACH_TRIES`] refusals in a row leave the link be.
 #[derive(Debug, Clone, Default)]
 pub struct LinkStore {
     path: Option<PathBuf>,
+    /// Keyed by [`link_key`]. A link written before links were kept per
+    /// project is keyed by its branch alone, and any project's branch of
+    /// that name takes it, as then.
     links: HashMap<String, PendingLink>,
 }
 
@@ -667,78 +877,252 @@ pub struct LinkStore {
 pub(crate) struct PendingLink {
     issue_ids: Vec<String>,
     identifiers: Vec<String>,
-    /// The branch's pull request took the issues already: nothing waits.
+    /// None of its issues waits: kept up to date for an older orion,
+    /// which reads only this. A link written with it and no
+    /// `attached_ids` had every issue attached ([`LinkStore::load`]).
     #[serde(default)]
     attached: bool,
+    /// The issues a pull request from the branch took; the rest wait.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attached_ids: Vec<String>,
+    /// The project whose branch it is; `None` on an older link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectId>,
+    /// The branch; `None` on an older link, whose key it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    /// Attaches Linear refused in a row.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    failures: u8,
+    /// An attach is out for it now: not tried again until it answers.
+    #[serde(skip)]
+    sending: bool,
+}
+
+impl PendingLink {
+    /// The issues still waiting on a pull request, as `(id, identifier)`.
+    fn waiting(&self) -> Vec<(String, String)> {
+        self.issue_ids
+            .iter()
+            .zip(&self.identifiers)
+            .filter(|(id, _)| !self.attached_ids.contains(id))
+            .map(|(id, identifier)| (id.clone(), identifier.clone()))
+            .collect()
+    }
+
+    fn gave_up(&self) -> bool {
+        self.failures >= ATTACH_TRIES
+    }
+
+    /// `(id, identifier)`s added after the issues already on it.
+    fn add(&mut self, issues: &[(String, String)]) {
+        for (id, identifier) in issues {
+            if !self.issue_ids.contains(id) {
+                self.issue_ids.push(id.clone());
+                self.identifiers.push(identifier.clone());
+            }
+        }
+    }
+
+    /// `attached` brought in line with `attached_ids`.
+    fn settle(&mut self) {
+        self.attached = self.waiting().is_empty();
+    }
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
+/// How many attaches in a row Linear may refuse a link before it is left
+/// alone: a refusal that sticks (the issue gone, a key without access)
+/// must not ask again on every list. Linking the branch again tries anew.
+const ATTACH_TRIES: u8 = 3;
+
+/// A link's key: the branch, then the project. Git never puts a `:` in a
+/// branch name, so it never reads as an older link's bare branch.
+fn link_key(project: &ProjectId, branch: &str) -> String {
+    format!("{branch}:{}", project.0)
 }
 
 impl LinkStore {
     pub fn load(path: PathBuf) -> Self {
-        let links = std::fs::read_to_string(&path)
+        let mut links: HashMap<String, PendingLink> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        // A link from before issues were attached one by one: `attached`
+        // spoke for all of them.
+        for link in links.values_mut() {
+            if link.attached && link.attached_ids.is_empty() {
+                link.attached_ids = link.issue_ids.clone();
+            }
+        }
         Self {
             path: Some(path),
             links,
         }
     }
 
-    /// Adds `issues` to what `branch`'s pull request attaches to, after
-    /// any already waiting on it.
-    pub fn remember(&mut self, branch: &str, issues: &[LinearIssue]) {
+    /// The key of `project`'s link on `branch`: its own, else an older
+    /// one kept for any project.
+    fn key_of(&self, project: &ProjectId, branch: &str) -> Option<String> {
+        let own = link_key(project, branch);
+        if self.links.contains_key(&own) {
+            return Some(own);
+        }
+        self.links
+            .get(branch)
+            .filter(|l| l.project.is_none())
+            .map(|_| branch.to_string())
+    }
+
+    /// `project`'s link on `branch`, made empty if it has none.
+    fn link_mut(&mut self, project: &ProjectId, branch: &str) -> &mut PendingLink {
+        let key = self
+            .key_of(project, branch)
+            .unwrap_or_else(|| link_key(project, branch));
+        self.links.entry(key).or_insert_with(|| PendingLink {
+            project: Some(project.clone()),
+            branch: Some(branch.to_string()),
+            ..PendingLink::default()
+        })
+    }
+
+    /// Sets `issues` waiting on `branch`'s next pull request, beside the
+    /// issues already on it — those a pull request took stay on it,
+    /// attached. Linking an issue again sets it waiting again, and gives
+    /// the link a fresh set of tries.
+    pub fn remember(&mut self, project: &ProjectId, branch: &str, issues: &[LinearIssue]) {
         if branch.is_empty() || issues.is_empty() {
             return;
         }
-        let link = self.links.entry(branch.to_string()).or_default();
-        for issue in issues {
-            if !link.issue_ids.contains(&issue.id) {
-                link.issue_ids.push(issue.id.clone());
-                link.identifiers.push(issue.identifier.clone());
-            }
-        }
+        let pairs: Vec<(String, String)> = issues
+            .iter()
+            .map(|i| (i.id.clone(), i.identifier.clone()))
+            .collect();
+        let link = self.link_mut(project, branch);
+        link.add(&pairs);
+        link.attached_ids
+            .retain(|id| !pairs.iter().any(|(again, _)| again == id));
+        link.failures = 0;
+        link.settle();
         self.persist();
     }
 
-    /// [`remember`](Self::remember) for issues `branch`'s open pull
-    /// request was attached to on the spot: kept for show, waiting on
-    /// nothing.
-    pub fn remember_attached(&mut self, branch: &str, issues: &[LinearIssue]) {
-        self.remember(branch, issues);
-        if let Some(link) = self.links.get_mut(branch) {
-            link.attached = true;
-            self.persist();
+    /// Issues `branch`'s open pull request was attached to on the spot:
+    /// kept for show beside the rest, waiting on nothing. Issues still
+    /// waiting on it keep waiting, for the next list to attach.
+    pub(crate) fn remember_attached(
+        &mut self,
+        project: &ProjectId,
+        branch: &str,
+        issues: &[(String, String)],
+    ) {
+        if branch.is_empty() || issues.is_empty() {
+            return;
         }
+        let link = self.link_mut(project, branch);
+        link.add(issues);
+        for (id, _) in issues {
+            if !link.attached_ids.contains(id) {
+                link.attached_ids.push(id.clone());
+            }
+        }
+        link.settle();
+        self.persist();
     }
 
-    /// The identifiers waiting on `branch`'s pull request.
-    pub fn pending(&self, branch: &str) -> &[String] {
-        self.links
-            .get(branch)
-            .filter(|l| !l.attached)
-            .map(|l| l.identifiers.as_slice())
+    /// The identifiers waiting on `branch`'s pull request — none once
+    /// Linear has refused the link [`ATTACH_TRIES`] times
+    /// ([`gave_up_on`](Self::gave_up_on)).
+    pub fn pending(&self, project: &ProjectId, branch: &str) -> Vec<String> {
+        self.key_of(project, branch)
+            .and_then(|key| self.links.get(&key))
+            .filter(|l| !l.gave_up())
+            .map(|l| l.waiting().into_iter().map(|(_, ident)| ident).collect())
             .unwrap_or_default()
     }
 
-    /// What `branch`'s new pull request attaches to, once: the link stays,
-    /// marked attached, so the issues still show the branch.
-    pub(crate) fn take(&mut self, branch: &str) -> Option<PendingLink> {
-        let link = self.links.get_mut(branch).filter(|l| !l.attached)?;
-        link.attached = true;
-        let taken = link.clone();
-        self.persist();
-        Some(taken)
+    /// The identifiers on `branch` that Linear refused [`ATTACH_TRIES`]
+    /// times in a row, no longer tried.
+    pub fn gave_up_on(&self, project: &ProjectId, branch: &str) -> Vec<String> {
+        self.key_of(project, branch)
+            .and_then(|key| self.links.get(&key))
+            .filter(|l| l.gave_up())
+            .map(|l| l.waiting().into_iter().map(|(_, ident)| ident).collect())
+            .unwrap_or_default()
     }
 
-    /// The branches `issue_id` was linked to, in name order.
+    /// The issues waiting on `branch`'s pull request, as `(id,
+    /// identifier)`: the link marked out until
+    /// [`finish_attach`](Self::finish_attach). `None` when nothing waits
+    /// on it, an attach is already out, or Linear has refused it
+    /// [`ATTACH_TRIES`] times.
+    pub(crate) fn begin_attach(
+        &mut self,
+        project: &ProjectId,
+        branch: &str,
+    ) -> Option<Vec<(String, String)>> {
+        let key = self.key_of(project, branch)?;
+        let link = self
+            .links
+            .get_mut(&key)
+            .filter(|l| !l.sending && !l.gave_up())?;
+        let waiting = link.waiting();
+        if waiting.is_empty() {
+            return None;
+        }
+        link.sending = true;
+        Some(waiting)
+    }
+
+    /// Linear answered the attach [`begin_attach`](Self::begin_attach)
+    /// sent out: the issues it took (`attached`, by id) are attached, and
+    /// any it refused — or that were added meanwhile — wait for the next
+    /// list. A refusal counts against the link's tries; true when it was
+    /// the last.
+    pub(crate) fn finish_attach(
+        &mut self,
+        project: &ProjectId,
+        branch: &str,
+        attached: &[String],
+        ok: bool,
+    ) -> bool {
+        let Some(link) = self
+            .key_of(project, branch)
+            .and_then(|key| self.links.get_mut(&key))
+        else {
+            return false;
+        };
+        link.sending = false;
+        for id in attached {
+            if link.issue_ids.contains(id) && !link.attached_ids.contains(id) {
+                link.attached_ids.push(id.clone());
+            }
+        }
+        link.settle();
+        let gave_up = if ok {
+            link.failures = 0;
+            false
+        } else {
+            link.failures = link.failures.saturating_add(1);
+            link.gave_up()
+        };
+        self.persist();
+        gave_up
+    }
+
+    /// The branches `issue_id` was ever linked to, in name order.
     pub fn branches_of(&self, issue_id: &str) -> Vec<&str> {
         let mut branches: Vec<&str> = self
             .links
             .iter()
             .filter(|(_, l)| l.issue_ids.iter().any(|id| id == issue_id))
-            .map(|(b, _)| b.as_str())
+            .map(|(key, l)| l.branch.as_deref().unwrap_or(key))
             .collect();
         branches.sort_unstable();
+        branches.dedup();
         branches
     }
 
@@ -771,27 +1155,46 @@ pub(crate) struct IssueWork {
 }
 
 /// The pull request in [`IssueWork`], as a PR ROW paints it
-/// ([`crate::pr_row::look`]).
+/// ([`crate::pr_row::look`]). `standing` is `None` for one nobody has said
+/// the state of — Linear's metadata left it out and orion has not heard of
+/// it — drawn neutrally, with no word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WorkPr {
     pub number: u64,
-    pub standing: crate::pull_request::Standing,
+    pub standing: Option<crate::pull_request::Standing>,
     pub trouble: Option<crate::pull_request::Trouble>,
 }
 
 impl WorkPr {
-    /// `ready`, `draft`, `merged`, `closed`, or the trouble's word.
+    /// `ready`, `draft`, `merged`, `closed`, or the trouble's word; nothing
+    /// for a state nobody has said.
     fn word(self) -> &'static str {
-        self.standing.word(self.trouble)
+        self.standing
+            .map_or("", |standing| standing.word(self.trouble))
     }
 
-    /// Open before merged before closed, then the newest.
+    /// Its colours: the PR ROW's for its state, or dim end to end for a
+    /// state nobody has said — neither the open muted nor any status.
+    fn look(self, th: Theme) -> crate::pr_row::Look {
+        match self.standing {
+            Some(standing) => crate::pr_row::look(standing, self.trouble, th),
+            None => crate::pr_row::Look {
+                glyph: th.dim,
+                label: th.dim,
+                rail: th.dim,
+                badge: th.dim,
+            },
+        }
+    }
+
+    /// Open before merged before closed before unknown, then the newest.
     fn rank(self) -> (u8, std::cmp::Reverse<u64>) {
         use crate::pull_request::Standing;
         let state = match self.standing {
-            Standing::Open | Standing::Draft => 0,
-            Standing::Merged => 1,
-            Standing::Closed => 2,
+            Some(Standing::Open | Standing::Draft) => 0,
+            Some(Standing::Merged) => 1,
+            Some(Standing::Closed) => 2,
+            None => 3,
         };
         (state, std::cmp::Reverse(self.number))
     }
@@ -822,12 +1225,21 @@ fn names_issue(branch: &str, identifier: &str) -> bool {
 ///
 /// The pull request is the best of those Linear has on the issue and the
 /// project's open ones on its branches — open before merged before closed.
-/// An open one in orion's list speaks for itself, failing checks and all;
-/// Linear's metadata says the rest. One from the root checkout's branch
-/// (the `dev` → `main` release) is never the issue's ([`root_branch`]).
+/// Where each stands is `App::prs`'s word for any pull request orion has
+/// heard of, failing checks and all — the same the list row and the band
+/// draw; Linear's metadata speaks only for one it never has. One from the
+/// root checkout's branch (the `dev` → `main` release) is never the
+/// issue's ([`root_branch`]).
 pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Option<IssueWork> {
     use crate::pull_request::Trouble;
     use orion_core::entities::Worktree;
+    let known = |number: u64, url: &str| {
+        app.prs.status(url).map(|status| WorkPr {
+            number,
+            standing: Some(status.standing),
+            trouble: status.trouble(),
+        })
+    };
     let worktrees: Vec<&Worktree> = app
         .tree
         .worktrees
@@ -873,21 +1285,26 @@ pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Op
     let live = open
         .iter()
         .filter(|pr| ours(&pr.head) || attached.iter().any(|p| p.url == pr.url))
-        .map(|pr| WorkPr {
-            number: pr.number,
-            standing: pr.standing(),
-            trouble: pr.trouble(),
+        .map(|pr| {
+            known(pr.number, &pr.url).unwrap_or(WorkPr {
+                number: pr.number,
+                standing: Some(crate::pull_request::Standing::Open),
+                trouble: None,
+            })
         });
     let from_linear = attached
         .iter()
         .filter(|p| !open.iter().any(|pr| pr.url == p.url))
         .map(|p| {
-            let standing = p.standing();
-            WorkPr {
-                number: p.number,
-                standing,
-                trouble: (standing.is_open() && p.conflicts).then_some(Trouble::Conflicts),
-            }
+            known(p.number, &p.url).unwrap_or_else(|| {
+                let standing = p.standing();
+                let conflicts = standing.is_some_and(|s| s.is_open()) && p.conflicts == Some(true);
+                WorkPr {
+                    number: p.number,
+                    standing,
+                    trouble: conflicts.then_some(Trouble::Conflicts),
+                }
+            })
         });
     let pr = live.chain(from_linear).min_by_key(|p| p.rank());
     if worktree.is_none() && pr.is_none() {
@@ -963,7 +1380,7 @@ fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: 
     let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
     view.selected = clamp_selection(0, list_len(app, &project));
     app.overlay = Some(Overlay::Linear(view));
-    request_list(app, project, dir);
+    request_list(app, project, dir, false);
     app.dirty = true;
 }
 
@@ -977,14 +1394,23 @@ fn list_len(app: &App, project: &ProjectId) -> usize {
     app.linear.get(project).map_or(0, |l| l.list.len())
 }
 
-fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
-    if app.linear_inflight.contains(&project) {
-        return;
-    }
+/// Ask Linear for `project`'s lists, off the loop — one ask at a time per
+/// project. `fresh` is a refresh the user asked for (`⌘R`), or one an
+/// edit needs: while a list is out, it is owed and asked as soon as that
+/// one lands, never dropped.
+fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
-    app.linear_inflight.insert(project.clone());
+    let now = crate::fetch::now();
+    let ticket = if fresh {
+        app.linear_flights.begin_fresh(project.clone(), now)
+    } else {
+        app.linear_flights.begin(project.clone(), now)
+    };
+    let Some(ticket) = ticket else {
+        return;
+    };
     app.linear_failed.remove(&project);
     app.dirty = true;
     let email = crate::config::Config::load()
@@ -992,17 +1418,82 @@ fn request_list(app: &mut App, project: ProjectId, dir: PathBuf) {
         .trim()
         .to_string();
     tokio::spawn(async move {
-        let result = fetch_lists(&dir, &email).await;
-        let _ = tx.send(LinearAnswer::List {
-            project,
-            list: result,
-        });
+        let list = fetch_lists(&dir, &email).await;
+        let _ = tx.send(LinearAnswer::List { ticket, dir, list });
     });
+}
+
+/// The LINEAR VIEW over `overlay`, wherever it stands: up, under the PR
+/// PICK its `⌘U` opened, or under the QUICK PROMPT its Enter opened.
+fn linear_view_mut(overlay: &mut Option<Overlay>) -> Option<&mut LinearView> {
+    use crate::app::PromptKind;
+    match overlay.as_mut()? {
+        Overlay::Linear(view) => Some(view),
+        Overlay::PullRequests(prs) => prs.pick.as_mut().map(|pick| pick.back.as_mut()),
+        Overlay::Prompt(prompt) => match &mut prompt.kind {
+            PromptKind::QuickPrompt(launch) => match &mut launch.under {
+                Some(ModalUnder::Linear(view)) => Some(view.as_mut()),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A new list for `project` landed over `old`: the cursor stays on the
+/// issue it was on, wherever that now sits, and is clamped only when the
+/// issue has left the list.
+fn follow_cursor(app: &mut App, project: &ProjectId, old: &[LinearIssue]) {
+    let list = app
+        .linear
+        .get(project)
+        .map(|l| l.list.as_slice())
+        .unwrap_or_default();
+    let Some(view) = linear_view_mut(&mut app.overlay) else {
+        return;
+    };
+    if &view.project != project {
+        return;
+    }
+    let was = old.get(view.selected).map(|issue| issue.id.as_str());
+    view.selected = was
+        .and_then(|id| list.iter().position(|issue| issue.id == id))
+        .unwrap_or_else(|| clamp_selection(view.selected as i64, list.len()));
+}
+
+/// An issue whose attachments ran past the page keeps the pull requests
+/// the last list knew it had: some of them is not none of them.
+fn keep_cut_prs(fresh: &mut LinearList, old: &[LinearIssue]) {
+    for issue in fresh
+        .list
+        .iter_mut()
+        .filter(|issue| fresh.prs_cut.contains(&issue.id))
+    {
+        let Some(was) = old.iter().find(|o| o.id == issue.id) else {
+            continue;
+        };
+        for pr in &was.prs {
+            if !issue.prs.iter().any(|p| p.url == pr.url) {
+                issue.prs.push(pr.clone());
+            }
+        }
+    }
 }
 
 pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     match answer {
-        LinearAnswer::Linked { dir, result } => crate::todos::view::land_linked(app, dir, result),
+        LinearAnswer::Linked { ticket, result } => {
+            let Some(landed) = app.linear_linked.flights.land(&ticket) else {
+                return;
+            };
+            let dir = ticket.key.clone();
+            crate::todos::view::land_linked(app, dir.clone(), ticket.at, result);
+            if landed.owed {
+                let ids = crate::todos::view::linked_ids(app, &dir);
+                request_linked(app, dir, ids);
+            }
+        }
         LinearAnswer::Teams { dir, item, result } => {
             crate::todos::view::land_teams(app, dir, item, result)
         }
@@ -1030,74 +1521,192 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
             app.linear_test = Some((dir, source, test));
             app.dirty = true;
         }
-        LinearAnswer::List { project, list } => {
-            app.linear_inflight.remove(&project);
+        LinearAnswer::List { ticket, dir, list } => {
+            // A list asked again since (or never asked) answers nothing.
+            let Some(landed) = app.linear_flights.land(&ticket) else {
+                return;
+            };
+            let project = ticket.key.clone();
             match list {
-                Ok(fetched) => {
-                    let n = fetched.list.len();
+                Ok(mut fetched) => {
+                    let old = app.linear.remove(&project).unwrap_or_default();
+                    keep_cut_prs(&mut fetched, &old.list);
+                    app.linear_edits
+                        .lay_over(&project, ticket.at, &mut fetched.list);
                     app.linear_failed.remove(&project);
                     app.linear.insert(project.clone(), fetched);
-                    if let Some(Overlay::Linear(view)) = &mut app.overlay {
-                        if view.project == project {
-                            view.selected = clamp_selection(view.selected as i64, n);
-                        }
-                    }
+                    follow_cursor(app, &project, &old.list);
                 }
                 Err(err) => {
-                    app.linear_failed.insert(project);
+                    app.linear_failed.insert(project.clone());
                     app.flash = Some(crate::flash::Flash::failed(err));
                 }
             }
             app.dirty = true;
-        }
-        LinearAnswer::Attach { result } => {
-            if let Err(err) = result {
-                app.flash = Some(crate::flash::Flash::failed(err));
+            if landed.owed {
+                request_list(app, project, dir, false);
             }
         }
-        // The wait the footer spun for is over: it says what Linear took,
-        // or the first issue it would not take and why.
-        LinearAnswer::Attached {
-            pr_number,
-            attached,
-            refused,
-        } => {
-            app.flash = Some(match refused {
-                Some((identifier, why)) => crate::flash::Flash::failed(format!(
-                    "couldn't attach PR #{pr_number} to {identifier}: {why}"
-                )),
-                None => crate::flash::Flash::done(format!(
-                    "attached PR #{pr_number} to {}",
-                    attached.join(", ")
-                )),
-            });
-            app.dirty = true;
-        }
+        LinearAnswer::Attach(run) => land_attach(app, run, true),
+        LinearAnswer::Attached(run) => land_attach(app, run, false),
         LinearAnswer::Status {
             project,
             issue_id,
             identifier,
+            state,
+            seq,
             result,
-            ..
-        } => {
-            // The row already reads the new status; a refusal puts back
-            // what it said before the move, and says why.
-            if let Err(refused) = result {
-                if let Some(issue) = app
-                    .linear
-                    .get_mut(&project)
-                    .and_then(|l| l.list.iter_mut().find(|i| i.id == issue_id))
-                {
-                    issue.status = refused.status;
-                    issue.status_type = refused.status_type;
-                    issue.state_color = refused.state_color;
-                }
+        } => land_status(app, project, issue_id, identifier, state, seq, result),
+    }
+}
+
+/// Linear answered the `⌘S` numbered `seq`. Taken, it is what Linear has
+/// now, and the TODOS MODAL's chips say so. Refused, the row goes back to
+/// what Linear had before it — only when no newer `⌘S` has been asked for
+/// since; otherwise the newer one stands, and a fresh list says where
+/// Linear has the issue. A newer `⌘S` queued behind this one goes out now.
+fn land_status(
+    app: &mut App,
+    project: ProjectId,
+    issue_id: String,
+    identifier: String,
+    state: LinearState,
+    seq: u64,
+    result: Result<(), String>,
+) {
+    app.dirty = true;
+    if let Err(why) = &result {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't move {identifier}: {why}"
+        )));
+    }
+    let Some(mv) = app.linear_edits.moves.get_mut(&issue_id) else {
+        return;
+    };
+    if mv.sending == Some(seq) {
+        mv.sending = None;
+    }
+    let newer = mv.seq != seq;
+    let dir = mv.dir.clone();
+    match result {
+        Ok(()) => {
+            let now = crate::fetch::now();
+            mv.confirmed = RowState::from_state(&state);
+            if !newer {
+                mv.landed = Some(now);
+            }
+            let url = app
+                .linear
+                .get(&project)
+                .and_then(|l| l.list.iter().find(|i| i.id == issue_id))
+                .map(|i| (i.url.clone(), i.priority));
+            let (url, priority) = url.unwrap_or_default();
+            crate::todos::view::note_linked(
+                app,
+                LinkedIssue {
+                    identifier,
+                    url,
+                    state: state.name,
+                    state_type: state.kind,
+                    state_color: state.color,
+                    priority,
+                },
+                now,
+            );
+        }
+        Err(_) if newer => request_list(app, project, dir, true),
+        Err(_) => {
+            let back = mv.confirmed.clone();
+            app.linear_edits.moves.remove(&issue_id);
+            if let Some(issue) = app
+                .linear
+                .get_mut(&project)
+                .and_then(|l| l.list.iter_mut().find(|i| i.id == issue_id))
+            {
+                back.put_on(issue);
+            }
+            request_list(app, project, dir, true);
+        }
+    }
+    if newer {
+        send_move(app, &issue_id);
+    }
+}
+
+/// Linear answered an attach run. What it took shows at once: the pull
+/// request on those issues' rows, and the branch remembered against them
+/// — an AUTO-ATTACH's link spent, or put back for the next list when
+/// Linear refused. Only the user's own attach, or a refusal, is said.
+fn land_attach(app: &mut App, run: AttachRun, auto: bool) {
+    app.dirty = true;
+    if let (Some(project), Some(branch)) = (&run.project, &run.branch) {
+        if auto {
+            let ids: Vec<String> = run.attached.iter().map(|(id, _)| id.clone()).collect();
+            let gave_up = app
+                .linear_links
+                .finish_attach(project, branch, &ids, run.ok());
+            if let Some((identifier, why)) = &run.refused {
+                let last = if gave_up {
+                    format!(" — gave up after {ATTACH_TRIES} tries")
+                } else {
+                    String::new()
+                };
                 app.flash = Some(crate::flash::Flash::failed(format!(
-                    "couldn't move {identifier}: {}",
-                    refused.why
+                    "couldn't attach PR #{} to {identifier}: {why}{last}",
+                    run.pr_number
                 )));
             }
-            app.dirty = true;
+        } else if !run.attached.is_empty() {
+            app.linear_links
+                .remember_attached(project, branch, &run.attached);
+        }
+    }
+    show_attached(app, &run);
+    if auto {
+        return;
+    }
+    app.flash = Some(match &run.refused {
+        Some((identifier, why)) => crate::flash::Flash::failed(format!(
+            "couldn't attach PR #{} to {identifier}: {why}",
+            run.pr_number
+        )),
+        None => crate::flash::Flash::done(format!(
+            "attached PR #{} to {}",
+            run.pr_number,
+            run.identifiers()
+        )),
+    });
+}
+
+/// The pull request `run` attached, on each issue it took, in whichever
+/// project's list holds it — and laid over any list asked before Linear
+/// took it ([`LocalEdits`]), so the work column says so without a `⌘R`.
+fn show_attached(app: &mut App, run: &AttachRun) {
+    let now = crate::fetch::now();
+    let pr = IssuePr {
+        number: run.pr_number,
+        url: run.pr_url.clone(),
+        branch: run.branch.clone().unwrap_or_default(),
+        ..IssuePr::default()
+    };
+    for (project, list) in app.linear.iter_mut() {
+        for issue in list
+            .list
+            .iter_mut()
+            .filter(|i| run.attached.iter().any(|(id, _)| *id == i.id))
+        {
+            if !issue.prs.iter().any(|p| p.url == pr.url) {
+                issue.prs.push(pr.clone());
+            }
+            app.linear_edits
+                .attached
+                .entry(issue.id.clone())
+                .or_default()
+                .push(AttachedPr {
+                    project: project.clone(),
+                    pr: pr.clone(),
+                    at: now,
+                });
         }
     }
 }
@@ -1105,7 +1714,8 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
 /// Remember a ⌘L launch's branch so the PR it opens can be attached. A
 /// launch aimed at the root checkout remembers nothing: its branch (`dev`)
 /// opens only the release pull request into `main`, and that one must not
-/// be linked to the issues ([`root_branch`]).
+/// be linked to the issues ([`root_branch`]). A branch with a pull request
+/// open already has nothing to wait for: it is attached there and then.
 pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
     let Some(batch) = &launch.linear else {
         return;
@@ -1113,17 +1723,33 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
     if !crate::config::Config::load().linear_auto_attach {
         return;
     }
-    let branch = match &launch.target {
-        QuickTarget::NewWorktree { branch, .. } => branch.clone(),
-        QuickTarget::Worktree(id) => app
-            .tree
-            .worktrees
-            .iter()
-            .find(|w| &w.id == id && !w.is_main)
-            .map(|w| w.branch.clone())
-            .unwrap_or_default(),
+    let (project, branch) = match &launch.target {
+        QuickTarget::NewWorktree {
+            project, branch, ..
+        } => (project.clone(), branch.clone()),
+        QuickTarget::Worktree(id) => {
+            let Some(w) = app
+                .tree
+                .worktrees
+                .iter()
+                .find(|w| &w.id == id && !w.is_main)
+            else {
+                return;
+            };
+            (w.project_id.clone(), w.branch.clone())
+        }
     };
-    app.linear_links.remember(&branch, &batch.issues);
+    app.linear_links.remember(&project, &branch, &batch.issues);
+    let open = app
+        .open_prs
+        .get(&project)
+        .and_then(|o| o.list.iter().find(|pr| pr.head == branch))
+        .map(|pr| (pr.url.clone(), pr.number));
+    if let (Some((url, number)), Some(dir)) = (open, project_dir(app, &project)) {
+        if root_branch(app, &project) != Some(branch.as_str()) {
+            attach_link(app, &project, dir, &branch, url, number);
+        }
+    }
 }
 
 /// The branch `project`'s root checkout is on — the long-lived one feature
@@ -1139,50 +1765,109 @@ fn root_branch<'a>(app: &'a App, project: &ProjectId) -> Option<&'a str> {
         .map(|w| w.branch.as_str())
 }
 
-/// When a new pull request appears on a remembered branch, attach it —
+/// The checkout `project` is read from — whose key asks Linear.
+fn project_dir(app: &App, project: &ProjectId) -> Option<PathBuf> {
+    app.tree
+        .projects
+        .iter()
+        .find(|p| &p.id == project)
+        .map(|p| p.repo_path.clone())
+}
+
+/// The project read from the checkout `dir`.
+fn project_at(app: &App, dir: &Path) -> Option<ProjectId> {
+    app.tree
+        .projects
+        .iter()
+        .find(|p| p.repo_path == dir)
+        .map(|p| p.id.clone())
+}
+
+/// When a pull request is listed on a remembered branch, attach it —
 /// never one from the root checkout's branch ([`root_branch`]), whatever
-/// is remembered for it.
+/// is remembered for it. Every list tries again a link Linear refused,
+/// up to [`ATTACH_TRIES`], so `previous` (the list before) no longer
+/// matters: a link is spent by Linear taking it, not by a list naming it.
 /// **Link PRs to Linear** decides only whether a ⌘L launch remembers its
 /// branch ([`remember_submit`]): a worktree linked by hand (`⌘.`) is
 /// attached either way.
 pub(crate) fn attach_new_prs(
     app: &mut App,
     project: &ProjectId,
-    previous: Option<&[crate::pull_request::OpenPr]>,
+    _previous: Option<&[crate::pull_request::OpenPr]>,
     fresh: &[crate::pull_request::OpenPr],
 ) {
-    let dir = app
-        .tree
-        .projects
-        .iter()
-        .find(|p| &p.id == project)
-        .map(|p| p.repo_path.clone());
-    let Some(dir) = dir else {
+    let Some(dir) = project_dir(app, project) else {
         return;
     };
     let root = root_branch(app, project).map(str::to_string);
     for pr in fresh {
-        let was = previous.is_some_and(|was| was.iter().any(|old| old.url == pr.url));
-        if was || root.as_deref() == Some(pr.head.as_str()) {
+        if root.as_deref() == Some(pr.head.as_str()) {
             continue;
         }
-        let Some(link) = app.linear_links.take(&pr.head) else {
-            continue;
-        };
-        for id in link.issue_ids {
-            spawn_attach(app, dir.clone(), id, pr.url.clone());
-        }
+        attach_link(
+            app,
+            project,
+            dir.clone(),
+            &pr.head,
+            pr.url.clone(),
+            pr.number,
+        );
     }
 }
 
-fn spawn_attach(app: &mut App, dir: PathBuf, issue_id: String, pr_url: String) {
+/// LINEAR AUTO-ATTACH: the pull request on `branch` linked to the issues
+/// waiting on it, off the loop, when any are and none is out already.
+fn attach_link(
+    app: &mut App,
+    project: &ProjectId,
+    dir: PathBuf,
+    branch: &str,
+    pr_url: String,
+    pr_number: u64,
+) {
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
+    let Some(targets) = app.linear_links.begin_attach(project, branch) else {
+        return;
+    };
+    let (project, branch) = (Some(project.clone()), Some(branch.to_string()));
     tokio::spawn(async move {
-        let result = attach_pr(&dir, &issue_id, &pr_url).await;
-        let _ = tx.send(LinearAnswer::Attach { result });
+        let run = attach_all(&dir, targets, project, branch, pr_url, pr_number).await;
+        let _ = tx.send(LinearAnswer::Attach(run));
     });
+}
+
+/// Link `pr_url` to each of `targets` (`(id, identifier)`), one after
+/// another; Linear keeps one attachment per pull request, so asking twice
+/// links once.
+async fn attach_all(
+    dir: &Path,
+    targets: Vec<(String, String)>,
+    project: Option<ProjectId>,
+    branch: Option<String>,
+    pr_url: String,
+    pr_number: u64,
+) -> AttachRun {
+    let mut attached = Vec::new();
+    let mut refused = None;
+    for (id, identifier) in targets {
+        match attach_pr(dir, &id, &pr_url).await {
+            Ok(()) => attached.push((id, identifier)),
+            Err(why) => {
+                refused.get_or_insert((identifier, why));
+            }
+        }
+    }
+    AttachRun {
+        project,
+        branch,
+        pr_url,
+        pr_number,
+        attached,
+        refused,
+    }
 }
 
 /// THE ATTACH: the pull request `#pr_number` at `pr_url` linked to each
@@ -1211,27 +1896,23 @@ pub(crate) fn attach_issues(
         .iter()
         .map(|i| (i.id.clone(), i.identifier.clone()))
         .collect();
+    let project = project_at(app, &dir);
+    let branch = project.as_ref().and_then(|project| {
+        app.open_prs
+            .get(project)?
+            .list
+            .iter()
+            .find(|pr| pr.url == pr_url)
+            .map(|pr| pr.head.clone())
+    });
     app.flash = Some(crate::flash::Flash::working(format!(
         "attaching PR #{pr_number} to {}…",
         ids_of(issues)
     )));
     app.dirty = true;
     tokio::spawn(async move {
-        let mut attached = Vec::new();
-        let mut refused = None;
-        for (id, identifier) in targets {
-            match attach_pr(&dir, &id, &pr_url).await {
-                Ok(()) => attached.push(identifier),
-                Err(why) => {
-                    refused.get_or_insert((identifier, why));
-                }
-            }
-        }
-        let _ = tx.send(LinearAnswer::Attached {
-            pr_number,
-            attached,
-            refused,
-        });
+        let run = attach_all(&dir, targets, project, branch, pr_url, pr_number).await;
+        let _ = tx.send(LinearAnswer::Attached(run));
     });
 }
 
@@ -1401,8 +2082,11 @@ fn handle_pick_key(app: &mut App, key: KeyEvent) {
 }
 
 /// Enter in the status picker: the row says the new state at once, and
-/// `issueUpdate` runs off the loop — put back if Linear refuses. The
-/// state the issue is already in closes the picker with nothing sent.
+/// `issueUpdate` runs off the loop — put back if Linear refuses
+/// ([`land_status`]). One move per issue is out at a time: a second `⌘S`
+/// while one is out queues behind it, the latest asked for winning, so
+/// Linear ends where the row does. The state the issue is already in
+/// closes the picker with nothing sent.
 fn set_status(app: &mut App) {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
@@ -1424,32 +2108,58 @@ fn set_status(app: &mut App) {
     if issue.status == state.name {
         return;
     }
-    let (status, status_type, state_color) = (
-        issue.status.clone(),
-        issue.status_type.clone(),
-        issue.state_color.clone(),
-    );
-    issue.status = state.name.clone();
-    issue.status_type = state.kind.clone();
-    issue.state_color = state.color.clone();
+    let before = RowState::of(issue);
+    RowState::from_state(&state).put_on(issue);
+    let edits = &mut app.linear_edits;
+    edits.next_seq += 1;
+    let seq = edits.next_seq;
+    let mv = edits
+        .moves
+        .entry(pick.issue_id.clone())
+        .or_insert_with(|| StatusMove {
+            project: project.clone(),
+            dir: dir.clone(),
+            identifier: pick.identifier.clone(),
+            want: state.clone(),
+            seq,
+            sending: None,
+            confirmed: before,
+            landed: None,
+        });
+    mv.want = state;
+    mv.seq = seq;
+    mv.dir = dir;
+    mv.landed = None;
+    if mv.sending.is_none() {
+        send_move(app, &pick.issue_id);
+    }
+}
+
+/// Send the `⌘S` the row says for `issue_id` to Linear, off the loop.
+fn send_move(app: &mut App, issue_id: &str) {
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
-    let (issue_id, identifier) = (pick.issue_id, pick.identifier);
+    let Some(mv) = app.linear_edits.moves.get_mut(issue_id) else {
+        return;
+    };
+    mv.sending = Some(mv.seq);
+    let (project, dir, identifier, state, seq) = (
+        mv.project.clone(),
+        mv.dir.clone(),
+        mv.identifier.clone(),
+        mv.want.clone(),
+        mv.seq,
+    );
+    let issue_id = issue_id.to_string();
     tokio::spawn(async move {
-        let result = update_state(&dir, &issue_id, &state.id)
-            .await
-            .map_err(|why| StatusRefused {
-                why,
-                status,
-                status_type,
-                state_color,
-            });
+        let result = update_state(&dir, &issue_id, &state.id).await;
         let _ = tx.send(LinearAnswer::Status {
             project,
             issue_id,
             identifier,
             state,
+            seq,
             result,
         });
     });
@@ -1535,12 +2245,13 @@ fn link_worktree(app: &mut App) {
         .get(&project)
         .and_then(|o| o.list.iter().find(|pr| &pr.head == branch))
         .map(|pr| (pr.url.clone(), pr.number));
+    // Remembered against the branch once Linear has taken them
+    // ([`land_attach`]).
     if let Some((url, number)) = open {
-        app.linear_links.remember_attached(branch, &pick.issues);
         attach_issues(app, dir, url, number, &pick.issues);
         return;
     }
-    app.linear_links.remember(branch, &pick.issues);
+    app.linear_links.remember(&project, branch, &pick.issues);
     app.flash = Some(crate::flash::Flash::done(format!(
         "{} will attach to the PR {branch} opens",
         ids_of(&pick.issues)
@@ -1811,7 +2522,7 @@ fn refresh(app: &mut App) {
     let Some(Overlay::Linear(view)) = &app.overlay else {
         return;
     };
-    request_list(app, view.project.clone(), view.dir.clone());
+    request_list(app, view.project.clone(), view.dir.clone(), true);
 }
 
 fn clear_query(app: &mut App) {
@@ -2102,9 +2813,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     .areas(area);
 
     let issues: Vec<LinearIssue> = rows(app, &view.project).to_vec();
-    let inflight = app.linear_inflight.contains(&view.project);
+    let inflight = app.linear_flights.in_flight(&view.project);
     let failed = app.linear_failed.contains(&view.project);
-    let more = app.linear.get(&view.project).is_some_and(|l| l.more);
+    let more = app
+        .linear
+        .get(&view.project)
+        .is_some_and(|l| l.more_on(view.tab));
     let parsed = crate::list_filter::parse(&view.query, FACETS);
     // One pass of the filter over both tabs: the tab's rows, and each
     // tab's count for its label.
@@ -2177,11 +2891,16 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         f.render_widget(Paragraph::new(line), query_area);
     }
     let mut rows_area = crate::ui::below_first_row(below_tabs);
-    if more && view.tab == LinearTab::Others {
+    // A page short of what Linear has says so, and where the rest is.
+    if more {
         if let Some(note) = row_rect(rows_area, 0) {
+            let limit = match view.tab {
+                LinearTab::Mine => MINE_LIMIT,
+                LinearTab::Others => OTHERS_LIMIT,
+            };
             f.render_widget(
                 Paragraph::new(Span::styled(
-                    format!("showing the {OTHERS_LIMIT} most recently updated"),
+                    format!("showing the {limit} most recently updated · more on Linear"),
                     Style::default().fg(th.dim),
                 )),
                 note,
@@ -2308,7 +3027,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     if let Some(pick) = &view.status_pick {
         draw_status_pick(f, body_inner, pick, th);
     } else if let Some(pick) = &view.worktree_pick {
-        draw_worktree_pick(f, body_inner, pick, &app.linear_links, th);
+        draw_worktree_pick(f, body_inner, pick, &view.project, &app.linear_links, th);
     } else if let Some(pick) = &mut filter_pick {
         let facets = pick_facets(&issues, view.tab, th);
         pick.clamp(&facets);
@@ -2489,7 +3208,7 @@ fn scope_span(work: &IssueWork, th: Theme) -> Span<'static> {
 /// A pull request as the band draws one ([`crate::pr_row::look`]): `↗ `,
 /// `#42` right-aligned to `num_w` and the state word padded to `word_w`.
 fn pr_spans(pr: WorkPr, num_w: usize, word_w: usize, th: Theme) -> Vec<Span<'static>> {
-    let look = crate::pr_row::look(pr.standing, pr.trouble, th);
+    let look = pr.look(th);
     vec![
         Span::styled("↗ ", Style::default().fg(look.glyph)),
         Span::styled(
@@ -2634,15 +3353,24 @@ fn draw_worktree_pick(
     f: &mut Frame,
     area: Rect,
     pick: &WorktreePick,
+    project: &ProjectId,
     links: &LinkStore,
     th: Theme,
 ) {
     let rows = pick.branches.iter().map(|branch| {
         let mut spans = vec![Span::raw(branch.clone())];
-        let waiting = links.pending(branch);
+        let waiting = links.pending(project, branch);
         if !waiting.is_empty() {
             spans.push(Span::styled(
                 format!("  {} waiting", waiting.join(", ")),
+                Style::default().fg(th.dim),
+            ));
+        }
+        // Refused too often to be tried again: linking it here again does.
+        let refused = links.gave_up_on(project, branch);
+        if !refused.is_empty() {
+            spans.push(Span::styled(
+                format!("  {} · couldn't attach", refused.join(", ")),
                 Style::default().fg(th.dim),
             ));
         }
@@ -2858,7 +3586,7 @@ const ISSUE_FIELDS: &str = "id identifier title url description priority created
     state { name type color position } labels { nodes { name color } } project { name color } \
     assignee { displayName } \
     team { id states { nodes { id name type position color } } } \
-    attachments(first: 10) { nodes { url metadata } }";
+    attachments(first: 25) { nodes { url metadata } pageInfo { hasNextPage } }";
 
 /// How many of the configured user's issues one ask lists.
 const MINE_LIMIT: usize = 100;
@@ -2904,7 +3632,7 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
           mine: issues(first: {MINE_LIMIT}, orderBy: updatedAt, filter: {{
             assignee: {{ {me} }}
             {OPEN_STATES}
-          }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
+          }}) {{ nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage }} }}
           others: issues(first: {OTHERS_LIMIT}, orderBy: updatedAt, filter: {{
             team: {{ members: {{ some: {{ {me} }} }} }}
             or: [{{ assignee: {{ null: true }} }}, {{ assignee: {{ {not_me} }} }}]
@@ -2934,14 +3662,19 @@ async fn update_state(dir: &Path, issue_id: &str, state_id: &str) -> Result<(), 
 const LINKED_FIELDS: &str = "identifier url state { name type color } priority";
 
 /// Every issue in `identifiers` in one ask, one aliased `issue(id:)` per
-/// identifier. One Linear cannot find (moved, deleted) is left out: it
-/// fails the whole ask — `issue` is never null, so Linear nulls `data` —
-/// and then each is asked on its own, the missing ones failing alone. An
-/// error every one of them hits (the key) is the answer's.
-async fn fetch_linked(dir: &Path, identifiers: &[String]) -> Result<Vec<LinkedIssue>, String> {
+/// identifier, each paired with the identifier it was asked by — a team
+/// move renames `ENG-12`, and Linear still finds it by the old name. One
+/// Linear cannot find (deleted) is left out: it fails the whole ask —
+/// `issue` is never null, so Linear nulls `data` — and then each is asked
+/// on its own, the missing ones failing alone. An error every one of them
+/// hits (the key) is the answer's.
+async fn fetch_linked(
+    dir: &Path,
+    identifiers: &[String],
+) -> Result<Vec<(String, LinkedIssue)>, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let json = graphql(&key, &linked_query(identifiers), serde_json::json!({})).await?;
-    let first = match parse_linked(&json, identifiers.len()) {
+    let first = match parse_linked(&json, identifiers) {
         Ok(found) => return Ok(found),
         Err(err) if identifiers.len() == 1 => return Err(err),
         Err(err) => err,
@@ -2952,7 +3685,7 @@ async fn fetch_linked(dir: &Path, identifiers: &[String]) -> Result<Vec<LinkedIs
         let one = std::slice::from_ref(id);
         match graphql(&key, &linked_query(one), serde_json::json!({}))
             .await
-            .and_then(|json| parse_linked(&json, 1))
+            .and_then(|json| parse_linked(&json, one))
         {
             Ok(issues) => found.extend(issues),
             Err(_) => failed += 1,
@@ -2977,13 +3710,20 @@ fn linked_query(identifiers: &[String]) -> String {
     format!("query {{ {} }}", fields.join(" "))
 }
 
-fn parse_linked(json: &serde_json::Value, count: usize) -> Result<Vec<LinkedIssue>, String> {
+fn parse_linked(
+    json: &serde_json::Value,
+    identifiers: &[String],
+) -> Result<Vec<(String, LinkedIssue)>, String> {
     let Some(data) = json.get("data").filter(|d| d.is_object()) else {
         return Err(graphql_error(json).unwrap_or_else(|| "Linear said nothing".into()));
     };
-    Ok((0..count)
-        .filter_map(|i| data.get(format!("i{i}")))
-        .filter_map(LinkedIssue::from_json)
+    Ok(identifiers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, asked)| {
+            let issue = LinkedIssue::from_json(data.get(format!("i{i}"))?)?;
+            Some((asked.clone(), issue))
+        })
         .collect())
 }
 
@@ -3079,7 +3819,10 @@ fn pick_team(teams: &[LinearTeam], remembered: Option<&str>) -> Option<LinearTea
 }
 
 /// Ask Linear, off the loop, how the issues the TODOS MODAL in `dir`
-/// links to stand now: they land as [`LinearAnswer::Linked`].
+/// links to stand now: they land as [`LinearAnswer::Linked`]. One ask per
+/// checkout at a time; asked again while one is out, it is owed, and
+/// asked afresh — with the identifiers linked by then — as soon as that
+/// one lands.
 pub(crate) fn request_linked(app: &mut App, dir: PathBuf, identifiers: Vec<String>) {
     if identifiers.is_empty() {
         return;
@@ -3087,9 +3830,16 @@ pub(crate) fn request_linked(app: &mut App, dir: PathBuf, identifiers: Vec<Strin
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
+    let Some(ticket) = app
+        .linear_linked
+        .flights
+        .begin_fresh(dir.clone(), crate::fetch::now())
+    else {
+        return;
+    };
     tokio::spawn(async move {
         let result = fetch_linked(&dir, &identifiers).await;
-        let _ = tx.send(LinearAnswer::Linked { dir, result });
+        let _ = tx.send(LinearAnswer::Linked { ticket, result });
     });
 }
 
@@ -3363,15 +4113,30 @@ async fn curl_graphql(
 }
 
 /// A [`fetch_lists`] answer as the list keeps it: both lists' issues,
-/// their teams' states, and whether Linear had more of the others.
+/// their teams' states, whether Linear had more of either, and the
+/// issues whose attachments it cut short.
 fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
+    let more = |path: &str| {
+        json.pointer(path)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    let prs_cut = issue_nodes(json)
+        .into_iter()
+        .flatten()
+        .filter(|(node, _)| {
+            node.pointer("/attachments/pageInfo/hasNextPage")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        })
+        .filter_map(|(node, _)| Some(node.get("id")?.as_str()?.to_string()))
+        .collect();
     Ok(LinearList {
         list: parse_issues(json)?,
         states: parse_states(json),
-        more: json
-            .pointer("/data/others/pageInfo/hasNextPage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        more: more("/data/others/pageInfo/hasNextPage"),
+        more_mine: more("/data/mine/pageInfo/hasNextPage"),
+        prs_cut,
     })
 }
 
@@ -3764,7 +4529,7 @@ pub(crate) mod tests {
             LinearList {
                 list: issues,
                 states,
-                more: false,
+                ..Default::default()
             },
         );
         app.overlay = Some(Overlay::Linear(LinearView::new(
@@ -3798,12 +4563,8 @@ pub(crate) mod tests {
                 issue_id: "1".into(),
                 identifier: "ENG-12".into(),
                 state: done,
-                result: Err(StatusRefused {
-                    why: "not allowed".into(),
-                    status: "In Progress".into(),
-                    status_type: "started".into(),
-                    state_color: String::new(),
-                }),
+                seq: 1,
+                result: Err("not allowed".into()),
             },
         );
         assert_eq!(app.linear[&project].list[0].status, "In Progress");
@@ -3864,25 +4625,38 @@ pub(crate) mod tests {
 
     #[test]
     fn link_store_adds_to_what_a_branch_waits_on() {
+        let p1 = ProjectId("p1".into());
         let mut store = LinkStore::default();
-        store.remember("feat", &[issue("1", "ENG-1", "a")]);
+        store.remember(&p1, "feat", &[issue("1", "ENG-1", "a")]);
         store.remember(
+            &p1,
             "feat",
             &[issue("1", "ENG-1", "a"), issue("2", "ENG-2", "b")],
         );
-        assert_eq!(store.pending("feat"), ["ENG-1", "ENG-2"]);
-        assert!(store.pending("other").is_empty());
-        assert_eq!(store.take("feat").unwrap().issue_ids, ["1", "2"]);
+        assert_eq!(store.pending(&p1, "feat"), ["ENG-1", "ENG-2"]);
+        assert!(store.pending(&p1, "other").is_empty());
+        assert!(store.pending(&ProjectId("p2".into()), "feat").is_empty());
+        let ids: Vec<String> = store
+            .begin_attach(&p1, "feat")
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["1", "2"]);
     }
 
     #[test]
     fn link_store_remembers_and_takes() {
+        let p1 = ProjectId("p1".into());
         let mut store = LinkStore::default();
-        store.remember("eng-12-fix", &[issue("abc", "ENG-12", "Fix")]);
-        assert!(store.take("other").is_none());
-        let link = store.take("eng-12-fix").unwrap();
-        assert_eq!(link.identifiers, ["ENG-12"]);
-        assert!(store.take("eng-12-fix").is_none());
+        store.remember(&p1, "eng-12-fix", &[issue("abc", "ENG-12", "Fix")]);
+        assert!(store.begin_attach(&p1, "other").is_none());
+        let link = store.begin_attach(&p1, "eng-12-fix").unwrap();
+        assert_eq!(link, [("abc".to_string(), "ENG-12".to_string())]);
+        assert!(store.begin_attach(&p1, "eng-12-fix").is_none(), "out");
+        store.finish_attach(&p1, "eng-12-fix", &["abc".into()], true);
+        assert!(store.begin_attach(&p1, "eng-12-fix").is_none(), "spent");
+        assert!(store.pending(&p1, "eng-12-fix").is_empty());
     }
 
     /// A project with `files` written into a fresh checkout, selected.
@@ -3910,8 +4684,8 @@ pub(crate) mod tests {
             number,
             title: title.into(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft: false,
-            health: Default::default(),
+            answered_draft: false,
+            answered: Default::default(),
             head: format!("branch-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -3947,7 +4721,7 @@ pub(crate) mod tests {
                     issue("3", "ENG-3", "Signup"),
                 ],
                 states: HashMap::new(),
-                more: false,
+                ..Default::default()
             },
         );
         let now = std::time::Instant::now();
@@ -3962,7 +4736,9 @@ pub(crate) mod tests {
         );
         // A list "in flight" is not asked for again: opening the view
         // stays on the loop, with no runtime under it.
-        app.linear_inflight.insert(ProjectId("p1".into()));
+        let _ = app
+            .linear_flights
+            .begin(ProjectId("p1".into()), std::time::Instant::now());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         app.linear_tx = Some(tx);
         (app, dir, rx)
@@ -4257,14 +5033,17 @@ pub(crate) mod tests {
         let view = the_view(&app);
         assert!(view.worktree_pick.is_none());
         assert!(view.marked.is_empty(), "the batch is spent");
-        assert_eq!(app.linear_links.pending("feature-x"), ["ENG-1", "ENG-3"]);
+        let project = ProjectId("p1".into());
+        assert_eq!(
+            app.linear_links.pending(&project, "feature-x"),
+            ["ENG-1", "ENG-3"]
+        );
         assert_eq!(
             app.flash.as_deref(),
             Some("ENG-1, ENG-3 will attach to the PR feature-x opens")
         );
         assert!(rx.try_recv().is_err(), "nothing asked of Linear yet");
 
-        let project = ProjectId("p1".into());
         let previous = app.open_prs[&project].list.clone();
         let mut fresh = previous.clone();
         let mut opened = open_pr(43, "Feature X");
@@ -4279,10 +5058,8 @@ pub(crate) mod tests {
             || {
                 rt.block_on(async {
                     attach_new_prs(&mut app, &project, Some(&previous), &fresh);
-                    for _ in 0..2 {
-                        let answer = rx.recv().await.expect("an answer");
-                        land_answer(&mut app, answer);
-                    }
+                    let answer = rx.recv().await.expect("an answer");
+                    land_answer(&mut app, answer);
                 });
                 graphql_sent()
             },
@@ -4290,7 +5067,10 @@ pub(crate) mod tests {
         let mut sent = sent;
         sent.sort_by_key(|v| v["issueId"].as_str().unwrap_or_default().to_string());
         assert_eq!(sent, [attached("1", 43), attached("3", 43)]);
-        assert!(app.linear_links.pending("feature-x").is_empty(), "taken");
+        assert!(
+            app.linear_links.pending(&project, "feature-x").is_empty(),
+            "taken"
+        );
     }
 
     /// A pull request from the root checkout's branch is the release
@@ -4299,11 +5079,11 @@ pub(crate) mod tests {
     #[test]
     fn a_release_pr_from_the_root_branch_is_never_attached() {
         let (mut app, _dir, mut rx) = paired_with_worktrees();
-        app.linear_links
-            .remember("dev", &[issue("1", "ENG-1", "Login")]);
-        app.linear_links
-            .remember("feature-x", &[issue("3", "ENG-3", "Signup")]);
         let project = ProjectId("p1".into());
+        app.linear_links
+            .remember(&project, "dev", &[issue("1", "ENG-1", "Login")]);
+        app.linear_links
+            .remember(&project, "feature-x", &[issue("3", "ENG-3", "Signup")]);
         let previous = app.open_prs[&project].list.clone();
         let mut fresh = previous.clone();
         for (number, head) in [(43, "feature-x"), (44, "dev")] {
@@ -4346,7 +5126,10 @@ pub(crate) mod tests {
             app.flash.as_deref(),
             Some("attached PR #41 to ENG-1, ENG-3")
         );
-        assert!(app.linear_links.pending("branch-41").is_empty());
+        assert!(app
+            .linear_links
+            .pending(&ProjectId("p1".into()), "branch-41")
+            .is_empty());
     }
 
     /// Esc backs out of the PR PICK one step at a time — off the page,
@@ -4443,11 +5226,14 @@ pub(crate) mod tests {
         let mut app = App::new();
         land_answer(
             &mut app,
-            LinearAnswer::Attached {
+            LinearAnswer::Attached(AttachRun {
+                project: None,
+                branch: None,
+                pr_url: "https://github.com/o/r/pull/41".into(),
                 pr_number: 41,
-                attached: vec!["ENG-1".into()],
+                attached: vec![("1".into(), "ENG-1".into())],
                 refused: Some(("ENG-3".into(), "Entity not found".into())),
-            },
+            }),
         );
         assert_eq!(
             app.flash.as_ref().map(|f| (f.kind, f.text.as_str())),
@@ -4676,7 +5462,7 @@ pub(crate) mod tests {
             LinearList {
                 list,
                 states: HashMap::new(),
-                more: false,
+                ..Default::default()
             },
         );
         app.overlay = Some(Overlay::Linear(LinearView::new(
@@ -5075,9 +5861,9 @@ pub(crate) mod tests {
             number,
             url: format!("https://github.com/o/{repo}/pull/{number}"),
             branch: branch.into(),
-            state: state.into(),
-            draft: false,
-            conflicts: false,
+            state: Some(state.into()),
+            draft: Some(false),
+            conflicts: Some(false),
         }
     }
 
@@ -5104,6 +5890,67 @@ pub(crate) mod tests {
             .to_string()
     }
 
+    /// Where an attached pull request stands is `App::prs`'s word once
+    /// orion has heard of it — Linear's metadata may be hours behind — and
+    /// one whose metadata says nothing of its state is neither open nor
+    /// anything else: no word, a neutral look, ranked after every known one.
+    #[test]
+    fn the_work_columns_pull_request_stands_where_orion_heard_it() {
+        use crate::pull_request::Standing;
+        let mut stale = rich("1", "ENG-1", "Stale", ("In Review", "started"), 2);
+        let shipped = attached_pr("other", 305, "ana/stale", "open");
+        let shipped_url = shipped.url.clone();
+        stale.prs = vec![shipped];
+        let bare_pr = |number: u64| IssuePr {
+            number,
+            url: format!("https://github.com/o/other/pull/{number}"),
+            branch: format!("ana/bare-{number}"),
+            ..IssuePr::default()
+        };
+        let mut bare = rich("2", "ENG-2", "Bare", ("In Review", "started"), 2);
+        bare.prs = vec![bare_pr(77), attached_pr("other", 12, "ana/old", "closed")];
+        let mut alone = rich("3", "ENG-3", "Alone", ("In Review", "started"), 2);
+        alone.prs = vec![bare_pr(78)];
+        let mut app = view_on(vec![stale, bare, alone]);
+        app.prs.observe(
+            &shipped_url,
+            crate::pr_store::PrObservation {
+                state: Some(crate::pull_request::STATE_MERGED.into()),
+                ..Default::default()
+            },
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
+        let project = ProjectId("p1".into());
+        let list = rows(&app, &project).to_vec();
+        let work = |ident: &str| {
+            let issue = list.iter().find(|i| i.identifier == ident).unwrap();
+            work_of(&app, &project, issue).and_then(|w| w.pr).unwrap()
+        };
+        let stale = work("ENG-1");
+        assert_eq!(
+            (stale.number, stale.standing),
+            (305, Some(Standing::Merged))
+        );
+        assert_eq!(stale.word(), "merged", "orion's word, not Linear's open");
+
+        let bare = work("ENG-2");
+        assert_eq!(
+            (bare.number, bare.standing),
+            (12, Some(Standing::Closed)),
+            "an unknown state ranks after every known one"
+        );
+        let alone = work("ENG-3");
+        assert_eq!((alone.number, alone.standing), (78, None));
+        assert_eq!(alone.word(), "", "no word for a state nobody said");
+        let th = Theme::default();
+        assert_eq!(alone.look(th).badge, th.dim, "drawn neutrally");
+        assert_ne!(
+            alone.look(th),
+            crate::pr_row::look(Standing::Open, None, th),
+            "never as open"
+        );
+    }
+
     /// An issue a worktree picked up — linked with `⌘.`, or named in its
     /// branch — wears its sessions' mark and `⎇` on its row, and the branch
     /// on the page's border; links outlive their attach.
@@ -5123,10 +5970,12 @@ pub(crate) mod tests {
         worktree_on(&mut app, 1, "solar-lemur", false);
         worktree_on(&mut app, 2, "fix/eng-2-thing", false);
         agent_in(&mut app, 1, orion_core::AgentStatus::NeedsFeedback);
-        app.linear_links
-            .remember("solar-lemur", &[issue("1", "ENG-1", "Linked by hand")]);
-        assert!(app.linear_links.take("solar-lemur").is_some());
         let project = ProjectId("p1".into());
+        app.linear_links.remember_attached(
+            &project,
+            "solar-lemur",
+            &[("1".into(), "ENG-1".into())],
+        );
         let list = rows(&app, &project).to_vec();
         let work = |i: usize| work_of(&app, &project, &list[i]);
         let linked = work(0).expect("linked by hand, kept after its attach");
@@ -5164,7 +6013,7 @@ pub(crate) mod tests {
         ours.prs = vec![attached_pr("r", 42, "fix/eng-1-login", "open")];
         let mut outside = rich("2", "ENG-2", "Outside", ("In Review", "started"), 2);
         outside.prs = vec![IssuePr {
-            conflicts: true,
+            conflicts: Some(true),
             ..attached_pr("other", 305, "ana/chevron-rows", "open")
         }];
         let mut landed = rich("3", "ENG-3", "Landed", ("In Review", "started"), 2);
@@ -5180,8 +6029,11 @@ pub(crate) mod tests {
         worktree_on(&mut app, 0, "dev", true);
         worktree_on(&mut app, 1, "fix/eng-1-login", false);
         agent_in(&mut app, 1, orion_core::AgentStatus::Running);
-        app.linear_links
-            .remember("gone-branch", &[issue("5", "ENG-5", "Gone")]);
+        app.linear_links.remember(
+            &ProjectId("p1".into()),
+            "gone-branch",
+            &[issue("5", "ENG-5", "Gone")],
+        );
         let pr_on = |number: u64, head: &str| crate::pull_request::OpenPr {
             url: format!("https://github.com/o/r/pull/{number}"),
             head: head.into(),
@@ -5210,14 +6062,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             ours.pr.map(|p| (p.number, p.standing)),
-            Some((42, Standing::Open))
+            Some((42, Some(Standing::Open)))
         );
         let outside = work("ENG-2").unwrap();
         assert_eq!(outside.branch, None);
         assert_eq!(outside.pr.and_then(|p| p.trouble), Some(Trouble::Conflicts));
         assert_eq!(
             work("ENG-3").unwrap().pr.map(|p| (p.number, p.standing)),
-            Some((301, Standing::Merged)),
+            Some((301, Some(Standing::Merged))),
             "merged beats closed; the release is nobody's"
         );
         assert_eq!(work("ENG-4"), None, "the release pull request alone");
@@ -5257,14 +6109,14 @@ pub(crate) mod tests {
                 number: 1358,
                 url: "https://github.com/o/r/pull/1358".into(),
                 branch: "fix/eng-1".into(),
-                state: "open".into(),
-                draft: true,
-                conflicts: false,
+                state: Some("open".into()),
+                draft: Some(true),
+                conflicts: Some(false),
             }]
         );
         assert_eq!(
             issue.prs[0].standing(),
-            crate::pull_request::Standing::Draft
+            Some(crate::pull_request::Standing::Draft)
         );
     }
 
@@ -5548,6 +6400,13 @@ pub(crate) mod tests {
             .item_mut(item)
             .unwrap()
             .linear = Some("RIP-412".into());
+        // Seen in progress when it was linked: the way into done ticks.
+        app.todos
+            .get_mut(dir.path())
+            .unwrap()
+            .item_mut(item)
+            .unwrap()
+            .linear_seen = Some("started".into());
         with_graphql_stub(
             |_, query| {
                 assert!(query.contains(r#"i0: issue(id: "RIP-412")"#), "{query}");
@@ -5701,5 +6560,574 @@ pub(crate) mod tests {
         press(&mut app, plain(KeyCode::Down));
         press(&mut app, plain(KeyCode::Enter));
         assert_eq!(todo_item(&app, &dir, item).linear, None, "unlinked");
+    }
+
+    // ---- newest asked wins: ⌘S, the cursor, attaches ----
+
+    /// Team `t1`'s workflow: Todo, In Progress, Done.
+    fn workflow() -> HashMap<String, Vec<LinearState>> {
+        let state = |id: &str, name: &str, kind: &str| LinearState {
+            id: id.into(),
+            name: name.into(),
+            kind: kind.into(),
+            color: String::new(),
+        };
+        HashMap::from([(
+            "t1".to_string(),
+            vec![
+                state("s1", "Todo", "unstarted"),
+                state("s2", "In Progress", "started"),
+                state("s3", "Done", "completed"),
+            ],
+        )])
+    }
+
+    /// `issues` as a list answer, with [`workflow`]'s states.
+    fn listed(issues: Vec<LinearIssue>) -> Result<LinearList, String> {
+        Ok(LinearList {
+            list: issues,
+            states: workflow(),
+            ..Default::default()
+        })
+    }
+
+    /// `ident` in `status` (one of [`workflow`]'s).
+    fn in_state(id: &str, ident: &str, status: &str) -> LinearIssue {
+        let kind = match status {
+            "Todo" => "unstarted",
+            "Done" => "completed",
+            _ => "started",
+        };
+        LinearIssue {
+            status: status.into(),
+            status_type: kind.into(),
+            ..issue(id, ident, "x")
+        }
+    }
+
+    /// `demo` with a key, ENG-1 and ENG-2 in progress, and the LINEAR
+    /// VIEW up on it — no list asked yet — with Linear's answers coming
+    /// back on the channel.
+    fn moving() -> (
+        App,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+    ) {
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, dir) = app_on(&[(".env", &line)]);
+        let project = ProjectId("p1".into());
+        app.linear.insert(
+            project.clone(),
+            listed(vec![
+                in_state("1", "ENG-1", "In Progress"),
+                in_state("2", "ENG-2", "In Progress"),
+            ])
+            .unwrap(),
+        );
+        app.overlay = Some(Overlay::Linear(LinearView::new(
+            project,
+            "demo".into(),
+            dir.path().into(),
+            LinearMode::Browse,
+        )));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        (app, dir, rx)
+    }
+
+    /// `⌘S` on the row at `index`, Enter on `state`.
+    fn move_to(app: &mut App, index: usize, state: &str) {
+        if let Some(Overlay::Linear(view)) = &mut app.overlay {
+            view.selected = index;
+        }
+        let mut out = Vec::new();
+        handle_key(
+            app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            &mut out,
+        );
+        if let Some(Overlay::Linear(view)) = &mut app.overlay {
+            let pick = view.status_pick.as_mut().expect("the status picker");
+            pick.selected = pick.states.iter().position(|s| s.name == state).unwrap();
+        }
+        handle_key(app, KeyEvent::from(KeyCode::Enter), &mut out);
+    }
+
+    fn status_of(app: &App, id: &str) -> String {
+        app.linear[&ProjectId("p1".into())]
+            .list
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.status.clone())
+            .unwrap_or_default()
+    }
+
+    /// A list for `demo`, asked at the ticket's time, landing.
+    fn land_list(
+        app: &mut App,
+        ticket: crate::fetch::Ticket<ProjectId>,
+        dir: &tempfile::TempDir,
+        issues: Vec<LinearIssue>,
+    ) {
+        land_answer(
+            app,
+            LinearAnswer::List {
+                ticket,
+                dir: dir.path().into(),
+                list: listed(issues),
+            },
+        );
+    }
+
+    fn ask_list(app: &mut App) -> crate::fetch::Ticket<ProjectId> {
+        app.linear_flights
+            .begin(ProjectId("p1".into()), crate::fetch::now())
+            .expect("no list out")
+    }
+
+    /// A list asked before a `⌘S` — or after it, but before Linear took
+    /// it — never puts the old state back; the first list asked after
+    /// Linear took it is the truth again, whatever it says.
+    #[test]
+    fn a_ctrl_s_outlasts_lists_asked_before_linear_took_it() {
+        let (mut app, dir, mut rx) = moving();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"data": {"issueUpdate": {"success": true}}})),
+            || {
+                rt.block_on(async {
+                    let before = ask_list(&mut app);
+                    move_to(&mut app, 1, "Done");
+                    assert_eq!(status_of(&app, "2"), "Done", "at once");
+                    let stale = vec![
+                        in_state("1", "ENG-1", "In Progress"),
+                        in_state("2", "ENG-2", "In Progress"),
+                    ];
+                    land_list(&mut app, before, &dir, stale.clone());
+                    assert_eq!(status_of(&app, "2"), "Done", "a list asked before");
+                    let meanwhile = ask_list(&mut app);
+                    let answer = rx.recv().await.expect("Linear's answer");
+                    land_answer(&mut app, answer);
+                    land_list(&mut app, meanwhile, &dir, stale);
+                    assert_eq!(
+                        status_of(&app, "2"),
+                        "Done",
+                        "a list asked before Linear took it"
+                    );
+                    let after = ask_list(&mut app);
+                    land_list(
+                        &mut app,
+                        after,
+                        &dir,
+                        vec![
+                            in_state("1", "ENG-1", "In Progress"),
+                            in_state("2", "ENG-2", "Todo"),
+                        ],
+                    );
+                });
+            },
+        );
+        assert_eq!(status_of(&app, "2"), "Todo", "moved on in Linear since");
+        assert!(
+            app.linear_edits.moves.is_empty(),
+            "nothing left to lay over"
+        );
+    }
+
+    /// Linear's first answer to `issueUpdate` refuses, every later one
+    /// takes it; a list is the one issue in progress.
+    fn refuse_the_first_move(_: &str, query: &str) -> Result<serde_json::Value, String> {
+        static MOVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if query.contains("issueUpdate") {
+            if MOVES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(serde_json::json!({"errors": [{"message": "not allowed"}]}));
+            }
+            return Ok(serde_json::json!({"data": {"issueUpdate": {"success": true}}}));
+        }
+        Ok(serde_json::json!({"data": {"mine": {"nodes": [
+            {"id": "1", "identifier": "ENG-1", "url": "https://linear.app/x/issue/ENG-1",
+             "state": {"name": "In Progress", "type": "started"}}
+        ]}, "others": {"nodes": []}}}))
+    }
+
+    /// The states each `issueUpdate` sent named, in order.
+    fn moves_sent() -> Vec<String> {
+        graphql_sent()
+            .iter()
+            .filter_map(|v| v.get("stateId")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Two quick `⌘S` on one issue go out one after the other, the second
+    /// once the first has answered. The first refused leaves the second
+    /// on the row — it is newer — and asks for a fresh list, which the
+    /// second outlasts; Linear ends where the row does.
+    #[test]
+    fn two_quick_ctrl_s_go_out_in_order_past_a_refused_first() {
+        let (mut app, _dir, mut rx) = moving();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let landed = with_graphql_stub(refuse_the_first_move, || {
+            rt.block_on(async {
+                move_to(&mut app, 0, "Done");
+                move_to(&mut app, 0, "Todo");
+                assert_eq!(status_of(&app, "1"), "Todo");
+                let first = rx.recv().await.expect("the first's answer");
+                assert!(matches!(first, LinearAnswer::Status { seq: 1, .. }));
+                assert_eq!(moves_sent(), ["s3"], "the second waits its turn");
+                land_answer(&mut app, first);
+                assert_eq!(status_of(&app, "1"), "Todo", "the newer one stands");
+                assert_eq!(
+                    app.flash.as_deref(),
+                    Some("couldn't move ENG-1: not allowed")
+                );
+                let mut landed = Vec::new();
+                for _ in 0..2 {
+                    let answer = rx.recv().await.expect("an answer");
+                    landed.push(matches!(answer, LinearAnswer::List { .. }));
+                    land_answer(&mut app, answer);
+                }
+                landed.sort();
+                (landed, moves_sent())
+            })
+        });
+        assert_eq!(landed.0, [false, true], "a fresh list and the second move");
+        assert_eq!(landed.1, ["s3", "s1"], "in the order they were asked");
+        assert_eq!(status_of(&app, "1"), "Todo");
+    }
+
+    /// A refused `⌘S` with none after it puts back the state Linear has,
+    /// and asks for a fresh list to be sure.
+    #[test]
+    fn a_lone_refused_ctrl_s_puts_back_what_linear_has() {
+        let (mut app, _dir, mut rx) = moving();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"errors": [{"message": "not allowed"}]})),
+            || {
+                rt.block_on(async {
+                    move_to(&mut app, 0, "Done");
+                    assert_eq!(status_of(&app, "1"), "Done");
+                    let answer = rx.recv().await.expect("Linear's answer");
+                    land_answer(&mut app, answer);
+                });
+            },
+        );
+        assert_eq!(status_of(&app, "1"), "In Progress");
+        assert!(app.linear_edits.moves.is_empty());
+        assert!(app.linear_flights.in_flight(&ProjectId("p1".into())));
+    }
+
+    /// A list that lands puts the cursor back on the issue it was on,
+    /// wherever that now sits; with the issue gone, it is clamped.
+    #[test]
+    fn the_cursor_follows_its_issue_across_a_refresh() {
+        let ident = |n: &str| in_state(n, &format!("ENG-{n}"), "In Progress");
+        let mut app = view_on(vec![ident("1"), ident("2"), ident("3")]);
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(Overlay::Linear(view)) = &mut app.overlay {
+            view.selected = 1;
+        }
+        let ticket = ask_list(&mut app);
+        land_list(
+            &mut app,
+            ticket,
+            &dir,
+            vec![ident("2"), ident("3"), ident("1")],
+        );
+        assert_eq!(the_view(&app).selected, 0);
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
+        if let Some(Overlay::Linear(view)) = &mut app.overlay {
+            view.selected = 2;
+        }
+        let ticket = ask_list(&mut app);
+        land_list(&mut app, ticket, &dir, vec![ident("3")]);
+        assert_eq!(the_view(&app).selected, 0, "ENG-1 is gone");
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-3"));
+    }
+
+    /// The pull request an attach linked is on the issue's row the moment
+    /// Linear takes it — and stays there over a list asked before, which
+    /// can't know it, until a list asked after says what Linear has.
+    #[test]
+    fn an_attach_shows_at_once_and_outlasts_an_older_list() {
+        let (mut app, dir, mut rx) = paired();
+        let project = ProjectId("p1".into());
+        app.linear_flights.cancel(&project);
+        let before = ask_list(&mut app);
+        let issues = vec![issue("1", "ENG-1", "Login")];
+        let sent = attach_through(&mut app, &mut rx, |app| {
+            let url = "https://github.com/o/r/pull/41".to_string();
+            attach_issues(app, dir.path().into(), url, 41, &issues);
+        });
+        assert_eq!(sent, [attached("1", 41)]);
+        let prs = |app: &App| -> Vec<(u64, String)> {
+            app.linear[&project].list[0]
+                .prs
+                .iter()
+                .map(|p| (p.number, p.branch.clone()))
+                .collect()
+        };
+        assert_eq!(prs(&app), [(41, "branch-41".to_string())], "at once");
+        assert_eq!(
+            app.linear_links.branches_of("1"),
+            ["branch-41"],
+            "remembered against its branch"
+        );
+        land_list(&mut app, before, &dir, vec![issue("1", "ENG-1", "Login")]);
+        assert_eq!(
+            prs(&app),
+            [(41, "branch-41".to_string())],
+            "a list asked before"
+        );
+        let after = ask_list(&mut app);
+        land_list(&mut app, after, &dir, vec![issue("1", "ENG-1", "Login")]);
+        assert!(prs(&app).is_empty(), "a list asked after is Linear's word");
+    }
+
+    // ---- the LinkStore ----
+
+    /// `linear-links.json` from before links were kept per project — or
+    /// per issue — still loads: its links wait on any project's branch of
+    /// that name, `attached: true` reading as every issue attached. New
+    /// links on one branch name in two projects stay apart, on disk too.
+    #[test]
+    fn older_links_load_and_two_projects_keep_one_branch_name_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linear-links.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "done": {"issue_ids": ["1"], "identifiers": ["ENG-1"], "attached": true},
+              "wait": {"issue_ids": ["2"], "identifiers": ["ENG-2"]}
+            }"#,
+        )
+        .unwrap();
+        let (p1, p2) = (ProjectId("p1".into()), ProjectId("p2".into()));
+        let mut store = LinkStore::load(path.clone());
+        assert!(store.pending(&p1, "done").is_empty(), "attached already");
+        assert_eq!(store.branches_of("1"), ["done"]);
+        assert_eq!(store.pending(&p1, "wait"), ["ENG-2"]);
+        assert_eq!(store.pending(&p2, "wait"), ["ENG-2"], "any project's");
+        store.remember(&p1, "feature-x", &[issue("3", "ENG-3", "c")]);
+        store.remember(&p2, "feature-x", &[issue("4", "ENG-4", "d")]);
+        let store = LinkStore::load(path);
+        assert_eq!(store.pending(&p1, "feature-x"), ["ENG-3"]);
+        assert_eq!(store.pending(&p2, "feature-x"), ["ENG-4"]);
+    }
+
+    /// Linking more issues to a branch whose pull request took some
+    /// already keeps those on it: the new ones wait, the old ones still
+    /// find the branch.
+    #[test]
+    fn linking_a_branch_again_keeps_the_issues_it_had() {
+        let p1 = ProjectId("p1".into());
+        let mut store = LinkStore::default();
+        store.remember_attached(&p1, "feat", &[("1".into(), "ENG-1".into())]);
+        store.remember(&p1, "feat", &[issue("2", "ENG-2", "b")]);
+        assert_eq!(store.pending(&p1, "feat"), ["ENG-2"]);
+        assert_eq!(store.branches_of("1"), ["feat"]);
+        assert_eq!(store.branches_of("2"), ["feat"]);
+    }
+
+    /// A link Linear refused is not spent: the next list tries it again,
+    /// until [`ATTACH_TRIES`] refusals in a row, when the footer says it
+    /// gave up, the worktree pick stops calling it waiting, and no list
+    /// asks again.
+    #[test]
+    fn a_refused_link_is_tried_on_the_next_list_until_it_gives_up() {
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        app.linear_links
+            .remember(&project, "feature-x", &[issue("1", "ENG-1", "Login")]);
+        let mut fresh = app.open_prs[&project].list.clone();
+        let mut opened = open_pr(43, "Feature X");
+        opened.head = "feature-x".into();
+        fresh.insert(0, opened);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"errors": [{"message": "Entity not found"}]})),
+            || {
+                rt.block_on(async {
+                    for _ in 0..ATTACH_TRIES {
+                        assert_eq!(app.linear_links.pending(&project, "feature-x"), ["ENG-1"]);
+                        attach_new_prs(&mut app, &project, None, &fresh);
+                        let answer = rx.recv().await.expect("an answer");
+                        land_answer(&mut app, answer);
+                    }
+                    attach_new_prs(&mut app, &project, None, &fresh);
+                });
+                graphql_sent()
+            },
+        );
+        assert_eq!(sent.len(), ATTACH_TRIES as usize, "not asked a fourth time");
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("couldn't attach PR #43 to ENG-1: Entity not found — gave up after 3 tries")
+        );
+        assert!(app.linear_links.pending(&project, "feature-x").is_empty());
+        assert_eq!(
+            app.linear_links.gave_up_on(&project, "feature-x"),
+            ["ENG-1"]
+        );
+    }
+
+    /// A ⌘L launch onto a worktree whose pull request is open already has
+    /// nothing to wait for: its issues are attached there and then.
+    #[test]
+    fn a_launch_onto_a_branch_with_an_open_pr_attaches_at_once() {
+        let (mut app, dir, mut rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let cfg = crate::config::Config::load();
+            let target = QuickTarget::Worktree(orion_core::WorktreeId("w1".into()));
+            let launch = QuickLaunch::from_config(target, &cfg).with_linear(Some(LinearBatch {
+                issues: vec![issue("2", "ENG-2", "Logout")],
+                task: "go".into(),
+            }));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let sent = with_graphql_stub(
+                |_, _| {
+                    Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}}))
+                },
+                || {
+                    rt.block_on(async {
+                        remember_submit(&mut app, &launch);
+                        let answer = rx.recv().await.expect("an answer");
+                        land_answer(&mut app, answer);
+                    });
+                    graphql_sent()
+                },
+            );
+            assert_eq!(sent, [attached("2", 41)]);
+        });
+        assert!(app.linear_links.pending(&project, "branch-41").is_empty());
+        assert_eq!(app.linear_links.branches_of("2"), ["branch-41"]);
+        assert!(app.flash.is_none(), "an auto-attach that worked is silent");
+    }
+
+    // ---- the TODOS MODAL's chips ----
+
+    /// What Linear says of `ident`, in `state`.
+    fn linked(ident: &str, state: &str, kind: &str) -> LinkedIssue {
+        LinkedIssue {
+            identifier: ident.into(),
+            url: format!("https://linear.app/x/issue/{ident}"),
+            state: state.into(),
+            state_type: kind.into(),
+            state_color: String::new(),
+            priority: 0,
+        }
+    }
+
+    /// `todo_app`'s item linked to `ident`, last seen `seen`.
+    fn link_item(
+        app: &mut App,
+        dir: &tempfile::TempDir,
+        item: u64,
+        ident: &str,
+        seen: Option<&str>,
+    ) {
+        let todo = app
+            .todos
+            .get_mut(dir.path())
+            .unwrap()
+            .item_mut(item)
+            .unwrap();
+        todo.linear = Some(ident.into());
+        todo.linear_seen = seen.map(str::to_string);
+    }
+
+    /// An answer asked before the one a chip shows is older news: it
+    /// lands without moving the chip, or what the todo last saw, back.
+    #[test]
+    fn an_older_linked_answer_never_moves_a_chip_back() {
+        let (mut app, dir, _rx, item) = todo_app();
+        link_item(&mut app, &dir, item, "RIP-1", Some("started"));
+        let older = crate::fetch::now();
+        let newer = crate::fetch::now();
+        let land = |app: &mut App, at, issue| {
+            crate::todos::view::land_linked(
+                app,
+                dir.path().into(),
+                at,
+                Ok(vec![("RIP-1".into(), issue)]),
+            )
+        };
+        land(&mut app, newer, linked("RIP-1", "Todo", "unstarted"));
+        land(&mut app, older, linked("RIP-1", "In Progress", "started"));
+        assert_eq!(todo_view(&app).linked["RIP-1"].state, "Todo");
+        assert_eq!(
+            todo_item(&app, &dir, item).linear_seen.as_deref(),
+            Some("unstarted")
+        );
+    }
+
+    /// Linking a todo from the LINEAR VIEW asks Linear at once, and that
+    /// first answer is only what the todo was linked in — done already,
+    /// it never ticks the todo; the next answer done again doesn't either.
+    #[test]
+    fn the_first_answer_after_linking_never_ticks_the_todo() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        let back = todo_view(&app).clone();
+        with_graphql_stub(
+            |_, _| {
+                Ok(serde_json::json!({"data": {"i0": {
+                    "identifier": "RIP-1", "url": "u",
+                    "state": {"name": "Done", "type": "completed", "color": ""}, "priority": 0
+                }}}))
+            },
+            || {
+                run_linear(&mut app, &mut rx, |app| {
+                    crate::todos::view::link_issue(
+                        app,
+                        back,
+                        item,
+                        linked("RIP-1", "In Progress", "started"),
+                    );
+                });
+                run_linear(&mut app, &mut rx, |app| press(app, cmd('r')));
+            },
+        );
+        let todo = todo_item(&app, &dir, item);
+        assert!(todo.done.is_none(), "never ticked");
+        assert_eq!(todo.linear_seen.as_deref(), Some("completed"));
+        assert_eq!(todo_view(&app).linked["RIP-1"].state, "Done");
+    }
+
+    /// A team move renames an issue; Linear still finds it by the old
+    /// identifier, and the todo is linked by the new one from then on.
+    #[test]
+    fn a_renamed_issue_renames_the_todos_link() {
+        let (mut app, dir, mut rx, item) = todo_app();
+        link_item(&mut app, &dir, item, "ENG-12", Some("started"));
+        with_graphql_stub(
+            |_, query| {
+                assert!(query.contains(r#"i0: issue(id: "ENG-12")"#), "{query}");
+                Ok(serde_json::json!({"data": {"i0": {
+                    "identifier": "OPS-3", "url": "u",
+                    "state": {"name": "In Progress", "type": "started", "color": ""}, "priority": 0
+                }}}))
+            },
+            || run_linear(&mut app, &mut rx, |app| press(app, cmd('r'))),
+        );
+        assert_eq!(todo_item(&app, &dir, item).linear.as_deref(), Some("OPS-3"));
+        let linked = &todo_view(&app).linked;
+        assert!(linked.contains_key("OPS-3"), "{linked:?}");
+        assert!(!linked.contains_key("ENG-12"));
     }
 }

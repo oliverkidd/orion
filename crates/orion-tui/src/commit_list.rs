@@ -205,7 +205,11 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
     if listing.head.is_none() {
         return listing;
     }
-    listing.base = resolve_base(root, base_setting);
+    // The base the band's `⇡4 ⇣1` was counted against, so the two agree —
+    // but a cached "no base" is asked again: the list is opened by hand,
+    // and must not miss a base that turned up since the band last looked.
+    // What it finds is cached, so the band follows it.
+    listing.base = resolve_base_cached_or_retry(root, base_setting);
     let Some(merge_base) = listing
         .base
         .as_deref()
@@ -285,29 +289,66 @@ pub fn ahead_behind(root: &Path, base_setting: &str) -> Option<(usize, usize)> {
     }
 }
 
-/// How long [`ahead_behind`] trusts a base it resolved: the setting and
-/// `origin/HEAD` it comes from rarely change, and resolving takes up to four
-/// git processes on a poll that runs every couple of seconds.
+/// How long [`resolve_base_cached`] trusts a base it resolved: the setting
+/// and `origin/HEAD` it comes from rarely change, and resolving takes up to
+/// four git processes on a poll that runs every couple of seconds.
 const BASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long it trusts finding no base at all: briefly, since that is
+/// usually a checkout caught mid-fetch or mid-switch, and a band with no
+/// `⇡⇣` for a minute would read as level with its base.
+const NO_BASE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// [`resolve_base`] for `root` and `base_setting`, kept for [`BASE_TTL`].
+/// Bases resolved, by checkout root and setting, and when.
+type Resolved = HashMap<(std::path::PathBuf, String), (std::time::Instant, Option<String>)>;
+
+fn bases() -> &'static std::sync::Mutex<Resolved> {
+    static BASES: std::sync::OnceLock<std::sync::Mutex<Resolved>> = std::sync::OnceLock::new();
+    BASES.get_or_init(Default::default)
+}
+
+/// [`resolve_base`] for `root` and `base_setting`, kept for [`BASE_TTL`]
+/// ([`NO_BASE_TTL`] when there was none) — the one base both the band's
+/// `⇡4 ⇣1` ([`ahead_behind`]) and the COMMIT LIST ([`read`]) measure
+/// against, so the two never count from different ones.
 pub(crate) fn resolve_base_cached(root: &Path, base_setting: &str) -> Option<String> {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::Instant;
-    type Resolved = HashMap<(std::path::PathBuf, String), (Instant, Option<String>)>;
-    static BASES: OnceLock<Mutex<Resolved>> = OnceLock::new();
-    let bases = BASES.get_or_init(Default::default);
+    cached_base(root, base_setting, true)
+}
+
+/// [`resolve_base_cached`] that takes a cached base but not a cached "no
+/// base": that one is asked again, once, and what it finds is cached for
+/// the band to follow.
+fn resolve_base_cached_or_retry(root: &Path, base_setting: &str) -> Option<String> {
+    cached_base(root, base_setting, false)
+}
+
+/// The base for `root` under `base_setting` from the cache while it is
+/// fresh — a cached "no base" only when `trust_none` — else resolved and
+/// cached.
+fn cached_base(root: &Path, base_setting: &str, trust_none: bool) -> Option<String> {
     let key = (root.to_path_buf(), base_setting.to_string());
-    if let Ok(known) = bases.lock() {
-        if let Some((_, base)) = known.get(&key).filter(|(at, _)| at.elapsed() < BASE_TTL) {
+    if let Ok(known) = bases().lock() {
+        let fresh = |(at, base): &&(std::time::Instant, Option<String>)| match base {
+            Some(_) => at.elapsed() < BASE_TTL,
+            None => trust_none && at.elapsed() < NO_BASE_TTL,
+        };
+        if let Some((_, base)) = known.get(&key).filter(fresh) {
             return base.clone();
         }
     }
     let base = resolve_base(root, base_setting);
-    if let Ok(mut known) = bases.lock() {
-        known.insert(key, (Instant::now(), base.clone()));
+    if let Ok(mut known) = bases().lock() {
+        known.insert(key, (std::time::Instant::now(), base.clone()));
     }
     base
+}
+
+/// Forget the bases resolved for the checkout at `root`, under every
+/// setting: something that moves refs — a PULL, a PUSH, a base sync, a
+/// branch switch — has just run there, and the next read resolves afresh.
+pub(crate) fn forget_base(root: &Path) {
+    if let Ok(mut known) = bases().lock() {
+        known.retain(|(at_root, _), _| at_root != root);
+    }
 }
 
 /// The ref a branch named `name` is read from: origin's copy when origin

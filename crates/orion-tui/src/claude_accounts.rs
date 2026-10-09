@@ -267,21 +267,33 @@ pub fn refresh_now() -> bool {
 }
 
 /// Ask for the records to be read again: on the blocking pool when the
-/// loop is running, the answer waking it through `app.accounts_tx`; inline
-/// in a unit test, which has no loop. `force` skips the slow beat's
-/// [`POLL`] spacing — for a sign-in that just ended, an account just
-/// added.
+/// loop is running, the answer landing through `app.accounts_tx`
+/// ([`land_refresh`]); inline in a unit test, which has no loop. `force`
+/// skips the slow beat's [`POLL`] spacing — for a sign-in that just
+/// ended, an account just added. One read runs at a time
+/// (`App::accounts_reads`): the beat skips while one runs, and a forced
+/// read asked meanwhile is owed — it runs once the running one lands, so
+/// it sees what changed after that one had read past it, and the two
+/// never write the record store at once.
 pub fn request_refresh(app: &mut App, force: bool) {
     if !force && app.accounts_polled.is_some_and(|at| at.elapsed() < POLL) {
         return;
     }
-    app.accounts_polled = Some(Instant::now());
+    let now = Instant::now();
+    app.accounts_polled = Some(now);
     match app.accounts_tx.clone() {
         Some(tx) => {
+            let ticket = if force {
+                app.accounts_reads.begin_fresh((), now)
+            } else {
+                app.accounts_reads.begin((), now)
+            };
+            let Some(ticket) = ticket else {
+                return;
+            };
             tokio::task::spawn_blocking(move || {
-                if refresh_now() {
-                    let _ = tx.send(());
-                }
+                let changed = refresh_now();
+                let _ = tx.send((ticket, changed));
             });
         }
         None => {
@@ -289,6 +301,20 @@ pub fn request_refresh(app: &mut App, force: bool) {
                 app.dirty = true;
             }
         }
+    }
+}
+
+/// A read off the loop finished: a changed name redraws, and a forced read
+/// asked while it ran starts now.
+pub fn land_refresh(app: &mut App, ticket: crate::fetch::Ticket<()>, changed: bool) {
+    let Some(landed) = app.accounts_reads.land(&ticket) else {
+        return;
+    };
+    if changed {
+        app.dirty = true;
+    }
+    if landed.owed {
+        request_refresh(app, true);
     }
 }
 

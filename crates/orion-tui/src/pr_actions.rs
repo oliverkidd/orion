@@ -58,6 +58,7 @@ use crate::app::{App, Overlay};
 use crate::git_proc::PUSH_TIMEOUT;
 use crate::hints::Hint;
 use crate::pr_modal::PullRequestsView;
+use crate::pr_store::PrStatus;
 use crate::pull_request::{run_piped, Checks, OpenPr, PrDetail};
 use crate::text_input::{TextInput, TextView};
 use crate::theme::Theme;
@@ -891,21 +892,25 @@ pub struct MergeForm {
 
 impl MergeForm {
     /// Take the branch, the base and what stands in the way from the pull
-    /// request's row and, once it has landed, its body.
-    fn apply_detail(&mut self, pr: &OpenPr, detail: Option<&PrDetail>) {
+    /// request's row and, once it has landed, its body; where it stands is
+    /// `status`, `App::prs`'s word.
+    fn apply_detail(&mut self, pr: &OpenPr, status: &PrStatus, detail: Option<&PrDetail>) {
         self.pending = detail.is_none();
         self.branch = deletable_branch(pr, detail);
         self.base = detail.map(|d| d.base.clone()).unwrap_or_default();
-        self.warnings = merge_warnings(pr, detail);
+        self.warnings = merge_warnings(status, detail);
         self.delete_branch = self.delete_default && self.branch.is_some();
     }
 }
 
-/// What stands in the way of merging, as GitHub said it last.
-fn merge_warnings(pr: &OpenPr, detail: Option<&PrDetail>) -> Vec<String> {
+/// What stands in the way of merging, as GitHub said it last: the draft
+/// flag, conflicts and checks from `App::prs` — the newest answer that
+/// knew, so a page the cache hydrated never freezes a warning a later
+/// list has cleared — and the review from the body.
+fn merge_warnings(status: &PrStatus, detail: Option<&PrDetail>) -> Vec<String> {
     let mut out = Vec::new();
-    let health = detail.map_or(pr.health, |d| d.health);
-    if detail.map_or(pr.is_draft, |d| d.is_draft) {
+    let health = status.health;
+    if status.is_draft() {
         out.push("it is a draft — GitHub merges it once it is marked ready".into());
     }
     if health.conflicts {
@@ -960,7 +965,11 @@ pub(crate) fn open_merge(app: &mut App) {
         notice: None,
         rows: Vec::new(),
     };
-    form.apply_detail(&pr, app.pr_detail.get(&pr.url));
+    form.apply_detail(
+        &pr,
+        &app.prs.status_or_open(&pr.url),
+        app.pr_detail.get(&pr.url),
+    );
     let ticket = form.ticket;
     put_form(app, PrForm::Merge(form));
     if let Some(tx) = app.pr_actions_tx.clone() {
@@ -988,10 +997,12 @@ fn deletable_branch(pr: &OpenPr, detail: Option<&PrDetail>) -> Option<String> {
 
 /// A pull request's body landed: a merge or close form opened on it
 /// before it did takes its branch and its base from it — and a merge form,
-/// what stands in the way.
+/// what stands in the way. A merge form opened on a body already here (the
+/// cache's, say) keeps its branch and its ticks, but its warnings follow
+/// every body that lands: the one it opened on may be hours behind.
 pub(crate) fn detail_landed(app: &mut App, url: &str) {
     let waiting = match form(app) {
-        Some(PrForm::Merge(f)) => f.pending && f.url == url,
+        Some(PrForm::Merge(f)) => f.url == url,
         Some(PrForm::Close(f)) => f.pending && f.url == url,
         _ => false,
     };
@@ -1004,8 +1015,10 @@ pub(crate) fn detail_landed(app: &mut App, url: &str) {
     let Some(detail) = app.pr_detail.get(url).cloned() else {
         return;
     };
+    let status = app.prs.status_or_open(url);
     match form(app) {
-        Some(PrForm::Merge(form)) => form.apply_detail(&pr, Some(&detail)),
+        Some(PrForm::Merge(form)) if form.pending => form.apply_detail(&pr, &status, Some(&detail)),
+        Some(PrForm::Merge(form)) => form.warnings = merge_warnings(&status, Some(&detail)),
         Some(PrForm::Close(form)) => form.apply_detail(&pr, Some(&detail)),
         _ => {}
     }
@@ -1523,8 +1536,8 @@ fn submit_review(app: &mut App) {
 
 /// `⌘D`: the pull request under the cursor marked ready for review —
 /// or, ready already, turned back into a draft — off the loop, the footer
-/// saying so meanwhile. Whether it is a draft is the body's word once it
-/// has landed, the row's until then.
+/// saying so meanwhile. Whether it is a draft is `App::prs`'s word — the
+/// newest answer that knew, the one the row's badge draws.
 pub(crate) fn toggle_draft(app: &mut App) {
     let Some(view) = modal(app) else {
         return;
@@ -1536,10 +1549,7 @@ pub(crate) fn toggle_draft(app: &mut App) {
     let Some(tx) = app.pr_actions_tx.clone() else {
         return;
     };
-    let ready = app
-        .pr_detail
-        .get(&pr.url)
-        .map_or(pr.is_draft, |d| d.is_draft);
+    let ready = app.pr_is_draft(&pr.url);
     let number = pr.number;
     app.flash = Some(crate::flash::Flash::working(if ready {
         format!("marking #{number} ready for review…")
@@ -1866,8 +1876,10 @@ fn land_done(
 }
 
 /// Pull request `url` changed on GitHub: its body and the project's list
-/// are read again, so the page and the row's badge follow.
+/// are read again, so the page and the row's badge follow. A body already
+/// being read was asked before the change, so it owes a fresh read.
 fn read_again(app: &mut App, project: &ProjectId, url: String) {
+    app.pr_detail_inflight.want_fresh(&url);
     app.pr_detail_stale.insert(url);
     if crate::pr_modal::is_up(app) {
         crate::pr_modal::schedule_detail(app);
@@ -1915,6 +1927,13 @@ fn land_readied(
 ) {
     app.flash = Some(match result {
         Ok(()) => {
+            // GitHub has just done it: every badge says so now, and a list
+            // asked before it can't put the old word back.
+            app.prs.observe(
+                &url,
+                crate::pr_store::PrObservation::of_draft(!ready),
+                crate::fetch::Asked::At(crate::fetch::now()),
+            );
             read_again(app, project, url);
             crate::flash::Flash::done(if ready {
                 format!("#{number} is ready for review")

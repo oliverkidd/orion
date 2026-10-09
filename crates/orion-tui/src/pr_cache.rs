@@ -154,7 +154,7 @@ impl PrCache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("diff.tmp");
+        let tmp = temp_path(&path);
         std::fs::write(&tmp, format!("{url}\n{diff}"))?;
         std::fs::rename(&tmp, &path)
     }
@@ -195,6 +195,11 @@ pub fn diff_file_name(url: &str) -> String {
 /// Write `value` to `path` as pretty JSON with a trailing newline, creating
 /// the parent dir. Atomic — a temp file beside it, then a rename — so a
 /// crash mid-write leaves the previous document, not half of the new one.
+///
+/// Each write has a temp file of its own ([`temp_path`]). Flushes run off
+/// the loop, so two can overlap — a GIT POLL's and the one on quit — and
+/// with one shared temp name the older snapshot's bytes could be the ones
+/// renamed into place after the newer one's.
 pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -204,9 +209,27 @@ pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io
     if !bytes.ends_with(b"\n") {
         bytes.push(b'\n');
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, path)
+    let tmp = temp_path(path);
+    if let Err(err) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// A temp name beside `path` no other write uses: `<name>.<pid>.<n>.tmp`,
+/// the process id keeping two instances apart and the counter two writes
+/// of the same one.
+fn temp_path(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}.{}.{n}.tmp", std::process::id()))
 }
 
 /// Startup: read the document and paint the app from it. Every hydrated
@@ -234,7 +257,24 @@ pub fn hydrate(app: &mut App) {
 /// * Bodies land marked stale (`pr_detail_stale`): the pane shows them the
 ///   instant the cursor rests on the row, and the same rest that would
 ///   have fetched a missing body fetches a fresh copy over the top.
+/// * Where each pull request stood goes to `App::prs` as
+///   [`Asked::Cached`](crate::fetch::Asked::Cached): drawn at once, and
+///   replaced by the first live answer whatever order they land in.
 pub fn install(app: &mut App, store: Store) {
+    use crate::fetch::Asked;
+    use crate::pr_store::PrObservation;
+    for pr in store.worktrees.values() {
+        app.prs
+            .observe(&pr.url, PrObservation::of_lookup(pr), Asked::Cached);
+    }
+    for pr in store.projects.values().flatten() {
+        app.prs
+            .observe(&pr.url, PrObservation::of_list_row(pr), Asked::Cached);
+    }
+    for (url, detail) in &store.details {
+        app.prs
+            .observe(url, PrObservation::of_detail(detail), Asked::Cached);
+    }
     for (worktree, pr) in store.worktrees {
         app.pull_requests.entry(worktree).or_insert(Some(pr));
     }
@@ -367,9 +407,9 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             title: format!("PR {number}"),
-            state: state.into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: state.into(),
+            answered_draft: false,
+            answered: Default::default(),
             activity: vec!["2024-04-25T19:55:42Z".into()],
         }
     }
@@ -379,8 +419,8 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft: number % 2 == 1,
-            health: Default::default(),
+            answered_draft: number % 2 == 1,
+            answered: Default::default(),
             head: format!("head-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -393,9 +433,9 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             title: format!("PR {number}"),
-            state: STATE_OPEN.into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
             author: "kate".into(),
             base: "main".into(),
             head: format!("head-{number}"),
@@ -457,10 +497,12 @@ mod tests {
         cache.save_store(&store).unwrap();
         let back = cache.load_store().expect("readable");
         assert_eq!(back, store);
-        assert!(
-            !cache.store_path().with_extension("json.tmp").exists(),
-            "the temp file was renamed into place"
-        );
+        let leftovers: Vec<_> = std::fs::read_dir(&cache.root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "the temp file was renamed into place");
     }
 
     /// A document from a build with a different shape, or one that isn't

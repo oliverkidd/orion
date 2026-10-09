@@ -2671,8 +2671,13 @@ pub enum PendingIntent {
 /// A row as it was before an OPTIMISTIC UPDATE changed it.
 #[derive(Debug, Clone)]
 pub enum Undo {
-    /// Renamed or (un)archived in place: this is the row to show again.
-    Restore(Box<orion_core::Entity>),
+    /// Renamed or (un)archived in place: the row before, and the row the
+    /// keypress showed. A refusal puts back only the fields the two differ
+    /// in, and only those still showing the keypress's value.
+    Restore {
+        before: Box<orion_core::Entity>,
+        shown: Box<orion_core::Entity>,
+    },
     /// Deleted: the row, and the index it held in its `tree` list.
     Reinsert {
         index: usize,
@@ -4346,10 +4351,14 @@ pub struct App {
     /// Stamp for the current editor spawn, so a closed editor's buffered
     /// events can't touch its successor.
     pub vim_generation: u64,
-    /// Where a CLAUDE ACCOUNTS read off the loop says a name changed; the
-    /// main loop installs it (`claude_accounts::request_refresh`). None in
-    /// a unit test, which reads inline.
-    pub accounts_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// Where a CLAUDE ACCOUNTS read off the loop lands, with whether a
+    /// name changed; the main loop installs it
+    /// (`claude_accounts::request_refresh`). None in a unit test, which
+    /// reads inline.
+    pub accounts_tx: Option<tokio::sync::mpsc::UnboundedSender<(crate::fetch::Ticket<()>, bool)>>,
+    /// The accounts read running off the loop, at most one: a forced read
+    /// asked while one runs is owed, and starts once it lands.
+    pub accounts_reads: crate::fetch::Flights<()>,
     /// When the accounts were last asked to be read, so the slow beat
     /// spaces its reads out.
     pub accounts_polled: Option<std::time::Instant>,
@@ -4365,17 +4374,27 @@ pub struct App {
     /// and the badge is not worth a late frame; the selection guard means a
     /// pending answer shows nothing rather than another checkout's count.
     pub git_changes: Option<(WorktreeId, Option<usize>)>,
-    /// The checkout whose count is being read right now, so a repaint can't
-    /// stack `git status` processes; the answer clears it.
-    pub git_changes_inflight: Option<WorktreeId>,
+    /// The selected checkout's read running off the loop, at most one at a
+    /// time, so a repaint can't stack `git status` processes. Its ticket
+    /// carries when the read was asked, and a PULL or PUSH while it runs
+    /// marks it owed (`event_loop::reread_checkouts`).
+    pub git_reads: crate::fetch::Flights<WorktreeId>,
     /// The last changed-file count read in each checkout, and when: what
     /// the LAUNCHER VIEW's cards print beside their branch. Fed by the
     /// selected checkout's own reads (`git_changes`) and by a sweep that
     /// spends each poll tick on one other checkout the grid lists, the
     /// least recently read first. The count is None when git couldn't say.
     pub worktree_changes: HashMap<WorktreeId, (Option<usize>, std::time::Instant)>,
-    /// The checkout the sweep is reading right now; its answer clears it.
-    pub worktree_changes_inflight: Option<WorktreeId>,
+    /// The checkout the sweep is reading right now, at most one; the
+    /// selected checkout's `git_reads` for every other one.
+    pub sweep_reads: crate::fetch::Flights<WorktreeId>,
+    /// When the read behind each checkout's counts (`worktree_changes`,
+    /// `worktree_lines`, `worktree_ahead`) was asked. Two readers feed
+    /// them — the selected checkout's and the sweep — so an answer asked
+    /// before the one already taken is dropped (`fetch` rule 1): a slow
+    /// read from before a PULL never puts its counts back over the read
+    /// after it.
+    pub worktree_read_at: HashMap<WorktreeId, std::time::Instant>,
     /// The lines added and removed in each checkout, read beside its
     /// changed-file count: what its band's rule prints after `*3`. Only a
     /// checkout with changed lines has an entry.
@@ -4427,8 +4446,17 @@ pub struct App {
     /// row's unread badge counts.
     pub pr_seen: HashMap<String, String>,
     /// Worktrees with a lookup in flight, so a repaint can't stack a second
-    /// `gh` process on the first.
-    pub pr_inflight: std::collections::HashSet<WorktreeId>,
+    /// `gh` process on the first. Each carries when it was asked, so its
+    /// answer lands in `prs` under that stamp; a branch switch cancels
+    /// the old branch's (`fetch::Flights::cancel`), whose answer is then
+    /// dropped.
+    pub pr_inflight: crate::fetch::Flights<WorktreeId>,
+    /// Where every pull request stands — state, draft, conflicts, checks —
+    /// from the newest answer that knew (`pr_store`). Every surface that
+    /// draws or decides on a pull request's status reads it; the copies
+    /// (`pull_requests`, `open_prs`, `pr_detail`) keep only what their own
+    /// answer alone says: list order, meta, the body.
+    pub prs: crate::pr_store::PrStore,
     /// When to ask `gh` about a worktree again, and the step that produced
     /// that deadline: a steady beat once its pull request is known (a quick
     /// one for the selected checkout, so the unread-comment count keeps up;
@@ -4443,8 +4471,9 @@ pub struct App {
     /// machine with thirty projects still costs one call per refresh.
     pub open_prs: HashMap<ProjectId, OpenPrs>,
     /// Projects with a list lookup in flight, so a repaint can't stack a
-    /// second `gh` on the first.
-    pub open_prs_inflight: std::collections::HashSet<ProjectId>,
+    /// second `gh` on the first — and whether one asked for meanwhile
+    /// (`⌘R`, a merge from the modal) is owed when it lands.
+    pub open_prs_inflight: crate::fetch::Flights<ProjectId>,
     /// Projects whose last list lookup came back with no answer — `gh`
     /// failed, timed out, or the checkout is gone. The list kept on screen
     /// is then the last one that worked, so the PULL REQUESTS MODAL says
@@ -4460,8 +4489,9 @@ pub struct App {
     pub pr_detail: HashMap<String, PrDetail>,
     /// Pull requests whose detail is in flight, and ones `gh` couldn't
     /// answer for — the pane says "couldn't reach gh" rather than spinning
-    /// on a request that already came back empty.
-    pub pr_detail_inflight: std::collections::HashSet<String>,
+    /// on a request that already came back empty. A page asked to be read
+    /// again while its fetch runs is owed a fresh one when it lands.
+    pub pr_detail_inflight: crate::fetch::Flights<String>,
     pub pr_detail_failed: std::collections::HashSet<String>,
     /// When `gh` last answered (or refused) each pull request's detail,
     /// this session. A page older than `event_loop::PR_DETAIL_FRESH` is
@@ -4549,10 +4579,22 @@ pub struct App {
     /// `issues::refresh_selected`), so `i` paints rows at once; the modal
     /// re-asks on open only past `issues::FRESH`, and on its `r`.
     pub issues: HashMap<ProjectId, crate::issues::IssueList>,
-    /// Projects with a list lookup in flight, and ones whose first ask
-    /// `gh` couldn't answer (the modal says so rather than spinning).
-    pub issues_inflight: std::collections::HashSet<ProjectId>,
+    /// Projects with a list lookup in flight — one each, a refresh asked
+    /// meanwhile owed rather than dropped — and ones whose first ask `gh`
+    /// couldn't answer (the modal says so rather than spinning).
+    pub issues_flights: crate::fetch::Flights<ProjectId>,
     pub issues_failed: std::collections::HashSet<ProjectId>,
+    /// An issue's title or description orion knows is newer than the
+    /// list it last landed: a save GitHub took, or GitHub's copy read
+    /// before one. Laid over any list asked before it, so a list in
+    /// flight when the edit landed can't put the old text back; a list
+    /// asked after it retires the entry. By URL.
+    pub issue_edits: HashMap<String, crate::issues::NewerText>,
+    /// What a save that went nowhere — changed on GitHub meanwhile, or
+    /// refused — had typed, when the form that sent it was gone by the
+    /// answer, by issue URL: the next `⌘I` on the issue opens on it, so
+    /// nothing typed is lost (`issues::EditDraft`).
+    pub issue_edit_drafts: HashMap<String, crate::issues::EditDraft>,
     /// When each project's next background list ask is owed — the steady
     /// beat once it has issues, a backoff while it hasn't — so the git
     /// tick spends a `gh` only when one is due.
@@ -4563,8 +4605,12 @@ pub struct App {
     /// The conversations of the issues the cursor has rested on, keyed by
     /// URL; in flight and failed like the pull requests'.
     pub issue_detail: HashMap<String, crate::issues::IssueDetail>,
-    pub issue_detail_inflight: std::collections::HashSet<String>,
+    pub issue_detail_flights: crate::fetch::Flights<String>,
     pub issue_detail_failed: std::collections::HashSet<String>,
+    /// When the last answer for each conversation — page or failure — was
+    /// asked: a visit reads the page again once it is older than
+    /// `issues::FRESH`, and a failure is retried after as long.
+    pub issue_detail_at: HashMap<String, std::time::Instant>,
     /// Issues with a comment on its way to GitHub (`gh issue comment`),
     /// by URL, so the reading pane says so until the answer lands.
     pub issue_comment_inflight: std::collections::HashSet<String>,
@@ -4575,11 +4621,19 @@ pub struct App {
     /// startup like `pr_diff_tx`, so the modal's own handlers can start a
     /// fetch. `None` in the unit tests, which then never spawn one.
     pub issues_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::issues::IssuesAnswer>>,
-    /// LINEAR VIEW rows, in flight, failed asks, and the answer channel.
+    /// LINEAR VIEW rows, the lists in flight (one per project, a ⌘R
+    /// asked meanwhile owed), failed asks, and the answer channel.
     pub linear: std::collections::HashMap<ProjectId, crate::linear::LinearList>,
-    pub linear_inflight: std::collections::HashSet<ProjectId>,
+    pub linear_flights: crate::fetch::Flights<ProjectId>,
     pub linear_failed: std::collections::HashSet<ProjectId>,
     pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
+    /// What orion did to issues that a list asked before it may not know
+    /// of yet — `⌘S` moves and attached pull requests — laid over every
+    /// such list as it lands.
+    pub linear_edits: crate::linear::LocalEdits,
+    /// The TODOS MODAL's asks after its linked issues: one in flight per
+    /// checkout, and when each chip's state was asked.
+    pub linear_linked: crate::linear::LinkedAsks,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
     /// Each project's TODOS list, by its checkout, read when the modal
@@ -4619,9 +4673,11 @@ pub struct App {
     /// checkout's worth, capped, replaced by every poll.
     pub changed_files: Option<(WorktreeId, Vec<crate::git_diff::DiffFile>)>,
     /// Rows deleted here ahead of the DAEMON's answer
-    /// (`event_loop::optimistic`): an upsert of one of them is a straggler
-    /// from before the delete, and is ignored rather than shown.
-    pub deleting: std::collections::HashSet<orion_core::EntityId>,
+    /// (`event_loop::optimistic`), each with its latest version: an upsert
+    /// or a status flip of one of them is kept here rather than shown, so
+    /// the row stays down — and a refusal puts back the row as the DAEMON
+    /// last had it, not as it was on the keypress.
+    pub deleting: HashMap<orion_core::EntityId, orion_core::Entity>,
     /// The BRANCH SWITCHER's answer channel, listing cache and fetch
     /// throttle — what outlives the modal.
     pub branch_switch: crate::branch_switch::Shared,
@@ -4810,12 +4866,14 @@ impl App {
             vim_tx: None,
             vim_generation: 0,
             accounts_tx: None,
+            accounts_reads: Default::default(),
             accounts_polled: None,
             usage: crate::usage::Usage::default(),
             git_changes: None,
-            git_changes_inflight: None,
+            git_reads: Default::default(),
             worktree_changes: HashMap::new(),
-            worktree_changes_inflight: None,
+            sweep_reads: Default::default(),
+            worktree_read_at: HashMap::new(),
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
             stacks: None,
@@ -4826,13 +4884,14 @@ impl App {
             merge_landed: HashMap::new(),
             attention_walk: None,
             pr_seen: HashMap::new(),
-            pr_inflight: std::collections::HashSet::new(),
+            pr_inflight: Default::default(),
+            prs: Default::default(),
             pr_recheck: HashMap::new(),
             open_prs: HashMap::new(),
-            open_prs_inflight: std::collections::HashSet::new(),
+            open_prs_inflight: Default::default(),
             open_prs_failed: std::collections::HashSet::new(),
             pr_detail: HashMap::new(),
-            pr_detail_inflight: std::collections::HashSet::new(),
+            pr_detail_inflight: Default::default(),
             pr_detail_failed: std::collections::HashSet::new(),
             pr_detail_at: HashMap::new(),
             pending_pr_detail: None,
@@ -4855,20 +4914,25 @@ impl App {
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
             issues: HashMap::new(),
-            issues_inflight: std::collections::HashSet::new(),
+            issues_flights: Default::default(),
             issues_failed: std::collections::HashSet::new(),
+            issue_edits: HashMap::new(),
+            issue_edit_drafts: HashMap::new(),
             issues_due: HashMap::new(),
             pending_issues_prefetch: None,
             issue_detail: HashMap::new(),
-            issue_detail_inflight: std::collections::HashSet::new(),
+            issue_detail_flights: Default::default(),
             issue_detail_failed: std::collections::HashSet::new(),
+            issue_detail_at: HashMap::new(),
             issue_comment_inflight: std::collections::HashSet::new(),
             pending_issue_detail: None,
             issues_tx: None,
             linear: HashMap::new(),
-            linear_inflight: std::collections::HashSet::new(),
+            linear_flights: crate::fetch::Flights::default(),
             linear_failed: std::collections::HashSet::new(),
             linear_tx: None,
+            linear_edits: crate::linear::LocalEdits::default(),
+            linear_linked: crate::linear::LinkedAsks::default(),
             linear_links: crate::linear::LinkStore::default(),
             todos: HashMap::new(),
             todo_pending: HashMap::new(),
@@ -4878,7 +4942,7 @@ impl App {
             view_jobs: None,
             diff_probe: None,
             changed_files: None,
-            deleting: std::collections::HashSet::new(),
+            deleting: HashMap::new(),
             branch_switch: Default::default(),
             git_sync: Default::default(),
             clean_worktrees: Default::default(),
@@ -6029,8 +6093,14 @@ impl App {
     pub fn listed_open_prs(&self) -> Vec<&OpenPr> {
         self.all_open_prs()
             .iter()
-            .filter(|pr| !(self.hide_draft_prs && pr.is_draft))
+            .filter(|pr| !(self.hide_draft_prs && self.pr_is_draft(&pr.url)))
             .collect()
+    }
+
+    /// Whether `url` is a draft, as `prs` last heard — what hiding drafts
+    /// (`hide_draft_prs`) and their place in the list go by.
+    pub fn pr_is_draft(&self, url: &str) -> bool {
+        self.prs.status(url).is_some_and(|s| s.is_draft())
     }
 
     /// The open pull requests with rows under the checkouts: the listed
@@ -6192,7 +6262,7 @@ impl App {
             return Some(PreviewedPr {
                 number: pr.number,
                 url: pr.url.clone(),
-                label: pr.label(),
+                label: self.prs.label(pr.number, &pr.url, &pr.title),
             });
         }
         // The LAUNCHER VIEW's pane holds the keys while it reads the pull
@@ -6229,7 +6299,7 @@ impl App {
         Some(PreviewedPr {
             number: pr.number,
             url: pr.url.clone(),
-            label: row.label(),
+            label: self.prs.label(pr.number, &pr.url, &pr.title),
         })
     }
 
@@ -6371,7 +6441,7 @@ impl App {
     /// but its conversation does, and the unread badge is only as fresh as
     /// the last poll.
     pub fn pr_lookup_due(&self, worktree: &WorktreeId) -> bool {
-        if self.pr_inflight.contains(worktree) {
+        if self.pr_inflight.in_flight(worktree) {
             return false;
         }
         match self.pr_recheck.get(worktree) {
@@ -6384,7 +6454,7 @@ impl App {
     /// an answer is in flight, and not before the timer the last answer
     /// armed. A project orion has never asked about is always due.
     pub fn open_prs_lookup_due(&self, project: &ProjectId) -> bool {
-        if self.open_prs_inflight.contains(project) {
+        if self.open_prs_inflight.in_flight(project) {
             return false;
         }
         match self.open_prs.get(project) {
@@ -6427,7 +6497,7 @@ impl App {
     /// not while one is in flight, nor while a fresh one is here
     /// ([`Self::pr_detail_fresh`]) or `gh` refused it moments ago.
     pub fn pr_detail_owed(&self, url: &str) -> bool {
-        if self.pr_detail_inflight.contains(url) {
+        if self.pr_detail_inflight.in_flight(&url.to_string()) {
             return false;
         }
         if self.pr_detail_failed.contains(url) {
@@ -6440,7 +6510,7 @@ impl App {
     /// missing, or only the cache's copy — and isn't being read now: what
     /// the modal's background prefetch fills in, ignoring age.
     pub fn pr_detail_unread(&self, url: &str) -> bool {
-        !self.pr_detail_inflight.contains(url)
+        !self.pr_detail_inflight.in_flight(&url.to_string())
             && !self.pr_detail_failed.contains(url)
             && (!self.pr_detail.contains_key(url) || self.pr_detail_stale.contains(url))
     }
@@ -6500,7 +6570,7 @@ impl App {
         let prs = self.open_prs.get(project_id).map(|open| {
             open.list
                 .iter()
-                .filter(|pr| !(self.hide_draft_prs && pr.is_draft))
+                .filter(|pr| !(self.hide_draft_prs && self.pr_is_draft(&pr.url)))
                 .count()
         });
         let issues = self.issues.get(project_id).map(|l| l.list.len());
@@ -6525,7 +6595,8 @@ impl App {
             .pull_requests
             .get(worktree_id)
             .and_then(Option::as_ref)
-            .is_some_and(|pr| pr.standing() == crate::pull_request::Standing::Merged);
+            .and_then(|pr| self.prs.status(&pr.url))
+            .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged);
         merged
             && !matches!(
                 self.worktree_rollup(worktree_id),
@@ -6904,9 +6975,9 @@ mod tests {
             number: 7,
             url: url.into(),
             title: "Attach links".into(),
-            state: crate::pull_request::STATE_OPEN.into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: crate::pull_request::STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
             activity: Vec::new(),
         }
     }
