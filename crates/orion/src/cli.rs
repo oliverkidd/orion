@@ -327,6 +327,10 @@ pub(crate) enum Command {
     /// already that code and can keep its sessions.
     #[command(hide = true, name = "_daemon-fingerprint")]
     DaemonFingerprint,
+    /// Installer hook: open orion in a new Ghostty window, its keybinds
+    /// written into Ghostty's config first (see install.sh).
+    #[command(hide = true, name = "_open-in-ghostty")]
+    OpenInGhostty,
 }
 
 const ADD_EXAMPLES: &str = "\

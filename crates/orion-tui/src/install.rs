@@ -4,9 +4,9 @@
 //! --cask ghostty`), the vendor's documented command for an agent (`curl
 //! -fsSL https://claude.ai/install.sh | bash`).
 //!
-//! The onboarding wizard's Agents, Editor and Terminal pages and the SETTINGS
-//! OVERLAY's **File editor**, CLAUDE ACCOUNTS and harness rows share it:
-//! `i` on a program that isn't on PATH shows its [`Plan`] — the line it
+//! The onboarding wizard's Agents and Editor pages and its Ghostty step,
+//! and the SETTINGS OVERLAY's **File editor**, CLAUDE ACCOUNTS and harness
+//! rows share it: `i` on a program that isn't on PATH shows its [`Plan`] — the line it
 //! would run — and Enter runs that line in the editor modal's PTY, the
 //! machinery a Claude sign-in uses (`claude_accounts::run`), so the
 //! installer's own output, and any question it asks, are on screen. The

@@ -43,7 +43,8 @@ its key, and `Enter` runs it.
   jump list, go to file, changes, the pane — are `⌘` chords, and each has a `Ctrl` twin (`⌘P` and
   `^P`) for a terminal that never sends ⌘. Ghostty and kitty send ⌘ (the KITTY PROTOCOL);
   Terminal.app, tmux and `orion browser` never do, so there only the twin arrives. Settings →
-  Hotkeys shows the chords this terminal can actually press.
+  Hotkeys shows the chords this terminal can actually press, and setup starts by offering to reopen
+  orion in Ghostty from a terminal that sends no ⌘.
 - **⌘ reaches orion from inside a pane.** No one types a ⌘ chord as text, so `⌘K`, `⌘P`, `⌘E`,
   `⌘⇧P` and the rest leave a locked pane and run, the agent losing nothing. The `Ctrl` twins stay
   the agent's while its pane is locked — `^P` there is the agent's `^P`.

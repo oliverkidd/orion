@@ -43,6 +43,7 @@ mod release_watch;
 use focus_walk::{
     double_tapped, enter_terminal_pane, land_click_focus, walk_focus_back, walk_focus_forward,
 };
+pub(crate) use host_terminal::host_sends_cmd;
 pub use host_terminal::restore_terminal;
 use host_terminal::{
     on_host_resize, reassert_modes, repaint, report_working_directory, setup_terminal,
@@ -265,6 +266,9 @@ pub enum Exit {
     /// **Upgrade orion**: install the newer release, then restart the
     /// daemon and this binary on it (`crate::restart`).
     Upgrade,
+    /// Setup's Ghostty step: open orion in a new Ghostty window
+    /// (`crate::open_in_ghostty`), the daemon and its sessions left up.
+    Ghostty,
 }
 
 pub async fn run_app() -> Result<Exit> {
@@ -997,6 +1001,8 @@ async fn main_loop(
                 Exit::Upgrade
             } else if app.restart {
                 Exit::Restart
+            } else if app.move_to_ghostty {
+                Exit::Ghostty
             } else {
                 app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
             });

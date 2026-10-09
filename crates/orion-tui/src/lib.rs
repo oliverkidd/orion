@@ -25,6 +25,7 @@ pub mod file_tabs;
 pub mod flash;
 pub mod fuzzy;
 pub mod ghostty_config;
+pub mod ghostty_host;
 pub mod git_diff;
 pub(crate) mod git_proc;
 pub mod git_sync;
@@ -119,6 +120,16 @@ pub use event_loop::Exit;
 /// a recent host, or [`restart`].
 pub fn run_tui() -> Result<Exit> {
     runtime()?.block_on(event_loop::run_app())
+}
+
+/// Open orion in a new Ghostty window, in this folder, and say so — after
+/// setup's Ghostty step has quit the TUI, and from `install.sh` on a first
+/// install (`orion _open-in-ghostty`). The daemon and its sessions stay
+/// up; the new window attaches to them. See [`ghostty_host`].
+pub fn open_in_ghostty() -> Result<()> {
+    ghostty_host::open_orion().map_err(|why| anyhow::anyhow!("couldn't open Ghostty: {why}"))?;
+    eprintln!("orion: opened in Ghostty — you can close this window.");
+    Ok(())
 }
 
 /// **Restart orion** (`⌘⇧R`), once the TUI has quit and restored the

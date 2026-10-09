@@ -104,6 +104,7 @@ fn main() -> Result<()> {
             println!("{}", orion_daemon::lifecycle::BUILD_FINGERPRINT);
             Ok(())
         }
+        Some(Command::OpenInGhostty) => orion_tui::open_in_ghostty(),
         None => match cli.dir {
             Some(dir) => orion_tui::run_add_project(dir),
             None => run_tui(),
@@ -194,6 +195,15 @@ fn run_tui() -> Result<()> {
             } else {
                 orion_tui::restart()
             }
+        }
+        // Setup's Ghostty step: orion opens in a new Ghostty window, the
+        // daemon and its sessions left up for it. Failing that, this
+        // terminal is left as it is, with the reason.
+        orion_tui::Exit::Ghostty => {
+            if let Err(why) = orion_tui::open_in_ghostty() {
+                eprintln!("orion: {why:#} — run orion again to carry on here");
+            }
+            Ok(())
         }
         orion_tui::Exit::Quit => Ok(()),
     }

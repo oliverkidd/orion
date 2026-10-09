@@ -197,6 +197,8 @@ fn spawn_ttyd(exe: &OsStr, port: u16, opts: &BrowserOpts) -> Result<Child> {
     Command::new("ttyd")
         .args(ttyd_args(port, opts))
         .arg(exe)
+        // A page in a browser has no terminal for setup to move into Ghostty.
+        .env(orion_core::env::BROWSER, "1")
         // ttyd never reads stdin, and inheriting it would put a second
         // reader on the terminal orion was launched from.
         .stdin(Stdio::null())

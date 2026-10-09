@@ -3915,6 +3915,9 @@ pub struct App {
     /// **Upgrade orion** confirmed: quit into [`crate::Exit::Upgrade`].
     pub upgrade: bool,
     pub restart: bool,
+    /// Set with `should_quit` by setup's Ghostty step: after teardown the
+    /// binary opens orion in a new Ghostty window (`crate::open_in_ghostty`).
+    pub move_to_ghostty: bool,
     /// The FOOTER's one line in place of its key hints, until the next key.
     pub flash: Option<crate::flash::Flash>,
     /// The newest release published on GitHub (`0.22.0`) when it is newer
@@ -4702,6 +4705,7 @@ impl App {
             should_quit: false,
             pending_ssh: None,
             restart: false,
+            move_to_ghostty: false,
             upgrade: false,
             flash: None,
             update_available: None,

@@ -57,6 +57,9 @@ pub const USAGE: &str = "ORION_USAGE";
 /// instead of the one Ghostty reads, or `off` for none — as the e2e tests
 /// set it, so a run never touches the real one.
 pub const GHOSTTY_CONFIG: &str = "ORION_GHOSTTY_CONFIG";
+/// Set on the orion `orion browser` serves through ttyd: a page in a
+/// browser has no terminal for setup to move into Ghostty.
+pub const BROWSER: &str = "ORION_BROWSER";
 /// A file the TUI writes its INPUT LATENCY PROBE's timeline to
 /// (`make perf`); unset, there is no probe.
 pub const PERF_LOG: &str = "ORION_PERF_LOG";

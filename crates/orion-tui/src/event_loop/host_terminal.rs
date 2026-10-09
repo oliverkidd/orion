@@ -68,6 +68,12 @@ static KITTY_PUSHED: AtomicBool = AtomicBool::new(false);
 /// the panic hook and drained by the loop through `take_worker_panic`.
 static WORKER_PANICS: AtomicUsize = AtomicUsize::new(0);
 
+/// Whether the terminal orion runs in took the kitty keyboard protocol, so
+/// sends ⌘ chords — Ghostty and kitty do, Terminal.app never does.
+pub(crate) fn host_sends_cmd() -> bool {
+    KITTY_PUSHED.load(Ordering::Relaxed)
+}
+
 pub(super) fn setup_terminal() -> Result<HostTerminal> {
     use crossterm::{execute, terminal::*};
     enable_raw_mode()?;

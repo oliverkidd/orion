@@ -578,6 +578,26 @@ fn reload_ghostty(path: &Path, changed: bool) -> bool {
 /// not be written; None when there was nothing to do. Unit tests never get
 /// past the first check: they must not write the machine's real config.
 pub fn ensure_for(cfg: &crate::config::Config) -> Option<crate::flash::Flash> {
+    ensure_if_in_use(cfg, || {
+        inside_ghostty()
+            || (cfg.outside_terminal() == crate::config::OutsideTerminal::Ghostty
+                && crate::event_loop::ghostty_app().is_some())
+    })
+}
+
+/// [`ensure_for`] ahead of opening orion in a new Ghostty
+/// (`ghostty_host`): the block written whatever the outside terminal, so
+/// the Ghostty about to start reads it at launch.
+pub fn ensure_before_launch(cfg: &crate::config::Config) -> Option<crate::flash::Flash> {
+    ensure_if_in_use(cfg, || true)
+}
+
+/// The pass behind [`ensure_for`], asking `ghostty_in_use` only once the
+/// cheap checks have passed and no `ORION_GHOSTTY_CONFIG` names the file.
+fn ensure_if_in_use(
+    cfg: &crate::config::Config,
+    ghostty_in_use: impl FnOnce() -> bool,
+) -> Option<crate::flash::Flash> {
     if cfg!(test)
         || !cfg.ghostty_keybinds
         || !cfg!(target_os = "macos")
@@ -589,10 +609,7 @@ pub fn ensure_for(cfg: &crate::config::Config) -> Option<crate::flash::Flash> {
         Ok(v) if v.eq_ignore_ascii_case("off") => return None,
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
         _ => {
-            let ghostty_in_use = inside_ghostty()
-                || (cfg.outside_terminal() == crate::config::OutsideTerminal::Ghostty
-                    && crate::event_loop::ghostty_app().is_some());
-            if !ghostty_in_use {
+            if !ghostty_in_use() {
                 return None;
             }
             let home = PathBuf::from(std::env::var_os("HOME")?);
