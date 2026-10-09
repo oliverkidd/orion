@@ -373,6 +373,35 @@ fn archived_in(app: &App, worktree: &WorktreeId, project: &ProjectId) -> Vec<Lau
     rows
 }
 
+/// Every session the GRID lists, in reading order: each band's cards,
+/// then the lines of its unfolded ARCHIVED DRAWER. A MULTI-SELECT range
+/// (`App::marked`) runs along this.
+pub fn grid_order(bands: &[Band]) -> Vec<SessionRef> {
+    bands
+        .iter()
+        .flat_map(|b| {
+            b.cards.iter().map(Card::sref).chain(
+                b.drawer()
+                    .iter()
+                    .map(|r| SessionRef::Agent(r.agent.id.clone())),
+            )
+        })
+        .collect()
+}
+
+/// The MULTI-SELECT's sessions still on the grid, in grid order: a card
+/// picked on another project, or in the other of the live and ARCHIVED
+/// views, is out of sight, and never counted or deleted.
+pub fn marked_on(app: &App, bands: &[Band]) -> Vec<SessionRef> {
+    if app.marked.is_empty() {
+        return Vec::new();
+    }
+    grid_order(bands)
+        .into_iter()
+        .filter(|s| app.marked.contains(s))
+        .collect()
+}
+
 /// A card's place on the grid: which band, and which card along it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CardRef {

@@ -4822,6 +4822,9 @@ fn dispatch_action(
         Action::NewTerminal => create_terminal_for_context(app, out),
         // Terminal-scope only; never resolved here.
         Action::UnlockTerminal => {}
+        // The grid's MULTI-SELECT (`launcher::handle_action`); off the
+        // grid there is nothing to pick out.
+        Action::ExtendUp | Action::ExtendDown | Action::ExtendLeft | Action::ExtendRight => {}
     }
 }
 
@@ -6916,6 +6919,9 @@ fn worktree_in_context(app: &App) -> Option<WorktreeId> {
 }
 
 fn open_delete_confirm(app: &mut App) {
+    if app.launcher_grid() && open_delete_marked_confirm(app) {
+        return;
+    }
     match app.focus {
         Focus::Projects => {
             if let Some(p) = app.selected_project() {
@@ -7272,29 +7278,89 @@ fn open_delete_all_confirm(app: &mut App) {
             }
             // The rows are the selected worktree's: a `D` that takes every
             // live card there asks about the checkout in the same dialog.
-            let live_taken = agents
-                .iter()
-                .filter(|id| app.tree.agents.iter().any(|a| &a.id == *id && !a.archived))
-                .count()
-                + terminals.len();
-            let dialog = ConfirmDialog {
-                title: format!("Delete ALL {} session(s)", names.len()),
-                message: format!(
-                    "Delete these {} session(s)? Their history goes away.\n{}",
-                    names.len(),
-                    bulk_confirm_listing(&names),
-                ),
-                action: PendingAction::DeleteAllSessions { agents, terminals },
-                area: ratatui::layout::Rect::default(),
-            };
-            let dialog = match app.selected_worktree().map(|w| w.id.clone()) {
-                Some(wt) => with_worktree_offer(app, dialog, &wt, live_taken),
-                None => dialog,
-            };
+            let worktree = app.selected_worktree().map(|w| w.id.clone());
+            let title = format!("Delete ALL {} session(s)", names.len());
+            let dialog = confirm_delete_sessions(app, title, &names, agents, terminals, worktree);
             app.overlay = Some(Overlay::Confirm(dialog));
         }
         Focus::Projects | Focus::Terminal => {}
     }
+}
+
+/// The confirm before several sessions go at once — **Delete all
+/// sessions**, and `⌫` on a MULTI-SELECT — itemizing them. When they are
+/// all one checkout's (`worktree`) and take every live card there, the
+/// dialog asks about the checkout too ([`with_worktree_offer`]).
+fn confirm_delete_sessions(
+    app: &App,
+    title: String,
+    names: &[String],
+    agents: Vec<AgentId>,
+    terminals: Vec<TerminalId>,
+    worktree: Option<WorktreeId>,
+) -> ConfirmDialog {
+    let live_taken = agents
+        .iter()
+        .filter(|id| app.tree.agents.iter().any(|a| &a.id == *id && !a.archived))
+        .count()
+        + terminals.len();
+    let dialog = ConfirmDialog {
+        title,
+        message: format!(
+            "Delete these {} session(s)? Their history goes away.\n{}",
+            names.len(),
+            bulk_confirm_listing(names),
+        ),
+        action: PendingAction::DeleteAllSessions { agents, terminals },
+        area: ratatui::layout::Rect::default(),
+    };
+    match worktree {
+        Some(wt) => with_worktree_offer(app, dialog, &wt, live_taken),
+        None => dialog,
+    }
+}
+
+/// `⌫` with cards picked out on the grid (`App::marked`): every one of
+/// them, live or archived, session or terminal, behind one confirm that
+/// lists them. False with nothing picked out on the grid as it stands —
+/// `⌫` is then the delete of the row under the cursor.
+fn open_delete_marked_confirm(app: &mut App) -> bool {
+    let marked = crate::launcher::marked_on(app, &crate::launcher::bands(app));
+    if marked.is_empty() {
+        return false;
+    }
+    let mut names = Vec::new();
+    let mut agents = Vec::new();
+    let mut terminals = Vec::new();
+    let mut worktrees = Vec::new();
+    for sref in marked {
+        let (name, worktree) = match &sref {
+            SessionRef::Agent(id) => match app.tree.agents.iter().find(|a| &a.id == id) {
+                Some(a) => (a.name.clone(), a.worktree_id.clone()),
+                None => continue,
+            },
+            SessionRef::Terminal(id) => match app.tree.terminals.iter().find(|t| &t.id == id) {
+                Some(t) => (t.name.clone(), t.worktree_id.clone()),
+                None => continue,
+            },
+        };
+        match sref {
+            SessionRef::Agent(id) => agents.push(id),
+            SessionRef::Terminal(id) => terminals.push(id),
+        }
+        names.push(name);
+        if !worktrees.contains(&worktree) {
+            worktrees.push(worktree);
+        }
+    }
+    if names.is_empty() {
+        return false;
+    }
+    let one_checkout = (worktrees.len() == 1).then(|| worktrees.remove(0));
+    let title = format!("Delete {} selected session(s)", names.len());
+    let dialog = confirm_delete_sessions(app, title, &names, agents, terminals, one_checkout);
+    app.overlay = Some(Overlay::Confirm(dialog));
+    true
 }
 
 /// Row menu for a link: open it, read its diff when it is a pull request,
@@ -9857,6 +9923,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             reconcile_selection(app, before, out);
         }
         PendingAction::DeleteAllSessions { agents, terminals } => {
+            launcher::clear_marks(app);
             for id in agents {
                 delete_agent(app, id, out);
             }
@@ -12942,6 +13009,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // worktree; a second click is Enter, down into the PANE
                 // beside the cards — which comes back first if it was
                 // folded away.
+                // ⌘ (⌥) or ⇧ held on a card or a drawer line: it goes in or
+                // out of the MULTI-SELECT instead.
+                Some(
+                    target @ (HitTarget::LauncherCard(_) | HitTarget::LauncherDrawerEntry(..)),
+                ) if launcher::marks_by_click(&mouse) => {
+                    let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+                    launcher::click_mark(app, &target, shift, out)
+                }
                 Some(HitTarget::LauncherCard(at)) => launcher::click_card(app, at, out),
                 // A BAND's rule: the cursor lands on the band, as `j`/`k`
                 // walking onto it do.

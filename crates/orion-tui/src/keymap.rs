@@ -48,6 +48,14 @@ pub enum Action {
     FocusRight,
     MoveDown,
     MoveUp,
+    /// `⇧↑` / `⇧↓` / `⇧←` / `⇧→` on the grid: the cursor steps as the
+    /// bare arrow does, and the MULTI-SELECT (`App::marked`) grows to
+    /// every card between where the run started and where it is now —
+    /// for `⌫` to delete them all behind one confirm.
+    ExtendUp,
+    ExtendDown,
+    ExtendLeft,
+    ExtendRight,
     Activate,
     /// `⌘K`: the JUMP list — every project, worktree, session and open
     /// pull request, with adding a project as its last row.
@@ -620,10 +628,46 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Delete,
         id: "delete",
         label: "Delete selected",
-        hint: "Remove the selected row, behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation",
+        hint: "Remove the selected row — or every card picked out with Shift+arrows or Cmd-click — behind a confirmation. With the PROJECT TABS holding the keys, close the tab under their cursor, behind the same kind of confirmation",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["backspace"],
+    },
+    ActionSpec {
+        action: Action::ExtendUp,
+        id: "extend_up",
+        label: "Select up",
+        hint: "Pick out the cards from where the run started to the one above, for Backspace to delete together. Cmd-click (Option-click) adds or drops one card; Esc lets them all go",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["shift+up"],
+    },
+    ActionSpec {
+        action: Action::ExtendDown,
+        id: "extend_down",
+        label: "Select down",
+        hint: "Pick out the cards from where the run started to the one below, for Backspace to delete together",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["shift+down"],
+    },
+    ActionSpec {
+        action: Action::ExtendLeft,
+        id: "extend_left",
+        label: "Select left",
+        hint: "Pick out the cards from where the run started to the one on the left, for Backspace to delete together",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["shift+left"],
+    },
+    ActionSpec {
+        action: Action::ExtendRight,
+        id: "extend_right",
+        label: "Select right",
+        hint: "Pick out the cards from where the run started to the one on the right, for Backspace to delete together",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["shift+right"],
     },
     ActionSpec {
         action: Action::DeleteWorktree,

@@ -198,6 +198,7 @@ pub(super) fn click_drawer_entry(
     entry: usize,
     out: &mut Vec<ClientRequest>,
 ) {
+    clear_marks(app);
     let Some(id) = point_at_drawer(app, band, entry, out) else {
         return;
     };
@@ -629,6 +630,9 @@ pub(super) fn click_strip_arrow(
 pub(super) fn escape(app: &mut App, out: &mut Vec<ClientRequest>) {
     if app.launcher_tab_cursor.is_some() {
         leave_tabs(app);
+    } else if !app.marked.is_empty() {
+        // The MULTI-SELECT is the nearest thing to let go of.
+        clear_marks(app);
     } else if app.open_band(&view::bands(app)).is_some() {
         app.launcher_expanded = None;
         app.dirty = true;
@@ -666,9 +670,21 @@ pub(super) fn handle_action(
     if app.launcher_tab_cursor.is_some() && tabs_action(app, action, armed, chord, out) {
         return true;
     }
+    // A bare arrow lets the MULTI-SELECT go, as it does in Finder; the
+    // shifted ones grow it ([`extend_marks`]).
+    if matches!(
+        action,
+        Action::MoveDown | Action::MoveUp | Action::FocusLeft | Action::FocusRight
+    ) {
+        clear_marks(app);
+    }
     match action {
         Action::MoveDown => step_grid(app, 0, 1, out),
         Action::MoveUp => step_up(app, armed, chord, out),
+        Action::ExtendDown => extend_marks(app, 0, 1, out),
+        Action::ExtendUp => extend_marks(app, 0, -1, out),
+        Action::ExtendLeft => extend_marks(app, -1, 0, out),
+        Action::ExtendRight => extend_marks(app, 1, 0, out),
         // Off the row's last card, with the pane beside the cards, the
         // walk goes on into the PANE, to read it ([`focus_pane`]).
         Action::FocusRight => step_or_enter_pane(app, 1, 0, chord, out),
@@ -1078,6 +1094,127 @@ pub(super) fn tab_menu(app: &mut App, id: &ProjectId, out: &mut Vec<ClientReques
     open_tab(app, id, out);
     let at = crumb_anchor(app, &HitTarget::LauncherTab(id.clone()));
     project_menu(app, at);
+}
+
+/// The card the cursor is on, as the MULTI-SELECT counts it: one of the
+/// grid's cards or drawer lines, aimed at. None with the aim let go, or
+/// the selection on a row the grid draws no card for.
+fn cursor_card(app: &App, order: &[SessionRef]) -> Option<SessionRef> {
+    if app.launcher_unaimed {
+        return None;
+    }
+    app.selected_session_row()
+        .and_then(|r| r.sref())
+        .filter(|s| order.contains(s))
+}
+
+/// Let the MULTI-SELECT go.
+pub(super) fn clear_marks(app: &mut App) {
+    if !app.marked.is_empty() || app.mark_anchor.is_some() {
+        app.marked.clear();
+        app.mark_anchor = None;
+        app.dirty = true;
+    }
+}
+
+/// The MULTI-SELECT made the range from its anchor to `to`, both ends
+/// in, in grid order. False when either end is off the grid.
+fn mark_range(app: &mut App, order: &[SessionRef], to: &SessionRef) -> bool {
+    let Some(anchor) = app.mark_anchor.as_ref() else {
+        return false;
+    };
+    let (Some(a), Some(b)) = (
+        order.iter().position(|s| s == anchor),
+        order.iter().position(|s| s == to),
+    ) else {
+        return false;
+    };
+    app.marked = order[a.min(b)..=a.max(b)].to_vec();
+    app.dirty = true;
+    true
+}
+
+/// `⇧↑` / `⇧↓` / `⇧←` / `⇧→`: the cursor steps as the bare arrow does
+/// ([`step_grid`]) and the MULTI-SELECT becomes every card from the
+/// anchor — where the first shifted step started, or the last
+/// `⌘`-click — to where the cursor now is, in grid order
+/// ([`view::grid_order`]), so stepping back shrinks it again.
+pub(super) fn extend_marks(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientRequest>) {
+    let order = view::grid_order(&view::bands(app));
+    let anchored = app.mark_anchor.as_ref().is_some_and(|a| order.contains(a));
+    if !anchored {
+        app.mark_anchor = cursor_card(app, &order);
+    }
+    step_grid(app, dx, dy, out);
+    let order = view::grid_order(&view::bands(app));
+    let Some(to) = cursor_card(app, &order) else {
+        return;
+    };
+    if app.mark_anchor.is_none() {
+        // The run started with no card aimed at: it starts here.
+        app.mark_anchor = Some(to.clone());
+    }
+    mark_range(app, &order, &to);
+}
+
+/// Whether a click picks cards out for the MULTI-SELECT rather than
+/// landing on one: `⌘` held — asked of macOS, as a mouse report carries
+/// no bit for it — or `⌥`, its twin where that can't be asked (SSH),
+/// toggles a card; `⇧`, where the host passes it on, takes the range.
+pub(super) fn marks_by_click(mouse: &crossterm::event::MouseEvent) -> bool {
+    mouse
+        .modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::SHIFT)
+        || super::host_terminal::command_held()
+}
+
+/// A `⌘`-click (or `⌥`-click) on a card or drawer line: in or out of
+/// the MULTI-SELECT, the cursor following onto it so its pane is the one
+/// read. The first one adds the card the cursor was on too, as a click
+/// in Finder keeps what was already selected. A `⇧`-click takes the
+/// range from the anchor instead, as `⇧`-arrows do.
+pub(super) fn click_mark(
+    app: &mut App,
+    target: &HitTarget,
+    shift: bool,
+    out: &mut Vec<ClientRequest>,
+) {
+    let bands = view::bands(app);
+    let sref = match *target {
+        HitTarget::LauncherCard(at) => view::card_at(&bands, at).map(view::Card::sref),
+        HitTarget::LauncherDrawerEntry(band, entry) => bands
+            .get(band)
+            .and_then(|b| b.drawer().get(entry))
+            .map(|r| SessionRef::Agent(r.agent.id.clone())),
+        _ => None,
+    };
+    let Some(sref) = sref else {
+        return;
+    };
+    let order = view::grid_order(&bands);
+    let cursor = cursor_card(app, &order);
+    if shift {
+        if !app.mark_anchor.as_ref().is_some_and(|a| order.contains(a)) {
+            app.mark_anchor = cursor.or_else(|| Some(sref.clone()));
+        }
+        mark_range(app, &order, &sref);
+    } else {
+        if app.marked.is_empty() {
+            app.marked.extend(cursor.filter(|c| c != &sref));
+        }
+        match app.marked.iter().position(|s| s == &sref) {
+            Some(i) => {
+                app.marked.remove(i);
+            }
+            None => app.marked.push(sref.clone()),
+        }
+        app.mark_anchor = Some(sref.clone());
+        app.dirty = true;
+    }
+    if app.launcher_pane_hidden {
+        toggle_pane(app);
+    }
+    select_card(app, sref, out);
 }
 
 /// `h` / `j` / `k` / `l` (and the half-page jumps). `j` and `k` walk the
@@ -1932,6 +2069,7 @@ fn select(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
 /// Enter, twice if need be — into the worktree, then down into the pane,
 /// where that session is already running.
 pub(super) fn click_card(app: &mut App, at: CardRef, out: &mut Vec<ClientRequest>) {
+    clear_marks(app);
     let Some(sref) = point_at(app, at, out) else {
         return;
     };
@@ -12099,5 +12237,190 @@ mod tests {
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert_eq!(launch(&app).1, "fix @src/auth.rs @");
         });
+    }
+
+    // ---- the MULTI-SELECT ----
+
+    /// [`three_sessions`] with a shell in the root beside its two
+    /// sessions, drawn, the cursor on the grid's first card. Returns the
+    /// grid's order: the root's `ship-docs`, `agent-1` and `shell-1`, then
+    /// `feat`'s `polish-nav`.
+    fn marking() -> (App, Vec<SessionRef>) {
+        let mut app = three_sessions();
+        seed_terminal(&mut app, "t1", "w1", "shell-1");
+        draw(&mut app);
+        let order = crate::launcher::grid_order(&crate::launcher::bands(&app));
+        assert_eq!(order.len(), 4, "{order:?}");
+        super::select_card(&mut app, order[0].clone(), &mut Vec::new());
+        (app, order)
+    }
+
+    /// A press on the card or drawer line `hit` with `mods` held.
+    fn click_with(app: &mut App, hit: HitTarget, mods: KeyModifiers) {
+        let r = tab_at(app, hit);
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: r.x + 2,
+            row: r.y + 1.min(r.height.saturating_sub(1)),
+            modifiers: mods,
+        };
+        handle_terminal_event(app, crossterm::event::Event::Mouse(event), &mut Vec::new());
+    }
+
+    /// `⇧→` / `⇧←` pick out a range from where the run started, growing
+    /// and shrinking it as the cursor walks; a bare arrow lets it go.
+    #[test]
+    fn shift_arrows_pick_out_a_range_and_a_bare_arrow_lets_it_go() {
+        with_default_config(|| {
+            let (mut app, order) = marking();
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            assert_eq!(app.marked, order[..2]);
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            assert_eq!(app.marked, order[..3]);
+            key(&mut app, KeyCode::Left, KeyModifiers::SHIFT);
+            assert_eq!(app.marked, order[..2], "stepping back shrinks it");
+            assert_eq!(selected_sref(&app), Some(order[1].clone()));
+            key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+            assert!(app.marked.is_empty(), "{:?}", app.marked);
+            assert_eq!(app.mark_anchor, None);
+        });
+    }
+
+    /// `⇧↓` runs the range on past the band, into the next checkout's.
+    #[test]
+    fn shift_down_runs_the_range_across_bands() {
+        with_default_config(|| {
+            let (mut app, order) = marking();
+            key(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+            assert_eq!(app.marked, order, "the root's three and feat's card");
+        });
+    }
+
+    /// `⌫` on a MULTI-SELECT asks once, listing every card picked out,
+    /// and Enter deletes them all — sessions and terminals alike — and
+    /// lets the selection go.
+    #[test]
+    fn backspace_deletes_every_card_picked_out_behind_one_confirm() {
+        with_default_config(|| {
+            let (mut app, order) = marking();
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+            let Some(Overlay::Confirm(c)) = &app.overlay else {
+                panic!("no confirm: {:?}", app.overlay);
+            };
+            assert!(c.title.contains("3 selected"), "{}", c.title);
+            for name in ["ship-docs", "agent-1", "shell-1"] {
+                assert!(c.message.contains(name), "{name} listed: {}", c.message);
+            }
+            assert!(!c.message.contains("polish-nav"), "{}", c.message);
+            let sent = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            let mut gone: Vec<SessionRef> = sent
+                .iter()
+                .filter_map(|r| match r {
+                    ClientRequest::DeleteAgent { id, .. } => Some(SessionRef::Agent(id.clone())),
+                    ClientRequest::CloseTerminal { id, .. } => {
+                        Some(SessionRef::Terminal(id.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut want = order[..3].to_vec();
+            gone.sort_by_key(|s| format!("{s:?}"));
+            want.sort_by_key(|s| format!("{s:?}"));
+            assert_eq!(gone, want, "{sent:?}");
+            assert!(app.marked.is_empty());
+        });
+    }
+
+    /// The first Esc lets the MULTI-SELECT go and nothing else; `⌫` is
+    /// then the card's own delete again.
+    #[test]
+    fn esc_lets_the_selection_go_first() {
+        with_default_config(|| {
+            let (mut app, _) = marking();
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(app.marked.is_empty());
+            assert!(!app.launcher_unaimed, "the card stays aimed at");
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if matches!(c.action, PendingAction::DeleteAgent(_))),
+                "{:?}",
+                app.overlay
+            );
+        });
+    }
+
+    /// `⌥`-click (`⌘`-click's twin, the one a test can hold) picks a card
+    /// out along with the one the cursor was on, a second one drops it
+    /// again, and a plain click lets the whole selection go.
+    #[test]
+    fn option_click_toggles_a_card_and_a_plain_click_lets_go() {
+        with_default_config(|| {
+            let (mut app, order) = marking();
+            let feat = HitTarget::LauncherCard(CardRef { band: 1, card: 0 });
+            click_with(&mut app, feat.clone(), KeyModifiers::ALT);
+            assert_eq!(app.marked, [order[0].clone(), order[3].clone()]);
+            assert_eq!(
+                selected_sref(&app),
+                Some(order[3].clone()),
+                "cursor follows"
+            );
+            draw(&mut app);
+            let third = HitTarget::LauncherCard(CardRef { band: 0, card: 1 });
+            click_with(&mut app, third.clone(), KeyModifiers::ALT);
+            assert_eq!(app.marked.len(), 3);
+            draw(&mut app);
+            click_with(&mut app, third.clone(), KeyModifiers::ALT);
+            assert_eq!(app.marked, [order[0].clone(), order[3].clone()], "dropped");
+            draw(&mut app);
+            click_with(&mut app, third, KeyModifiers::NONE);
+            assert!(app.marked.is_empty());
+        });
+    }
+
+    /// A picked-out card wears the `✓`, and the footer says what `⌫` will
+    /// do to them all.
+    #[test]
+    fn picked_out_cards_are_drawn_marked_and_the_footer_counts_them() {
+        with_default_config(|| {
+            let (mut app, _) = marking();
+            let before = screen_text(&draw(&mut app));
+            assert!(!before.contains('✓'));
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            let after = screen_text(&draw(&mut app));
+            assert_eq!(after.matches('✓').count(), 2, "{after}");
+            assert!(
+                footer_text(&app).contains("delete 2 selected"),
+                "{}",
+                footer_text(&app)
+            );
+        });
+    }
+
+    /// Cards picked out on one project are out of sight on another, and
+    /// `⌫` there never reaches them.
+    #[test]
+    fn a_selection_left_on_another_project_is_never_deleted() {
+        with_default_config(|| {
+            let (mut app, _) = marking();
+            key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
+            // Over to `web`, the way the `/` PALETTE lands on its card.
+            super::select(&mut app, AgentId("a3".into()), &mut Vec::new());
+            draw(&mut app);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Confirm(c))
+                    if matches!(c.action, PendingAction::DeleteAgent(_))),
+                "web's own card: {:?}",
+                app.overlay
+            );
+        });
+    }
+
+    fn selected_sref(app: &App) -> Option<SessionRef> {
+        app.selected_session_row().and_then(|r| r.sref())
     }
 }

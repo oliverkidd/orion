@@ -4009,6 +4009,16 @@ pub struct App {
     /// Anything that puts the cursor back on a card takes the aim back
     /// (`event_loop::launcher::take_aim`).
     pub launcher_unaimed: bool,
+    /// The GRID's MULTI-SELECT: the cards picked out together — by
+    /// `⇧↑`/`⇧↓`/`⇧←`/`⇧→` over a range, or `⌘`-click (`⌥`-click its
+    /// twin) one at a time — for `⌫` to delete in one confirm. In grid
+    /// order (`launcher::grid_order`) after a range, in click order after
+    /// a toggle; empty with nothing picked, which is most of the time. A
+    /// bare arrow, a plain click or Esc lets it go.
+    pub marked: Vec<SessionRef>,
+    /// Where the MULTI-SELECT's range is measured from: the card the
+    /// first `⇧`-arrow left, or the last one `⌘`-clicked.
+    pub mark_anchor: Option<SessionRef>,
     /// Height the LAUNCHER VIEW's PANE was dragged to, in rows; None until
     /// its top edge is dragged, which leaves the pane on its default share
     /// of the body. Re-clamped to the body on every draw
@@ -4792,6 +4802,8 @@ impl App {
             collapsed: false,
             hide_draft_prs: false,
             launcher_unaimed: false,
+            marked: Vec::new(),
+            mark_anchor: None,
             launcher_pane_h: None,
             launcher_pane_w: None,
             launcher_pane_at: crate::launcher::PaneSide::default(),

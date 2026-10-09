@@ -91,6 +91,62 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, body: Rect) {
     let scroll = settle_panel_scroll(app, &panel, &bands, cursor);
     draw_head(f, app, body, count, panel.hidden(scroll));
     draw_bands(f, app, &g, &panel, &bands, cursor, scroll);
+    draw_marks(f, app, &bands);
+}
+
+/// What a card picked out for the MULTI-SELECT wears at its top-left,
+/// one cell in.
+const MARKED_MARK: &str = "✓";
+/// How much of the accent a picked-out card's fill keeps: well over the
+/// cursor's own wash ([`TINT_STILL`]), so a run of them reads as one
+/// selection under the cursor's heavy frame.
+const MARKED_TINT: f32 = 0.28;
+
+/// The MULTI-SELECT over what the bands drew: every picked-out card, list
+/// entry and drawer line washed in the accent, with a `✓` at its top-left
+/// — found by the hit rect each was drawn into, so one pass covers
+/// every layout. Marks left on a card no longer on the grid are dropped
+/// here, as the frame is the one place that knows.
+fn draw_marks(f: &mut Frame, app: &mut App, bands: &[crate::launcher::Band]) {
+    if app.marked.is_empty() {
+        return;
+    }
+    app.marked = crate::launcher::marked_on(app, bands);
+    if app.marked.is_empty() {
+        app.mark_anchor = None;
+        return;
+    }
+    let th = app.theme;
+    let fill = match dim_toward_black(th.accent, MARKED_TINT) {
+        Color::Reset => th.sel_bg,
+        c => c,
+    };
+    let buf = f.buffer_mut();
+    for (rect, hit) in &app.hits {
+        let sref = match *hit {
+            HitTarget::LauncherCard(at) => {
+                crate::launcher::card_at(bands, at).map(crate::launcher::Card::sref)
+            }
+            HitTarget::LauncherDrawerEntry(band, entry) => bands
+                .get(band)
+                .and_then(|b| b.drawer().get(entry))
+                .map(|r| orion_core::SessionRef::Agent(r.agent.id.clone())),
+            _ => None,
+        };
+        if !sref.is_some_and(|s| app.marked.contains(&s)) {
+            continue;
+        }
+        let area = rect.intersection(buf.area);
+        buf.set_style(area, Style::default().bg(fill));
+        // One in: past a card's corner, and onto the air after a LIST
+        // entry's cursor mark rather than over it.
+        if let Some(cell) = buf
+            .cell_mut((area.x + 1, area.y))
+            .filter(|_| area.width > 1)
+        {
+            cell.set_symbol(MARKED_MARK).set_fg(th.accent);
+        }
+    }
 }
 
 /// The scroll this frame draws the GRID at, settled from what the last

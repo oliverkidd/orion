@@ -264,6 +264,19 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
         act(km, Action::CommandPalette, "commands"),
         act(km, Action::Home, "home"),
     ];
+    // Cards picked out (the MULTI-SELECT): what to do with them all, and
+    // the way to let them go, ahead of anything about the one card.
+    let marked = crate::launcher::marked_on(app, &bands).len();
+    if marked > 0 {
+        let mut list = vec![
+            act(km, Action::Delete, &format!("delete {marked} selected")).map(Hint::kept),
+            acts(km, &[Action::ExtendUp, Action::ExtendDown], "select more"),
+            Some(Hint::new("⌘click", "add / drop")),
+            Some(Hint::new("Esc", "clear selection")),
+        ];
+        list.extend(tail);
+        return list;
+    }
     if app.show_archived {
         // The ARCHIVED VIEW is a different list with different verbs on
         // it: nothing to attach, prompt or archive there.
