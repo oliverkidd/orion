@@ -362,6 +362,14 @@ pub(super) fn delete_worktree(app: &mut App, id: &WorktreeId) {
         w.branch,
         doomed.len()
     );
+    // The changes the last read of the checkout found, said up front. The
+    // delete still goes unforced: the daemon reads it again and asks
+    // before anything is lost, the files written since included.
+    if let Some(&(Some(files @ 1..), _)) = app.worktree_changes.get(id) {
+        message.push_str(&format!(
+            "\nIt has {files} uncommitted or untracked file(s); you'll be asked before they're lost."
+        ));
+    }
     if !doomed.is_empty() {
         message.push('\n');
         message.push_str(&super::bulk_confirm_listing(&doomed));

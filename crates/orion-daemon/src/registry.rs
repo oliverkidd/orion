@@ -909,6 +909,14 @@ impl Daemon {
         id: &WorktreeId,
         force: bool,
     ) -> Result<WorktreeDelete> {
+        // Answer a changed checkout before queueing for `worktree_ops`: a
+        // run of deletes holds it through git, containers and hooks, and
+        // the question shouldn't wait for all of that to be asked.
+        if !force {
+            if let Some(files) = self.uncommitted_in(id).await? {
+                return Ok(WorktreeDelete::HasChanges(files));
+            }
+        }
         let ops = self.worktree_ops.lock().await;
         let worktree = self.store.get_worktree(id)?.context("worktree not found")?;
         if worktree.is_main {
@@ -918,12 +926,11 @@ impl Daemon {
             .store
             .get_project(&worktree.project_id)?
             .context("project not found")?;
-        if !force && worktree.path.exists() {
-            // A checkout git can't read has nothing it can report as
-            // changed; the removal below says what is wrong with it.
-            let changed = git::changed_files(&worktree.path).await.unwrap_or(0);
-            if changed > 0 {
-                return Ok(WorktreeDelete::HasChanges(changed));
+        // Asked again under the lock: the checkout's sessions kept running
+        // while this waited for it, and may have written since.
+        if !force {
+            if let Some(files) = self.uncommitted_in(id).await? {
+                return Ok(WorktreeDelete::HasChanges(files));
             }
         }
 
@@ -953,6 +960,19 @@ impl Daemon {
             .await;
         drop(ops);
         Ok(WorktreeDelete::Deleted)
+    }
+
+    /// How many files worktree `id` has with uncommitted or untracked
+    /// changes, when it has any. The main checkout — never deleted — and
+    /// a checkout that is gone or git can't read report none; the removal
+    /// says what is wrong with those.
+    async fn uncommitted_in(&self, id: &WorktreeId) -> Result<Option<usize>> {
+        let worktree = self.store.get_worktree(id)?.context("worktree not found")?;
+        if worktree.is_main || !worktree.path.exists() {
+            return Ok(None);
+        }
+        let changed = git::changed_files(&worktree.path).await.unwrap_or(0);
+        Ok((changed > 0).then_some(changed))
     }
 
     /// ENV LINKS for a checkout just added to the project cloned at
@@ -7204,6 +7224,38 @@ mod tests {
             WorktreeDelete::Deleted
         );
         assert!(!wt.exists());
+    }
+
+    /// A changed checkout's answer doesn't queue behind other worktree
+    /// work: with `worktree_ops` held — as a run of deletes holds it
+    /// through git, containers and hooks — an unforced delete still says
+    /// at once that there are changes, and leaves the checkout be.
+    #[tokio::test]
+    async fn a_changed_worktree_is_answered_without_waiting_for_other_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = init_repo(&root);
+        let wt = root.join("repo-worktrees").join("feat");
+        git_in(
+            &repo,
+            &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
+        );
+        let daemon = test_daemon();
+        project_at(&daemon, &repo);
+        seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
+        let id = WorktreeId("feat".into());
+        std::fs::write(wt.join("notes.txt"), "draft").unwrap();
+
+        let _busy = daemon.worktree_ops.lock().await;
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            daemon.delete_worktree(&id, false),
+        )
+        .await
+        .expect("answered without waiting for the lock")
+        .unwrap();
+        assert_eq!(answer, WorktreeDelete::HasChanges(1));
+        assert!(wt.join("notes.txt").exists(), "nothing removed");
     }
 
     fn git_in(repo: &Path, args: &[&str]) {

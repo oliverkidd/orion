@@ -5065,6 +5065,52 @@ mod tests {
         });
     }
 
+    /// The worktree's confirm says up front how many changed files the
+    /// last read of the checkout found, and says nothing of them for a
+    /// clean or never-read one. The delete it sends stays unforced, so the
+    /// daemon still asks before the files go.
+    #[test]
+    fn the_worktree_confirm_counts_the_checkouts_changes() {
+        with_default_config(|| {
+            let message = |count: Option<Option<usize>>| {
+                let mut app = with_empty_band();
+                let id = WorktreeId("w3".into());
+                if let Some(count) = count {
+                    app.worktree_changes
+                        .insert(id.clone(), (count, std::time::Instant::now()));
+                }
+                super::super::activate::delete_worktree(&mut app, &id);
+                match app.overlay {
+                    Some(Overlay::Confirm(c)) => c.message,
+                    other => panic!("expected the worktree's confirm, got {other:?}"),
+                }
+            };
+            let dirty = message(Some(Some(3)));
+            assert!(
+                dirty.contains("3 uncommitted or untracked file(s)"),
+                "{dirty}"
+            );
+            for quiet in [message(Some(Some(0))), message(Some(None)), message(None)] {
+                assert!(!quiet.contains("uncommitted"), "{quiet}");
+            }
+
+            let mut app = with_empty_band();
+            app.worktree_changes.insert(
+                WorktreeId("w3".into()),
+                (Some(3), std::time::Instant::now()),
+            );
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+            let sent = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                sent.iter()
+                    .any(|r| matches!(r, ClientRequest::DeleteWorktree { force: false, .. })),
+                "unforced: {sent:?}"
+            );
+        });
+    }
+
     /// [`with_empty_band`] with `idle`'s branch on a pull request git
     /// detected: still no cards on its band, but the checkout's rows now
     /// hold the pull request's link row, and the cursor rests on it.
