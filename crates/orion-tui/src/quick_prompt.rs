@@ -765,7 +765,8 @@ impl QuickLaunch {
 /// but it still needs a checkout to run in, so a PROJECT with no worktree
 /// selected opens nothing.
 ///
-/// The one exception is the WORKTREES PANEL: `p` there means "a fresh
+/// The one exception is the WORKTREES PANEL — and everywhere, with the
+/// QUICK PROMPT NEW WORKTREE SETTING on: `p` there means "a fresh
 /// worktree, then this task in it", whatever checkout the cursor is
 /// parked on (the root, another checkout) — the checkout does not exist
 /// yet, so only the PROJECT has to be selected. Its branch is the same
@@ -792,7 +793,9 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
         crate::issues::open_prompt_for_row(app);
         return;
     }
-    if app.focus == Focus::Worktrees {
+    // The WORKTREES PANEL, and anywhere with the QUICK PROMPT NEW
+    // WORKTREE SETTING on: a fresh worktree of the selected project.
+    if app.focus == Focus::Worktrees || Config::load().quick_prompt_new_worktree {
         let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
             return;
         };

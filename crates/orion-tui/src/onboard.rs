@@ -2260,8 +2260,9 @@ mod tests {
 
     /// The Worktrees page mirrors Settings → General's rows — the base
     /// branch and linking `.env` files — and says where a fresh worktree
-    /// comes from: the box's own toggle is gone, and the retired
-    /// `quick_prompt_new_worktree` is neither shown nor flipped here.
+    /// comes from: the box's own toggle is gone, and
+    /// `quick_prompt_new_worktree` is the Agents tab's, neither shown nor
+    /// flipped here.
     #[test]
     fn the_worktrees_page_offers_its_settings_and_points_at_the_picker() {
         with_temp_config(|| {
@@ -2296,7 +2297,7 @@ mod tests {
             assert!(!cfg.link_env_files, "row 1 is the .env link");
             assert!(
                 !cfg.quick_prompt_new_worktree,
-                "the retired key is left alone"
+                "the Agents tab's key is left alone"
             );
             press(&mut app, KeyCode::Up);
             press(&mut app, KeyCode::Enter);

@@ -486,6 +486,12 @@ pub const AGENTS_HEAD: &[SettingSpec] = &[
         group: "Quick prompt",
     },
     SettingSpec {
+        kind: SettingKind::QuickPromptNewWorktree,
+        label: "New worktree",
+        hint: "A new agent's box starts on a fresh worktree (off = the checkout under the cursor); {select_launch_worktree} picks another for one box",
+        group: "Quick prompt",
+    },
+    SettingSpec {
         kind: SettingKind::HideUninstalledHarnesses,
         label: "Hide missing CLIs",
         hint: "List only harnesses found on PATH when you start an agent (daemon still checks at launch)",
@@ -552,6 +558,7 @@ pub enum SettingKind {
     QuickPromptKind,
     QuickPromptFocus,
     FollowNewSession,
+    QuickPromptNewWorktree,
     RunCommand,
     OpenCommand,
     RememberHarness,
@@ -698,6 +705,7 @@ impl SettingKind {
             | SettingKind::LinearTest
             | SettingKind::OutsideEditor => (2026, 10, 3),
             SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => (2026, 10, 5),
+            SettingKind::QuickPromptNewWorktree => (2026, 10, 9),
             SettingKind::DiffTreeView
             | SettingKind::DiffStart
             | SettingKind::DiffTicked
@@ -1895,14 +1903,14 @@ pub struct Config {
     /// outranks it — a launch that enters the new session's pane has to
     /// go there.
     pub follow_new_session: bool,
-    /// RETIRED with the box's `[ ] new worktree` toggle. Through 0.42 the
-    /// **New worktree** SETTING (Settings → Agents, and the onboarding
-    /// wizard's Worktrees page) started every QUICK PROMPT aimed at a
-    /// fresh worktree. Every box starts in the checkout under the grid's
-    /// cursor now, and a fresh one is the WORKTREE PICKER's first row
-    /// (`⌘.` / `^T`), so no tab shows the row and nothing reads it. Still
-    /// loaded and written back as stored, so an older build sharing the
-    /// file keeps the choice its user made.
+    /// QUICK PROMPT NEW WORKTREE: every box a plain launch opens (`p`,
+    /// `n`) starts aimed at a fresh worktree of its project rather than
+    /// the checkout under the grid's cursor. The WORKTREE PICKER (`⌘.` /
+    /// `^T`) still re-aims one box either way. A PR SESSION's and an
+    /// ISSUE's box keep their own checkouts. Off by default. Retired in
+    /// 1.0 with the box's `[ ] new worktree` toggle and back as a row on
+    /// the Agents tab under the same key, so a choice an older build
+    /// stored still holds.
     pub quick_prompt_new_worktree: bool,
     /// Hotkey overrides, keyed by `keymap::ActionSpec::id`; the value is a
     /// comma-separated chord list (`"j, down"`), and an empty string means
@@ -3456,6 +3464,7 @@ impl Config {
             },
             SettingKind::QuickPromptFocus => on_off(self.quick_prompt_focus).into(),
             SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
+            SettingKind::QuickPromptNewWorktree => on_off(self.quick_prompt_new_worktree).into(),
         }
     }
 
@@ -3668,6 +3677,9 @@ impl Config {
             }
             SettingKind::FollowNewSession => {
                 self.follow_new_session = !self.follow_new_session;
+            }
+            SettingKind::QuickPromptNewWorktree => {
+                self.quick_prompt_new_worktree = !self.quick_prompt_new_worktree;
             }
         }
     }
@@ -5203,37 +5215,37 @@ mod tests {
         assert!(!legacy.hide_draft_prs);
     }
 
-    /// QUICK PROMPT NEW WORKTREE: retired with the box's toggle — a fresh
-    /// worktree is the WORKTREE PICKER's first row. The key an older build
-    /// wrote still loads to what it wrote and is written back as stored,
-    /// but no tab shows it any more.
+    /// QUICK PROMPT NEW WORKTREE starts off, sits under Follow new on the
+    /// Agents tab, toggles like any bool and persists under the key the
+    /// pre-1.0 row wrote, so a choice an older build stored still holds.
     #[test]
-    fn quick_prompt_new_worktree_is_retired_but_still_round_trips() {
-        assert!(
-            !Config::default().quick_prompt_new_worktree,
-            "the default an older build reads"
-        );
-        let cfg: Config = serde_json::from_str(r#"{"quick_prompt_new_worktree": true}"#).unwrap();
-        assert!(
-            cfg.quick_prompt_new_worktree,
-            "loaded to what an older build wrote"
-        );
+    fn quick_prompt_new_worktree_is_off_by_default_on_the_agents_tab_and_persists() {
+        let mut cfg = Config::default();
+        assert!(!cfg.quick_prompt_new_worktree, "a box starts in a checkout");
+        assert_eq!(cfg.value_label(SettingKind::QuickPromptNewWorktree), "off");
+        let (tab, row) = locate(SettingKind::QuickPromptNewWorktree).unwrap();
+        assert_eq!(SETTINGS_TABS[tab].title, "Agents");
+        assert_eq!(locate(SettingKind::FollowNewSession), Some((tab, row - 1)));
+
+        cfg.cycle(tab, row, 0);
+        assert!(cfg.quick_prompt_new_worktree);
+        assert_eq!(cfg.value_label(SettingKind::QuickPromptNewWorktree), "on");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         cfg.save_to(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains(r#""quick_prompt_new_worktree": true"#),
+            "{raw}"
+        );
         assert!(
             load_from(&path).quick_prompt_new_worktree,
-            "written back as stored"
+            "on survives a save"
         );
 
-        assert!(
-            SETTINGS_TABS.iter().all(|t| match t.body {
-                TabBody::Values(rows) => rows.iter().all(|r| r.label != "New worktree"),
-                _ => true,
-            }) && AGENTS_HEAD.iter().all(|r| r.label != "New worktree"),
-            "no tab shows the row"
-        );
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.quick_prompt_new_worktree, "a missing key reads as off");
     }
 
     /// CARD PROMPT: retired with every card carrying its last prompt. The
@@ -6798,6 +6810,7 @@ mod tests {
                             "Agent".to_string(),
                             "Focus".to_string(),
                             "Follow new".to_string(),
+                            "New worktree".to_string(),
                             "Hide missing CLIs".to_string()
                         ]
                     ),

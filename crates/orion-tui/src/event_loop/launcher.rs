@@ -74,7 +74,8 @@ pub(super) fn open_new_session(app: &mut App) {
 }
 
 /// The launch a box opened from the grid starts from: the Settings →
-/// Agents harness, aimed as [`open_box`] says. None when there is no
+/// Agents harness, aimed as [`open_box`] says — or at a fresh worktree
+/// with the QUICK PROMPT NEW WORKTREE SETTING on. None when there is no
 /// project to aim at.
 fn box_launch(app: &mut App) -> Option<QuickLaunch> {
     let project = app.selected_project().map(|p| p.id.clone()).or_else(|| {
@@ -85,7 +86,7 @@ fn box_launch(app: &mut App) -> Option<QuickLaunch> {
     });
     let project = project?;
     let cfg = crate::config::Config::load();
-    let target = view::target_for(app, &project, false);
+    let target = view::target_for(app, &project, cfg.quick_prompt_new_worktree);
     Some(QuickLaunch::from_config(target, &cfg))
 }
 
@@ -2739,9 +2740,12 @@ fn show_worktree_picker(app: &mut App, back: QuickReturn, keep: Option<PickerKee
     if !menu.set_filter(&query) {
         menu.set_filter("");
     }
-    if let Some(at) = hovered.and_then(|label| menu.items.iter().position(|i| i.label == label)) {
-        menu.hover = at;
-    }
+    // A fresh picker starts on `+ new worktree`, not the ✓: the box is
+    // already in its checkout, so ⌘. is nearly always reached for a new
+    // one, and Enter takes it. A rebuild keeps the row it was on.
+    menu.hover = hovered
+        .and_then(|label| menu.items.iter().position(|i| i.label == label))
+        .unwrap_or(0);
     app.overlay = Some(Overlay::Menu(menu));
 }
 
@@ -5452,7 +5456,7 @@ mod tests {
             assert!(rows[0].starts_with("+ new worktree  "), "{rows:?}");
             assert!(!rows[0].ends_with(" ✓"), "{rows:?}");
             assert_eq!(rows[1..], ["main  (root) ✓", "feat"], "{rows:?}");
-            assert_eq!(hover, 1, "the cursor starts on the ✓");
+            assert_eq!(hover, 0, "the cursor starts on the fresh worktree");
 
             // Over the box, which stays on screen behind it.
             let text = buffer_text(&draw_at(&mut app, 140, 40));
@@ -5486,7 +5490,8 @@ mod tests {
             // as it was.
             open_worktree_picker(&mut app);
             let (rows, hover) = picker_rows(&app);
-            assert_eq!(rows[hover], "feat ✓");
+            assert!(rows.iter().any(|r| r == "feat ✓"), "{rows:?}");
+            assert_eq!(hover, 0, "the cursor on the fresh worktree all the same");
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             let (kept, text) = launch(&app);
             assert_eq!(kept.target, after.target);
@@ -9331,34 +9336,37 @@ mod tests {
         });
     }
 
-    /// The retired `quick_prompt_new_worktree` SETTING an older build
-    /// wrote starts no box on a fresh worktree: every box starts in a
-    /// checkout of the project, a fresh worktree picked in the WORKTREE
-    /// PICKER is that box's alone, and the next box starts in a checkout
-    /// again.
+    /// The QUICK PROMPT NEW WORKTREE SETTING starts every box on a fresh
+    /// worktree of the selected project; a checkout picked in the WORKTREE
+    /// PICKER is that box's alone, and the next box starts fresh again.
     #[test]
-    fn the_retired_new_worktree_setting_starts_every_box_in_a_checkout() {
+    fn the_new_worktree_setting_starts_every_box_on_a_fresh_worktree() {
         with_config_json(r#"{"quick_prompt_new_worktree": true}"#, || {
             let mut app = two_sessions();
             draw(&mut app);
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
             let (launch, _) = launch(&app);
-            let QuickTarget::Worktree(worktree) = &launch.target else {
-                panic!("expected an existing checkout, got {:?}", launch.target);
+            let QuickTarget::NewWorktree { project, .. } = &launch.target else {
+                panic!("expected a fresh worktree, got {:?}", launch.target);
             };
-            let project = crate::launcher::project_of(&app, &launch.target);
-            assert_eq!(project, app.selected_project().map(|p| p.id.clone()));
-            assert!(app.tree.worktrees.iter().any(|w| &w.id == worktree));
+            assert_eq!(Some(project), app.selected_project().map(|p| &p.id));
 
-            pick_fresh_worktree(&mut app, &mut Vec::new());
-            assert!(self::launch(&app).0.is_new_worktree(), "this box's pick");
+            open_worktree_picker(&mut app);
+            let (rows, hover) = picker_rows(&app);
+            assert!(rows[0].ends_with(" ✓"), "the box is on it: {rows:?}");
+            assert_eq!(hover, 0);
+            click_picker_row(&mut app, "feat");
+            assert_eq!(
+                self::launch(&app).0.target,
+                QuickTarget::Worktree(WorktreeId("w2".into())),
+                "this box's pick"
+            );
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             app.quick_draft.clear();
             key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
-            let (launch, _) = self::launch(&app);
             assert!(
-                !launch.is_new_worktree(),
-                "the next box starts in a checkout"
+                self::launch(&app).0.is_new_worktree(),
+                "the next box starts fresh"
             );
         });
     }

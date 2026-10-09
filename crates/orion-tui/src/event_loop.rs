@@ -25823,19 +25823,16 @@ diff --git a/src/c.rs b/src/c.rs
     /// `+ new worktree`. The box comes back with its text.
     pub(super) fn pick_fresh_worktree(app: &mut App, out: &mut Vec<ClientRequest>) {
         press(app, KeyCode::Char('t'), KeyModifiers::CONTROL, out);
-        let hover = match &app.overlay {
+        match &app.overlay {
             Some(Overlay::Menu(menu)) if menu.is_launch_worktree_picker() => {
                 assert!(
                     menu.items[0].label.starts_with("+ new worktree"),
                     "the fresh worktree is the first row: {:?}",
                     menu.items[0].label
                 );
-                menu.hover
+                assert_eq!(menu.hover, 0, "and the picker starts on it");
             }
             other => panic!("^T should open the worktree picker, got {other:?}"),
-        };
-        for _ in 0..hover {
-            press(app, KeyCode::Up, KeyModifiers::NONE, out);
         }
         press(app, KeyCode::Enter, KeyModifiers::NONE, out);
     }
@@ -28837,10 +28834,10 @@ diff --git a/src/c.rs b/src/c.rs
                 "the old flat labels are gone:\n{text}"
             );
 
-            // Headers and blanks are not rows the cursor can land on: six ↓
-            // from the first row — the head's four, the CLAUDE ACCOUNTS
+            // Headers and blanks are not rows the cursor can land on: seven
+            // ↓ from the first row — the head's five, the CLAUDE ACCOUNTS
             // section's two — reach Claude's Enabled row, not a header.
-            for _ in 0..6 {
+            for _ in 0..7 {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             let (_, claude_enabled) = locate_agent("claude", HarnessField::Enabled).unwrap();
@@ -33859,8 +33856,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// The ISSUES MODAL's box lands on the project's ROOT BRANCH, whatever
-    /// card the cursor was on — the retired `quick_prompt_new_worktree`
-    /// SETTING an older build wrote changes nothing — and the WORKTREE
+    /// card the cursor was on — the QUICK PROMPT NEW WORKTREE SETTING
+    /// changes nothing, an issue's box keeps its own aim — and the WORKTREE
     /// PICKER's fresh worktree is named after the issue.
     #[test]
     fn the_issue_quick_prompt_starts_on_the_root_branch_or_a_fresh_worktree() {
