@@ -1,0 +1,25 @@
+crates/orion-tui/src/remote.rs
+  s_421f9707af290e::t_61d554d2ef0562 53
+crates/orion-tui/src/pr_actions.rs
+  s_421f9707af290e::t_f4e83e2478cb88 1734-1742,2972-3003,3008-3016
+  s_421f9707af290e::t_6cae6e26d972a8 721-727,3004-3007
+  s_421f9707af290e::t_90fce762ead5e3 630-633,646,648,658-659,667,669-674,712-717,719-720,728-736,2471-2472,3017
+  s_421f9707af290e::t_61d554d2ef0562 718
+  s_421f9707af290e::t_40f41e21a7b83c 737-738,3018
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c33b6b60d8e8ba30c5350d47ab2130d423a1d23e",
+  "prompts": {},
+  "sessions": {
+    "s_421f9707af290e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "66d0c4a6-2db0-4a50-865a-65a26559d06d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
