@@ -75,6 +75,11 @@ pub struct LinearIssue {
     pub status: String,
     #[serde(default)]
     pub status_type: String,
+    /// The state's place in its team's workflow (Linear's `position`,
+    /// scaled to an integer): what orders states of one type, so
+    /// In Progress sits above In Staging.
+    #[serde(default)]
+    pub status_order: i64,
     /// The team the issue belongs to: whose workflow states it can move
     /// to (`LinearList::states`).
     #[serde(default)]
@@ -2042,8 +2047,9 @@ fn filtered(query: &str, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
     );
     rows.sort_by(|(a, _), (b, _)| {
         let (a, b) = (&list[*a], &list[*b]);
-        status_rank(&a.status_type)
-            .cmp(&status_rank(&b.status_type))
+        status_rank(a)
+            .cmp(&status_rank(b))
+            .then_with(|| a.status_order.cmp(&b.status_order))
             .then_with(|| a.status.cmp(&b.status))
     });
     rows
@@ -2849,7 +2855,7 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 /// requests attached to it for the work column — the same fields whoever's
 /// issues are asked for.
 const ISSUE_FIELDS: &str = "id identifier title url description priority createdAt updatedAt \
-    state { name type color } labels { nodes { name color } } project { name color } \
+    state { name type color position } labels { nodes { name color } } project { name color } \
     assignee { displayName } \
     team { id states { nodes { id name type position color } } } \
     attachments(first: 10) { nodes { url metadata } }";
@@ -3370,8 +3376,8 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
 }
 
 /// The issues of both lists, in the order the LINEAR VIEW's sections go:
-/// by where their state stands (started, not yet, the backlog, the
-/// rest), the state's name, then priority — urgent first, none last —
+/// by where their state stands (triage, todo, the backlog, started,
+/// done, duplicate, cancelled), the state's place in its workflow, its name, then priority — urgent first, none last —
 /// and the most recently touched first.
 fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
     if let Some(err) = graphql_error(json) {
@@ -3390,8 +3396,9 @@ fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
         })
         .collect();
     issues.sort_by(|a, b| {
-        status_rank(&a.status_type)
-            .cmp(&status_rank(&b.status_type))
+        status_rank(a)
+            .cmp(&status_rank(b))
+            .then_with(|| a.status_order.cmp(&b.status_order))
             .then_with(|| a.status.cmp(&b.status))
             .then_with(|| priority_rank(a.priority).cmp(&priority_rank(b.priority)))
             .then_with(|| b.updated_at.cmp(&a.updated_at))
@@ -3469,6 +3476,10 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        status_order: value
+            .pointer("/state/position")
+            .and_then(|v| v.as_f64())
+            .map_or(0, |p| (p * 1000.0).round() as i64),
         team_id: value
             .pointer("/team/id")
             .and_then(|v| v.as_str())
@@ -3484,12 +3495,20 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
     })
 }
 
-fn status_rank(kind: &str) -> u8 {
-    match kind {
-        "started" => 0,
+fn status_rank(issue: &LinearIssue) -> u8 {
+    // Duplicate is a cancelled state to Linear, but reads as closed
+    // rather than dropped: before cancelled.
+    if issue.status.eq_ignore_ascii_case("duplicate") {
+        return 5;
+    }
+    match issue.status_type.as_str() {
+        "triage" => 0,
         "unstarted" => 1,
         "backlog" => 2,
-        _ => 3,
+        "started" => 3,
+        "completed" => 4,
+        "canceled" => 6,
+        _ => 7,
     }
 }
 
@@ -3699,6 +3718,7 @@ pub(crate) mod tests {
         LinearIssue {
             id: id.into(),
             identifier: ident.into(),
+            status_order: 0,
             title: title.into(),
             url: format!("https://linear.app/x/issue/{ident}"),
             description: String::new(),
@@ -4730,18 +4750,18 @@ pub(crate) mod tests {
         let ids: Vec<&str> = fetched.list.iter().map(|i| i.identifier.as_str()).collect();
         assert_eq!(
             ids,
-            ["ENG-3", "ENG-2", "ENG-1"],
-            "started first, then urgent before low"
+            ["ENG-2", "ENG-1", "ENG-3"],
+            "todo first, urgent before low, then started"
         );
-        let urgent = &fetched.list[1];
+        let urgent = &fetched.list[0];
         assert!(urgent.mine);
         assert_eq!(urgent.priority, 1);
         assert_eq!(urgent.labels.len(), 1, "a nameless label is dropped");
         assert_eq!(urgent.project.as_ref().unwrap().name, "Exports");
         assert_eq!(urgent.assignee, "me");
-        assert_eq!(fetched.list[2].state_color, "#26b5ce");
-        assert!(!fetched.list[0].mine);
-        assert_eq!(fetched.list[0].assignee, "");
+        assert_eq!(fetched.list[1].state_color, "#26b5ce");
+        assert!(!fetched.list[2].mine);
+        assert_eq!(fetched.list[2].assignee, "");
         // An answer with neither list is a miss.
         assert!(parse_lists(&serde_json::json!({"data": {}})).is_err());
     }
@@ -4794,20 +4814,20 @@ pub(crate) mod tests {
                 .find(needle)
                 .unwrap_or_else(|| panic!("{needle} missing from\n{screen}"))
         };
-        assert!(at("IN PROGRESS 1") < at("ENG-1 Started one"), "{screen}");
-        assert!(at("ENG-1 Started one") < at("TODO 2"), "{screen}");
         assert!(at("TODO 2") < at("ENG-2 Todo one"), "{screen}");
+        assert!(at("ENG-3 Todo two") < at("IN PROGRESS 1"), "{screen}");
+        assert!(at("IN PROGRESS 1") < at("ENG-1 Started one"), "{screen}");
         assert!(screen.contains("◑ H ENG-1 Started one"), "{screen}");
         assert!(screen.contains("○ U ENG-2 Todo one"), "{screen}");
         assert!(screen.contains("○ · ENG-3 Todo two"), "{screen}");
         assert!(!screen.contains("Their bug"), "{screen}");
 
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
-        // The first ↓ takes the keys off the search line, the second moves.
+        // The first ↓ takes the keys off the search line, then ↑ moves.
         handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut Vec::new());
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
-        handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut Vec::new());
-        assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
+        handle_key(&mut app, KeyEvent::from(KeyCode::Up), &mut Vec::new());
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-3"));
 
         let shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
         handle_key(&mut app, shift_right, &mut Vec::new());
@@ -4830,7 +4850,7 @@ pub(crate) mod tests {
         };
         handle_mouse(&mut app, click, at, &mut Vec::new());
         assert_eq!(the_view(&app).tab, LinearTab::Mine);
-        assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
     }
 
     /// Tokens narrow by status, priority, label, project and assignee —
@@ -4861,14 +4881,14 @@ pub(crate) mod tests {
         assert_eq!(shown(LinearTab::Mine, "p:high"), ["ENG-1"]);
         assert_eq!(
             shown(LinearTab::Mine, "p:urgent p:high"),
-            ["ENG-1", "ENG-2"]
+            ["ENG-2", "ENG-1"]
         );
         assert_eq!(shown(LinearTab::Mine, "p:none"), ["ENG-3"]);
         assert_eq!(shown(LinearTab::Mine, "status:todo label:bug"), ["ENG-3"]);
         assert_eq!(shown(LinearTab::Mine, "status:in-progress"), ["ENG-1"]);
         assert_eq!(
             shown(LinearTab::Mine, "label:export -label:bug"),
-            ["ENG-1", "ENG-2"]
+            ["ENG-2", "ENG-1"]
         );
         assert_eq!(shown(LinearTab::Others, "assignee:sam p:high"), ["ENG-4"]);
         assert_eq!(shown(LinearTab::Mine, "two"), ["ENG-3"]);
