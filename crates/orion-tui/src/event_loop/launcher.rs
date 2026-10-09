@@ -5227,9 +5227,8 @@ mod tests {
         });
     }
 
-    /// Enter sends what was typed down that session's PTY as its next turn
-    /// — the text, then the carriage return, two Inputs so the child reads
-    /// the prompt before the Enter — and the box closes onto the grid.
+    /// Enter sends what was typed to that session as its next turn and the
+    /// box closes onto the grid.
     #[test]
     fn the_modal_sends_the_turn_and_closes() {
         with_default_config(|| {
@@ -5242,9 +5241,9 @@ mod tests {
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
             assert_eq!(
-                inputs_to(&out, &id),
-                vec![b"rebase onto main".to_vec(), b"\r".to_vec()],
-                "the prompt, then the Enter that submits it: {out:?}"
+                turns_to(&out, &id),
+                vec!["rebase onto main".to_string()],
+                "{out:?}"
             );
             assert!(app.overlay.is_none(), "the box closed: {:?}", app.overlay);
             assert_eq!(app.flash, None, "the turn in the pane says it went");
@@ -5274,8 +5273,8 @@ mod tests {
                 type_text(&mut app, turn);
                 let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
                 assert_eq!(
-                    inputs_to(&out, &id),
-                    vec![turn.as_bytes().to_vec(), b"\r".to_vec()],
+                    turns_to(&out, &id),
+                    vec![turn.to_string()],
                     "{turn} went to the card it was typed on"
                 );
                 assert!(
@@ -5304,7 +5303,8 @@ mod tests {
             let out = key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(app.overlay.is_none(), "the box closed");
             assert!(
-                !out.iter().any(|r| matches!(r, ClientRequest::Input { .. })),
+                !out.iter()
+                    .any(|r| matches!(r, ClientRequest::SendTurn { .. })),
                 "nothing was sent: {out:?}"
             );
             assert_eq!(
@@ -5364,15 +5364,11 @@ mod tests {
         });
     }
 
-    /// The Inputs `out` carries for session `id`, in order.
-    fn inputs_to(out: &[ClientRequest], id: &AgentId) -> Vec<Vec<u8>> {
+    /// The follow-up turns `out` sends session `id`, in order.
+    fn turns_to(out: &[ClientRequest], id: &AgentId) -> Vec<String> {
         out.iter()
             .filter_map(|r| match r {
-                ClientRequest::Input { session, data }
-                    if session == &SessionRef::Agent(id.clone()) =>
-                {
-                    Some(data.clone())
-                }
+                ClientRequest::SendTurn { id: to, text, .. } if to == id => Some(text.clone()),
                 _ => None,
             })
             .collect()

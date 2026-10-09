@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 48;
+pub const PROTOCOL_VERSION: u32 = 49;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -318,6 +318,19 @@ pub enum ClientRequest {
         req_id: u64,
         id: AgentId,
         message: String,
+    },
+    /// `text` as a local agent's next turn: typed down its PTY and
+    /// submitted when its CLI is up; otherwise the CLI is booted (resuming
+    /// the stored session) with `text` as the first prompt it submits on
+    /// its own, at `cols`×`rows`. Either way the turn is sent — a session
+    /// the IDLE REAPER put down never swallows it. Refused for archived and
+    /// Cloud rows. Answered with `Ack`.
+    SendTurn {
+        req_id: u64,
+        id: AgentId,
+        text: String,
+        cols: u16,
+        rows: u16,
     },
     CreateTerminal {
         req_id: u64,

@@ -3671,20 +3671,6 @@ fn follow_up_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) -> 
 
 /// Enter in the composer: what it holds goes to the agent as its next turn
 /// and the card folds back up.
-///
-/// The text crosses as a BRACKETED PASTE when it has line breaks — the
-/// CLI (claude, codex…) then takes it as one block instead of auto-indenting
-/// it into mush — and as plain bytes when it is the one line it usually is,
-/// which keeps it out of the "[Pasted text]" placeholder those CLIs fold a
-/// paste into. The carriage return that submits it is a second `Input` of
-/// its own, so the child's read of the prompt and its read of the Enter are
-/// two reads and it has the prompt in hand before the Enter arrives.
-///
-/// A session with no live PTY behind it — reaped by the IDLE REAPER, or
-/// cold since the daemon started — is booted first and the box kept as it
-/// is: the daemon drops `Input` for a session it has not spawned, and the
-/// CLI that boot starts is seconds from reading anything, so the prompt
-/// would be typed into a process that never saw it.
 fn send_follow_up(app: &mut App, out: &mut Vec<ClientRequest>) {
     let Some(follow_up) = &app.follow_up else {
         return;
@@ -3694,71 +3680,60 @@ fn send_follow_up(app: &mut App, out: &mut Vec<ClientRequest>) {
     if text.is_empty() {
         return;
     }
+    app.follow_up = None;
     // The pane goes to the session being prompted: the answer is about to
     // land there, and the user asked for it by name. (The LAUNCHER VIEW's
-    // modal deliberately does not — see `send_turn`.)
-    if app.tree.agents.iter().any(|a| a.id == id && a.alive) {
-        attach_now(app, SessionRef::Agent(id.clone()), out);
-    }
-    if !matches!(send_turn(app, &id, &text, out), TurnSent::Booting) {
-        app.follow_up = None;
+    // modal deliberately does not — see `send_turn`.) After the send, so a
+    // stopped session is booted on the turn rather than bare by the Attach.
+    if send_turn(app, &id, text, false, out) {
+        attach_now(app, SessionRef::Agent(id), out);
     }
     app.dirty = true;
 }
 
-/// What one follow-up send did.
-enum TurnSent {
-    /// The prompt and its Enter are on their way down the PTY.
-    Sent,
-    /// The session's CLI was not up, so the daemon was told to start it
-    /// and nothing was sent: the box stays as it is.
-    Booting,
-    /// The row went away under the box — deleted, or the daemon lost it.
-    Gone,
-}
-
-/// `text` to `id` as that agent's next turn, straight down its PTY — the
-/// one send behind both composers, the card's box and the LAUNCHER VIEW's
-/// modal.
+/// `text` to `id` as that agent's next turn — the one send behind both
+/// composers, the card's box and the LAUNCHER VIEW's modal (`modal`).
 ///
-/// The text crosses as a BRACKETED PASTE when it has line breaks — the
-/// CLI (claude, codex…) then takes it as one block instead of auto-indenting
-/// it into mush — and as plain bytes when it is the one line it usually is,
-/// which keeps it out of the "[Pasted text]" placeholder those CLIs fold a
-/// paste into. The carriage return that submits it is a second `Input` of
-/// its own, so the child's read of the prompt and its read of the Enter are
-/// two reads and it has the prompt in hand before the Enter arrives.
-///
-/// It attaches only when it has to: a session with no live PTY behind it —
-/// reaped by the IDLE REAPER, or cold since the daemon started — is booted
-/// first and nothing sent, since the daemon drops `Input` for a session it
-/// has not spawned and the CLI that boot starts is seconds from reading
-/// anything. A live one is written to where it stands, so prompting a card
-/// need not disturb what the pane is showing.
-fn send_turn(app: &mut App, id: &AgentId, text: &str, out: &mut Vec<ClientRequest>) -> TurnSent {
-    let Some(agent) = app.tree.agents.iter().find(|a| &a.id == id).cloned() else {
-        return TurnSent::Gone;
+/// The daemon types it down the PTY and submits it when the CLI is up,
+/// and otherwise boots the session with it as the first prompt
+/// (`ClientRequest::SendTurn`): a session the IDLE REAPER put down, or
+/// cold since the daemon started, still gets the turn. Nothing attaches,
+/// so prompting a card need not disturb what the pane is showing. False
+/// when the row went away under the box.
+fn send_turn(
+    app: &mut App,
+    id: &AgentId,
+    text: String,
+    modal: bool,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    let Some(booting) = app
+        .tree
+        .agents
+        .iter()
+        .find(|a| &a.id == id)
+        .map(|a| !a.alive)
+    else {
+        return false;
     };
     let sref = SessionRef::Agent(id.clone());
-    if !agent.alive {
-        attach_now(app, sref, out);
-        return TurnSent::Booting;
-    }
-    let data = if text.contains('\n') {
-        bracketed(text)
-    } else {
-        text.as_bytes().to_vec()
-    };
-    out.push(ClientRequest::Input {
-        session: sref.clone(),
-        data,
-    });
     typed_into(app, &sref);
-    out.push(ClientRequest::Input {
-        session: sref,
-        data: b"\r".to_vec(),
+    let (cols, rows) = pane_size(app);
+    let intent = PendingIntent::SendTurn {
+        id: id.clone(),
+        text: text.clone(),
+        booting,
+        modal,
+    };
+    let id = id.clone();
+    send_with(app, out, intent, |req_id| ClientRequest::SendTurn {
+        req_id,
+        id,
+        text,
+        cols,
+        rows,
     });
-    TurnSent::Sent
+    true
 }
 
 /// A key, a paste or a turn is going down `session`'s PTY: that is work in
@@ -3785,7 +3760,7 @@ fn worked_in(app: &mut App, worktree: &WorktreeId) {
 
 /// The LAUNCHER VIEW's FOLLOW-UP MODAL for `id`, carrying `text`: opened
 /// empty by Space on a card, and put back with what was typed when the
-/// session had to be started first.
+/// send was refused.
 pub(crate) fn open_follow_up(app: &mut App, id: AgentId, text: String) {
     open_prompt(app, PromptKind::FollowUp { id });
     if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
@@ -9417,9 +9392,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         // is not swapped, not unfolded and not focused, so one card after
         // another can be prompted without ever stepping into a session.
         PromptKind::FollowUp { id } => {
-            if matches!(send_turn(app, &id, &value, out), TurnSent::Booting) {
-                open_follow_up(app, id, value);
-            }
+            send_turn(app, &id, value, true, out);
         }
         PromptKind::RenameAgent { id } => optimistic::rename_agent(app, id, value, out),
         PromptKind::RenameTerminal { id } => optimistic::rename_terminal(app, id, value, out),
@@ -13261,6 +13234,20 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 (Some(PendingIntent::ReopenPromptOnError { note, .. }), _) => {
                     app.flash = Some(crate::flash::Flash::failed(note));
                 }
+                (Some(PendingIntent::SendTurn { id, booting, .. }), _) => {
+                    let name = app
+                        .tree
+                        .agents
+                        .iter()
+                        .find(|a| a.id == id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| "the session".into());
+                    let note = match booting {
+                        true => format!("{name} was stopped — started it with your follow-up"),
+                        false => format!("follow-up sent to {name}"),
+                    };
+                    app.flash = Some(crate::flash::Flash::done(note));
+                }
                 (Some(PendingIntent::SelectCreatedProject), Some(EntityId::Project(id))) => {
                     // Its upsert usually lands just before this Ack; if not,
                     // stash the id and select once it does.
@@ -13465,6 +13452,20 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 Some(PendingIntent::ReopenPromptOnError { kind, text, .. }) => {
                     reopen_prompt_with(app, kind, text);
                 }
+                // A refused follow-up comes back to the box it was typed in.
+                Some(PendingIntent::SendTurn {
+                    id, text, modal, ..
+                }) => match modal {
+                    true => open_follow_up(app, id, text),
+                    false => {
+                        if app.follow_up.is_none() {
+                            app.follow_up = Some(crate::app::FollowUp {
+                                agent: id,
+                                input: crate::text_input::TextInput::multiline_with_text(text),
+                            });
+                        }
+                    }
+                },
                 // The worktree the QUICK PROMPT wanted to cut first was
                 // refused (a fetch that failed, a branch that exists):
                 // both stand-in rows go, and the box comes back, its
@@ -37448,10 +37449,18 @@ diff --git a/src/c.rs b/src/c.rs
         }
     }
 
-    /// A turn with line breaks in it crosses as a BRACKETED PASTE, so the
-    /// CLI takes it as one block instead of auto-indenting it to mush.
+    /// What `out` sent as a follow-up turn.
+    fn turn_sent(out: &[ClientRequest]) -> Option<String> {
+        out.iter().find_map(|r| match r {
+            ClientRequest::SendTurn { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    /// A turn with line breaks in it goes to the daemon whole — which
+    /// pastes it bracketed, so the CLI takes it as one block.
     #[test]
-    fn a_multi_line_turn_goes_as_a_bracketed_paste() {
+    fn a_multi_line_turn_goes_whole() {
         let mut app = follow_up_app();
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
@@ -37463,21 +37472,18 @@ diff --git a/src/c.rs b/src/c.rs
         out.clear();
 
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let sent = out
-            .iter()
-            .find_map(|r| match r {
-                ClientRequest::Input { data, .. } if data != b"\r" => Some(data.clone()),
-                _ => None,
-            })
-            .expect("the turn was sent");
-        assert_eq!(sent, bracketed("a\nb"));
+        assert_eq!(turn_sent(&out).as_deref(), Some("a\nb"));
+        assert!(
+            !out.iter().any(|r| matches!(r, ClientRequest::Input { .. })),
+            "the daemon types it, not the client: {out:?}"
+        );
     }
 
-    /// A session with no live PTY is booted first and the box kept as it
-    /// is: the daemon drops Input for a session it has not spawned, and
-    /// the CLI that attach starts is seconds from reading anything.
+    /// A session the IDLE REAPER put down still gets its turn — the daemon
+    /// boots it on it — and the box closes: nothing is left waiting for a
+    /// second Enter.
     #[test]
-    fn a_cold_session_is_booted_instead_of_typed_at() {
+    fn a_stopped_session_is_sent_its_turn_too() {
         let mut app = follow_up_app();
         app.tree.agents[0].alive = false;
         let mut out = Vec::new();
@@ -37486,21 +37492,37 @@ diff --git a/src/c.rs b/src/c.rs
         out.clear();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
 
-        assert_eq!(
-            follow_up_text(&app).as_deref(),
-            Some("x"),
-            "the box and what is in it stay"
+        assert_eq!(turn_sent(&out).as_deref(), Some("x"));
+        assert_eq!(follow_up_text(&app), None, "the box closed");
+    }
+
+    /// A refused turn comes back to the box, so it is never retyped.
+    #[test]
+    fn a_refused_turn_comes_back_to_the_box() {
+        let mut app = follow_up_app();
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut out);
+        out.clear();
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let req_id = out
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::SendTurn { req_id, .. } => Some(*req_id),
+                _ => None,
+            })
+            .expect("the turn was sent");
+        assert_eq!(follow_up_text(&app), None);
+
+        handle_server_event(
+            &mut app,
+            ServerEvent::Error {
+                req_id: Some(req_id),
+                message: "agent is archived — unarchive it first".into(),
+            },
+            &mut out,
         );
-        assert!(
-            !out.iter().any(|r| matches!(r, ClientRequest::Input { .. })),
-            "nothing was typed into a session that is not up: {out:?}"
-        );
-        assert!(
-            out.iter()
-                .any(|r| matches!(r, ClientRequest::Attach { .. })),
-            "it was booted: {out:?}"
-        );
-        assert_eq!(app.flash, None, "the box still holding the text says it");
+        assert_eq!(follow_up_text(&app).as_deref(), Some("x"));
     }
 
     /// The FOLLOW-UP box is a modal over the grid, so Esc is the way out
@@ -37558,14 +37580,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         out.clear();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let sent = out
-            .iter()
-            .find_map(|r| match r {
-                ClientRequest::Input { data, .. } if data != b"\r" => Some(data.clone()),
-                _ => None,
-            })
-            .expect("the turn was sent");
-        assert_eq!(String::from_utf8(sent).unwrap(), text);
+        assert_eq!(turn_sent(&out), Some(text));
     }
 
     /// Without an ATTACHMENTS DIR (every other unit test) a drop is pasted

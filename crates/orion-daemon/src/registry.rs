@@ -2377,30 +2377,7 @@ impl Daemon {
             return Ok(s);
         }
         match sref {
-            SessionRef::Agent(id) => {
-                let agent = self.store.get_agent(id)?.context("agent not found")?;
-                if agent.archived {
-                    bail!("agent is archived — unarchive it first");
-                }
-                // A Cloud row's only PTY is the `claude --cloud <task>`
-                // create, gone seconds after it prints the session id. There
-                // is nothing to bring back: the agent runs in the cloud, and
-                // a spawn here would be a bare local CLI wearing its name.
-                if agent.cloud_session_id.is_some() {
-                    bail!("{CLOUD_ROW_NO_LOCAL_SESSION}");
-                }
-                let worktree = self
-                    .store
-                    .get_worktree(&agent.worktree_id)?
-                    .context("worktree not found")?;
-                let session = self.spawn_agent_session(&agent, &worktree, cols, rows)?;
-                let mut broadcast_agent = agent;
-                broadcast_agent.alive = true;
-                self.broadcast(ServerEvent::EntityUpserted {
-                    entity: Entity::Agent(broadcast_agent),
-                });
-                Ok(session)
-            }
+            SessionRef::Agent(id) => self.boot_agent(id, cols, rows, None),
             SessionRef::Terminal(id) => {
                 let term = self.store.get_terminal(id)?.context("terminal not found")?;
                 // A RUN TERMINAL is only ever started by `r`: an attach, or
@@ -2426,6 +2403,93 @@ impl Daemon {
                 Ok(session)
             }
         }
+    }
+
+    /// Start agent `id`'s CLI — resuming its stored session — with
+    /// `initial_prompt` as a first turn it submits on its own. The caller
+    /// holds `spawn_gate` and has seen no live session.
+    fn boot_agent(
+        self: &Arc<Self>,
+        id: &AgentId,
+        cols: u16,
+        rows: u16,
+        initial_prompt: Option<&str>,
+    ) -> Result<Arc<PtySession>> {
+        let agent = self.store.get_agent(id)?.context("agent not found")?;
+        if agent.archived {
+            bail!("agent is archived — unarchive it first");
+        }
+        // A Cloud row's only PTY is the `claude --cloud <task>`
+        // create, gone seconds after it prints the session id. There
+        // is nothing to bring back: the agent runs in the cloud, and
+        // a spawn here would be a bare local CLI wearing its name.
+        if agent.cloud_session_id.is_some() {
+            bail!("{CLOUD_ROW_NO_LOCAL_SESSION}");
+        }
+        let worktree = self
+            .store
+            .get_worktree(&agent.worktree_id)?
+            .context("worktree not found")?;
+        let session = self.spawn_agent_session_with(
+            &agent,
+            &worktree,
+            cols,
+            rows,
+            None,
+            initial_prompt,
+            orion_core::harness::AgentMode::Edit,
+        )?;
+        let mut broadcast_agent = agent;
+        broadcast_agent.alive = true;
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Agent(broadcast_agent),
+        });
+        Ok(session)
+    }
+
+    /// `text` as agent `id`'s next turn (`ClientRequest::SendTurn`). A live
+    /// CLI has it typed and submitted: the text, then the carriage return
+    /// as a write of its own, so the child reads the prompt before the
+    /// Enter — a BRACKETED PASTE when it has line breaks, so the CLI takes
+    /// it as one block, plain bytes otherwise, which keeps a one-liner out
+    /// of the "[Pasted text]" placeholder. A dead one — the IDLE REAPER's,
+    /// or cold since the daemon started — boots with `text` as its first
+    /// prompt, since a CLI still starting up drops what is typed at it.
+    pub fn send_turn(
+        self: &Arc<Self>,
+        id: &AgentId,
+        text: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        let sref = SessionRef::Agent(id.clone());
+        let live = match self.session(&sref) {
+            Some(session) => Some(session),
+            None => {
+                let _gate = self.spawn_gate.lock().unwrap();
+                match self.session(&sref) {
+                    Some(session) => Some(session),
+                    None => {
+                        tracing::info!(agent = %id, "booting a stopped session on its follow-up");
+                        self.boot_agent(id, cols, rows, Some(text))?;
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(session) = live {
+            let data = if text.contains('\n') {
+                let mut data = b"\x1b[200~".to_vec();
+                data.extend_from_slice(text.as_bytes());
+                data.extend_from_slice(b"\x1b[201~");
+                data
+            } else {
+                text.as_bytes().to_vec()
+            };
+            session.write_input(&data)?;
+            session.write_input(b"\r")?;
+        }
+        Ok(())
     }
 
     /// Boot every dead, non-archived session under `worktree_id` (agents and
@@ -5347,6 +5411,45 @@ mod tests {
         // An Attach that got there first is never doubled.
         assert!(!daemon.resume_interrupted_agent(&working).unwrap());
         daemon.kill_all();
+        drop(dir);
+    }
+
+    /// A follow-up always lands: a live CLI has it typed and submitted, and
+    /// one the IDLE REAPER put down is booted on it rather than left for a
+    /// second Enter. An archived row is refused, as its attach is.
+    #[tokio::test]
+    async fn a_turn_is_typed_into_a_live_session_and_boots_a_stopped_one() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        // `/bin/cat` stands in for the CLI: what is submitted comes back.
+        let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
+        seed_agent(&daemon, "follow", &worktree.id.0, Some("sid-1"));
+        let id = AgentId("follow".into());
+        let sref = SessionRef::Agent(id.clone());
+
+        daemon.send_turn(&id, "first turn", 80, 24).unwrap();
+        assert!(
+            daemon.is_alive(&sref),
+            "a stopped session is booted on its turn"
+        );
+
+        daemon.send_turn(&id, "second turn", 80, 24).unwrap();
+        let session = daemon.session(&sref).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // Typed (the tty's echo), then submitted (cat's line back).
+        while String::from_utf8_lossy(&session.snapshot(None).1)
+            .matches("second turn")
+            .count()
+            < 2
+        {
+            assert!(Instant::now() < deadline, "the turn never went in");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        daemon.kill_all();
+        daemon.store.set_agent_archived(&id, true).unwrap();
+        let err = daemon.send_turn(&id, "too late", 80, 24).unwrap_err();
+        assert!(err.to_string().contains("archived"), "{err}");
         drop(dir);
     }
 

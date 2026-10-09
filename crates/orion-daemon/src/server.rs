@@ -587,6 +587,18 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 ClientRequest::RestartAgent { req_id, id } => {
                     reply_done(&out_tx, req_id, daemon.restart_agent(&id).await).await;
                 }
+                // Inline, as Attach boots inline: an Attach the client sends
+                // right after finds the session this turn started.
+                ClientRequest::SendTurn {
+                    req_id,
+                    id,
+                    text,
+                    cols,
+                    rows,
+                } => {
+                    let result = daemon.send_turn(&id, &text, cols, rows);
+                    reply_done(&out_tx, req_id, result).await;
+                }
                 ClientRequest::ContinueAgentOn {
                     req_id,
                     id,

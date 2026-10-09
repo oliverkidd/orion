@@ -2593,6 +2593,16 @@ pub enum PendingIntent {
         text: String,
         note: String,
     },
+    /// A follow-up `text` sent to agent `id` (`ClientRequest::SendTurn`).
+    /// The Ack says it went — and, when the session was `booting`, that
+    /// it was started with it; an Error puts `text` back in the box it came
+    /// from, the LAUNCHER VIEW's modal when `modal`, else the card's.
+    SendTurn {
+        id: AgentId,
+        text: String,
+        booting: bool,
+        modal: bool,
+    },
     /// Select the added project and step into its Worktrees panel.
     SelectCreatedProject,
     /// The NEW WORKTREE modal's create. The stand-in row `placeholder`
