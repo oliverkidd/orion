@@ -1,0 +1,55 @@
+crates/orion-tui/src/linear.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 740-745,1172-1173,1808-1815,5930-5933,6734-6737,6840-6845,6886-6890,7004-7006,7038-7044,7064-7069
+docs/cubic-deferred/orion-tui.md
+  s_304bd358ac7b8e::t_d8b16011555f2d 11,15
+crates/orion-tui/src/commit_list.rs
+  s_304bd358ac7b8e::t_99b024f2d836fa 212,314-327,330-332
+crates/orion-tui/src/autofix.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 1704-1707
+crates/orion-tui/src/pull_request.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 1012-1016,1218-1221,2208-2212,2291-2295,2473-2477,2479-2483,2560-2564
+crates/orion-tui/src/pr_modal.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 815-817,2462-2463,3114-3117,3918-3919
+crates/orion-tui/src/pr_preview.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 531-534
+docs/sessions.md
+  s_304bd358ac7b8e::t_7f3d7d53e46f7f 663-674
+docs/how-it-works.md
+  s_304bd358ac7b8e::t_7f3d7d53e46f7f 413-415,432-442
+  s_304bd358ac7b8e::t_cba912f1a8995c 443
+crates/orion-tui/src/issues.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 2716-2720,2747-2751,2792-2800,2885-2889,2892-2896,2977-2978,3057-3058,3086-3094,3476-3480,3608-3612,3617-3619,3638-3641,3666-3669,3993-4000
+docs/2026-10-09-fetch-consistency/fetch-consistency.md
+  s_304bd358ac7b8e::t_bcd478812bca4c 3-21
+crates/orion-tui/src/event_loop.rs
+  s_304bd358ac7b8e::t_b07230dcef80d8 18484-18502,18507,18517-18525
+  s_304bd358ac7b8e::t_d8b16011555f2d 1385,1443,1564-1569,1689-1695,1798-1801,1907-1910,2190,7740-7742,16652-16653,17289,17489-17496,18503-18506,18508-18516,18766-18769,18780-18784,18858-18865,18883-18886,18918-18921,18938-18946,18950-18953,18958-18966,18969-18972,18974-18977,18979-18986,18988,19432-19433,26848-26851,26853-26856,26870-26873,34689-34702,35049-35062,41591
+  s_304bd358ac7b8e::t_c78a7ea07b3b9b 2093-2096
+  s_304bd358ac7b8e::t_a73bf22ca676d3 718,1527,1542-1545,1547-1552,18671
+crates/orion-tui/src/app.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 4358
+crates/orion-tui/src/pr_actions.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 968-972,1020
+crates/orion-tui/src/event_loop/optimistic.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 292-296,300-305,434,501-506
+crates/orion-tui/src/pr_cache.rs
+  s_304bd358ac7b8e::t_d8b16011555f2d 267-268,271-272,275-276
+docs/keys.md
+  s_304bd358ac7b8e::t_7f3d7d53e46f7f 258
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "122d5726ea443d3c23d8734960efd5dae8005fd4",
+  "prompts": {},
+  "sessions": {
+    "s_304bd358ac7b8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f5cf7681-7cb0-4464-9cf3-78f8f9afe257",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
