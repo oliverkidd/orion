@@ -50,7 +50,7 @@ fn remote_url(root: &Path, name: &str) -> Option<String> {
 
 /// `git -C root <args>`, stdout on success. A failing git (no remote by
 /// that name, not a repo) is `Err` carrying its own complaint.
-fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = crate::git_diff::git_command(root)
         .args(args)
         .output()

@@ -627,8 +627,10 @@ fn submit_create(app: &mut App) {
         Some(format!("#{number} is already open from {from}"))
     } else if form.ahead == Some(0) && form.fetching {
         Some("fetching origin to check — try again in a moment".into())
-    } else if form.ahead == Some(0) {
-        Some(format!("{from} has no commits that {into} doesn't"))
+    } else if form.ahead == Some(0) && !form.draft {
+        Some(format!(
+            "{from} has no commits that {into} doesn't — a draft can open on an empty one"
+        ))
     } else {
         None
     };
@@ -641,8 +643,9 @@ fn submit_create(app: &mut App) {
     form.saving = Some(format!("pushing {from} and opening the pull request…"));
     let (project, dir, ticket) = (form.project.clone(), form.dir.clone(), form.ticket);
     let (body, draft) = (form.body.as_str().to_string(), form.draft);
+    let empty = form.ahead == Some(0);
     tokio::spawn(async move {
-        let result = create(&dir, &from, &into, &title, &body, draft).await;
+        let result = create(&dir, &from, &into, &title, &body, draft, empty).await;
         let _ = tx.send(Answer::Created {
             project,
             ticket,
@@ -652,6 +655,8 @@ fn submit_create(app: &mut App) {
 }
 
 /// Push `from` to origin and open the pull request: its URL, or why not.
+/// `empty`, From has nothing Into lacks — which GitHub refuses, draft or
+/// not — so an empty commit titled as the pull request goes on it first.
 async fn create(
     dir: &Path,
     from: &str,
@@ -659,7 +664,14 @@ async fn create(
     title: &str,
     body: &str,
     draft: bool,
+    empty: bool,
 ) -> Result<String, String> {
+    if empty {
+        let (dir, from, title) = (dir.to_path_buf(), from.to_string(), title.to_string());
+        tokio::task::spawn_blocking(move || commit_empty(&dir, &from, &title))
+            .await
+            .map_err(|e| e.to_string())??;
+    }
     // Origin's copy already holding all of the local one, there is nothing
     // to push — and a push of a branch behind it would be refused.
     let carried = {
@@ -695,6 +707,33 @@ async fn create(
         .rfind(|line| line.starts_with("http"))
         .unwrap_or_default()
         .to_string())
+}
+
+/// An empty commit on the local branch `branch`, messaged `message`, made
+/// without the index or any worktree: one with the branch checked out and
+/// edits in it keeps them as they were. A branch only origin has gets its
+/// local copy here; a local copy behind origin's is not moved under
+/// whoever has it checked out.
+fn commit_empty(dir: &Path, branch: &str, message: &str) -> Result<(), String> {
+    let git = |args: &[&str]| crate::remote::run_git(dir, args).map(|out| out.trim().to_string());
+    let local = format!("refs/heads/{branch}");
+    let head = head_ref(dir, branch).ok_or_else(|| format!("git doesn't know {branch}"))?;
+    let old = git(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{local}^{{commit}}"),
+    ])
+    .ok();
+    let tip = git(&["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
+    if old.as_ref().is_some_and(|old| *old != tip) {
+        return Err(format!("{branch} is behind origin's — pull it first"));
+    }
+    let tree = format!("{tip}^{{tree}}");
+    let new = git(&["commit-tree", &tree, "-p", &tip, "-m", message])?;
+    // Only from where it was read: a commit landing meanwhile is not lost.
+    let was = old.unwrap_or_else(|| "0".repeat(tip.len()));
+    git(&["update-ref", &local, &new, &was]).map(|_| ())
 }
 
 /// `git push` of the local branch `branch` to the branch of that name on
@@ -1692,7 +1731,15 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             result,
         } => match result {
             Ok(url) => land_created(app, &project, ticket, url),
-            Err(why) => refused(app, ticket, why, "open the pull request"),
+            Err(why) => {
+                refused(app, ticket, why, "open the pull request");
+                // An empty commit may have gone on before the refusal:
+                // counted again, the next Enter doesn't add another.
+                if let Some(PrForm::Create(form)) = form_for(app, ticket) {
+                    form.filled_for = None;
+                    request_fill(app);
+                }
+            }
         },
         Answer::MergeOptions {
             ticket,
@@ -2421,6 +2468,8 @@ fn draw_create(f: &mut Frame, area: Rect, form: &CreateForm, focused: bool, th: 
         let noun = if ahead == 1 { "commit" } else { "commits" };
         let note = if into.is_empty() {
             format!("  {ahead} {noun}")
+        } else if ahead == 0 && form.draft {
+            format!("  0 commits not on {into} — opens on an empty one")
         } else {
             format!("  {ahead} {noun} not on {into}")
         };
@@ -2918,6 +2967,53 @@ mod tests {
         assert_eq!(head_ref(repo, "dev").as_deref(), Some("refs/heads/dev"));
         assert_eq!(read_commits(repo, "dev", "main").map(|f| f.ahead), Some(2));
         assert_eq!(head_ref(repo, "nope"), None);
+    }
+
+    /// A draft from a branch with nothing new starts on an empty commit,
+    /// the edits in its checkout left as they were; a local copy behind
+    /// origin's is refused rather than moved.
+    #[test]
+    fn an_empty_commit_leaves_the_checkout_alone() {
+        let git = |repo: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "Tess"]);
+        std::fs::write(repo.join("a.txt"), "one").unwrap();
+        git(repo, &["add", "a.txt"]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+        git(repo, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(repo.join("a.txt"), "two").unwrap();
+        std::fs::write(repo.join("b.txt"), "new").unwrap();
+        git(repo, &["add", "b.txt"]);
+        let before = git(repo, &["status", "--porcelain"]);
+        assert_eq!(read_commits(repo, "feat", "main").map(|f| f.ahead), Some(0));
+
+        commit_empty(repo, "feat", "Start feat").unwrap();
+        assert_eq!(read_commits(repo, "feat", "main").map(|f| f.ahead), Some(1));
+        assert_eq!(
+            git(repo, &["log", "-1", "--format=%s", "feat"]),
+            "Start feat"
+        );
+        assert_eq!(git(repo, &["status", "--porcelain"]), before);
+
+        git(repo, &["update-ref", "refs/remotes/origin/old", "main"]);
+        commit_empty(repo, "old", "Start old").unwrap();
+        assert_eq!(read_commits(repo, "old", "main").map(|f| f.ahead), Some(1));
+
+        git(repo, &["update-ref", "refs/remotes/origin/feat", "feat"]);
+        git(repo, &["update-ref", "refs/heads/feat", "main"]);
+        assert!(commit_empty(repo, "feat", "again").is_err());
     }
 
     #[test]
