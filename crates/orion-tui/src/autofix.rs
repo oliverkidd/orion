@@ -41,6 +41,7 @@ use crate::agent_presets::AgentPreset;
 use crate::app::{App, Overlay};
 use crate::flash::Flash;
 use crate::hints::Hint;
+use crate::pr_store::PrStatus;
 use crate::pull_request::{CheckState, Checks, OpenPr, PrCheck, PrDetail, PrLaunch};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -188,10 +189,12 @@ pub struct Diagnosis {
     pub running: bool,
 }
 
-/// Read a pull request's body for what is wrong with it.
-pub fn diagnose(detail: &PrDetail) -> Diagnosis {
+/// Read a pull request's body for what is wrong with it — its failed and
+/// running checks — with `conflicts` as `App::prs` says (the newest answer
+/// that knew; an unknown one reads as none).
+pub fn diagnose(detail: &PrDetail, conflicts: bool) -> Diagnosis {
     let mut out = Diagnosis {
-        conflicts: detail.health.conflicts,
+        conflicts,
         ..Diagnosis::default()
     };
     for check in &detail.checks {
@@ -291,17 +294,17 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    /// Whether this is the breakage `pr`'s row shows, as far as a row can
-    /// tell: the same head commit, the same conflicts, and — while its
-    /// checks fail — failed checks named. A row names no checks, so a
-    /// different set failing on the same commit is not told apart; a push,
-    /// conflicts coming or going, or checks failing after a conflicts-only
-    /// send are.
-    fn covers(&self, pr: &OpenPr) -> bool {
-        !pr.head_sha.is_empty()
-            && self.sha == pr.head_sha
-            && self.conflicts == pr.health.conflicts
-            && (pr.health.checks != Checks::Failing || !self.checks.is_empty())
+    /// Whether this is the breakage a pull request standing at `status`
+    /// (`App::prs`) shows, as far as a row can tell: the same head commit,
+    /// the same conflicts, and — while its checks fail — failed checks
+    /// named. A row names no checks, so a different set failing on the
+    /// same commit is not told apart; a push, conflicts coming or going, or
+    /// checks failing after a conflicts-only send are.
+    fn covers(&self, status: &PrStatus) -> bool {
+        !status.head_sha.is_empty()
+            && self.sha == status.head_sha
+            && self.conflicts == status.health.conflicts
+            && (status.health.checks != Checks::Failing || !self.checks.is_empty())
     }
 }
 
@@ -341,8 +344,11 @@ pub type RowState = (
     Option<crate::pull_request::CheckTally>,
 );
 
-fn row_state(pr: &OpenPr) -> RowState {
-    (pr.head_sha.clone(), pr.health, pr.meta.checks)
+/// `pr`'s [`RowState`]: the head commit and health as `App::prs` has
+/// them, the tally off the row's meta line.
+fn row_state(app: &App, pr: &OpenPr) -> RowState {
+    let status = app.prs.status_or_open(&pr.url);
+    (status.head_sha, status.health, pr.meta.checks)
 }
 
 /// The app's AUTOFIX state (`App::autofix`).
@@ -394,24 +400,28 @@ fn asking(app: &App, url: &str) -> bool {
 /// A project's open-PR list landed: watch each of the user's PRs in
 /// trouble that this breakage has not been handled for, read a watched
 /// one's body again now that its row moved, and forget the attempts — and
-/// any waiting ask — of each one that has gone green.
+/// any waiting ask — of each one that has gone green. Where each stands is
+/// `App::prs`'s word, the list already observed into it. Green is known,
+/// never guessed ([`PrStatus::is_green`]): while GitHub has not said
+/// whether the branch merges, or checks are still running, a watch and its
+/// attempts are left as they are.
 pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
     for pr in list.iter().filter(|pr| pr.mine) {
-        if pr.trouble().is_none() {
-            if pr.health.checks != Checks::Pending
-                && app
-                    .autofix
-                    .ledger
-                    .get(&pr.url)
-                    .is_some_and(|r| r.attempts > 0)
+        let status = app.prs.status_or_open(&pr.url);
+        if status.is_green() {
+            if app
+                .autofix
+                .ledger
+                .get(&pr.url)
+                .is_some_and(|r| r.attempts > 0)
             {
                 app.autofix.record(&pr.url).attempts = 0;
             }
             app.autofix.forget(&pr.url);
             continue;
         }
+        let row = row_state(app, pr);
         if let Some(watch) = app.autofix.watching.get_mut(&pr.url) {
-            let row = row_state(pr);
             if watch.row != row {
                 watch.row = row;
                 match &mut watch.next_fetch {
@@ -419,6 +429,10 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
                     None => watch.moved = true,
                 }
             }
+            continue;
+        }
+        // Not in trouble, but not known green either: nothing to watch.
+        if status.trouble().is_none() {
             continue;
         }
         if app.autofix_mode == Mode::Off || asking(app, &pr.url) {
@@ -429,7 +443,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
             .ledger
             .get(&pr.url)
             .and_then(|r| r.handled.as_ref())
-            .is_some_and(|f| f.covers(pr));
+            .is_some_and(|f| f.covers(&status));
         if handled {
             continue;
         }
@@ -461,6 +475,7 @@ fn watch(app: &mut App, project: &ProjectId, pr: &OpenPr, next_fetch: Instant) {
     let Some(dir) = repo_dir(app, project) else {
         return;
     };
+    let row = row_state(app, pr);
     app.autofix.watching.insert(
         pr.url.clone(),
         Watch {
@@ -469,7 +484,7 @@ fn watch(app: &mut App, project: &ProjectId, pr: &OpenPr, next_fetch: Instant) {
             dir,
             first_seen: Instant::now(),
             next_fetch: Some(next_fetch),
-            row: row_state(pr),
+            row,
             moved: false,
         },
     );
@@ -495,7 +510,7 @@ pub fn due_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
     for (url, watch) in app.autofix.watching.iter_mut() {
         if watch.next_fetch.is_some_and(|at| at <= now) {
             watch.next_fetch = None;
-            if !app.pr_detail_inflight.contains(url) {
+            if !app.pr_detail_inflight.in_flight(url) {
                 due.push((url.clone(), watch.number, watch.dir.clone()));
             }
         }
@@ -503,8 +518,11 @@ pub fn due_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
     due
 }
 
-/// A body landed (any body: a watched PR's, or the pane's): act on a
-/// watched one's breakage once its checks have settled.
+/// A body landed (any body: a watched PR's, or the pane's), already
+/// observed into `App::prs`: act on a watched one's breakage once its
+/// checks have settled. A body that shows nothing wrong forgets the watch
+/// only once GitHub has said the branch merges; with conflicts unknown it
+/// is read again on the next beat.
 pub fn land_detail(
     app: &mut App,
     url: &str,
@@ -523,9 +541,14 @@ pub fn land_detail(
         app.autofix.recheck_later(url);
         return;
     };
-    let diagnosis = diagnose(detail);
+    let status = app.prs.status_or_open(url);
+    let diagnosis = diagnose(detail, status.health.conflicts);
     let pr = open_pr(app, &watch.project, url);
-    let (Some(pr), true, false) = (pr, detail.is_open(), diagnosis.is_empty()) else {
+    if diagnosis.is_empty() && status.is_open() && pr.is_some() && !status.conflicts_known {
+        app.autofix.recheck_later(url);
+        return;
+    }
+    let (Some(pr), true, false) = (pr, status.is_open(), diagnosis.is_empty()) else {
         app.autofix.forget(url);
         return;
     };
@@ -538,7 +561,7 @@ pub fn land_detail(
     }
     app.autofix.watching.remove(url);
     let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
-    let form = AutofixForm::new(watch.project, pr, detail);
+    let form = AutofixForm::new(watch.project, pr, detail, status.health.conflicts);
     if record.handled.as_ref() == Some(&form.fingerprint()) || asking(app, url) {
         return;
     }
@@ -578,8 +601,9 @@ fn open_pending(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         return;
     };
     let project = view.project.clone();
+    let open = app.prs.status_or_open(url).is_open();
     match detail.or_else(|| app.pr_detail.get(url)).cloned() {
-        Some(detail) if !detail.is_open() => {
+        Some(_) if !open => {
             app.flash = Some(Flash::note(format!("#{} is no longer open", pr.number)));
         }
         Some(detail) => {
@@ -861,10 +885,11 @@ pub struct AutofixForm {
 }
 
 impl AutofixForm {
-    /// The form for `pr` as `detail` diagnoses it: what was detected
-    /// ticked, the caret on the first of them.
-    pub fn new(project: ProjectId, pr: OpenPr, detail: &PrDetail) -> Self {
-        let diagnosis = diagnose(detail);
+    /// The form for `pr` as `detail` diagnoses it, with `conflicts` as
+    /// `App::prs` says: what was detected ticked, the caret on the first of
+    /// them.
+    pub fn new(project: ProjectId, pr: OpenPr, detail: &PrDetail, conflicts: bool) -> Self {
+        let diagnosis = diagnose(detail, conflicts);
         let picks = Issue::ALL.map(|issue| diagnosis.has(issue));
         let row = Row::ORDER
             .into_iter()
@@ -899,7 +924,8 @@ impl AutofixForm {
 /// `⌘G` in the PULL REQUESTS MODAL: the form for `pr`, over the modal,
 /// from the body already in hand.
 pub fn open_for(app: &mut App, project: ProjectId, pr: OpenPr, detail: &PrDetail) {
-    let mut form = AutofixForm::new(project, pr, detail);
+    let conflicts = app.prs.status_or_open(&pr.url).health.conflicts;
+    let mut form = AutofixForm::new(project, pr, detail, conflicts);
     if let Some(Overlay::PullRequests(view)) = app.overlay.take() {
         form.under = Some(Box::new(view));
     }
@@ -1241,9 +1267,9 @@ pub(crate) fn sample_form() -> AutofixForm {
     let detail = PrDetail {
         number: 7,
         url: "https://github.com/o/r/pull/7".into(),
-        state: "OPEN".into(),
-        health: crate::pull_request::Health {
-            conflicts: true,
+        answered_state: "OPEN".into(),
+        answered: crate::pull_request::Answered {
+            conflicts: Some(true),
             ..Default::default()
         },
         base: "main".into(),
@@ -1254,20 +1280,25 @@ pub(crate) fn sample_form() -> AutofixForm {
         number: 7,
         title: "Add things".into(),
         url: detail.url.clone(),
-        is_draft: false,
-        health: detail.health,
+        answered_draft: false,
+        answered: detail.answered,
         head: "feat".into(),
         mine: true,
         head_sha: String::new(),
         meta: Default::default(),
     };
-    AutofixForm::new(ProjectId("p".into()), pr, &detail)
+    AutofixForm::new(ProjectId("p".into()), pr, &detail, true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pull_request::Health;
+    use crate::pull_request::Answered;
+
+    /// [`diagnose`] with the conflicts the body itself answered.
+    fn diag(detail: &PrDetail) -> Diagnosis {
+        diagnose(detail, detail.answered.conflicts == Some(true))
+    }
 
     fn check(name: &str, workflow: &str, state: CheckState) -> PrCheck {
         PrCheck {
@@ -1286,10 +1317,10 @@ mod tests {
             number: 7,
             url: "https://github.com/o/r/pull/7".into(),
             title: "Add things".into(),
-            state: "OPEN".into(),
-            health: Health {
-                conflicts,
-                ..Health::default()
+            answered_state: "OPEN".into(),
+            answered: Answered {
+                conflicts: Some(conflicts),
+                ..Answered::default()
             },
             base: "main".into(),
             head: "feat".into(),
@@ -1304,8 +1335,8 @@ mod tests {
             number: 7,
             title: "Add things".into(),
             url: "https://github.com/o/r/pull/7".into(),
-            is_draft: false,
-            health: Health::default(),
+            answered_draft: false,
+            answered: Default::default(),
             head: "feat".into(),
             mine: true,
             head_sha: "abc123".into(),
@@ -1326,7 +1357,7 @@ mod tests {
 
     #[test]
     fn diagnosis_lists_failures_and_notices_running_checks() {
-        let d = diagnose(&detail(
+        let d = diag(&detail(
             true,
             vec![
                 check("lint", "", CheckState::Failed),
@@ -1343,14 +1374,14 @@ mod tests {
 
     #[test]
     fn the_fingerprint_ignores_check_order_but_not_the_head() {
-        let a = diagnose(&detail(
+        let a = diag(&detail(
             false,
             vec![
                 check("a test", "", CheckState::Failed),
                 check("b test", "", CheckState::Failed),
             ],
         ));
-        let b = diagnose(&detail(
+        let b = diag(&detail(
             false,
             vec![
                 check("b test", "", CheckState::Failed),
@@ -1367,7 +1398,7 @@ mod tests {
         let text = prompt(
             &pr(),
             &PrRefs::of(&detail),
-            &diagnose(&detail),
+            &diag(&detail),
             &[false, false, true, false],
             "flaky on CI",
             None,
@@ -1397,7 +1428,7 @@ mod tests {
         let text = prompt(
             &pr(),
             &PrRefs::of(&detail),
-            &diagnose(&detail),
+            &diag(&detail),
             &[true, false, false, false],
             "",
             Some(&preset),
@@ -1411,7 +1442,7 @@ mod tests {
     #[test]
     fn the_form_ticks_what_was_detected() {
         let detail = detail(false, vec![check("unit", "", CheckState::Failed)]);
-        let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail);
+        let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail, false);
         assert_eq!(form.picks, [false, true, false, false]);
         assert_eq!(form.row, Row::Issue(Issue::Unit));
     }
@@ -1458,25 +1489,40 @@ mod tests {
 
     fn broken(conflicts: bool, failing: bool) -> OpenPr {
         OpenPr {
-            health: Health {
-                conflicts,
-                checks: if failing {
+            answered: Answered {
+                conflicts: Some(conflicts),
+                checks: Some(if failing {
                     Checks::Failing
                 } else {
                     Checks::Passing
-                },
+                }),
             },
             ..pr()
         }
     }
 
+    /// The list as `note_open_prs_answer` lands it: its rows observed into
+    /// `App::prs`, asked just now, then handed over.
     fn listed(app: &mut App) {
         let project = ProjectId("p".into());
         let list = app.open_prs[&project].list.clone();
+        for pr in &list {
+            app.prs.observe(
+                &pr.url,
+                crate::pr_store::PrObservation::of_list_row(pr),
+                crate::fetch::Asked::At(crate::fetch::now()),
+            );
+        }
         note_list(app, &project, &list);
     }
 
+    /// A body as `land_pr_detail` lands it: observed, then handed over.
     fn landed(app: &mut App, detail: &PrDetail) -> Vec<ClientRequest> {
+        app.prs.observe(
+            &detail.url,
+            crate::pr_store::PrObservation::of_detail(detail),
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
         let mut out = Vec::new();
         crate::config::with_config_path(
             tempfile::tempdir().unwrap().path().join("config.json"),
@@ -1629,6 +1675,52 @@ mod tests {
         assert!(app.overlay.is_none() && app.autofix.queue.is_empty(), "off");
     }
 
+    /// Green is known, never guessed: while GitHub has not said whether
+    /// the branch merges (`mergeable: UNKNOWN`), a list whose checks pass
+    /// and a page with nothing failing leave the watch and the attempts
+    /// where they are. Once it says the branch merges, the PR is green.
+    #[test]
+    fn unknown_conflicts_are_never_green() {
+        let unsure = |checks: Checks| OpenPr {
+            answered: Answered {
+                conflicts: None,
+                checks: Some(checks),
+            },
+            ..pr()
+        };
+        let mut app = app_with(vec![unsure(Checks::Failing)], Mode::Ask);
+        app.autofix.ledger.insert(
+            pr().url,
+            Record {
+                handled: None,
+                attempts: 2,
+            },
+        );
+        listed(&mut app);
+        assert!(app.autofix.watching.contains_key(&pr().url));
+
+        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![unsure(Checks::Passing)];
+        listed(&mut app);
+        assert!(app.autofix.watching.contains_key(&pr().url), "still watched");
+        assert_eq!(app.autofix.ledger[&pr().url].attempts, 2, "attempts kept");
+
+        let quiet = PrDetail {
+            answered: Answered::default(),
+            ..detail(false, vec![check("unit", "", CheckState::Passed)])
+        };
+        landed(&mut app, &quiet);
+        assert!(
+            app.autofix.watching.contains_key(&pr().url),
+            "a page with nothing failing but conflicts unknown keeps it"
+        );
+        assert_eq!(app.autofix.ledger[&pr().url].attempts, 2);
+
+        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![broken(false, false)];
+        listed(&mut app);
+        assert!(app.autofix.watching.is_empty(), "known green");
+        assert_eq!(app.autofix.ledger[&pr().url].attempts, 0);
+    }
+
     #[test]
     fn auto_sends_until_its_attempts_run_out_then_asks() {
         let mut app = app_with(vec![broken(true, false)], Mode::Auto);
@@ -1723,6 +1815,7 @@ mod tests {
             ProjectId("p".into()),
             pr(),
             &detail,
+            true,
         ))));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();

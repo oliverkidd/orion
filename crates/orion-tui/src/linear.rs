@@ -115,7 +115,9 @@ pub struct LinearIssue {
 
 /// A pull request on a Linear issue, from the attachment's metadata:
 /// enough for the work column to say where it stands without asking
-/// GitHub ([`IssueWork`]).
+/// GitHub ([`IssueWork`]) — for a pull request orion has heard nothing of
+/// itself; one `App::prs` knows is drawn from there. Each part Linear
+/// left out is unknown (`None`), never open, merged or clean by default.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct IssuePr {
     pub number: u64,
@@ -125,11 +127,11 @@ pub struct IssuePr {
     pub branch: String,
     /// `open`, `merged` or `closed`, as Linear spells it.
     #[serde(default)]
-    pub state: String,
+    pub state: Option<String>,
     #[serde(default)]
-    pub draft: bool,
+    pub draft: Option<bool>,
     #[serde(default)]
-    pub conflicts: bool,
+    pub conflicts: Option<bool>,
 }
 
 impl IssuePr {
@@ -147,25 +149,25 @@ impl IssuePr {
             .parse::<u64>()
             .ok();
         let number = meta.get("number").and_then(|n| n.as_u64()).or(from_url)?;
-        let text = |key: &str| {
-            meta.get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        let flag = |key: &str| meta.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = |key: &str| meta.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let flag = |key: &str| meta.get(key).and_then(|v| v.as_bool());
         Some(IssuePr {
             number,
             url: url.to_string(),
-            branch: text("branch"),
-            state: text("status"),
+            branch: text("branch").unwrap_or_default(),
+            state: text("status").filter(|state| !state.is_empty()),
             draft: flag("draft"),
             conflicts: flag("hasConflicts"),
         })
     }
 
-    fn standing(&self) -> crate::pull_request::Standing {
-        crate::pull_request::Standing::of(&self.state.to_ascii_uppercase(), self.draft)
+    /// Where Linear's metadata says it stands; `None` when it didn't say.
+    fn standing(&self) -> Option<crate::pull_request::Standing> {
+        let state = self.state.as_ref()?;
+        Some(crate::pull_request::Standing::of(
+            &state.to_ascii_uppercase(),
+            self.draft.unwrap_or(false),
+        ))
     }
 }
 
@@ -1148,27 +1150,45 @@ pub(crate) struct IssueWork {
 }
 
 /// The pull request in [`IssueWork`], as a PR ROW paints it
-/// ([`crate::pr_row::look`]).
+/// ([`crate::pr_row::look`]). `standing` is `None` for one nobody has said
+/// the state of — Linear's metadata left it out and orion has not heard of
+/// it — drawn neutrally, with no word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WorkPr {
     pub number: u64,
-    pub standing: crate::pull_request::Standing,
+    pub standing: Option<crate::pull_request::Standing>,
     pub trouble: Option<crate::pull_request::Trouble>,
 }
 
 impl WorkPr {
-    /// `ready`, `draft`, `merged`, `closed`, or the trouble's word.
+    /// `ready`, `draft`, `merged`, `closed`, or the trouble's word; nothing
+    /// for a state nobody has said.
     fn word(self) -> &'static str {
-        self.standing.word(self.trouble)
+        self.standing.map_or("", |standing| standing.word(self.trouble))
     }
 
-    /// Open before merged before closed, then the newest.
+    /// Its colours: the PR ROW's for its state, or dim end to end for a
+    /// state nobody has said — neither the open muted nor any status.
+    fn look(self, th: Theme) -> crate::pr_row::Look {
+        match self.standing {
+            Some(standing) => crate::pr_row::look(standing, self.trouble, th),
+            None => crate::pr_row::Look {
+                glyph: th.dim,
+                label: th.dim,
+                rail: th.dim,
+                badge: th.dim,
+            },
+        }
+    }
+
+    /// Open before merged before closed before unknown, then the newest.
     fn rank(self) -> (u8, std::cmp::Reverse<u64>) {
         use crate::pull_request::Standing;
         let state = match self.standing {
-            Standing::Open | Standing::Draft => 0,
-            Standing::Merged => 1,
-            Standing::Closed => 2,
+            Some(Standing::Open | Standing::Draft) => 0,
+            Some(Standing::Merged) => 1,
+            Some(Standing::Closed) => 2,
+            None => 3,
         };
         (state, std::cmp::Reverse(self.number))
     }
@@ -1199,12 +1219,21 @@ fn names_issue(branch: &str, identifier: &str) -> bool {
 ///
 /// The pull request is the best of those Linear has on the issue and the
 /// project's open ones on its branches — open before merged before closed.
-/// An open one in orion's list speaks for itself, failing checks and all;
-/// Linear's metadata says the rest. One from the root checkout's branch
-/// (the `dev` → `main` release) is never the issue's ([`root_branch`]).
+/// Where each stands is `App::prs`'s word for any pull request orion has
+/// heard of, failing checks and all — the same the list row and the band
+/// draw; Linear's metadata speaks only for one it never has. One from the
+/// root checkout's branch (the `dev` → `main` release) is never the
+/// issue's ([`root_branch`]).
 pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Option<IssueWork> {
     use crate::pull_request::Trouble;
     use orion_core::entities::Worktree;
+    let known = |number: u64, url: &str| {
+        app.prs.status(url).map(|status| WorkPr {
+            number,
+            standing: Some(status.standing),
+            trouble: status.trouble(),
+        })
+    };
     let worktrees: Vec<&Worktree> = app
         .tree
         .worktrees
@@ -1250,21 +1279,26 @@ pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Op
     let live = open
         .iter()
         .filter(|pr| ours(&pr.head) || attached.iter().any(|p| p.url == pr.url))
-        .map(|pr| WorkPr {
-            number: pr.number,
-            standing: pr.standing(),
-            trouble: pr.trouble(),
+        .map(|pr| {
+            known(pr.number, &pr.url).unwrap_or(WorkPr {
+                number: pr.number,
+                standing: Some(crate::pull_request::Standing::Open),
+                trouble: None,
+            })
         });
     let from_linear = attached
         .iter()
         .filter(|p| !open.iter().any(|pr| pr.url == p.url))
         .map(|p| {
-            let standing = p.standing();
-            WorkPr {
-                number: p.number,
-                standing,
-                trouble: (standing.is_open() && p.conflicts).then_some(Trouble::Conflicts),
-            }
+            known(p.number, &p.url).unwrap_or_else(|| {
+                let standing = p.standing();
+                let conflicts = standing.is_some_and(|s| s.is_open()) && p.conflicts == Some(true);
+                WorkPr {
+                    number: p.number,
+                    standing,
+                    trouble: conflicts.then_some(Trouble::Conflicts),
+                }
+            })
         });
     let pr = live.chain(from_linear).min_by_key(|p| p.rank());
     if worktree.is_none() && pr.is_none() {
@@ -3161,7 +3195,7 @@ fn scope_span(work: &IssueWork, th: Theme) -> Span<'static> {
 /// A pull request as the band draws one ([`crate::pr_row::look`]): `↗ `,
 /// `#42` right-aligned to `num_w` and the state word padded to `word_w`.
 fn pr_spans(pr: WorkPr, num_w: usize, word_w: usize, th: Theme) -> Vec<Span<'static>> {
-    let look = crate::pr_row::look(pr.standing, pr.trouble, th);
+    let look = pr.look(th);
     vec![
         Span::styled("↗ ", Style::default().fg(look.glyph)),
         Span::styled(
@@ -4637,8 +4671,8 @@ pub(crate) mod tests {
             number,
             title: title.into(),
             url: format!("https://github.com/o/r/pull/{number}"),
-            is_draft: false,
-            health: Default::default(),
+            answered_draft: false,
+            answered: Default::default(),
             head: format!("branch-{number}"),
             mine: false,
             head_sha: String::new(),
@@ -5814,9 +5848,9 @@ pub(crate) mod tests {
             number,
             url: format!("https://github.com/o/{repo}/pull/{number}"),
             branch: branch.into(),
-            state: state.into(),
-            draft: false,
-            conflicts: false,
+            state: Some(state.into()),
+            draft: Some(false),
+            conflicts: Some(false),
         }
     }
 
@@ -5841,6 +5875,64 @@ pub(crate) mod tests {
             .find(|l| l.contains(needle))
             .unwrap_or_else(|| panic!("no {needle:?} on\n{screen}"))
             .to_string()
+    }
+
+    /// Where an attached pull request stands is `App::prs`'s word once
+    /// orion has heard of it — Linear's metadata may be hours behind — and
+    /// one whose metadata says nothing of its state is neither open nor
+    /// anything else: no word, a neutral look, ranked after every known one.
+    #[test]
+    fn the_work_columns_pull_request_stands_where_orion_heard_it() {
+        use crate::pull_request::Standing;
+        let mut stale = rich("1", "ENG-1", "Stale", ("In Review", "started"), 2);
+        let shipped = attached_pr("other", 305, "ana/stale", "open");
+        let shipped_url = shipped.url.clone();
+        stale.prs = vec![shipped];
+        let bare_pr = |number: u64| IssuePr {
+            number,
+            url: format!("https://github.com/o/other/pull/{number}"),
+            branch: format!("ana/bare-{number}"),
+            ..IssuePr::default()
+        };
+        let mut bare = rich("2", "ENG-2", "Bare", ("In Review", "started"), 2);
+        bare.prs = vec![bare_pr(77), attached_pr("other", 12, "ana/old", "closed")];
+        let mut alone = rich("3", "ENG-3", "Alone", ("In Review", "started"), 2);
+        alone.prs = vec![bare_pr(78)];
+        let mut app = view_on(vec![stale, bare, alone]);
+        app.prs.observe(
+            &shipped_url,
+            crate::pr_store::PrObservation {
+                state: Some(crate::pull_request::STATE_MERGED.into()),
+                ..Default::default()
+            },
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
+        let project = ProjectId("p1".into());
+        let list = rows(&app, &project).to_vec();
+        let work = |ident: &str| {
+            let issue = list.iter().find(|i| i.identifier == ident).unwrap();
+            work_of(&app, &project, issue).and_then(|w| w.pr).unwrap()
+        };
+        let stale = work("ENG-1");
+        assert_eq!((stale.number, stale.standing), (305, Some(Standing::Merged)));
+        assert_eq!(stale.word(), "merged", "orion's word, not Linear's open");
+
+        let bare = work("ENG-2");
+        assert_eq!(
+            (bare.number, bare.standing),
+            (12, Some(Standing::Closed)),
+            "an unknown state ranks after every known one"
+        );
+        let alone = work("ENG-3");
+        assert_eq!((alone.number, alone.standing), (78, None));
+        assert_eq!(alone.word(), "", "no word for a state nobody said");
+        let th = Theme::default();
+        assert_eq!(alone.look(th).badge, th.dim, "drawn neutrally");
+        assert_ne!(
+            alone.look(th),
+            crate::pr_row::look(Standing::Open, None, th),
+            "never as open"
+        );
     }
 
     /// An issue a worktree picked up — linked with `⌘.`, or named in its
@@ -5905,7 +5997,7 @@ pub(crate) mod tests {
         ours.prs = vec![attached_pr("r", 42, "fix/eng-1-login", "open")];
         let mut outside = rich("2", "ENG-2", "Outside", ("In Review", "started"), 2);
         outside.prs = vec![IssuePr {
-            conflicts: true,
+            conflicts: Some(true),
             ..attached_pr("other", 305, "ana/chevron-rows", "open")
         }];
         let mut landed = rich("3", "ENG-3", "Landed", ("In Review", "started"), 2);
@@ -5954,14 +6046,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             ours.pr.map(|p| (p.number, p.standing)),
-            Some((42, Standing::Open))
+            Some((42, Some(Standing::Open)))
         );
         let outside = work("ENG-2").unwrap();
         assert_eq!(outside.branch, None);
         assert_eq!(outside.pr.and_then(|p| p.trouble), Some(Trouble::Conflicts));
         assert_eq!(
             work("ENG-3").unwrap().pr.map(|p| (p.number, p.standing)),
-            Some((301, Standing::Merged)),
+            Some((301, Some(Standing::Merged))),
             "merged beats closed; the release is nobody's"
         );
         assert_eq!(work("ENG-4"), None, "the release pull request alone");
@@ -6001,14 +6093,14 @@ pub(crate) mod tests {
                 number: 1358,
                 url: "https://github.com/o/r/pull/1358".into(),
                 branch: "fix/eng-1".into(),
-                state: "open".into(),
-                draft: true,
-                conflicts: false,
+                state: Some("open".into()),
+                draft: Some(true),
+                conflicts: Some(false),
             }]
         );
         assert_eq!(
             issue.prs[0].standing(),
-            crate::pull_request::Standing::Draft
+            Some(crate::pull_request::Standing::Draft)
         );
     }
 

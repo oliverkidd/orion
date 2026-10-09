@@ -4447,8 +4447,17 @@ pub struct App {
     /// row's unread badge counts.
     pub pr_seen: HashMap<String, String>,
     /// Worktrees with a lookup in flight, so a repaint can't stack a second
-    /// `gh` process on the first.
-    pub pr_inflight: std::collections::HashSet<WorktreeId>,
+    /// `gh` process on the first. Each carries when it was asked, so its
+    /// answer lands in `prs` under that stamp; a branch switch cancels
+    /// the old branch's (`fetch::Flights::cancel`), whose answer is then
+    /// dropped.
+    pub pr_inflight: crate::fetch::Flights<WorktreeId>,
+    /// Where every pull request stands — state, draft, conflicts, checks —
+    /// from the newest answer that knew (`pr_store`). Every surface that
+    /// draws or decides on a pull request's status reads it; the copies
+    /// (`pull_requests`, `open_prs`, `pr_detail`) keep only what their own
+    /// answer alone says: list order, meta, the body.
+    pub prs: crate::pr_store::PrStore,
     /// When to ask `gh` about a worktree again, and the step that produced
     /// that deadline: a steady beat once its pull request is known (a quick
     /// one for the selected checkout, so the unread-comment count keeps up;
@@ -4463,8 +4472,9 @@ pub struct App {
     /// machine with thirty projects still costs one call per refresh.
     pub open_prs: HashMap<ProjectId, OpenPrs>,
     /// Projects with a list lookup in flight, so a repaint can't stack a
-    /// second `gh` on the first.
-    pub open_prs_inflight: std::collections::HashSet<ProjectId>,
+    /// second `gh` on the first — and whether one asked for meanwhile
+    /// (`⌘R`, a merge from the modal) is owed when it lands.
+    pub open_prs_inflight: crate::fetch::Flights<ProjectId>,
     /// Projects whose last list lookup came back with no answer — `gh`
     /// failed, timed out, or the checkout is gone. The list kept on screen
     /// is then the last one that worked, so the PULL REQUESTS MODAL says
@@ -4480,8 +4490,9 @@ pub struct App {
     pub pr_detail: HashMap<String, PrDetail>,
     /// Pull requests whose detail is in flight, and ones `gh` couldn't
     /// answer for — the pane says "couldn't reach gh" rather than spinning
-    /// on a request that already came back empty.
-    pub pr_detail_inflight: std::collections::HashSet<String>,
+    /// on a request that already came back empty. A page asked to be read
+    /// again while its fetch runs is owed a fresh one when it lands.
+    pub pr_detail_inflight: crate::fetch::Flights<String>,
     pub pr_detail_failed: std::collections::HashSet<String>,
     /// When `gh` last answered (or refused) each pull request's detail,
     /// this session. A page older than `event_loop::PR_DETAIL_FRESH` is
@@ -4874,13 +4885,14 @@ impl App {
             merge_landed: HashMap::new(),
             attention_walk: None,
             pr_seen: HashMap::new(),
-            pr_inflight: std::collections::HashSet::new(),
+            pr_inflight: Default::default(),
+            prs: Default::default(),
             pr_recheck: HashMap::new(),
             open_prs: HashMap::new(),
-            open_prs_inflight: std::collections::HashSet::new(),
+            open_prs_inflight: Default::default(),
             open_prs_failed: std::collections::HashSet::new(),
             pr_detail: HashMap::new(),
-            pr_detail_inflight: std::collections::HashSet::new(),
+            pr_detail_inflight: Default::default(),
             pr_detail_failed: std::collections::HashSet::new(),
             pr_detail_at: HashMap::new(),
             pending_pr_detail: None,
@@ -6082,8 +6094,14 @@ impl App {
     pub fn listed_open_prs(&self) -> Vec<&OpenPr> {
         self.all_open_prs()
             .iter()
-            .filter(|pr| !(self.hide_draft_prs && pr.is_draft))
+            .filter(|pr| !(self.hide_draft_prs && self.pr_is_draft(&pr.url)))
             .collect()
+    }
+
+    /// Whether `url` is a draft, as `prs` last heard — what hiding drafts
+    /// (`hide_draft_prs`) and their place in the list go by.
+    pub fn pr_is_draft(&self, url: &str) -> bool {
+        self.prs.status(url).is_some_and(|s| s.is_draft())
     }
 
     /// The open pull requests with rows under the checkouts: the listed
@@ -6245,7 +6263,7 @@ impl App {
             return Some(PreviewedPr {
                 number: pr.number,
                 url: pr.url.clone(),
-                label: pr.label(),
+                label: self.prs.label(pr.number, &pr.url, &pr.title),
             });
         }
         // The LAUNCHER VIEW's pane holds the keys while it reads the pull
@@ -6282,7 +6300,7 @@ impl App {
         Some(PreviewedPr {
             number: pr.number,
             url: pr.url.clone(),
-            label: row.label(),
+            label: self.prs.label(pr.number, &pr.url, &pr.title),
         })
     }
 
@@ -6424,7 +6442,7 @@ impl App {
     /// but its conversation does, and the unread badge is only as fresh as
     /// the last poll.
     pub fn pr_lookup_due(&self, worktree: &WorktreeId) -> bool {
-        if self.pr_inflight.contains(worktree) {
+        if self.pr_inflight.in_flight(worktree) {
             return false;
         }
         match self.pr_recheck.get(worktree) {
@@ -6437,7 +6455,7 @@ impl App {
     /// an answer is in flight, and not before the timer the last answer
     /// armed. A project orion has never asked about is always due.
     pub fn open_prs_lookup_due(&self, project: &ProjectId) -> bool {
-        if self.open_prs_inflight.contains(project) {
+        if self.open_prs_inflight.in_flight(project) {
             return false;
         }
         match self.open_prs.get(project) {
@@ -6480,7 +6498,7 @@ impl App {
     /// not while one is in flight, nor while a fresh one is here
     /// ([`Self::pr_detail_fresh`]) or `gh` refused it moments ago.
     pub fn pr_detail_owed(&self, url: &str) -> bool {
-        if self.pr_detail_inflight.contains(url) {
+        if self.pr_detail_inflight.in_flight(&url.to_string()) {
             return false;
         }
         if self.pr_detail_failed.contains(url) {
@@ -6493,7 +6511,7 @@ impl App {
     /// missing, or only the cache's copy — and isn't being read now: what
     /// the modal's background prefetch fills in, ignoring age.
     pub fn pr_detail_unread(&self, url: &str) -> bool {
-        !self.pr_detail_inflight.contains(url)
+        !self.pr_detail_inflight.in_flight(&url.to_string())
             && !self.pr_detail_failed.contains(url)
             && (!self.pr_detail.contains_key(url) || self.pr_detail_stale.contains(url))
     }
@@ -6553,7 +6571,7 @@ impl App {
         let prs = self.open_prs.get(project_id).map(|open| {
             open.list
                 .iter()
-                .filter(|pr| !(self.hide_draft_prs && pr.is_draft))
+                .filter(|pr| !(self.hide_draft_prs && self.pr_is_draft(&pr.url)))
                 .count()
         });
         let issues = self.issues.get(project_id).map(|l| l.list.len());
@@ -6578,7 +6596,8 @@ impl App {
             .pull_requests
             .get(worktree_id)
             .and_then(Option::as_ref)
-            .is_some_and(|pr| pr.standing() == crate::pull_request::Standing::Merged);
+            .and_then(|pr| self.prs.status(&pr.url))
+            .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged);
         merged
             && !matches!(
                 self.worktree_rollup(worktree_id),
@@ -6957,9 +6976,9 @@ mod tests {
             number: 7,
             url: url.into(),
             title: "Attach links".into(),
-            state: crate::pull_request::STATE_OPEN.into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: crate::pull_request::STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
             activity: Vec::new(),
         }
     }

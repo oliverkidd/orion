@@ -4132,6 +4132,8 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         number: pr.number,
         title: &title,
         detail: detail.as_ref(),
+        status: app.prs.status(&pr.url),
+        freshness: crate::pr_preview::freshness(app, &pr.url),
         failed,
         posting: false,
         browser_key: key_hint(app, Action::Activate),

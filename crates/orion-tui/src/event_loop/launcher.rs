@@ -4528,8 +4528,8 @@ mod tests {
                     number: 9,
                     title: "Polish the nav".into(),
                     url: pull_request(9).url,
-                    is_draft: false,
-                    health: Default::default(),
+                    answered_draft: false,
+                    answered: Default::default(),
                     head: "idle".into(),
                     mine: false,
                     head_sha: String::new(),
@@ -4613,7 +4613,7 @@ mod tests {
                 number: 9,
                 url: url.clone(),
                 title: "Polish the nav".into(),
-                state: crate::pull_request::STATE_OPEN.into(),
+                answered_state: crate::pull_request::STATE_OPEN.into(),
                 changed_files: 2,
                 ..Default::default()
             };
@@ -9602,9 +9602,9 @@ mod tests {
                     number: 42,
                     url: "https://github.com/o/web/pull/42".into(),
                     title: "Polish the nav".into(),
-                    state: crate::pull_request::STATE_OPEN.into(),
-                    is_draft: false,
-                    health: Default::default(),
+                    answered_state: crate::pull_request::STATE_OPEN.into(),
+                    answered_draft: false,
+                    answered: Default::default(),
                     activity: Vec::new(),
                 }),
             );
@@ -9644,9 +9644,9 @@ mod tests {
             number,
             url: format!("https://github.com/o/demo/pull/{number}"),
             title: "Polish the nav".into(),
-            state: crate::pull_request::STATE_OPEN.into(),
-            is_draft: false,
-            health: Default::default(),
+            answered_state: crate::pull_request::STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
             activity: Vec::new(),
         }
     }
