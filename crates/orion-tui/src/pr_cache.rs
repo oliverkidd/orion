@@ -264,13 +264,16 @@ pub fn install(app: &mut App, store: Store) {
     use crate::fetch::Asked;
     use crate::pr_store::PrObservation;
     for pr in store.worktrees.values() {
-        app.prs.observe(&pr.url, PrObservation::of_lookup(pr), Asked::Cached);
+        app.prs
+            .observe(&pr.url, PrObservation::of_lookup(pr), Asked::Cached);
     }
     for pr in store.projects.values().flatten() {
-        app.prs.observe(&pr.url, PrObservation::of_list_row(pr), Asked::Cached);
+        app.prs
+            .observe(&pr.url, PrObservation::of_list_row(pr), Asked::Cached);
     }
     for (url, detail) in &store.details {
-        app.prs.observe(url, PrObservation::of_detail(detail), Asked::Cached);
+        app.prs
+            .observe(url, PrObservation::of_detail(detail), Asked::Cached);
     }
     for (worktree, pr) in store.worktrees {
         app.pull_requests.entry(worktree).or_insert(Some(pr));

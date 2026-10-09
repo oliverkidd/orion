@@ -965,7 +965,11 @@ pub(crate) fn open_merge(app: &mut App) {
         notice: None,
         rows: Vec::new(),
     };
-    form.apply_detail(&pr, &app.prs.status_or_open(&pr.url), app.pr_detail.get(&pr.url));
+    form.apply_detail(
+        &pr,
+        &app.prs.status_or_open(&pr.url),
+        app.pr_detail.get(&pr.url),
+    );
     let ticket = form.ticket;
     put_form(app, PrForm::Merge(form));
     if let Some(tx) = app.pr_actions_tx.clone() {
@@ -1013,9 +1017,7 @@ pub(crate) fn detail_landed(app: &mut App, url: &str) {
     };
     let status = app.prs.status_or_open(url);
     match form(app) {
-        Some(PrForm::Merge(form)) if form.pending => {
-            form.apply_detail(&pr, &status, Some(&detail))
-        }
+        Some(PrForm::Merge(form)) if form.pending => form.apply_detail(&pr, &status, Some(&detail)),
         Some(PrForm::Merge(form)) => form.warnings = merge_warnings(&status, Some(&detail)),
         Some(PrForm::Close(form)) => form.apply_detail(&pr, Some(&detail)),
         _ => {}

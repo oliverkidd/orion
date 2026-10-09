@@ -1009,7 +1009,11 @@ fn apply_recheck(json: &str, rows: &mut [OpenPr]) -> std::collections::HashSet<S
         let Some(page) = answer.pointer(&path) else {
             continue;
         };
-        if page.pointer("/pageInfo/hasNextPage").and_then(|more| more.as_bool()) == Some(true) {
+        if page
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(|more| more.as_bool())
+            == Some(true)
+        {
             cut.insert(pr.url.clone());
             continue;
         }
@@ -1211,7 +1215,10 @@ pub(crate) fn list_answer(nodes: &str) -> String {
 /// Stable, so the cursor's PR — followed by URL across every refresh —
 /// never swaps places with a neighbour it did not change relative to.
 pub fn drafts_last(list: &mut [OpenPr], prs: &crate::pr_store::PrStore) {
-    list.sort_by_key(|pr| prs.status(&pr.url).is_some_and(|s| s.standing == Standing::Draft));
+    list.sort_by_key(|pr| {
+        prs.status(&pr.url)
+            .is_some_and(|s| s.standing == Standing::Draft)
+    });
 }
 
 /// How long a `gh pr diff` may run. Diffs are bigger than metadata and
@@ -2198,7 +2205,11 @@ mod tests {
                 pending: 0
             })
         );
-        assert_eq!(rows[1].answered.checks, Some(Checks::Failing), "not in the answer");
+        assert_eq!(
+            rows[1].answered.checks,
+            Some(Checks::Failing),
+            "not in the answer"
+        );
         assert!(failing_query(&[1321, 7]).contains("p7: pullRequest(number: 7)"));
     }
 
@@ -2277,7 +2288,11 @@ mod tests {
         };
         let asked = || crate::fetch::Asked::At(crate::fetch::now());
         let mut prs = PrStore::default();
-        prs.observe(url, PrObservation::of_list_row(&list("CONFLICTING")), asked());
+        prs.observe(
+            url,
+            PrObservation::of_list_row(&list("CONFLICTING")),
+            asked(),
+        );
         prs.observe(url, PrObservation::of_list_row(&list("UNKNOWN")), asked());
         let status = prs.status_or_open(url);
         assert!(status.conflicts_known && status.health.conflicts, "list");
@@ -2455,9 +2470,17 @@ mod tests {
             None,
         )
         .expect("parsed");
-        assert_eq!(pr.answered.conflicts, Some(true), "the answer is kept as given");
+        assert_eq!(
+            pr.answered.conflicts,
+            Some(true),
+            "the answer is kept as given"
+        );
         let trouble = |pr: &PullRequest| status_of(PrObservation::of_lookup(pr)).trouble();
-        assert_eq!(trouble(&pr), None, "a merged pull request is not in trouble");
+        assert_eq!(
+            trouble(&pr),
+            None,
+            "a merged pull request is not in trouble"
+        );
         pr.answered_state = STATE_OPEN.into();
         assert_eq!(trouble(&pr), Some(Trouble::Conflicts));
         pr.answered_draft = true;
@@ -2534,7 +2557,11 @@ mod tests {
         let mut list = vec![row(42, true), row(40, false), row(31, true), row(30, false)];
         let mut prs = PrStore::default();
         for pr in &list {
-            prs.observe(&pr.url, PrObservation::of_list_row(pr), crate::fetch::Asked::Cached);
+            prs.observe(
+                &pr.url,
+                PrObservation::of_list_row(pr),
+                crate::fetch::Asked::Cached,
+            );
         }
         drafts_last(&mut list, &prs);
         let numbers: Vec<u64> = list.iter().map(|p| p.number).collect();

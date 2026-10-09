@@ -4355,8 +4355,7 @@ pub struct App {
     /// name changed; the main loop installs it
     /// (`claude_accounts::request_refresh`). None in a unit test, which
     /// reads inline.
-    pub accounts_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<(crate::fetch::Ticket<()>, bool)>>,
+    pub accounts_tx: Option<tokio::sync::mpsc::UnboundedSender<(crate::fetch::Ticket<()>, bool)>>,
     /// The accounts read running off the loop, at most one: a forced read
     /// asked while one runs is owed, and starts once it lands.
     pub accounts_reads: crate::fetch::Flights<()>,

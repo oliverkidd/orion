@@ -737,7 +737,12 @@ impl LocalEdits {
     /// Lay what orion did over `project`'s list asked at `asked`: each
     /// move or attach Linear had not taken by then put back on its issue,
     /// the rest forgotten — this list and every one after knows them.
-    fn lay_over(&mut self, project: &ProjectId, asked: std::time::Instant, list: &mut [LinearIssue]) {
+    fn lay_over(
+        &mut self,
+        project: &ProjectId,
+        asked: std::time::Instant,
+        list: &mut [LinearIssue],
+    ) {
         self.moves.retain(|issue_id, mv| {
             if &mv.project != project {
                 return true;
@@ -1164,7 +1169,8 @@ impl WorkPr {
     /// `ready`, `draft`, `merged`, `closed`, or the trouble's word; nothing
     /// for a state nobody has said.
     fn word(self) -> &'static str {
-        self.standing.map_or("", |standing| standing.word(self.trouble))
+        self.standing
+            .map_or("", |standing| standing.word(self.trouble))
     }
 
     /// Its colours: the PR ROW's for its state, or dim end to end for a
@@ -1799,7 +1805,14 @@ pub(crate) fn attach_new_prs(
         if root.as_deref() == Some(pr.head.as_str()) {
             continue;
         }
-        attach_link(app, project, dir.clone(), &pr.head, pr.url.clone(), pr.number);
+        attach_link(
+            app,
+            project,
+            dir.clone(),
+            &pr.head,
+            pr.url.clone(),
+            pr.number,
+        );
     }
 }
 
@@ -5914,7 +5927,10 @@ pub(crate) mod tests {
             work_of(&app, &project, issue).and_then(|w| w.pr).unwrap()
         };
         let stale = work("ENG-1");
-        assert_eq!((stale.number, stale.standing), (305, Some(Standing::Merged)));
+        assert_eq!(
+            (stale.number, stale.standing),
+            (305, Some(Standing::Merged))
+        );
         assert_eq!(stale.word(), "merged", "orion's word, not Linear's open");
 
         let bare = work("ENG-2");
@@ -6715,7 +6731,10 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(status_of(&app, "2"), "Todo", "moved on in Linear since");
-        assert!(app.linear_edits.moves.is_empty(), "nothing left to lay over");
+        assert!(
+            app.linear_edits.moves.is_empty(),
+            "nothing left to lay over"
+        );
     }
 
     /// Linear's first answer to `issueUpdate` refuses, every later one
@@ -6818,7 +6837,12 @@ pub(crate) mod tests {
             view.selected = 1;
         }
         let ticket = ask_list(&mut app);
-        land_list(&mut app, ticket, &dir, vec![ident("2"), ident("3"), ident("1")]);
+        land_list(
+            &mut app,
+            ticket,
+            &dir,
+            vec![ident("2"), ident("3"), ident("1")],
+        );
         assert_eq!(the_view(&app).selected, 0);
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
         if let Some(Overlay::Linear(view)) = &mut app.overlay {
@@ -6859,7 +6883,11 @@ pub(crate) mod tests {
             "remembered against its branch"
         );
         land_list(&mut app, before, &dir, vec![issue("1", "ENG-1", "Login")]);
-        assert_eq!(prs(&app), [(41, "branch-41".to_string())], "a list asked before");
+        assert_eq!(
+            prs(&app),
+            [(41, "branch-41".to_string())],
+            "a list asked before"
+        );
         let after = ask_list(&mut app);
         land_list(&mut app, after, &dir, vec![issue("1", "ENG-1", "Login")]);
         assert!(prs(&app).is_empty(), "a list asked after is Linear's word");
@@ -6973,7 +7001,9 @@ pub(crate) mod tests {
                 .build()
                 .unwrap();
             let sent = with_graphql_stub(
-                |_, _| Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})),
+                |_, _| {
+                    Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}}))
+                },
                 || {
                     rt.block_on(async {
                         remember_submit(&mut app, &launch);
@@ -7005,7 +7035,13 @@ pub(crate) mod tests {
     }
 
     /// `todo_app`'s item linked to `ident`, last seen `seen`.
-    fn link_item(app: &mut App, dir: &tempfile::TempDir, item: u64, ident: &str, seen: Option<&str>) {
+    fn link_item(
+        app: &mut App,
+        dir: &tempfile::TempDir,
+        item: u64,
+        ident: &str,
+        seen: Option<&str>,
+    ) {
         let todo = app
             .todos
             .get_mut(dir.path())
@@ -7025,7 +7061,12 @@ pub(crate) mod tests {
         let older = crate::fetch::now();
         let newer = crate::fetch::now();
         let land = |app: &mut App, at, issue| {
-            crate::todos::view::land_linked(app, dir.path().into(), at, Ok(vec![("RIP-1".into(), issue)]))
+            crate::todos::view::land_linked(
+                app,
+                dir.path().into(),
+                at,
+                Ok(vec![("RIP-1".into(), issue)]),
+            )
         };
         land(&mut app, newer, linked("RIP-1", "Todo", "unstarted"));
         land(&mut app, older, linked("RIP-1", "In Progress", "started"));

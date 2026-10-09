@@ -2713,7 +2713,11 @@ mod tests {
             "no rows: the modal stays"
         );
         assert_eq!(app.flash, None);
-        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(14, "Fix login redirect")]));
+        land_list(
+            &mut app,
+            project.clone(),
+            Some(vec![issue(15, "a"), issue(14, "Fix login redirect")]),
+        );
         select(&mut app, 1);
         handle_key(&mut app, c, &mut Vec::new());
         let Some(Overlay::Prompt(prompt)) = &app.overlay else {
@@ -2740,7 +2744,11 @@ mod tests {
     fn posting_puts_the_modal_back_and_a_missing_checkout_returns_the_box() {
         let mut app = App::new();
         let project = ProjectId("p1".into());
-        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(14, "b")]));
+        land_list(
+            &mut app,
+            project.clone(),
+            Some(vec![issue(15, "a"), issue(14, "b")]),
+        );
         let mut view = IssuesView::new(project.clone(), "demo".into(), std::env::temp_dir());
         view.selected = 1;
         let fourteen = issue(14, "b").launch_ref();
@@ -2781,11 +2789,15 @@ mod tests {
         app.overlay = Some(Overlay::Issues(view.clone()));
         land_list(&mut app, project.clone(), Some(vec![issue(15, "a")]));
         let fifteen = issue(15, "a");
-        land_detail(&mut app, &fifteen.url, Some(IssueDetail {
-                    url: fifteen.url.clone(),
-                    comments: vec![],
-                    updated_at: String::new(),
-                }));
+        land_detail(
+            &mut app,
+            &fifteen.url,
+            Some(IssueDetail {
+                url: fifteen.url.clone(),
+                comments: vec![],
+                updated_at: String::new(),
+            }),
+        );
         app.pending_issue_detail = None;
         let answer = |posted: bool| IssuesAnswer::Comment {
             view: view.clone(),
@@ -2870,10 +2882,18 @@ mod tests {
             "demo".into(),
             "/tmp/demo".into(),
         )));
-        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(14, "b"), issue(13, "c")]));
+        land_list(
+            &mut app,
+            project.clone(),
+            Some(vec![issue(15, "a"), issue(14, "b"), issue(13, "c")]),
+        );
         select(&mut app, 2);
         assert!(matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 2));
-        land_list(&mut app, project.clone(), Some(vec![issue(15, "a"), issue(13, "c")]));
+        land_list(
+            &mut app,
+            project.clone(),
+            Some(vec![issue(15, "a"), issue(13, "c")]),
+        );
         assert!(
             matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1),
             "#13 moved up a row and the cursor followed"
@@ -2954,7 +2974,8 @@ mod tests {
         assert_eq!(target(&app), None, "its own, longer backoff holds it");
         app.issues_due.get_mut(&p2).unwrap().due = now;
 
-        app.issues_flights.begin(p2.clone(), std::time::Instant::now());
+        app.issues_flights
+            .begin(p2.clone(), std::time::Instant::now());
         assert_eq!(target(&app), None, "already in flight");
         app.issues_flights.clear();
         assert_eq!(target(&app), Some(p2.clone()));
@@ -3033,7 +3054,8 @@ mod tests {
 
         app.issues_due.get_mut(&project).unwrap().due = std::time::Instant::now();
         assert!(prefetch_due(&app, &project), "the timer ran out");
-        app.issues_flights.begin(project.clone(), std::time::Instant::now());
+        app.issues_flights
+            .begin(project.clone(), std::time::Instant::now());
         assert!(!prefetch_due(&app, &project), "never while in flight");
     }
 
@@ -3061,11 +3083,15 @@ mod tests {
         land_detail(&mut app, &url, None);
         assert!(app.issue_detail_failed.contains(&url));
         assert!(!app.issue_detail_flights.in_flight(&url));
-        land_detail(&mut app, &url, Some(IssueDetail {
-                    url: url.clone(),
-                    comments: vec![],
-                    updated_at: String::new(),
-                }));
+        land_detail(
+            &mut app,
+            &url,
+            Some(IssueDetail {
+                url: url.clone(),
+                comments: vec![],
+                updated_at: String::new(),
+            }),
+        );
         assert!(app.issue_detail.contains_key(&url));
     }
 
@@ -3447,7 +3473,11 @@ mod tests {
         assert!(app.issue_edits.contains_key(&url));
 
         // Asked after the save: GitHub's copy, retitled by someone since.
-        land_list(&mut app, project.clone(), Some(vec![issue(15, "Login loops")]));
+        land_list(
+            &mut app,
+            project.clone(),
+            Some(vec![issue(15, "Login loops")]),
+        );
         assert_eq!(app.issues[&project].list[0].title, "Login loops");
         assert!(app.issue_edits.is_empty(), "the newer list retired it");
     }
@@ -3575,12 +3605,18 @@ mod tests {
 
         // Put away while GitHub is asked again.
         editor_mut(&mut app).saving = true;
-        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE), &mut Vec::new());
+        handle_key(
+            &mut app,
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            &mut Vec::new(),
+        );
         assert!(editor(&app).is_none());
         land_answer(&mut app, changed("Theirs, again"));
         assert!(editor(&app).is_none(), "no form pops up unasked");
         assert!(
-            app.flash.as_deref().is_some_and(|f| f.contains("your edit is kept")),
+            app.flash
+                .as_deref()
+                .is_some_and(|f| f.contains("your edit is kept")),
             "{:?}",
             app.flash
         );
@@ -3599,7 +3635,10 @@ mod tests {
     fn a_page_is_read_again_when_stale_or_behind_the_list() {
         let mut app = App::new();
         let fifteen = issue(15, "a");
-        assert!(detail_due(&app, &fifteen, std::time::Instant::now()), "never read");
+        assert!(
+            detail_due(&app, &fifteen, std::time::Instant::now()),
+            "never read"
+        );
         land_detail(
             &mut app,
             &fifteen.url,
@@ -3624,7 +3663,10 @@ mod tests {
         let at = app.issue_detail_at[&fifteen.url];
         assert!(!detail_due(&app, &commented, at), "a failure backs off");
         assert!(detail_due(&app, &commented, at + FRESH), "then is retried");
-        assert!(app.issue_detail.contains_key(&fifteen.url), "the page stays");
+        assert!(
+            app.issue_detail.contains_key(&fifteen.url),
+            "the page stays"
+        );
     }
 
     /// The title rides argv as one `--title=` token and the description
@@ -3948,10 +3990,14 @@ mod tests {
         type_str(&mut app, "login");
         select(&mut app, 2);
         assert_eq!(cursor_number(&app), Some(13));
-        land_list(&mut app, project, Some(vec![
-                    issue(15, "Fix login redirect"),
-                    issue(14, "Docs pass"),
-                ]));
+        land_list(
+            &mut app,
+            project,
+            Some(vec![
+                issue(15, "Fix login redirect"),
+                issue(14, "Docs pass"),
+            ]),
+        );
         assert_eq!(
             cursor_number(&app),
             Some(15),

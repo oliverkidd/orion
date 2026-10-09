@@ -812,7 +812,9 @@ fn query_changed(app: &mut App) {
     };
     let list = rows(app, &view.project);
     let target = if has_query(view) {
-        visible_rows(&view.query, list, &app.prs).first().map(|(i, _)| *i)
+        visible_rows(&view.query, list, &app.prs)
+            .first()
+            .map(|(i, _)| *i)
     } else {
         cursor_index(view, list, &app.prs)
     };
@@ -2457,7 +2459,8 @@ mod tests {
             let mut fresh = detail(42, "Fix login");
             fresh.answered.conflicts = Some(false);
             let asked = Asked::At(crate::fetch::now());
-            app.prs.observe(&url, PrObservation::of_detail(&fresh), asked);
+            app.prs
+                .observe(&url, PrObservation::of_detail(&fresh), asked);
             app.pr_detail.insert(url.clone(), fresh);
             crate::pr_actions::detail_landed(&mut app, &url);
             assert!(!warnings(&app).contains(&conflicts), "{:?}", warnings(&app));
@@ -3108,7 +3111,10 @@ mod tests {
             "the rows' hit area starts under the note"
         );
 
-        let ticket = app.open_prs_inflight.begin(project.clone(), crate::fetch::now()).unwrap();
+        let ticket = app
+            .open_prs_inflight
+            .begin(project.clone(), crate::fetch::now())
+            .unwrap();
         // Wide enough for the title to say it in full.
         let retrying = screen(&mut app, 160, 20);
         assert!(!retrying.contains("couldn't refresh"), "{retrying}");
@@ -3909,7 +3915,8 @@ mod tests {
             "yours, then one of theirs"
         );
         for p in &due {
-            app.pr_detail_inflight.begin(p.url.clone(), crate::fetch::now());
+            app.pr_detail_inflight
+                .begin(p.url.clone(), crate::fetch::now());
         }
         assert_eq!(
             prefetch_delay(&app),

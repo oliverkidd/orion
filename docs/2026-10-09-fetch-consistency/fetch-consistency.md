@@ -1,5 +1,24 @@
 # Fetch consistency: one answer per fact, newest asked wins
 
+Status: built (2026-10-09). Changes from the plan below, made while building:
+
+- **Stamps never tie by accident.** `fetch::now()` never hands out the same instant twice, and tickets are stamped with it, so the only answers that tie are ones sharing an ask on purpose (a recheck stamped with its list's time).
+- **Phase 2, item 10:** a lookup carries the branch the checkout was on when it was asked, and is dropped if the checkout is on another branch by the time it lands. The lookup query has no head field, and a fork's or renamed branch would falsely mismatch.
+- **Phase 2, extra:** titles are read from `PrStore` too, wherever two surfaces name the same pull request, so a rename shows on both at once. The store forgets a pull request no row names 10 min after its newest answer (`RETIRED_KEEP`).
+- **Phase 2, item 6:** a recheck cut short keeps the known checks verdict, and when there is none it falls back to GitHub's own rollup word, so a busy failing pull request seen for the first time still goes red.
+- **Phase 2, final pass:** a checkout's lookup that says merged or closed takes the row out of the open list at once, as a page does.
+- **Phase 3, item 6:** links track attachment per issue (`attached_ids`), so relinking a branch keeps the issues it had. A link Linear refused three times reads `couldn't attach` in the worktree picker.
+- **Phase 3, item 9:** the "more on Linear" note sits at the top of a tab, where the existing "showing the N most recently updated" note was.
+- **Phase 4, item 2:** a save that comes back after you left its form keeps your text as a draft that opens with that issue's form next time.
+- **Phase 4, item 7:** the commit list takes a cached base but asks again past a cached "no base", once.
+
+Known limits, left as they are:
+
+- When a page's own fold of the checks and the list's tally disagree, the store's verdict follows whichever was asked last.
+- Undo compares values. If the daemon sends a field back to exactly the value a keypress showed, a refusal still puts the old value back.
+- `fetch.rs` API hardening (`land` returning the accepted stamp, private ticket fields) is deferred; see `docs/cubic-deferred/orion-tui.md`.
+- `tui_diff_steps_through_a_branch_one_commit_at_a_time` in `crates/orion/tests/e2e_tui.rs` fails on `main` (3526272) as well; it is not caused by this work.
+
 Branch `fetch-consistency`, worktree `~/Documents/Projects/orion-worktrees/fetch-consistency`. All paths below are relative to that root; TUI code is under `crates/orion-tui/src/`.
 
 ## The problem

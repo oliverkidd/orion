@@ -1701,7 +1701,10 @@ mod tests {
 
         app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![unsure(Checks::Passing)];
         listed(&mut app);
-        assert!(app.autofix.watching.contains_key(&pr().url), "still watched");
+        assert!(
+            app.autofix.watching.contains_key(&pr().url),
+            "still watched"
+        );
         assert_eq!(app.autofix.ledger[&pr().url].attempts, 2, "attempts kept");
 
         let quiet = PrDetail {

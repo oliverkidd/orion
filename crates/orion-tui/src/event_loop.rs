@@ -715,7 +715,7 @@ async fn main_loop(
             answer = pr_rx.recv() => {
                 // Never None: `pr_tx` lives as long as the loop.
                 if let Some(answer) = answer {
-                    land_lookup(&mut app, answer);
+                    land_lookup(&mut app, answer, &mut out);
                 }
             }
             answer = git_rx.recv() => {
@@ -1382,10 +1382,7 @@ pub(crate) struct DetailLanded {
 /// while one is in flight — a repaint must never stack `gh` processes — and
 /// until the timer the last answer armed expires. The reply arrives on
 /// `pr_tx`.
-fn lookup_pull_request(
-    app: &mut App,
-    pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>,
-) {
+fn lookup_pull_request(app: &mut App, pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>) {
     let Some((id, path)) = app
         .selected_worktree()
         .map(|w| (w.id.clone(), w.path.clone()))
@@ -1443,10 +1440,7 @@ fn spawn_pull_request(
 /// expired gets this tick, the next one waits for the next tick, so a
 /// project of thirty checkouts fills in over a minute at startup and then
 /// idles on `PR_SWEEP_REFRESH`. The reply lands on `pr_tx` like any other.
-fn sweep_pull_request(
-    app: &mut App,
-    pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>,
-) {
+fn sweep_pull_request(app: &mut App, pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>) {
     let Some((id, path)) = sweep_target(app) else {
         return;
     };
@@ -1530,7 +1524,7 @@ fn note_pr_answer(app: &mut App, worktree: &WorktreeId, found: bool) {
 /// was on a branch it has left since (a switch made outside orion): its
 /// pull request is the old branch's, and the row would bring it back. An
 /// owed lookup is asked on the next tick.
-fn land_lookup(app: &mut App, landed: LookupLanded) {
+fn land_lookup(app: &mut App, landed: LookupLanded, out: &mut Vec<ClientRequest>) {
     let Some(flight) = app.pr_inflight.land(&landed.ticket) else {
         return;
     };
@@ -1545,7 +1539,17 @@ fn land_lookup(app: &mut App, landed: LookupLanded) {
         app.pr_recheck.remove(&worktree);
         return;
     }
+    let url = match &landed.answer {
+        Lookup::Found(pr) => Some(pr.url.clone()),
+        Lookup::Absent | Lookup::Unavailable => None,
+    };
     land_pull_request_at(app, worktree, landed.answer, landed.ticket.asked());
+    // A checkout's own lookup that says merged or closed retires the row
+    // from the open lists now, as a page does, rather than leaving it
+    // there reading `merged` until the next list.
+    if let Some(url) = url.filter(|url| !app.prs.status_or_open(url).is_open()) {
+        drop_retired_pr(app, &url, out);
+    }
     // The answer just armed the next lookup's timer; a fresh one asked
     // for meanwhile goes on the next tick instead.
     if flight.owed {
@@ -1557,7 +1561,12 @@ fn land_lookup(app: &mut App, landed: LookupLanded) {
 /// way in, with no flight to land.
 #[cfg(test)]
 fn land_pull_request(app: &mut App, worktree: WorktreeId, answer: Lookup) {
-    land_pull_request_at(app, worktree, answer, crate::fetch::Asked::At(crate::fetch::now()));
+    land_pull_request_at(
+        app,
+        worktree,
+        answer,
+        crate::fetch::Asked::At(crate::fetch::now()),
+    );
 }
 
 /// A branch lookup's answer, asked at `asked`. The row takes a found pull
@@ -1677,7 +1686,13 @@ fn land_open_prs(
         return;
     };
     let project = landed.ticket.key.clone();
-    note_open_prs_answer_at(app, project.clone(), landed.answer, landed.ticket.asked(), out);
+    note_open_prs_answer_at(
+        app,
+        project.clone(),
+        landed.answer,
+        landed.ticket.asked(),
+        out,
+    );
     if flight.owed && landed.dir.is_dir() {
         spawn_open_prs(app, prs_tx, project, landed.dir);
     }
@@ -1780,7 +1795,10 @@ fn note_open_prs_answer_at(
             status_changed |= app.prs.observe_list_row(row, cut, asked);
         }
         if answer.slim {
-            carry_meta(&mut rows, app.open_prs.get(&project).map(|o| o.list.as_slice()));
+            carry_meta(
+                &mut rows,
+                app.open_prs.get(&project).map(|o| o.list.as_slice()),
+            );
         }
         rows.retain(|row| app.prs.status_or_open(&row.url).is_open());
         rows
@@ -1886,7 +1904,10 @@ fn row_status(row: &crate::pull_request::OpenPr) -> crate::pr_store::PrObservati
 /// on every beat GitHub balks at the full query. Carried after the rows
 /// were observed, so a carried tally is the meta line's alone and never
 /// the checks' verdict.
-fn carry_meta(rows: &mut [crate::pull_request::OpenPr], previous: Option<&[crate::pull_request::OpenPr]>) {
+fn carry_meta(
+    rows: &mut [crate::pull_request::OpenPr],
+    previous: Option<&[crate::pull_request::OpenPr]>,
+) {
     let Some(previous) = previous else {
         return;
     };
@@ -2069,9 +2090,10 @@ fn adopt_pr_state(app: &mut App, url: &str, was_merged: bool) {
 
 /// Retire one pull request from every project's list ahead of the next
 /// list lookup, because GitHub has just told us — in the detail fetched
-/// for the row the cursor is resting on — that it is merged or closed.
-/// The list refresh would catch it within the minute anyway; this is for
-/// the case where the user is looking straight at it.
+/// for the row the cursor is resting on, or a checkout's own lookup —
+/// that it is merged or closed. The list refresh would catch it within
+/// the minute anyway; this is for the case where the user is looking
+/// straight at it.
 fn drop_retired_pr(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
     let cursor = app.selected_worktree_pr().cloned();
     let mut removed = false;
@@ -2165,10 +2187,7 @@ fn note_preview_change(app: &mut App, before: Option<String>) {
 
 /// Fire the debounced fetch. Disarms first, so a `gh` that never answers
 /// can't re-fire on every loop turn.
-fn lookup_pr_detail(
-    app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
-) {
+fn lookup_pr_detail(app: &mut App, detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>) {
     let Some((pending, _)) = app.pending_pr_detail.take() else {
         return;
     };
@@ -7718,7 +7737,9 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
                 }
                 // And drafts to hide — or, once hidden, a way back that
                 // doesn't need the list to still hold one.
-                if app.hide_draft_prs || app.all_open_prs().iter().any(|pr| app.pr_is_draft(&pr.url)) {
+                if app.hide_draft_prs
+                    || app.all_open_prs().iter().any(|pr| app.pr_is_draft(&pr.url))
+                {
                     let label = if app.hide_draft_prs {
                         "Show draft PRs"
                     } else {
@@ -16628,7 +16649,8 @@ mod tests {
         assert!(app.open_prs_lookup_due(&pid));
 
         // An in-flight call is never doubled up on.
-        app.open_prs_inflight.begin(pid.clone(), crate::fetch::now());
+        app.open_prs_inflight
+            .begin(pid.clone(), crate::fetch::now());
         assert!(!app.open_prs_lookup_due(&pid));
     }
 
@@ -17264,11 +17286,7 @@ mod tests {
         let mut merged = a_detail(7, "shipped", vec![]);
         merged.answered_state = "MERGED".into();
         adopt(&mut app, &merged);
-        assert_eq!(
-            branch_pr(&app).word(),
-            "merged",
-            "the row wears the answer"
-        );
+        assert_eq!(branch_pr(&app).word(), "merged", "the row wears the answer");
         assert!(app.dirty, "and repaints for it");
         assert_eq!(app.visible_links().len(), 1, "but the row is not retired");
 
@@ -17468,7 +17486,14 @@ mod tests {
             .begin(url.to_string(), crate::fetch::now())
             .expect("none in flight");
         let flight = app.pr_detail_inflight.land(&ticket).expect("its own");
-        land_pr_detail(app, url.to_string(), detail, ticket.asked(), flight.owed, out);
+        land_pr_detail(
+            app,
+            url.to_string(),
+            detail,
+            ticket.asked(),
+            flight.owed,
+            out,
+        );
     }
 
     /// Seed the Sessions panel's PR ROW: the pull request `gh` found on the
@@ -18456,6 +18481,48 @@ diff --git a/src/b.rs b/src/b.rs
         }
     }
 
+    /// A checkout's own lookup that says merged takes the row out of the
+    /// open list at once, as a page saying so does — not left there
+    /// reading `merged` until the next list.
+    #[test]
+    fn a_lookup_that_says_merged_retires_the_open_row() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_open_prs(&mut app, &[(7, "seven"), (8, "eight")]);
+        let w1 = orion_core::WorktreeId("w1".into());
+        let branch = app
+            .tree
+            .worktrees
+            .iter()
+            .find(|w| w.id == w1)
+            .map(|w| w.branch.clone())
+            .unwrap();
+        let mut merged = cached_pr(7);
+        merged.answered_state = crate::pull_request::STATE_MERGED.into();
+
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
+        let answer = Lookup::Found(merged);
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer,
+            },
+            &mut Vec::new(),
+        );
+
+        let listed: Vec<u64> = app
+            .open_prs
+            .values()
+            .flat_map(|open| open.list.iter().map(|pr| pr.number))
+            .collect();
+        assert_eq!(listed, vec![8], "the merged row left the list");
+    }
+
     /// Only a merge seen to happen starts the ONE-SHOT SWEEP: the last
     /// answer was something other than merged, and this one is. A
     /// checkout's first answer ever — and the first beat of a row the cache
@@ -18601,6 +18668,7 @@ diff --git a/src/b.rs b/src/b.rs
                 branch,
                 answer: Lookup::Unavailable,
             },
+            &mut Vec::new(),
         );
         assert!(!app.pr_inflight.in_flight(&w1));
         assert_eq!(
@@ -18695,7 +18763,10 @@ diff --git a/src/b.rs b/src/b.rs
         land_page(&mut app, &pr_url(7), Some(merged), &mut Vec::new());
         assert_eq!(open_pr_numbers(&app), vec![9], "the page retires it");
 
-        let rows = vec![a_pr(7, "Attach links", false), a_pr(9, "Number lines", false)];
+        let rows = vec![
+            a_pr(7, "Attach links", false),
+            a_pr(9, "Number lines", false),
+        ];
         note_open_prs_answer_at(
             &mut app,
             pid,
@@ -18706,7 +18777,11 @@ diff --git a/src/b.rs b/src/b.rs
             list_asked,
             &mut Vec::new(),
         );
-        assert_eq!(open_pr_numbers(&app), vec![9], "the older list leaves it out");
+        assert_eq!(
+            open_pr_numbers(&app),
+            vec![9],
+            "the older list leaves it out"
+        );
         assert_eq!(app.prs.status_or_open(&pr_url(7)).word(), "merged");
     }
 
@@ -18780,8 +18855,14 @@ diff --git a/src/b.rs b/src/b.rs
         };
         land_detail(&mut app, &detail_tx, landed, &mut out);
         assert_eq!(app.pr_detail[&url].body, "body", "the answer lands");
-        assert!(app.pr_detail_stale.contains(&url), "but is not the last word");
-        assert!(app.pr_detail_inflight.in_flight(&url), "the owed read is out");
+        assert!(
+            app.pr_detail_stale.contains(&url),
+            "but is not the last word"
+        );
+        assert!(
+            app.pr_detail_inflight.in_flight(&url),
+            "the owed read is out"
+        );
 
         let (prs_tx, _prs_rx) = tokio::sync::mpsc::unbounded_channel();
         let ticket = app
@@ -18799,7 +18880,10 @@ diff --git a/src/b.rs b/src/b.rs
         };
         land_open_prs(&mut app, &prs_tx, landed, &mut out);
         assert_eq!(open_pr_numbers(&app), vec![9], "the answer lands");
-        assert!(app.open_prs_inflight.in_flight(&pid), "the owed list is out");
+        assert!(
+            app.open_prs_inflight.in_flight(&pid),
+            "the owed list is out"
+        );
 
         // Nothing asked for meanwhile: nothing more goes out.
         let ticket = app
@@ -18831,7 +18915,10 @@ diff --git a/src/b.rs b/src/b.rs
         let w1 = WorktreeId("w1".into());
         let found = |number| Lookup::Found(cached_pr(number));
 
-        let ticket = app.pr_inflight.begin(w1.clone(), crate::fetch::now()).unwrap();
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
         let mut moved = app
             .tree
             .worktrees
@@ -18848,27 +18935,57 @@ diff --git a/src/b.rs b/src/b.rs
         );
         assert!(!app.pr_inflight.in_flight(&w1), "the switch cancels it");
         let branch = "main".to_string();
-        land_lookup(&mut app, LookupLanded { ticket, branch, answer: found(7) });
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: found(7),
+            },
+            &mut Vec::new(),
+        );
         assert_eq!(app.pull_requests.get(&w1), None, "dropped");
         assert!(app.prs.status(&pr_url(7)).is_none(), "and never observed");
 
-        let ticket = app.pr_inflight.begin(w1.clone(), crate::fetch::now()).unwrap();
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
         if let Some(w) = app.tree.worktrees.iter_mut().find(|w| w.id == w1) {
             w.branch = "other".into();
         }
         let branch = "feat".to_string();
-        land_lookup(&mut app, LookupLanded { ticket, branch, answer: found(8) });
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: found(8),
+            },
+            &mut Vec::new(),
+        );
         assert_eq!(app.pull_requests.get(&w1), None, "dropped");
         assert!(app.prs.status(&pr_url(8)).is_none());
-        assert!(app.pr_lookup_due(&w1), "the branch it is on now is asked next");
-
-        let ticket = app.pr_inflight.begin(w1.clone(), crate::fetch::now()).unwrap();
-        let branch = "other".to_string();
-        land_lookup(&mut app, LookupLanded { ticket, branch, answer: found(9) });
-        assert_eq!(
-            app.pull_requests[&w1].as_ref().map(|pr| pr.number),
-            Some(9)
+        assert!(
+            app.pr_lookup_due(&w1),
+            "the branch it is on now is asked next"
         );
+
+        let ticket = app
+            .pr_inflight
+            .begin(w1.clone(), crate::fetch::now())
+            .unwrap();
+        let branch = "other".to_string();
+        land_lookup(
+            &mut app,
+            LookupLanded {
+                ticket,
+                branch,
+                answer: found(9),
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(app.pull_requests[&w1].as_ref().map(|pr| pr.number), Some(9));
     }
 
     /// The daemon's snapshot is the truth about which checkouts and
@@ -19312,7 +19429,8 @@ diff --git a/src/c.rs b/src/c.rs
 
         // One already in flight is left to land: nothing is stacked on it.
         app.pending_pr_detail = None;
-        app.pr_detail_inflight.begin(url.clone(), crate::fetch::now());
+        app.pr_detail_inflight
+            .begin(url.clone(), crate::fetch::now());
         press(
             &mut app,
             KeyCode::Char('r'),
@@ -26727,9 +26845,15 @@ diff --git a/src/c.rs b/src/c.rs
             added: 3,
             removed: 2,
         };
-        let read = app.git_reads.begin(w1.clone(), std::time::Instant::now()).expect("idle");
+        let read = app
+            .git_reads
+            .begin(w1.clone(), std::time::Instant::now())
+            .expect("idle");
         land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((4, 1)));
-        let read = app.git_reads.begin(w1.clone(), std::time::Instant::now()).expect("idle");
+        let read = app
+            .git_reads
+            .begin(w1.clone(), std::time::Instant::now())
+            .expect("idle");
         land_git_read(&mut app, &read, None, None, None);
         assert_eq!(app.worktree_ahead.get(&w1), Some(&(4, 1)));
         assert_eq!(app.worktree_lines(&w1), Some(lines));
@@ -26743,7 +26867,10 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         let w1 = WorktreeId("w1".into());
-        let read = app.git_reads.begin(w1.clone(), std::time::Instant::now()).expect("idle");
+        let read = app
+            .git_reads
+            .begin(w1.clone(), std::time::Instant::now())
+            .expect("idle");
         let mut switched = app.tree.worktrees[0].clone();
         switched.branch = "feat".into();
         hse(
@@ -34559,16 +34686,20 @@ diff --git a/src/c.rs b/src/c.rs
                     "demo".into(),
                     "/tmp/demo".into(),
                 )));
-                crate::issues::land_list(&mut app, project, Some(vec![crate::issues::Issue {
-                            number: 15,
-                            url: "https://github.com/o/r/issues/15".into(),
-                            title: "Login fails".into(),
-                            author: "webdevcody".into(),
-                            created_at: "2026-09-10T12:00:00Z".into(),
-                            updated_at: "2026-09-11T12:00:00Z".into(),
-                            labels: vec![],
-                            body: String::new(),
-                        }]));
+                crate::issues::land_list(
+                    &mut app,
+                    project,
+                    Some(vec![crate::issues::Issue {
+                        number: 15,
+                        url: "https://github.com/o/r/issues/15".into(),
+                        title: "Login fails".into(),
+                        author: "webdevcody".into(),
+                        created_at: "2026-09-10T12:00:00Z".into(),
+                        updated_at: "2026-09-11T12:00:00Z".into(),
+                        labels: vec![],
+                        body: String::new(),
+                    }]),
+                );
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 if fresh {
                     pick_fresh_worktree(&mut app, &mut out);
@@ -34915,16 +35046,20 @@ diff --git a/src/c.rs b/src/c.rs
                 "demo".into(),
                 "/tmp/demo".into(),
             )));
-            crate::issues::land_list(&mut app, project, Some(vec![crate::issues::Issue {
-                        number: 15,
-                        url: "https://github.com/o/r/issues/15".into(),
-                        title: "Fix login redirect".into(),
-                        author: "webdevcody".into(),
-                        created_at: "2026-09-10T12:00:00Z".into(),
-                        updated_at: "2026-09-11T12:00:00Z".into(),
-                        labels: vec![],
-                        body: String::new(),
-                    }]));
+            crate::issues::land_list(
+                &mut app,
+                project,
+                Some(vec![crate::issues::Issue {
+                    number: 15,
+                    url: "https://github.com/o/r/issues/15".into(),
+                    title: "Fix login redirect".into(),
+                    author: "webdevcody".into(),
+                    created_at: "2026-09-10T12:00:00Z".into(),
+                    updated_at: "2026-09-11T12:00:00Z".into(),
+                    labels: vec![],
+                    body: String::new(),
+                }]),
+            );
             let fresh = |app: &App| match &app.overlay {
                 Some(Overlay::AgentPresets(v)) => v.is_new_worktree(),
                 other => panic!("expected the preset picker, got {other:?}"),
@@ -41453,8 +41588,7 @@ diff --git a/src/c.rs b/src/c.rs
                 assert!(text.contains("2  High"), "{text}");
                 press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE, &mut out);
                 assert!(todo_view(&app).pick.is_none());
-                let first =
-                    todo_file(&app).shown_items(emails, &[])[0].clone();
+                let first = todo_file(&app).shown_items(emails, &[])[0].clone();
                 assert_eq!((first.text.as_str(), first.priority), ("new one", 2));
                 assert!(matches!(
                     todo_view(&app).cursor,

@@ -209,10 +209,7 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
     // but a cached "no base" is asked again: the list is opened by hand,
     // and must not miss a base that turned up since the band last looked.
     // What it finds is cached, so the band follows it.
-    listing.base = resolve_base_cached(root, base_setting).or_else(|| {
-        forget_base(root);
-        resolve_base_cached(root, base_setting)
-    });
+    listing.base = resolve_base_cached_or_retry(root, base_setting);
     let Some(merge_base) = listing
         .base
         .as_deref()
@@ -314,10 +311,25 @@ fn bases() -> &'static std::sync::Mutex<Resolved> {
 /// `⇡4 ⇣1` ([`ahead_behind`]) and the COMMIT LIST ([`read`]) measure
 /// against, so the two never count from different ones.
 pub(crate) fn resolve_base_cached(root: &Path, base_setting: &str) -> Option<String> {
+    cached_base(root, base_setting, true)
+}
+
+/// [`resolve_base_cached`] that takes a cached base but not a cached "no
+/// base": that one is asked again, once, and what it finds is cached for
+/// the band to follow.
+fn resolve_base_cached_or_retry(root: &Path, base_setting: &str) -> Option<String> {
+    cached_base(root, base_setting, false)
+}
+
+/// The base for `root` under `base_setting` from the cache while it is
+/// fresh — a cached "no base" only when `trust_none` — else resolved and
+/// cached.
+fn cached_base(root: &Path, base_setting: &str, trust_none: bool) -> Option<String> {
     let key = (root.to_path_buf(), base_setting.to_string());
     if let Ok(known) = bases().lock() {
-        let fresh = |(at, base): &&(std::time::Instant, Option<String>)| {
-            at.elapsed() < if base.is_some() { BASE_TTL } else { NO_BASE_TTL }
+        let fresh = |(at, base): &&(std::time::Instant, Option<String>)| match base {
+            Some(_) => at.elapsed() < BASE_TTL,
+            None => trust_none && at.elapsed() < NO_BASE_TTL,
         };
         if let Some((_, base)) = known.get(&key).filter(fresh) {
             return base.clone();

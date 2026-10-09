@@ -410,7 +410,9 @@ remote — just shows no rows instead of an error. The selected project is asked
 selected worktree's pull request and its open list on every tick, one process each, and its other
 checkouts on a sweep that takes one of them per tick — so every band learns whether its branch
 has merged without the cursor ever visiting it (the ROOT WORKTREE is left out; nobody deletes it over a
-merge). Nothing is stacked while a call is in flight, and each is abandoned after 20 s. The other
+merge). Nothing is stacked while a call is in flight — a refresh asked for meanwhile (`⌘R`, a
+merge, a comment) runs as soon as it lands rather than being dropped — and each is abandoned after
+20 s. The other
 projects' open pull requests and open issues are swept too, one project per tick on the five-minute
 beat, so a project switched to shows lists minutes old at worst. The selected
 worktree and the open list settle onto a steady 15 s beat; the swept checkouts onto 5 min, since a
@@ -426,6 +428,18 @@ only GitHub's own verdict on them — the pass / fail / pending the pull request
 list` asks for every check on every pull request instead, which on a busy repo times out every time. A
 lookup that fails keeps the last list that worked on screen, and the PULL REQUESTS MODAL says
 `couldn't refresh` under its filter until an answer lands.
+
+The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
+all say where the same pull request stands, on their own beats, and land in whatever order the
+network gives. So none of them is drawn directly: each answer goes into one store of what is known
+about every pull request, each fact stamped with when its answer was *asked*, and every surface — the
+modal's rows and page, the preview, the band, its cards, the footer, the palette, Linear's work column,
+the merge form and AUTOFIX — draws from that store. The newest-asked answer wins, so a slow list asked
+before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
+UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
+last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's
+list, the ISSUES MODAL, the git counts on the bands and the todo chips keep their answers by the same
+rules.
 
 Settings and hotkeys live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

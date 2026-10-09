@@ -660,13 +660,18 @@ refused (not logged in, no network) brings the box back with your text so nothin
 the row's title and description — `Tab`, `↑`/`↓` or a click move between the two fields, and the
 description takes `Shift+Enter` (or `Option+Enter`, or `Ctrl+J`) for a line break and `↑`/`↓` to walk
 its lines, as every multi-row box does — the preset editor's prefix and postfix included.
-`Enter` sends both to GitHub as one `gh issue edit` (the title on the command line, the description
-on its stdin) and holds the form, its foot saying `saving…`, until GitHub answers: the row and the
-pane then carry the new text at once, and the list is asked for again underneath. `Esc` drops the
-draft and puts the reading pane back. An unchanged form closes
-without a call, a blank title is refused on the spot, and a save GitHub refuses — not logged in, no
-push access to the repo — keeps the form up with `gh`'s own reason on its frame and your text
-intact, so nothing typed is lost. Labels, assignees and milestones stay GitHub's to edit.
+`Enter` first reads the issue back from GitHub, then sends only the fields you changed as one
+`gh issue edit` (the title on the command line, the description on its stdin), holding the form, its
+foot saying `saving…`, until GitHub answers: the row and the pane then carry the new text at once,
+and the list is asked for again underneath — a list asked before the save can't put the old text
+back. If someone changed a field you changed since the form opened, nothing is sent: the form comes
+back over GitHub's new text with what you typed kept, its frame saying `changed on GitHub since you
+opened it — Enter saves yours over it`. `Esc` drops the draft and puts the reading pane back. An
+unchanged form closes without a call, a blank title is refused on the spot, and a save GitHub
+refuses — not logged in, no push access to the repo — keeps the form up with `gh`'s own reason on its
+frame and your text intact. Left before GitHub answered, the form's text is kept as a draft and opens
+with the issue's form next time, so nothing typed is lost. Labels, assignees and milestones stay
+GitHub's to edit.
 
 Two keys put an agent on the issue. `Enter` opens the QUICK PROMPT for it — the same box
 `⌘N` opens anywhere, titled `Quick prompt · issue #15 (claude · opus)`, launching the `Agent` row's

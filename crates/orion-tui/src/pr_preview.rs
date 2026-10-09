@@ -528,7 +528,10 @@ pub fn border(
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
         if let Some(fresh) = input.freshness {
-            left.push(Span::styled(format!(" {fresh}"), Style::default().fg(th.dim)));
+            left.push(Span::styled(
+                format!(" {fresh}"),
+                Style::default().fg(th.dim),
+            ));
         }
         left.push(Span::raw("  "));
     }

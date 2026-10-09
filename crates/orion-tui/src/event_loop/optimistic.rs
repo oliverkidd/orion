@@ -289,11 +289,20 @@ fn taken_back(app: &App, before: &Entity, shown: &Entity) -> Option<Entity> {
             let changed = put_back(&mut now.name, &before.name, &shown.name)
                 | put_back(&mut now.archived, &before.archived, &shown.archived)
                 | put_back(&mut now.alive, &before.alive, &shown.alive)
-                | put_back(&mut now.archived_at, &before.archived_at, &shown.archived_at);
+                | put_back(
+                    &mut now.archived_at,
+                    &before.archived_at,
+                    &shown.archived_at,
+                );
             changed.then_some(Entity::Agent(now))
         }
         (Entity::Terminal(before), Entity::Terminal(shown)) => {
-            let mut now = app.tree.terminals.iter().find(|t| t.id == shown.id)?.clone();
+            let mut now = app
+                .tree
+                .terminals
+                .iter()
+                .find(|t| t.id == shown.id)?
+                .clone();
             put_back(&mut now.name, &before.name, &shown.name).then_some(Entity::Terminal(now))
         }
         (Entity::Project(before), Entity::Project(shown)) => {
@@ -422,10 +431,7 @@ mod tests {
                 message: "name is taken".into(),
             },
         );
-        assert_eq!(
-            agent_name(&app, "a1").as_deref(),
-            Some("renamed elsewhere")
-        );
+        assert_eq!(agent_name(&app, "a1").as_deref(), Some("renamed elsewhere"));
     }
 
     /// A refused archive puts back what the keypress changed and the
@@ -492,7 +498,12 @@ mod tests {
                 message: "database is locked".into(),
             },
         );
-        let a1 = app.tree.agents.iter().find(|a| a.id.0 == "a1").expect("back");
+        let a1 = app
+            .tree
+            .agents
+            .iter()
+            .find(|a| a.id.0 == "a1")
+            .expect("back");
         assert_eq!(a1.name, "renamed meanwhile");
         assert_eq!(a1.status, orion_core::AgentStatus::NeedsFeedback);
         assert_eq!(a1.status_changed_at, 42);
