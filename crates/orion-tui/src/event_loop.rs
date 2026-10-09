@@ -41199,7 +41199,12 @@ diff --git a/src/c.rs b/src/c.rs
                 state_color: String::new(),
                 priority: 0,
             };
-            crate::todos::view::land_linked(&mut app, "/tmp/demo".into(), Ok(vec![issue]));
+            crate::todos::view::land_linked(
+                &mut app,
+                "/tmp/demo".into(),
+                crate::fetch::now(),
+                Ok(vec![("RIP-1".into(), issue)]),
+            );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).linked.contains_key("RIP-1"));
 

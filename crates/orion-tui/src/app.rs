@@ -4575,11 +4575,19 @@ pub struct App {
     /// startup like `pr_diff_tx`, so the modal's own handlers can start a
     /// fetch. `None` in the unit tests, which then never spawn one.
     pub issues_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::issues::IssuesAnswer>>,
-    /// LINEAR VIEW rows, in flight, failed asks, and the answer channel.
+    /// LINEAR VIEW rows, the lists in flight (one per project, a ⌘R
+    /// asked meanwhile owed), failed asks, and the answer channel.
     pub linear: std::collections::HashMap<ProjectId, crate::linear::LinearList>,
-    pub linear_inflight: std::collections::HashSet<ProjectId>,
+    pub linear_flights: crate::fetch::Flights<ProjectId>,
     pub linear_failed: std::collections::HashSet<ProjectId>,
     pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
+    /// What orion did to issues that a list asked before it may not know
+    /// of yet — `⌘S` moves and attached pull requests — laid over every
+    /// such list as it lands.
+    pub linear_edits: crate::linear::LocalEdits,
+    /// The TODOS MODAL's asks after its linked issues: one in flight per
+    /// checkout, and when each chip's state was asked.
+    pub linear_linked: crate::linear::LinkedAsks,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
     /// Each project's TODOS list, by its checkout, read when the modal
@@ -4866,9 +4874,11 @@ impl App {
             pending_issue_detail: None,
             issues_tx: None,
             linear: HashMap::new(),
-            linear_inflight: std::collections::HashSet::new(),
+            linear_flights: crate::fetch::Flights::default(),
             linear_failed: std::collections::HashSet::new(),
             linear_tx: None,
+            linear_edits: crate::linear::LocalEdits::default(),
+            linear_linked: crate::linear::LinkedAsks::default(),
             linear_links: crate::linear::LinkStore::default(),
             todos: HashMap::new(),
             todo_pending: HashMap::new(),

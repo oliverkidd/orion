@@ -596,8 +596,10 @@ fn goto_project(app: &mut App, n: usize) {
 }
 
 /// The modal onto `project`'s tab: the one it is on parked, `project`'s
-/// back as it was left — or, first time on it, at its top, Linear asked
-/// how its linked issues stand.
+/// back as it was left — or, first time on it, at its top. Linear is
+/// asked how its linked issues stand the first time, and again on the way
+/// back once what the chips say is older than the PULL REQUESTS MODAL's
+/// `FRESH`.
 fn show_project(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
     if view(app).is_none_or(|v| v.project == project) {
         return;
@@ -605,19 +607,20 @@ fn show_project(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
     load_list(app, dir.clone());
     let fresh = TodoView::new(project.clone(), name.clone(), dir);
     let linked = linked_from_linear(app, &fresh);
+    let chips_fresh = app.linear_linked.fresh(&fresh.dir);
     let Some(view) = view_mut(app) else {
         return;
     };
     let mut parked = std::mem::take(&mut view.parked);
     let back = parked.remove(&project);
-    let first_time = back.is_none();
+    let stale = back.is_none() || !chips_fresh;
     let mut next = back.unwrap_or(TodoView { linked, ..fresh });
     // The name may have changed since it was parked.
     next.project_name = name;
     let left = std::mem::replace(view, next).park();
     parked.insert(left.project.clone(), left);
     view.parked = parked;
-    if first_time {
+    if stale {
         refresh_linked(app);
     }
 }
@@ -628,13 +631,18 @@ fn refresh_linked(app: &mut App) {
         return;
     };
     let dir = view.dir.clone();
-    let ids: Vec<String> = app.todos.get(&dir).map_or_else(Vec::new, |file| {
+    let ids = linked_ids(app, &dir);
+    crate::linear::request_linked(app, dir, ids);
+}
+
+/// Every issue `dir`'s todos link to, once each.
+pub(crate) fn linked_ids(app: &App, dir: &std::path::Path) -> Vec<String> {
+    app.todos.get(dir).map_or_else(Vec::new, |file| {
         let mut ids: Vec<String> = file.items.iter().filter_map(|i| i.linear.clone()).collect();
         ids.sort();
         ids.dedup();
         ids
-    });
-    crate::linear::request_linked(app, dir, ids);
+    })
 }
 
 /// Put the modal back up as it was left.
@@ -2037,8 +2045,19 @@ fn open_issue(app: &mut App, item: u64, out: &mut Vec<ClientRequest>) {
 /// that **Link existing…** opened to come back to it. An answer landing
 /// meanwhile is not lost on the way back.
 fn view_on<'a>(app: &'a mut App, dir: &std::path::Path) -> Option<&'a mut TodoView> {
+    let view = root_view(&mut app.overlay)?;
+    // A project the modal has moved off is answered where it is parked.
+    if view.dir == dir {
+        return Some(view);
+    }
+    view.parked.values_mut().find(|v| v.dir == dir)
+}
+
+/// The modal over `overlay` wherever it is kept ([`view_on`]), on the
+/// tab it is on.
+fn root_view(overlay: &mut Option<Overlay>) -> Option<&mut TodoView> {
     use crate::app::PromptKind;
-    let view = match app.overlay.as_mut()? {
+    let view = match overlay.as_mut()? {
         Overlay::Todos(view) => view,
         Overlay::Linear(linear) => match &mut linear.mode {
             crate::linear::LinearMode::Link { back, .. } => back.as_mut(),
@@ -2053,17 +2072,65 @@ fn view_on<'a>(app: &'a mut App, dir: &std::path::Path) -> Option<&'a mut TodoVi
         },
         _ => return None,
     };
-    // A project the modal has moved off is answered where it is parked.
-    if view.dir == dir {
-        return Some(view);
-    }
-    view.parked.values_mut().find(|v| v.dir == dir)
+    Some(view)
 }
 
-/// Linear's answer on the linked issues: their chips say how they stand,
-/// and an issue gone to done or canceled since it was last seen ticks its
-/// todo, if it is still open.
-pub(crate) fn land_linked(app: &mut App, dir: PathBuf, result: Result<Vec<LinkedIssue>, String>) {
+/// A state of `issue` Linear took from a `⌘S`, asked at `asked`: the chip
+/// says it in every tab that links the issue, parked ones too — unless
+/// that tab's chip already shows a state asked later. Ticking stays
+/// [`land_linked`]'s: the next answer sees the move.
+pub(crate) fn note_linked(app: &mut App, issue: LinkedIssue, asked: std::time::Instant) {
+    let todos = &app.todos;
+    let asks = &mut app.linear_linked;
+    let Some(root) = root_view(&mut app.overlay) else {
+        return;
+    };
+    let links = |dir: &std::path::Path| {
+        todos.get(dir).is_some_and(|file| {
+            file.items
+                .iter()
+                .any(|i| i.linear.as_deref() == Some(issue.identifier.as_str()))
+        })
+    };
+    let mut note = |view: &mut TodoView| {
+        let shown = view.linked.contains_key(&issue.identifier);
+        if !shown && !links(&view.dir) {
+            return;
+        }
+        if !asks.accept(&view.dir, &issue.identifier, asked) {
+            return;
+        }
+        match view.linked.get_mut(&issue.identifier) {
+            Some(chip) => {
+                chip.state = issue.state.clone();
+                chip.state_type = issue.state_type.clone();
+                chip.state_color = issue.state_color.clone();
+            }
+            None => {
+                view.linked.insert(issue.identifier.clone(), issue.clone());
+            }
+        }
+    };
+    note(root);
+    for view in root.parked.values_mut() {
+        note(view);
+    }
+    app.dirty = true;
+}
+
+/// Linear's answer, asked at `asked`, on the linked issues — each with
+/// the identifier it was asked by: their chips say how they stand, and an
+/// issue gone to done or canceled since it was last seen ticks its todo,
+/// if it is still open. An issue whose chip already shows a state asked
+/// later is left as it is, so nothing goes back. The first answer after a
+/// todo is linked only sets what was last seen, and never ticks it. An
+/// issue a team move renamed is linked by its new identifier.
+pub(crate) fn land_linked(
+    app: &mut App,
+    dir: PathBuf,
+    asked: std::time::Instant,
+    result: Result<Vec<(String, LinkedIssue)>, String>,
+) {
     app.dirty = true;
     let issues = match result {
         Ok(issues) => issues,
@@ -2072,24 +2139,34 @@ pub(crate) fn land_linked(app: &mut App, dir: PathBuf, result: Result<Vec<Linked
             return;
         }
     };
+    app.linear_linked.answered(&dir, asked);
+    let issues: Vec<(String, LinkedIssue)> = issues
+        .into_iter()
+        .filter(|(_, issue)| app.linear_linked.accept(&dir, &issue.identifier, asked))
+        .collect();
     let now = super::now();
     let mut ticked = Vec::new();
     if let Some(file) = app.todos.get_mut(&dir) {
         let mut changed = false;
         for item in file.items.iter_mut() {
-            let Some(issue) = item
+            let Some((_, issue)) = item
                 .linear
                 .as_ref()
-                .and_then(|id| issues.iter().find(|i| &i.identifier == id))
+                .and_then(|id| issues.iter().find(|(asked_by, _)| asked_by == id))
             else {
                 continue;
             };
+            if item.linear.as_deref() != Some(issue.identifier.as_str()) {
+                item.linear = Some(issue.identifier.clone());
+                changed = true;
+            }
             // Only the way into done ticks: an issue that was already
-            // done when last seen leaves an unticked item alone.
+            // done when last seen leaves an unticked item alone — and one
+            // not seen yet is only seen.
             let was_finished = item
                 .linear_seen
                 .as_deref()
-                .is_some_and(crate::linear::finished_kind);
+                .is_none_or(crate::linear::finished_kind);
             if issue.finished() && !was_finished && item.done.is_none() {
                 item.done = Some(now);
                 ticked.push(issue.identifier.clone());
@@ -2110,7 +2187,10 @@ pub(crate) fn land_linked(app: &mut App, dir: PathBuf, result: Result<Vec<Linked
         )));
     }
     if let Some(view) = view_on(app, &dir) {
-        for issue in issues {
+        for (asked_by, issue) in issues {
+            if asked_by != issue.identifier {
+                view.linked.remove(&asked_by);
+            }
             view.linked.insert(issue.identifier.clone(), issue);
         }
     }
@@ -2201,20 +2281,25 @@ pub(crate) fn land_created(
 }
 
 /// Enter in the LINEAR VIEW opened by **Link existing…**: `item` linked to
-/// `issue`, and the modal back as it was left.
+/// `issue`, and the modal back as it was left. The LINEAR VIEW's list may
+/// be hours old, so its state is only the chip's until Linear is asked
+/// afresh: the first answer is what the todo was linked in, and only a
+/// move to done after it ticks it.
 pub(crate) fn link_issue(app: &mut App, mut back: TodoView, item: u64, issue: LinkedIssue) {
     if let Some(file) = app.todos.get_mut(&back.dir) {
         if let Some(todo) = file.item_mut(item) {
-            link_to(todo, &issue);
+            todo.linear = Some(issue.identifier.clone());
+            todo.linear_seen = None;
         }
         store::save(file);
     }
     back.linked.insert(issue.identifier.clone(), issue);
     reopen(app, back);
+    refresh_linked(app);
 }
 
-/// `todo` linked to `issue`, in the state it is in now: only a move to
-/// done from here on ticks it.
+/// `todo` linked to `issue`, in the state Linear has just said it is in:
+/// only a move to done from here on ticks it.
 fn link_to(todo: &mut Item, issue: &LinkedIssue) {
     todo.linear = Some(issue.identifier.clone());
     todo.linear_seen = Some(issue.state_type.clone());
