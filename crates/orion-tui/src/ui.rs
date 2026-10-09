@@ -161,6 +161,8 @@ pub(crate) const NO_MATCHES: &str = "no matches";
 const MIN_PREVIEW_TEXT_W: usize = 16;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // Every text field records where this frame draws it, for the mouse.
+    crate::text_input::new_frame();
     // A frame asks where the cursor is a dozen times over and moves it
     // none of them: the ROWS MEMO works it out once.
     app.rows_memo.arm();
@@ -1231,14 +1233,14 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             // caret; the caret dims while a listing row is highlighted
             // (Enter takes the highlight, not the text).
             if let Some(r) = row_rect(inner, 1) {
-                let budget = inner.width.saturating_sub(2) as usize;
+                let at = after_lead(r, 2);
                 let cursor = if prompt.hover.is_some() {
                     th.dim
                 } else {
                     th.text
                 };
                 let mut spans = vec![Span::raw("> ")];
-                spans.extend(input_spans(&prompt.input, budget, cursor, th));
+                spans.extend(input_spans(&prompt.input, at, cursor, th));
                 f.render_widget(Paragraph::new(Line::from(spans)), r);
             }
 
@@ -2573,9 +2575,8 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             }
             if let Some(input) = &view.input {
                 if let Some(row_area) = row_rect(inner, total.saturating_sub(start)) {
-                    let budget = (inner.width as usize).saturating_sub(2);
                     let mut spans = vec![Span::styled("+ ", Style::default().fg(th.accent))];
-                    spans.extend(input_spans(input, budget, th.accent, th));
+                    spans.extend(input_spans(input, after_lead(row_area, 2), th.accent, th));
                     f.render_widget(Paragraph::new(Line::from(spans)), row_area);
                 }
             }
@@ -4805,7 +4806,59 @@ pub(crate) fn draw_multiline_input_with_caret(
         .take(view.height.into())
         .collect();
     f.render_widget(Paragraph::new(shown), area);
+    crate::text_input::place_rows(input, area, view.top);
     (view, rows)
+}
+
+/// A multi-row field without the caret — a box the caret is elsewhere
+/// in — its text, or `empty` dim while there is none. In the
+/// very rows the live field draws, from the top, so a click lands where
+/// it points as the box takes the caret.
+pub(crate) fn draw_multiline_idle(
+    f: &mut Frame,
+    input: &TextInput,
+    area: Rect,
+    empty: &str,
+    th: Theme,
+) {
+    crate::text_input::place_rows(input, area, 0);
+    if input.trim().is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(empty.to_string(), Style::default().fg(th.dim))),
+            area,
+        );
+        return;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let lines: Vec<Line> = input
+        .rows(area.width.max(1).into())
+        .into_iter()
+        .take(area.height.into())
+        .map(|(start, end)| Line::from(chars[start..end].iter().collect::<String>()))
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The cells of `row` past a `lead` cells wide — where a field drawn after
+/// a label or a mark sits.
+pub(crate) fn after_lead(row: Rect, lead: usize) -> Rect {
+    let lead = u16::try_from(lead).unwrap_or(u16::MAX).min(row.width);
+    Rect {
+        x: row.x + lead,
+        width: row.width - lead,
+        height: 1,
+        ..row
+    }
+}
+
+/// [`after_lead`] keeping the row's last cell clear: a form row's field
+/// after its label.
+pub(crate) fn field_after(row: Rect, lead: usize) -> Rect {
+    let at = after_lead(row, lead);
+    Rect {
+        width: at.width.saturating_sub(1),
+        ..at
+    }
 }
 
 // ---- forms in a modal's reading pane ----
@@ -4856,28 +4909,31 @@ pub(crate) fn form_label(label: &str, on: bool, th: Theme) -> Span<'static> {
     Span::styled(format!("{indent}{label:<FORM_LABEL_W$}"), style)
 }
 
-/// A one-line form field on its row, `width` cells: its label, then the
-/// field — the live text with its caret while it has it (`on`), else its
-/// text, or `placeholder` dim while it is empty.
+/// A one-line form field on its `row`: its label, then the field — the
+/// live text with its caret while it has it (`on`), else its text, or
+/// `placeholder` dim while it is empty.
 pub(crate) fn form_field(
     label: &str,
     input: &TextInput,
     placeholder: &str,
     on: bool,
-    width: usize,
+    row: Rect,
     th: Theme,
 ) -> Vec<Span<'static>> {
     let label = form_label(label, on, th);
-    let budget = width.saturating_sub(label.content.chars().count() + 1);
+    let at = field_after(row, label.content.chars().count());
+    let budget = usize::from(at.width);
     let mut spans = vec![label];
     if on {
-        spans.extend(input_spans(input, budget, th.accent, th));
+        spans.extend(input_spans(input, at, th.accent, th));
     } else if input.trim().is_empty() {
+        crate::text_input::place_line(input, at, 0);
         spans.push(Span::styled(
             placeholder.to_string(),
             Style::default().fg(th.dim),
         ));
     } else {
+        crate::text_input::place_line(input, at, 0);
         spans.push(Span::styled(
             truncate(input.as_str(), budget),
             Style::default().fg(th.text),
@@ -4923,12 +4979,7 @@ pub(crate) fn form_text_box(
         draw_scroll_marks(f, area, view, rows, th.dim);
         return Some(view);
     }
-    let text = if input.trim().is_empty() {
-        Paragraph::new(Span::styled(empty.to_string(), Style::default().fg(th.dim)))
-    } else {
-        Paragraph::new(input.as_str().to_string()).wrap(ratatui::widgets::Wrap { trim: false })
-    };
-    f.render_widget(text, inner);
+    draw_multiline_idle(f, input, inner, empty, th);
     None
 }
 
@@ -5078,19 +5129,21 @@ pub(crate) fn multiline_input_lines(
 
 /// Spans for a one-line text field: the value with a block cursor sitting
 /// where the caret is, and its SELECTION on the theme's selection
-/// background. Long values scroll under the field — the window keeps the
-/// caret near the middle, and a `…` marks each end that has text scrolled
-/// off it.
+/// background. Long values scroll under the field — the window moves only
+/// as far as keeps the caret in sight, and a `…` marks each end that has
+/// text scrolled off it.
 ///
-/// `cursor` colors the caret block; pass `th.dim` to park it (the prompt
-/// does that while a listing row, not the text, holds Enter).
+/// `at` is the cells the field is drawn in, recorded for the mouse; its
+/// width is the room it has. `cursor` colors the caret block; pass
+/// `th.dim` to park it (the prompt does that while a listing row, not the
+/// text, holds Enter).
 pub(crate) fn input_spans(
     input: &TextInput,
-    budget: usize,
+    at: Rect,
     cursor: Color,
     th: Theme,
 ) -> Vec<Span<'static>> {
-    input_spans_lit(input, budget, cursor, th, &[])
+    input_spans_lit(input, at, cursor, th, &[])
 }
 
 /// [`input_spans`] with the plain text inside `lit` (char ranges, end
@@ -5098,6 +5151,32 @@ pub(crate) fn input_spans(
 /// (`list_filter`), which read as the chips they are.
 pub(crate) fn input_spans_lit(
     input: &TextInput,
+    at: Rect,
+    cursor: Color,
+    th: Theme,
+    lit: &[(usize, usize)],
+) -> Vec<Span<'static>> {
+    let budget = usize::from(at.width);
+    let start = input.line_first(budget);
+    crate::text_input::place_line(input, at, start);
+    line_spans(input, start, budget, cursor, th, lit)
+}
+
+/// [`input_spans`] for a field whose caller records where it lands
+/// itself, once it knows (`text_input::place_line`).
+pub(crate) fn input_spans_unplaced(
+    input: &TextInput,
+    budget: usize,
+    cursor: Color,
+    th: Theme,
+) -> Vec<Span<'static>> {
+    line_spans(input, input.line_first(budget), budget, cursor, th, &[])
+}
+
+/// A one-line field's spans, `budget` cells of it from char `start`.
+fn line_spans(
+    input: &TextInput,
+    start: usize,
     budget: usize,
     cursor: Color,
     th: Theme,
@@ -5107,13 +5186,7 @@ pub(crate) fn input_spans_lit(
     let caret = input.cursor_chars();
     let selection = input.selection_chars();
     let budget = budget.max(1);
-    // A caret parked past the last character needs one extra cell to sit in.
-    let total = chars.len() + usize::from(caret >= chars.len());
-    let start = if total <= budget {
-        0
-    } else {
-        caret.saturating_sub(budget / 2).min(total - budget)
-    };
+    let total = input.line_cells();
     let end = (start + budget).min(total);
 
     let mut cells: Vec<(char, FieldCell, bool)> = (start..end)
@@ -5125,8 +5198,8 @@ pub(crate) fn input_spans_lit(
             )
         })
         .collect();
-    // The window is centered on the caret, so an elided edge is never the
-    // caret's own cell.
+    // The window keeps the caret off its edges (`TextInput::line_first`),
+    // so an elided edge is never the caret's own cell.
     if start > 0 {
         if let Some(first) = cells.first_mut() {
             first.0 = '…';
@@ -5174,12 +5247,13 @@ pub(crate) fn search_line(
     th: Theme,
 ) -> Line<'static> {
     if input.is_empty() {
+        crate::text_input::place_line(input, area, 0);
         return Line::from(Span::styled(
             placeholder.to_string(),
             Style::default().fg(th.dim),
         ));
     }
-    Line::from(input_spans(input, area.width as usize, th.accent, th))
+    Line::from(input_spans(input, area, th.accent, th))
 }
 
 /// A search row without the keys: what was typed, dim and with no caret —
@@ -5190,6 +5264,7 @@ pub(crate) fn search_line_idle(
     area: Rect,
     th: Theme,
 ) -> Line<'static> {
+    crate::text_input::place_line(input, area, 0);
     let text = if input.is_empty() {
         placeholder
     } else {
@@ -5213,13 +5288,7 @@ pub(crate) fn search_line_lit(
     if input.is_empty() {
         return search_line(input, placeholder, area, th);
     }
-    Line::from(input_spans_lit(
-        input,
-        area.width as usize,
-        th.accent,
-        th,
-        lit,
-    ))
+    Line::from(input_spans_lit(input, area, th.accent, th, lit))
 }
 
 /// One entry of a list gathered into sections: a header over the run of
@@ -5672,7 +5741,7 @@ mod tests {
     /// `[]` so placement is readable in an assertion.
     fn rendered(input: &TextInput, budget: usize) -> String {
         let th = Theme::default();
-        input_spans(input, budget, th.accent, th)
+        input_spans(input, Rect::new(0, 0, budget as u16, 1), th.accent, th)
             .iter()
             .map(|s| {
                 if s.style.bg == Some(th.accent) {
@@ -5858,7 +5927,7 @@ mod tests {
         for _ in 0..3 {
             one.handle_key(&shift_left);
         }
-        let spans = input_spans(&one, 40, th.accent, th);
+        let spans = input_spans(&one, Rect::new(0, 0, 40, 1), th.accent, th);
         assert_eq!(lit(&spans), "ug", "`b` is the caret's, at the moving end");
         let caret = spans.iter().find(|s| s.content.as_ref() == "b").unwrap();
         assert_eq!(caret.style.bg, Some(th.accent));

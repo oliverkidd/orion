@@ -12093,7 +12093,7 @@ fn spawn_and_reap(mut command: std::process::Command, what: &'static str) -> boo
 }
 
 /// Two clicks on the same cell within this window make a double-click.
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+pub(crate) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// Whether this click on `key` is the second of a double-click. The slot
 /// is consumed either way: a double-click is spent, so a third click starts
@@ -12341,6 +12341,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             }
         }
     }
+    // A text field under the pointer takes it — a click puts the caret,
+    // a drag selects — the same in every modal (`field_mouse`).
+    if crate::field_mouse::handle(app, &mouse) {
+        return;
+    }
     // An open context menu owns the rest of the mouse: a click on a row
     // activates it, a right- or middle-click off the rows closes and lands
     // its focus like the left click above (the left button never gets here
@@ -12374,8 +12379,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     // A prompt dialog is modal too: the wheel and clicks drive the
     // Add-project directory listing (click highlights, a second click on
     // the highlighted row steps in) or a task box's text (the wheel
-    // scrolls it, a click puts the caret where it points); everything
-    // else is swallowed.
+    // scrolls it anywhere over the dialog; the text's own clicks and drags
+    // were `field_mouse`'s); everything else is swallowed.
     // The QUICK PROMPT's header fields are buttons — `project demo ⌘P`,
     // `worktree main ⌘.`, `agent Claude Tab`, `model opus ⌘/`, `effort
     // high ⌘Y`, a preset's: a click on one opens the picker its key does
@@ -12406,14 +12411,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 prompt.input.scroll_rows(-(MODAL_WHEEL_LINES as isize));
                 app.dirty = true;
             }
-            MouseEventKind::Down(MouseButton::Left) if task_box => {
-                let area = prompt.editor_area;
-                if area.contains(mouse_pos) {
-                    let (row, col) = (mouse.row - area.y, mouse.column - area.x);
-                    prompt.input.click(row, col);
-                }
-                app.dirty = true;
-            }
             MouseEventKind::ScrollDown => {
                 prompt.move_hover(1);
                 app.dirty = true;
@@ -12422,7 +12419,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 prompt.move_hover(-1);
                 app.dirty = true;
             }
-            MouseEventKind::Down(MouseButton::Left) => {
+            MouseEventKind::Down(MouseButton::Left) if !task_box => {
                 let area = prompt.list_area;
                 let first = prompt.window_start(area.height as usize);
                 if let Some(i) = crate::list_hit::row_at(area, first, prompt.dirs.len(), mouse_pos)

@@ -2327,6 +2327,20 @@ fn is_char_key(key: &KeyEvent) -> bool {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
 
+/// The create form's caret to `to`, as a click on its row puts it: off a
+/// branch field, the title and description fill for the branches it
+/// leaves.
+pub(crate) fn focus_create(app: &mut App, to: CreateField) {
+    let Some(form) = create_form(app) else {
+        return;
+    };
+    let fill = form.field.is_branch();
+    form.focus(to);
+    if fill {
+        request_fill(app);
+    }
+}
+
 /// The mouse while a form is up: a click puts the caret on a field —
 /// on a branch in the list, takes it — or works a merge or close row as
 /// Space does; the wheel walks a branch list. Nothing else, so a draft is
@@ -2355,8 +2369,9 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position) {
                     if to == CreateField::Draft && field == CreateField::Draft {
                         form.draft = !form.draft;
                     }
-                    fill = field.is_branch();
-                    form.focus(to);
+                    focus_create(app, to);
+                    app.dirty = true;
+                    return;
                 }
             }
             _ => {}
@@ -2477,8 +2492,11 @@ fn draw_create(f: &mut Frame, area: Rect, form: &CreateForm, focused: bool, th: 
     let dim = Style::default().fg(th.dim);
     let caret = |field: CreateField| focused && form.field == field && form.saving.is_none();
     let width = usize::from(inner.width);
+    // Each field on its row of the four below.
     let line_of = |field: CreateField, label: &str, input: &TextInput, placeholder: &str| {
-        form_field(label, input, placeholder, caret(field), width, th)
+        let row = CreateField::ORDER.iter().position(|f| *f == field);
+        let row = row.and_then(|i| row_rect(inner, i)).unwrap_or_default();
+        form_field(label, input, placeholder, caret(field), row, th)
     };
     // From, with how far ahead it is once the fill has counted.
     let mut from = line_of(CreateField::From, "From", &form.from, "a branch of yours");

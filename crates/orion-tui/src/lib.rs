@@ -22,6 +22,7 @@ pub mod dropped_files;
 pub mod editor;
 pub mod event_loop;
 pub mod fetch;
+pub mod field_mouse;
 pub mod file_tabs;
 pub mod flash;
 pub mod fuzzy;

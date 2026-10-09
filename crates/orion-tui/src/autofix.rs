@@ -1165,7 +1165,7 @@ fn issue_row(form: &AutofixForm, issue: Issue, th: Theme) -> Vec<Span<'static>> 
 }
 
 /// The form's rows top to bottom, each with the row it is for the mouse.
-fn lines(form: &AutofixForm, inner_w: usize, th: Theme) -> Vec<(Option<Row>, Vec<Span<'static>>)> {
+fn lines(form: &AutofixForm, th: Theme) -> Vec<(Option<Row>, Vec<Span<'static>>)> {
     let indent = crate::pr_preview::INDENT;
     let mut lines = vec![
         (
@@ -1195,17 +1195,8 @@ fn lines(form: &AutofixForm, inner_w: usize, th: Theme) -> Vec<(Option<Row>, Vec
             .map(|issue| (Some(Row::Issue(issue)), issue_row(form, issue, th))),
     );
     lines.push((None, Vec::new()));
-    lines.push((
-        Some(Row::Note),
-        crate::ui::form_field(
-            "Note",
-            &form.note,
-            "anything the agent should know (optional)",
-            form.row == Row::Note,
-            inner_w,
-            th,
-        ),
-    ));
+    // Drawn where it lands (`draw`), for the mouse to find it there.
+    lines.push((Some(Row::Note), Vec::new()));
     if let Some(notice) = &form.notice {
         lines.push((None, Vec::new()));
         lines.push((
@@ -1225,7 +1216,7 @@ pub fn draw(f: &mut Frame, app: &mut App, form: &AutofixForm, th: Theme) {
         .min(frame.width.saturating_sub(2))
         .max(frame.width.min(MODAL_MIN_W));
     let inner_w = usize::from(width.saturating_sub(2));
-    let lines = lines(form, inner_w, th);
+    let lines = lines(form, th);
     let explain_rows = crate::hints::explain_lines(EXPLAIN, width.saturating_sub(2), EXPLAIN_ROWS)
         .len() as u16
         + 1;
@@ -1250,6 +1241,10 @@ pub fn draw(f: &mut Frame, app: &mut App, form: &AutofixForm, th: Theme) {
         let Some(rect) = crate::ui::row_rect(body, i) else {
             break;
         };
+        let spans = match row {
+            Some(Row::Note) => note_field(form, rect, th),
+            _ => spans,
+        };
         f.render_widget(Paragraph::new(crate::pr_preview::fit(spans, inner_w)), rect);
         if let Some(row) = row {
             rows.push((rect, row));
@@ -1259,6 +1254,18 @@ pub fn draw(f: &mut Frame, app: &mut App, form: &AutofixForm, th: Theme) {
         live.area = area;
         live.rows = rows;
     }
+}
+
+/// The note on its `row`.
+fn note_field(form: &AutofixForm, row: Rect, th: Theme) -> Vec<Span<'static>> {
+    crate::ui::form_field(
+        "Note",
+        &form.note,
+        "anything the agent should know (optional)",
+        form.row == Row::Note,
+        row,
+        th,
+    )
 }
 
 /// A form for a pull request with conflicts — what the overlay tests open.

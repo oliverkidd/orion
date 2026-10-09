@@ -2112,9 +2112,9 @@ fn draw_commit(
     }
     if let Some(row) = row_rect(body, 2) {
         let label = " message  ";
-        let budget = (body.width as usize).saturating_sub(label.len() + 1);
+        let at = crate::ui::field_after(row, label.len());
         let mut spans = vec![Span::styled(label, Style::default().fg(th.dim))];
-        spans.extend(input_spans(message, budget, th.accent, th));
+        spans.extend(input_spans(message, at, th.accent, th));
         f.render_widget(Paragraph::new(Line::from(spans)), row);
     }
     draw_files(f, files, body, 4, th);

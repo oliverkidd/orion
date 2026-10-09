@@ -21,6 +21,14 @@
 //! Every renderer draws it on the theme's selection background
 //! (`ui::field_spans`).
 //!
+//! And the MOUSE works in every field the same way, as it does in any
+//! macOS text field (and in Claude Code's own prompt): a click puts the
+//! caret where it points, a drag selects, a double-click takes the word
+//! and a triple-click the line, ⇧-click stretches the selection there, and
+//! the wheel scrolls a box that runs past its rows. Each renderer records
+//! where it drew its field ([`place_line`], [`place_rows`]); the event loop
+//! hands the mouse to the field under it ([`TextInput::mouse`]).
+//!
 //! A [`TextInput::multiline`] field holds hard line breaks as well, and
 //! takes them the way Claude Code's own prompt does: Shift+Enter,
 //! Option+Enter — the `ESC` `CR` a terminal without the kitty protocol
@@ -44,10 +52,14 @@
 //! returns [`Edit::Ignored`] for anything it doesn't recognize, and callers
 //! run it last, after their own bindings have had first refusal.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 thread_local! {
     /// What the last ⌘C or ⌘X in any field copied, until the event loop
@@ -62,6 +74,108 @@ thread_local! {
 /// it on the clipboard after every key.
 pub fn take_copied() -> Option<String> {
     COPIED.with(|c| c.borrow_mut().take())
+}
+
+/// Which field is which, across the clone a frame is drawn from: a field
+/// and its clones share one, so where the clone was drawn is where the
+/// live field is. Every new field takes the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FieldId(u64);
+
+impl Default for FieldId {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// How a field was laid out where it was drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// One row, scrolled sideways: the char in the first column.
+    Line { first: usize },
+    /// Wrapped into [`TextInput::rows`] the area's width: the row at the
+    /// top.
+    Rows { top: u16 },
+}
+
+/// Where a field was drawn: the cells its text sits in, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placed {
+    area: Rect,
+    shape: Shape,
+}
+
+/// Every field drawn in the frame on screen (`drawn`), and in the one
+/// before it (`last`) — a one-line field scrolls on from where it was.
+#[derive(Default)]
+struct Placements {
+    drawn: HashMap<FieldId, Placed>,
+    last: HashMap<FieldId, Placed>,
+}
+
+thread_local! {
+    /// Where each field was drawn, for the mouse. A draw works on a clone
+    /// of the overlay and a field's renderer seldom knows which overlay it
+    /// is in, so rather than every one of them writing its rect back, each
+    /// renderer records it here under the field's [`FieldId`].
+    static PLACED: RefCell<Placements> = RefCell::default();
+}
+
+/// A frame is starting: what was drawn becomes the last frame's, and each
+/// field records afresh where it lands. A field not drawn this frame takes
+/// no clicks.
+pub fn new_frame() {
+    PLACED.with(|p| {
+        let p = &mut *p.borrow_mut();
+        std::mem::swap(&mut p.last, &mut p.drawn);
+        p.drawn.clear();
+    });
+}
+
+fn place(input: &TextInput, area: Rect, shape: Shape) {
+    PLACED.with(|p| {
+        p.borrow_mut()
+            .drawn
+            .insert(input.id, Placed { area, shape })
+    });
+}
+
+/// `input` was drawn one row high in `area`, from char `first` —
+/// [`TextInput::line_first`]'s, for a field drawn live.
+pub fn place_line(input: &TextInput, area: Rect, first: usize) {
+    place(input, Rect { height: 1, ..area }, Shape::Line { first });
+}
+
+/// `input` was drawn wrapped into the rows `area` is wide
+/// ([`TextInput::rows`]), from row `top`.
+pub fn place_rows(input: &TextInput, area: Rect, top: u16) {
+    place(input, area, Shape::Rows { top });
+}
+
+/// What a press selects, and a drag from it grows by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Char,
+    Word,
+    Line,
+}
+
+/// The left button, pressed in the field and not yet let go.
+#[derive(Debug, Clone, Copy)]
+struct Press {
+    unit: Unit,
+    /// What the press itself selected, as a byte range — empty for a
+    /// single click — which a drag's selection always covers.
+    origin: (usize, usize),
+}
+
+/// The last click, for counting a double- or triple-click.
+#[derive(Debug, Clone, Copy)]
+struct Click {
+    at: Instant,
+    cell: (u16, u16),
+    count: u8,
 }
 
 /// What one key press did to the field.
@@ -89,7 +203,7 @@ impl Edit {
 }
 
 /// Editable text plus a cursor into it: one line, or many.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct TextInput {
     text: String,
     /// Byte offset into `text`; always on a char boundary, always ≤ len.
@@ -107,6 +221,12 @@ pub struct TextInput {
     goal: Option<u16>,
     /// Where a multi-row field was last drawn (see [`TextView`]).
     view: TextView,
+    /// Which field this is, for where it was drawn ([`Placements`]).
+    id: FieldId,
+    /// The left button held down in the field: the drag it selects by.
+    press: Option<Press>,
+    /// The last click, for a double- or triple-click.
+    click: Option<Click>,
 }
 
 /// Where a multi-row field was last drawn: the columns its rows wrap at,
@@ -130,7 +250,8 @@ fn cells(n: usize) -> u16 {
 
 /// A field's value is its text, caret, SELECTION and shape — the range
 /// selected, that is, the anchor being the caret's other end; the column
-/// a run of ↑/↓ aims for and where it was last drawn are not part of it.
+/// a run of ↑/↓ aims for, where it was last drawn and what the mouse is
+/// doing in it are not part of it.
 impl PartialEq for TextInput {
     fn eq(&self, other: &Self) -> bool {
         self.text == other.text
@@ -142,11 +263,36 @@ impl PartialEq for TextInput {
 
 impl Eq for TextInput {}
 
+/// Which field it is and what the mouse is doing in it are left out, as
+/// they are of its value: two fields that read the same print the same.
+impl fmt::Debug for TextInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextInput")
+            .field("text", &self.text)
+            .field("cursor", &self.cursor)
+            .field("anchor", &self.anchor)
+            .field("multiline", &self.multiline)
+            .field("goal", &self.goal)
+            .field("view", &self.view)
+            .finish()
+    }
+}
+
 /// Word characters for ⌥-arrow / Ctrl+W motion: a run of these is one word,
 /// everything else (spaces, `/`, `-`, `.`) separates. Matches what readline
 /// does in a shell, which is where the muscle memory comes from.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// The char `col` chars into row `row` of a [`TextInput::rows`] layout —
+/// or as far as that row lets a caret stand: a soft-wrapped row's last
+/// spot is its final char (one step on is the next row's start), a hard
+/// line's is its end.
+fn spot_in_row(rows: &[(usize, usize)], row: usize, col: usize) -> usize {
+    let (start, end) = rows[row];
+    let last = if is_soft(rows, row) { end - 1 } else { end };
+    (start + col).min(last)
 }
 
 /// Does row `i` of a [`TextInput::rows`] layout end at a soft wrap — the
@@ -249,11 +395,15 @@ impl TextInput {
 
     /// Park the caret `at` chars in, clamped to the end of the text.
     fn set_cursor_chars(&mut self, at: usize) {
-        self.cursor = self
-            .text
+        self.cursor = self.byte_of(at);
+    }
+
+    /// The byte offset of char `at`, clamped to the end of the text.
+    fn byte_of(&self, at: usize) -> usize {
+        self.text
             .char_indices()
             .nth(at)
-            .map_or(self.text.len(), |(i, _)| i);
+            .map_or(self.text.len(), |(i, _)| i)
     }
 
     /// Caret to the very start of the text — ↑ on a task box's top row.
@@ -445,18 +595,279 @@ impl TextInput {
         Edit::Moved
     }
 
-    /// A click `row` rows down and `col` columns into the box as last
-    /// drawn: the caret to that spot — or the end of that row, clicked
-    /// past it, and the end of the text, clicked below the last row.
-    pub fn click(&mut self, row: u16, col: u16) {
-        self.goal = None;
-        self.anchor = None;
-        let rows = self.rows(self.view.width.into());
-        let row = usize::from(self.view.top) + usize::from(row);
-        match rows.get(row) {
-            Some(_) => self.land(&rows, row, col.into()),
-            None => self.cursor = self.text.len(),
+    /// The first char a one-line field `budget` cells wide shows: where
+    /// it was last drawn from, moved only as far as keeps the caret in
+    /// sight and off an edge's `…` — so the text holds still under the
+    /// pointer and the caret, as a macOS text field's does — or, never
+    /// drawn, the caret near the middle.
+    pub fn line_first(&self, budget: usize) -> usize {
+        let caret = self.cursor_chars();
+        let len = self.text.chars().count();
+        let total = self.line_cells();
+        let budget = budget.max(1);
+        if total <= budget {
+            return 0;
         }
+        // As far along as shows the end and the cell past it, the caret
+        // there or not — so stepping off the end doesn't nudge the text.
+        let latest = (len + 1).saturating_sub(budget);
+        let centred = caret.saturating_sub(budget / 2);
+        let last = PLACED.with(|p| {
+            let p = p.borrow();
+            match p.drawn.get(&self.id).or_else(|| p.last.get(&self.id)) {
+                Some(Placed {
+                    shape: Shape::Line { first },
+                    ..
+                }) => Some(*first),
+                _ => None,
+            }
+        });
+        let first = match last {
+            // Never on a first cell an elided start covers, nor on the
+            // last one, which an elided end does — unless too narrow for a
+            // `…` either side of it.
+            Some(first) if budget >= 3 => first
+                .min(caret.saturating_sub(1))
+                .max((caret + 2).saturating_sub(budget)),
+            _ => centred,
+        };
+        first.min(latest)
+    }
+
+    /// The cells a one-line field's text takes: a char each, and one more
+    /// for a caret past the last character to sit in.
+    pub fn line_cells(&self) -> usize {
+        let len = self.text.chars().count();
+        len + usize::from(self.cursor_chars() >= len)
+    }
+
+    /// Where the field was drawn in the frame on screen, if it was.
+    fn placed(&self) -> Option<Placed> {
+        PLACED.with(|p| p.borrow().drawn.get(&self.id).copied())
+    }
+
+    /// Is `at` — a cell on screen — in the field as last drawn?
+    pub fn under(&self, at: Position) -> bool {
+        self.placed().is_some_and(|p| p.area.contains(at))
+    }
+
+    /// Is the left button held down in the field — a drag selecting?
+    pub fn pressed(&self) -> bool {
+        self.press.is_some()
+    }
+
+    /// Let a press go without its release — another took the mouse.
+    pub fn release(&mut self) {
+        self.press = None;
+    }
+
+    /// The mouse, in screen cells: the field's when it was drawn under the
+    /// pointer (a press, the wheel over a box that runs past its rows) or
+    /// the button was pressed in it (a drag, the release). [`Edit::Ignored`]
+    /// — the caller's — otherwise.
+    ///
+    /// A click puts the caret where it points: past a row's end at that
+    /// end, below the last row at the text's end. A second and a third
+    /// click on the spot take the word and the line, and a drag from any
+    /// of them selects on by chars, words or lines. ⇧-click stretches the
+    /// SELECTION (or makes one from the caret) to the spot. A drag past an
+    /// edge scrolls the field a step at a time.
+    pub fn mouse(&mut self, event: &MouseEvent) -> Edit {
+        self.mouse_at(event, Instant::now())
+    }
+
+    /// [`mouse`](Self::mouse), the clock read by the caller.
+    pub fn mouse_at(&mut self, event: &MouseEvent, now: Instant) -> Edit {
+        let at = Position::new(event.column, event.row);
+        let Some(placed) = self.placed() else {
+            self.press = None;
+            return Edit::Ignored;
+        };
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) if placed.area.contains(at) => {
+                self.press_at(
+                    placed,
+                    at,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                    now,
+                );
+                Edit::Moved
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.press.is_some() => {
+                self.drag_to(placed, at);
+                Edit::Moved
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.press.is_some() => {
+                self.press = None;
+                Edit::Moved
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if placed.area.contains(at) && matches!(placed.shape, Shape::Rows { .. }) =>
+            {
+                self.sync_view(placed);
+                let step = if event.kind == MouseEventKind::ScrollUp {
+                    -1
+                } else {
+                    1
+                };
+                self.scroll_rows(step * crate::pr_modal::WHEEL_LINES as isize)
+            }
+            _ => Edit::Ignored,
+        }
+    }
+
+    /// A box drawn wrapped walks the rows it was drawn in — the view a
+    /// renderer with no write-back never handed it.
+    fn sync_view(&mut self, placed: Placed) {
+        if let Shape::Rows { top } = placed.shape {
+            self.view = TextView {
+                width: placed.area.width,
+                height: placed.area.height,
+                top,
+            };
+        }
+    }
+
+    fn press_at(&mut self, placed: Placed, at: Position, shift: bool, now: Instant) {
+        self.goal = None;
+        self.sync_view(placed);
+        let spot = self.point(placed, at);
+        let cell = (at.x, at.y);
+        let count = match self.click {
+            Some(last)
+                if last.cell == cell
+                    && now.saturating_duration_since(last.at)
+                        <= crate::event_loop::DOUBLE_CLICK =>
+            {
+                last.count % 3 + 1
+            }
+            _ => 1,
+        };
+        self.click = Some(Click {
+            at: now,
+            cell,
+            count,
+        });
+        if shift {
+            let anchor = self.anchor.unwrap_or(self.cursor);
+            self.press = Some(Press {
+                unit: Unit::Char,
+                origin: (anchor, anchor),
+            });
+            self.extend_to(spot);
+            return;
+        }
+        let unit = match count {
+            1 => Unit::Char,
+            2 => Unit::Word,
+            _ => Unit::Line,
+        };
+        let origin = self.unit_at(unit, spot);
+        self.press = Some(Press { unit, origin });
+        self.anchor = (origin.0 != origin.1).then_some(origin.0);
+        self.cursor = origin.1;
+    }
+
+    fn drag_to(&mut self, placed: Placed, at: Position) {
+        let area = placed.area;
+        let (placed, at) = match placed.shape {
+            // Past a box's top or bottom it scrolls a row, the caret
+            // following onto its edge row.
+            Shape::Rows { .. } => {
+                let y = if at.y < area.y {
+                    self.scroll_rows(-1);
+                    area.y
+                } else if at.y >= area.bottom() {
+                    self.scroll_rows(1);
+                    area.bottom().saturating_sub(1)
+                } else {
+                    at.y
+                };
+                let shape = Shape::Rows { top: self.view.top };
+                (Placed { shape, ..placed }, Position::new(at.x, y))
+            }
+            Shape::Line { .. } => (placed, at),
+        };
+        let spot = self.point(placed, at);
+        self.extend_to(spot);
+    }
+
+    /// The SELECTION from the press's origin out to whichever unit holds
+    /// `spot`, the caret on its far end.
+    fn extend_to(&mut self, spot: usize) {
+        let Some(press) = self.press else { return };
+        let (start, end) = self.unit_at(press.unit, spot);
+        let (from, to) = press.origin;
+        if start < from {
+            self.anchor = Some(to);
+            self.cursor = start;
+        } else {
+            self.anchor = Some(from);
+            self.cursor = end.max(to);
+        }
+        if self.anchor == Some(self.cursor) {
+            self.anchor = None;
+        }
+    }
+
+    /// The span of `unit` at byte `at`: the spot itself, the word — or run
+    /// of spaces, or of punctuation — it is in, or its line.
+    fn unit_at(&self, unit: Unit, at: usize) -> (usize, usize) {
+        match unit {
+            Unit::Char => (at, at),
+            Unit::Line => (self.line_start(at), self.line_end(at)),
+            Unit::Word => {
+                // The char at the spot decides the kind; at a line's end,
+                // the one before it.
+                let Some(c) = self
+                    .char_at(at)
+                    .filter(|c| *c != '\n')
+                    .or_else(|| self.char_before(at).filter(|c| *c != '\n'))
+                else {
+                    return (at, at);
+                };
+                let kind = |c: char| (is_word(c), c.is_whitespace());
+                let want = kind(c);
+                let mut start = at;
+                while self
+                    .char_before(start)
+                    .is_some_and(|b| b != '\n' && kind(b) == want)
+                {
+                    start = self.prev_boundary(start);
+                }
+                let mut end = at;
+                while self
+                    .char_at(end)
+                    .is_some_and(|n| n != '\n' && kind(n) == want)
+                {
+                    end = self.next_boundary(end);
+                }
+                (start, end)
+            }
+        }
+    }
+
+    /// The byte offset a screen cell points at in the field as `placed`:
+    /// the char under it — the end of a row clicked past its end, the
+    /// text's end below the last row, and a step past either end of a
+    /// one-line field's window clicked beside it.
+    fn point(&self, placed: Placed, at: Position) -> usize {
+        let area = placed.area;
+        let col = usize::from(at.x.saturating_sub(area.x));
+        let chars = match placed.shape {
+            Shape::Line { first } if at.x < area.x => first.saturating_sub(1),
+            Shape::Line { first } => (first + col).min(self.text.chars().count()),
+            Shape::Rows { top } => {
+                let rows = self.rows(area.width.into());
+                let row = usize::from(top) + usize::from(at.y.saturating_sub(area.y));
+                if row < rows.len() {
+                    spot_in_row(&rows, row, col)
+                } else {
+                    self.text.chars().count()
+                }
+            }
+        };
+        self.byte_of(chars)
     }
 
     /// Type `c` at the caret — over the SELECTION, when there is one.
@@ -762,13 +1173,9 @@ impl TextInput {
             .map_or(self.text.len(), |i| at + i)
     }
 
-    /// The caret `col` chars into `row` — or as far as that row lets it
-    /// stand: a soft-wrapped row's last spot is its final char (one step
-    /// on is the next row's start), a hard line's is its end.
+    /// The caret `col` chars into `row` ([`spot_in_row`]).
     fn land(&mut self, rows: &[(usize, usize)], row: usize, col: usize) {
-        let (start, end) = rows[row];
-        let last = if is_soft(rows, row) { end - 1 } else { end };
-        self.set_cursor_chars((start + col).min(last));
+        self.set_cursor_chars(spot_in_row(rows, row, col));
     }
 
     /// The caret `delta` rows up (−) or down, as last drawn, at the goal
@@ -1545,22 +1952,244 @@ mod tests {
         assert_eq!(input.scroll_rows(-1), Edit::Ignored);
     }
 
+    /// A multi-row field drawn into the `width` × `height` box at the
+    /// screen's top left, as a renderer records it.
+    fn placed(text: &str, width: u16, height: u16) -> TextInput {
+        let input = drawn(text, width, height);
+        place_rows(&input, Rect::new(0, 0, width, height), input.view().top);
+        input
+    }
+
+    /// A one-line field drawn `width` cells wide from column 2 of row 5,
+    /// from where it would scroll to.
+    fn placed_line(text: &str, width: u16) -> TextInput {
+        let input = TextInput::with_text(text);
+        place_line(
+            &input,
+            Rect::new(2, 5, width, 1),
+            input.line_first(width.into()),
+        );
+        input
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    const LEFT: MouseButton = MouseButton::Left;
+
+    /// A click — press and release — at a screen cell, `at` that instant.
+    fn click_at(input: &mut TextInput, column: u16, row: u16, at: Instant) -> Edit {
+        let edit = input.mouse_at(&mouse(MouseEventKind::Down(LEFT), column, row), at);
+        input.mouse_at(&mouse(MouseEventKind::Up(LEFT), column, row), at);
+        edit
+    }
+
+    fn click(input: &mut TextInput, column: u16, row: u16) -> Edit {
+        click_at(input, column, row, Instant::now())
+    }
+
+    fn drag(input: &mut TextInput, column: u16, row: u16) -> Edit {
+        input.mouse(&mouse(MouseEventKind::Drag(LEFT), column, row))
+    }
+
     /// A click puts the caret where it points in the rows as drawn — past
     /// a row's end at that end, below the last row at the text's end.
     #[test]
     fn a_click_lands_the_caret_where_it_points() {
-        let mut input = drawn(FOX, 10, 3);
+        let mut input = placed(FOX, 10, 3);
         assert_eq!(input.view().top, 2, "rows 2-4 in sight");
-        input.click(0, 2);
+        click(&mut input, 2, 0);
         assert_eq!(input.cursor_chars(), 22, "ju|mps");
-        input.click(0, 9);
+        click(&mut input, 9, 0);
         assert_eq!(input.cursor_chars(), 25, "the end of `jumps `");
-        input.click(9, 0);
+        // Below the box is not the field's; its last row's end is.
+        assert_eq!(click(&mut input, 0, 9), Edit::Ignored);
+        click(&mut input, 9, 2);
         assert_eq!(input.cursor_chars(), 43);
-        let mut top = drawn(FOX, 10, 5);
-        top.click(1, 0);
+        let mut top = placed(FOX, 10, 5);
+        click(&mut top, 0, 1);
         assert_eq!(top.cursor_chars(), 10);
         assert_eq!(row_of(&top), 1, "a soft break's caret starts the next row");
+    }
+
+    /// A one-line field's click counts from the char its window starts
+    /// on, wherever on screen it was drawn; past the text, its end.
+    #[test]
+    fn a_click_in_a_one_line_field_counts_from_where_it_was_drawn() {
+        let mut input = placed_line("hello world", 20);
+        assert_eq!(click(&mut input, 2 + 4, 5), Edit::Moved);
+        assert_eq!(input.cursor_chars(), 4, "hell|o");
+        click(&mut input, 2 + 15, 5);
+        assert_eq!(input.cursor_chars(), 11);
+        assert_eq!(click(&mut input, 1, 5), Edit::Ignored, "left of the field");
+        assert_eq!(click(&mut input, 4, 6), Edit::Ignored, "the row below");
+        // Never drawn, a field takes no clicks at all.
+        let mut hidden = TextInput::with_text("hello");
+        assert_eq!(click(&mut hidden, 0, 0), Edit::Ignored);
+    }
+
+    /// A drag selects from the press to the pointer, either way round —
+    /// across rows in a box — and a click lets it go.
+    #[test]
+    fn a_drag_selects_from_where_it_was_pressed() {
+        let mut input = placed_line("hello world", 20);
+        input.mouse(&mouse(MouseEventKind::Down(LEFT), 2 + 6, 5));
+        assert!(input.pressed());
+        drag(&mut input, 2 + 11, 5);
+        assert_eq!(sel(&input), "world");
+        assert_eq!(input.cursor_chars(), 11, "the caret on the far end");
+        drag(&mut input, 2, 5);
+        assert_eq!(sel(&input), "hello ");
+        assert_eq!(input.cursor_chars(), 0);
+        input.mouse(&mouse(MouseEventKind::Up(LEFT), 2, 5));
+        assert!(!input.pressed());
+        assert_eq!(drag(&mut input, 2 + 6, 5), Edit::Ignored, "released");
+        assert_eq!(sel(&input), "hello ", "kept past the release");
+        click(&mut input, 2 + 3, 5);
+        assert_eq!(input.selected(), None);
+
+        let mut many = placed(FOX, 10, 5);
+        many.mouse(&mouse(MouseEventKind::Down(LEFT), 4, 0));
+        drag(&mut many, 5, 1);
+        assert_eq!(sel(&many), "quick brown");
+        // Dragged off the box, the rows' end.
+        drag(&mut many, 30, 4);
+        assert_eq!(sel(&many), "quick brown fox jumps over the lazy dog");
+    }
+
+    /// A second click on the spot takes the word — or the run of spaces
+    /// or punctuation — a third the line, a fourth starts over; a drag
+    /// from a double-click grows by words. Clicks apart in time or place
+    /// count afresh.
+    #[test]
+    fn double_and_triple_clicks_take_the_word_and_the_line() {
+        use std::time::Duration;
+        let mut input = TextInput::multiline_with_text("one two-three\nfour");
+        place_rows(&input, Rect::new(0, 0, 40, 4), 0);
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        click_at(&mut input, 5, 0, ms(0));
+        assert_eq!(input.selected(), None);
+        click_at(&mut input, 5, 0, ms(200));
+        assert_eq!(sel(&input), "two");
+        click_at(&mut input, 5, 0, ms(400));
+        assert_eq!(sel(&input), "one two-three", "the line, not its break");
+        click_at(&mut input, 5, 0, ms(600));
+        assert_eq!(input.selected(), None, "a fourth starts over");
+        click_at(&mut input, 7, 0, ms(800));
+        click_at(&mut input, 7, 0, ms(900));
+        assert_eq!(sel(&input), "-", "punctuation is a run of its own");
+        click_at(&mut input, 3, 0, ms(2000));
+        click_at(&mut input, 3, 0, ms(2100));
+        assert_eq!(sel(&input), " ");
+        click_at(&mut input, 1, 0, ms(5000));
+        click_at(&mut input, 2, 0, ms(5100));
+        assert_eq!(input.selected(), None, "a different cell is a new click");
+        click_at(&mut input, 1, 0, ms(9000));
+        click_at(&mut input, 1, 0, ms(9600));
+        assert_eq!(input.selected(), None, "too slow to be a double-click");
+
+        // Double-click `two` and drag: whole words either way.
+        click_at(&mut input, 5, 0, ms(20_000));
+        input.mouse_at(&mouse(MouseEventKind::Down(LEFT), 5, 0), ms(20_100));
+        drag(&mut input, 10, 0);
+        assert_eq!(sel(&input), "two-three");
+        drag(&mut input, 1, 0);
+        assert_eq!(sel(&input), "one two");
+        drag(&mut input, 1, 1);
+        assert_eq!(sel(&input), "two-three\nfour");
+    }
+
+    /// ⇧-click stretches the selection — or makes one from the caret — to
+    /// the spot, and a drag on from it keeps the same anchor.
+    #[test]
+    fn shift_click_extends_the_selection() {
+        let mut input = placed_line("hello world", 20);
+        click(&mut input, 2 + 2, 5);
+        let shifted = MouseEvent {
+            modifiers: KeyModifiers::SHIFT,
+            ..mouse(MouseEventKind::Down(LEFT), 2 + 8, 5)
+        };
+        input.mouse(&shifted);
+        assert_eq!(sel(&input), "llo wo");
+        drag(&mut input, 2 + 11, 5);
+        assert_eq!(sel(&input), "llo world");
+        input.mouse(&mouse(MouseEventKind::Up(LEFT), 2 + 11, 5));
+        input.mouse(&MouseEvent {
+            modifiers: KeyModifiers::SHIFT,
+            ..mouse(MouseEventKind::Down(LEFT), 2, 5)
+        });
+        assert_eq!(sel(&input), "he", "from the same anchor");
+    }
+
+    /// The wheel over a box scrolls it; a one-line field leaves the wheel
+    /// to the list under it. A drag past a box's edge scrolls it a row a
+    /// step, the selection growing with it.
+    #[test]
+    fn the_wheel_and_a_drag_past_the_edge_scroll_a_box() {
+        let mut input = placed(&twenty_lines(), 20, 5);
+        assert_eq!(input.view().top, 15);
+        assert_eq!(
+            input.mouse(&mouse(MouseEventKind::ScrollUp, 3, 2)),
+            Edit::Moved
+        );
+        assert_eq!(input.view().top, 12);
+        assert_eq!(
+            input.mouse(&mouse(MouseEventKind::ScrollUp, 30, 2)),
+            Edit::Ignored,
+            "not over the box"
+        );
+        let mut line = placed_line("hello", 20);
+        assert_eq!(
+            line.mouse(&mouse(MouseEventKind::ScrollUp, 3, 5)),
+            Edit::Ignored
+        );
+
+        // A box drawn from row 3, `l15` on its top row.
+        let mut up = drawn(&twenty_lines(), 20, 5);
+        place_rows(&up, Rect::new(0, 3, 20, 5), up.view().top);
+        up.mouse(&mouse(MouseEventKind::Down(LEFT), 0, 3));
+        drag(&mut up, 0, 1);
+        assert_eq!(up.view().top, 14);
+        drag(&mut up, 0, 1);
+        assert_eq!(up.view().top, 13);
+        assert_eq!(sel(&up), "l13\nl14\n");
+        // Below the bottom: down again, to the end at most.
+        for _ in 0..9 {
+            drag(&mut up, 0, 20);
+        }
+        assert_eq!(up.view().top, 15);
+        assert_eq!(sel(&up), "l15\nl16\nl17\nl18\n");
+    }
+
+    /// A one-line field too long for its window scrolls only as far as
+    /// keeps the caret in sight — not recentring on every step, so the
+    /// text holds still under a drag.
+    #[test]
+    fn a_long_one_line_field_scrolls_only_as_far_as_it_must() {
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let mut input = TextInput::with_text(text);
+        assert_eq!(input.line_first(10), 17, "never drawn: the text's end");
+        place_line(&input, Rect::new(0, 0, 10, 1), 17);
+        assert_eq!(input.line_first(10), 17, "at the end, the window stays");
+        for _ in 0..5 {
+            press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        }
+        assert_eq!(input.line_first(10), 17, "caret 21 still in sight");
+        for _ in 0..4 {
+            press(&mut input, KeyCode::Left, KeyModifiers::NONE);
+        }
+        assert_eq!(input.line_first(10), 16, "caret 17 one in from the `…`");
+        press(&mut input, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(input.line_first(10), 0);
+        // Short text never scrolls.
+        assert_eq!(TextInput::with_text("abc").line_first(10), 0);
     }
 
     #[test]
@@ -1836,7 +2465,8 @@ mod tests {
         left.set_text("abc");
         assert_eq!(left, plain);
         press(&mut right, KeyCode::Home, SHIFT);
-        right.click(0, 1);
+        place_line(&right, Rect::new(0, 0, 10, 1), 0);
+        click(&mut right, 1, 0);
         assert_eq!(right.selected(), None);
     }
 }

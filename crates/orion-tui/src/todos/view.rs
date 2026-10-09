@@ -71,8 +71,8 @@ use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
-    centered_rect_pct, fit_parts_at, fuzzy_highlight_styled, input_spans, panel_block, render_row,
-    row_rect, search_line, truncate, visible_positions, SPLIT_MODAL_PCT,
+    centered_rect_pct, fit_parts_at, fuzzy_highlight_styled, panel_block, render_row, row_rect,
+    search_line, truncate, visible_positions, SPLIT_MODAL_PCT,
 };
 
 /// What `⌘X`/`⌘C` took: the items as they were, and the text the
@@ -2584,6 +2584,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         if rect.height == 0 {
             continue;
         }
+        if let Entry::Input { depth } = entry {
+            place_input(view, depth, rect, th);
+        }
         if let Entry::Item { id, .. } = entry {
             for (chip, x, w) in spots {
                 let x = rect.x + GUTTER_W + x as u16;
@@ -3075,14 +3078,33 @@ fn linear_chip(id: &str, issue: Option<&LinkedIssue>, th: Theme) -> Vec<Span<'st
     chip
 }
 
-/// The open field, where what it makes will stand: a box or a fold glyph
-/// for what it is, then the text and the caret — wrapped under its own
-/// first character as an item's text is, and a dim word for it while it
-/// is empty.
-fn input_lines(view: &TodoView, depth: u16, budget: usize, th: Theme) -> Vec<Vec<Span<'static>>> {
+/// Record where the open field landed in the list — its row `rect`, the
+/// field past the row's mark and the field's own lead (`input_lines`) —
+/// for the mouse.
+fn place_input(view: &TodoView, depth: u16, rect: Rect, th: Theme) {
     let Some((kind, input)) = &view.input else {
-        return vec![Vec::new()];
+        return;
     };
+    let (lead, _) = input_lead(kind, depth, th);
+    let field = crate::ui::field_after(rect, usize::from(GUTTER_W) + width_of(&lead));
+    if input.is_empty() {
+        crate::text_input::place_line(input, field, 0);
+    } else {
+        crate::text_input::place_rows(
+            input,
+            Rect {
+                height: rect.height,
+                ..field
+            },
+            0,
+        );
+    }
+}
+
+/// What stands before the open field — its depth's indent, then a box or
+/// a fold glyph for what it makes — and the dim word for it while it is
+/// empty.
+fn input_lead(kind: &InputKind, depth: u16, th: Theme) -> (Vec<Span<'static>>, &'static str) {
     let (mark, word) = match kind {
         InputKind::Item { .. } => ("☐ ", "new item"),
         InputKind::Group { .. } => ("▾ ", "new group"),
@@ -3093,11 +3115,24 @@ fn input_lines(view: &TodoView, depth: u16, budget: usize, th: Theme) -> Vec<Vec
         indent(depth),
         Span::styled(mark, Style::default().fg(th.accent)),
     ];
+    (lead, word)
+}
+
+/// The open field, where what it makes will stand: a box or a fold glyph
+/// for what it is, then the text and the caret — wrapped under its own
+/// first character as an item's text is, and a dim word for it while it
+/// is empty.
+fn input_lines(view: &TodoView, depth: u16, budget: usize, th: Theme) -> Vec<Vec<Span<'static>>> {
+    let Some((kind, input)) = &view.input else {
+        return vec![Vec::new()];
+    };
+    let (lead, word) = input_lead(kind, depth, th);
     let lead_w = width_of(&lead);
     let room = budget.saturating_sub(lead_w).max(1);
     if input.is_empty() {
         let mut spans = lead;
-        spans.extend(input_spans(input, room, th.accent, th));
+        // Where the list puts it is `place_input`'s to record.
+        spans.extend(crate::ui::input_spans_unplaced(input, room, th.accent, th));
         spans.push(Span::styled(word, Style::default().fg(th.dim)));
         return vec![spans];
     }

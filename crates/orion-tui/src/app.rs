@@ -5559,7 +5559,8 @@ impl App {
     /// its release has not: a panel splitter being dragged (the LAUNCHER
     /// VIEW's pane edge, the diff and tree modals' file-list border), a
     /// program in the pane holding the button, or a drag-selection under
-    /// way? While it is, the host terminal is left exactly as it is:
+    /// way — in the pane or in a modal's text field? While it is, the
+    /// host terminal is left exactly as it is:
     /// re-asking it for its modes mid-drag is a change under a gesture in
     /// progress, and xterm.js (`orion browser`) takes the `?1000h` in
     /// that re-ask as the end of the drag — it drops its motion listener
@@ -5573,6 +5574,7 @@ impl App {
                 _ => false,
             };
         splitter
+            || crate::field_mouse::held()
             || self.term_mouse_grab.is_some()
             || self.term_selection.is_some_and(|s| s.dragging)
     }

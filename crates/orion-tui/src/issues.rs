@@ -2419,14 +2419,7 @@ fn draw_editor(
     if let Some(row) = row_rect(inner, 0) {
         title_area = row;
         let on = editor.field == EditField::Title;
-        let spans = form_field(
-            "Title",
-            &editor.title,
-            "(required)",
-            on,
-            row.width.into(),
-            th,
-        );
+        let spans = form_field("Title", &editor.title, "(required)", on, row, th);
         f.render_widget(Paragraph::new(Line::from(spans)), row);
     }
 

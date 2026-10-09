@@ -1542,9 +1542,11 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
         let budget = (inner.width as usize).saturating_sub(2 + label_w + 2);
         match field {
             PresetField::Name => {
+                // Past the row's mark and the label.
+                let at = crate::ui::field_after(row_area, 1 + label_w + 2);
                 if focused {
                     let caret = if bad { th.err } else { th.accent };
-                    let mut value = input_spans(&editor.name, budget, caret, th);
+                    let mut value = input_spans(&editor.name, at, caret, th);
                     if bad {
                         for span in &mut value {
                             if span.style.fg == Some(th.text) {
@@ -1553,16 +1555,19 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
                         }
                     }
                     spans.extend(value);
-                } else if editor.name.trim().is_empty() {
-                    let hint = if bad { th.err } else { th.dim };
-                    spans.push(Span::styled("(required)", Style::default().fg(hint)));
-                } else if bad {
-                    spans.push(Span::styled(
-                        truncate(editor.name.as_str(), budget),
-                        Style::default().fg(th.err),
-                    ));
                 } else {
-                    spans.push(Span::raw(truncate(editor.name.as_str(), budget)));
+                    crate::text_input::place_line(&editor.name, at, 0);
+                    spans.push(if editor.name.trim().is_empty() {
+                        let hint = if bad { th.err } else { th.dim };
+                        Span::styled("(required)", Style::default().fg(hint))
+                    } else if bad {
+                        Span::styled(
+                            truncate(editor.name.as_str(), budget),
+                            Style::default().fg(th.err),
+                        )
+                    } else {
+                        Span::raw(truncate(editor.name.as_str(), budget))
+                    });
                 }
             }
             _ => {
@@ -1686,17 +1691,8 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
             let (view, rows) = draw_multiline_input(f, input, box_inner, th);
             draw_scroll_marks(f, box_area, view, rows, th.dim);
             focused_view = Some(view);
-        } else if input.trim().is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(*placeholder, Style::default().fg(th.dim))),
-                box_inner,
-            );
         } else {
-            f.render_widget(
-                Paragraph::new(input.as_str().to_string())
-                    .wrap(ratatui::widgets::Wrap { trim: false }),
-                box_inner,
-            );
+            crate::ui::draw_multiline_idle(f, input, box_inner, placeholder, th);
         }
     }
 
