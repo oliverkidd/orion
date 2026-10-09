@@ -1,0 +1,71 @@
+crates/orion-tui/src/ghostty_config.rs
+  s_2cc4ecdce6a3cb::t_ab05faad1b4c56 586-591,593-594
+  s_2cc4ecdce6a3cb::t_c044e16fa98a95 581-585,592,595-600,612
+crates/orion/src/main.rs
+  s_2cc4ecdce6a3cb::t_3a12ac92344add 107,199-206
+  s_2cc4ecdce6a3cb::t_228b9d881b2b37 207
+install.sh
+  s_e6edb5fc9a9ed4::t_4a74735569d0ac 10-12,16,21,27,40-41,142-146,156-157,161,163-172,177-179,184-187,189-191,198-202,249-250
+  s_2cc4ecdce6a3cb::t_ee9dc84ab4a933 147-155,158-160,162,180-183,188
+crates/orion-core/src/env.rs
+  s_2cc4ecdce6a3cb::t_c044e16fa98a95 60-62
+crates/orion-tui/src/lib.rs
+  s_2cc4ecdce6a3cb::t_3a12ac92344add 125-134
+  s_2cc4ecdce6a3cb::t_ab05faad1b4c56 28
+docs/keys.md
+  s_2cc4ecdce6a3cb::t_3dba44835abc7d 46-47
+crates/orion-tui/src/ghostty_host.rs
+  s_2cc4ecdce6a3cb::t_35990d6890e947 1-17,21-36,38-43,51-81,93-94,96,104-112,114,116-186,189-194
+  s_2cc4ecdce6a3cb::t_4d89611f2317b8 18-20,37,44-50,82-92,95,97-103,113,115,187-188
+crates/orion/src/browser.rs
+  s_2cc4ecdce6a3cb::t_c044e16fa98a95 201
+  s_2cc4ecdce6a3cb::t_3a12ac92344add 200
+crates/orion-tui/src/install.rs
+  s_2cc4ecdce6a3cb::t_4b8f12892cb7ea 7-9
+docs/configuration.md
+  s_2cc4ecdce6a3cb::t_0300e9fd49c93f 252-253
+  s_2cc4ecdce6a3cb::t_3dba44835abc7d 72-73,243-251,256,262-263
+crates/orion/src/cli.rs
+  s_2cc4ecdce6a3cb::t_3a12ac92344add 330-333
+crates/orion-tui/src/onboard.rs
+  s_2cc4ecdce6a3cb::t_f7acf02adfe963 3-4,56-59,69,75,81-82,85,101,107-110,118,204-205,317,327-328,486,499-502,515,549,561,885-886,973,1019-1021,1025-1040,1042-1047,1052,1055,1057,1060-1061,1063-1069,1072,1074-1075,1800,1802,1853,1857,1875,1881-1889,1898,1900,2048,2054,2780
+  s_2cc4ecdce6a3cb::t_05d9f3dd5a9d21 5-7,70-72,130,153,485,988-1018,1048-1049,1053-1054,1058-1059,1062,1071,1364,1890-1894,1896-1897,1899
+  s_2cc4ecdce6a3cb::t_8a57674523e48c 1459-1469
+  s_2cc4ecdce6a3cb::t_c044e16fa98a95 1474
+  s_2cc4ecdce6a3cb::t_0258d7e4b75269 2799,2802-2805,2811,2813-2814,2819,2825,2831,2834,2879
+  s_2cc4ecdce6a3cb::t_b22e97c445abc6 1022-1024,1041,1050-1051,1056,1070
+  s_2cc4ecdce6a3cb::t_2edac8a316fa7c 1073,1076,2088,2102-2103,2106,2108-2109,2148-2151,2169-2173,2286,2293,2751-2779,2781-2785,2788,2791-2798,2800-2801,2807-2810,2812,2815-2818,2820-2824,2827-2830,2832-2833,2835-2841,2843-2854,2859-2860,2863,2865-2878,2880-2881
+README.md
+  s_2cc4ecdce6a3cb::t_3dba44835abc7d 31-32
+crates/orion-tui/src/event_loop.rs
+  s_2cc4ecdce6a3cb::t_aa927bc362bf14 46,269-271,1004-1005
+crates/orion-tui/src/app.rs
+  s_2cc4ecdce6a3cb::t_aa927bc362bf14 3918-3920
+  s_2cc4ecdce6a3cb::t_5dd864ca5b3531 4708
+crates/orion-tui/src/event_loop/host_terminal.rs
+  s_2cc4ecdce6a3cb::t_aa927bc362bf14 71-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "adbdcac14a9217622880d964f8d09cae8c90c7e4",
+  "prompts": {},
+  "sessions": {
+    "s_2cc4ecdce6a3cb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eade8e42-717f-4419-a9e3-e7005999af1b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    },
+    "s_e6edb5fc9a9ed4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8bca9328-45bd-4b0a-8d3d-dc4be217a14e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
