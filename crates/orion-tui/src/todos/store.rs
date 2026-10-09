@@ -15,8 +15,10 @@ use std::sync::Mutex;
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-/// The file format's version: what [`TodoFile::version`] says.
-pub const VERSION: u32 = 1;
+/// The file format's version: what [`TodoFile::version`] says. Before 2
+/// a group's items were drawn sorted by priority; from 2 they are drawn in
+/// the order they stand ([`TodoFile::upgrade`]).
+pub const VERSION: u32 = 2;
 
 /// One project's list: its groups, in the order they were made or
 /// imported, and its items, in the order they were made.
@@ -55,6 +57,10 @@ pub struct Group {
     pub name: String,
     #[serde(default)]
     pub collapsed: bool,
+    /// Where a nested group stands among its parent's items: right before
+    /// this one — or, with none, after them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
 }
 
 /// One thing to do.
@@ -183,10 +189,13 @@ pub fn load_from(path: &Path, repo: &Path, now: u64) -> Loaded {
         }
     };
     match serde_json::from_str::<TodoFile>(&raw) {
-        Ok(file) => Loaded {
-            file,
-            problem: None,
-        },
+        Ok(mut file) => {
+            file.upgrade();
+            Loaded {
+                file,
+                problem: None,
+            }
+        }
         Err(err) => {
             let aside = corrupt_path(path, now);
             if let Err(why) = std::fs::rename(path, &aside) {
@@ -315,6 +324,7 @@ mod tests {
             parent: None,
             name: "Emails".into(),
             collapsed: true,
+            before: None,
         });
         file.items.push(Item {
             id: 2,

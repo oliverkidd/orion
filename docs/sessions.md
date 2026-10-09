@@ -740,8 +740,8 @@ rebindable (`pull_requests`).
 list, a tab each along the top in the projects' order, opened on the selected project's tab
 (`←`/`→`, `Tab` or a click for another, `⌘1`–`⌘9` straight to one; each comes back as it was left
 while the modal is up). Each
-list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, sorted by it inside its
-group. The list is this machine's alone — one file per checkout under orion's data folder
+list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
+an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
 (`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the
 checkout's path, the path written inside it — and is never written into the repo, so `git status`
 stays clean. Every change is saved at once; a file that will not read is moved aside to
@@ -752,25 +752,39 @@ open items at each priority (`U`rgent, `H`igh, `M`edium, `L`ow — the letters t
 uses too), how many are open and how many were ticked today, nested groups and folded headers counted
 in. A group under it says only how many are open. Under each header is a line per item — more when
 its text is long enough to wrap: its box, its priority letter, the text, and on the right the agent
-sent at it, the Linear issue it is linked to and how many days it has carried over (`2d`). The
-project row's right end says what was ticked today and this week, with a bar for each day from
-Monday. `Space` ticks an item: it strikes through where it stands — the cursor stays on it — and
-sinks to the bottom of its group once the modal closes, for the rest of the day. From the next day
-on it is under **DONE BEFORE TODAY**, a folded section below the groups (`Space` opens it), under
-the day it was done, where `Space` unticks it back into its group. Nothing unfinished goes anywhere
-— it is simply still there tomorrow, a day older. Days are local: a tick at 11pm is that day's.
+sent at it, the Linear issue it is linked to and how many days it has carried over (`2d`). A
+nested group stands among its parent's items wherever it was put. `Space` ticks an item: it
+strikes through and drops to the bottom of its group, the next item coming up under the cursor.
+When everything in a group is ticked, the group is complete: its name struck through, `✓ done`, at
+the bottom of the group it is in (or of the list). Ticked items and complete groups stay in sight
+until the modal closes; the next time it opens they are gone from the list. Nothing unfinished goes
+anywhere — it is simply still there tomorrow, a day older.
 
-Open items sort by priority, then in the order you put them: `⌥↑`/`⌥↓` move one past the next at
-its priority, and past the end of its group onto the end of the group above (or the start of the one
-below). `⇧↑`/`⇧↓` select a run of items, across groups too, and ticking, `⌘P`, moving, deleting,
-`Enter` and cut/copy then act on them all. `⌘X` cuts and `⌘C` copies: the clipboard gets their text,
-a line each, and that text pasted back into the modal — any project's tab — puts the items
-themselves after the cursor, priority and links kept.
+The project row's right end says what was ticked today and this week, across every project, with a
+bar for each day from Monday. A click on `✓N today` or `✓N this week` opens the **DONE** page: what
+was ticked in that span, a section per project in the tabs' order, each over the groups it was
+ticked in and nested groups under theirs, with the time (today) or day (this week) it was ticked.
+`←`/`→` turn between today and the week, `Space` puts an item ticked by mistake back on its list,
+`Esc` goes back. Days are local: a tick at 11pm is that day's, and the week starts on Monday.
+
+The order is yours: `⌥↑`/`⌥↓` move an item a place up or down the list as it is drawn, whatever
+its priority — past the next item, into a nested group it meets and through it, out of the bottom
+of the nested group to just under it, and past the end of a top-level group onto the start of the
+next (or the end of the one before). `⌘P` puts an item set out of order at the end of the run of
+items at its new priority, so a list kept in priority order stays so. `⌥→` puts the item, or a
+selection in one top-level group, into a new group where they stood, its name typed at once (`Esc`
+keeps **New group**) — groups made this way go one deep. `⌥←` takes items in a nested group out to
+just under it; on all of its items, or on its header, it flattens the group into its place.
+(Ghostty sends `⌥←`/`⌥→` as `⌥B`/`⌥F`; both work.) `⇧↑`/`⇧↓` select a run of items, across groups
+too, and ticking, `⌘P`, moving, grouping, deleting, `Enter` and cut/copy then act on them all.
+`⌘X` cuts and `⌘C` copies: the clipboard gets their text, a line each, and that text pasted back
+into the modal — any project's tab, or a new item's empty field — puts the items themselves right
+after the cursor, priority and links kept.
 
 A row is edited where it stands: typing on an item or a group header adds to its end, and `⌫` opens
 it with its last character gone; `Enter` saves, `↑`/`↓` save and move on, `Esc` puts it back.
-`⌘N` types a new item right under the cursor's, at its priority (from a header or `+ new item`, at
-the group's end) — `Enter` adds it and opens the next under it, `Esc` stops; the field wraps as you
+`⌘N` types a new item right under the cursor's (from a header or `+ new item`, at the group's
+end) — `Enter` adds it and opens the next under it, `Esc` stops; the field wraps as you
 type — `⌘⇧N` a new group beside it, `⌘P` picks the priority (`1`–`4` urgent to low, `0` none) and
 `⌘⌫` deletes, a group with items in it only after a second press.
 `⌘↑`/`⌘↓` jump from group to group. `⌘F` opens the filter, which keeps the matching items under

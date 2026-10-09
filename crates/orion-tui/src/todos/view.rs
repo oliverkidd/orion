@@ -2,9 +2,8 @@
 //! in the projects' own order — `←`/`→` (or `Tab`) walk them, as the
 //! LINEAR VIEW walks its tabs, and `⌘1`–`⌘9` go straight to one, as on
 //! the grid — opened from anywhere on the selected project's. The list is
-//! the project's groups with their open items, the ones ticked today
-//! struck through at the bottom of theirs, and under them, folded away,
-//! DONE BEFORE TODAY: what was ticked on each day before. A line per item
+//! the project's groups with their open items, a nested group standing
+//! among its parent's items where it was put. A line per item
 //! — more where its text wraps: its box, its priority as the one letter
 //! Linear's rows use too, the text, and on the right what it is tied to —
 //! the agent sent at it, the Linear issue it is linked to — and how many
@@ -13,16 +12,21 @@
 //! priority, nested groups and all, and what was ticked today; a group
 //! under it says only how many are open. Each folds (`space` on it), and
 //! `⌘↑`/`⌘↓` jump from header to header. The project row says what was
-//! ticked today and this week, day by day.
+//! ticked today and this week, across every project, day by day — and a
+//! click on either opens the DONE page on it (`history`).
 //!
-//! An item ticked stays where it stood, struck through, until the modal
-//! goes (`TodoView::held`): the cursor never loses it. `⇧↑`/`⇧↓` select a
-//! run of items, and what acts on an item acts on them all — tick, `⌘P`
-//! priority, `⌥↑`/`⌥↓` move (past the next item at its priority, then
-//! into the next group), `⌘⌫` delete, `Enter` one agent at them all, and
-//! `⌘X`/`⌘C` cut or copy them: the clipboard has their text, and pasted
-//! back into the modal — any project's — they land after the cursor as
-//! they were (`TodoClip`).
+//! An item ticked goes to the bottom of its group, struck through, the
+//! next one coming up under the cursor; a group with everything in it
+//! ticked goes to the bottom of where it stands. Both stay in sight until
+//! the modal goes (`TodoView::held`), and are gone from the list the next
+//! time it opens. `⇧↑`/`⇧↓` select a run of items, and what acts on an
+//! item acts on them all — tick, `⌘P` priority, `⌥↑`/`⌥↓` move (a place
+//! through the list as drawn, into a nested group and out of it), `⌥→`
+//! group them, `⌥←` take them out of their group — or, on its header,
+//! flatten it — `⌘⌫` delete, `Enter` one agent at them all, and `⌘X`/`⌘C`
+//! cut or copy them: the clipboard has their text, and pasted back into
+//! the modal — any project's — they land after the cursor as they were,
+//! their priority and all (`TodoClip`).
 //!
 //! The list is the [`App`]'s (`App::todos`, by checkout), so it outlives
 //! the modal; the view holds the cursor, the filter and the field being
@@ -58,7 +62,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-use super::{store, Item, TodoFile, TodoRef};
+use super::{store, Child, Item, TodoFile, TodoRef};
 use crate::app::{App, Overlay};
 use crate::keymap::KeyChord;
 pub use crate::linear::LinkedIssue;
@@ -214,31 +218,15 @@ pub enum Entry {
     },
     /// `+ new item`, closing the groups.
     AddRow,
-    /// DONE BEFORE TODAY's header: `count` items, folded unless
-    /// [`TodoView::show_done`] (or a filter) opens it.
-    DoneHeader {
-        count: usize,
-    },
-    /// A day under DONE BEFORE TODAY, over what was done on it. Never the
-    /// cursor's.
-    Day {
-        date: NaiveDate,
-        count: usize,
-    },
 }
 
 impl Entry {
-    fn selectable(&self) -> bool {
-        !matches!(self, Entry::Day { .. })
-    }
-
     fn depth(&self) -> u16 {
         match self {
             Entry::Header { depth, .. } | Entry::Item { depth, .. } | Entry::Input { depth } => {
                 *depth
             }
-            Entry::Day { .. } => 1,
-            Entry::AddRow | Entry::DoneHeader { .. } => 0,
+            Entry::AddRow => 0,
         }
     }
 }
@@ -250,8 +238,8 @@ pub struct TodoView {
     pub project_name: String,
     /// The project's checkout: whose list this is.
     pub dir: PathBuf,
-    /// DONE BEFORE TODAY unfolded.
-    pub show_done: bool,
+    /// The DONE page, while it is up over the list: every key is its own.
+    pub page: Option<super::history::DonePage>,
     /// The cursor's row, by index into the rows as last drawn; and the row
     /// itself, which it follows when the rows move under it (a priority
     /// re-sorts them). A tick lets go of the row, so the cursor stays put
@@ -261,9 +249,9 @@ pub struct TodoView {
     /// Where `⇧↑`/`⇧↓` started: the items from it to the cursor's are
     /// selected.
     pub anchor: Option<u64>,
-    /// The items ticked (or unticked) since the modal opened: drawn where
-    /// they stood rather than sorted to their group's end, so nothing
-    /// jumps from under the cursor. Let go with the modal.
+    /// The items ticked (or unticked) since the modal opened: a ticked
+    /// one stays in sight, struck through at the bottom of its group,
+    /// until the modal goes — and then it is out of the list.
     pub held: Vec<u64>,
     pub query: TextInput,
     /// The filter row is up (`⌘F`): typing is the filter's, not the row's.
@@ -291,6 +279,9 @@ pub struct TodoView {
     /// click.
     pub project_hits: Vec<(u16, u16)>,
     pub project_row: Rect,
+    /// Where `✓N today` and `✓N this week` were drawn, each with whether
+    /// it is the week: a click opens the DONE page on it.
+    pub summary_hits: Vec<(Rect, bool)>,
     /// The other projects' tabs as they were left, by project.
     pub parked: HashMap<ProjectId, TodoView>,
 }
@@ -301,7 +292,7 @@ impl TodoView {
             project,
             project_name,
             dir,
-            show_done: false,
+            page: None,
             selected: 0,
             cursor: None,
             anchor: None,
@@ -319,13 +310,15 @@ impl TodoView {
             row_rects: Vec::new(),
             project_hits: Vec::new(),
             project_row: Rect::default(),
+            summary_hits: Vec::new(),
             parked: HashMap::new(),
         }
     }
 
-    /// Put away to come back to: the cursor, the filter and DONE kept,
-    /// what was half done let go — and the ticks held in place, sorted.
+    /// Put away to come back to: the cursor and the filter kept, what was
+    /// half done let go — and the ticks held in sight with it.
     fn park(mut self) -> Self {
+        self.page = None;
         self.input = None;
         self.pick = None;
         self.confirm_delete = None;
@@ -362,9 +355,15 @@ pub(crate) mod keys {
     );
     /// The previous or next group's header, nested ones included.
     pub const JUMP: Key = Key::new(&["cmd+up", "cmd+down"], "groups").show(2);
-    /// The item — or the selection — a place up or down: past the next at
-    /// its priority, then into the next group.
+    /// The item — or the selection — a place up or down the list as
+    /// drawn: past the next item, into a nested group and out of it, then
+    /// into the next group.
     pub const MOVE: Key = Key::new(&["alt+up", "alt+down"], "move").show(2);
+    /// `⌥→` the items into a new group of their own; `⌥←` them out of
+    /// theirs — or, on its header, the group flattened into its place.
+    /// Ghostty sends ⌥←/⌥→ as `⌥B`/`⌥F` (its word-jump default), so those
+    /// are the same keys.
+    pub const GROUP: Key = Key::new(&["alt+right", "alt+left", "alt+f", "alt+b"], "group").show(2);
     /// A run of items selected, from where it started to the cursor.
     pub const SELECT: Key = Key::new(&["shift+up", "shift+down"], "select").show(2);
     /// A new item right under the cursor's, at its priority — or at the
@@ -408,10 +407,15 @@ pub(crate) mod keys {
     /// The priority pick's rows by their digit: `1` urgent to `4` low,
     /// `0` none.
     pub const LEVEL: Key = Key::new(&["1", "2", "3", "4", "0"], "level");
+    /// The DONE page's: today or this week, as the tabs are walked.
+    pub const SPAN: Key = Key::new(&["left", "right", "tab"], "today / week").show(2);
+    /// The DONE page's: the item ticked by mistake, open again.
+    pub const UNDO: Key = Key::new(&["space"], "not done");
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        DONE, TABS, PROJECT, JUMP, MOVE, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE, CUT, COPY,
-        FILTER, SAVE, SAVE_MOVE, CONFIRM, AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE, LEVEL,
+        DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
+        CUT, COPY, FILTER, SAVE, SAVE_MOVE, CONFIRM, AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE,
+        LEVEL, SPAN, UNDO,
     ];
 }
 
@@ -426,6 +430,14 @@ fn project_hint() -> Option<crate::hints::Hint> {
 /// first, then the filter.
 pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
+    if view.page.is_some() {
+        return vec![
+            keys::UNDO.hint().kept(),
+            keys::SPAN.hint(),
+            keys::PICK.hint_as("move"),
+            Hint::new("Esc", "back"),
+        ];
+    }
     if view.input.is_some() {
         return vec![
             keys::SAVE.hint().kept(),
@@ -450,6 +462,7 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
             keys::AGENT.hint().kept(),
             keys::SELECT.hint(),
             keys::MOVE.hint(),
+            keys::GROUP.hint(),
             keys::PRIORITY.hint(),
             keys::CUT.hint(),
             keys::COPY.hint(),
@@ -476,6 +489,7 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::FILTER.hint(),
         keys::SELECT.hint(),
         keys::MOVE.hint(),
+        keys::GROUP.hint(),
         keys::CUT.hint(),
         keys::COPY.hint(),
         keys::JUMP.hint(),
@@ -539,7 +553,7 @@ fn load_list(app: &mut App, dir: PathBuf) {
 }
 
 /// The project tabs: every open project, in the projects' own order.
-fn projects(app: &App) -> Vec<(ProjectId, String, PathBuf)> {
+pub(super) fn projects(app: &App) -> Vec<(ProjectId, String, PathBuf)> {
     app.tree
         .projects
         .iter()
@@ -643,14 +657,14 @@ fn linked_from_linear(app: &App, view: &TodoView) -> HashMap<String, LinkedIssue
         .collect()
 }
 
-fn view(app: &App) -> Option<&TodoView> {
+pub(super) fn view(app: &App) -> Option<&TodoView> {
     match app.overlay.as_ref()? {
         Overlay::Todos(view) => Some(view),
         _ => None,
     }
 }
 
-fn view_mut(app: &mut App) -> Option<&mut TodoView> {
+pub(super) fn view_mut(app: &mut App) -> Option<&mut TodoView> {
     match app.overlay.as_mut()? {
         Overlay::Todos(view) => Some(view),
         _ => None,
@@ -683,62 +697,23 @@ fn edit_if<T>(app: &mut App, f: impl FnOnce(&mut TodoFile) -> Option<T>) -> Opti
     Some(out)
 }
 
-/// The rows as `file`, the filter and the open field lay them out on
-/// `today`: the groups, `+ new item`, then DONE BEFORE TODAY — its days
-/// and their items when it is open.
-pub(crate) fn entries(file: &TodoFile, view: &TodoView, today: NaiveDate) -> Vec<Entry> {
+/// The rows as `file`, the filter and the open field lay them out: the
+/// groups, each over what is in it in the order drawn — what was ticked
+/// while the modal has been up at its bottom — then `+ new item`.
+pub(crate) fn entries(file: &TodoFile, view: &TodoView) -> Vec<Entry> {
     let mut out = Vec::new();
-    let query = view.query.trim();
     let input = view.input.as_ref().map(|(kind, _)| *kind);
     let walk = Walk {
         file,
-        query,
-        today,
+        query: view.query.trim(),
         input,
         held: &view.held,
     };
-    walk.groups(None, 0, false, &mut out);
+    walk.top(&mut out);
     if matches!(input, Some(InputKind::Item { group: None, .. })) {
         out.push(Entry::Input { depth: 1 });
     }
     out.push(Entry::AddRow);
-    let days: Vec<(NaiveDate, Vec<&Item>)> = file
-        .log_days(today)
-        .into_iter()
-        .map(|(date, items)| {
-            let items: Vec<&Item> = items
-                .into_iter()
-                .filter(|i| query.is_empty() || matches(query, &i.text))
-                .collect();
-            (date, items)
-        })
-        .filter(|(_, items)| !items.is_empty())
-        .collect();
-    let count = days.iter().map(|(_, items)| items.len()).sum();
-    if count == 0 {
-        return out;
-    }
-    out.push(Entry::DoneHeader { count });
-    if !view.show_done && query.is_empty() {
-        return out;
-    }
-    for (date, items) in days {
-        out.push(Entry::Day {
-            date,
-            count: items.len(),
-        });
-        for item in items {
-            out.push(match input {
-                Some(InputKind::Rename(Target::Item(id))) if id == item.id => {
-                    Entry::Input { depth: 2 }
-                }
-                _ => Entry::Item {
-                    id: item.id,
-                    depth: 2,
-                },
-            });
-        }
-    }
     out
 }
 
@@ -751,83 +726,106 @@ fn matches(query: &str, text: &str) -> bool {
 struct Walk<'a> {
     file: &'a TodoFile,
     query: &'a str,
-    today: NaiveDate,
     input: Option<InputKind>,
     held: &'a [u64],
 }
 
 impl Walk<'_> {
-    /// The groups under `parent`, each header over its items and then its
-    /// own groups — all of them when `all` (a filter matched a group they
-    /// are in), else only what the filter finds, folded groups left
-    /// folded while nothing is typed.
-    fn groups(&self, parent: Option<u64>, depth: u16, all: bool, out: &mut Vec<Entry>) {
+    /// The top-level groups as drawn, then the field for a new one.
+    fn top(&self, out: &mut Vec<Entry>) {
+        for group in self.file.top_groups(self.held) {
+            self.group(group, 0, false, out);
+        }
+        if self.input == Some(InputKind::Group { parent: None }) {
+            out.push(Entry::Input { depth: 0 });
+        }
+    }
+
+    /// `group`'s header over what is in it — all of it when `all` (a
+    /// filter matched a group it is in), else only what the filter finds,
+    /// a folded group left folded while nothing is typed.
+    fn group(&self, group: u64, depth: u16, all: bool, out: &mut Vec<Entry>) {
         if depth as usize > super::MAX_DEPTH {
             return;
         }
+        let Some(g) = self.file.group(group) else {
+            return;
+        };
         let filtering = !self.query.is_empty();
-        for group in self.file.subgroups(parent) {
-            let all = all || (filtering && matches(self.query, &group.name));
-            let start = out.len();
-            out.push(match self.input {
-                Some(InputKind::Rename(Target::Group(id))) if id == group.id => {
-                    Entry::Input { depth }
-                }
-                _ => Entry::Header {
-                    group: group.id,
-                    depth,
-                },
-            });
-            if group.collapsed && !filtering {
-                continue;
-            }
-            let mut found = false;
-            let mut field_placed = false;
-            for item in self.file.today_items(group.id, self.today, self.held) {
-                if filtering && !all && !matches(self.query, &item.text) {
-                    continue;
-                }
-                found = true;
-                out.push(match self.input {
-                    Some(InputKind::Rename(Target::Item(id))) if id == item.id => {
-                        Entry::Input { depth: depth + 1 }
+        let all = all || (filtering && matches(self.query, &g.name));
+        let start = out.len();
+        out.push(match self.input {
+            Some(InputKind::Rename(Target::Group(id))) if id == group => Entry::Input { depth },
+            _ => Entry::Header { group, depth },
+        });
+        if g.collapsed && !filtering {
+            return;
+        }
+        // A new item's field in this group, and the item it goes after.
+        let field = match self.input {
+            Some(InputKind::Item {
+                group: Some(g),
+                after,
+            }) if g == group => Some(after),
+            _ => None,
+        };
+        let mut found = false;
+        let mut placed = false;
+        // Under the last open item drawn: where one with nothing to go
+        // after lands.
+        let mut slot = out.len();
+        for child in self.file.children(group, self.held) {
+            match child {
+                Child::Item(id) => {
+                    let Some(item) = self.file.item(id) else {
+                        continue;
+                    };
+                    if filtering && !all && !matches(self.query, &item.text) {
+                        continue;
                     }
-                    _ => Entry::Item {
-                        id: item.id,
-                        depth: depth + 1,
-                    },
-                });
-                // A new item after this one: its field right under it.
-                if self.input
-                    == Some(InputKind::Item {
-                        group: Some(group.id),
-                        after: Some(item.id),
-                    })
-                {
-                    field_placed = true;
-                    out.push(Entry::Input { depth: depth + 1 });
+                    found = true;
+                    out.push(match self.input {
+                        Some(InputKind::Rename(Target::Item(r))) if r == id => {
+                            Entry::Input { depth: depth + 1 }
+                        }
+                        _ => Entry::Item {
+                            id,
+                            depth: depth + 1,
+                        },
+                    });
+                    // A new item after this one: its field right under it.
+                    if field == Some(Some(id)) {
+                        placed = true;
+                        out.push(Entry::Input { depth: depth + 1 });
+                    }
+                    if item.done.is_none() {
+                        slot = out.len();
+                    }
                 }
-            }
-            // At the group's end — where one after an item not drawn goes
-            // too, so the field is always on screen.
-            let field_here = matches!(
-                self.input,
-                Some(InputKind::Item { group: Some(g), .. }) if g == group.id
-            );
-            if field_here && !field_placed {
-                found = true;
-                out.push(Entry::Input { depth: depth + 1 });
-            }
-            let before = out.len();
-            self.groups(Some(group.id), depth + 1, all, out);
-            found |= out.len() > before;
-            // Filtering, a group with nothing found in it goes.
-            if filtering && !all && !found {
-                out.truncate(start);
+                Child::Group(sub) => {
+                    let before = out.len();
+                    self.group(sub, depth + 1, all, out);
+                    found |= out.len() > before;
+                }
             }
         }
-        if self.input == Some(InputKind::Group { parent }) {
-            out.push(Entry::Input { depth });
+        // One after an item not drawn goes there too, so the field is
+        // always on screen.
+        if field.is_some() && !placed {
+            found = true;
+            out.insert(slot, Entry::Input { depth: depth + 1 });
+        }
+        if self.input
+            == Some(InputKind::Group {
+                parent: Some(group),
+            })
+        {
+            found = true;
+            out.push(Entry::Input { depth: depth + 1 });
+        }
+        // Filtering, a group with nothing found in it goes.
+        if filtering && !all && !found {
+            out.truncate(start);
         }
     }
 }
@@ -849,17 +847,14 @@ fn resolve(view: &TodoView, entries: &[Entry]) -> Option<usize> {
     {
         return Some(i);
     }
-    let at = view.selected.min(entries.len().checked_sub(1)?);
-    (at..entries.len())
-        .chain((0..at).rev())
-        .find(|i| entries[*i].selectable())
+    Some(view.selected.min(entries.len().checked_sub(1)?))
 }
 
 /// The rows as they stand now, and the cursor's among them.
 fn rows_now(app: &App) -> Option<(Vec<Entry>, Option<usize>)> {
     let view = view(app)?;
     let file = app.todos.get(&view.dir)?;
-    let entries = entries(file, view, super::today());
+    let entries = entries(file, view);
     let at = resolve(view, &entries);
     Some((entries, at))
 }
@@ -870,16 +865,15 @@ fn current(app: &App) -> Option<Entry> {
     entries.get(at?).copied()
 }
 
-/// The cursor's item while it sorts with the open ones — a tick held in
-/// place too: what a new item or a paste goes in after.
+/// The cursor's item while it is open: what a new item or a paste goes
+/// in after.
 fn cursor_open_item(app: &App) -> Option<u64> {
     let Some(Entry::Item { id, .. }) = current(app) else {
         return None;
     };
-    let held = &view(app)?.held;
     list(app)?
         .item(id)
-        .filter(|i| i.sorts_open(held, super::today()))
+        .filter(|i| i.done.is_none())
         .map(|i| i.id)
 }
 
@@ -932,17 +926,12 @@ fn put_cursor(app: &mut App, index: usize, entry: Option<Entry>) {
     }
 }
 
-/// Move the cursor `delta` rows, over the day headers.
+/// Move the cursor `delta` rows.
 fn step(app: &mut App, delta: i32) {
     let Some((entries, Some(at))) = rows_now(app) else {
         return;
     };
-    let selectable: Vec<usize> = (0..entries.len())
-        .filter(|i| entries[*i].selectable())
-        .collect();
-    let here = selectable.iter().position(|i| *i == at).unwrap_or(0);
-    let next = (here as i32 + delta).clamp(0, selectable.len() as i32 - 1) as usize;
-    let index = selectable[next];
+    let index = (at as i64 + i64::from(delta)).clamp(0, entries.len() as i64 - 1) as usize;
     put_cursor(app, index, Some(entries[index]));
 }
 
@@ -950,10 +939,30 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(view) = view_mut(app) else {
         return false;
     };
-    // The menu, the team pick and the delete question take no text.
-    if view.pick.is_some() || view.confirm_delete.is_some() {
+    // The menu, the team pick, the delete question and the DONE page take
+    // no text.
+    if view.pick.is_some() || view.confirm_delete.is_some() || view.page.is_some() {
         return true;
     }
+    // What `⌘X`/`⌘C` took, pasted into an empty new item's field: the
+    // items themselves, where the field stands — never new ones at the
+    // priority of the item above.
+    let empty_field = match &view.input {
+        Some((InputKind::Item { group, after }, input)) if input.trim().is_empty() => {
+            Some((*group, *after))
+        }
+        _ => None,
+    };
+    if let Some((group, after)) = empty_field.filter(|_| clip_matches(app, text)) {
+        if let Some(view) = view_mut(app) {
+            view.input = None;
+        }
+        paste_clip_at(app, text, group, after);
+        return true;
+    }
+    let Some(view) = view_mut(app) else {
+        return false;
+    };
     if let Some((kind, input)) = &mut view.input {
         let kind = *kind;
         let lines = super::import::lines(text);
@@ -1017,6 +1026,10 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
+    if view(app).is_some_and(|v| v.page.is_some()) {
+        super::history::handle_key(app, key);
+        return;
+    }
     if view(app).is_some_and(|v| v.input.is_some()) {
         input_key(app, key);
         return;
@@ -1049,6 +1062,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let keeps_selection = [
         keys::SELECT,
         keys::MOVE,
+        keys::GROUP,
         keys::PRIORITY,
         keys::AGENT,
         keys::PRESET,
@@ -1067,6 +1081,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Esc if selecting => unselect(app),
         KeyCode::Esc if filtering => close_filter(app),
         KeyCode::Esc => app.overlay = None,
+        // The filter's own while it is up: a word left or right.
+        _ if keys::GROUP.matches(&key) && !filtering => {
+            group_chosen(app, matches!(key.code, KeyCode::Right | KeyCode::Char('f')))
+        }
         // Plain ←/→ move the filter's caret while it is up.
         _ if keys::TABS.matches(&key)
             && !(filtering && key.modifiers.is_empty() && key.code != KeyCode::Tab) =>
@@ -1091,7 +1109,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Enter => match current(app) {
             Some(Entry::AddRow) => start_item(app),
             Some(Entry::Item { .. }) => agent(app, out),
-            Some(Entry::Header { .. } | Entry::DoneHeader { .. }) => done(app),
+            Some(Entry::Header { .. }) => done(app),
             _ => {}
         },
         _ if keys::PRESET.matches(&key) => preset(app),
@@ -1170,20 +1188,79 @@ fn move_chosen(app: &mut App, up: bool) {
     if ids.is_empty() || !view.query.trim().is_empty() {
         return;
     }
-    let held = view.held.clone();
     let cursor = match view.cursor {
         Some(Entry::Item { id, .. }) => Some(id),
         _ => None,
     };
-    let today = super::today();
     edit_if(app, |file| {
-        for group in file.move_items(&ids, up, &held, today)? {
+        for group in file.move_items(&ids, up)? {
             file.reveal(group);
         }
         Some(())
     });
     if let Some(id) = cursor {
         land_on_item(app, id);
+    }
+}
+
+/// `⌥→`: the chosen items — open, in one top-level group — into a new
+/// group there, its name's field open on it. `⌥←`: on a nested group's
+/// header, the group flattened into its place; on items in one, them out
+/// of it, right under it — the group flattened when that is all of it.
+fn group_chosen(app: &mut App, into: bool) {
+    let note = |app: &mut App, text: &str| {
+        app.flash = Some(crate::flash::Flash::note(text.to_string()));
+    };
+    let Some(view) = view(app) else {
+        return;
+    };
+    if !view.query.trim().is_empty() {
+        return;
+    }
+    let header = match current(app) {
+        Some(Entry::Header { group, .. }) => Some(group),
+        _ => None,
+    };
+    let ids = chosen(app);
+    let Some(file) = list(app) else {
+        return;
+    };
+    let shared = file.shared_group(&ids);
+    let nested = |group: u64| file.parent_of(group).is_some();
+    match (into, header) {
+        (false, Some(group)) if !nested(group) => {
+            note(app, "a top-level group has nowhere to flatten into")
+        }
+        (false, Some(group)) => {
+            edit(app, |file| file.ungroup(group));
+            if let Some(view) = view_mut(app) {
+                view.cursor = None;
+            }
+        }
+        (true, Some(_)) => note(app, "select items to group them"),
+        (_, None) if ids.is_empty() => {}
+        (_, None) if shared.is_none() => note(app, "pick open items in one group"),
+        (false, None) if !shared.is_some_and(nested) => {
+            note(app, "these are already at the top level")
+        }
+        (false, None) => {
+            edit(app, |file| file.outdent(&ids));
+            land_on_item(app, ids[0]);
+        }
+        (true, None) if shared.is_some_and(nested) => {
+            note(app, "groups go one deep — these are already in one")
+        }
+        (true, None) => {
+            let made = edit(app, |file| file.group_items(&ids)).flatten();
+            if let Some(view) = view_mut(app) {
+                view.anchor = None;
+            }
+            if let Some(group) = made {
+                land_on_group(app, Some(group));
+                // Named at once: typed over, or kept as it is with Esc.
+                open_input(app, InputKind::Rename(Target::Group(group)), "");
+            }
+        }
     }
 }
 
@@ -1238,18 +1315,27 @@ fn clip(app: &mut App, cut: bool) {
 /// from), copies after that and from `⌘C` new items, unlinked and open.
 /// False when the paste is not that text.
 fn paste_clip(app: &mut App, text: &str) -> bool {
-    let matched = app
-        .todo_clip
-        .as_ref()
-        .is_some_and(|clip| clip_key(text) == clip_key(&clip.text));
-    let Some(clip) = app.todo_clip.clone().filter(|_| matched) else {
-        return false;
-    };
     if view(app).is_none() {
         return false;
     }
     let after = cursor_open_item(app);
     let group = cursor_group(app);
+    paste_clip_at(app, text, group, after)
+}
+
+/// Whether `text` is what `⌘X`/`⌘C` last put on the clipboard.
+fn clip_matches(app: &App, text: &str) -> bool {
+    app.todo_clip
+        .as_ref()
+        .is_some_and(|clip| clip_key(text) == clip_key(&clip.text))
+}
+
+/// [`paste_clip`] into `group` (else the Inbox), after `after` while it
+/// is there.
+fn paste_clip_at(app: &mut App, text: &str, group: Option<u64>, after: Option<u64>) -> bool {
+    let Some(clip) = app.todo_clip.clone().filter(|_| clip_matches(app, text)) else {
+        return false;
+    };
     let today = super::today();
     let count = clip.items.len();
     let landed = edit(app, |file| {
@@ -1354,12 +1440,8 @@ fn beside_field(app: &App, up: bool) -> Option<Entry> {
     let at = entries
         .iter()
         .position(|e| matches!(e, Entry::Input { .. }))?;
-    let found = if up {
-        (0..at).rev().find(|i| entries[*i].selectable())
-    } else {
-        (at + 1..entries.len()).find(|i| entries[*i].selectable())
-    };
-    found.map(|i| entries[i])
+    let found = if up { at.checked_sub(1) } else { Some(at + 1) };
+    found.and_then(|i| entries.get(i)).copied()
 }
 
 /// The field shut and what was typed in it put in — nothing, when it was
@@ -1494,7 +1576,7 @@ fn start_edit(app: &mut App, append: Option<&str>) {
             },
             String::new(),
         ),
-        Entry::Input { .. } | Entry::Day { .. } | Entry::DoneHeader { .. } => return,
+        Entry::Input { .. } => return,
     };
     open_input(app, kind, &text);
     let Some((_, input)) = view_mut(app).and_then(|v| v.input.as_mut()) else {
@@ -1509,19 +1591,12 @@ fn start_edit(app: &mut App, append: Option<&str>) {
 }
 
 /// `⌘↓`/`⌘↑`: the cursor onto the next (or previous) group's header,
-/// nested groups' included — under DONE BEFORE TODAY, the first item of
-/// the next (or previous) day.
+/// nested groups' included.
 fn jump(app: &mut App, down: bool) {
     let Some((entries, Some(at))) = rows_now(app) else {
         return;
     };
-    let header = |i: &usize| match entries[*i] {
-        Entry::Header { .. } | Entry::DoneHeader { .. } => true,
-        Entry::Item { .. } => i
-            .checked_sub(1)
-            .is_some_and(|p| matches!(entries[p], Entry::Day { .. })),
-        _ => false,
-    };
+    let header = |i: &usize| matches!(entries[*i], Entry::Header { .. });
     let found = if down {
         (at + 1..entries.len()).find(header)
     } else {
@@ -1533,14 +1608,16 @@ fn jump(app: &mut App, down: bool) {
 }
 
 /// `space`: tick or untick the chosen items — all ticked unless every
-/// one already is — each staying where it stands until the modal goes
-/// (`TodoView::held`); or fold the header.
+/// one already is. A tick goes to the bottom of its group, in sight until
+/// the modal goes (`TodoView::held`), the cursor staying put so the next
+/// item comes up under it; an untick goes back where it stood, the cursor
+/// with it. Or fold the header.
 fn done(app: &mut App) {
     match current(app) {
         Some(Entry::Item { .. }) => {
             let ids = chosen(app);
             let now = super::now();
-            edit(app, |file| {
+            let ticked = edit(app, |file| {
                 let tick = ids
                     .iter()
                     .any(|id| file.item(*id).is_some_and(|i| i.done.is_none()));
@@ -1553,12 +1630,21 @@ fn done(app: &mut App) {
                         };
                     }
                 }
+                tick
             });
             if let Some(view) = view_mut(app) {
-                for id in ids {
-                    if !view.held.contains(&id) {
-                        view.held.push(id);
+                for id in &ids {
+                    if !view.held.contains(id) {
+                        view.held.push(*id);
                     }
+                }
+                // What was selected has moved apart: let it go.
+                view.anchor = None;
+                view.cursor = None;
+            }
+            if ticked == Some(false) {
+                if let Some(first) = ids.first() {
+                    land_on_item(app, *first);
                 }
             }
         }
@@ -1571,11 +1657,6 @@ fn done(app: &mut App) {
                     g.collapsed = !folded;
                 }
             });
-        }
-        Some(Entry::DoneHeader { .. }) => {
-            if let Some(view) = view_mut(app) {
-                view.show_done = !view.show_done;
-            }
         }
         _ => {}
     }
@@ -1597,14 +1678,13 @@ fn open_priority(app: &mut App) {
     }
 }
 
-/// The chosen items at Linear's `level`. They re-sort, the cursor going
-/// with its item.
+/// The chosen items at Linear's `level` — each moved to the end of its
+/// level's run when it stood out of order ([`TodoFile::set_priority`]),
+/// the cursor going with its item.
 fn set_priority(app: &mut App, ids: &[u64], level: u8) {
     edit(app, |file| {
         for id in ids {
-            if let Some(item) = file.item_mut(*id) {
-                item.priority = level;
-            }
+            file.set_priority(*id, level);
         }
     });
 }
@@ -1655,7 +1735,7 @@ fn query_changed(app: &mut App) {
         let first = entries
             .iter()
             .position(|e| matches!(e, Entry::Item { .. }))
-            .or_else(|| entries.iter().position(Entry::selectable));
+            .or((!entries.is_empty()).then_some(0));
         if let Some(i) = first {
             put_cursor(app, i, Some(entries[i]));
         }
@@ -2151,6 +2231,18 @@ pub(crate) fn handle_mouse(
         return;
     };
     let click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+    if view.page.is_some() {
+        super::history::handle_mouse(app, mouse, pos);
+        return;
+    }
+    let summary = click
+        .then(|| view.summary_hits.iter().find(|(r, _)| r.contains(pos)))
+        .flatten()
+        .map(|(_, week)| *week);
+    if let Some(week) = summary {
+        super::history::open(app, week);
+        return;
+    }
     if view.pick.is_some() {
         if click {
             pick_click(app, pos, out);
@@ -2223,7 +2315,7 @@ fn click_row(app: &mut App, pos: Position) {
     let Some((entries, _)) = rows_now(app) else {
         return;
     };
-    let Some(entry) = entries.get(index).copied().filter(Entry::selectable) else {
+    let Some(entry) = entries.get(index).copied() else {
         return;
     };
     put_cursor(app, index, Some(entry));
@@ -2235,27 +2327,25 @@ fn click_row(app: &mut App, pos: Position) {
         view.anchor = None;
     }
     match entry {
-        Entry::Item { .. } | Entry::Header { .. } | Entry::DoneHeader { .. } if on_mark => {
-            done(app)
-        }
+        Entry::Item { .. } | Entry::Header { .. } if on_mark => done(app),
         Entry::AddRow => start_item(app),
         _ => {}
     }
 }
 
 /// `Tue 6 Oct`.
-fn day_label(date: NaiveDate) -> String {
+pub(super) fn day_label(date: NaiveDate) -> String {
     date.format("%a %-d %b").to_string()
 }
 
-fn width_of(spans: &[Span]) -> usize {
+pub(super) fn width_of(spans: &[Span]) -> usize {
     use unicode_width::UnicodeWidthStr;
     spans.iter().map(|s| s.content.width()).sum()
 }
 
 /// `left`, then `rest` cut to fit, then `right` against the edge of
 /// `budget` columns.
-fn justify(
+pub(super) fn justify(
     mut left: Vec<Span<'static>>,
     text: Vec<Span<'static>>,
     right: Vec<Span<'static>>,
@@ -2280,7 +2370,7 @@ const INDENT_W: u16 = 2;
 const MARK_W: u16 = 2;
 
 /// `depth` levels of indent.
-fn indent(depth: u16) -> Span<'static> {
+pub(super) fn indent(depth: u16) -> Span<'static> {
     Span::raw(" ".repeat((INDENT_W * depth) as usize))
 }
 
@@ -2295,6 +2385,16 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     let block = panel_block(&title, focused, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if view.page.is_some() {
+        super::history::draw(f, app, view, inner, th, focused);
+        if !backdrop {
+            crate::hints::draw_on_border(f, area, &hints(view), 0, th);
+        }
+        if let Some(Overlay::Todos(v)) = &mut app.overlay {
+            v.area = area;
+        }
+        return;
+    }
 
     // A tab per project on the first line, each with what is open in it,
     // and against its right edge the week so far, when there is room.
@@ -2323,15 +2423,25 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     );
     let strip_w = width_of(&strip);
     f.render_widget(Paragraph::new(Line::from(strip)), project_row);
-    let summary = week_summary(file, today, th);
+    let summary = week_summary(&super::history::week_ticks(app, today), today, th);
     // A gap after the tabs, and the frame's margin on the right.
     const GAP: usize = 2;
     const MARGIN: u16 = 1;
-    if strip_w + GAP + width_of(&summary) + usize::from(MARGIN) <= project_row.width as usize {
+    let summary_w = width_of(&summary);
+    let mut summary_hits = Vec::new();
+    if strip_w + GAP + summary_w + usize::from(MARGIN) <= project_row.width as usize {
         let right = Rect {
             width: project_row.width.saturating_sub(MARGIN),
             ..project_row
         };
+        // `✓N today` and `✓N this week`, each a way onto the DONE page.
+        let x0 = right.right().saturating_sub(summary_w as u16);
+        let at = |from: usize, to: usize, week: bool| {
+            let x = x0 + width_of(&summary[..from]) as u16;
+            let w = width_of(&summary[from..to]) as u16;
+            (Rect::new(x, right.y, w, 1), week)
+        };
+        summary_hits = vec![at(0, 2, false), at(3, 5, true)];
         let line = Line::from(summary).alignment(ratatui::layout::Alignment::Right);
         f.render_widget(Paragraph::new(line), right);
     }
@@ -2343,7 +2453,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     }
     let rows_area = crate::ui::below_first_row(below_tabs);
 
-    let entries = entries(file, view, today);
+    let entries = entries(file, view);
     let cursor = resolve(view, &entries);
     let chosen = selected_ids(view, &entries, cursor);
     let budget = (rows_area.width as usize).saturating_sub(2);
@@ -2356,8 +2466,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         th,
     };
     let drawn_lines: Vec<_> = entries.iter().map(|e| row.lines(*e)).collect();
-    // A section, a day or `+ new item` past the first row stands a blank
-    // line below what is over it.
+    // A section or `+ new item` past the first row stands a blank line
+    // below what is over it.
     let gaps: Vec<bool> = entries
         .iter()
         .enumerate()
@@ -2368,14 +2478,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         .zip(&gaps)
         .map(|((lines, _), gap)| lines.len().max(1) as u16 + u16::from(*gap))
         .collect();
-    // The cursor's row on screen — and the day over it, under DONE.
+    // The cursor's row on screen.
     let at = cursor.unwrap_or(0);
-    let first = match at.checked_sub(1).map(|i| entries[i]) {
-        Some(Entry::Day { .. }) => at - 1,
-        _ => at,
-    };
-    let (list_start, drawn) =
-        crate::ui::stacked_rows(&heights, first, at, view.list_start, rows_area);
+    let (list_start, drawn) = crate::ui::stacked_rows(&heights, at, at, view.list_start, rows_area);
     let mut row_rects = Vec::with_capacity(drawn.len());
     let mut chip_hits = Vec::new();
     let mut drawn_lines = drawn_lines;
@@ -2400,25 +2505,18 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
                 chip_hits.push((Rect::new(x, rect.y, w as u16, 1), id, chip));
             }
         }
-        if entry.selectable() {
-            // The selection's other rows lit as an unfocused cursor's.
-            let in_selection = view.anchor.is_some()
-                && matches!(entry, Entry::Item { id, .. } if chosen.contains(&id));
-            let at_cursor = cursor == Some(i);
-            crate::ui::render_row_lines(
-                f,
-                rect,
-                lines,
-                at_cursor || in_selection,
-                at_cursor && focused && view.input.is_none(),
-                th,
-            );
-        } else {
-            f.render_widget(
-                Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>()),
-                rect,
-            );
-        }
+        // The selection's other rows lit as an unfocused cursor's.
+        let in_selection = view.anchor.is_some()
+            && matches!(entry, Entry::Item { id, .. } if chosen.contains(&id));
+        let at_cursor = cursor == Some(i);
+        crate::ui::render_row_lines(
+            f,
+            rect,
+            lines,
+            at_cursor || in_selection,
+            at_cursor && focused && view.input.is_none(),
+            th,
+        );
         row_rects.push((i, rect));
     }
 
@@ -2439,6 +2537,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         v.row_rects = row_rects;
         v.project_hits = project_hits;
         v.project_row = project_row;
+        v.summary_hits = summary_hits;
         if let Some(at) = cursor {
             v.selected = at;
             v.cursor = entries.get(at).copied();
@@ -2447,38 +2546,35 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
 }
 
 /// Whether `entry` stands a blank line below the row over it: a
-/// top-level group's header (or the field naming one), `+ new item`,
-/// DONE BEFORE TODAY and each day under it.
+/// top-level group's header (or the field naming one) and `+ new item`.
 fn spaced(entry: Entry) -> bool {
     matches!(
         entry,
-        Entry::Header { depth: 0, .. }
-            | Entry::Input { depth: 0 }
-            | Entry::AddRow
-            | Entry::DoneHeader { .. }
-            | Entry::Day { .. }
+        Entry::Header { depth: 0, .. } | Entry::Input { depth: 0 } | Entry::AddRow
     )
 }
 
-/// The tab row's right end: what was ticked today and this week, then
-/// the week a bar a day from Monday — today's brightest, the days to
-/// come a faint `·`.
-fn week_summary(file: &TodoFile, today: NaiveDate, th: Theme) -> Vec<Span<'static>> {
+/// The tab row's right end: what was ticked today and this week — `days`,
+/// Monday first — then the week a bar a day — today's brightest, the
+/// days to come a faint `·`. Spans 0–1 are `✓N today`, 3–4 `✓N this
+/// week`: what a click opens the DONE page on.
+fn week_summary(days: &[usize; 7], today: NaiveDate, th: Theme) -> Vec<Span<'static>> {
     use chrono::Datelike;
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let days = file.week_ticks(today);
     let at = today.weekday().num_days_from_monday() as usize;
     let max = days.iter().copied().max().unwrap_or(0).max(1);
     // The busiest day reaches the tallest bar.
     const TOP: usize = BARS.len() - 1;
     let mut spans = vec![
         Span::styled(format!("✓{}", days[at]), Style::default().fg(th.ok)),
-        Span::styled(" today · ", Style::default().fg(th.dim)),
+        Span::styled(" today", Style::default().fg(th.dim)),
+        Span::styled(" · ", Style::default().fg(th.dim)),
         Span::styled(
             format!("✓{}", days.iter().sum::<usize>()),
             Style::default().fg(th.ok),
         ),
-        Span::styled(" this week ", Style::default().fg(th.dim)),
+        Span::styled(" this week", Style::default().fg(th.dim)),
+        Span::raw(" "),
     ];
     for (i, n) in days.iter().enumerate() {
         let (bar, color) = match (i.cmp(&at), *n) {
@@ -2522,7 +2618,6 @@ impl Row<'_> {
                 }
             }
             Entry::Input { depth } => return (input_lines(view, depth, budget, th), Vec::new()),
-            Entry::DoneHeader { count } => done_header(view, count, budget, th),
             Entry::AddRow => {
                 let words = if file.groups.is_empty() {
                     "+ new item — or paste an indented list"
@@ -2537,14 +2632,6 @@ impl Row<'_> {
                     ),
                 ]
             }
-            Entry::Day { date, count } => vec![
-                indent(1),
-                Span::styled(
-                    day_label(date),
-                    Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" · {count} done"), Style::default().fg(th.dim)),
-            ],
         };
         (vec![line], Vec::new())
     }
@@ -2644,7 +2731,11 @@ fn header_spans(
     let counts = file.counts(group, today);
     let dim = Style::default().fg(th.dim);
     let open = Span::styled(format!("{} open", counts.open_total()), dim);
-    let right = if top {
+    // Everything in it ticked: struck through at the bottom, as an item is.
+    let complete = file.complete(group);
+    let right = if complete {
+        vec![Span::styled("✓ done", Style::default().fg(th.ok))]
+    } else if top {
         let mut right: Vec<Span<'static>> = Vec::new();
         // The levels with something open — no priority is in the total.
         let levels = crate::linear::PRIORITY_ORDER.iter().zip(counts.open.iter());
@@ -2687,9 +2778,15 @@ fn header_spans(
     let positions = crate::fuzzy::fuzzy_match(view.query.trim(), &full)
         .map(|m| visible_positions(&m.positions, &name, &full).to_vec())
         .unwrap_or_default();
-    let style = Style::default()
-        .fg(if top { th.text } else { th.muted })
-        .add_modifier(Modifier::BOLD);
+    let style = if complete {
+        Style::default()
+            .fg(th.dim)
+            .add_modifier(Modifier::BOLD | Modifier::CROSSED_OUT)
+    } else {
+        Style::default()
+            .fg(if top { th.text } else { th.muted })
+            .add_modifier(Modifier::BOLD)
+    };
     let name = fuzzy_highlight_styled(&name, &positions, style, th);
     if !top {
         return justify(left, name, right, budget);
@@ -2704,7 +2801,7 @@ const AROUND_RULE: usize = 2;
 
 /// A section's header: `left`, a rule across, `right` against the edge
 /// of `budget` columns.
-fn ruled(
+pub(super) fn ruled(
     left: Vec<Span<'static>>,
     right: Vec<Span<'static>>,
     budget: usize,
@@ -2776,7 +2873,7 @@ fn wrap_at(text: &str, first: usize, rest: usize) -> Vec<(usize, String)> {
 fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
     let Row {
         app,
-        file,
+        file: _,
         view,
         today,
         budget,
@@ -2808,17 +2905,7 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
     if let Some(id) = &item.linear {
         parts.push((Some(Chip::Linear), linear_chip(id, view.linked.get(id), th)));
     }
-    // Done before today: under DONE, with the group it was in.
-    let earlier = done && !item.done_today(today);
-    if earlier {
-        parts.push((
-            None,
-            vec![Span::styled(
-                file.path_label(item.group),
-                Style::default().fg(th.dim),
-            )],
-        ));
-    } else if !done && item.age(today) > 0 {
+    if !done && item.age(today) > 0 {
         parts.push((
             None,
             vec![Span::styled(
@@ -2840,9 +2927,7 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
             .map(|m| m.positions)
             .unwrap_or_default()
     };
-    let base = if earlier {
-        Style::default().fg(th.muted)
-    } else if done {
+    let base = if done {
         Style::default()
             .fg(th.dim)
             .add_modifier(Modifier::CROSSED_OUT)
@@ -2946,27 +3031,6 @@ fn input_lines(view: &TodoView, depth: u16, budget: usize, th: Theme) -> Vec<Vec
         .collect()
 }
 
-/// DONE BEFORE TODAY's header, a section as a top-level group's is: the
-/// fold glyph, its name, a rule across and how many it holds.
-fn done_header(view: &TodoView, count: usize, budget: usize, th: Theme) -> Vec<Span<'static>> {
-    let open = view.show_done || !view.query.trim().is_empty();
-    let left = vec![
-        Span::styled(
-            format!("{} ", crate::ui::fold_mark(open)),
-            Style::default().fg(th.muted),
-        ),
-        Span::styled(
-            "DONE BEFORE TODAY",
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let right = vec![Span::styled(
-        format!("✓{count}"),
-        Style::default().fg(th.ok),
-    )];
-    ruled(left, right, budget, th)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3032,12 +3096,13 @@ mod tests {
         assert_eq!(wide, [(0, "日本語".into()), (3, "版".into())]);
     }
 
-    /// A tab put away keeps its cursor, filter and DONE open, and lets go
-    /// of what was half done on it — the selection and the held ticks too.
+    /// A tab put away keeps its cursor and filter, and lets go of what
+    /// was half done on it — the selection, the held ticks and the DONE
+    /// page too.
     #[test]
     fn a_parked_tab_keeps_its_place_and_drops_the_half_done() {
         let mut v = view();
-        v.show_done = true;
+        v.page = Some(super::super::history::DonePage::default());
         v.query.insert_str("resend");
         v.cursor = Some(Entry::Item { id: 3, depth: 1 });
         v.input = Some((
@@ -3052,7 +3117,7 @@ mod tests {
         v.anchor = Some(3);
         v.held = vec![3];
         let parked = v.clone().park();
-        assert!(parked.show_done);
+        assert!(parked.page.is_none());
         assert_eq!(parked.query.trim(), "resend");
         assert_eq!(parked.cursor, v.cursor);
         assert!(parked.input.is_none() && parked.pick.is_none());
@@ -3060,47 +3125,50 @@ mod tests {
         assert!(parked.anchor.is_none() && parked.held.is_empty());
     }
 
-    /// What was done before today is one folded section under the groups:
-    /// open, its days over their items; a filter opens it too.
+    /// A tick stays in the list — at the bottom of its group, a complete
+    /// group at the bottom of the list — only while the modal that ticked
+    /// it is up; one from before is out of it.
     #[test]
-    fn done_before_today_folds_under_the_groups() {
+    fn done_items_show_only_while_held() {
         use chrono::TimeZone;
+        let tick = chrono::Local
+            .with_ymd_and_hms(2026, 10, 6, 12, 0, 0)
+            .unwrap();
         let mut file = TodoFile::new(Path::new("/r"));
         let g = file.add_group(None, "G");
+        let done = file.add_group(None, "Done");
+        let shipped = file.add_item(g, "shipped", day(5));
         let open = file.add_item(g, "open", day(5));
-        let old = file.add_item(g, "shipped", day(5));
-        file.toggle(
-            old,
-            chrono::Local
-                .with_ymd_and_hms(2026, 10, 5, 12, 0, 0)
-                .unwrap(),
-        );
+        let last = file.add_item(done, "last", day(5));
+        file.toggle(shipped, tick);
+        file.toggle(last, tick);
         let mut v = view();
-        let rows = entries(&file, &v, day(6));
         assert_eq!(
-            rows,
+            entries(&file, &v),
             [
                 Entry::Header { group: g, depth: 0 },
                 Entry::Item { id: open, depth: 1 },
                 Entry::AddRow,
-                Entry::DoneHeader { count: 1 },
             ]
         );
-        v.show_done = true;
-        let rows = entries(&file, &v, day(6));
+        v.held = vec![last, shipped];
         assert_eq!(
-            rows[4..],
+            entries(&file, &v),
             [
-                Entry::Day {
-                    date: day(5),
-                    count: 1
+                Entry::Header { group: g, depth: 0 },
+                Entry::Item { id: open, depth: 1 },
+                Entry::Item {
+                    id: shipped,
+                    depth: 1
                 },
-                Entry::Item { id: old, depth: 2 },
+                Entry::Header {
+                    group: done,
+                    depth: 0
+                },
+                Entry::Item { id: last, depth: 1 },
+                Entry::AddRow,
             ]
         );
-        v.show_done = false;
-        v.query.insert_str("ship");
-        assert!(entries(&file, &v, day(6)).contains(&Entry::Item { id: old, depth: 2 }));
     }
 
     /// A selection is the items from its anchor to the cursor, either way
@@ -3137,7 +3205,7 @@ mod tests {
         file.add_item(c, "chips", day(6));
         file.group_mut(a).unwrap().collapsed = true;
         let mut v = view();
-        let rows = entries(&file, &v, day(6));
+        let rows = entries(&file, &v);
         assert_eq!(
             rows,
             [
@@ -3148,7 +3216,7 @@ mod tests {
             ]
         );
         v.query.insert_str("resend");
-        let rows = entries(&file, &v, day(6));
+        let rows = entries(&file, &v);
         assert_eq!(
             rows,
             [
@@ -3178,7 +3246,7 @@ mod tests {
             TextInput::new(),
         ));
         assert_eq!(
-            entries(&file, &v, day(6))[2],
+            entries(&file, &v)[2],
             Entry::Input { depth: 1 },
             "after x, before Sub"
         );
@@ -3191,7 +3259,7 @@ mod tests {
             TextInput::new(),
         ));
         assert_eq!(
-            entries(&file, &v, day(6))[1..4],
+            entries(&file, &v)[1..4],
             [
                 Entry::Item { id: item, depth: 1 },
                 Entry::Input { depth: 1 },
@@ -3201,10 +3269,10 @@ mod tests {
         );
         file.delete_item(y);
         v.input = Some((InputKind::Group { parent: Some(a) }, TextInput::new()));
-        assert_eq!(entries(&file, &v, day(6))[3], Entry::Input { depth: 1 });
+        assert_eq!(entries(&file, &v)[3], Entry::Input { depth: 1 });
         v.input = Some((InputKind::Rename(Target::Item(item)), TextInput::new()));
-        assert_eq!(entries(&file, &v, day(6))[1], Entry::Input { depth: 1 });
-        assert_eq!(resolve(&v, &entries(&file, &v, day(6))), Some(1));
+        assert_eq!(entries(&file, &v)[1], Entry::Input { depth: 1 });
+        assert_eq!(resolve(&v, &entries(&file, &v)), Some(1));
         let _ = sub;
     }
 }

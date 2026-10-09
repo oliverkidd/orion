@@ -40339,13 +40339,15 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// `space` ticks the item under the cursor: its box ticked and its
-    /// text struck through, its header counting it done today. The next
-    /// day it is gone from Today and in the Log under the day it was done.
+    /// A tick strikes the item through and sends it to the bottom of its
+    /// group, the next item coming up under the cursor; the summary says
+    /// so. Once the modal goes, so does the item — and its DONE page,
+    /// opened by a click on the summary, has it under its group, where
+    /// `space` puts it back on the list.
     #[test]
-    fn a_ticked_todo_strikes_through_then_moves_to_the_log() {
+    fn a_ticked_todo_sinks_then_leaves_the_list() {
         let mut out = Vec::new();
-        let mut app = crate::todos::with_now(todo_clock(6), || {
+        crate::todos::with_now(todo_clock(6), || {
             let mut app = todos_with(TWO_EMAILS);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
@@ -40359,50 +40361,100 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(cell
                 .modifier
                 .contains(ratatui::style::Modifier::CROSSED_OUT));
-            // The tick stays where it stood, the cursor on it, until the
-            // modal goes: then it is at the bottom of its group.
             let ticked = todo_file(&app).groups[0].id;
             let order = |app: &App| -> Vec<String> {
                 let file = todo_file(app);
                 let held = &todo_view(app).held;
-                file.today_items(ticked, crate::todos::today(), held)
+                file.shown_items(ticked, held)
                     .iter()
                     .map(|i| i.text.clone())
                     .collect()
             };
-            assert_eq!(order(&app), ["run plan", "setup resend"]);
-            let view = todo_view(&app);
-            let on = |app: &App, text: &str| {
-                let file = todo_file(app);
-                matches!(
-                    todo_view(app).cursor,
-                    Some(crate::todos::view::Entry::Item { id, .. })
-                        if file.item(id).is_some_and(|i| i.text == text)
-                )
-            };
-            assert!(view.cursor.is_some() && on(&app, "run plan"));
+            assert_eq!(order(&app), ["setup resend", "run plan"]);
+            let file = todo_file(&app);
+            assert!(matches!(
+                todo_view(&app).cursor,
+                Some(crate::todos::view::Entry::Item { id, .. })
+                    if file.item(id).is_some_and(|i| i.text == "setup resend")
+            ));
+
+            // Closed and opened again: out of the list.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             run_action(&mut app, crate::keymap::Action::Todos);
-            assert_eq!(order(&app), ["setup resend", "run plan"]);
-            app
-        });
-        crate::todos::with_now(todo_clock(7), || {
-            let text = buffer_text(&draw_todos(&mut app));
+            assert_eq!(order(&app), ["setup resend"]);
+            let terminal = draw_todos(&mut app);
+            let text = buffer_text(&terminal);
             assert!(!text.contains("run plan"), "{text}");
-            assert!(text.contains("setup resend"), "{text}");
-            assert!(text.contains("1d"), "an item carried over says so: {text}");
-            assert!(text.contains("▸ DONE BEFORE TODAY"), "folded: {text}");
-            // DONE is the last row; space opens it.
-            press(&mut app, KeyCode::End, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert!(!text.contains("DONE BEFORE TODAY"), "{text}");
+
+            // A click on `✓1 today`: the DONE page, project over group
+            // over item.
+            let (x, y) = find_cell(&terminal, "✓1 today");
+            click(&mut app, x, y, &mut out);
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("Tue 6 Oct · 1 done"), "{text}");
-            assert!(text.contains("run plan"), "{text}");
-            assert!(text.contains("Emails"), "its group beside it: {text}");
-            // `space` on it unticks it: back in its group, open.
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            assert!(text.contains("Today ✓1"), "{text}");
+            let (project, group, item) = (
+                text.find("DEMO").unwrap(),
+                text.find("Emails").unwrap(),
+                text.find("run plan").unwrap(),
+            );
+            assert!(project < group && group < item, "{text}");
+            assert!(text.contains("10:00"), "when: {text}");
+            // `→` turns to the week; `space` puts it back; Esc to the list.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert!(buffer_text(&draw_todos(&mut app)).contains("Tue 6 Oct"));
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("nothing ticked this week yet"), "{text}");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(todo_view(&app).page.is_none());
+            assert_eq!(order(&app), ["run plan", "setup resend"]);
+        });
+    }
+
+    /// Ticking the last open item in a nested group completes the group:
+    /// it goes to the bottom of the group around it, and once the modal
+    /// goes, it does too.
+    #[test]
+    fn a_completed_group_sinks_then_leaves() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with("- UI\n    - Later\n        - one\n    - chips\n");
+            let file = todo_file(&app);
+            let ui = file.groups[0].id;
+            let later = file.groups[1].id;
+            let names = |app: &App| -> Vec<crate::todos::Child> {
+                todo_file(app).children(ui, &todo_view(app).held)
+            };
+            let chips = file.items.iter().find(|i| i.text == "chips").unwrap().id;
+            assert_eq!(
+                names(&app),
+                [
+                    crate::todos::Child::Group(later),
+                    crate::todos::Child::Item(chips)
+                ],
+                "as the pasted list had it"
+            );
+            // UI, Later, one, chips: tick one.
+            for _ in 0..2 {
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert!(todo_file(&app).complete(later));
+            assert_eq!(
+                names(&app),
+                [
+                    crate::todos::Child::Item(chips),
+                    crate::todos::Child::Group(later)
+                ],
+                "at the bottom"
+            );
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("✓ done"), "{text}");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            run_action(&mut app, crate::keymap::Action::Todos);
+            assert_eq!(names(&app), [crate::todos::Child::Item(chips)]);
         });
     }
 
@@ -40430,7 +40482,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn todo_texts(app: &App, group: usize) -> Vec<String> {
         let file = todo_file(app);
         let id = file.subgroups(None).nth(group).unwrap().id;
-        file.today_items(id, crate::todos::today(), &todo_view(app).held)
+        file.shown_items(id, &todo_view(app).held)
             .iter()
             .map(|i| i.text.clone())
             .collect()
@@ -40479,7 +40531,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `⇧↓` selects a run of items; `⌘P` sets them all, `space` ticks them
-    /// all, and they stay where they stood; any plain move lets go.
+    /// all — each to the bottom of its group, the selection let go, as
+    /// any plain move lets it go.
     #[test]
     fn shift_arrows_select_todos_to_act_on_together() {
         crate::todos::with_now(todo_clock(6), || {
@@ -40498,7 +40551,9 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_some()));
             assert_eq!(todo_texts(&app, 0), ["run plan", "setup resend"]);
-            assert!(todo_view(&app).anchor.is_some(), "kept");
+            assert!(todo_view(&app).anchor.is_none());
+            press(&mut app, KeyCode::Up, KeyModifiers::SHIFT, &mut out);
+            assert!(todo_view(&app).anchor.is_some());
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).anchor.is_none());
         });
@@ -40531,10 +40586,71 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
+    /// `⌥→` puts the selected items in a new group where they stood, its
+    /// name typed at once; `⌥←` on one of them takes it out, right under
+    /// the group, and on the group's header flattens it. A top-level
+    /// group's items go nowhere.
+    #[test]
+    fn alt_right_groups_todos_and_alt_left_ungroups_them() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with("- Emails\n    - a\n    - b\n    - c\n");
+            let shape = |app: &App| -> Vec<String> {
+                let file = todo_file(app);
+                let emails = file.groups[0].id;
+                file.children(emails, &[])
+                    .into_iter()
+                    .map(|c| match c {
+                        crate::todos::Child::Item(id) => file.item(id).unwrap().text.clone(),
+                        crate::todos::Child::Group(id) => {
+                            format!("[{}]", file.group(id).unwrap().name)
+                        }
+                    })
+                    .collect()
+            };
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::SHIFT, &mut out);
+            press(&mut app, KeyCode::Char('f'), KeyModifiers::ALT, &mut out);
+            assert!(todo_view(&app).input.is_some(), "its name's field open");
+            type_text(&mut app, "later", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(shape(&app), ["a", "[later]"]);
+            assert_eq!(todo_texts_in(&app, "later"), ["b", "c"]);
+
+            // b out, right under the group; then the group flattened.
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
+            assert_eq!(shape(&app), ["a", "[later]", "b"]);
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
+            assert_eq!(shape(&app), ["a", "c", "b"]);
+            assert_eq!(todo_file(&app).groups.len(), 1);
+
+            // Already at the top: nothing moves, and the footer says so —
+            // ⌥← as Ghostty sends it, `⌥B`.
+            press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT, &mut out);
+            assert_eq!(shape(&app), ["a", "c", "b"]);
+            assert!(app.flash.is_some());
+        });
+    }
+
+    /// The texts of the items in the group named `name`, as drawn.
+    fn todo_texts_in(app: &App, name: &str) -> Vec<String> {
+        let file = todo_file(app);
+        let id = file.groups.iter().find(|g| g.name == name).unwrap().id;
+        file.shown_items(id, &todo_view(app).held)
+            .iter()
+            .map(|i| i.text.clone())
+            .collect()
+    }
+
     /// `⌘X` takes the items out and puts their text on the clipboard; that
-    /// text pasted back lands them after the cursor as they were — their
-    /// priority and id kept — and a paste after that, or of a `⌘C`, is
-    /// copies.
+    /// text pasted back lands them right after the cursor as they were —
+    /// their priority and id kept — and a paste after that, or of a `⌘C`,
+    /// is copies. Pasted into a new item's field, it is the items too, not
+    /// new ones at the priority of the item above.
     #[test]
     fn cut_and_paste_moves_todos() {
         crate::todos::with_now(todo_clock(6), || {
@@ -40558,7 +40674,7 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut app,
                 "- run plan\r\n- setup resend\n"
             ));
-            assert_eq!(todo_texts(&app, 1), ["run plan", "chips", "setup resend"]);
+            assert_eq!(todo_texts(&app, 1), ["chips", "run plan", "setup resend"]);
             let file = todo_file(&app);
             let moved: Vec<u64> = ["run plan", "setup resend"]
                 .iter()
@@ -40577,6 +40693,28 @@ diff --git a/src/c.rs b/src/c.rs
             let text = app.todo_clip.clone().unwrap().text;
             assert!(!text.starts_with("- "), "{text}");
             assert!(paste_into_overlay(&mut app, &text));
+            assert_eq!(todo_file(&app).items.len(), 6);
+
+            // `⌘X` again, then into `⌘N`'s field under chips: the item,
+            // its priority kept.
+            press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            let moving = match todo_view(&app).cursor {
+                Some(crate::todos::view::Entry::Item { id, .. }) => id,
+                other => panic!("{other:?}"),
+            };
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Char('3'), KeyModifiers::NONE, &mut out);
+            let priority = todo_file(&app).item(moving).unwrap().priority;
+            assert_eq!(priority, 3);
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::SUPER, &mut out);
+            let text = app.todo_clip.clone().unwrap().text;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            assert!(todo_view(&app).input.is_some());
+            assert!(paste_into_overlay(&mut app, &text));
+            assert!(todo_view(&app).input.is_none(), "the field shut");
+            assert_eq!(todo_file(&app).item(moving).unwrap().priority, priority);
             assert_eq!(todo_file(&app).items.len(), 6);
         });
     }
@@ -40667,7 +40805,7 @@ diff --git a/src/c.rs b/src/c.rs
                 press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE, &mut out);
                 assert!(todo_view(&app).pick.is_none());
                 let first =
-                    todo_file(&app).today_items(emails, crate::todos::today(), &[])[0].clone();
+                    todo_file(&app).shown_items(emails, &[])[0].clone();
                 assert_eq!((first.text.as_str(), first.priority), ("new one", 2));
                 assert!(matches!(
                     todo_view(&app).cursor,
