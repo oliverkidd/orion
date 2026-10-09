@@ -496,7 +496,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Linear,
         id: "linear",
         label: "Linear issues",
-        hint: "List Linear issues assigned to you; Space marks, Enter starts one agent on the marked set in one worktree",
+        hint: "List Linear issues assigned to you; type to search, ↓ to the list where Space marks, Enter starts one agent on the marked set in one worktree",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+l", "ctrl+l"],

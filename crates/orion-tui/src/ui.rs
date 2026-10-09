@@ -5180,6 +5180,25 @@ pub(crate) fn search_line(
     Line::from(input_spans(input, area.width as usize, th.accent, th))
 }
 
+/// A search row without the keys: what was typed, dim and with no caret —
+/// so the caret shows where typing goes.
+pub(crate) fn search_line_idle(
+    input: &TextInput,
+    placeholder: &str,
+    area: Rect,
+    th: Theme,
+) -> Line<'static> {
+    let text = if input.is_empty() {
+        placeholder
+    } else {
+        input.as_str()
+    };
+    Line::from(Span::styled(
+        truncate(text, area.width as usize),
+        Style::default().fg(th.dim),
+    ))
+}
+
 /// [`search_line`] with the filter's `key:value` tokens lit
 /// (`list_filter::Parsed::spans`).
 pub(crate) fn search_line_lit(

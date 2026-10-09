@@ -48,8 +48,8 @@ use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
     centered_rect_pct, empty_list_row, fuzzy_highlight_styled, layout_sections, list_header,
-    panel_block, render_row, row_rect, search_line_lit, sections, truncate, visible_positions,
-    ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
+    panel_block, render_row, row_rect, search_line_idle, search_line_lit, sections, truncate,
+    visible_positions, ListEntry, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 
 const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
@@ -411,6 +411,22 @@ pub struct LinearView {
     /// The FILTER PICK (`⌘F`) in the reading pane's place, while it is
     /// up: every key is its own (`list_filter`).
     pub filter_pick: Option<FilterPick>,
+    /// Which part of the list panel has the keys: the search line, where
+    /// it opens and `space` types, or the rows, where `space` marks.
+    pub focus: LinearFocus,
+}
+
+/// Where the LINEAR VIEW's keys go. `↓` off the search line hands them to
+/// the rows, `↑` off the top row hands them back, and typing on the rows
+/// goes back to the search line with what was typed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinearFocus {
+    /// The search line: every key that edits a line is the filter's,
+    /// `space` among them.
+    #[default]
+    Search,
+    /// The rows: `space` marks the one under the cursor.
+    List,
 }
 
 impl LinearView {
@@ -438,6 +454,7 @@ impl LinearView {
             list_start: 0,
             row_rects: Vec::new(),
             filter_pick: None,
+            focus: LinearFocus::Search,
         }
     }
 
@@ -1218,7 +1235,10 @@ pub(crate) fn attach_issues(
 pub(crate) mod keys {
     use crate::hints::Key;
 
+    /// On the rows only: on the search line `space` types.
     pub const MARK: Key = Key::new(&["space"], "mark");
+    /// From the search line to the rows, where `space` marks.
+    pub const ROWS: Key = Key::new(&["down"], "to list");
     pub const CONFIRM: Key = Key::new(&["enter"], "agent on marked");
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
     pub const BROWSER: Key = crate::issues::keys::BROWSER;
@@ -1244,8 +1264,8 @@ pub(crate) mod keys {
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, WORKTREE, PICK, SET, LINK, TABS,
-        FILTER,
+        MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, WORKTREE, PICK, SET, LINK,
+        TABS, FILTER,
     ];
 }
 
@@ -1280,9 +1300,13 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     if view.filter_pick.is_some() {
         return crate::list_filter::hints();
     }
+    let mark = match view.focus {
+        LinearFocus::List => keys::MARK.hint(),
+        LinearFocus::Search => keys::ROWS.hint(),
+    };
     match view.mode {
         LinearMode::Browse => vec![
-            keys::MARK.hint(),
+            mark,
             keys::CONFIRM.hint().kept(),
             keys::TABS.hint(),
             keys::FILTER.hint(),
@@ -1302,7 +1326,7 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", esc),
         ],
         LinearMode::Attach { .. } => vec![
-            keys::MARK.hint(),
+            mark,
             keys::CONFIRM.hint_as("attach marked to this PR").kept(),
             keys::TABS.hint(),
             keys::FILTER.hint(),
@@ -1545,13 +1569,26 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     };
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let page = view.view_height.max(1) as i32;
+    let on_list = view.focus == LinearFocus::List;
     match key.code {
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
         KeyCode::Esc => close(app),
         KeyCode::Down if shift => view.scroll_by(1),
         KeyCode::Up if shift => view.scroll_by(-1),
-        KeyCode::Down => step(app, 1),
-        KeyCode::Up => step(app, -1),
+        // ↓ off the search line hands the rows the keys, the cursor where
+        // it was; ↑ off the top row hands them back.
+        KeyCode::Down if !on_list => view.focus = LinearFocus::List,
+        KeyCode::Down => {
+            step(app, 1);
+        }
+        KeyCode::Up if !on_list => {}
+        KeyCode::Up => {
+            if !step(app, -1) {
+                if let Some(Overlay::Linear(view)) = &mut app.overlay {
+                    view.focus = LinearFocus::Search;
+                }
+            }
+        }
         // ←/→ (⇧ or not) are the tabs', never the filter line's caret: a
         // filter is typed and backspaced, not edited mid-line.
         KeyCode::Left | KeyCode::Right if keys::TABS.matches(&key) => {
@@ -1562,7 +1599,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
         KeyCode::End => view.scroll = view.max_scroll(),
-        _ if keys::MARK.matches(&key) => toggle_mark(app),
+        // On the search line `space` is the filter's, a word break.
+        _ if on_list && keys::MARK.matches(&key) => toggle_mark(app),
         _ if keys::CONFIRM.matches(&key) => confirm(app),
         _ if keys::PRESET.matches(&key) => open_preset(app),
         _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
@@ -1571,8 +1609,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
         _ if keys::WORKTREE.matches(&key) => open_worktree_pick(app),
         _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
+        // Everything else edits the filter — and typing on the rows takes
+        // the keys back to the search line.
         _ => {
             if view.query.handle_key(&key).changed() {
+                view.focus = LinearFocus::Search;
                 query_changed(app);
             }
         }
@@ -1598,8 +1639,12 @@ pub(crate) fn handle_mouse(
     let list = view.list_area;
     let body = view.body_area;
     match mouse.kind {
-        MouseEventKind::ScrollDown if list.contains(pos) => step(app, 1),
-        MouseEventKind::ScrollUp if list.contains(pos) => step(app, -1),
+        MouseEventKind::ScrollDown if list.contains(pos) => {
+            step(app, 1);
+        }
+        MouseEventKind::ScrollUp if list.contains(pos) => {
+            step(app, -1);
+        }
         MouseEventKind::ScrollDown if body.contains(pos) => {
             if let Some(Overlay::Linear(view)) = &mut app.overlay {
                 view.scroll_by(WHEEL_LINES);
@@ -1621,6 +1666,7 @@ pub(crate) fn handle_mouse(
                 if let Some(Overlay::Linear(view)) = &mut app.overlay {
                     view.selected = i;
                     view.scroll = 0;
+                    view.focus = LinearFocus::List;
                 }
             }
         }
@@ -1785,14 +1831,16 @@ fn query_changed(app: &mut App) {
     }
 }
 
-fn step(app: &mut App, delta: i32) {
+/// Move the cursor `delta` rows over the ones the filter leaves; false
+/// when it was already at that end.
+fn step(app: &mut App, delta: i32) -> bool {
     let Some(Overlay::Linear(view)) = &app.overlay else {
-        return;
+        return false;
     };
     let list = rows(app, &view.project);
     let visible = visible_rows(view, list);
     if visible.is_empty() {
-        return;
+        return false;
     }
     let here = visible
         .iter()
@@ -1803,6 +1851,7 @@ fn step(app: &mut App, delta: i32) {
         view.selected = visible[next].0;
         view.scroll = 0;
     }
+    next != here
 }
 
 fn toggle_mark(app: &mut App) {
@@ -2084,6 +2133,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let side_up =
         view.status_pick.is_some() || view.worktree_pick.is_some() || view.filter_pick.is_some();
     let list_focused = list_focused && !side_up;
+    let rows_focused = list_focused && view.focus == LinearFocus::List;
     let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
@@ -2113,7 +2163,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let below_tabs = crate::ui::below_first_row(list_inner);
     if let Some(query_area) = row_rect(below_tabs, 0) {
         let placeholder = format!("search title, status, label… {} pick", keys::FILTER.label());
-        let line = search_line_lit(&view.query, &placeholder, query_area, th, &parsed.spans);
+        let line = if list_focused && view.focus == LinearFocus::Search {
+            search_line_lit(&view.query, &placeholder, query_area, th, &parsed.spans)
+        } else {
+            search_line_idle(&view.query, &placeholder, query_area, th)
+        };
         f.render_widget(Paragraph::new(line), query_area);
     }
     let mut rows_area = crate::ui::below_first_row(below_tabs);
@@ -2182,7 +2236,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
                     spin,
                 };
                 let line = title_spans(issue, positions, marked, budget, &work, th);
-                render_row(f, rect, line, Some(*index) == cursor, list_focused, th);
+                render_row(f, rect, line, Some(*index) == cursor, rows_focused, th);
                 row_rects.push((*index, rect));
             }
         }
@@ -3897,6 +3951,8 @@ pub(crate) mod tests {
     /// The LINEAR VIEW browsing `demo`, ENG-1 and ENG-3 marked.
     fn browse_marked(app: &mut App) {
         open(app);
+        // ↓ hands the rows the keys; `space` on the search line types.
+        press(app, plain(KeyCode::Down));
         press(app, plain(KeyCode::Char(' ')));
         press(app, plain(KeyCode::Down));
         press(app, plain(KeyCode::Down));
@@ -3905,6 +3961,38 @@ pub(crate) mod tests {
             panic!("the LINEAR VIEW, got {:?}", app.overlay);
         };
         assert_eq!(view.marked, BTreeSet::from(["1".into(), "3".into()]));
+    }
+
+    /// The view opens on the search line, where `space` is a word break;
+    /// ↓ hands the rows the keys and `space` marks there; ↑ off the top
+    /// row, or typing, hands them back.
+    #[test]
+    fn space_types_on_the_search_line_and_marks_on_the_rows() {
+        let (mut app, _dir, _rx) = paired();
+        open(&mut app);
+        let view = |app: &App| match &app.overlay {
+            Some(Overlay::Linear(view)) => view.clone(),
+            other => panic!("the LINEAR VIEW, got {other:?}"),
+        };
+        assert_eq!(view(&app).focus, LinearFocus::Search);
+        for c in "lo ".chars() {
+            press(&mut app, plain(KeyCode::Char(c)));
+        }
+        assert_eq!(view(&app).query.as_str(), "lo ");
+        assert!(view(&app).marked.is_empty(), "space typed, not marked");
+
+        press(&mut app, plain(KeyCode::Down));
+        assert_eq!(view(&app).focus, LinearFocus::List);
+        press(&mut app, plain(KeyCode::Char(' ')));
+        assert_eq!(view(&app).marked, BTreeSet::from(["1".into()]));
+        assert_eq!(view(&app).query.as_str(), "lo ");
+
+        press(&mut app, plain(KeyCode::Up));
+        assert_eq!(view(&app).focus, LinearFocus::Search, "↑ off the top row");
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Char('x')));
+        assert_eq!(view(&app).focus, LinearFocus::Search, "typing goes back");
+        assert_eq!(view(&app).query.as_str(), "lo x");
     }
 
     /// Typing in a Linear box never drops the issues: the text goes first
@@ -4302,6 +4390,7 @@ pub(crate) mod tests {
             view.mode,
             LinearMode::Attach { pr_number: 41, .. }
         ));
+        press(&mut app, plain(KeyCode::Down));
         press(&mut app, plain(KeyCode::Char(' ')));
         press(&mut app, plain(KeyCode::Down));
         press(&mut app, plain(KeyCode::Down));
@@ -4713,6 +4802,9 @@ pub(crate) mod tests {
         assert!(screen.contains("○ · ENG-3 Todo two"), "{screen}");
         assert!(!screen.contains("Their bug"), "{screen}");
 
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
+        // The first ↓ takes the keys off the search line, the second moves.
+        handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut Vec::new());
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-1"));
         handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut Vec::new());
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-2"));
