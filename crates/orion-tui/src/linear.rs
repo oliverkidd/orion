@@ -7,7 +7,8 @@
 //! tokens and the FILTER PICK (`list_filter`).
 //! Issues are picked together so one agent fixes them in one worktree and
 //! opens one pull request. From the PULL REQUESTS MODAL the same list attaches a pull
-//! request to the issues you mark (`attachmentLinkGitHubPR`) — and the
+//! request to the issues you mark (`attachmentLinkGitHubPR`, as a link
+//! that closes them, so Linear's automations move them with it) — and the
 //! other way round, `⌘U` here flips to that modal as a PR PICK, Enter on
 //! a pull request attaching it to the issues marked here. Both ends run
 //! the one ATTACH ([`attach_issues`]). `⌘.` links the marked issues to a
@@ -660,6 +661,14 @@ pub enum LinearAnswer {
     Attach(AttachRun),
     /// THE ATTACH the user asked for, from either end ([`attach_issues`]).
     Attached(AttachRun),
+    /// The pull requests of the branches `project`'s issues moved off
+    /// were taken off them ([`detach_stale`]): the first Linear would not
+    /// drop, by issue identifier and why, when one was.
+    Detached {
+        project: ProjectId,
+        dir: PathBuf,
+        refused: Option<(String, String)>,
+    },
     /// **Test connection**: who the key in `dir` belongs to.
     Viewer {
         dir: PathBuf,
@@ -772,6 +781,10 @@ pub struct AttachRun {
     pub pr_number: u64,
     /// The issues Linear linked it to, as `(id, identifier)`.
     pub attached: Vec<(String, String)>,
+    /// The attachments this run made, as `(issue id, attachment id)` —
+    /// not those Linear had linked already. What a later move of the
+    /// issue takes off again ([`LinkStore::remember`]).
+    pub made: Vec<(String, String)>,
     /// The first issue it refused, by identifier, and why.
     pub refused: Option<(String, String)>,
 }
@@ -959,12 +972,20 @@ impl KeySource {
 /// Branch → Linear issues, per project, so a pull request cut from a ⌘L
 /// launch, or from a worktree the issues were linked to (`⌘.`), can be
 /// attached once GitHub lists it. A link outlives its attach: the LINEAR
-/// VIEW still finds the worktree and pull request of every issue ever on
-/// it by that branch ([`IssueWork`]) — while there is a branch to find:
+/// VIEW still finds the worktree and pull request of every issue on it
+/// by that branch ([`IssueWork`]) — while there is a branch to find:
 /// a link not touched in [`LINK_KEEP_DAYS`] whose branch is in no
 /// checkout and on no open pull request is forgotten
 /// ([`prune`](Self::prune)), so the store holds the work in hand and
 /// never every branch there ever was.
+///
+/// An issue is on one link at a time — ONE HOME: linking it to a branch
+/// takes it off the one it was on, and hands back the attachment orion
+/// made for that branch's pull request, for Linear to drop
+/// ([`detach_stale`]). Linear moves an issue when the pull requests that
+/// close it merge, so one left on a branch it has moved off would move
+/// it for work done elsewhere. A pull request may still close several
+/// issues.
 ///
 /// Each issue on a link is attached or waiting, on its own. Waiting ones
 /// are spent only when Linear takes them:
@@ -999,6 +1020,10 @@ pub(crate) struct PendingLink {
     /// The branch; `None` on an older link, whose key it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
+    /// The attachments orion's own asks made, by issue id: the ones it
+    /// may take off again. One Linear made itself is never here.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    attachments: HashMap<String, String>,
     /// Attaches Linear refused in a row.
     #[serde(default, skip_serializing_if = "is_zero")]
     failures: u8,
@@ -1041,6 +1066,53 @@ impl PendingLink {
     fn settle(&mut self) {
         self.attached = self.waiting().is_empty();
     }
+
+    /// `ids` attached, and of `made` (`(issue id, attachment id)`) the
+    /// attachments of the issues on it kept.
+    fn attach(&mut self, ids: &[String], made: &[(String, String)]) {
+        for id in ids {
+            if self.issue_ids.contains(id) && !self.attached_ids.contains(id) {
+                self.attached_ids.push(id.clone());
+            }
+        }
+        for (id, attachment) in made {
+            if self.issue_ids.contains(id) {
+                self.attachments.insert(id.clone(), attachment.clone());
+            }
+        }
+        self.settle();
+    }
+
+    /// Takes the issues `ids` off it; the attachments orion made for
+    /// them.
+    fn drop_issues(&mut self, ids: &[String]) -> Vec<StaleAttachment> {
+        let mut stale = Vec::new();
+        let issues = std::mem::take(&mut self.issue_ids)
+            .into_iter()
+            .zip(std::mem::take(&mut self.identifiers));
+        for (issue, identifier) in issues {
+            if !ids.contains(&issue) {
+                self.issue_ids.push(issue);
+                self.identifiers.push(identifier);
+                continue;
+            }
+            self.attached_ids.retain(|attached| *attached != issue);
+            if let Some(id) = self.attachments.remove(&issue) {
+                stale.push(StaleAttachment { identifier, id });
+            }
+        }
+        self.settle();
+        stale
+    }
+}
+
+/// An attachment orion made for a branch its issue has since moved off:
+/// Linear's to drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleAttachment {
+    /// The issue's, to say which a refusal is about.
+    identifier: String,
+    id: String,
 }
 
 fn is_zero(n: &u8) -> bool {
@@ -1149,13 +1221,48 @@ impl LinkStore {
         })
     }
 
+    /// ONE HOME: the issues `ids` taken off every link but `project`'s on
+    /// `branch`, a link left with none forgotten. The attachments orion
+    /// made for the branches they left.
+    fn rehome(
+        &mut self,
+        project: &ProjectId,
+        branch: &str,
+        ids: &[String],
+    ) -> Vec<StaleAttachment> {
+        let home = self.key_of(project, branch);
+        let mut stale = Vec::new();
+        self.links.retain(|key, link| {
+            if Some(key) == home.as_ref() {
+                return true;
+            }
+            stale.extend(link.drop_issues(ids));
+            !link.issue_ids.is_empty()
+        });
+        stale
+    }
+
+    /// Whether `issue_id` is on `project`'s link on `branch`.
+    fn holds(&self, project: &ProjectId, branch: &str, issue_id: &str) -> bool {
+        self.key_of(project, branch)
+            .and_then(|key| self.links.get(&key))
+            .is_some_and(|link| link.issue_ids.iter().any(|id| id == issue_id))
+    }
+
     /// Sets `issues` waiting on `branch`'s next pull request, beside the
     /// issues already on it — those a pull request took stay on it,
     /// attached. Linking an issue again sets it waiting again, and gives
-    /// the link a fresh set of tries.
-    pub fn remember(&mut self, project: &ProjectId, branch: &str, issues: &[LinearIssue]) {
+    /// the link a fresh set of tries. The branch is now each issue's ONE
+    /// HOME: what they left behind on another comes back
+    /// ([`rehome`](Self::rehome)).
+    pub fn remember(
+        &mut self,
+        project: &ProjectId,
+        branch: &str,
+        issues: &[LinearIssue],
+    ) -> Vec<StaleAttachment> {
         if branch.is_empty() || issues.is_empty() {
-            return;
+            return Vec::new();
         }
         let pairs: Vec<(String, String)> = issues
             .iter()
@@ -1168,31 +1275,36 @@ impl LinkStore {
             .retain(|id| !pairs.iter().any(|(again, _)| again == id));
         link.failures = 0;
         link.settle();
+        let ids: Vec<String> = pairs.into_iter().map(|(id, _)| id).collect();
+        let stale = self.rehome(project, branch, &ids);
         self.persist();
+        stale
     }
 
     /// Issues `branch`'s open pull request was attached to on the spot:
     /// kept for show beside the rest, waiting on nothing. Issues still
-    /// waiting on it keep waiting, for the next list to attach.
+    /// waiting on it keep waiting, for the next list to attach. `made`
+    /// is the attachments the ask made (`(issue id, attachment id)`).
+    /// The branch is now each issue's ONE HOME, as
+    /// [`remember`](Self::remember)'s is.
     pub(crate) fn remember_attached(
         &mut self,
         project: &ProjectId,
         branch: &str,
         issues: &[(String, String)],
-    ) {
+        made: &[(String, String)],
+    ) -> Vec<StaleAttachment> {
         if branch.is_empty() || issues.is_empty() {
-            return;
+            return Vec::new();
         }
+        let ids: Vec<String> = issues.iter().map(|(id, _)| id.clone()).collect();
         let link = self.link_mut(project, branch);
         link.add(issues);
         link.linked_at = Some(orion_core::clock::now_secs());
-        for (id, _) in issues {
-            if !link.attached_ids.contains(id) {
-                link.attached_ids.push(id.clone());
-            }
-        }
-        link.settle();
+        link.attach(&ids, made);
+        let stale = self.rehome(project, branch, &ids);
         self.persist();
+        stale
     }
 
     /// The identifiers waiting on `branch`'s pull request — none once
@@ -1240,15 +1352,17 @@ impl LinkStore {
     }
 
     /// Linear answered the attach [`begin_attach`](Self::begin_attach)
-    /// sent out: the issues it took (`attached`, by id) are attached, and
-    /// any it refused — or that were added meanwhile — wait for the next
-    /// list. A refusal counts against the link's tries; true when it was
-    /// the last.
+    /// sent out: the issues it took (`attached`, by id) are attached —
+    /// `made` the attachments the ask made for them, as `(issue id,
+    /// attachment id)` — and any it refused, or that were added
+    /// meanwhile, wait for the next list. A refusal counts against the
+    /// link's tries; true when it was the last.
     pub(crate) fn finish_attach(
         &mut self,
         project: &ProjectId,
         branch: &str,
         attached: &[String],
+        made: &[(String, String)],
         ok: bool,
     ) -> bool {
         let Some(link) = self
@@ -1258,12 +1372,7 @@ impl LinkStore {
             return false;
         };
         link.sending = false;
-        for id in attached {
-            if link.issue_ids.contains(id) && !link.attached_ids.contains(id) {
-                link.attached_ids.push(id.clone());
-            }
-        }
-        link.settle();
+        link.attach(attached, made);
         let gave_up = if ok {
             link.failures = 0;
             false
@@ -1275,7 +1384,8 @@ impl LinkStore {
         gave_up
     }
 
-    /// The branches `issue_id` was ever linked to, in name order.
+    /// The branch `issue_id` is linked to — more than one only in a store
+    /// written before ONE HOME — in name order.
     pub fn branches_of(&self, issue_id: &str) -> Vec<&str> {
         let mut branches: Vec<&str> = self
             .links
@@ -1716,6 +1826,22 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
         }
         LinearAnswer::Attach(run) => land_attach(app, run, true),
         LinearAnswer::Attached(run) => land_attach(app, run, false),
+        LinearAnswer::Detached {
+            project,
+            dir,
+            refused,
+        } => {
+            match refused {
+                Some((identifier, why)) => {
+                    app.flash = Some(crate::flash::Flash::failed(format!(
+                        "couldn't take {identifier} off the PR it moved from: {why}"
+                    )))
+                }
+                // The rows still show the pull request Linear just dropped.
+                None => request_list(app, project, dir, true),
+            }
+            app.dirty = true;
+        }
         LinearAnswer::Edited {
             project,
             issue_id,
@@ -1821,9 +1947,26 @@ fn land_attach(app: &mut App, run: AttachRun, auto: bool) {
     if let (Some(project), Some(branch)) = (&run.project, &run.branch) {
         if auto {
             let ids: Vec<String> = run.attached.iter().map(|(id, _)| id.clone()).collect();
-            let gave_up = app
-                .linear_links
-                .finish_attach(project, branch, &ids, run.ok());
+            let gave_up =
+                app.linear_links
+                    .finish_attach(project, branch, &ids, &run.made, run.ok());
+            // An issue that moved to another branch while this was out
+            // was attached all the same: off again.
+            let moved_on = run
+                .made
+                .iter()
+                .filter(|(issue, _)| !app.linear_links.holds(project, branch, issue))
+                .map(|(issue, id)| StaleAttachment {
+                    identifier: run
+                        .attached
+                        .iter()
+                        .find(|(attached, _)| attached == issue)
+                        .map(|(_, identifier)| identifier.clone())
+                        .unwrap_or_default(),
+                    id: id.clone(),
+                })
+                .collect();
+            detach_stale(app, project, moved_on);
             if let Some((identifier, why)) = &run.refused {
                 let last = if gave_up {
                     format!(" — gave up after {ATTACH_TRIES} tries")
@@ -1836,8 +1979,10 @@ fn land_attach(app: &mut App, run: AttachRun, auto: bool) {
                 )));
             }
         } else if !run.attached.is_empty() {
-            app.linear_links
-                .remember_attached(project, branch, &run.attached);
+            let stale =
+                app.linear_links
+                    .remember_attached(project, branch, &run.attached, &run.made);
+            detach_stale(app, project, stale);
         }
     }
     show_attached(app, &run);
@@ -1895,6 +2040,7 @@ fn show_attached(app: &mut App, run: &AttachRun) {
 /// opens only the release pull request into `main`, and that one must not
 /// be linked to the issues ([`root_branch`]). A branch with a pull request
 /// open already has nothing to wait for: it is attached there and then.
+/// The branch is the issues' ONE HOME from here ([`LinkStore`]).
 pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
     let Some(batch) = &launch.linear else {
         return;
@@ -1918,7 +2064,8 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
             (w.project_id.clone(), w.branch.clone())
         }
     };
-    app.linear_links.remember(&project, &branch, &batch.issues);
+    let stale = app.linear_links.remember(&project, &branch, &batch.issues);
+    detach_stale(app, &project, stale);
     let open = app
         .open_prs
         .get(&project)
@@ -2038,6 +2185,33 @@ fn attach_link(
     });
 }
 
+/// ONE HOME's other half: the attachments orion made for the branches
+/// `project`'s issues have moved off (`stale`) dropped from Linear, off
+/// the loop with the project checkout's key. Silent unless Linear refuses
+/// ([`LinearAnswer::Detached`]); nothing is asked when none is stale.
+fn detach_stale(app: &mut App, project: &ProjectId, stale: Vec<StaleAttachment>) {
+    if stale.is_empty() {
+        return;
+    }
+    let (Some(tx), Some(dir)) = (app.linear_tx.clone(), project_dir(app, project)) else {
+        return;
+    };
+    let project = project.clone();
+    tokio::spawn(async move {
+        let mut refused = None;
+        for StaleAttachment { identifier, id } in stale {
+            if let Err(why) = detach_pr(&dir, &id).await {
+                refused.get_or_insert((identifier, why));
+            }
+        }
+        let _ = tx.send(LinearAnswer::Detached {
+            project,
+            dir,
+            refused,
+        });
+    });
+}
+
 /// Link `pr_url` to each of `targets` (`(id, identifier)`), one after
 /// another; Linear keeps one attachment per pull request, so asking twice
 /// links once.
@@ -2050,10 +2224,16 @@ async fn attach_all(
     pr_number: u64,
 ) -> AttachRun {
     let mut attached = Vec::new();
+    let mut made = Vec::new();
     let mut refused = None;
     for (id, identifier) in targets {
         match attach_pr(dir, &id, &pr_url).await {
-            Ok(()) => attached.push((id, identifier)),
+            Ok(attachment) => {
+                if let Some(attachment) = attachment {
+                    made.push((id.clone(), attachment));
+                }
+                attached.push((id, identifier));
+            }
             Err(why) => {
                 refused.get_or_insert((identifier, why));
             }
@@ -2065,6 +2245,7 @@ async fn attach_all(
         pr_url,
         pr_number,
         attached,
+        made,
         refused,
     }
 }
@@ -2544,11 +2725,12 @@ fn link_worktree(app: &mut App) {
         attach_issues(app, dir, url, number, &pick.issues);
         return;
     }
-    app.linear_links.remember(&project, branch, &pick.issues);
+    let stale = app.linear_links.remember(&project, branch, &pick.issues);
     app.flash = Some(crate::flash::Flash::done(format!(
         "{} will attach to the PR {branch} opens",
         ids_of(&pick.issues)
     )));
+    detach_stale(app, &project, stale);
 }
 
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
@@ -4418,12 +4600,24 @@ fn parse_members(json: &serde_json::Value) -> HashMap<String, Vec<LinearUser>> {
         .collect()
 }
 
-async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> {
+/// The pull request at `url` linked to the issue as one that closes it —
+/// the attachment's id, or `None` when Linear had it linked already
+/// ([`already_attached`]).
+///
+/// `linkKind: closes` is what makes the link count: Linear's pull request
+/// automations (in progress when it opens, the team's merge state when it
+/// merges) move only the issues a pull request closes, as one whose branch
+/// or title names the issue does. Left out, Linear files the link as
+/// `links`, which shows the pull request on the issue and moves nothing.
+async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<Option<String>, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let json = graphql(
         &key,
         r#"mutation($issueId: String!, $url: String!) {
-          attachmentLinkGitHubPR(issueId: $issueId, url: $url) { success }
+          attachmentLinkGitHubPR(issueId: $issueId, url: $url, linkKind: closes) {
+            success
+            attachment { id }
+          }
         }"#,
         serde_json::json!({ "issueId": issue_id, "url": url }),
     )
@@ -4433,9 +4627,29 @@ async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> 
         "attachmentLinkGitHubPR",
         "Linear did not attach the pull request",
     ) {
-        Err(why) if already_attached(&why) => Ok(()),
-        result => result,
+        Ok(()) => Ok(json
+            .pointer("/data/attachmentLinkGitHubPR/attachment/id")
+            .and_then(|id| id.as_str())
+            .map(str::to_string)),
+        Err(why) if already_attached(&why) => Ok(None),
+        Err(why) => Err(why),
     }
+}
+
+/// The attachment `attachment` dropped from its issue (`attachmentDelete`).
+async fn detach_pr(dir: &Path, attachment: &str) -> Result<(), String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let json = graphql(
+        &key,
+        r#"mutation($id: String!) { attachmentDelete(id: $id) { success } }"#,
+        serde_json::json!({ "id": attachment }),
+    )
+    .await?;
+    mutation_result(
+        &json,
+        "attachmentDelete",
+        "Linear did not drop the pull request",
+    )
 }
 
 /// Whether Linear refused an attach because the pull request is on the
@@ -5112,7 +5326,7 @@ pub(crate) mod tests {
         let link = store.begin_attach(&p1, "eng-12-fix").unwrap();
         assert_eq!(link, [("abc".to_string(), "ENG-12".to_string())]);
         assert!(store.begin_attach(&p1, "eng-12-fix").is_none(), "out");
-        store.finish_attach(&p1, "eng-12-fix", &["abc".into()], true);
+        store.finish_attach(&p1, "eng-12-fix", &["abc".into()], &[], true);
         assert!(store.begin_attach(&p1, "eng-12-fix").is_none(), "spent");
         assert!(store.pending(&p1, "eng-12-fix").is_empty());
     }
@@ -5352,6 +5566,10 @@ pub(crate) mod tests {
             |key, query| {
                 assert_eq!(key, FAKE_KEY, "the project's key");
                 assert!(query.contains("attachmentLinkGitHubPR"), "{query}");
+                assert!(
+                    query.contains("linkKind: closes"),
+                    "a link Linear's automations move the issue on: {query}"
+                );
                 Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}}))
             },
             || {
@@ -5691,6 +5909,7 @@ pub(crate) mod tests {
                 pr_url: "https://github.com/o/r/pull/41".into(),
                 pr_number: 41,
                 attached: vec![("1".into(), "ENG-1".into())],
+                made: Vec::new(),
                 refused: Some(("ENG-3".into(), "Entity not found".into())),
             }),
         );
@@ -6549,6 +6768,7 @@ pub(crate) mod tests {
             &project,
             "solar-lemur",
             &[("1".into(), "ENG-1".into())],
+            &[],
         );
         let list = rows(&app, &project).to_vec();
         let work = |i: usize| work_of(&app, &project, &list[i]);
@@ -7875,7 +8095,7 @@ pub(crate) mod tests {
     fn linking_a_branch_again_keeps_the_issues_it_had() {
         let p1 = ProjectId("p1".into());
         let mut store = LinkStore::default();
-        store.remember_attached(&p1, "feat", &[("1".into(), "ENG-1".into())]);
+        store.remember_attached(&p1, "feat", &[("1".into(), "ENG-1".into())], &[]);
         store.remember(&p1, "feat", &[issue("2", "ENG-2", "b")]);
         assert_eq!(store.pending(&p1, "feat"), ["ENG-2"]);
         assert_eq!(store.branches_of("1"), ["feat"]);
@@ -8000,6 +8220,170 @@ pub(crate) mod tests {
         assert!(app.linear_links.pending(&project, "branch-41").is_empty());
         assert_eq!(app.linear_links.branches_of("2"), ["branch-41"]);
         assert!(app.flash.is_none(), "an auto-attach that worked is silent");
+    }
+
+    /// ONE HOME: an issue linked to another branch leaves the one it was
+    /// on, handing back the attachment orion made there — never one
+    /// Linear made itself — and a link left with no issue is forgotten.
+    #[test]
+    fn an_issue_linked_to_another_branch_leaves_the_one_it_was_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linear-links.json");
+        let p1 = ProjectId("p1".into());
+        let mut store = LinkStore::load(path.clone());
+        let both = [issue("1", "ENG-1", "a"), issue("2", "ENG-2", "b")];
+        assert!(store.remember(&p1, "old", &both).is_empty());
+        // Linear had ENG-2 linked already: only ENG-1's is orion's.
+        let made = [("1".to_string(), "att-1".to_string())];
+        store.finish_attach(&p1, "old", &["1".into(), "2".into()], &made, true);
+
+        let mut store = LinkStore::load(path.clone());
+        let stale = store.remember(&p1, "new", &both[..1]);
+        assert_eq!(
+            stale,
+            [StaleAttachment {
+                identifier: "ENG-1".into(),
+                id: "att-1".into()
+            }]
+        );
+        assert_eq!(store.branches_of("1"), ["new"]);
+        assert_eq!(store.pending(&p1, "new"), ["ENG-1"]);
+        assert_eq!(store.branches_of("2"), ["old"], "the rest stay");
+        assert!(store.pending(&p1, "old").is_empty());
+
+        let moved = [("2".to_string(), "ENG-2".to_string())];
+        assert!(
+            store.remember_attached(&p1, "new", &moved, &[]).is_empty(),
+            "Linear's own link is Linear's to keep"
+        );
+        assert_eq!(store.branches_of("2"), ["new"]);
+        assert!(store.begin_attach(&p1, "old").is_none(), "forgotten");
+        let again = store.remember(&p1, "new", &both[..1]);
+        assert!(again.is_empty(), "its own branch again moves nothing");
+        let back = LinkStore::load(path);
+        assert_eq!(back.branches_of("1"), ["new"]);
+        assert_eq!(back.branches_of("2"), ["new"]);
+    }
+
+    /// A ⌘L launch that takes an issue to another worktree takes it off
+    /// the pull request it was on: orion drops the attachment it made
+    /// there, so that pull request's merge no longer moves the issue.
+    #[test]
+    fn a_launch_onto_another_worktree_takes_the_issue_off_its_old_pr() {
+        let (mut app, dir, mut rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        app.linear_links
+            .remember(&project, "branch-41", &[issue("2", "ENG-2", "Logout")]);
+        let open = app.open_prs[&project].list.clone();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let cfg = crate::config::Config::load();
+            let target = QuickTarget::Worktree(orion_core::WorktreeId("w2".into()));
+            let launch = QuickLaunch::from_config(target, &cfg).with_linear(Some(LinearBatch {
+                issues: vec![issue("2", "ENG-2", "Logout")],
+                task: "go".into(),
+            }));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let sent = with_graphql_stub(
+                |_, query| {
+                    Ok(if query.contains("attachmentDelete") {
+                        serde_json::json!({"data": {"attachmentDelete": {"success": true}}})
+                    } else {
+                        serde_json::json!({"data": {"attachmentLinkGitHubPR": {
+                            "success": true, "attachment": {"id": "att-41"}}}})
+                    })
+                },
+                || {
+                    rt.block_on(async {
+                        attach_new_prs(&mut app, &project, None, &open);
+                        let answer = rx.recv().await.expect("the attach");
+                        land_answer(&mut app, answer);
+                        remember_submit(&mut app, &launch);
+                        let answer = rx.recv().await.expect("the detach");
+                        let sent = graphql_sent();
+                        land_answer(&mut app, answer);
+                        sent
+                    })
+                },
+            );
+            assert_eq!(
+                sent,
+                [attached("2", 41), serde_json::json!({"id": "att-41"})]
+            );
+        });
+        assert_eq!(app.linear_links.branches_of("2"), ["feature-x"]);
+        assert_eq!(app.linear_links.pending(&project, "feature-x"), ["ENG-2"]);
+        assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
+    }
+
+    /// An issue that moves to another branch while its attach to the old
+    /// one is still out is attached there all the same: that attachment
+    /// is dropped as the answer lands.
+    #[test]
+    fn an_attach_that_lands_after_its_issue_moved_on_is_taken_off() {
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        let moving = [issue("2", "ENG-2", "Logout")];
+        app.linear_links.remember(&project, "branch-41", &moving);
+        let open = app.open_prs[&project].list.clone();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, query| {
+                Ok(if query.contains("attachmentDelete") {
+                    serde_json::json!({"data": {"attachmentDelete": {"success": true}}})
+                } else {
+                    serde_json::json!({"data": {"attachmentLinkGitHubPR": {
+                        "success": true, "attachment": {"id": "att-41"}}}})
+                })
+            },
+            || {
+                rt.block_on(async {
+                    attach_new_prs(&mut app, &project, None, &open);
+                    let moved = app.linear_links.remember(&project, "feature-x", &moving);
+                    assert!(moved.is_empty(), "nothing made yet");
+                    let answer = rx.recv().await.expect("the attach");
+                    land_answer(&mut app, answer);
+                    let answer = rx.recv().await.expect("the detach");
+                    assert!(matches!(
+                        answer,
+                        LinearAnswer::Detached { refused: None, .. }
+                    ));
+                    graphql_sent()
+                })
+            },
+        );
+        assert_eq!(
+            sent,
+            [attached("2", 41), serde_json::json!({"id": "att-41"})]
+        );
+        assert_eq!(app.linear_links.branches_of("2"), ["feature-x"]);
+        assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
+    }
+
+    /// An old pull request Linear would not drop is said, by issue.
+    #[test]
+    fn a_refused_detach_says_which_issue_and_why() {
+        let (mut app, dir, _rx) = paired();
+        land_answer(
+            &mut app,
+            LinearAnswer::Detached {
+                project: ProjectId("p1".into()),
+                dir: dir.path().into(),
+                refused: Some(("ENG-2".into(), "Entity not found".into())),
+            },
+        );
+        assert_eq!(
+            app.flash.as_ref().map(|f| (f.kind, f.text.as_str())),
+            Some((
+                crate::flash::FlashKind::Failed,
+                "couldn't take ENG-2 off the PR it moved from: Entity not found"
+            ))
+        );
     }
 
     // ---- the TODOS MODAL's chips ----
