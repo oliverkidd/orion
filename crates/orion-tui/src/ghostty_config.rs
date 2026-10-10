@@ -165,6 +165,8 @@ const MODAL_KEYS: &[crate::hints::Key] = &[
     crate::issues::keys::BROWSER,
     crate::issues::keys::REFRESH,
     crate::linear::keys::STATUS,
+    crate::linear::keys::PRIORITY,
+    crate::linear::keys::ASSIGN,
     crate::linear::keys::ATTACH,
     crate::skills::keys::NEW,
     crate::skills::keys::TRASH,

@@ -1,7 +1,8 @@
 //! The LINEAR VIEW (`⌘L`): open Linear issues in two tabs — `My issues`,
 //! assigned to you, and `Other issues`, the rest of your teams' — grouped
 //! by status, a line per issue with its priority's letter, the reading
-//! pane setting out its properties as Linear's sidebar does, and filtered
+//! pane setting out its properties as Linear's sidebar does — who has it
+//! and who reported it among them — and filtered
 //! by words (a status, priority or label as well as the title), `key:value`
 //! tokens and the FILTER PICK (`list_filter`).
 //! Issues are picked together so one agent fixes them in one worktree and
@@ -14,9 +15,11 @@
 //! later is attached to them as a ⌘L launch's is, or the one open on it
 //! now there and then. `⌘S` on
 //! an issue lists its team's workflow states in the reading pane's place
-//! ([`StatusPick`]) — read with the issues, so the list is up at once —
+//! ([`PropPick`]) — read with the issues, so the list is up at once —
 //! and Enter moves the issue to one (`issueUpdate`), the row saying so
-//! before Linear has answered and put back if it refuses.
+//! before Linear has answered and put back if it refuses. `⌘P` sets its
+//! priority and `⌘I` whose it is — you, nobody, or one of its team — the
+//! same way ([`Change`]).
 //!
 //! The key is the project's `LINEAR_API_KEY` (`.env.local`, then `.env`,
 //! then the process env). Only that one name is read. It is never logged,
@@ -97,6 +100,14 @@ pub struct LinearIssue {
     /// The assignee's display name; empty for nobody.
     #[serde(default)]
     pub assignee: String,
+    /// The assignee's Linear id; empty for nobody.
+    #[serde(default)]
+    pub assignee_id: String,
+    /// Who filed the issue, by display name — or, for one that came in
+    /// through an integration (Slack, email), who asked there. Empty when
+    /// Linear names neither.
+    #[serde(default)]
+    pub reporter: String,
     /// Assigned to the configured user: the `My issues` tab's, else
     /// `Other issues`'.
     #[serde(default)]
@@ -217,14 +228,117 @@ pub struct LinearState {
     pub color: String,
 }
 
-/// `⌘S`: the issue under the cursor, and the states it can move to,
-/// in the reading pane's place.
+/// Someone an issue can be assigned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusPick {
+pub struct LinearUser {
+    pub id: String,
+    /// Their display name.
+    pub name: String,
+}
+
+/// A property of an issue `issueUpdate` sets from here: `⌘S`, `⌘P`, `⌘I`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Prop {
+    Status,
+    Priority,
+    Assignee,
+}
+
+/// A value of one [`Prop`]: what a picker's row sets, and what a refusal
+/// puts back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Status(LinearState),
+    /// On Linear's scale ([`LinearIssue::priority`]).
+    Priority(u8),
+    /// `None` is nobody.
+    Assignee(Option<LinearUser>),
+}
+
+impl Change {
+    pub fn prop(&self) -> Prop {
+        match self {
+            Change::Status(_) => Prop::Status,
+            Change::Priority(_) => Prop::Priority,
+            Change::Assignee(_) => Prop::Assignee,
+        }
+    }
+
+    /// What `issue`'s row says of `prop`. A state read off a row has no
+    /// id: it is only ever put back, never sent.
+    fn of(issue: &LinearIssue, prop: Prop) -> Self {
+        match prop {
+            Prop::Status => Change::Status(LinearState {
+                id: String::new(),
+                name: issue.status.clone(),
+                kind: issue.status_type.clone(),
+                color: issue.state_color.clone(),
+            }),
+            Prop::Priority => Change::Priority(issue.priority),
+            Prop::Assignee => {
+                Change::Assignee((!issue.assignee_id.is_empty()).then(|| LinearUser {
+                    id: issue.assignee_id.clone(),
+                    name: issue.assignee.clone(),
+                }))
+            }
+        }
+    }
+
+    /// Whether `issue`'s row says this already.
+    fn stands_on(&self, issue: &LinearIssue) -> bool {
+        match self {
+            Change::Status(state) => issue.status == state.name,
+            Change::Priority(priority) => issue.priority == *priority,
+            Change::Assignee(user) => {
+                issue.assignee_id == user.as_ref().map_or("", |u| u.id.as_str())
+            }
+        }
+    }
+
+    /// Say it on `issue`'s row. `me` is the configured user's id: an
+    /// issue assigned to them is the `My issues` tab's, any other the
+    /// `Other issues`'.
+    fn put_on(&self, issue: &mut LinearIssue, me: Option<&str>) {
+        match self {
+            Change::Status(state) => {
+                issue.status = state.name.clone();
+                issue.status_type = state.kind.clone();
+                issue.state_color = state.color.clone();
+            }
+            Change::Priority(priority) => issue.priority = *priority,
+            Change::Assignee(user) => {
+                let (id, name) = user
+                    .as_ref()
+                    .map(|u| (u.id.clone(), u.name.clone()))
+                    .unwrap_or_default();
+                issue.mine = !id.is_empty() && me == Some(id.as_str());
+                issue.assignee_id = id;
+                issue.assignee = name;
+            }
+        }
+    }
+
+    /// What a refusal says.
+    fn refused(&self, identifier: &str, why: &str) -> String {
+        match self {
+            Change::Status(_) => format!("couldn't move {identifier}: {why}"),
+            Change::Priority(_) => format!("couldn't set {identifier}'s priority: {why}"),
+            Change::Assignee(_) => format!("couldn't assign {identifier}: {why}"),
+        }
+    }
+}
+
+/// `⌘S`, `⌘P` or `⌘I`: the issue under the cursor, and what its status,
+/// priority or assignee can be set to, in the reading pane's place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropPick {
     pub issue_id: String,
     pub identifier: String,
-    pub states: Vec<LinearState>,
+    pub prop: Prop,
+    pub rows: Vec<Change>,
     pub selected: usize,
+    /// The row the issue stands on, marked `current`.
+    pub current: Option<usize>,
 }
 
 /// `⌘.`: the project's worktrees, in the reading pane's place, for the
@@ -400,8 +514,9 @@ pub struct LinearView {
     pub query: TextInput,
     pub marked: BTreeSet<String>,
     pub mode: LinearMode,
-    /// The status picker, while it is up: every key but Esc is its own.
-    pub status_pick: Option<StatusPick>,
+    /// The status, priority or assignee picker, while it is up: every key
+    /// but Esc is its own.
+    pub prop_pick: Option<PropPick>,
     /// The worktree picker, while it is up: every key but Esc is its own.
     pub worktree_pick: Option<WorktreePick>,
     /// Which list shows: `My issues` or `Other issues`.
@@ -453,7 +568,7 @@ impl LinearView {
             query: TextInput::new(),
             marked: BTreeSet::new(),
             mode,
-            status_pick: None,
+            prop_pick: None,
             worktree_pick: None,
             tab: LinearTab::Mine,
             tab_hits: Vec::new(),
@@ -477,11 +592,18 @@ impl LinearView {
 
 /// What Linear last said about a project's open issues — the configured
 /// user's and the rest of their teams' — and the workflow states of the
-/// teams they belong to, by team id, in Linear's own order.
+/// teams they belong to, by team id, in Linear's own order, with who the
+/// user is and who is in their teams.
 #[derive(Debug, Clone, Default)]
 pub struct LinearList {
     pub list: Vec<LinearIssue>,
     pub states: HashMap<String, Vec<LinearState>>,
+    /// The configured user — who `⌘I`'s `Me` assigns to. `None` when
+    /// Linear knows nobody by Settings → Linear account.
+    pub me: Option<LinearUser>,
+    /// The members of each of the configured user's teams, by team id and
+    /// then by name: who else `⌘I` can assign to.
+    pub members: HashMap<String, Vec<LinearUser>>,
     /// Linear had more of the other issues than one page holds
     /// ([`OTHERS_LIMIT`]): the list says it shows the most recent.
     pub more: bool,
@@ -494,6 +616,11 @@ pub struct LinearList {
 }
 
 impl LinearList {
+    /// The configured user's id.
+    fn me_id(&self) -> Option<&str> {
+        self.me.as_ref().map(|me| me.id.as_str())
+    }
+
     /// Whether Linear had more of `tab`'s issues than the list holds.
     fn more_on(&self, tab: LinearTab) -> bool {
         match tab {
@@ -513,12 +640,13 @@ pub enum LinearAnswer {
         dir: PathBuf,
         list: Result<LinearList, String>,
     },
-    /// The `⌘S` numbered `seq` moved an issue to `state` — or why not.
-    Status {
+    /// The edit numbered `seq` — a `⌘S`, `⌘P` or `⌘I` — set `change` on
+    /// an issue, or why not.
+    Edited {
         project: ProjectId,
         issue_id: String,
         identifier: String,
-        state: LinearState,
+        change: Change,
         seq: u64,
         result: Result<(), String>,
     },
@@ -657,71 +785,40 @@ impl AttachRun {
     }
 }
 
-/// An issue's workflow state as its row says it — what a refused `⌘S`
-/// puts back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RowState {
-    status: String,
-    status_type: String,
-    state_color: String,
-}
-
-impl RowState {
-    fn of(issue: &LinearIssue) -> Self {
-        Self {
-            status: issue.status.clone(),
-            status_type: issue.status_type.clone(),
-            state_color: issue.state_color.clone(),
-        }
-    }
-
-    fn from_state(state: &LinearState) -> Self {
-        Self {
-            status: state.name.clone(),
-            status_type: state.kind.clone(),
-            state_color: state.color.clone(),
-        }
-    }
-
-    fn put_on(&self, issue: &mut LinearIssue) {
-        issue.status = self.status.clone();
-        issue.status_type = self.status_type.clone();
-        issue.state_color = self.state_color.clone();
-    }
-}
-
 /// What orion did to issues that a list asked before it may not know of
-/// yet, by issue id: `⌘S` moves and pull requests attached from here.
+/// yet: the edits to a property (`⌘S`, `⌘P`, `⌘I`), by issue id and
+/// property, and pull requests attached from here, by issue id.
 /// Each is laid over every list that lands asked before Linear took it —
-/// so a slow list asked before the `⌘S` can't put the old state back —
+/// so a slow list asked before an edit can't put the old value back —
 /// and is dropped by the first list asked after, which knows it
 /// (`fetch`'s rule 1).
 #[derive(Debug, Default)]
 pub struct LocalEdits {
-    moves: HashMap<String, StatusMove>,
+    moves: HashMap<(String, Prop), Move>,
     attached: HashMap<String, Vec<AttachedPr>>,
-    /// Numbers every `⌘S`, so an answer knows whether a newer one has
+    /// Numbers every edit, so an answer knows whether a newer one has
     /// been asked for since.
     next_seq: u64,
 }
 
-/// The `⌘S` moves on one issue: one sent to Linear at a time, the last
-/// asked for queued behind it.
+/// The edits to one property of one issue: one sent to Linear at a time,
+/// the last asked for queued behind it. Each property queues on its own,
+/// so a `⌘P` never waits on a `⌘S`.
 #[derive(Debug, Clone)]
-struct StatusMove {
+struct Move {
     project: ProjectId,
     dir: PathBuf,
     identifier: String,
-    /// The state the row says: the last `⌘S`'s, numbered `seq`.
-    want: LinearState,
+    /// What the row says: the last edit's, numbered `seq`.
+    want: Change,
     seq: u64,
-    /// The `⌘S` out at Linear now, by number; `None` once it answered.
+    /// The edit out at Linear now, by number; `None` once it answered.
     sending: Option<u64>,
-    /// The state Linear has, as far as orion knows: the row's before the
-    /// first `⌘S`, then each one Linear took. What a refusal puts back.
-    confirmed: RowState,
-    /// When Linear took the last `⌘S`, with none after it: a list asked
-    /// later knows the move. `None` while one is still to answer.
+    /// What Linear has, as far as orion knows: the row's before the
+    /// first edit, then each one Linear took. What a refusal puts back.
+    confirmed: Change,
+    /// When Linear took the last edit, with none after it: a list asked
+    /// later knows it. `None` while one is still to answer.
     landed: Option<std::time::Instant>,
 }
 
@@ -735,15 +832,17 @@ struct AttachedPr {
 
 impl LocalEdits {
     /// Lay what orion did over `project`'s list asked at `asked`: each
-    /// move or attach Linear had not taken by then put back on its issue,
+    /// edit or attach Linear had not taken by then put back on its issue,
     /// the rest forgotten — this list and every one after knows them.
+    /// `me` is the configured user's id, as the list has it.
     fn lay_over(
         &mut self,
         project: &ProjectId,
         asked: std::time::Instant,
         list: &mut [LinearIssue],
+        me: Option<&str>,
     ) {
-        self.moves.retain(|issue_id, mv| {
+        self.moves.retain(|(issue_id, _), mv| {
             if &mv.project != project {
                 return true;
             }
@@ -751,7 +850,7 @@ impl LocalEdits {
                 return false;
             }
             if let Some(issue) = list.iter_mut().find(|i| &i.id == issue_id) {
-                RowState::from_state(&mv.want).put_on(issue);
+                mv.want.put_on(issue, me);
             }
             true
         });
@@ -1531,8 +1630,13 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 Ok(mut fetched) => {
                     let old = app.linear.remove(&project).unwrap_or_default();
                     keep_cut_prs(&mut fetched, &old.list);
-                    app.linear_edits
-                        .lay_over(&project, ticket.at, &mut fetched.list);
+                    let me = fetched.me_id().map(str::to_string);
+                    app.linear_edits.lay_over(
+                        &project,
+                        ticket.at,
+                        &mut fetched.list,
+                        me.as_deref(),
+                    );
                     app.linear_failed.remove(&project);
                     app.linear.insert(project.clone(), fetched);
                     follow_cursor(app, &project, &old.list);
@@ -1549,38 +1653,47 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
         }
         LinearAnswer::Attach(run) => land_attach(app, run, true),
         LinearAnswer::Attached(run) => land_attach(app, run, false),
-        LinearAnswer::Status {
+        LinearAnswer::Edited {
             project,
             issue_id,
             identifier,
-            state,
+            change,
             seq,
             result,
-        } => land_status(app, project, issue_id, identifier, state, seq, result),
+        } => land_edit(app, project, issue_id, identifier, change, seq, result),
     }
 }
 
-/// Linear answered the `⌘S` numbered `seq`. Taken, it is what Linear has
-/// now, and the TODOS MODAL's chips say so. Refused, the row goes back to
-/// what Linear had before it — only when no newer `⌘S` has been asked for
-/// since; otherwise the newer one stands, and a fresh list says where
-/// Linear has the issue. A newer `⌘S` queued behind this one goes out now.
-fn land_status(
+/// The configured user's id, as `project`'s list has it.
+fn me_id(app: &App, project: &ProjectId) -> Option<String> {
+    app.linear.get(project)?.me_id().map(str::to_string)
+}
+
+/// Linear answered the edit numbered `seq`. Taken, it is what Linear has
+/// now — and a state is what the TODOS MODAL's chips say, so they are
+/// told one. Refused, the row goes back to
+/// what Linear had before it — only when no newer edit to that property
+/// has been asked for since; otherwise the newer one stands, and a fresh
+/// list says where Linear has the issue. A newer edit queued behind this
+/// one goes out now.
+fn land_edit(
     app: &mut App,
     project: ProjectId,
     issue_id: String,
     identifier: String,
-    state: LinearState,
+    change: Change,
     seq: u64,
     result: Result<(), String>,
 ) {
     app.dirty = true;
     if let Err(why) = &result {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "couldn't move {identifier}: {why}"
-        )));
+        app.flash = Some(crate::flash::Flash::failed(
+            change.refused(&identifier, why),
+        ));
     }
-    let Some(mv) = app.linear_edits.moves.get_mut(&issue_id) else {
+    let prop = change.prop();
+    let key = (issue_id.clone(), prop);
+    let Some(mv) = app.linear_edits.moves.get_mut(&key) else {
         return;
     };
     if mv.sending == Some(seq) {
@@ -1591,45 +1704,48 @@ fn land_status(
     match result {
         Ok(()) => {
             let now = crate::fetch::now();
-            mv.confirmed = RowState::from_state(&state);
+            mv.confirmed = change.clone();
             if !newer {
                 mv.landed = Some(now);
             }
-            let url = app
-                .linear
-                .get(&project)
-                .and_then(|l| l.list.iter().find(|i| i.id == issue_id))
-                .map(|i| (i.url.clone(), i.priority));
-            let (url, priority) = url.unwrap_or_default();
-            crate::todos::view::note_linked(
-                app,
-                LinkedIssue {
-                    identifier,
-                    url,
-                    state: state.name,
-                    state_type: state.kind,
-                    state_color: state.color,
-                    priority,
-                },
-                now,
-            );
+            if let Change::Status(state) = change {
+                let url = app
+                    .linear
+                    .get(&project)
+                    .and_then(|l| l.list.iter().find(|i| i.id == issue_id))
+                    .map(|i| (i.url.clone(), i.priority));
+                let (url, priority) = url.unwrap_or_default();
+                crate::todos::view::note_linked(
+                    app,
+                    LinkedIssue {
+                        identifier,
+                        url,
+                        state: state.name,
+                        state_type: state.kind,
+                        state_color: state.color,
+                        priority,
+                    },
+                    now,
+                );
+            }
         }
         Err(_) if newer => request_list(app, project, dir, true),
         Err(_) => {
             let back = mv.confirmed.clone();
-            app.linear_edits.moves.remove(&issue_id);
+            app.linear_edits.moves.remove(&key);
+            let me = me_id(app, &project);
             if let Some(issue) = app
                 .linear
                 .get_mut(&project)
                 .and_then(|l| l.list.iter_mut().find(|i| i.id == issue_id))
             {
-                back.put_on(issue);
+                back.put_on(issue, me.as_deref());
             }
             request_list(app, project, dir, true);
         }
     }
     if newer {
-        send_move(app, &issue_id);
+        send_edit(app, &issue_id, prop);
     }
 }
 
@@ -1931,6 +2047,12 @@ pub(crate) mod keys {
     pub const REFRESH: Key = crate::issues::keys::REFRESH;
     /// The issue's workflow state.
     pub const STATUS: Key = Key::new(&["cmd+s", "ctrl+s"], "status");
+    /// Its priority: the TODOS MODAL's own key for one.
+    pub const PRIORITY: Key = crate::todos::view::keys::PRIORITY;
+    /// Whose it is: `I`, as Linear assigns an issue to you — never `⌘A`,
+    /// the filter line's select-all. Where no ⌘ arrives it is `^G`: `^I`
+    /// is Tab there, and `^A` is what Ghostty types for `⌘←`.
+    pub const ASSIGN: Key = Key::new(&["cmd+i", "ctrl+g"], "assign");
     /// The PR PICK: the marked issues attached to a pull request picked
     /// in the PULL REQUESTS MODAL. That modal's own hotkey (`⌘U`, `^V`
     /// its twin), as the modal's way here is this one's (`⌘L`).
@@ -1939,9 +2061,12 @@ pub(crate) mod keys {
     /// worktree's branch opens. The grid's **Select worktree** chord
     /// (`⌘.`, `^T` its twin), as picking a worktree is everywhere.
     pub const WORKTREE: Key = Key::new(&["cmd+.", "ctrl+t"], "link to worktree");
-    /// The status and worktree pickers' own.
+    /// The property and worktree pickers' own.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
-    pub const SET: Key = Key::new(&["enter"], "set status");
+    pub const SET: Key = Key::new(&["enter"], "set");
+    /// The priority picker's digits, each choosing at once — the TODOS
+    /// MODAL's.
+    pub const LEVEL: Key = crate::todos::view::keys::LEVEL;
     pub const LINK: Key = Key::new(&["enter"], "link");
     /// `My issues` ⇄ `Other issues`: plain or with ⇧, as the PULL
     /// REQUESTS MODAL's tab keys are.
@@ -1950,8 +2075,8 @@ pub(crate) mod keys {
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, ATTACH, WORKTREE, PICK, SET, LINK,
-        TABS, FILTER,
+        MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
+        PICK, SET, LEVEL, LINK, TABS, FILTER,
     ];
 }
 
@@ -1969,12 +2094,13 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     } else {
         "close"
     };
-    if view.status_pick.is_some() {
-        return vec![
-            keys::SET.hint().kept(),
-            keys::PICK.hint(),
-            Hint::new("Esc", "cancel"),
-        ];
+    if let Some(pick) = &view.prop_pick {
+        let mut hints = vec![keys::SET.hint().kept(), keys::PICK.hint()];
+        if pick.prop == Prop::Priority {
+            hints.push(Hint::new("1-4/0", keys::LEVEL.does));
+        }
+        hints.push(Hint::new("Esc", "cancel"));
+        return hints;
     }
     if view.worktree_pick.is_some() {
         return vec![
@@ -1996,9 +2122,13 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::CONFIRM.hint().kept(),
             keys::TABS.hint(),
             keys::FILTER.hint(),
+            // An issue's own properties before where it is sent: a
+            // narrow border cuts the hints from the right.
+            keys::STATUS.hint(),
+            keys::PRIORITY.hint(),
+            keys::ASSIGN.hint(),
             keys::ATTACH.hint(),
             keys::WORKTREE.hint(),
-            keys::STATUS.hint(),
             keys::PRESET.hint(),
             keys::BROWSER.hint(),
             keys::REFRESH.hint(),
@@ -2017,10 +2147,31 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::TABS.hint(),
             keys::FILTER.hint(),
             keys::STATUS.hint(),
+            keys::PRIORITY.hint(),
+            keys::ASSIGN.hint(),
             keys::BROWSER.hint(),
             Hint::new("Esc", esc),
         ],
     }
+}
+
+/// A property picker for `issue` in the reading pane's place: `rows`,
+/// the one `issue` stands on marked, and the cursor on it — or, `on_top`,
+/// on the first whatever the issue has.
+fn open_prop_pick(app: &mut App, issue: &LinearIssue, prop: Prop, rows: Vec<Change>, on_top: bool) {
+    let current = rows.iter().position(|row| row.stands_on(issue));
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    view.filter_pick = None;
+    view.prop_pick = Some(PropPick {
+        issue_id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        prop,
+        rows,
+        selected: current.filter(|_| !on_top).unwrap_or(0),
+        current,
+    });
 }
 
 /// `⌘S`: the status picker for the issue under the cursor, on the
@@ -2046,58 +2197,111 @@ fn open_status_pick(app: &mut App) {
         )));
         return;
     }
-    let selected = states
-        .iter()
-        .position(|s| s.name == issue.status)
-        .unwrap_or(0);
-    if let Some(Overlay::Linear(view)) = &mut app.overlay {
-        view.filter_pick = None;
-        view.status_pick = Some(StatusPick {
-            issue_id: issue.id,
-            identifier: issue.identifier,
-            states,
-            selected,
-        });
-    }
+    let rows = states.into_iter().map(Change::Status).collect();
+    open_prop_pick(app, &issue, Prop::Status, rows, false);
 }
 
-/// Keys while the status picker is up.
+/// `⌘P`: Linear's priorities for the issue under the cursor, urgent
+/// first, on its own.
+fn open_priority_pick(app: &mut App) {
+    let Some(issue) = selected_issue(app).cloned() else {
+        return;
+    };
+    let rows = PRIORITY_ORDER.into_iter().map(Change::Priority).collect();
+    open_prop_pick(app, &issue, Prop::Priority, rows, false);
+}
+
+/// `⌘I`: who the issue under the cursor can go to — the configured user
+/// first, so `Enter` is "assign to me", then nobody, then the rest of its
+/// team by name. The cursor opens on the top row, never on whose it is
+/// now: that row is only marked. An issue Linear named nobody for says so.
+fn open_assign_pick(app: &mut App) {
+    let Some(issue) = selected_issue(app).cloned() else {
+        return;
+    };
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let list = app.linear.get(&view.project);
+    let me = list.and_then(|l| l.me.clone());
+    let members = list
+        .and_then(|l| l.members.get(&issue.team_id))
+        .cloned()
+        .unwrap_or_default();
+    if me.is_none() && members.is_empty() {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "Linear didn't say who {} can go to — {} asks again",
+            issue.identifier,
+            keys::REFRESH.label()
+        )));
+        return;
+    }
+    let others = members
+        .into_iter()
+        .filter(|user| me.as_ref().is_none_or(|me| me.id != user.id));
+    let rows = me
+        .iter()
+        .cloned()
+        .map(Some)
+        .chain([None])
+        .chain(others.map(Some))
+        .map(Change::Assignee)
+        .collect();
+    open_prop_pick(app, &issue, Prop::Assignee, rows, true);
+}
+
+/// Keys while a property picker is up. A priority's digit sets it at
+/// once, as the TODOS MODAL's pick does.
 fn handle_pick_key(app: &mut App, key: KeyEvent) {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
-    let Some(pick) = &mut view.status_pick else {
+    let Some(pick) = &mut view.prop_pick else {
         return;
     };
-    match key.code {
-        KeyCode::Esc => view.status_pick = None,
-        KeyCode::Down => {
-            pick.selected = clamp_selection(pick.selected as i64 + 1, pick.states.len())
+    let digit_row = match key.code {
+        KeyCode::Char(c) if pick.prop == Prop::Priority && keys::LEVEL.matches(&key) => {
+            let level = c.to_digit(10).unwrap_or(0) as u8;
+            pick.rows
+                .iter()
+                .position(|row| *row == Change::Priority(level))
         }
-        KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, pick.states.len()),
-        _ if keys::SET.matches(&key) => set_status(app),
+        _ => None,
+    };
+    if let Some(row) = digit_row {
+        pick.selected = row;
+        set_prop(app);
+        app.dirty = true;
+        return;
+    }
+    match key.code {
+        KeyCode::Esc => view.prop_pick = None,
+        KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, pick.rows.len()),
+        KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, pick.rows.len()),
+        _ if keys::SET.matches(&key) => set_prop(app),
         _ => {}
     }
     app.dirty = true;
 }
 
-/// Enter in the status picker: the row says the new state at once, and
+/// Enter in a property picker: the row says the new value at once, and
 /// `issueUpdate` runs off the loop — put back if Linear refuses
-/// ([`land_status`]). One move per issue is out at a time: a second `⌘S`
-/// while one is out queues behind it, the latest asked for winning, so
-/// Linear ends where the row does. The state the issue is already in
-/// closes the picker with nothing sent.
-fn set_status(app: &mut App) {
+/// ([`land_edit`]). One edit per property of an issue is out at a time: a
+/// second to that property while one is out queues behind it, the latest
+/// asked for winning, so Linear ends where the row does. The value the
+/// issue already has closes the picker with nothing sent.
+fn set_prop(app: &mut App) {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
-    let Some(pick) = view.status_pick.take() else {
+    let Some(pick) = view.prop_pick.take() else {
         return;
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(state) = pick.states.get(pick.selected).cloned() else {
+    let Some(change) = pick.rows.get(pick.selected).cloned() else {
         return;
     };
+    let me = me_id(app, &project);
     let Some(issue) = app
         .linear
         .get_mut(&project)
@@ -2105,46 +2309,52 @@ fn set_status(app: &mut App) {
     else {
         return;
     };
-    if issue.status == state.name {
+    if change.stands_on(issue) {
         return;
     }
-    let before = RowState::of(issue);
-    RowState::from_state(&state).put_on(issue);
+    let prop = change.prop();
+    let before = Change::of(issue, prop);
+    change.put_on(issue, me.as_deref());
     let edits = &mut app.linear_edits;
     edits.next_seq += 1;
     let seq = edits.next_seq;
     let mv = edits
         .moves
-        .entry(pick.issue_id.clone())
-        .or_insert_with(|| StatusMove {
+        .entry((pick.issue_id.clone(), prop))
+        .or_insert_with(|| Move {
             project: project.clone(),
             dir: dir.clone(),
             identifier: pick.identifier.clone(),
-            want: state.clone(),
+            want: change.clone(),
             seq,
             sending: None,
             confirmed: before,
             landed: None,
         });
-    mv.want = state;
+    mv.want = change;
     mv.seq = seq;
     mv.dir = dir;
     mv.landed = None;
     if mv.sending.is_none() {
-        send_move(app, &pick.issue_id);
+        send_edit(app, &pick.issue_id, prop);
     }
 }
 
-/// Send the `⌘S` the row says for `issue_id` to Linear, off the loop.
-fn send_move(app: &mut App, issue_id: &str) {
+/// Send the edit the row says for `issue_id`'s `prop` to Linear, off the
+/// loop.
+fn send_edit(app: &mut App, issue_id: &str, prop: Prop) {
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
-    let Some(mv) = app.linear_edits.moves.get_mut(issue_id) else {
+    let Some(mv) = app
+        .linear_edits
+        .moves
+        .get_mut(&(issue_id.to_string(), prop))
+    else {
         return;
     };
     mv.sending = Some(mv.seq);
-    let (project, dir, identifier, state, seq) = (
+    let (project, dir, identifier, change, seq) = (
         mv.project.clone(),
         mv.dir.clone(),
         mv.identifier.clone(),
@@ -2153,12 +2363,12 @@ fn send_move(app: &mut App, issue_id: &str) {
     );
     let issue_id = issue_id.to_string();
     tokio::spawn(async move {
-        let result = update_state(&dir, &issue_id, &state.id).await;
-        let _ = tx.send(LinearAnswer::Status {
+        let result = update_issue(&dir, &issue_id, &change).await;
+        let _ = tx.send(LinearAnswer::Edited {
             project,
             issue_id,
             identifier,
-            state,
+            change,
             seq,
             result,
         });
@@ -2268,7 +2478,7 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
-    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.status_pick.is_some()) {
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.prop_pick.is_some()) {
         handle_pick_key(app, key);
         return;
     }
@@ -2322,6 +2532,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::STATUS.matches(&key) => open_status_pick(app),
+        _ if keys::PRIORITY.matches(&key) => open_priority_pick(app),
+        _ if keys::ASSIGN.matches(&key) => open_assign_pick(app),
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
         _ if keys::WORKTREE.matches(&key) => open_worktree_pick(app),
         _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
@@ -2719,13 +2931,15 @@ fn rows<'a>(app: &'a App, project: &ProjectId) -> &'a [LinearIssue] {
 }
 
 /// The keys the filter line takes besides its words (`list_filter`):
-/// `status:todo p:high label:bug project:"Export PDF" assignee:sam`.
+/// `status:todo p:high label:bug project:"Export PDF" assignee:sam
+/// reporter:ana`.
 pub(crate) const FACETS: &[FacetKey] = &[
     FacetKey::new("status", "Status"),
     FacetKey::new("priority", "Priority").aliases(&["p"]),
     FacetKey::new("label", "Label"),
     FacetKey::new("project", "Project"),
     FacetKey::new("assignee", "Assignee"),
+    FacetKey::new("reporter", "Reporter"),
 ];
 
 /// An issue's values for one of the [`FACETS`].
@@ -2739,6 +2953,7 @@ fn facet_values(issue: &LinearIssue, key: &str) -> Vec<String> {
         "project" => issue.project.iter().map(|p| p.name.clone()).collect(),
         "assignee" if issue.assignee.is_empty() => vec![UNASSIGNED.to_string()],
         "assignee" => vec![issue.assignee.clone()],
+        "reporter" if !issue.reporter.is_empty() => vec![issue.reporter.clone()],
         _ => Vec::new(),
     }
 }
@@ -2851,7 +3066,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         head
     };
     let side_up =
-        view.status_pick.is_some() || view.worktree_pick.is_some() || view.filter_pick.is_some();
+        view.prop_pick.is_some() || view.worktree_pick.is_some() || view.filter_pick.is_some();
     let list_focused = list_focused && !side_up;
     let rows_focused = list_focused && view.focus == LinearFocus::List;
     let block = panel_block(&title, list_focused, th);
@@ -3024,8 +3239,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         }
     }
     let mut filter_pick = view.filter_pick;
-    if let Some(pick) = &view.status_pick {
-        draw_status_pick(f, body_inner, pick, th);
+    if let Some(pick) = &view.prop_pick {
+        let me = app.linear.get(&view.project).and_then(|l| l.me_id());
+        draw_prop_pick(f, body_inner, pick, me, th);
     } else if let Some(pick) = &view.worktree_pick {
         draw_worktree_pick(f, body_inner, pick, &view.project, &app.linear_links, th);
     } else if let Some(pick) = &mut filter_pick {
@@ -3330,23 +3546,41 @@ fn short_date(stamp: &str, now: i64) -> Option<String> {
     })
 }
 
-/// The status picker in the reading pane's place: what it is for, then a
-/// row per state, the cursor's lit and the kind of each dim beside it.
-fn draw_status_pick(f: &mut Frame, area: Rect, pick: &StatusPick, th: Theme) {
-    let rows = pick.states.iter().map(|state| {
-        vec![
-            Span::raw(state.name.clone()),
-            Span::styled(format!("  {}", state.kind), Style::default().fg(th.dim)),
-        ]
+/// A property picker in the reading pane's place: what it is for, then a
+/// row per value — a state with its kind dim beside it, a priority with
+/// its letter and digit, the configured user (`me`, by id) as `Me` — the
+/// cursor's lit and the one the issue stands on marked.
+fn draw_prop_pick(f: &mut Frame, area: Rect, pick: &PropPick, me: Option<&str>, th: Theme) {
+    let dim = Style::default().fg(th.dim);
+    let heading = match pick.prop {
+        Prop::Status => format!("Move {} to…", pick.identifier),
+        Prop::Priority => format!("Set {}'s priority to…", pick.identifier),
+        Prop::Assignee => format!("Assign {} to…", pick.identifier),
+    };
+    let rows = pick.rows.iter().enumerate().map(|(i, row)| {
+        let mut spans = match row {
+            Change::Status(state) => vec![
+                Span::raw(state.name.clone()),
+                Span::styled(format!("  {}", state.kind), dim),
+            ],
+            Change::Priority(priority) => vec![
+                priority_mark(*priority, th),
+                Span::raw(format!(" {}", priority_word(*priority))),
+                Span::styled(format!("  {priority}"), dim),
+            ],
+            Change::Assignee(Some(user)) if me == Some(user.id.as_str()) => vec![
+                Span::raw("Me"),
+                Span::styled(format!("  {}", user.name), dim),
+            ],
+            Change::Assignee(Some(user)) => vec![Span::raw(user.name.clone())],
+            Change::Assignee(None) => vec![Span::raw("No assignee")],
+        };
+        if pick.current == Some(i) {
+            spans.push(Span::styled("  current", dim));
+        }
+        spans
     });
-    draw_side_pick(
-        f,
-        area,
-        format!("Move {} to…", pick.identifier),
-        rows,
-        pick.selected,
-        th,
-    );
+    draw_side_pick(f, area, heading, rows, pick.selected, th);
 }
 
 fn draw_worktree_pick(
@@ -3436,9 +3670,10 @@ fn reading_area(inner: Rect) -> Rect {
 
 /// The issue's properties at the head of the page, as the PULL REQUEST
 /// PAGE carries its own under its border: a dim name, then the value in
-/// Linear's colours — status and priority, assignee and project, side by
+/// Linear's colours — status and priority, assignee and reporter, side by
 /// side while the pane has room for two ([`PAIR_W`] each), one per row
-/// otherwise; the labels on a row of their own; then the dates.
+/// otherwise; the project and the labels on rows of their own; then the
+/// dates.
 fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Line<'static>> {
     const NAME_W: usize = 10;
     let paired = width >= PAIR_W * 2;
@@ -3476,14 +3711,19 @@ fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
             text(priority_word(issue.priority), plain),
         ],
     );
-    let assignee = cell(
-        "Assignee",
-        vec![if issue.assignee.is_empty() {
-            Span::styled(UNASSIGNED, quiet)
-        } else {
-            text(&issue.assignee, plain)
-        }],
-    );
+    // Someone by name, or what stands for nobody.
+    let person = |label: &str, name: &str, nobody: &'static str| {
+        cell(
+            label,
+            vec![if name.is_empty() {
+                Span::styled(nobody, quiet)
+            } else {
+                text(name, plain)
+            }],
+        )
+    };
+    let assignee = person("Assignee", &issue.assignee, UNASSIGNED);
+    let reporter = person("Reporter", &issue.reporter, "unknown");
     let project = cell(
         "Project",
         match &issue.project {
@@ -3533,7 +3773,8 @@ fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
         }
     };
     pair(&mut lines, vec![status, priority]);
-    pair(&mut lines, vec![assignee, project]);
+    pair(&mut lines, vec![assignee, reporter]);
+    lines.push(crate::pr_preview::fit(project, width));
     lines.push(crate::pr_preview::fit(labels, width));
     if !dates.is_empty() {
         pair(&mut lines, dates);
@@ -3584,7 +3825,7 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 /// issues are asked for.
 const ISSUE_FIELDS: &str = "id identifier title url description priority createdAt updatedAt \
     state { name type color position } labels { nodes { name color } } project { name color } \
-    assignee { displayName } \
+    assignee { id displayName } creator { displayName } externalUserCreator { name } \
     team { id states { nodes { id name type position color } } } \
     attachments(first: 25) { nodes { url metadata } pageInfo { hasNextPage } }";
 
@@ -3594,13 +3835,20 @@ const MINE_LIMIT: usize = 100;
 /// most recently touched first.
 pub const OTHERS_LIMIT: usize = 250;
 
+/// How many of the configured user's teams `⌘I` knows the members of,
+/// and how many of each: an issue in a team past that is still theirs or
+/// nobody's to make it.
+const TEAMS_LIMIT: usize = 25;
+const MEMBERS_LIMIT: usize = 100;
+
 /// Not done and not canceled: the open issues.
 const OPEN_STATES: &str = r#"state: { type: { nin: ["completed", "canceled"] } }"#;
 
 /// Both tabs' issues in one ask, as two aliased lists: `mine`, assigned to
 /// the key's owner — or to `email`, when Settings → Linear account names
 /// someone — and `others`, open issues in that person's teams assigned to
-/// someone else or to nobody.
+/// someone else or to nobody. With them `me`, who that person is, and
+/// their `teams`' members: who `⌘I` assigns to.
 async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let (query, variables) = lists_query(email);
@@ -3612,11 +3860,12 @@ async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
 fn lists_query(email: &str) -> (String, serde_json::Value) {
     // `me` picks out the configured user — as an assignee, and among a
     // team's members.
-    let (head, me, not_me, variables) = if email.is_empty() {
+    let (head, me, not_me, me_field, variables) = if email.is_empty() {
         (
             "query",
             "isMe: { eq: true }",
             "isMe: { eq: false }",
+            "me: viewer { id displayName }",
             serde_json::json!({}),
         )
     } else {
@@ -3624,6 +3873,7 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
             "query($email: String!)",
             "email: { eq: $email }",
             "email: { neq: $email }",
+            "me: users(first: 1, filter: { email: { eq: $email } }) { nodes { id displayName } }",
             serde_json::json!({ "email": email }),
         )
     };
@@ -3638,23 +3888,48 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
             or: [{{ assignee: {{ null: true }} }}, {{ assignee: {{ {not_me} }} }}]
             {OPEN_STATES}
           }}) {{ nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage }} }}
+          {me_field}
+          teams(first: {TEAMS_LIMIT}, filter: {{ members: {{ some: {{ {me} }} }} }}) {{
+            nodes {{ id members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} }}
+          }}
         }}"#
     );
     (query, variables)
 }
 
-/// Move issue `issue_id` to the workflow state `state_id`.
-async fn update_state(dir: &Path, issue_id: &str, state_id: &str) -> Result<(), String> {
+/// Set `change` on issue `issue_id`: its state, priority or assignee —
+/// a null `assigneeId` is nobody.
+async fn update_issue(dir: &Path, issue_id: &str, change: &Change) -> Result<(), String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
-    let json = graphql(
-        &key,
-        r#"mutation($id: String!, $stateId: String!) {
-          issueUpdate(id: $id, input: { stateId: $stateId }) { success }
-        }"#,
-        serde_json::json!({ "id": issue_id, "stateId": state_id }),
-    )
-    .await?;
-    mutation_result(&json, "issueUpdate", "Linear did not move the issue")
+    let (field, gql_type, value, refusal) = match change {
+        Change::Status(state) => (
+            "stateId",
+            "String!",
+            serde_json::json!(state.id),
+            "Linear did not move the issue",
+        ),
+        Change::Priority(priority) => (
+            "priority",
+            "Int!",
+            serde_json::json!(priority),
+            "Linear did not set the priority",
+        ),
+        Change::Assignee(user) => (
+            "assigneeId",
+            "String",
+            serde_json::json!(user.as_ref().map(|u| u.id.as_str())),
+            "Linear did not assign the issue",
+        ),
+    };
+    let query = format!(
+        r#"mutation($id: String!, ${field}: {gql_type}) {{
+          issueUpdate(id: $id, input: {{ {field}: ${field} }}) {{ success }}
+        }}"#
+    );
+    let mut variables = serde_json::json!({ "id": issue_id });
+    variables[field] = value;
+    let json = graphql(&key, &query, variables).await?;
+    mutation_result(&json, "issueUpdate", refusal)
 }
 
 /// The fields a linked todo's chip draws, as [`LinkedIssue::from_json`]
@@ -3984,6 +4259,44 @@ fn parse_states(json: &serde_json::Value) -> HashMap<String, Vec<LinearState>> {
     out
 }
 
+/// A node's `{ id displayName }` as someone to assign to; None without
+/// either.
+fn user_at(value: &serde_json::Value) -> Option<LinearUser> {
+    let user = LinearUser {
+        id: json_text(value, "/id"),
+        name: json_text(value, "/displayName"),
+    };
+    (!user.id.is_empty() && !user.name.is_empty()).then_some(user)
+}
+
+/// The configured user in a [`fetch_lists`] answer: the `viewer`, or the
+/// one user Settings → Linear account's email found.
+fn parse_me(json: &serde_json::Value) -> Option<LinearUser> {
+    let me = json.pointer("/data/me")?;
+    user_at(me.pointer("/nodes/0").unwrap_or(me))
+}
+
+/// Each of the configured user's teams' members, by team id, by name.
+fn parse_members(json: &serde_json::Value) -> HashMap<String, Vec<LinearUser>> {
+    let teams = json.pointer("/data/teams/nodes").and_then(|v| v.as_array());
+    teams
+        .into_iter()
+        .flatten()
+        .filter_map(|team| {
+            let id = team.get("id")?.as_str()?.to_string();
+            let mut members: Vec<LinearUser> = team
+                .pointer("/members/nodes")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(user_at)
+                .collect();
+            members.sort_by_key(|user| user.name.to_lowercase());
+            Some((id, members))
+        })
+        .collect()
+}
+
 async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let json = graphql(
@@ -4134,6 +4447,8 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
     Ok(LinearList {
         list: parse_issues(json)?,
         states: parse_states(json),
+        me: parse_me(json),
+        members: parse_members(json),
         more: more("/data/others/pageInfo/hasNextPage"),
         more_mine: more("/data/mine/pageInfo/hasNextPage"),
         prs_cut,
@@ -4215,6 +4530,10 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .collect(),
         project: value.get("project").and_then(tag_at),
         assignee: text("/assignee/displayName"),
+        assignee_id: text("/assignee/id"),
+        reporter: Some(text("/creator/displayName"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| text("/externalUserCreator/name")),
         mine: false,
         created_at: text("/createdAt"),
         updated_at: text("/updatedAt"),
@@ -4495,6 +4814,8 @@ pub(crate) mod tests {
             labels: Vec::new(),
             project: None,
             assignee: String::new(),
+            assignee_id: String::new(),
+            reporter: String::new(),
             mine: true,
             created_at: String::new(),
             updated_at: String::new(),
@@ -4544,25 +4865,26 @@ pub(crate) mod tests {
         let Some(Overlay::Linear(view)) = &app.overlay else {
             panic!("the modal stays");
         };
-        let pick = view.status_pick.as_ref().expect("the picker");
+        let pick = view.prop_pick.as_ref().expect("the picker");
         assert_eq!(pick.selected, 1, "on the state it is in");
+        assert_eq!(pick.current, Some(1));
         crate::hints::assert_hints_from(&hints(view), keys::ALL);
         handle_key(&mut app, KeyEvent::from(KeyCode::Down), &mut out);
         handle_key(&mut app, KeyEvent::from(KeyCode::Enter), &mut out);
         let Some(Overlay::Linear(view)) = &app.overlay else {
             panic!("the modal stays");
         };
-        assert!(view.status_pick.is_none());
+        assert!(view.prop_pick.is_none());
         assert_eq!(app.linear[&project].list[0].status, "Done");
 
         let done = app.linear[&project].states["t1"][2].clone();
         land_answer(
             &mut app,
-            LinearAnswer::Status {
+            LinearAnswer::Edited {
                 project: project.clone(),
                 issue_id: "1".into(),
                 identifier: "ENG-12".into(),
-                state: done,
+                change: Change::Status(done),
                 seq: 1,
                 result: Err("not allowed".into()),
             },
@@ -5522,14 +5844,26 @@ pub(crate) mod tests {
                  "priority": 1, "createdAt": "2026-10-05T22:44:07.232Z",
                  "labels": {"nodes": [{"name": "Export PDF", "color": "#26b5ce"}, {"name": ""}]},
                  "project": {"name": "Exports", "color": "#f2c94c"},
-                 "assignee": {"displayName": "me"},
+                 "assignee": {"id": "u1", "displayName": "me"},
+                 "creator": {"displayName": "Ana"},
+                 "externalUserCreator": {"name": "Someone on Slack"},
                  "state": {"name": "Todo", "type": "unstarted"}}
             ]},
             "others": {"nodes": [
                 {"id": "3", "identifier": "ENG-3", "title": "Theirs", "url": "https://linear.app/x/issue/ENG-3",
                  "priority": 0, "assignee": null,
+                 "creator": null, "externalUserCreator": {"name": "Someone on Slack"},
                  "state": {"name": "In Progress", "type": "started"}}
-            ], "pageInfo": {"hasNextPage": true}}
+            ], "pageInfo": {"hasNextPage": true}},
+            "me": {"id": "u1", "displayName": "me"},
+            "teams": {"nodes": [
+                {"id": "t1", "members": {"nodes": [
+                    {"id": "u3", "displayName": "cy"},
+                    {"id": "u2", "displayName": "Bo"},
+                    {"id": "u1", "displayName": "me"},
+                    {"id": "u4"}
+                ]}}
+            ]}
         }});
         let fetched = parse_lists(&json).unwrap();
         assert!(fetched.more);
@@ -5545,9 +5879,34 @@ pub(crate) mod tests {
         assert_eq!(urgent.labels.len(), 1, "a nameless label is dropped");
         assert_eq!(urgent.project.as_ref().unwrap().name, "Exports");
         assert_eq!(urgent.assignee, "me");
+        assert_eq!(urgent.assignee_id, "u1");
+        assert_eq!(urgent.reporter, "Ana", "whoever filed it in Linear");
         assert_eq!(fetched.list[1].state_color, "#26b5ce");
+        assert_eq!(fetched.list[1].reporter, "", "Linear named nobody");
         assert!(!fetched.list[2].mine);
         assert_eq!(fetched.list[2].assignee, "");
+        assert_eq!(fetched.list[2].assignee_id, "");
+        assert_eq!(
+            fetched.list[2].reporter, "Someone on Slack",
+            "filed through an integration"
+        );
+        // Who `⌘I` assigns to: the configured user, and each team's
+        // members by name, a nameless one dropped.
+        assert_eq!(fetched.me, Some(user("u1", "me")));
+        assert_eq!(
+            fetched.members["t1"],
+            [user("u2", "Bo"), user("u3", "cy"), user("u1", "me")]
+        );
+        // With Settings → Linear account set, `me` is the one user found.
+        let by_email = serde_json::json!({"data": {
+            "mine": {"nodes": []}, "others": {"nodes": []},
+            "me": {"nodes": [{"id": "u2", "displayName": "Bo"}]}
+        }});
+        assert_eq!(parse_lists(&by_email).unwrap().me, Some(user("u2", "Bo")));
+        let nobody = serde_json::json!({"data": {
+            "mine": {"nodes": []}, "others": {"nodes": []}, "me": {"nodes": []}
+        }});
+        assert_eq!(parse_lists(&nobody).unwrap().me, None);
         // An answer with neither list is a miss.
         assert!(parse_lists(&serde_json::json!({"data": {}})).is_err());
     }
@@ -5569,11 +5928,29 @@ pub(crate) mod tests {
         );
         assert!(query.contains("{ assignee: { null: true } }"), "{query}");
         assert!(query.contains("pageInfo { hasNextPage }"), "{query}");
+        assert!(query.contains("creator { displayName }"), "{query}");
+        assert!(query.contains("me: viewer { id displayName }"), "{query}");
+        assert!(
+            query.contains(
+                "teams(first: 25, filter: { members: { some: { isMe: { eq: true } } } })"
+            ),
+            "{query}"
+        );
         assert_eq!(vars, serde_json::json!({}));
         let (query, vars) = lists_query("sam@x.co");
         assert!(query.starts_with("query($email: String!)"), "{query}");
         assert!(query.contains("email: { neq: $email }"), "{query}");
         assert!(!query.contains("isMe"), "{query}");
+        assert!(
+            query.contains("me: users(first: 1, filter: { email: { eq: $email } })"),
+            "{query}"
+        );
+        assert!(
+            query.contains(
+                "teams(first: 25, filter: { members: { some: { email: { eq: $email } } } })"
+            ),
+            "{query}"
+        );
         assert_eq!(vars, serde_json::json!({"email": "sam@x.co"}));
     }
 
@@ -5646,6 +6023,7 @@ pub(crate) mod tests {
         let mut theirs = rich("4", "ENG-4", "Their bug", ("Todo", "unstarted"), 2);
         theirs.mine = false;
         theirs.assignee = "Sam".into();
+        theirs.reporter = "Ana".into();
         let list = vec![
             rich("1", "ENG-1", "Started one", ("In Progress", "started"), 2),
             rich("2", "ENG-2", "Todo one", ("Todo", "unstarted"), 1),
@@ -5677,6 +6055,8 @@ pub(crate) mod tests {
             ["ENG-2", "ENG-1"]
         );
         assert_eq!(shown(LinearTab::Others, "assignee:sam p:high"), ["ENG-4"]);
+        assert_eq!(shown(LinearTab::Others, "reporter:ana"), ["ENG-4"]);
+        assert!(shown(LinearTab::Mine, "reporter:ana").is_empty());
         assert_eq!(shown(LinearTab::Mine, "two"), ["ENG-3"]);
     }
 
@@ -5770,6 +6150,7 @@ pub(crate) mod tests {
             2,
         );
         long.assignee = "Sam".into();
+        long.reporter = "Ana".into();
         long.description = "Body text.".into();
         let mut app = view_on(vec![long]);
         let row = |screen: &str, needle: &str| {
@@ -5781,13 +6162,19 @@ pub(crate) mod tests {
         };
         let wide = shot(&mut app, 220, 40);
         // Two to a row while the pane has room: status beside priority,
-        // assignee beside project; the labels on a row of their own.
+        // assignee beside reporter; the project and the labels on rows of
+        // their own.
         let status = row(&wide, "Status");
         assert!(
             status.contains("In Progress") && status.contains("High"),
             "{wide}"
         );
-        assert!(row(&wide, "Assignee").contains("Sam"), "{wide}");
+        let people = row(&wide, "Assignee");
+        assert!(
+            people.contains("Sam") && people.contains("Reporter") && people.contains("Ana"),
+            "{wide}"
+        );
+        assert!(!row(&wide, "Project").contains("Labels"), "{wide}");
         assert!(row(&wide, "Labels").contains("● Export PDF"), "{wide}");
 
         let narrow = shot(&mut app, 110, 40);
@@ -5795,6 +6182,7 @@ pub(crate) mod tests {
             !row(&narrow, "Status").contains("Priority"),
             "one to a row\n{narrow}"
         );
+        assert!(row(&narrow, "Reporter").contains("Ana"), "{narrow}");
         assert!(
             narrow.contains("it onto more lines"),
             "the title wraps\n{narrow}"
@@ -6233,17 +6621,20 @@ pub(crate) mod tests {
         }
     }
 
+    fn one_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
     /// Land every answer Linear sends until `done` says the flow is over.
     fn run_linear(
         app: &mut App,
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
         act: impl FnOnce(&mut App),
     ) {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        one_thread().block_on(async {
             act(app);
             let answer = rx.recv().await.expect("an answer");
             land_answer(app, answer);
@@ -6647,8 +7038,12 @@ pub(crate) mod tests {
             &mut out,
         );
         if let Some(Overlay::Linear(view)) = &mut app.overlay {
-            let pick = view.status_pick.as_mut().expect("the status picker");
-            pick.selected = pick.states.iter().position(|s| s.name == state).unwrap();
+            let pick = view.prop_pick.as_mut().expect("the status picker");
+            pick.selected = pick
+                .rows
+                .iter()
+                .position(|row| matches!(row, Change::Status(s) if s.name == state))
+                .unwrap();
         }
         handle_key(app, KeyEvent::from(KeyCode::Enter), &mut out);
     }
@@ -6778,7 +7173,7 @@ pub(crate) mod tests {
                 move_to(&mut app, 0, "Todo");
                 assert_eq!(status_of(&app, "1"), "Todo");
                 let first = rx.recv().await.expect("the first's answer");
-                assert!(matches!(first, LinearAnswer::Status { seq: 1, .. }));
+                assert!(matches!(first, LinearAnswer::Edited { seq: 1, .. }));
                 assert_eq!(moves_sent(), ["s3"], "the second waits its turn");
                 land_answer(&mut app, first);
                 assert_eq!(status_of(&app, "1"), "Todo", "the newer one stands");
@@ -6824,6 +7219,326 @@ pub(crate) mod tests {
         assert_eq!(status_of(&app, "1"), "In Progress");
         assert!(app.linear_edits.moves.is_empty());
         assert!(app.linear_flights.in_flight(&ProjectId("p1".into())));
+    }
+
+    // ---- ⌘P and ⌘I: the same edit, another property ----
+
+    fn user(id: &str, name: &str) -> LinearUser {
+        LinearUser {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// [`moving`], with Ana (`u1`) the configured user and Bo and Cy her
+    /// teammates: ENG-1 is hers, on `My issues`, ENG-2 Bo's, on `Other
+    /// issues`.
+    fn staffed() -> (
+        App,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+    ) {
+        let (mut app, dir, rx) = moving();
+        app.linear
+            .insert(ProjectId("p1".into()), staff(team_issues()));
+        (app, dir, rx)
+    }
+
+    /// ENG-1, Ana's, and ENG-2, Bo's, as Linear lists them.
+    fn team_issues() -> Vec<LinearIssue> {
+        let of = |id: &str, ident: &str, who: &LinearUser| LinearIssue {
+            assignee: who.name.clone(),
+            assignee_id: who.id.clone(),
+            mine: who.id == "u1",
+            ..in_state(id, ident, "In Progress")
+        };
+        vec![
+            of("1", "ENG-1", &user("u1", "Ana")),
+            of("2", "ENG-2", &user("u2", "Bo")),
+        ]
+    }
+
+    /// `issues` as a list answer that knows who Ana is and who is in `t1`.
+    fn staff(issues: Vec<LinearIssue>) -> LinearList {
+        LinearList {
+            me: Some(user("u1", "Ana")),
+            members: HashMap::from([(
+                "t1".to_string(),
+                vec![user("u1", "Ana"), user("u2", "Bo"), user("u3", "Cy")],
+            )]),
+            ..listed(issues).unwrap()
+        }
+    }
+
+    /// [`staffed`]'s own list landing again, asked at the ticket's time.
+    fn land_staffed(
+        app: &mut App,
+        ticket: crate::fetch::Ticket<ProjectId>,
+        dir: &tempfile::TempDir,
+    ) {
+        land_answer(
+            app,
+            LinearAnswer::List {
+                ticket,
+                dir: dir.path().into(),
+                list: Ok(staff(team_issues())),
+            },
+        );
+    }
+
+    /// The cursor on the row at `index`, on the tab that shows it.
+    fn cursor_on(app: &mut App, index: usize) {
+        let mine = app.linear[&ProjectId("p1".into())].list[index].mine;
+        if let Some(Overlay::Linear(view)) = &mut app.overlay {
+            view.selected = index;
+            view.tab = if mine {
+                LinearTab::Mine
+            } else {
+                LinearTab::Others
+            };
+        }
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn row_of(app: &App, id: &str) -> LinearIssue {
+        app.linear[&ProjectId("p1".into())]
+            .list
+            .iter()
+            .find(|i| i.id == id)
+            .cloned()
+            .expect("the issue")
+    }
+
+    fn the_pick(app: &App) -> &PropPick {
+        the_view(app).prop_pick.as_ref().expect("the picker")
+    }
+
+    /// The variables of each `issueUpdate` sent, in order.
+    fn edits_sent() -> Vec<serde_json::Value> {
+        graphql_sent()
+            .into_iter()
+            .filter(|v| v.get("id").is_some())
+            .collect()
+    }
+
+    fn took_it(_: &str, _: &str) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"data": {"issueUpdate": {"success": true}}}))
+    }
+
+    fn refused_it(_: &str, _: &str) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"errors": [{"message": "not allowed"}]}))
+    }
+
+    /// `⌘P` lists Linear's priorities on the issue's own; a digit sets
+    /// one at once — the row saying so before Linear answers, and a list
+    /// asked before Linear took it never putting the old one back.
+    #[test]
+    fn cmd_p_sets_a_priority_by_its_digit() {
+        let (mut app, dir, mut rx) = staffed();
+        with_graphql_stub(took_it, || {
+            one_thread().block_on(async {
+                let before = ask_list(&mut app);
+                cursor_on(&mut app, 0);
+                press(&mut app, cmd('p'));
+                let pick = the_pick(&app);
+                assert_eq!(pick.prop, Prop::Priority);
+                assert_eq!(pick.rows[pick.selected], Change::Priority(0));
+                assert_eq!(pick.current, Some(pick.selected));
+                // The digits are spelled as a range, not from the table.
+                let (digits, shown): (Vec<_>, Vec<_>) = hints(the_view(&app))
+                    .into_iter()
+                    .partition(|h| h.does == keys::LEVEL.does);
+                crate::hints::assert_hints_from(&shown, keys::ALL);
+                assert_eq!(digits.len(), 1, "{digits:?}");
+                let screen = shot(&mut app, 160, 30);
+                assert!(screen.contains("Set ENG-1's priority to…"), "{screen}");
+                assert!(
+                    line_with(&screen, "No priority").contains("current"),
+                    "{screen}"
+                );
+
+                press(&mut app, plain(KeyCode::Char('2')));
+                assert!(the_view(&app).prop_pick.is_none());
+                assert_eq!(row_of(&app, "1").priority, 2, "at once");
+                land_staffed(&mut app, before, &dir);
+                assert_eq!(row_of(&app, "1").priority, 2, "a list asked before");
+                let answer = rx.recv().await.expect("Linear's answer");
+                land_answer(&mut app, answer);
+            });
+            assert_eq!(
+                edits_sent(),
+                [serde_json::json!({"id": "1", "priority": 2})]
+            );
+        });
+        assert_eq!(row_of(&app, "1").priority, 2);
+        assert_eq!(app.flash.as_deref(), None);
+    }
+
+    /// A refused `⌘P` puts the priority Linear has back and says why.
+    #[test]
+    fn a_refused_cmd_p_puts_the_priority_back() {
+        let (mut app, _dir, mut rx) = staffed();
+        with_graphql_stub(refused_it, || {
+            run_linear(&mut app, &mut rx, |app| {
+                cursor_on(app, 0);
+                press(app, ctrl('p'));
+                press(app, plain(KeyCode::Up));
+                press(app, plain(KeyCode::Enter));
+                assert_eq!(row_of(app, "1").priority, 4, "the row above none: low");
+            });
+        });
+        assert_eq!(row_of(&app, "1").priority, 0);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("couldn't set ENG-1's priority: not allowed")
+        );
+        assert!(app.linear_edits.moves.is_empty());
+    }
+
+    /// `⌘I` opens on `Me`, whoever has the issue: Enter makes it yours,
+    /// and it is on `My issues` at once. `No assignee` takes it off you
+    /// again, to `Other issues`.
+    #[test]
+    fn cmd_i_assigns_the_issue_to_me_or_to_nobody() {
+        let (mut app, dir, mut rx) = staffed();
+        with_graphql_stub(took_it, || {
+            one_thread().block_on(async {
+                cursor_on(&mut app, 1);
+                press(&mut app, cmd('i'));
+                let pick = the_pick(&app);
+                assert_eq!(pick.prop, Prop::Assignee);
+                let rows: Vec<&str> = pick
+                    .rows
+                    .iter()
+                    .map(|row| match row {
+                        Change::Assignee(Some(user)) => user.name.as_str(),
+                        _ => "nobody",
+                    })
+                    .collect();
+                assert_eq!(rows, ["Ana", "nobody", "Bo", "Cy"], "you once, on top");
+                assert_eq!((pick.selected, pick.current), (0, Some(2)));
+                crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+                let screen = shot(&mut app, 160, 30);
+                assert!(screen.contains("Assign ENG-2 to…"), "{screen}");
+                assert!(line_with(&screen, "Me ").contains("Ana"), "{screen}");
+                assert!(screen.contains("No assignee"), "{screen}");
+                assert!(line_with(&screen, "Bo").contains("current"), "{screen}");
+
+                let before = ask_list(&mut app);
+                press(&mut app, plain(KeyCode::Enter));
+                let mine = row_of(&app, "2");
+                assert_eq!((mine.assignee.as_str(), mine.mine), ("Ana", true));
+                land_staffed(&mut app, before, &dir);
+                let mine = row_of(&app, "2");
+                assert_eq!(
+                    (mine.assignee.as_str(), mine.mine),
+                    ("Ana", true),
+                    "a list asked before"
+                );
+                let answer = rx.recv().await.expect("Linear's answer");
+                land_answer(&mut app, answer);
+
+                // The twin where no ⌘ arrives, on what is now yours.
+                cursor_on(&mut app, 1);
+                press(&mut app, ctrl('g'));
+                assert_eq!(the_pick(&app).current, Some(0));
+                press(&mut app, plain(KeyCode::Down));
+                press(&mut app, plain(KeyCode::Enter));
+                let nobodys = row_of(&app, "2");
+                assert_eq!(
+                    (nobodys.assignee.as_str(), nobodys.assignee_id.as_str()),
+                    ("", "")
+                );
+                assert!(!nobodys.mine);
+                let answer = rx.recv().await.expect("Linear's answer");
+                land_answer(&mut app, answer);
+            });
+            assert_eq!(
+                edits_sent(),
+                [
+                    serde_json::json!({"id": "2", "assigneeId": "u1"}),
+                    serde_json::json!({"id": "2", "assigneeId": null}),
+                ]
+            );
+        });
+        assert_eq!(app.flash.as_deref(), None);
+    }
+
+    /// A refused `⌘I` gives the issue back to whoever Linear has it with,
+    /// on the tab it came from.
+    #[test]
+    fn a_refused_cmd_i_puts_the_assignee_and_the_tab_back() {
+        let (mut app, _dir, mut rx) = staffed();
+        with_graphql_stub(refused_it, || {
+            run_linear(&mut app, &mut rx, |app| {
+                cursor_on(app, 1);
+                press(app, cmd('i'));
+                press(app, plain(KeyCode::Enter));
+                assert!(row_of(app, "2").mine);
+            });
+        });
+        let back = row_of(&app, "2");
+        assert_eq!(
+            (back.assignee.as_str(), back.assignee_id.as_str(), back.mine),
+            ("Bo", "u2", false)
+        );
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("couldn't assign ENG-2: not allowed")
+        );
+    }
+
+    /// An issue Linear named nobody for — no configured user, no team
+    /// members — opens no picker.
+    #[test]
+    fn cmd_i_with_nobody_to_assign_to_says_so() {
+        let (mut app, _dir, _rx) = moving();
+        press(&mut app, cmd('i'));
+        assert!(the_view(&app).prop_pick.is_none());
+        let said = app.flash.as_deref().unwrap_or_default().to_string();
+        assert!(
+            said.starts_with("Linear didn't say who ENG-1 can go to"),
+            "{said}"
+        );
+    }
+
+    /// Each property of an issue queues on its own: a `⌘P` goes out while
+    /// the `⌘S` before it is still at Linear, and both land.
+    #[test]
+    fn a_status_and_a_priority_edit_go_out_side_by_side() {
+        let (mut app, _dir, mut rx) = staffed();
+        with_graphql_stub(took_it, || {
+            one_thread().block_on(async {
+                move_to(&mut app, 0, "Done");
+                press(&mut app, cmd('p'));
+                press(&mut app, plain(KeyCode::Char('1')));
+                assert_eq!(app.linear_edits.moves.len(), 2);
+                assert!(
+                    app.linear_edits.moves.values().all(|m| m.sending.is_some()),
+                    "neither waits on the other"
+                );
+                for _ in 0..2 {
+                    let answer = rx.recv().await.expect("Linear's answer");
+                    land_answer(&mut app, answer);
+                }
+            });
+            let mut sent = edits_sent();
+            sent.sort_by_key(|v| v.get("priority").is_some());
+            assert_eq!(
+                sent,
+                [
+                    serde_json::json!({"id": "1", "stateId": "s3"}),
+                    serde_json::json!({"id": "1", "priority": 1}),
+                ]
+            );
+        });
+        let row = row_of(&app, "1");
+        assert_eq!((row.status.as_str(), row.priority), ("Done", 1));
+        assert!(app.linear_edits.moves.values().all(|m| m.landed.is_some()));
+        assert_eq!(app.flash.as_deref(), None);
     }
 
     /// A list that lands puts the cursor back on the issue it was on,
