@@ -1,0 +1,20 @@
+crates/orion-tui/assets/orion-icon.swift
+  s_f07bdde69690be::t_31414092483371 2-11,14-23,25-59,62-67,71-128,130-139,142-151
+  s_f07bdde69690be::t_8863d5ee15c21d 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ede9aa263831184fe1f09cbcdd3ef524b25f574",
+  "prompts": {},
+  "sessions": {
+    "s_f07bdde69690be": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "78e31d7d-7f1d-4728-8b28-d33849b02041",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
