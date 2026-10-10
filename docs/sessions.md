@@ -759,8 +759,18 @@ orion gathers; a model writes. Opening the modal fetches every pull request merg
 its description (the PULL REQUESTS MODAL's merged list carries titles, and a review is written from
 what a pull request says it does), a page of 100 at a time until the week is covered. The done
 issues and ticked todos come from the lists already in hand. `Enter` then puts all of it in one
-prompt and sends it through the `claude` command's print mode with no tools: text in, text out. No
-session starts, nothing runs in a checkout, and there is nothing to tidy up after. A very large
+prompt and sends it through a Claude account's print mode with no tools: text in, text out. No
+session starts, nothing runs in a checkout, and there is nothing to tidy up after.
+
+The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: your
+default agent's (Settings → Agents) when that is a Claude account, the one Settings → Review →
+**Review account** names when you pick one there, and otherwise the first Claude account that is
+switched on. It runs as that account's own CLI with that account's config dir, so the ask lands on
+that sign-in and that account's usage. Compose says which on its **Via** line, as Claude accounts
+names it — `Work (a@b.co)`, or `Work (not signed in)` — and refuses to send, saying why, when no
+Claude account is on or its CLI is not on your PATH. An account that reads as not signed in is still
+tried: that record only knows a browser sign-in, and one on an API key answers all the same; one that
+cannot answer says so itself, and Compose shows what it said. A very large
 pull request — a feature branch merged in one go — sends far more of its description than an
 ordinary one, since its commit list is all the description it has; one that only moves a standing
 branch into `main` is marked a release and left out.
@@ -777,7 +787,7 @@ were merged and not listed — is orion's own subtraction, so it is exact.
 
 Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project, with what
 each was written from beside it. The **Note** typed on Compose is kept per project, so what matters
-there is said once. It needs the `claude` command on your PATH and uses its own sign-in.
+there is said once.
 
 ## TODOS
 

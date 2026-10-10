@@ -10,9 +10,10 @@
 //!   issues and the ticked todos come from the lists the app already
 //!   holds ([`gather`]).
 //! * **Writing is a model's, in one ask.** [`prompt`] puts everything in
-//!   one text and [`write`] sends it through the `claude` command's print
-//!   mode with no tools: nothing runs in a checkout, no session appears on
-//!   the grid, and there is nothing to tidy up after. Measured on a week
+//!   one text and [`write`] sends it through the print mode of a Claude
+//!   account orion runs — the default agent's, or the **Review account**
+//!   row's ([`account`]) — with no tools: nothing runs in a checkout, no
+//!   session appears on the grid, and there is nothing to tidy up after. Measured on a week
 //!   of 162 pull requests: under a minute, where an agent session that
 //!   fetched for itself took over two.
 //! * **Counting is orion's again.** The model is told to list what earns
@@ -786,11 +787,47 @@ pub struct Reply {
     pub cost: Option<f64>,
 }
 
-/// Send `prompt` to `model` at `effort` through the `claude` command's
-/// print mode, with no tools: text in, text out. The failure is the one
-/// line worth showing — the command missing, not signed in, timed out.
-pub async fn write(prompt: String, model: String, effort: String) -> Result<Reply, String> {
-    let mut cmd = tokio::process::Command::new("claude");
+/// The Claude account a review is written through, as [`write`] runs it:
+/// one of the accounts orion runs sessions on — its own program, with the
+/// config dir that pins it — run directly, as the sign-in modal runs
+/// `claude auth`. A shell alias for the program is not followed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Account {
+    /// The account's own CLI: `claude`, or what its `harnesses` row names.
+    pub program: String,
+    /// Its environment on top of orion's — the `CLAUDE_CONFIG_DIR` that
+    /// pins an extra account to its own sign-in.
+    pub env: Vec<(String, String)>,
+    /// `Work (a@b.co)`, or `Work (not signed in)`: what Compose and the
+    /// Writing panel call it. Being signed out is said, never refused on:
+    /// the record only knows a browser sign-in, and an account on an API
+    /// key answers all the same. One that cannot answer says so itself.
+    pub label: String,
+}
+
+/// The account `cfg` writes reviews through (`Config::review_account`);
+/// None with no Claude account switched on.
+pub fn account(cfg: &crate::config::Config) -> Option<Account> {
+    let entry = cfg.review_account()?;
+    Some(Account {
+        program: entry.program.trim().to_string(),
+        env: entry.launch_env(),
+        label: entry.display_label().to_string(),
+    })
+}
+
+/// Send `prompt` to `model` at `effort` through `account`'s CLI in print
+/// mode, with no tools: text in, text out, under that account's sign-in.
+/// The failure is the one line worth showing — the command missing, not
+/// signed in, timed out.
+pub async fn write(
+    prompt: String,
+    model: String,
+    effort: String,
+    account: Account,
+) -> Result<Reply, String> {
+    let mut cmd = tokio::process::Command::new(&account.program);
+    cmd.envs(account.env.iter().map(|(name, value)| (name, value)));
     cmd.args([
         "-p",
         "--model",
@@ -1073,6 +1110,8 @@ pub struct Meta {
     pub scope: Scope,
     /// Unix seconds.
     pub written_at: i64,
+    /// The Claude account it was written through, as it was called then.
+    pub account: String,
     pub model: String,
     pub effort: String,
     pub secs: u64,
@@ -1194,6 +1233,8 @@ pub struct Pending {
     pub scope: Scope,
     pub material: Material,
     pub people: Vec<(String, String, String)>,
+    /// The Claude account writing it, by the name Compose showed.
+    pub account: String,
     pub model: String,
     pub effort: String,
     pub started: Instant,
@@ -1344,6 +1385,7 @@ fn land_written(app: &mut App, id: u64, result: Result<Reply, String>) {
         to: to.format("%Y-%m-%d").to_string(),
         scope: pending.scope,
         written_at: pending.asked,
+        account: pending.account,
         model: pending.model,
         effort: pending.effort,
         secs: pending.started.elapsed().as_secs(),
@@ -1651,14 +1693,25 @@ fn submit(app: &mut App) {
             "GitHub could not be asked for the week — Enter tries again, or untick the pull requests to write without them",
         );
     }
+    // The account it is written through: one of orion's own. A unit test
+    // starts nothing, so it needs none.
+    let cfg = crate::config::Config::load();
+    let through = account(&cfg);
     if app.week_review.tx.is_some() {
         if orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some() {
             return notice(app, "off while ORION_AGENT_CMD stands in for the agents");
         }
-        if !crate::config::program_installed("claude") {
-            return notice(app, "needs the claude command, which is not on your PATH");
+        let Some(through) = &through else {
+            return notice(
+                app,
+                "no Claude account is switched on — Settings → Agents, or Claude accounts in the palette",
+            );
+        };
+        if !crate::config::program_installed(&through.program) {
+            return notice(app, &format!("{} is not on your PATH", through.program));
         }
     }
+    let through = through.unwrap_or_default();
     let now = orion_core::clock::now_secs() as i64;
     let material = gather(app, &project, scope, picks, now);
     if material.is_empty() {
@@ -1679,13 +1732,13 @@ fn submit(app: &mut App) {
         Where::All => "all projects".to_string(),
     };
     let text = prompt(&material, &people, scope, &label, &note, now);
-    let (model, effort) = crate::config::Config::load().review_launch();
+    let (model, effort) = cfg.review_launch();
     app.week_review.next_id += 1;
     let id = app.week_review.next_id;
     let task = app.week_review.tx.clone().map(|tx| {
-        let (model, effort) = (model.clone(), effort.clone());
+        let (model, effort, through) = (model.clone(), effort.clone(), through.clone());
         tokio::spawn(async move {
-            let result = write(text, model, effort).await;
+            let result = write(text, model, effort, through).await;
             let _ = tx.send(Answer::Written { id, result });
         })
         .abort_handle()
@@ -1696,6 +1749,7 @@ fn submit(app: &mut App) {
         scope,
         material,
         people,
+        account: through.label,
         model,
         effort,
         started: Instant::now(),
@@ -2410,7 +2464,8 @@ fn draw_compose(
     let (from, to) = period(now);
     let rule = |name: &str| crate::ui::section_rule(name, th.muted, Vec::new(), width, th);
     let label = |name: &str| Span::styled(format!("{name:<7}"), Style::default().fg(th.muted));
-    let (model, effort) = crate::config::Config::load().review_launch();
+    let cfg = crate::config::Config::load();
+    let (model, effort) = cfg.review_launch();
     let mut out: Vec<(Option<Row>, Line<'static>)> = Vec::new();
     let period = period_label(from, to, false);
     let last = format!("Last {DAYS} days");
@@ -2480,6 +2535,17 @@ fn draw_compose(
             Span::styled(" · ", Style::default().fg(th.dim)),
             Span::styled(format!("{effort} effort"), Style::default().fg(th.text)),
         ]),
+    ));
+    let through = match account(&cfg) {
+        Some(through) => Span::styled(
+            truncate(&through.label, width.saturating_sub(2 + 7 + 1)),
+            Style::default().fg(th.text),
+        ),
+        None => Span::styled("no Claude account is on", Style::default().fg(th.warn)),
+    };
+    out.push((
+        None,
+        Line::from(vec![Span::raw("  "), label("Via"), through]),
     ));
     out.push((None, Line::default()));
     out.push((Some(Row::Note), Line::default()));
@@ -2633,6 +2699,10 @@ fn writing_lines(app: &App, pending: &Pending, width: usize, th: Theme) -> Vec<L
     let glyph = crate::app::spinner_frame(app.spin_phase());
     let took = format!("{}s", pending.started.elapsed().as_secs());
     let head = format!("Writing your week · {} · {}", pending.model, pending.effort);
+    let through = match pending.account.as_str() {
+        "" => String::new(),
+        name => format!("through {name}"),
+    };
     let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("{glyph} "), Style::default().fg(th.warn)),
@@ -2669,8 +2739,9 @@ fn writing_lines(app: &App, pending: &Pending, width: usize, th: Theme) -> Vec<L
     let notes = [
         "You can close this. The footer says when the review is ready, and this window opens on it.",
         "Nothing runs in your checkout and no session is started: the descriptions go to the model, and text comes back.",
+        through.as_str(),
     ];
-    for note in notes {
+    for note in notes.into_iter().filter(|note| !note.is_empty()) {
         for part in wrap(note, width) {
             lines.push(Line::from(Span::styled(
                 part,
@@ -3085,6 +3156,56 @@ AL Ada L · GR Grace
         assert_eq!(finish(&through, &material), all);
     }
 
+    /// A review is written through a Claude account orion runs: the
+    /// default agent's, with the config dir that pins it; the **Review
+    /// account** row's when one is picked; and, where the default agent is
+    /// not Claude at all, the first Claude account that is on.
+    #[test]
+    fn a_review_is_written_through_one_of_orions_claude_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            format!(
+                r#"{{"claude_enabled": true, "codex_enabled": true, "quick_prompt_kind": "claude-work",
+                     "claude_accounts": [{{"id": "claude-work", "name": "Work", "config_dir": "{}"}}]}}"#,
+                work.display()
+            ),
+        )
+        .unwrap();
+        crate::config::with_config_path(config, || {
+            let pinned = |a: &Account| {
+                a.env
+                    .iter()
+                    .find(|(name, _)| name == orion_core::env::CLAUDE_CONFIG_DIR)
+                    .map(|(_, dir)| dir.clone())
+            };
+            let mut cfg = crate::config::Config::load();
+            let through = account(&cfg).expect("the default agent's account");
+            assert_eq!(through.program, "claude");
+            assert_eq!(pinned(&through), Some(work.display().to_string()));
+            assert!(through.label.starts_with("Work"), "{}", through.label);
+
+            cfg.review_account = "claude".into();
+            let through = account(&cfg).expect("the one picked");
+            assert_eq!(pinned(&through), None, "built-in Claude, its own sign-in");
+
+            cfg.review_account = "gone".into();
+            assert!(
+                pinned(&account(&cfg).unwrap()).is_some(),
+                "back to the default agent's"
+            );
+
+            cfg.review_account.clear();
+            cfg.quick_prompt_kind = "codex".into();
+            assert_eq!(
+                account(&cfg).expect("a Claude account that is on").program,
+                "claude"
+            );
+        });
+    }
+
     /// A release is one standing branch moved into another, never a
     /// feature branch merged into `main`.
     #[test]
@@ -3389,7 +3510,13 @@ AL Ada L · GR Grace
         };
         let text = prompt(&material, &people, scope, "live", "", now);
         let started = Instant::now();
-        let reply = write(text.clone(), MODELS[0].into(), EFFORTS[0].into())
+        let mut cfg = crate::config::Config::load();
+        if let Some(id) = orion_core::env::non_empty("ORION_WEEK_REVIEW_ACCOUNT") {
+            cfg.review_account = id;
+        }
+        let through = account(&cfg).expect("a Claude account is on");
+        println!("through {} ({})", through.label, through.program);
+        let reply = write(text.clone(), MODELS[0].into(), EFFORTS[0].into(), through)
             .await
             .expect("the model answered");
         let review = finish(&reply.text, &material);
