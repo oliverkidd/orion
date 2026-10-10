@@ -286,6 +286,15 @@ pub(crate) enum Command {
     /// terminal, with `i` to install what's missing. The palette's Run
     /// setup and Settings → Tools → Setup open the same thing.
     Setup,
+    /// Open orion as a Mac app of its own.
+    ///
+    /// Makes Orion.app in ~/Applications on first use — a copy of the
+    /// Ghostty on this Mac under orion's name and icon — and opens orion
+    /// in it: in the Dock, Launchpad and Spotlight from then on. The app
+    /// is a window onto this same orion, so sessions keep running and
+    /// projects, settings and history stay where they are; `orion` in a
+    /// terminal goes on working beside it. macOS only, and needs Ghostty.
+    App,
     /// Check what orion needs on this machine.
     ///
     /// One line each for git, gh and its sign-in, the File editor and what
@@ -327,10 +336,10 @@ pub(crate) enum Command {
     /// already that code and can keep its sessions.
     #[command(hide = true, name = "_daemon-fingerprint")]
     DaemonFingerprint,
-    /// Installer hook: open orion in a new Ghostty window, its keybinds
-    /// written into Ghostty's config first (see install.sh).
+    /// Installer hook: what `orion app` does, under the name every
+    /// install.sh has called (see install.sh).
     #[command(hide = true, name = "_open-in-ghostty")]
-    OpenInGhostty,
+    OpenApp,
 }
 
 const ADD_EXAMPLES: &str = "\

@@ -383,8 +383,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   one under the header's cursor while it has the keys (behind a confirm), closes it and the grid
   moves to the tab that slides into its place. Closing a tab
   changes nothing about the project — its sessions run on. Closing the last tab puts orion back on
-  the splash it opens on before there is any project, where `+` lists every project, `Enter` opens
-  the repo orion was started in and `⌘K`'s last row another folder; the splash stays across a restart. The
+  the splash it opens on before there is any project, where `Enter` begins — it opens the repo orion
+  was started in — `+` lists every project and `⌘K`'s last row opens another folder; the splash stays
+  across a restart. The
   tabs are remembered across restarts. Each tab carries its project's STATUS MARKS right of the name — the
   mark a session in each state wears, carrying that state's count and no word at all: crimson `●`
   waiting on you, crimson `✕` crashed, `●` in the done color for an unread finish, the gold spinner

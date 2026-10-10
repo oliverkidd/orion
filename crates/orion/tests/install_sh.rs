@@ -42,7 +42,9 @@ impl Sandbox {
             std::fs::create_dir_all(sandbox.path(sub)).unwrap();
         }
         // The few programs the step itself runs.
-        for tool in ["sh", "chmod", "mkdir", "uname"] {
+        for tool in [
+            "sh", "chmod", "mkdir", "uname", "sed", "tail", "grep", "mktemp", "rm",
+        ] {
             let real = ["/bin", "/usr/bin"]
                 .iter()
                 .map(|dir| Path::new(dir).join(tool))
@@ -113,11 +115,16 @@ esac"##,
     }
 
     /// `call` after the script's functions, in `shell`, with nothing but
-    /// the sandbox on PATH.
+    /// the sandbox on PATH — and Ghostty taken as installed, which the
+    /// script reads off /Applications, a folder no sandbox reaches; a
+    /// `call` after a Mac without it says so itself.
     fn run(&self, shell: &str, call: &str, env: &[(&str, &str)]) -> Output {
         Command::new(shell)
             .arg("-c")
-            .arg(format!("{}\n{call}\n", functions()))
+            .arg(format!(
+                "{}\nhave_ghostty() {{ return 0; }}\n{call}\n",
+                functions()
+            ))
             .env_clear()
             .env("PATH", self.path("bin"))
             .env("HOME", self.path("home"))
@@ -279,4 +286,133 @@ fn the_step_can_be_skipped() {
     let out = sandbox.run("/bin/sh", "parse_args --deps", &[]);
     assert!(!out.status.success());
     assert!(said(&out).contains("unknown option: --deps"));
+}
+
+/// A first install at a Mac with Ghostty opens orion as its app, whatever
+/// terminal the installer ran in; an update, ssh, tmux, `--no-launch` and
+/// Linux leave it to `orion` typed by hand.
+#[test]
+fn a_first_install_at_a_mac_opens_orion_as_its_app() {
+    // Ghostty is looked for in /Applications, which no sandbox reaches.
+    let open = |had: &str| {
+        format!(
+            r#"have_ghostty() {{ return 0; }}; parse_args; had_orion={had}; open_app "$BIN/orion""#
+        )
+    };
+    let opened = |system: &str, call: &str, env: &[(&str, &str)]| {
+        let sandbox = Sandbox::new();
+        sandbox
+            .system(system)
+            .stub("orion", r#"echo "orion $*" >> "$LOG""#);
+        let out = sandbox.run("/bin/sh", call, env);
+        assert!(out.status.success(), "{}", said(&out));
+        sandbox.log()
+    };
+    for terminal in [
+        ("TERM_PROGRAM", "Apple_Terminal"),
+        ("TERM_PROGRAM", "ghostty"),
+    ] {
+        assert_eq!(
+            opened("Darwin", &open(""), &[terminal]),
+            "orion _open-in-ghostty\n",
+            "{terminal:?}"
+        );
+    }
+    assert_eq!(opened("Darwin", &open("1"), &[]), "", "an update");
+    assert_eq!(opened("Linux", &open(""), &[]), "", "not a Mac");
+    for skip in [
+        ("SSH_TTY", "/dev/ttys001"),
+        ("TMUX", "/tmp/tmux-501/default,1,0"),
+        ("ORION_NO_LAUNCH", "1"),
+        ("ORION_UPGRADE_HANDOFF", "1"),
+    ] {
+        assert_eq!(opened("Darwin", &open(""), &[skip]), "", "{skip:?}");
+    }
+}
+
+/// A Mac without Ghostty gets it for Orion.app: Homebrew's cask where
+/// there is a Homebrew, else the newest disk image Ghostty's own feed
+/// lists, copied in only when the app inside is signed by Ghostty's team.
+/// Over ssh, in tmux and on Linux nothing is fetched.
+#[test]
+fn a_mac_without_ghostty_gets_it_from_homebrew_or_its_own_download() {
+    const MISSING: &str = "have_ghostty() { return 1; }; ensure_ghostty";
+    let sandbox = Sandbox::new();
+    sandbox.system("Darwin").brew();
+    let out = sandbox.run("/bin/sh", MISSING, &[]);
+    assert_eq!(
+        sandbox.log(),
+        "brew install --cask ghostty\n",
+        "{}",
+        said(&out)
+    );
+
+    let download = |team: &str| {
+        let sandbox = Sandbox::new();
+        sandbox
+            .system("Darwin")
+            .stub(
+                "curl",
+                r#"echo "curl $*" >> "$LOG"
+case "$*" in
+*appcast.xml*)
+    echo '<enclosure url="https://release.files.ghostty.org/1.3.0/Ghostty.dmg" length="1"/>'
+    echo '<enclosure url="https://release.files.ghostty.org/1.3.1/Ghostty.dmg" length="1"/>' ;;
+esac"#,
+            )
+            .stub(
+                "hdiutil",
+                r#"echo "hdiutil $1" >> "$LOG"
+if [ "$1" = attach ]; then mkdir -p "$6/Ghostty.app"; fi"#,
+            )
+            .stub(
+                "codesign",
+                &format!(r#"if [ "$1" = -dv ]; then echo "TeamIdentifier={team}" >&2; fi"#),
+            )
+            .stub("ditto", r#"echo "ditto ${1##*/} -> ${2##*/}" >> "$LOG""#);
+        let out = sandbox.run("/bin/sh", MISSING, &[]);
+        assert!(out.status.success(), "{}", said(&out));
+        (sandbox.log(), said(&out))
+    };
+    let (log, said_ok) = download("24VZTF6M5V");
+    let ran: Vec<&str> = log.lines().collect();
+    assert_eq!(
+        ran[0],
+        "curl -fsSL https://release.files.ghostty.org/appcast.xml"
+    );
+    assert!(
+        ran[1].starts_with("curl -fsSL https://release.files.ghostty.org/1.3.1/Ghostty.dmg -o "),
+        "the newest image: {log}"
+    );
+    assert_eq!(
+        ran[2..],
+        [
+            "hdiutil attach",
+            "ditto Ghostty.app -> Ghostty.app",
+            "hdiutil detach"
+        ],
+        "{said_ok}"
+    );
+    assert!(!said_ok.contains("warning"), "{said_ok}");
+
+    let (log, said_bad) = download("SOMEONEELSE");
+    assert!(
+        !log.contains("ditto"),
+        "an app signed by anyone else is left on the image: {log}"
+    );
+    assert!(
+        said_bad.contains("warning: couldn't install Ghostty"),
+        "{said_bad}"
+    );
+
+    for (system, env) in [
+        ("Darwin", ("SSH_TTY", "/dev/ttys001")),
+        ("Darwin", ("TMUX", "x")),
+        ("Linux", ("X", "")),
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.system(system).brew();
+        sandbox.run("/bin/sh", MISSING, &[env]);
+        assert_eq!(sandbox.log(), "", "{system} {env:?}");
+    }
 }

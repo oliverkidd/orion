@@ -67,10 +67,10 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `outside_editor` | string | `"auto"` | Tools | **Open in app**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, the skills browser, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode`, `sublime`, `zed`, or `default` (macOS `open`, whatever the system opens that kind of file with). `auto` is the first of Cursor, VS Code, Sublime Text and Zed installed, else the system default; the row shows which (`auto · Cursor`) and its hint lists the ones installed. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`, `Zed.app/Contents/MacOS/cli`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` and `zed` with `<file>:<line>`); `open -a` and the system default open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
 | `link_env_files` | bool | `true` | General | DAEMON-owned ENV LINKS (**Link .env files**): every new WORKTREE, one an agent moves into, and one made outside orion that the sync adopts gets the main checkout's git-ignored `.env*` files (`.env`, `.env.local`, `apps/web/.env.development`, …) as symlinks at the same paths, so each checkout runs against the clone's secrets and local settings. A tracked file (a committed `.env.example`) and anything under `node_modules` are left alone, and a path that already exists in the worktree is never replaced. Off links nothing new; links already made stay. |
 | `worktree_containers` | string | `"off"` | General | DAEMON-owned WORKTREE CONTAINERS (**Worktree containers**): what deleting a worktree does to the docker compose projects started in it — `off` leaves them, `stop` stops them, `remove` runs `docker compose down` (volumes kept), `remove+volumes` removes their volumes too. Matched by the directory compose recorded on each container, never by name; a value this build doesn't know is `off`. See [Worktree containers](#worktree-containers). |
-| `outside_terminal` | string | `"ghostty"` | Tools | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
-| `ghostty_keybinds` | bool | `true` | Tools | GHOSTTY KEYBINDS: keep a marked block in Ghostty's config that releases every ⌘ chord orion's keymap uses — your rebinds included — so none of them is swallowed by Ghostty. See [Outside terminal and Ghostty keybinds](#outside-terminal-and-ghostty-keybinds). |
-| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP. In a terminal that sends no ⌘ — Terminal.app on a Mac, outside tmux and ssh — it starts on the GHOSTTY STEP: `Enter` reopens orion in a new Ghostty window in the same folder, its keybinds already in Ghostty's config, and setup carries on there (with Ghostty missing, `Enter` installs it first, or opens its download page without Homebrew); `→` stays with the `^` twins. Then: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); autofix; then what was chosen, and the keys to press next. The outside terminal and the Ghostty keybinds are on Settings → Tools. `i` installs a missing CLI or editor ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
-| `setup_version` | number | `0` | — (config.local.json) | The SETUP VERSION this machine last went through. A release that adds a step to **Orion setup** bumps it; on the next launch an onboarded machine on an older version sees only the new steps that have something to offer it (a terminal that sends no ⌘ gets the Ghostty step), then Ready — and with nothing to offer, the version is stamped quietly. 0 on a config from before the key, read as 1. Setup opens again in full from the palette's **Run setup**, Settings → Tools → **Setup**, or `orion setup`. |
+| `outside_terminal` | string | `"ghostty"` | Tools | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. |
+| `ghostty_keybinds` | bool | `true` | — (retired) | Through 1.6, **Ghostty keybinds** (Settings → Tools): on, orion kept a marked block in your Ghostty config unbinding the ⌘ chords its keymap used. Nothing writes that block now, and the first launch takes it out: [Orion.app](#orionapp) carries its own key table. Still loaded and written back as stored, so an older build sharing the file keeps the choice its user made. |
+| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP. On a Mac — outside tmux and ssh, and anywhere but in Orion.app already — it starts on the APP STEP, on a Mac that has the Ghostty the app is made from: `Enter` makes [Orion.app](#orionapp) and reopens orion in it in the same folder, and setup carries on there; `→` stays in this terminal with the `^` twins. Then: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); autofix; then what was chosen, and the keys to press next. The outside terminal is on Settings → Tools. `i` installs a missing CLI or editor ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
+| `setup_version` | number | `0` | — (config.local.json) | The SETUP VERSION this machine last went through. A release that adds a step to **Orion setup** bumps it; on the next launch an onboarded machine on an older version sees only the new steps that have something to offer it (version 4's is the App step: every Mac set up before Orion.app existed is offered the move once), then Ready — and with nothing to offer, the version is stamped quietly. 0 on a config from before the key, read as 1. Setup opens again in full from the palette's **Run setup**, Settings → Tools → **Setup**, or `orion setup`. |
 | `seen_version` | string | `""` | — (config.local.json) | The orion version this machine last saw **What's new** for. On the first launch of a newer build — after `orion upgrade` or the footer's update — setup opens as **What's new in Orion**: every release since this one, stacked newest first however many the upgrade jumped, each with its date and what its commits said; then the setup steps added since (`setup_version`) and Ready, or with none missed, the notes alone. Closing it stamps this build's version; it is never lowered, so an older or dev build in between shows nothing twice. A first run stamps it without showing notes. Empty on a config from before the key: read as the release that brought its `setup_version` (2 → 1.0.17, 3 → 1.0.21), or as nothing seen. The notes are baked in at build time from git — each release is the commits between its `v*` tag and the one before (`crates/orion-tui/build.rs`) — so a build without git or tags has none, and setup carries on. |
 | `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal (or the MARKDOWN PAGE), so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
 | `ssh_sync_config` | bool | `true` | General | SETTINGS SYNC: `orion ssh` and `orion tunnel` send this machine's `config.json` and AGENT PRESETS along, and the remote orion merges them into its own settings before it starts — so a remote is set up the way this machine is on every connect, without reconfiguring it. Its `config.local.json` still wins there, and its projects, sessions and SSH HOSTS FILE stay its own. `--no-sync-config` leaves the settings behind for one connection. See [Backup, restore and other machines](#backup-restore-and-other-machines). |
@@ -156,84 +156,38 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `usage_cursor` | bool | `true` | Sessions | ACCOUNT USAGE reads the `cursor-agent` login's monthly allowance every 15 minutes, from Cursor's dashboard endpoint. Shown while `cursor-agent` is installed and the Cursor harness is on. On a Mac the first read may ask to let `security` read the `cursor-access-token` Keychain item. |
 | `prewarm_sessions` | bool | `true` | Sessions | DAEMON-owned SESSION PREWARM: boot a WORKTREE's dead sessions when your selection rests on it, so attaching shows an already-booted screen instead of a booting shell. **Costs idle shell/CLI processes for sessions you may never open.** Off — for a machine with less memory to spare — landing on a worktree boots nothing: a session forks only when your cursor lands on its row or you attach to it, one at a time; sessions already up stay until the IDLE REAPER takes them. |
 
-### Outside terminal and Ghostty keybinds
+### Ghostty's keys in Orion.app
 
 Ghostty claims a lot of ⌘ chords for itself and never passes them to the program inside it — `⌘K`
-clears the screen, `⌘N` opens a window, `⌘⇧P` is its own palette, `⌘F` searches, `⌘J` scrolls to the
-selection. So with `ghostty_keybinds` on (the default), orion keeps a block in Ghostty's config that
-releases **every ⌘ chord its keymap answers to** — derived from the keymap itself, your
-rebinds in `keybindings` included, so a chord orion uses can never be swallowed by Ghostty. A rebind
-in Settings → Hotkeys rewrites the block at once: the new ⌘ chord is released and the one it replaced
-goes back to Ghostty. A few chords are never taken whatever the keymap says: `⌘C`, `⌘V`, `⌘Q`, `⌘W`,
-`⌘T`, `⌘⇧T`, `⌘Enter` and the tab and window keys (`⌘1`–`⌘9`, `⌘⇧W`, …) stay Ghostty's. `⌘C` is
-Ghostty's only while it has a selection of its own (a ⇧-drag): the block binds it
-`performable:super+c=copy_to_clipboard:mixed`, so with nothing selected in Ghostty it reaches orion,
-where a typed field copies its selection, the editor its own and a session pane its drag selection. The
-BUILT-IN EDITOR's chords are released whatever the keymap says ([Keys](keys.md#the-built-in-editor)):
-`⌘Z`, `⌘⇧Z`, `⌘D`, `⌘A`, `⌘X`, and the Mac editing chords — `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓`, which
-were Ghostty's jump to prompt, `⌥⌘↑`/`⌥⌘↓`, which were its split up and down (`⌥⌘←`/`⌥⌘→` stay its
-split left and right), and `⌘⇧L`. `⌘←`/`⌘→` are not taken: Ghostty types `^A`/`^E` for them, which a
-shell outside orion still needs and the editor reads as the line's ends. Every typed field takes three
-of them too: `⌘A` selects its text, `⌘X` cuts the selection and `⇧⌘↑`/`⇧⌘↓` select to its ends
-([Keys](keys.md#typed-fields)).
-Its other selection chords need no line — Ghostty binds no `⇧⌘←`/`⇧⌘→` or `⌥⇧←`/`⌥⇧→`, and its
-`⇧←`/`⇧→`/`⇧↑`/`⇧↓`, `⇧Home`/`⇧End` binds only act on a selection made in Ghostty itself, so they
-reach orion as they are. With the default keymap the block reads:
+clears the screen, `⌘N` opens a window, `⌘T` a tab, `⌘⇧P` is its own palette, `⌘F` searches. In
+[Orion.app](#orionapp) the program inside is always orion, so the app's own config clears Ghostty's
+whole key table (`keybind = clear`) and binds back only what a Mac app should still answer to
+itself:
 
-```
-# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>
-keybind = super+k=unbind
-keybind = super+e=unbind
-keybind = super+r=unbind
-keybind = super+l=unbind
-keybind = super+n=unbind
-keybind = super+/=unbind
-keybind = super+y=unbind
-keybind = super+shift+/=unbind
-keybind = super+.=csi:46;9u
-keybind = super+p=unbind
-keybind = super+shift+f=unbind
-keybind = super+b=unbind
-keybind = super+s=unbind
-keybind = super+j=unbind
-keybind = super+f=unbind
-keybind = super+g=unbind
-keybind = super+,=unbind
-keybind = super+shift+p=unbind
-keybind = super+o=unbind
-keybind = super+z=unbind
-keybind = super+shift+z=unbind
-keybind = super+d=unbind
-keybind = super+a=unbind
-keybind = super+x=unbind
-keybind = super+arrow_up=unbind
-keybind = super+arrow_down=unbind
-keybind = super+shift+arrow_up=unbind
-keybind = super+shift+arrow_down=unbind
-keybind = super+alt+arrow_up=unbind
-keybind = super+alt+arrow_down=unbind
-keybind = super+shift+l=unbind
-# <<< orion keybinds <<<
-```
+| Key | Stays the app's |
+|---|---|
+| `⌘C` | copy — only while Ghostty has a selection of its own (a ⇧-drag); with none it reaches orion, and a text field copies its SELECTION, the editor its own, the session pane its drag selection |
+| `⌘V` | paste |
+| `⌘Q` | quit the app (sessions keep running in the daemon) |
+| `⌘⇧W` | close the window |
+| `⌘Enter`, `⌃⌘F` | full screen |
+| `⌘=`, `⌘+`, `⌘-`, `⌘0` | text size |
+| `⌘←`, `⌘→`, `⌥←`, `⌥→` | typed as the keys a shell reads, as Ghostty types them anywhere: the line's start and end (`^A`, `^E`), a word back and on (`⎋b`, `⎋f`) — what orion's fields, its editor and every agent's prompt expect |
 
-— one line per ⌘ chord, in the order the actions are listed and the editor's after them, Ghostty's spelling (`⌘?` is the key it is
-typed with, `super+shift+/`). A chord macOS keeps for itself never reaches Ghostty to be released at
-all: `⇧⌘/` opens every app's Help menu, which is why **Cycle effort** (`cycle_effort`) leads with `⌘Y`
-(`^Y` its twin) and keeps `⇧⌘/` only behind it. `⌘.` is the one chord bound rather than released: macOS
-reads it as Cancel — the command Escape sends — in every app, so a bare `unbind` let it through as an
-Escape and **Select worktree** closed the new-agent box it was pressed in. `csi:46;9u` makes Ghostty
-send the KITTY PROTOCOL's own spelling of `⌘.` instead (`ESC [46;9u`: the `.`, with ⌘), and orion reads
-an Escape still carrying ⌘ as `⌘.` too, for a terminal without the line. It is written at startup, whenever the Ghostty rows in Settings change
-and whenever the keymap does, only on a local Mac and only while Ghostty is in use — orion running
-inside it, or `outside_terminal` set to `ghostty` with Ghostty installed. The file is the first
-non-empty one of `~/Library/Application Support/com.mitchellh.ghostty/config.ghostty`, `…/config`,
-`$XDG_CONFIG_HOME/ghostty/config.ghostty` and `…/config` (`~/.config` when `XDG_CONFIG_HOME` is
-unset), else the first. Everything outside the block is yours and is never touched, and a block that
-already says the right thing is not rewritten. Ghostty reads its config at launch and on its own
-reload (`⌘⇧,`); when orion changes the block from inside Ghostty 1.2 or later it sends that Ghostty
-`SIGUSR2`, which reloads it, and otherwise the footer says a reload is needed. `ORION_GHOSTTY_CONFIG` names another file, or
-`off` to never write one. Turning the setting off stops orion writing; the block already there stays
-until you delete it.
+Every other chord reaches orion as the key it is, whatever your keymap or a rebind says — `⌘T`,
+`⌘N`, `⌘D`, `⌘W`, `⌘1`–`⌘9` and the rest of Ghostty's tab, split and window keys included — and
+Settings → Hotkeys marks a rebind onto one of the kept keys. `⌘.` is the one chord macOS takes
+before a terminal can send it (it is Cancel, Escape's twin, in every Mac app), so the app's config
+binds it to the bytes the kitty protocol spells it with (`csi:46;9u`); orion also reads an Escape
+still carrying ⌘ as `⌘.`, for a terminal without that line.
+
+Nothing is written into your own Ghostty config. Releases through 1.6 kept a marked block of
+`unbind` lines there (`# >>> orion keybinds … >>>` to `# <<< orion keybinds <<<`), rewritten on
+every rebind; the first launch of a newer orion takes that block out and leaves the rest of the file
+as it was, and Ghostty's own ⌘ keys are its own again from its next start. `ORION_GHOSTTY_CONFIG`
+names another file to clean, or `off` to leave every file alone. So an orion started in a Ghostty
+window of your own — or in Terminal.app, which never sends ⌘ — answers to the `^` twins (`^K`,
+`^N`, `^P`), and Help and the footers print those there.
 
 ### Installing editors and agent CLIs
 
@@ -244,16 +198,52 @@ fresh-editor`; without Homebrew, on Linux, the quick-install script fresh's READ
 universal build linked into the install dir, and on a Mac — or should that fail — the one micro's
 README links, run in the install dir); and gh, which pull
 requests and issues are read with (`brew install gh`, else a pointer to its install page); and on a
-Mac whose terminal sends no ⌘, Ghostty (`brew install --cask ghostty`, else a pointer to
-ghostty.org/download). It says nothing about what is already there, and `--no-deps` (`curl … | sh -s
+Mac, Ghostty, which Orion.app is made from (`brew install --cask ghostty`; without Homebrew, the
+newest disk image Ghostty's own update feed lists, copied into `/Applications` — or `~/Applications`
+when that can't be written — once the app inside is seen to be signed by Ghostty's team). It says nothing about what is already there, and `--no-deps` (`curl … | sh -s
 -- --no-deps`) or `ORION_NO_DEPS=1` skips the step.
 
-A first install on a Mac, from a terminal that sends no ⌘ (anything but Ghostty and kitty), then
-opens orion in a new Ghostty window, so setup starts where the ⌘ shortcuts work: orion's keybinds go
-into Ghostty's config first, so no reload is needed, and orion runs with the installer's PATH, the
-window falling back to your login shell when orion quits. The terminal the installer ran in can be
-closed. An update, `orion upgrade`, ssh or tmux, `--no-launch` or `ORION_NO_LAUNCH=1`, or no
-Ghostty, skips it.
+A first install on a Mac then opens orion as [Orion.app](#orionapp), so setup starts where the ⌘
+shortcuts work and orion is in the Dock from then on: orion's keybinds go into Ghostty's config
+first, so no reload is needed. The terminal the installer ran in can be closed. An update, `orion
+upgrade`, ssh or tmux, `--no-launch` or `ORION_NO_LAUNCH=1`, or no Ghostty, skips it — an orion
+that was here already is offered the move by its own setup instead.
+
+### Orion.app
+
+On a Mac orion can run as an app of its own: **Orion** in the Dock, Launchpad, Spotlight and ⌘-Tab
+under its constellation icon, one click to open it, and a second click that brings the window back
+rather than opening another. `orion app` opens it, and so do the installer on a first install and
+setup's App step.
+
+orion is drawn in a terminal, so the app is one: a copy of the Ghostty.app on this Mac, kept at
+`~/Applications/Orion.app` under orion's name, icon and bundle id (`dev.orion.app`) and signed ad
+hoc — made the first time it is opened, in about a second. It needs Ghostty installed to copy, and
+it reads your Ghostty config first, so your font and theme carry over, and then its own
+(`Orion.app/Contents/Resources/orion.conf`), which wins: the window is black to the edge and opaque,
+opens filling the screen, and shows the three window buttons and no title, and Ghostty's key table
+is cleared down to a few ([Ghostty's keys in Orion.app](#ghosttys-keys-in-orionapp)).
+
+**Nothing moves into the app.** It is a window onto the orion already here: it runs the installed
+`orion` binary, attaches to the same daemon and reads the same data dir. Sessions keep running
+through the move, projects, settings, accounts and history are where they were, and `orion` typed
+in a terminal goes on working beside it. Deleting `~/Applications/Orion.app` removes the app and
+nothing else.
+
+The app starts orion through your login shell (`$SHELL -l -i`), so the PATH your shell profile sets
+— the one your agents' CLIs are on — is the one orion gets; a click in the Dock has no other. From
+the Dock it starts in your home folder, from `orion app` or setup in the folder you were in.
+Quitting orion closes the app.
+
+Desktop notifications come from the app itself — its name, its icon, and a click that brings its
+window back — so macOS asks once whether Orion may send them. Outside the app they are posted with
+`osascript` on a Mac and `notify-send` elsewhere.
+
+The copy is rebuilt when the Ghostty it came from is updated, when `orion` is installed somewhere
+else, or when a newer orion gives it a different config or layout: by `orion app` when the app isn't running, or
+as orion quits inside it. Ghostty's own updater is off in the copy. macOS treats it as a new app,
+so whatever it once asked you to allow Ghostty — a folder such as Documents, notifications — it may
+ask again for "Orion", and once more after a rebuild.
 
 Inside orion, `i` on a row whose program isn't on PATH — first-run setup's Agents and Editor steps,
 every program row on Settings → Tools (**Outside terminal** for Ghostty, **File editor**, **Open in app**, git and gh), a
@@ -262,7 +252,7 @@ installs it, and `Enter` runs it in the editor modal, the installer's own output
 stops it), the footer reading `installing …` meanwhile. When it exits the modal stays, its title and
 the footer saying whether the program is here now, until `Enter`; the footer and the page or tab
 under the modal then keep the result. Ghostty counts as here once its app is in `/Applications` or
-`~/Applications`, and installing it from setup — `Enter` on the Ghostty step — makes it the outside
+`~/Applications`, and installing it from setup — `Enter` on the App step — makes it the outside
 terminal again. The rows read
 PATH as they draw. An
 installer that puts its program somewhere new and adds that to your shell profile leaves orion's
@@ -821,7 +811,7 @@ Knobs worth reaching for by hand:
 |---|---|---|
 | `ORION_LOG` | — | `RUST_LOG`-style tracing filter for both the DAEMON and the TUI. |
 | `ORION_EDITOR` | — | Editor command the file modals open, ahead of the `editor` setting. |
-| `ORION_GHOSTTY_CONFIG` | Ghostty's own config file | The Ghostty config file orion keeps its GHOSTTY KEYBINDS block in, or `off` to never write one. |
+| `ORION_GHOSTTY_CONFIG` | Ghostty's own config file | The Ghostty config file a newer orion takes an older one's keybind block out of, or `off` to leave every file alone. |
 | `ORION_CONFIG_FILE` | `<DATA DIR>/config.json` | Moves `config.json` alone — into a dotfiles checkout, say — leaving the database, logs and `config.local.json` in the DATA DIR. Give an absolute or `~/` path. The DAEMON reads it from its own environment, so after changing it run `orion kill` and relaunch. |
 
 Overrides for tests and parallel instances — real, but not things a normal install needs:

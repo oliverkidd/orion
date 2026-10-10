@@ -1418,20 +1418,20 @@ const CTRL_COLLISIONS: &[(char, &str)] = &[
 ];
 
 static CMD_SHOWN: AtomicBool = AtomicBool::new(false);
-static GHOSTTY_UNBOUND: AtomicBool = AtomicBool::new(false);
+static IN_ORION_APP: AtomicBool = AtomicBool::new(false);
 
-/// Ghostty has Orion's UNBINDS in its config (or the setting is on while
-/// running inside Ghostty), so those ⌘ chords are no longer painted ⚠.
-pub fn set_ghostty_unbound(unbound: bool) {
-    GHOSTTY_UNBOUND.store(unbound, Ordering::Relaxed);
+/// orion is running in Orion.app, whose Ghostty hands it every ⌘ chord but
+/// the few it keeps, so those chords are no longer painted ⚠.
+pub fn set_in_orion_app(unbound: bool) {
+    IN_ORION_APP.store(unbound, Ordering::Relaxed);
 }
 
-pub fn ghostty_unbound() -> bool {
-    GHOSTTY_UNBOUND.load(Ordering::Relaxed)
+pub fn in_orion_app() -> bool {
+    IN_ORION_APP.load(Ordering::Relaxed)
 }
 
 /// Whether Help, the footers and the palettes print the ⌘ chords: set
-/// once at startup, when orion runs inside a terminal that sends ⌘.
+/// once at startup, when orion runs in Orion.app, which hands them over.
 pub fn set_cmd_shown(shown: bool) {
     CMD_SHOWN.store(shown, Ordering::Relaxed);
 }
@@ -1465,9 +1465,9 @@ fn shown_side(all: &[KeyChord], cmd: bool) -> Vec<KeyChord> {
 
 /// The ⌘ chords Ghostty binds by default (`ghostty +list-keybinds
 /// --default`, Ghostty 1.3.1), in orion's spelling: none of them reaches a
-/// program running inside it until the GHOSTTY KEYBINDS block releases it
-/// ([`crate::ghostty_config`]), and the few the block never takes
-/// ([`crate::ghostty_config::NEVER_RELEASED`]) never do.
+/// program running inside it. Orion.app clears them all but a few
+/// ([`crate::ghostty_config::KEPT`]); a Ghostty window of the user's own
+/// keeps every one.
 const GHOSTTY_BINDS: &[&str] = &[
     "cmd+<",
     "cmd+,",
@@ -1561,21 +1561,21 @@ pub fn host_warning(chord: &KeyChord) -> (Reach, Option<&'static str>) {
         if ghostty_binds && !released {
             return (
                 Reach::Blocked,
-                Some("Ghostty keeps this ⌘ chord for itself — orion never takes copy, paste, quit or its tab and window keys"),
+                Some("Orion.app keeps this ⌘ chord — copy, paste, quit, close window, full screen and the text size stay the app's, and ⌘← and ⌘→ are typed as the line's ends"),
             );
         }
-        if released && ghostty_unbound() {
+        if released && in_orion_app() {
             return (Reach::Fine, None);
         }
         if ghostty_binds {
             return (
                 Reach::Risky,
-                Some("Ghostty gives this ⌘ chord to orion only with Settings → Tools → Ghostty keybinds on (then reload Ghostty, ⌘⇧,); Terminal.app never sends ⌘"),
+                Some("⌘ reaches orion in Orion.app (orion app) — a Ghostty window of your own keeps this chord for itself, and Terminal.app never sends ⌘"),
             );
         }
         return (
             Reach::Risky,
-            Some("⌘ reaches orion in Ghostty and kitty only — Terminal.app and orion browser never send it; the ^ twin works everywhere"),
+            Some("⌘ reaches orion in Orion.app (orion app) and kitty only — Terminal.app and orion browser never send it; the ^ twin works everywhere"),
         );
     }
     // Mission Control owns these on stock macOS (they switch Spaces).
@@ -2332,13 +2332,13 @@ mod tests {
 
     #[test]
     fn cmd_chords_are_reported_by_who_keeps_them() {
-        for kept in ["cmd+c", "cmd+shift+w", "cmd+t", "cmd+q"] {
+        for kept in ["cmd+c", "cmd+shift+w", "cmd+q", "cmd+0"] {
             let (reach, why) = host_warning(&KeyChord::parse(kept).unwrap());
-            assert_eq!(reach, Reach::Blocked, "{kept} is Ghostty's for good");
+            assert_eq!(reach, Reach::Blocked, "{kept} is the app's for good");
             assert!(why.unwrap().contains('⌘'));
         }
-        // Every other chord Ghostty binds is one the block can release —
-        // a rebind onto ⌘] included.
+        // Every other chord Ghostty binds reaches orion in Orion.app and
+        // nowhere else — its tab key and a rebind onto ⌘] included.
         for freed in [
             "cmd+shift+p",
             "cmd+n",
@@ -2347,17 +2347,18 @@ mod tests {
             "cmd+]",
             "cmd+1",
             "cmd+w",
+            "cmd+t",
         ] {
             let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
             assert_eq!(reach, Reach::Risky, "{freed}");
-            assert!(why.unwrap().contains("Ghostty keybinds"), "{freed}");
+            assert!(why.unwrap().contains("Orion.app"), "{freed}");
         }
-        set_ghostty_unbound(true);
+        set_in_orion_app(true);
         let (reach, why) = host_warning(&KeyChord::parse("cmd+shift+p").unwrap());
         let (rebound, _) = host_warning(&KeyChord::parse("cmd+]").unwrap());
         let (copy, _) = host_warning(&KeyChord::parse("cmd+c").unwrap());
-        set_ghostty_unbound(false);
-        assert_eq!(reach, Reach::Fine, "unbinds written: no ⚠");
+        set_in_orion_app(false);
+        assert_eq!(reach, Reach::Fine, "in the app: no ⚠");
         assert!(why.is_none());
         assert_eq!(rebound, Reach::Fine);
         assert_eq!(copy, Reach::Blocked);
@@ -2367,8 +2368,8 @@ mod tests {
         }
     }
 
-    /// No default chord is one Ghostty keeps for itself: every ⌘ default
-    /// either passes through it or is one orion's block releases.
+    /// No default chord is one Orion.app keeps for itself: every ⌘ default
+    /// reaches orion there.
     #[test]
     fn no_default_is_a_chord_ghostty_keeps() {
         let map = Keymap::default();
