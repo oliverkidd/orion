@@ -1,0 +1,21 @@
+Cargo.toml
+  s_f07bdde69690be::t_f45829a0b6bcb6 14
+Cargo.lock
+  s_f07bdde69690be::t_db428a9ebe4285 1300,1317,1331,1352,1356
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "64ac76692bfe9d5050aa48649e368de0b10ff5c7",
+  "prompts": {},
+  "sessions": {
+    "s_f07bdde69690be": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "78e31d7d-7f1d-4728-8b28-d33849b02041",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
