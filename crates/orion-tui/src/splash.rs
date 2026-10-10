@@ -3,8 +3,10 @@
 //! first. Every cell is computed per frame — a thin, grainy cloud (belt,
 //! sword, Barnard's Loop) modulated by value noise, a sparse starfield
 //! with a fainter layer behind it, the hunter's seven stars as dots on
-//! dotted sticks — and the wordmark materializes in a carved-out band the
-//! sky never paints.
+//! dotted sticks — and the name materializes small in the hunter's chest,
+//! between his shoulders and his belt, in a band the sky never paints.
+//! Under it all, one line: the key that begins, or, with a newer release
+//! waiting, the key that installs it.
 //!
 //! The sky is shades of the theme's accent, save Betelgeuse's warmth,
 //! Rigel's ice and M42's rose; the wordmark runs from the theme's special
@@ -58,14 +60,32 @@ const FAR_STARS: u32 = 52;
 /// Colors in the wordmark's gradient.
 const MARK_STEPS: usize = 6;
 
-/// 5-row block bitmaps for O R I O N.
+/// 5-row bitmaps for O R I O N, three pixels wide (the N four). Drawn two
+/// rows to a cell with half blocks, so a pixel is as tall as it is wide
+/// and the name stands [`MARK_ROWS`] cells high.
 const LETTERS: &[&[&str; 5]] = &[
-    &[".###.", "#...#", "#...#", "#...#", ".###."],
-    &["####.", "#...#", "####.", "#.#..", "#..#."],
+    &["###", "#.#", "#.#", "#.#", "###"],
+    &["##.", "#.#", "##.", "#.#", "#.#"],
     &["###", ".#.", ".#.", ".#.", "###"],
-    &[".###.", "#...#", "#...#", "#...#", ".###."],
-    &["#...#", "##..#", "#.#.#", "#..##", "#...#"],
+    &["###", "#.#", "#.#", "#.#", "###"],
+    &["#..#", "##.#", "#.##", "#..#", "#..#"],
 ];
+/// Cells the block-letter name stands high.
+const MARK_ROWS: u16 = 3;
+/// Columns kept clear either side of the name, between it and the
+/// hunter's sides.
+const MARK_CLEAR: u16 = 1;
+/// Empty columns between two of its letters.
+const MARK_GAP: usize = 1;
+/// The name letter by letter, for a chest too narrow for the blocks.
+const MARK_SPACED: &str = "O R I O N";
+/// How far up the hunter the name sits, in constellation space: midway
+/// between the shoulders and the belt.
+const CHEST: f32 = -0.3;
+/// Where his sides cross that height, inside which the name has to fit.
+const CHEST_SIDES: (f32, f32) = (-0.42, 0.39);
+/// The shoulders' and the belt's heights, which it has to fit between.
+const CHEST_SPAN: (f32, f32) = (-0.62, 0.03);
 
 type Rgb = [f32; 3];
 const WHITE: Rgb = [255.0; 3];
@@ -277,42 +297,91 @@ pub fn wordmark_word(word: &str, t: f32, th: Theme) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// One wordmark row as per-cell spans: gradient across the word, a slow
-/// shine sweeping through, and the blocks materializing from static
-/// (`░` -> `▒` -> `█`) while the scene fades in.
+/// Columns the block-letter name spans.
+fn mark_width() -> usize {
+    LETTERS.iter().map(|l| l[0].len()).sum::<usize>() + MARK_GAP * (LETTERS.len() - 1)
+}
+
+/// One cell row of the block-letter name as per-cell spans: two bitmap
+/// rows to the cell, the gradient across the word, a slow shine sweeping
+/// through, and the blocks materializing from static (`░` -> `▒`) while
+/// the scene fades in.
 fn wordmark_line(row: usize, t: f32, fade: f32, th: Theme) -> Line<'static> {
     let steps = mark_steps(th);
-    let width: usize = LETTERS.iter().map(|l| l[0].len()).sum::<usize>() + 2 * (LETTERS.len() - 1);
-    let block = if fade < 0.5 {
-        "░"
-    } else if fade < 0.85 {
-        "▒"
-    } else {
-        "█"
+    let width = mark_width();
+    let lit = |letter: &[&str; 5], r: usize, c: usize| {
+        letter.get(r).is_some_and(|line| line.as_bytes()[c] == b'#')
     };
     let mut spans = Vec::new();
     let mut col = 0usize;
     for (i, letter) in LETTERS.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("  "));
-            col += 2;
+            spans.push(Span::raw(" ".repeat(MARK_GAP)));
+            col += MARK_GAP;
         }
-        for ch in letter[row].chars() {
-            if ch == '#' {
-                let u = col as f32 / width as f32;
-                spans.push(Span::styled(
-                    block,
-                    Style::default()
-                        .fg(mark_color(u, t, fade, &steps))
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::raw(" "));
-            }
+        for c in 0..letter[0].len() {
+            let glyph = match (lit(letter, 2 * row, c), lit(letter, 2 * row + 1, c)) {
+                (false, false) => {
+                    spans.push(Span::raw(" "));
+                    col += 1;
+                    continue;
+                }
+                _ if fade < 0.5 => "░",
+                _ if fade < 0.85 => "▒",
+                (true, true) => "█",
+                (true, false) => "▀",
+                (false, true) => "▄",
+            };
+            let u = col as f32 / width as f32;
+            spans.push(Span::styled(
+                glyph,
+                Style::default()
+                    .fg(mark_color(u, t, fade, &steps))
+                    .add_modifier(Modifier::BOLD),
+            ));
             col += 1;
         }
     }
     Line::from(spans)
+}
+
+/// The name as the hunter's chest has room for it: the block letters, the
+/// name letter by letter on one row, or nothing where even that would
+/// cross his sides — with the cells it takes, centered in the chest.
+fn chest_mark(
+    frame: &SkyFrame,
+    area: Rect,
+    t: f32,
+    th: Theme,
+) -> Option<(Rect, Vec<Line<'static>>)> {
+    let at = frame.place(HUNTER_SPAN, 0.0);
+    let (mid_x, mid_y) = at.cell(0.0, CHEST);
+    let room_w = at.cell(CHEST_SIDES.1, CHEST).0 - at.cell(CHEST_SIDES.0, CHEST).0 - 1;
+    let room_h = at.cell(0.0, CHEST_SPAN.1).1 - at.cell(0.0, CHEST_SPAN.0).1 - 1;
+    let blocks = mark_width() as i32;
+    let spaced = MARK_SPACED.chars().count() as i32;
+    let (w, lines): (i32, Vec<Line<'static>>) =
+        if room_w >= blocks + 2 * i32::from(MARK_CLEAR) && room_h > i32::from(MARK_ROWS) {
+            let fade = fade_at(t);
+            (
+                blocks,
+                (0..usize::from(MARK_ROWS))
+                    .map(|row| wordmark_line(row, t, fade, th))
+                    .collect(),
+            )
+        } else if room_w >= spaced + 2 * i32::from(MARK_CLEAR) && room_h >= 1 {
+            (spaced, vec![Line::from(wordmark_word(MARK_SPACED, t, th))])
+        } else {
+            return None;
+        };
+    let h = lines.len() as i32;
+    let rect = Rect {
+        x: u16::try_from(mid_x - w / 2).ok()?,
+        y: u16::try_from(mid_y - h / 2).ok()?,
+        width: w as u16,
+        height: h as u16,
+    };
+    (rect.intersection(area) == rect).then_some((rect, lines))
 }
 
 pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
@@ -321,107 +390,67 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let t = scene_time(app, app.splash_epoch);
-    let fade = fade_at(t);
 
-    // ---- text block: wordmark, tagline, key hints, bottom-anchored ----
-    let big = area.width >= 50 && area.height >= 18;
+    // ---- the one line under the sky ----
     let mut lines: Vec<Line> = Vec::new();
-    if big {
-        for row in 0..5 {
-            lines.push(wordmark_line(row, t, fade, th));
+    // Enter, spelled from the live keymap: it begins — back down to the
+    // grid from HOME, into the repo orion was started in, or to the
+    // open-project prompt — or, with a newer release waiting, installs it,
+    // on the upgrade's own green and clickable like the footer's `⇡ v…`.
+    // The jump list, `+` and the rest still work; the footer names them.
+    let enter = crate::hints::key_or(&app.keymap, crate::keymap::Action::Activate, "Enter");
+    let mut upgrade_row = match app.splash_upgrade().map(str::to_string) {
+        Some(v) => {
+            lines.push(Line::from(crate::ui::footer::upgrade_spans(
+                app,
+                &format!("⇡ v{v} available · {enter} to upgrade"),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            Some(lines.len() - 1)
         }
-    } else {
-        lines.push(Line::from(vec![
+        None => {
+            lines.push(Line::from(vec![
+                Span::styled(enter, crate::hints::key_style(th)),
+                Span::styled(" to begin", crate::hints::does_style(th)),
+            ]));
+            None
+        }
+    };
+
+    // Bottom-anchored, a row clear of the body's edge where there is one.
+    let block = |lines: &[Line]| {
+        let w = (lines.iter().map(Line::width).max().unwrap_or(0) as u16).min(area.width);
+        let h = (lines.len() as u16).min(area.height);
+        Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + area.height - h - u16::from(area.height > h),
+            width: w,
+            height: h,
+        }
+    };
+    let mut text = block(&lines);
+
+    // ---- the name: in the hunter's chest, or with no room there, at the
+    // head of the words as it always was on a small screen ----
+    let mark = chest_mark(&SkyFrame::over(area, text), area, t, th)
+        .filter(|(rect, _)| rect.bottom() < text.y);
+    if mark.is_none() {
+        let name = Line::from(vec![
             Span::styled("◆ ", Style::default().fg(th.accent)),
             Span::styled(
                 "orion",
                 Style::default().fg(th.text).add_modifier(Modifier::BOLD),
             ),
-        ]));
+        ]);
+        lines.splice(0..0, [name, Line::from("")]);
+        upgrade_row = upgrade_row.map(|row| row + 2);
+        text = block(&lines);
     }
-    // A newer release, under the wordmark: what it is and the key that
-    // installs it — clickable, like the footer's `⇡ v…`.
-    let upgrade_row = app.update_available.clone().map(|v| {
-        let key = crate::hints::act(&app.keymap, crate::keymap::Action::Upgrade, "upgrade")
-            .map_or_else(String::new, |h| format!(" · {} to upgrade", h.key));
-        lines.push(Line::from(crate::ui::footer::upgrade_spans(
-            app,
-            &format!("⇡ v{v} available{key}"),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.len() - 1
-    });
-    lines.push(Line::from(""));
-    if area.width >= 47 {
-        lines.push(Line::from(Span::styled(
-            "your agents keep running, even when you leave",
-            Style::default().fg(th.dim),
-        )));
-        lines.push(Line::from(""));
+    let mark_rect = mark.as_ref().map_or(Rect::default(), |(rect, _)| *rect);
+    paint_sky(f.buffer_mut(), area, text, mark_rect, t, th.accent);
+    if let Some((rect, rows)) = mark {
+        f.render_widget(Paragraph::new(rows), rect);
     }
-    // The ways into a project, each spelled from the live keymap: what
-    // Enter opens, and the jump list (`⌘K`), whose rows are every project
-    // and whose last row opens a folder. HOME leads with its way back.
-    let key = |k: &str, label: &str| {
-        vec![
-            Span::styled(k.to_string(), crate::hints::key_style(th)),
-            Span::styled(format!(" {label}"), crate::hints::does_style(th)),
-        ]
-    };
-    let sep = || Span::styled("   ·   ", Style::default().fg(th.dim));
-    let enter = crate::hints::key_or(&app.keymap, crate::keymap::Action::Activate, "Enter");
-    let jump = crate::hints::key(&app.keymap, crate::keymap::Action::Palette);
-    let mut hint = Vec::new();
-    if app.home {
-        // The way back down is the footer's to say, as it is everywhere
-        // off the grid; the body offers the way elsewhere.
-        if let Some(jump) = &jump {
-            hint.extend(key(jump, "jump to any project"));
-        }
-    } else if !app.tree.has_projects() {
-        // Started inside a repo, that repo is one key away; anywhere else
-        // Enter asks for a folder. Nothing here asks for anything but one.
-        match app.launch_repo_name() {
-            Some(name) => {
-                hint.extend(key(&enter, &format!("open {name}")));
-                if let Some(jump) = &jump {
-                    hint.push(sep());
-                    hint.extend(key(jump, "another folder"));
-                }
-            }
-            None => hint.extend(key(&enter, "open your first project")),
-        }
-    } else if app.projects_closed {
-        // Every tab closed: the projects are all still there, so the jump
-        // list has them; Enter still opens the repo orion was started in.
-        let here = app.launch_repo.as_deref().and_then(|path| {
-            app.tree
-                .project_at_path(path)
-                .map(|p| p.name.clone())
-                .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()))
-        });
-        if let Some(name) = here {
-            hint.extend(key(&enter, &format!("open {name}")));
-        }
-        if let Some(jump) = &jump {
-            if !hint.is_empty() {
-                hint.push(sep());
-            }
-            hint.extend(key(jump, "your projects, or another folder"));
-        }
-    }
-    lines.push(Line::from(hint));
-
-    let block_w = (lines.iter().map(Line::width).max().unwrap_or(0) as u16).min(area.width);
-    let block_h = (lines.len() as u16).min(area.height);
-    let text = Rect {
-        x: area.x + (area.width - block_w) / 2,
-        y: area.y + area.height - block_h - u16::from(area.height > block_h),
-        width: block_w,
-        height: block_h,
-    };
-
-    draw_sky(f.buffer_mut(), area, text, t, th.accent);
     f.render_widget(Paragraph::new(lines).centered(), text);
     // A click anywhere on HOME goes back down to the grid, as Esc does;
     // on the first-run splash it lands focus on the (invisible) projects
@@ -451,48 +480,88 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// How wide the hunter is stretched across the sky, and the cloud a
+/// little past him, in the span [`SkyFrame::place`] takes.
+const HUNTER_SPAN: f32 = 2.2;
+const DUST_SPAN: f32 = 2.35;
+
+/// The sky above the words: its middle, and the cells it has to stretch
+/// the hunter over.
+struct SkyFrame {
+    cx: f32,
+    cy: f32,
+    width: f32,
+    above: f32,
+}
+
+impl SkyFrame {
+    fn over(area: Rect, text: Rect) -> Self {
+        let above = text.y.saturating_sub(area.y).max(4);
+        Self {
+            cx: f32::from(area.x) + f32::from(area.width) / 2.0,
+            cy: f32::from(area.y) + f32::from(above) / 2.0,
+            width: f32::from(area.width),
+            above: f32::from(above),
+        }
+    }
+
+    /// A figure `span` wide stretched to fill the sky, turned by `rot`.
+    /// The x and y scales are independent; a terminal cell is ~2x taller
+    /// than wide, hence the factor 2 on y.
+    fn place(&self, span: f32, rot: f32) -> Placement {
+        Placement {
+            cx: self.cx,
+            cy: self.cy,
+            sx: span / (0.42 * self.width).max(4.0),
+            sy: 2.0 * span / (1.6 * self.above).max(4.0),
+            rot,
+        }
+    }
+}
+
 /// The constellation and its starfield across `area`, `t` seconds into
 /// the scene: the hunter centered in the sky above `text` and stretched
 /// to fill it, dust and stars both kept off a band around `text` so the
 /// words sit on clear black. The first-run splash and the empty GRID's
 /// welcome (`ui::launcher_view`) are both drawn over it.
 pub fn draw_sky(buf: &mut Buffer, area: Rect, text: Rect, t: f32, accent: Color) {
+    paint_sky(buf, area, text, Rect::default(), t, accent);
+}
+
+/// [`draw_sky`], with a second band kept clear inside the hunter: `mark`,
+/// where the splash draws the name. An empty `mark` clears nothing.
+fn paint_sky(buf: &mut Buffer, area: Rect, text: Rect, mark: Rect, t: f32, accent: Color) {
     let fade = fade_at(t);
     let pal = Palette::of(accent);
-    // ---- hunter centered in the sky above the text ----
-    let above = text.y.saturating_sub(area.y).max(4);
-    let cx = f32::from(area.x) + f32::from(area.width) / 2.0;
-    let cy = f32::from(area.y) + f32::from(above) / 2.0;
-    // Independent x/y scales stretch a figure `span` wide to fill the sky;
-    // a terminal cell is ~2x taller than wide, hence the factor 2 on y.
-    let scales = |span: f32| {
-        (
-            span / (0.42 * f32::from(area.width)).max(4.0),
-            2.0 * span / (1.6 * f32::from(above)).max(4.0),
-        )
+    let frame = SkyFrame::over(area, text);
+    // The bands the dust, the stars and the sticks never touch.
+    let band = |r: Rect, dx: u16, dy: u16| {
+        if r.is_empty() {
+            return r;
+        }
+        Rect {
+            x: r.x.saturating_sub(dx),
+            y: r.y.saturating_sub(dy),
+            width: r.width + 2 * dx,
+            height: r.height + 2 * dy,
+        }
+        .intersection(area)
     };
-    let (sx, sy) = scales(2.35);
-    // Text carve: rows the dust and stars never touch.
-    let carve = Rect {
-        x: text.x.saturating_sub(3),
-        y: text.y.saturating_sub(1),
-        width: text.width + 6,
-        height: text.height + 2,
-    }
-    .intersection(area);
+    let clear = [band(text, 3, 1), band(mark, MARK_CLEAR, 1)];
 
     // A breath of sway keeps the hunter alive and readable. Dust drifts.
     let sway = (t * 0.4).sin() * 0.02;
     let drift = t * 0.5;
+    let cloud = frame.place(DUST_SPAN, 0.0);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            if x >= carve.left() && x < carve.right() && y >= carve.top() && y < carve.bottom() {
+            let (hx, hy) = (i32::from(x), i32::from(y));
+            if !in_sky(area, &clear, hx, hy) {
                 continue;
             }
-            let (hx, hy) = (i32::from(x), i32::from(y));
             let d = density(
-                (f32::from(x) - cx) * sx,
-                (f32::from(y) - cy) * sy,
+                (f32::from(x) - cloud.cx) * cloud.sx,
+                (f32::from(y) - cloud.cy) * cloud.sy,
                 sway,
                 drift,
             );
@@ -504,15 +573,8 @@ pub fn draw_sky(buf: &mut Buffer, area: Rect, text: Rect, t: f32, accent: Color)
         }
     }
     // The hunter spans most of the sky, a little inside the cloud.
-    let (sx, sy) = scales(2.2);
-    let at = Placement {
-        cx,
-        cy,
-        sx,
-        sy,
-        rot: sway,
-    };
-    paint_hunter(buf, area, carve, at, t, fade, &pal);
+    let at = frame.place(HUNTER_SPAN, sway);
+    paint_hunter(buf, area, &clear, at, t, fade, &pal);
 }
 
 /// The dust in cell (`x`, `y`) at density `d`, if any. Each cell is kept
@@ -575,24 +637,22 @@ impl Placement {
     }
 }
 
-fn in_sky(area: Rect, carve: Rect, x: i32, y: i32) -> bool {
+/// Whether cell (`x`, `y`) is in `area` and off every band in `clear`.
+fn in_sky(area: Rect, clear: &[Rect], x: i32, y: i32) -> bool {
     let Ok(x) = u16::try_from(x) else {
         return false;
     };
     let Ok(y) = u16::try_from(y) else {
         return false;
     };
-    x >= area.left()
-        && x < area.right()
-        && y >= area.top()
-        && y < area.bottom()
-        && !(x >= carve.left() && x < carve.right() && y >= carve.top() && y < carve.bottom())
+    let at = ratatui::layout::Position { x, y };
+    area.contains(at) && !clear.iter().any(|band| band.contains(at))
 }
 
 fn paint_hunter(
     buf: &mut Buffer,
     area: Rect,
-    carve: Rect,
+    clear: &[Rect],
     at: Placement,
     t: f32,
     fade: f32,
@@ -616,11 +676,11 @@ fn paint_hunter(
     };
     let figure = EDGES.iter().map(|&(a, b)| (cells[a], cells[b]));
     for (a, b) in figure.chain(sword.windows(2).map(|w| (w[0], w[1]))) {
-        stroke(buf, area, carve, a, b, stick);
+        stroke(buf, area, clear, a, b, stick);
     }
     for (i, Star(_, _, ch, phase, _)) in STARS.iter().enumerate() {
         let (x, y) = cells[i];
-        if !in_sky(area, carve, x, y) {
+        if !in_sky(area, clear, x, y) {
             continue;
         }
         // The stars shimmer in brightness alone, the glyphs holding still:
@@ -633,7 +693,7 @@ fn paint_hunter(
     }
     // M42 — the fuzzy middle of the sword.
     let (mx, my) = sword[2];
-    if in_sky(area, carve, mx, my) && fade > 0.4 {
+    if in_sky(area, clear, mx, my) && fade > 0.4 {
         buf[(mx as u16, my as u16)]
             .set_char('+')
             .set_fg(shade(M42, fade));
@@ -642,7 +702,7 @@ fn paint_hunter(
 
 /// A dotted stick from `a` to `b`, a dot in every other cell between
 /// them, so the figure is traced rather than drawn.
-fn stroke(buf: &mut Buffer, area: Rect, carve: Rect, a: (i32, i32), b: (i32, i32), fg: Color) {
+fn stroke(buf: &mut Buffer, area: Rect, clear: &[Rect], a: (i32, i32), b: (i32, i32), fg: Color) {
     let steps = (a.0 - b.0)
         .unsigned_abs()
         .max((a.1 - b.1).unsigned_abs())
@@ -652,7 +712,7 @@ fn stroke(buf: &mut Buffer, area: Rect, carve: Rect, a: (i32, i32), b: (i32, i32
         let x = a.0 as f32 + (b.0 - a.0) as f32 * u;
         let y = a.1 as f32 + (b.1 - a.1) as f32 * u;
         let (cx, cy) = (x.round() as i32, y.round() as i32);
-        if in_sky(area, carve, cx, cy) {
+        if in_sky(area, clear, cx, cy) {
             buf[(cx as u16, cy as u16)].set_char('·').set_fg(fg);
         }
     }
@@ -664,20 +724,64 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+    /// The name's rows: three cells high, O-R-I-O-N across, drawn in
+    /// half blocks once the scene has faded in and in static before.
     #[test]
-    fn the_wordmark_is_orion_not_nebula() {
+    fn the_wordmark_is_orion_in_half_blocks() {
         assert_eq!(LETTERS.len(), 5, "O-R-I-O-N");
-        assert_eq!(LETTERS[0][0], ".###.", "O");
-        assert_eq!(LETTERS[1][0], "####.", "R");
-        assert_eq!(LETTERS[2][0], "###", "I");
-        assert_eq!(LETTERS[4][0], "#...#", "N");
-        let row: String = wordmark_line(0, 60.0, 1.0, Theme::default())
+        assert_eq!(LETTERS[0], LETTERS[3], "both Os");
+        assert_eq!(mark_width(), 20);
+        let rows: Vec<String> = (0..usize::from(MARK_ROWS))
+            .map(|row| {
+                wordmark_line(row, 60.0, 1.0, Theme::default())
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "█▀█ █▀▄ ▀█▀ █▀█ █▄ █",
+                "█ █ █▀▄  █  █ █ █ ▀█",
+                "▀▀▀ ▀ ▀ ▀▀▀ ▀▀▀ ▀  ▀",
+            ]
+        );
+        let fading: String = wordmark_line(0, 0.3, 0.3, Theme::default())
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(row.contains('█'));
-        assert!(!row.contains("NEBULA"));
+        assert!(fading.contains('░') && !fading.contains('█'), "{fading}");
+    }
+
+    /// The name sits inside the hunter: in block letters where his chest
+    /// has the room, letter by letter where it is narrower, and nowhere in
+    /// a sky too small for either.
+    #[test]
+    fn the_name_takes_what_room_the_chest_has() {
+        let th = Theme::default();
+        let mark = |w: u16, h: u16| {
+            let area = Rect::new(0, 0, w, h);
+            let text = Rect::new(w / 2 - 8, h - 2, 16, 1);
+            let frame = SkyFrame::over(area, text);
+            let at = frame.place(HUNTER_SPAN, 0.0);
+            let shoulders = at.cell(0.0, CHEST_SPAN.0).1;
+            let belt = at.cell(0.0, CHEST_SPAN.1).1;
+            chest_mark(&frame, area, 60.0, th).map(|(rect, rows)| {
+                assert!(
+                    i32::from(rect.y) > shoulders,
+                    "{rect:?} under the shoulders"
+                );
+                assert!(i32::from(rect.bottom()) <= belt, "{rect:?} over the belt");
+                assert_eq!(rect.x + rect.width / 2, w / 2, "centered");
+                (rect.width, rows.len())
+            })
+        };
+        assert_eq!(mark(190, 50), Some((20, 3)));
+        assert_eq!(mark(120, 40), Some((9, 1)));
+        assert_eq!(mark(60, 20), None);
     }
 
     const SLATE: Color = Color::Indexed(110);

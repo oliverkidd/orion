@@ -331,8 +331,6 @@ pub(crate) mod keys {
     pub const DOWN: Key = Key::new(&["cmd+w", "ctrl+w"], "take down");
     pub const STOP_ALL: Key = Key::new(&["s"], "stop all");
     pub const CLOSE: Key = Key::new(&["esc", "q", "shift+s"], "close");
-    #[cfg(test)]
-    pub const ALL: &[Key] = &[TOGGLE, TABS, DOWN, STOP_ALL, CLOSE];
 }
 
 /// `⇧S`: the modal, on the selected project's tab and the selected

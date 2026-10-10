@@ -28,7 +28,7 @@ orion
 
 First launch walks you through setup (agents, accounts, editor). `⌘,` changes it later. `orion doctor` checks what's missing.
 
-On a Mac, orion's `⌘` shortcuts need a terminal that passes `⌘` on: Ghostty or kitty, not Terminal.app. The installer installs Ghostty and opens orion in it, and setup offers to move there if you start orion from Terminal.app.
+On a Mac, orion runs as an app of its own: the installer opens it as **Orion.app** (in `~/Applications`, so in the Dock, Launchpad and Spotlight), and `orion app` or setup's first step makes the move from a terminal later. The app is the Ghostty on your Mac under orion's name — the installer fetches Ghostty when it's missing — and it is where the `⌘` shortcuts work; in a terminal each answers to its `^` twin. It is only a window: sessions, projects and settings are the same ones `orion` in a terminal sees.
 
 ## Keys
 

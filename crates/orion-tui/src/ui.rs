@@ -4609,10 +4609,6 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(th.text).add_modifier(Modifier::BOLD),
                 ),
             ]));
-            lines.push(Line::from(Span::styled(
-                "your agents keep running, even when you leave",
-                Style::default().fg(th.dim),
-            )));
             lines.push(Line::from(""));
             lines.push(Line::from(hint));
             let msg = Paragraph::new(lines).centered();

@@ -34,7 +34,6 @@ mod focus_walk;
 mod host_terminal;
 mod launcher;
 mod menus;
-mod notifier_app;
 mod optimistic;
 mod pacing;
 mod placeholder;
@@ -43,7 +42,6 @@ mod release_watch;
 use focus_walk::{
     double_tapped, enter_terminal_pane, land_click_focus, walk_focus_back, walk_focus_forward,
 };
-pub(crate) use host_terminal::host_sends_cmd;
 pub use host_terminal::restore_terminal;
 use host_terminal::{
     on_host_resize, reassert_modes, repaint, report_working_directory, setup_terminal,
@@ -266,9 +264,9 @@ pub enum Exit {
     /// **Upgrade orion**: install the newer release, then restart the
     /// daemon and this binary on it (`crate::restart`).
     Upgrade,
-    /// Setup's Ghostty step: open orion in a new Ghostty window
-    /// (`crate::open_in_ghostty`), the daemon and its sessions left up.
-    Ghostty,
+    /// Setup's App step: open orion in its own app
+    /// (`crate::open_app`), the daemon and its sessions left up.
+    App,
 }
 
 pub async fn run_app() -> Result<Exit> {
@@ -312,17 +310,20 @@ async fn main_loop(
     // when its settings carry one, so an org-restricted machine offers the
     // ids the CLI will accept instead of aliases it refuses.
     crate::claude_catalogue::bootstrap(cfg.claude_enabled);
-    // The ⌘ chords Ghostty would otherwise keep for itself, released in
-    // its config whenever Ghostty is in use (`ghostty_config`).
-    if let Some(note) = crate::ghostty_config::ensure_for(&cfg) {
+    // The block an older orion kept in the user's Ghostty config comes
+    // out of it, once (`ghostty_config`).
+    if let Some(note) = crate::ghostty_config::retire_block() {
         app.flash = Some(note);
     }
-    // Ghostty sends ⌘ chords through the kitty protocol, so Help and the
-    // footers print those; anywhere else they print the `^` twins.
-    crate::keymap::set_cmd_shown(crate::ghostty_config::inside_ghostty() && !app.is_remote);
-    crate::keymap::set_ghostty_unbound(
-        cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
-    );
+    // So does the re-badged terminal-notifier older orions built to post
+    // notifications under orion's name: Orion.app posts its own.
+    let _ = std::fs::remove_dir_all(orion_core::paths::data_dir().join("notifier"));
+    // Orion.app hands orion every ⌘ chord but the few it keeps, so there
+    // Help and the footers print those; anywhere else — a terminal that
+    // keeps ⌘ for itself, or never sends it — they print the `^` twins.
+    let in_app = crate::app_bundle::inside() && !app.is_remote;
+    crate::keymap::set_cmd_shown(in_app);
+    crate::keymap::set_in_orion_app(in_app);
     if let Some(since) = crate::onboard::pending(&cfg) {
         crate::onboard::open(&mut app, &cfg, since);
     }
@@ -966,6 +967,10 @@ async fn main_loop(
             }
         }
 
+        // The notifications just raised, where Orion.app is to post them
+        // itself: asked of it as the terminal it is (`alerts`).
+        alerts::write_host_notes(terminal.backend_mut());
+
         // Once the connection is gone nothing is sent — a request queued
         // to a writer that has died would vanish without a word — and each
         // round's requests fail through `connection_lost` instead, so a
@@ -1003,8 +1008,8 @@ async fn main_loop(
                 Exit::Upgrade
             } else if app.restart {
                 Exit::Restart
-            } else if app.move_to_ghostty {
-                Exit::Ghostty
+            } else if app.move_to_app {
+                Exit::App
             } else {
                 app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
             });
@@ -4685,6 +4690,8 @@ fn dispatch_action(
         | Action::ProjectDropdown => {}
         Action::MoveDown => move_selection(app, 1, out),
         Action::MoveUp => move_selection(app, -1, out),
+        // The SPLASH with a newer release waiting: Enter asks to install it.
+        Action::Activate if app.splash_upgrade().is_some() => open_upgrade(app),
         // The first-run SPLASH, started inside a git repo: Enter opens it —
         // the one-key way from a fresh install to a project.
         Action::Activate if app.splash_showing() => open_launch_repo(app, out),
@@ -5420,6 +5427,17 @@ fn home_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     use crate::keymap::Action;
     let chord = crate::keymap::KeyChord::from_event(&key);
     let action = app.keymap.lookup(crate::keymap::Scope::Global, &chord);
+    // Enter with a newer release waiting installs it — HOME's one line
+    // says so — and goes back to coming down once that has been asked.
+    if action == Some(Action::Activate) && app.splash_upgrade().is_some() {
+        crate::key_combo::note(
+            app,
+            &[chord],
+            crate::keymap::spec_of(Action::Upgrade).map(|s| s.label),
+        );
+        open_upgrade(app);
+        return;
+    }
     if key.code == KeyCode::Esc
         || matches!(
             action,
@@ -7160,6 +7178,7 @@ fn confirm_quit() -> ConfirmDialog {
 /// (the e2e tests turn it off) it says this one is current.
 pub(super) fn open_upgrade(app: &mut App) {
     if let Some(v) = app.update_available.clone() {
+        app.splash_upgrade_asked = true;
         app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v)));
         return;
     }
@@ -9039,12 +9058,6 @@ fn save_keymap(app: &mut App, keymap: crate::keymap::Keymap) -> bool {
         return false;
     }
     app.keymap = keymap;
-    // The GHOSTTY KEYBINDS block is the keymap's ⌘ chords: a rebind adds
-    // its chord to it and hands the old one back to Ghostty — and the
-    // footer says Ghostty wants a reload to see it.
-    if let Some(note) = crate::ghostty_config::ensure_for(&cfg) {
-        app.flash = Some(note);
-    }
     true
 }
 
@@ -9205,23 +9218,6 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         Some(crate::config::SettingKind::FeedbackSound) => cfg.feedback_sound(),
         _ => None,
     };
-    let ghostty_row = crate::config::setting_at(tab, index).is_some_and(|spec| {
-        matches!(
-            spec.kind,
-            crate::config::SettingKind::OutsideTerminal
-                | crate::config::SettingKind::GhosttyKeybinds
-        )
-    });
-    if ghostty_row {
-        if let (Some(note), Some(view)) =
-            (crate::ghostty_config::ensure_for(&cfg), settings_mut(app))
-        {
-            view.info(note.text);
-        }
-        crate::keymap::set_ghostty_unbound(
-            cfg.ghostty_keybinds && crate::ghostty_config::inside_ghostty() && !app.is_remote,
-        );
-    }
 }
 
 /// Adopt every config value the running app mirrors. Shared by startup and
@@ -9308,11 +9304,6 @@ fn reset_settings(app: &mut App) {
         Ok(cfg) => {
             apply_config(app, &cfg);
             app.keymap = cfg.keymap();
-            // The default keymap's ⌘ chords are the GHOSTTY KEYBINDS block
-            // again — the default setting writes it.
-            if let Some(note) = crate::ghostty_config::ensure_for(&cfg) {
-                app.flash = Some(note);
-            }
             if let Some(view) = settings_mut(app) {
                 view.info("every setting is back to its default");
             }
@@ -16022,11 +16013,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter open your first project"), "{text}");
-        assert!(
-            text.contains("your agents keep running"),
-            "tagline on the splash: {text}"
-        );
+        assert!(text.contains("Enter to begin"), "{text}");
         let grid_head = |app: &App| {
             app.hits
                 .iter()
@@ -16186,7 +16173,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter open your first project"), "{text}");
+        assert!(text.contains("Enter to begin"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
         assert!(text.contains("^C quit"), "{text}");
         for dead in ["⌫ delete", "t terminal", "a archive"] {
@@ -16203,7 +16190,53 @@ mod tests {
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("new agent"), "{text}");
-        assert!(!text.contains("open your first project"), "{text}");
+        assert!(!text.contains("to begin"), "{text}");
+    }
+
+    /// With a newer release waiting, the SPLASH's one line offers it and
+    /// Enter puts the upgrade confirm up; turned down, the line and Enter
+    /// go back to beginning — on HOME too, where that is the way down.
+    #[test]
+    fn enter_on_the_splash_offers_a_waiting_upgrade_once() {
+        let mut app = App::new();
+        app.update_available = Some("9.9.9".into());
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("⇡ v9.9.9 available · Enter to upgrade"),
+            "{text}"
+        );
+        assert!(!text.contains("to begin"), "{text}");
+
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Confirm(c)) if matches!(c.action, PendingAction::Upgrade { .. })),
+            "{:?}",
+            app.overlay
+        );
+        app.overlay = None;
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Enter to begin"), "{text}");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let Some(Overlay::Prompt(p)) = &app.overlay else {
+            panic!("expected the open-project prompt, got {:?}", app.overlay);
+        };
+        assert_eq!(p.kind, crate::app::PromptKind::AddProject);
+
+        // HOME, over a grid: the same offer, then Enter comes back down.
+        let mut app = App::new();
+        seed_tree(&mut app);
+        app.update_available = Some("9.9.9".into());
+        toggle_home(&mut app);
+        assert!(app.home);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(app.home && matches!(&app.overlay, Some(Overlay::Confirm(_))));
+        app.overlay = None;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert!(!app.home, "Enter comes down once the upgrade was offered");
     }
 
     /// A tempdir holding `ws/alpha` (a git repo) and `ws/beta` (not one),
@@ -16216,9 +16249,9 @@ mod tests {
         tmp
     }
 
-    /// First run, started inside a repo: the SPLASH names the folder, and
-    /// Enter opens it as a project — the one key between a fresh install
-    /// and a project on screen, whichever focus the app booted with.
+    /// First run, started inside a repo: Enter on the SPLASH opens that
+    /// folder as a project — the one key between a fresh install and a
+    /// project on screen, whichever focus the app booted with.
     #[test]
     fn enter_on_the_first_run_splash_opens_the_folder_orion_started_in() {
         let mut app = App::new();
@@ -16227,7 +16260,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter open alpha"), "{text}");
+        assert!(text.contains("Enter to begin"), "{text}");
         assert!(!text.contains("workspace"), "{text}");
 
         let mut out = Vec::new();
@@ -16242,15 +16275,15 @@ mod tests {
         );
     }
 
-    /// Started outside a repo there is no folder to name: the splash says
-    /// Enter opens one, and Enter opens the prompt rather than nothing.
+    /// Started outside a repo there is no folder to open: Enter opens the
+    /// prompt rather than nothing.
     #[test]
     fn enter_on_the_first_run_splash_elsewhere_opens_the_prompt() {
         let mut app = App::new();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Enter open your first project"), "{text}");
+        assert!(text.contains("Enter to begin"), "{text}");
         let mut out = Vec::new();
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         let Some(Overlay::Prompt(p)) = &app.overlay else {
