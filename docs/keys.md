@@ -358,6 +358,11 @@ the editor binds that action to:
 - **`⌘⇧L` is `⌘D` pressed 500 times at once.** Neither editor has a select-all-matches of its own;
   both stop adding cursors at the last match, so the presses past it do nothing. The first press
   takes the word under the cursor when nothing is selected, as `⌘D` does.
+- **`Enter` after a find steps through the matches in fresh.** The `Enter` that runs the find puts
+  the cursor on the first match; each `Enter` straight after it moves to the next one and `⇧Enter`
+  to the one before (fresh's `F3` and `⇧F3`), nothing edited. Any other key, a click or a paste
+  ends that, and `Enter` is a new line again. It reads fresh's `Search:` prompt off the screen, so
+  under another fresh locale `Enter` stays fresh's own.
 - **Ghostty keeps `⌘←`/`⌘→` and `⌥←`/`⌥→`** and types the shell's keys for them — `^A`/`^E`, `⎋b`/`⎋f`
   — so in the editor a bare `^A` and `^E` are the line's start and end, as in any Mac text field.
   micro's command bar, `^E` elsewhere, is `⌘⇧P` (`⌥:`) here.

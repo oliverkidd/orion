@@ -72,6 +72,10 @@ pub struct VimTerm {
     /// A mouse press inside the editor is held: its drag and release are
     /// the editor's wherever the pointer goes.
     pub mouse_held: bool,
+    /// The last key was the Enter that ran a find, or one that stepped to
+    /// a match since: the next Enter steps too, where the editor's own
+    /// would be a new line (`Kind::find_step`).
+    pub find_stepping: bool,
     /// Output chunks seen, and whether one asked something that was
     /// answered: the first quiet chunk after that is its first screen.
     chunks: u64,
@@ -228,6 +232,7 @@ impl VimTerm {
             queries: orion_core::kitty::KittyScanner::new(),
             startup_keys: None,
             mouse_held: false,
+            find_stepping: false,
             chunks: 0,
             answered: false,
             master: pair.master,
@@ -274,6 +279,18 @@ impl VimTerm {
     /// The kitty keyboard flags the editor has pushed (0: legacy keys).
     pub fn kitty_flags(&self) -> u8 {
         self.queries.flags()
+    }
+
+    /// The editor's find prompt is on its bottom row
+    /// ([`Kind::find_prompt`]), waiting on the Enter that runs the find.
+    ///
+    /// [`Kind::find_prompt`]: crate::editor::Kind::find_prompt
+    pub fn find_prompt_up(&self) -> bool {
+        let Some(prompt) = self.kind.find_prompt() else {
+            return false;
+        };
+        let bottom = self.parser.screen().rows(0, self.cols).last();
+        bottom.is_some_and(|row| row.starts_with(prompt))
     }
 
     /// The mouse protocol the editor asked for, and whether in SGR

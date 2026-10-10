@@ -197,6 +197,33 @@ impl Kind {
         }
     }
 
+    /// What the editor's bottom row starts with while its find prompt is
+    /// up: fresh's `Search: `, in the English it ships with (under another
+    /// locale the prompt is never seen, and Enter stays the editor's own).
+    /// None for an editor whose Enter after a find the modal leaves alone.
+    pub fn find_prompt(self) -> Option<&'static str> {
+        match self {
+            Kind::Fresh => Some("Search:"),
+            _ => None,
+        }
+    }
+
+    /// The key the editor binds its next match to — `back`, its previous
+    /// one: fresh's `F3` and `⇧F3`. What Enter and `⇧Enter` are typed as
+    /// straight after a find, where fresh's own Enter is a new line at the
+    /// first match.
+    pub fn find_step(self, back: bool) -> Option<KeyEvent> {
+        let mods = if back {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        match self {
+            Kind::Fresh => Some(KeyEvent::new(KeyCode::F(3), mods)),
+            _ => None,
+        }
+    }
+
     /// `key` as a Mac's text-editing chord, in the key this editor binds
     /// the same action to — micro, Edit and fresh only, None for any other
     /// key (it goes on as it came, a ⌘ letter as its Ctrl twin):

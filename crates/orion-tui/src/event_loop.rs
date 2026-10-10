@@ -3651,6 +3651,7 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
                 // login` reads its code with a plain readline, and took the
                 // markers for part of the code (`Invalid code`).
                 let data = pasted(vim.parser.screen(), &text);
+                vim.find_stepping = false;
                 vim.input(&data);
             }
         }
@@ -6626,6 +6627,9 @@ fn resolve_file_link(root: &std::path::Path, path: &str) -> Option<String> {
 /// own ⌘ keys — `⌘L`, `⌘/`, `⌘P` — are the editor's while it is up. Keys
 /// are encoded for the kitty flags the editor pushed (fresh does), else in
 /// the legacy dialect.
+///
+/// Enter straight after a find in fresh is its next match, not a new line
+/// ([`find_step`]).
 fn handle_vim_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let Some(vim) = &mut app.vim else {
@@ -6665,9 +6669,36 @@ fn handle_vim_key(app: &mut App, key: KeyEvent) {
             None => key,
         }
     };
+    let key = find_step(vim, key);
     if let Some(data) = keys::encode_key(&key, vim.kitty_flags()) {
         vim.input(&data);
     }
+}
+
+/// Enter after a find, in an editor whose own Enter there is a new line at
+/// the first match (fresh): the Enter that runs the find goes on as it
+/// came, and each Enter straight after it — `⇧Enter` backwards — is typed
+/// as the editor's next-match key (`editor::Kind::find_step`), so it only
+/// moves the cursor from match to match. Any other key ends the stepping,
+/// as a click or a paste does: Enter is the editor's own again.
+fn find_step(vim: &mut VimTerm, key: KeyEvent) -> KeyEvent {
+    // A modifier on its own (the ⇧ of `⇧Enter`) is no key yet.
+    if matches!(key.code, KeyCode::Modifier(_)) {
+        return key;
+    }
+    let back = key.modifiers == KeyModifiers::SHIFT;
+    if key.code != KeyCode::Enter || !(key.modifiers.is_empty() || back) {
+        vim.find_stepping = false;
+        return key;
+    }
+    if vim.find_prompt_up() {
+        vim.find_stepping = true;
+        return key;
+    }
+    if !vim.find_stepping {
+        return key;
+    }
+    vim.kind.find_step(back).unwrap_or(key)
 }
 
 /// `Ctrl+\` — which a terminal without the kitty protocol delivers as
@@ -11744,6 +11775,7 @@ fn editor_mouse(app: &mut App, mouse: &MouseEvent) {
     let data = match mouse.kind {
         MouseEventKind::Down(button) if inside && wants => {
             vim.mouse_held = true;
+            vim.find_stepping = false;
             report(button_bits(button), false)
         }
         MouseEventKind::Drag(button) if vim.mouse_held && motion => {
@@ -32053,6 +32085,116 @@ diff --git a/src/c.rs b/src/c.rs
             "{shown}"
         );
         assert!(out.is_empty(), "nothing went to the daemon");
+        if let Some(vim) = &mut app.vim {
+            vim.kill();
+        }
+    }
+
+    /// Enter after a find in fresh steps through the matches: the Enter
+    /// its `Search:` prompt is waiting on runs the find as it came, the
+    /// next is fresh's `F3` and `⇧Enter` its `⇧F3`, and once anything else
+    /// is typed Enter is a new line again.
+    #[test]
+    fn enter_after_a_find_steps_through_the_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // fresh's kitty push, its prompt on the bottom row until the find
+        // is run, then the keys that follow.
+        let script = "stty raw -echo; printf '\\033[>5u\\033[24;1HSearch: foo\\033[1;1HREADY'; \
+                      dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'; \
+                      printf '\\033[24;1H\\033[K\\033[2;1HRAN'; \
+                      dd bs=1 count=11 2>/dev/null | od -An -tx1 | tr -d ' \\n'; \
+                      printf ' DONE'; sleep 30";
+        let mut vim = VimTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), script.into()],
+            dir.path(),
+            "t".into(),
+            80,
+            24,
+            1,
+            tx,
+        )
+        .unwrap();
+        vim.kind = crate::editor::Kind::Fresh;
+        vim.quits_itself = true;
+        let mut app = App::new();
+        app.vim = Some(vim);
+        let mut out = Vec::new();
+        pump_editor(&mut app, &mut rx, |s| s.contains("READY"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("RAN"));
+        assert!(shown.contains("READY0d"), "the find's own Enter: {shown}");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut out);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("DONE"));
+        assert!(shown.contains("RAN1b4f521b5b313b3252780d DONE"), "{shown}");
+        if let Some(vim) = &mut app.vim {
+            vim.kill();
+        }
+    }
+
+    /// The same in the real fresh, where installed: Enter runs the find,
+    /// Enter and `⇧Enter` move its cursor to the next match and back with
+    /// the file untouched, and Enter after a typed letter is a new line.
+    #[test]
+    fn enter_steps_through_the_real_freshs_matches() {
+        if !crate::config::program_installed("fresh") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let text = "alpha foo one\nbeta\nfoo two\ngamma\nmid foo three\n";
+        std::fs::write(dir.path().join("a.txt"), text).unwrap();
+        crate::editor::ensure_fresh_config(&crate::editor::fresh_config(dir.path())).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut vim = VimTerm::spawn_cmd(
+            "fresh",
+            &crate::editor::editor_args("fresh", dir.path(), "a.txt", 1),
+            dir.path(),
+            "t".into(),
+            80,
+            24,
+            1,
+            tx,
+        )
+        .unwrap();
+        vim.kind = crate::editor::Kind::Fresh;
+        vim.quits_itself = true;
+        let mut app = App::new();
+        app.vim = Some(vim);
+        let mut out = Vec::new();
+        pump_editor(&mut app, &mut rx, |s| s.contains("alpha foo one"));
+        press(
+            &mut app,
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        pump_editor(&mut app, &mut rx, |s| s.contains("Search:"));
+        for c in "foo".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
+        pump_editor(&mut app, &mut rx, |s| s.contains("Search: foo"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        pump_editor(&mut app, &mut rx, |s| s.contains("Ln 1, Col 7"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        pump_editor(&mut app, &mut rx, |s| s.contains("Ln 3, Col 1"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        pump_editor(&mut app, &mut rx, |s| s.contains("Ln 5, Col 5"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+        let shown = pump_editor(&mut app, &mut rx, |s| s.contains("Ln 3, Col 1"));
+        assert!(
+            shown.contains("alpha foo one") && shown.contains("│ foo two"),
+            "no line was broken: {shown}"
+        );
+        press(&mut app, KeyCode::Char('X'), KeyModifiers::NONE, &mut out);
+        pump_editor(&mut app, &mut rx, |s| s.contains("Xfoo two"));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        pump_editor(&mut app, &mut rx, |s| {
+            s.contains("Ln 4, Col 1") && s.lines().any(|l| l.trim_end().ends_with("│ X"))
+        });
         if let Some(vim) = &mut app.vim {
             vim.kill();
         }
