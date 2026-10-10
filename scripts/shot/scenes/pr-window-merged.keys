@@ -1,0 +1,9 @@
+# The PULL REQUESTS MODAL's Merged section: Esc skips WHAT'S NEW, `^V` opens
+# the modal, and ↓ walks past the open rows onto the latest merge — the
+# week's merged pull requests under the open ones, each with how long ago
+# it landed (fixtures/pr-merged.json; #20, a month old, is left out).
+Escape
+C-v
+Down
+Down
+Down

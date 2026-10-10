@@ -2444,6 +2444,7 @@ mod tests {
         app.open_prs.insert(
             ProjectId("p2".into()),
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list: vec![crate::pull_request::OpenPr {
                     number: 7,
                     title: "Tidy".into(),

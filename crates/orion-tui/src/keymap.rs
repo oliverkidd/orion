@@ -113,6 +113,9 @@ pub enum Action {
     Linear,
     /// `⌘I`: the TODOS MODAL — every project's todo list, a tab each.
     Todos,
+    /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
+    /// days, written up by product area with what to show and say.
+    WeekReview,
     /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
     /// another branch, asking what to do with uncommitted changes.
     SwitchBranch,
@@ -520,6 +523,18 @@ pub const ACTIONS: &[ActionSpec] = &[
         // Tab, so its twin is `^Q` — free on the grid, where only a
         // locked pane reads it (its hatch).
         defaults: &["cmd+i", "ctrl+q"],
+    },
+    ActionSpec {
+        action: Action::WeekReview,
+        id: "week_review",
+        label: "My week in review",
+        hint: "What was merged and done in the last 7 days, written up by product area with what to show and what to say; just yours or everyone's",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        // ⌘⇧W would read better, and Ghostty keeps it for good. Every `^`
+        // letter is spoken for, so its twin for a terminal that sends no
+        // ⌘ is the grid's `⇧W`, for week.
+        defaults: &["cmd+shift+y", "shift+w"],
     },
     ActionSpec {
         action: Action::SwitchBranch,

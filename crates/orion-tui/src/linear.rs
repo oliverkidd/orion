@@ -66,8 +66,9 @@ const LINEAR_URL: &str = "https://api.linear.app/graphql";
 const KEY_NAME: &str = "LINEAR_API_KEY";
 const ENV_FILES: &[&str] = &[".env.local", ".env"];
 
-/// One open Linear issue: assigned to the configured user (`mine`), or
-/// someone else's or nobody's in one of their teams.
+/// One Linear issue the view lists — open, or done within [`DONE_DAYS`]:
+/// assigned to the configured user (`mine`), or someone else's or
+/// nobody's in one of their teams.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearIssue {
     pub id: String,
@@ -118,6 +119,9 @@ pub struct LinearIssue {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+    /// When it was done; empty while it is open.
+    #[serde(default)]
+    pub completed_at: String,
     /// The GitHub pull requests Linear has on the issue — its GitHub
     /// integration's, or ones orion attached — as Linear last heard of
     /// them, open, merged or closed.
@@ -591,7 +595,8 @@ impl LinearView {
     }
 }
 
-/// What Linear last said about a project's open issues — the configured
+/// What Linear last said about a project's issues — the open ones and
+/// the ones done within [`DONE_DAYS`], the configured
 /// user's and the rest of their teams' — and the workflow states of the
 /// teams they belong to, by team id, in Linear's own order, with who the
 /// user is and who is in their teams.
@@ -968,7 +973,11 @@ impl KeySource {
 /// launch, or from a worktree the issues were linked to (`⌘.`), can be
 /// attached once GitHub lists it. A link outlives its attach: the LINEAR
 /// VIEW still finds the worktree and pull request of every issue on it
-/// by that branch ([`IssueWork`]).
+/// by that branch ([`IssueWork`]) — while there is a branch to find:
+/// a link not touched in [`LINK_KEEP_DAYS`] whose branch is in no
+/// checkout and on no open pull request is forgotten
+/// ([`prune`](Self::prune)), so the store holds the work in hand and
+/// never every branch there ever was.
 ///
 /// An issue is on one link at a time — ONE HOME: linking it to a branch
 /// takes it off the one it was on, and hands back the attachment orion
@@ -1018,6 +1027,11 @@ pub(crate) struct PendingLink {
     /// Attaches Linear refused in a row.
     #[serde(default, skip_serializing_if = "is_zero")]
     failures: u8,
+    /// When issues were last linked to it, in unix seconds: what
+    /// [`LinkStore::prune`] ages it by. `None` on a link written before
+    /// links were dated, which [`LinkStore::load`] dates from that load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linked_at: Option<u64>,
     /// An attach is out for it now: not tried again until it answers.
     #[serde(skip)]
     sending: bool,
@@ -1110,6 +1124,12 @@ fn is_zero(n: &u8) -> bool {
 /// must not ask again on every list. Linking the branch again tries anew.
 const ATTACH_TRIES: u8 = 3;
 
+/// How long a link outlives its branch: one last linked longer ago than
+/// this, whose branch no checkout is on and no open pull request is from,
+/// is forgotten ([`LinkStore::prune`]). Long enough that a branch parked
+/// for a quarter and checked out again still finds its issues.
+const LINK_KEEP_DAYS: u64 = 90;
+
 /// A link's key: the branch, then the project. Git never puts a `:` in a
 /// branch name, so it never reads as an older link's bare branch.
 fn link_key(project: &ProjectId, branch: &str) -> String {
@@ -1129,10 +1149,50 @@ impl LinkStore {
                 link.attached_ids = link.issue_ids.clone();
             }
         }
-        Self {
+        // And one from before links were dated: its age counts from now,
+        // written down so the next launch does not start it again.
+        let now = orion_core::clock::now_secs();
+        let undated = links.values().any(|l| l.linked_at.is_none());
+        for link in links.values_mut() {
+            link.linked_at.get_or_insert(now);
+        }
+        let store = Self {
             path: Some(path),
             links,
+        };
+        if undated {
+            store.persist();
         }
+        store
+    }
+
+    /// Forget `project`'s links last linked more than [`LINK_KEEP_DAYS`]
+    /// before `now` (unix seconds) whose branch is not in `live` — the
+    /// branches the project's checkouts are on and its open pull requests
+    /// are from. An attach that is out keeps its link, and so does a link
+    /// from before they were kept per project, which may be another
+    /// project's. True when any went.
+    pub(crate) fn prune(
+        &mut self,
+        project: &ProjectId,
+        live: &std::collections::HashSet<String>,
+        now: u64,
+    ) -> bool {
+        let before = self.links.len();
+        self.links.retain(|_, link| {
+            let (Some(branch), Some(linked_at)) = (&link.branch, link.linked_at) else {
+                return true;
+            };
+            link.project.as_ref() != Some(project)
+                || link.sending
+                || live.contains(branch)
+                || now.saturating_sub(linked_at) <= LINK_KEEP_DAYS * 24 * 60 * 60
+        });
+        let pruned = self.links.len() != before;
+        if pruned {
+            self.persist();
+        }
+        pruned
     }
 
     /// The key of `project`'s link on `branch`: its own, else an older
@@ -1156,6 +1216,7 @@ impl LinkStore {
         self.links.entry(key).or_insert_with(|| PendingLink {
             project: Some(project.clone()),
             branch: Some(branch.to_string()),
+            linked_at: Some(orion_core::clock::now_secs()),
             ..PendingLink::default()
         })
     }
@@ -1209,6 +1270,7 @@ impl LinkStore {
             .collect();
         let link = self.link_mut(project, branch);
         link.add(&pairs);
+        link.linked_at = Some(orion_core::clock::now_secs());
         link.attached_ids
             .retain(|id| !pairs.iter().any(|(again, _)| again == id));
         link.failures = 0;
@@ -1238,6 +1300,7 @@ impl LinkStore {
         let ids: Vec<String> = issues.iter().map(|(id, _)| id.clone()).collect();
         let link = self.link_mut(project, branch);
         link.add(issues);
+        link.linked_at = Some(orion_core::clock::now_secs());
         link.attach(&ids, made);
         let stale = self.rehome(project, branch, &ids);
         self.persist();
@@ -1607,7 +1670,7 @@ fn list_len(app: &App, project: &ProjectId) -> usize {
 /// project. `fresh` is a refresh the user asked for (`⌘R`), or one an
 /// edit needs: while a list is out, it is owed and asked as soon as that
 /// one lands, never dropped.
-fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
+pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
@@ -2077,6 +2140,26 @@ pub(crate) fn attach_new_prs(
             pr.number,
         );
     }
+}
+
+/// Forget `project`'s links whose branch is long gone
+/// ([`LinkStore::prune`]): run as its open list lands, which is what says
+/// which branches still have a pull request.
+pub(crate) fn prune_links(app: &mut App, project: &ProjectId) {
+    let checkouts = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == project)
+        .map(|w| w.branch.clone());
+    let pull_requests = app
+        .open_prs
+        .get(project)
+        .into_iter()
+        .flat_map(|open| open.list.iter().map(|pr| pr.head.clone()));
+    let live = checkouts.chain(pull_requests).collect();
+    app.linear_links
+        .prune(project, &live, orion_core::clock::now_secs());
 }
 
 /// LINEAR AUTO-ATTACH: the pull request on `branch` linked to the issues
@@ -3916,6 +3999,7 @@ fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
     let dates: Vec<Vec<Span<'static>>> = [
         ("Created", &issue.created_at),
         ("Updated", &issue.updated_at),
+        ("Completed", &issue.completed_at),
     ]
     .into_iter()
     .filter_map(|(label, stamp)| {
@@ -4005,7 +4089,8 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 /// reading pane, its team's workflow states for `⌘S`, and the pull
 /// requests attached to it for the work column — the same fields whoever's
 /// issues are asked for.
-const ISSUE_FIELDS: &str = "id identifier title url description priority createdAt updatedAt \
+const ISSUE_FIELDS: &str =
+    "id identifier title url description priority createdAt updatedAt completedAt \
     state { name type color position } labels { nodes { name color } } project { name color } \
     assignee { id displayName } creator { displayName } externalUserCreator { name } \
     team { id states { nodes { id name type position color } } } \
@@ -4026,11 +4111,27 @@ const MEMBERS_LIMIT: usize = 100;
 /// Not done and not canceled: the open issues.
 const OPEN_STATES: &str = r#"state: { type: { nin: ["completed", "canceled"] } }"#;
 
-/// Both tabs' issues in one ask, as two aliased lists: `mine`, assigned to
+/// How far back the LINEAR VIEW's done issues reach: a week of what was
+/// finished, under the open ones, as the PULL REQUESTS MODAL keeps a week
+/// of merges (`pull_request::MERGED_DAYS`).
+pub const DONE_DAYS: u32 = 7;
+/// How many done issues each tab's ask lists, the most recently touched
+/// first.
+const DONE_LIMIT: usize = 50;
+
+/// Done — not canceled — within [`DONE_DAYS`]: Linear reads the duration
+/// back from now, so the week is cut where the issues are kept and an
+/// older one is never sent.
+fn done_states() -> String {
+    format!(r#"state: {{ type: {{ eq: "completed" }} }} completedAt: {{ gt: "-P{DONE_DAYS}D" }}"#)
+}
+
+/// Both tabs' issues in one ask, as aliased lists: `mine`, assigned to
 /// the key's owner — or to `email`, when Settings → Linear account names
 /// someone — and `others`, open issues in that person's teams assigned to
-/// someone else or to nobody. With them `me`, who that person is, and
-/// their `teams`' members: who `⌘I` assigns to.
+/// someone else or to nobody; then `mineDone` and `othersDone`, the same
+/// two cut to the issues done lately ([`done_states`]). With them `me`,
+/// who that person is, and their `teams`' members: who `⌘I` assigns to.
 async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let (query, variables) = lists_query(email);
@@ -4059,6 +4160,7 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
             serde_json::json!({ "email": email }),
         )
     };
+    let done = done_states();
     let query = format!(
         r#"{head} {{
           mine: issues(first: {MINE_LIMIT}, orderBy: updatedAt, filter: {{
@@ -4070,6 +4172,15 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
             or: [{{ assignee: {{ null: true }} }}, {{ assignee: {{ {not_me} }} }}]
             {OPEN_STATES}
           }}) {{ nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage }} }}
+          mineDone: issues(first: {DONE_LIMIT}, orderBy: updatedAt, filter: {{
+            assignee: {{ {me} }}
+            {done}
+          }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
+          othersDone: issues(first: {DONE_LIMIT}, orderBy: updatedAt, filter: {{
+            team: {{ members: {{ some: {{ {me} }} }} }}
+            or: [{{ assignee: {{ null: true }} }}, {{ assignee: {{ {not_me} }} }}]
+            {done}
+          }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
           {me_field}
           teams(first: {TEAMS_LIMIT}, filter: {{ members: {{ some: {{ {me} }} }} }}) {{
             nodes {{ id members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} }}
@@ -4388,8 +4499,18 @@ fn issue_nodes(json: &serde_json::Value) -> Option<Vec<(&serde_json::Value, bool
     if mine.is_none() && others.is_none() {
         return None;
     }
+    // The done lists ride along: an answer without them lists the open
+    // issues alone.
+    let done = |path: &str| json.pointer(path).and_then(|v| v.as_array());
+    let mine_done = done("/data/mineDone/nodes");
+    let others_done = done("/data/othersDone/nodes");
     let mut nodes = Vec::new();
-    for (list, is_mine) in [(mine, true), (others, false)] {
+    for (list, is_mine) in [
+        (mine, true),
+        (others, false),
+        (mine_done, true),
+        (others_done, false),
+    ] {
         nodes.extend(list.into_iter().flatten().map(|n| (n, is_mine)));
     }
     Some(nodes)
@@ -4682,7 +4803,8 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
 
 /// The issues of both lists, in the order the LINEAR VIEW's sections go:
 /// by where their state stands (triage, todo, the backlog, started,
-/// done, duplicate, cancelled), the state's place in its workflow, its name, then priority — urgent first, none last —
+/// done, duplicate, cancelled), the state's place in its workflow, its name, then — for the done — the
+/// latest finished first, then priority — urgent first, none last —
 /// and the most recently touched first.
 fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
     if let Some(err) = graphql_error(json) {
@@ -4705,6 +4827,7 @@ fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
             .cmp(&status_rank(b))
             .then_with(|| a.status_order.cmp(&b.status_order))
             .then_with(|| a.status.cmp(&b.status))
+            .then_with(|| b.completed_at.cmp(&a.completed_at))
             .then_with(|| priority_rank(a.priority).cmp(&priority_rank(b.priority)))
             .then_with(|| b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.identifier.cmp(&b.identifier))
@@ -4762,6 +4885,7 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
         mine: false,
         created_at: text("/createdAt"),
         updated_at: text("/updatedAt"),
+        completed_at: text("/completedAt"),
         id: value.get("id")?.as_str()?.to_string(),
         identifier: value.get("identifier")?.as_str()?.to_string(),
         title: value
@@ -5044,6 +5168,7 @@ pub(crate) mod tests {
             mine: true,
             created_at: String::new(),
             updated_at: String::new(),
+            completed_at: String::new(),
             prs: Vec::new(),
         }
     }
@@ -5275,6 +5400,7 @@ pub(crate) mod tests {
         app.open_prs.insert(
             project,
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list: vec![open_pr(42, "Fix login"), open_pr(41, "Spike")],
                 at: now,
                 due: now + std::time::Duration::from_secs(60),
@@ -6141,6 +6267,38 @@ pub(crate) mod tests {
         assert!(parse_lists(&serde_json::json!({"data": {}})).is_err());
     }
 
+    /// The done lists land under the open issues, each on its own tab:
+    /// the latest finished first, whatever its priority.
+    #[test]
+    fn the_done_lists_sort_under_the_open_issues_latest_first() {
+        let done = |id: &str, at: &str, priority: u8| {
+            serde_json::json!({
+                "id": id, "identifier": format!("ENG-{id}"), "title": "Shipped",
+                "url": format!("https://linear.app/x/issue/ENG-{id}"), "priority": priority,
+                "completedAt": at, "state": {"name": "Done", "type": "completed"}
+            })
+        };
+        let json = serde_json::json!({"data": {
+            "mine": {"nodes": [
+                {"id": "1", "identifier": "ENG-1", "title": "Open", "url": "https://linear.app/x/issue/ENG-1",
+                 "state": {"name": "In Progress", "type": "started"}}
+            ]},
+            "others": {"nodes": []},
+            "mineDone": {"nodes": [
+                done("2", "2026-10-06T09:00:00.000Z", 1),
+                done("3", "2026-10-09T09:00:00.000Z", 4)
+            ]},
+            "othersDone": {"nodes": [done("4", "2026-10-08T09:00:00.000Z", 0)]}
+        }});
+        let fetched = parse_lists(&json).unwrap();
+        let ids: Vec<&str> = fetched.list.iter().map(|i| i.identifier.as_str()).collect();
+        assert_eq!(ids, ["ENG-1", "ENG-3", "ENG-4", "ENG-2"]);
+        let mine: Vec<bool> = fetched.list.iter().map(|i| i.mine).collect();
+        assert_eq!(mine, [true, true, false, true]);
+        assert_eq!(fetched.list[1].completed_at, "2026-10-09T09:00:00.000Z");
+        assert!(fetched.list[0].completed_at.is_empty(), "open");
+    }
+
     /// The one ask names both lists; with Settings → Linear account set,
     /// that person stands in for the key's owner on both.
     #[test]
@@ -6148,6 +6306,22 @@ pub(crate) mod tests {
         let (query, vars) = lists_query("");
         assert!(query.contains("mine: issues(first: 100"), "{query}");
         assert!(query.contains("others: issues(first: 250"), "{query}");
+        // Each has its done list beside it: finished, not canceled, and
+        // cut to the week by Linear itself.
+        for done in ["mineDone", "othersDone"] {
+            let (_, list) = query
+                .split_once(&format!("{done}: issues(first: 50"))
+                .expect(done);
+            let filter = list.split_once("nodes").expect("a filter").0;
+            assert!(
+                filter.contains(r#"state: { type: { eq: "completed" } }"#),
+                "{filter}"
+            );
+            assert!(
+                filter.contains(r#"completedAt: { gt: "-P7D" }"#),
+                "{filter}"
+            );
+        }
         assert!(
             query.contains("assignee: { isMe: { eq: true } }"),
             "{query}"
@@ -6491,6 +6665,7 @@ pub(crate) mod tests {
         app.open_prs.insert(
             ProjectId("p1".into()),
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list,
                 at: now,
                 due: now,
@@ -7868,6 +8043,49 @@ pub(crate) mod tests {
         let store = LinkStore::load(path);
         assert_eq!(store.pending(&p1, "feature-x"), ["ENG-3"]);
         assert_eq!(store.pending(&p2, "feature-x"), ["ENG-4"]);
+    }
+
+    /// A link outlives its branch by ninety days and no more: one whose
+    /// branch a checkout or an open pull request is still on stays however
+    /// old, another project's is not this prune's, and a link from before
+    /// they were dated starts its ninety days when it is first loaded.
+    #[test]
+    fn a_link_is_forgotten_ninety_days_after_its_branch_is_gone() {
+        const DAY: u64 = 24 * 60 * 60;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linear-links.json");
+        std::fs::write(
+            &path,
+            r#"{"old:p1": {"issue_ids": ["9"], "identifiers": ["ENG-9"],
+                           "project": "p1", "branch": "old"}}"#,
+        )
+        .unwrap();
+        let (p1, p2) = (ProjectId("p1".into()), ProjectId("p2".into()));
+        let mut store = LinkStore::load(path.clone());
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("linked_at"),
+            "dated on the load that found it undated"
+        );
+        store.remember(&p1, "gone", &[issue("1", "ENG-1", "a")]);
+        store.remember(&p1, "kept", &[issue("2", "ENG-2", "b")]);
+        store.remember(&p2, "gone", &[issue("3", "ENG-3", "c")]);
+        let now = orion_core::clock::now_secs();
+        let live: std::collections::HashSet<String> = ["kept".to_string()].into();
+
+        assert!(!store.prune(&p1, &live, now + 89 * DAY), "not yet");
+        assert_eq!(store.branches_of("1"), ["gone"]);
+        assert!(store.prune(&p1, &live, now + 91 * DAY));
+        assert!(store.branches_of("1").is_empty(), "its branch is gone");
+        assert!(store.branches_of("9").is_empty(), "the older one too");
+        assert_eq!(store.branches_of("2"), ["kept"], "still worked on");
+        assert_eq!(store.branches_of("3"), ["gone"], "another project's");
+        assert!(!store.prune(&p1, &live, now + 91 * DAY), "nothing left to");
+
+        let back = LinkStore::load(path);
+        assert!(back.branches_of("1").is_empty(), "forgotten on disk too");
+        assert_eq!(back.branches_of("2"), ["kept"]);
     }
 
     /// Linking more issues to a branch whose pull request took some

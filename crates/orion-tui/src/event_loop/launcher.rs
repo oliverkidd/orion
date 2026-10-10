@@ -4662,6 +4662,7 @@ mod tests {
         app.open_prs.insert(
             ProjectId("p1".into()),
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list: vec![crate::pull_request::OpenPr {
                     number: 9,
                     title: "Polish the nav".into(),

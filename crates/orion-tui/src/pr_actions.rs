@@ -937,7 +937,7 @@ pub(crate) fn open_merge(app: &mut App) {
         return;
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = crate::pr_modal::selected_pr(app) else {
+    let Some(pr) = crate::pr_modal::selected_open_pr(app) else {
         return;
     };
     let config = crate::config::Config::load();
@@ -1237,7 +1237,7 @@ pub(crate) fn open_close(app: &mut App) {
         return;
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = crate::pr_modal::selected_pr(app) else {
+    let Some(pr) = crate::pr_modal::selected_open_pr(app) else {
         return;
     };
     let mut form = CloseForm {
@@ -1543,7 +1543,7 @@ pub(crate) fn toggle_draft(app: &mut App) {
         return;
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = crate::pr_modal::selected_pr(app) else {
+    let Some(pr) = crate::pr_modal::selected_open_pr(app) else {
         return;
     };
     let Some(tx) = app.pr_actions_tx.clone() else {

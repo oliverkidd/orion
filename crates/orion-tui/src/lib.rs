@@ -81,6 +81,7 @@ pub mod update_check;
 pub mod usage;
 pub mod view_jobs;
 pub mod vim_term;
+pub mod week_review;
 pub mod whats_new;
 
 use anyhow::Result;

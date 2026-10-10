@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::fetch::{Asked, Known};
 use crate::pull_request::{
-    Checks, Health, OpenPr, PrDetail, PullRequest, Standing, Trouble, STATE_OPEN,
+    Checks, Health, OpenPr, PrDetail, PullRequest, Standing, Trouble, STATE_MERGED, STATE_OPEN,
 };
 
 /// Every pull request orion has heard about, by URL.
@@ -111,6 +111,18 @@ impl PrObservation {
             conflicts: pr.answered.conflicts,
             checks: pr.listed_checks(),
             head_sha: said(&pr.head_sha),
+        }
+    }
+
+    /// A row of the list's merged tail (`ListAnswer::merged`): merged, by
+    /// the query that brought it, and nothing asked of its conflicts or
+    /// checks — a merged pull request is past both.
+    pub fn of_merged_row(pr: &OpenPr) -> Self {
+        Self {
+            title: said(&pr.title),
+            state: Some(STATE_MERGED.to_string()),
+            head_sha: said(&pr.head_sha),
+            ..Self::default()
         }
     }
 

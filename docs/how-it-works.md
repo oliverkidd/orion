@@ -398,7 +398,8 @@ checkout is live, so it says so once; one found already merged (last run's cache
 sweeps, and a merged checkout left lying around costs an idle orion no repaints. Jump to it with
 `⌘K` and the pane reads the pull request as its [page](keys.md#the-pull-request-page) — description and
 conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
-as the PULL REQUESTS MODAL does (whose list retires a pull request on merge, and which `hide_draft_prs` never thins — the
+as the PULL REQUESTS MODAL does (whose list moves a pull request to its **Merged** section on merge — the last 7 days'
+merges, under the open rows — and which `hide_draft_prs` never thins — the
 modal lists drafts too); `⌘E` shows its diff. Manual link
 attachment is gone; links an earlier version saved stay in the database, so no data is discarded,
 though the grid draws none of them.
@@ -427,7 +428,15 @@ The open list is one GraphQL query per project rather than `gh pr list`, because
 only GitHub's own verdict on them — the pass / fail / pending the pull request page shows — and `gh pr
 list` asks for every check on every pull request instead, which on a busy repo times out every time. A
 lookup that fails keeps the last list that worked on screen, and the PULL REQUESTS MODAL says
-`couldn't refresh` under its filter until an answer lands.
+`couldn't refresh` under its filter until an answer lands. The same query brings the modal's
+**Merged** section: the merged pull requests most recently touched — name, author and merge
+time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). There is
+no cap on how many: GitHub cannot be asked for "merged since", so when a page of 100 ends on a pull
+request still touched inside the week, the next page is asked for, until one reaches back past it.
+That walk runs every five minutes at most; in between, the first page — where every new merge lands —
+is folded into the list already held, so a repo that merges 160 a week costs no more per refresh than
+a quiet one. If a page cannot be
+read, the section's count says `99+` rather than pass a short list off as the week.
 
 The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
 all say where the same pull request stands, on their own beats, and land in whatever order the

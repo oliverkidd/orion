@@ -366,6 +366,12 @@ async fn main_loop(
     let (pr_actions_tx, mut pr_actions_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::pr_actions::Answer>();
     app.pr_actions_tx = Some(pr_actions_tx);
+    // The WEEK IN REVIEW: its fetch of the week's merges and the write of
+    // the review, each off the loop, and where the reviews are kept.
+    let (week_review_tx, mut week_review_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::week_review::Answer>();
+    app.week_review.tx = Some(week_review_tx);
+    app.week_review.root = Some(orion_core::paths::data_dir().join("reviews"));
     // The ISSUES MODAL's `gh issue list` / `gh issue view` answers, on the
     // same footing: the modal's own handlers start the fetch, the loop
     // lands it.
@@ -805,6 +811,11 @@ async fn main_loop(
             answer = pr_actions_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::pr_actions::land_answer(&mut app, answer);
+                }
+            }
+            answer = week_review_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::week_review::land_answer(&mut app, answer);
                 }
             }
             // The ISSUES MODAL's hover debounce: the cursor has rested on
@@ -1658,12 +1669,18 @@ fn spawn_open_prs(
     id: ProjectId,
     dir: std::path::PathBuf,
 ) {
+    // The merged tail is walked to its end only now and then; in between
+    // its first page says everything new.
+    let whole_week = app
+        .merged_walked
+        .get(&id)
+        .is_none_or(|at| at.elapsed() >= crate::pull_request::MERGED_WALK_EVERY);
     let Some(ticket) = app.open_prs_inflight.begin(id, crate::fetch::now()) else {
         return;
     };
     let prs_tx = prs_tx.clone();
     tokio::spawn(async move {
-        let answer = crate::pull_request::list(&dir).await;
+        let answer = crate::pull_request::list(&dir, whole_week).await;
         let _ = prs_tx.send(ListLanded {
             ticket,
             dir,
@@ -1771,7 +1788,9 @@ fn note_open_prs_answer(
 /// first, and the list then drops any row `prs` says has merged or closed
 /// since — a page asked after this list was asked said so, and a list
 /// already on its way must not bring the row back. A slim answer carries
-/// each row's meta line over from the last list (`carry_meta`).
+/// each row's meta line over from the last list (`carry_meta`), and an
+/// answer with no merged tail — the slim one's, a failed one's — keeps
+/// the last tail there was.
 fn note_open_prs_answer_at(
     app: &mut App,
     project: orion_core::ProjectId,
@@ -1788,12 +1807,36 @@ fn note_open_prs_answer_at(
     // the cursor goes with it — a checkout is never lost to a re-list.
     let checkout = app.selected_worktree().map(|w| w.id.clone());
     let mut status_changed = false;
+    let mut merged = None;
+    // Whether the merged tail is the whole week is for an answer that
+    // walked it to say; one that brought the first page alone says
+    // nothing either way.
+    if let Some(answer) = answer
+        .as_ref()
+        .filter(|a| a.merged.is_some() && !a.merged_head)
+    {
+        if answer.merged_short {
+            app.merged_short.insert(project.clone());
+        } else {
+            app.merged_short.remove(&project);
+        }
+        app.merged_walked
+            .insert(project.clone(), std::time::Instant::now());
+    }
     let list = answer.map(|answer| {
         let mut rows = answer.rows;
         for row in &rows {
             let cut = answer.cut.contains(&row.url);
             status_changed |= app.prs.observe_list_row(row, cut, asked);
         }
+        // The merged tail after the open rows: a pull request GitHub
+        // listed under both in the moment it merged reads as merged, and
+        // leaves the open rows below.
+        for row in answer.merged.iter().flatten() {
+            let seen = crate::pr_store::PrObservation::of_merged_row(row);
+            status_changed |= app.prs.observe(&row.url, seen, asked);
+        }
+        merged = answer.merged.map(|rows| (rows, answer.merged_head));
         if answer.slim {
             carry_meta(
                 &mut rows,
@@ -1843,7 +1886,16 @@ fn note_open_prs_answer_at(
     // answer lands through; the cursor reconcile below follows its PR by
     // URL, so the reorder never moves the selection off it.
     crate::pull_request::drafts_last(&mut list, &app.prs);
-    let changed = previous.map(|o| &o.list) != Some(&list) || status_changed;
+    let held = previous.map(|o| o.merged.as_slice()).unwrap_or_default();
+    let merged = match merged {
+        Some((head, true)) => {
+            crate::pull_request::fold_merged(head, held, orion_core::clock::now_secs() as i64)
+        }
+        Some((whole, false)) => whole,
+        None => held.to_vec(),
+    };
+    let changed =
+        previous.map(|o| (&o.list, &o.merged)) != Some((&list, &merged)) || status_changed;
     app.dirty |= changed;
     app.pr_cache_dirty |= changed;
     reask_checkouts_whose_pr_left(app, &left);
@@ -1857,6 +1909,7 @@ fn note_open_prs_answer_at(
         project,
         crate::app::OpenPrs {
             list,
+            merged,
             at: now,
             due: now + step,
             step,
@@ -1874,6 +1927,11 @@ fn note_open_prs_answer_at(
     let fresh = app.open_prs.get(&project_id).map(|o| o.list.clone());
     if let Some(fresh) = fresh {
         crate::linear::attach_new_prs(app, &project_id, previous_list.as_deref(), &fresh);
+    }
+    // And only a real answer says which branches still have a pull
+    // request: the links of the ones long gone are forgotten on it.
+    if !failed {
+        crate::linear::prune_links(app, &project_id);
     }
     // So does the PULL REQUESTS MODAL, whose cursor follows its pull
     // request across the new list.
@@ -2308,7 +2366,10 @@ fn land_pr_detail(
                 app.pr_detail_stale.remove(&url);
             }
             app.pr_detail_failed.remove(&url);
-            app.pr_cache_dirty |= changed;
+            if changed {
+                app.pr_detail_unsaved.insert(url.clone());
+                app.pr_cache_dirty = true;
+            }
             crate::pr_actions::detail_landed(app, &url);
             if retired {
                 drop_retired_pr(app, &url, out);
@@ -3804,6 +3865,10 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         crate::autofix::paste(app, text);
         return true;
     }
+    if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
+        crate::week_review::paste(app, text);
+        return true;
+    }
     let Some(overlay) = &mut app.overlay else {
         return false;
     };
@@ -4559,6 +4624,7 @@ fn dispatch_action(
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
         Action::Todos => crate::todos::open(app),
+        Action::WeekReview => crate::week_review::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
@@ -8017,6 +8083,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
+        Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::Stacks(_) => crate::stacks::handle_key(app, key, out),
@@ -12862,6 +12929,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::autofix::handle_mouse(app, mouse);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
+        crate::week_review::handle_mouse(app, mouse);
+        return;
+    }
     // Hosts picker: the wheel moves the selection, a click on a row connects
     // (the context-menu convention — rows are actions, not editable items);
     // everything else inside the box is swallowed.
@@ -16421,6 +16492,7 @@ mod tests {
         app.open_prs.insert(
             id,
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list: prs
                     .iter()
                     .map(|(number, title)| crate::pull_request::OpenPr {
@@ -18931,6 +19003,69 @@ diff --git a/src/b.rs b/src/b.rs
         assert!(!app.pr_cache_dirty, "nothing changed");
     }
 
+    /// The merged tail lands beside the open rows and is the PULL REQUESTS
+    /// MODAL's alone — no open pull request to the group or the counts.
+    /// An answer that did not ask for it — the slim query's, a failed
+    /// call — keeps the last one; one that asked and found none empties it.
+    #[test]
+    fn the_merged_tail_lands_beside_the_open_rows_and_outlasts_a_slim_answer() {
+        use crate::pull_request::ListAnswer;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let pid = app.selected_project().expect("a project").id.clone();
+        let landed = || {
+            let mut row = a_pr(5, "Landed", false);
+            row.meta.merged_at = "2026-10-06T09:10:27Z".into();
+            row
+        };
+        let land = |app: &mut App, merged: Option<Vec<_>>, slim| {
+            let answer = ListAnswer {
+                rows: vec![a_pr(7, "Attach links", false)],
+                slim,
+                merged,
+                ..Default::default()
+            };
+            let asked = crate::fetch::Asked::At(crate::fetch::now());
+            note_open_prs_answer_at(app, pid.clone(), Some(answer), asked, &mut Vec::new());
+        };
+        land(&mut app, Some(vec![landed()]), false);
+        assert_eq!(open_pr_numbers(&app), vec![7]);
+        assert_eq!(app.project_open_counts(&pid).0, Some(1));
+        assert_eq!(app.open_prs[&pid].merged, vec![landed()]);
+        assert_eq!(app.prs.status_or_open(&pr_url(5)).word(), "merged");
+        assert!(app.live_pr_urls().contains(&pr_url(5)), "its page is kept");
+        app.pr_cache_dirty = false;
+
+        land(&mut app, None, true);
+        assert_eq!(app.open_prs[&pid].merged, vec![landed()], "never asked");
+        assert!(!app.pr_cache_dirty, "nothing changed");
+        note_open_prs_answer(&mut app, pid.clone(), None, &mut Vec::new());
+        assert_eq!(app.open_prs[&pid].merged, vec![landed()], "a failed call");
+
+        land(&mut app, Some(Vec::new()), false);
+        assert!(app.open_prs[&pid].merged.is_empty(), "a week on, it leaves");
+        assert!(app.pr_cache_dirty);
+
+        // A tail GitHub cut short is remembered as short until one that
+        // was read to the end lands; a slim answer says nothing either way.
+        let short = |app: &mut App, merged: Option<Vec<_>>, merged_short| {
+            let answer = ListAnswer {
+                slim: merged.is_none(),
+                merged,
+                merged_short,
+                ..Default::default()
+            };
+            let asked = crate::fetch::Asked::At(crate::fetch::now());
+            note_open_prs_answer_at(app, pid.clone(), Some(answer), asked, &mut Vec::new());
+        };
+        short(&mut app, Some(vec![landed()]), true);
+        assert!(app.merged_short.contains(&pid));
+        short(&mut app, None, false);
+        assert!(app.merged_short.contains(&pid), "never asked");
+        short(&mut app, Some(vec![landed()]), false);
+        assert!(!app.merged_short.contains(&pid), "read to the end");
+    }
+
     /// A page asked to be read again while its fetch runs — the list says
     /// the row moved — is owed a fresh read: the answer in flight lands but
     /// leaves the page stale, and the next read starts at once. A list
@@ -19116,6 +19251,7 @@ diff --git a/src/b.rs b/src/b.rs
             .pr_recheck
             .insert(gone_w.clone(), (now, PR_RECHECK_MIN));
         let open = |list| crate::app::OpenPrs {
+            merged: Vec::new(),
             list,
             at: now,
             due: now,
@@ -19191,6 +19327,7 @@ diff --git a/src/b.rs b/src/b.rs
         app.open_prs.insert(
             p2.clone(),
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list: Vec::new(),
                 at: now,
                 due: now,
@@ -34075,6 +34212,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.open_prs.insert(
             orion_core::ProjectId("p9".into()),
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list: vec![crate::pull_request::OpenPr {
                     number: 3,
                     title: "Hush the logs".into(),
@@ -34337,6 +34475,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.open_prs.insert(
                 project,
                 crate::app::OpenPrs {
+                    merged: Vec::new(),
                     list,
                     at: now,
                     due: now + OPEN_PRS_REFRESH,
@@ -39727,6 +39866,14 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "WeekReview",
+                |app| {
+                    seed_tree(app);
+                    run_action(app, crate::keymap::Action::WeekReview);
+                },
+                None,
+            ),
+            (
                 "BranchSwitch",
                 |app| {
                     seed_tree(app);
@@ -39951,6 +40098,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
             Overlay::Autofix(_) => "Autofix",
+            Overlay::WeekReview(_) => "WeekReview",
             Overlay::Todos(_) => "Todos",
         }
     }
@@ -39980,7 +40128,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
         });
     }
 

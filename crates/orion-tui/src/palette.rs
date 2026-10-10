@@ -675,6 +675,7 @@ mod tests {
         open_prs.insert(
             ProjectId("p1".into()),
             OpenPrs {
+                merged: Vec::new(),
                 list: vec![pr(7, "Attach links", false), pr(9, "Still cooking", true)],
                 at: now,
                 due: now,
@@ -737,6 +738,7 @@ mod tests {
         open_prs.insert(
             ProjectId("p1".into()),
             OpenPrs {
+                merged: Vec::new(),
                 list: vec![
                     pr(7, Answered::default()),
                     pr(
@@ -810,6 +812,7 @@ mod tests {
         open_prs.insert(
             ProjectId("p1".into()),
             OpenPrs {
+                merged: Vec::new(),
                 list: vec![
                     pr(7, "Attach links", false),
                     pr(9, "Number the lines", true),

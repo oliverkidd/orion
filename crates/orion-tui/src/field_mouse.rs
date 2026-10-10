@@ -30,6 +30,7 @@ enum Field {
     LinearQuery,
     DiffFilter,
     AutofixNote,
+    ReviewNote,
 }
 
 /// Every text field the modal that is up holds, with which it is.
@@ -76,6 +77,10 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         },
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
+        Overlay::WeekReview(v) => match v.mode {
+            crate::week_review::Mode::Compose => vec![(Field::ReviewNote, &mut v.note)],
+            crate::week_review::Mode::Reviews => Vec::new(),
+        },
         // An open item field has every key, the filter's too.
         Overlay::Todos(v) => match &mut v.input {
             Some((_, input)) => vec![(Field::Only, input)],
@@ -135,6 +140,9 @@ fn focus(app: &mut App, field: Field) {
         }
         (Some(Overlay::Autofix(form)), Field::AutofixNote) => {
             form.row = crate::autofix::Row::Note;
+        }
+        (Some(Overlay::WeekReview(view)), Field::ReviewNote) => {
+            view.row = crate::week_review::Row::Note;
         }
         _ => {}
     }

@@ -4,6 +4,12 @@
 //! sections (yours, the ones waiting on your review, the rest), each row's
 //! author, age, checks, review and labels on a line under its title, and
 //! the one under the cursor read on the right, as the PULL REQUEST PAGE.
+//! Under them, `Merged`: what landed in the last week
+//! (`pull_request::MERGED_DAYS`), the latest merge first, so the list
+//! reads as a lineage. A merged row is read, diffed, commented on and
+//! opened like any other; the verbs that need an open pull request — an
+//! agent, merge, close, ready/draft, autofix — say it has merged
+//! ([`selected_open_pr`]).
 //! `⌘F` and `key:value` tokens in the filter narrow by facet
 //! (`list_filter`). Two panels, and
 //! `Tab` / `⇧Tab` hand the keys from one to the other as they do in the
@@ -54,7 +60,8 @@
 //! (`DiffView::back`).
 //!
 //! Nothing is fetched here the panels do not already keep. The rows are
-//! the project's open list (`App::open_prs`) — kept warm on the OPEN PRS
+//! the project's open list and its merged tail (`App::open_prs`) — kept
+//! warm on the OPEN PRS
 //! beat and remembered across launches (`pr_cache`) — so the modal paints
 //! at once, and opening it on a list older than [`FRESH`] asks again
 //! underneath. The reading side is the PULL REQUEST PAGE the pane shows
@@ -330,7 +337,7 @@ pub(crate) fn open_pick(app: &mut App, pick: PrPick) {
 /// reading — else the first.
 fn show(app: &mut App, mut view: PullRequestsView) {
     let project = view.project.clone();
-    let list = rows(app, &project);
+    let list = &rows(app, &project);
     let start = app
         .selected_worktree_pr()
         .and_then(|pr| list.iter().position(|row| row.url == pr.url))
@@ -353,17 +360,19 @@ fn show(app: &mut App, mut view: PullRequestsView) {
 /// them. Opening (`opening`) asks for each of yours that isn't fresh —
 /// what you came to look at — and every other one this session hasn't
 /// read; a list landing later queues only what is still unread, so the
-/// beat never turns into a sweep of every page.
+/// beat never turns into a sweep of every page. The merged rows are left
+/// out: a week of them is a page each nobody may walk down to, read when
+/// the cursor rests on one.
 fn queue_prefetch(app: &mut App, opening: bool) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     let mut soon = Vec::new();
     let mut later = Vec::new();
     for (i, _) in visible_rows("", list, &app.prs) {
         let pr = &list[i];
-        if view.prefetch.holds(&pr.url) {
+        if pr.is_merged() || view.prefetch.holds(&pr.url) {
             continue;
         }
         let pending = PendingPrDetail {
@@ -506,11 +515,13 @@ pub(crate) fn reopen(app: &mut App, view: PullRequestsView) {
 
 /// The project's open pull requests, as the group shows them (drafts and
 /// all: the modal lists everything open, whatever `hide_draft_prs` keeps
-/// out of the panel).
-fn rows<'a>(app: &'a App, project: &ProjectId) -> &'a [OpenPr] {
-    app.open_prs
-        .get(project)
-        .map_or(&[], |open| open.list.as_slice())
+/// out of the panel), then the ones merged lately (`OpenPrs::merged`) —
+/// after the open rows, so an open row's index is its index in the
+/// group's list.
+fn rows(app: &App, project: &ProjectId) -> Vec<OpenPr> {
+    app.open_prs.get(project).map_or_else(Vec::new, |open| {
+        open.list.iter().chain(&open.merged).cloned().collect()
+    })
 }
 
 /// Is there a filter to apply — words beyond whitespace, or a token?
@@ -519,7 +530,8 @@ fn has_query(view: &PullRequestsView) -> bool {
 }
 
 /// The keys the filter line takes besides its words (`list_filter`):
-/// `author:sam label:bug review:approved checks:failing is:draft`.
+/// `author:sam label:bug review:approved checks:failing is:draft` —
+/// `is:merged` for the merged rows alone.
 pub(crate) const FACETS: &[FacetKey] = &[
     FacetKey::new("author", "Author"),
     FacetKey::new("label", "Label"),
@@ -548,6 +560,7 @@ fn facet_values(pr: &OpenPr, key: &str, prs: &PrStore) -> Vec<String> {
         "label" => pr.meta.labels.iter().map(|l| l.name.clone()).collect(),
         "review" => vec![pr.meta.review.word().to_string()],
         "checks" => vec![checks_word(prs.status_or_open(&pr.url).health.checks).to_string()],
+        "is" if pr.is_merged() => vec!["merged".to_string()],
         "is" => {
             let status = prs.status_or_open(&pr.url);
             let mut is = vec![if status.is_draft() { "draft" } else { "ready" }.to_string()];
@@ -564,7 +577,7 @@ fn facet_values(pr: &OpenPr, key: &str, prs: &PrStore) -> Vec<String> {
 /// with the matched char positions of its `#42 title` (lit when drawn).
 /// The words rank the rows best first and the tokens narrow them; then
 /// they gather by [`PrSection`] — yours, then the ones waiting on your
-/// review, then the rest — keeping that order inside each. With nothing
+/// review, then the rest, then the merged — keeping that order inside each. With nothing
 /// typed, every row in list order, section by section. Worked out afresh
 /// on every call rather than kept — a project's open pull requests are a
 /// handful — so it can never go stale against the list.
@@ -622,8 +635,23 @@ pub(crate) fn selected_pr(app: &App) -> Option<OpenPr> {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return None;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     cursor_index(view, list, &app.prs).and_then(|i| list.get(i).cloned())
+}
+
+/// [`selected_pr`] for a verb that needs the pull request still open — an
+/// agent on it, merge, close, ready/draft, autofix. A merged row has none
+/// of them left: the footer says it has merged, and nothing opens.
+pub(crate) fn selected_open_pr(app: &mut App) -> Option<OpenPr> {
+    let pr = selected_pr(app)?;
+    if pr.is_merged() {
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "#{} has merged",
+            pr.number
+        )));
+        return None;
+    }
+    Some(pr)
 }
 
 /// `⌘G`: the AUTOFIX form for the pull request under the cursor — at
@@ -634,7 +662,7 @@ fn autofix(app: &mut App) {
         return;
     };
     let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = selected_pr(app) else {
+    let Some(pr) = selected_open_pr(app) else {
         return;
     };
     let fresh = app.pr_detail_fresh(&pr.url);
@@ -701,7 +729,7 @@ pub(crate) fn list_changed(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     let found = view
         .selected_url
         .as_ref()
@@ -748,7 +776,7 @@ fn select(app: &mut App, index: i64) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     let next = clamp_selection(index, list.len());
     let url = list.get(next).map(|pr| pr.url.clone());
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
@@ -771,7 +799,7 @@ fn sync_row(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     let row = cursor_index(view, list, &app.prs).and_then(|c| {
         visible_rows(&view.query, list, &app.prs)
             .iter()
@@ -788,7 +816,7 @@ fn step(app: &mut App, delta: i64) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     let Some(current) = cursor_index(view, list, &app.prs) else {
         return;
     };
@@ -810,7 +838,7 @@ fn query_changed(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let list = rows(app, &view.project);
+    let list = &rows(app, &view.project);
     let target = if has_query(view) {
         visible_rows(&view.query, list, &app.prs)
             .first()
@@ -894,6 +922,9 @@ fn launch_for_selected(app: &App) -> Option<QuickLaunch> {
 /// launch closes it onto the new session's card. The box's own `Tab` and
 /// `⇧Tab` pick another harness or an AGENT PRESET for it.
 fn open_prompt_for_selected(app: &mut App) {
+    if selected_open_pr(app).is_none() {
+        return;
+    }
     let under = ModalUnder::of(app.overlay.as_ref());
     if let Some(launch) = launch_for_selected(app) {
         crate::quick_prompt::open_pr_box(app, launch.with_under(under));
@@ -1118,7 +1149,7 @@ fn filter_pick_key(app: &mut App, key: &KeyEvent) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let facets = pick_facets(rows(app, &view.project), &app.prs, app.theme);
+    let facets = pick_facets(&rows(app, &view.project), &app.prs, app.theme);
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
@@ -1165,7 +1196,11 @@ fn pick_facets(list: &[OpenPr], prs: &PrStore, th: Theme) -> Vec<PickFacet> {
                         None
                     })
                 }
-                "is" => fixed_values(&["ready", "draft", "conflicts"], &count("is"), |_| None),
+                "is" => fixed_values(
+                    &["ready", "draft", "conflicts", "merged"],
+                    &count("is"),
+                    |_| None,
+                ),
                 key => plain_values(by_count(count(key))),
             };
             PickFacet {
@@ -1443,10 +1478,16 @@ const WORD_W: usize = 9;
 /// …then two cells, then how long ago it was opened, at least this wide.
 const AGE_W: usize = 3;
 
-/// How long ago `pr` was opened, as its row's last column says it: `3d`,
-/// `21m`, `now` — empty for a row the list said nothing about.
+/// How long ago `pr` was opened — merged, for a merged row — as its
+/// row's last column says it: `3d`, `21m`, `now` — empty for a row the
+/// list said nothing about.
 fn age_of(pr: &OpenPr, now: i64) -> String {
-    crate::pull_request::rfc3339_secs(&pr.meta.created_at)
+    let stamp = if pr.is_merged() {
+        &pr.meta.merged_at
+    } else {
+        &pr.meta.created_at
+    };
+    crate::pull_request::rfc3339_secs(stamp)
         .map(|at| crate::hosts::ago_short(now - at))
         .unwrap_or_default()
 }
@@ -1647,7 +1688,7 @@ pub(crate) fn draw(
     ])
     .areas(area);
 
-    let rows: Vec<OpenPr> = rows(app, &view.project).to_vec();
+    let rows: Vec<OpenPr> = rows(app, &view.project);
     let inflight = app.open_prs_inflight.in_flight(&view.project);
     let asked = app.open_prs.contains_key(&view.project);
     // The last ask came back with nothing — these rows are the last
@@ -1662,11 +1703,14 @@ pub(crate) fn draw(
         .unwrap_or(0);
 
     // ---- left: the list ----
-    // The count reads `matches/all` while a filter is on.
+    // The count is the open ones' — the merged section's is on its own
+    // rule — and reads `matches/all` while a filter is on.
+    let open = rows.iter().filter(|pr| !pr.is_merged()).count();
     let count = if parsed.is_active() {
-        format!("{}/{}", visible.len(), rows.len())
+        let matched = visible.iter().filter(|(i, _)| !rows[*i].is_merged());
+        format!("{}/{open}", matched.count())
     } else {
-        rows.len().to_string()
+        open.to_string()
     };
     // A PR PICK names the issues it attaches to, as the LINEAR VIEW
     // opened from a pull request names the pull request (`Linear → PR #42`).
@@ -1750,7 +1794,7 @@ pub(crate) fn draw(
     } else if visible.is_empty() {
         empty_list_row(f, rows_area, "no pull requests match", th);
     }
-    // Sections — yours, waiting on your review, the rest — each under a
+    // Sections — yours, waiting on your review, the rest, the merged — each under a
     // rule the way the main page's checkouts sit under their bands, a blank
     // line between them; a row one line, the main page's LIST row's shape.
     let keys: Vec<PrSection> = visible.iter().map(|(i, _)| rows[*i].section()).collect();
@@ -1764,10 +1808,20 @@ pub(crate) fn draw(
     for (entry, rect) in drawn {
         match entry {
             ListEntry::Header { first, count } => {
+                // A merged tail GitHub cut short says there are more: the
+                // count is never passed off as the week's.
+                let short = keys[first] == PrSection::Merged
+                    && !parsed.is_active()
+                    && app.merged_short.contains(&view.project);
+                let count = if short {
+                    format!("{count}+")
+                } else {
+                    count.to_string()
+                };
                 let rule = crate::ui::section_rule(
                     keys[first].name(),
                     th.muted,
-                    vec![Span::styled(count.to_string(), Style::default().fg(th.dim))],
+                    vec![Span::styled(count, Style::default().fg(th.dim))],
                     width,
                     th,
                 );
@@ -2009,6 +2063,7 @@ mod tests {
         app.open_prs.insert(
             project.clone(),
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list,
                 at: now,
                 due: now + std::time::Duration::from_secs(60),
@@ -3341,7 +3396,7 @@ mod tests {
         handle_mouse(&mut app, click, at, &mut Vec::new());
         assert_eq!(view(&app).query.as_str(), "login", "the filter is kept");
         let picked = selected_pr(&app).unwrap();
-        let list = rows(&app, &view(&app).project);
+        let list = &rows(&app, &view(&app).project);
         let visible = visible_rows("login", list, &app.prs);
         assert_eq!(picked.number, list[visible[1].0].number);
         assert_ne!(picked.number, 41);
@@ -3545,6 +3600,7 @@ mod tests {
                     failed: 0,
                     pending: 2,
                 }),
+                merged_at: String::new(),
             },
             answered: crate::pull_request::Answered {
                 conflicts: Some(false),
@@ -3627,6 +3683,77 @@ mod tests {
         let shot = screen(&mut app, 160, 40);
         assert!(shot.contains(" ── Others ─"), "{shot}");
         assert!(shot.contains("#43  A"), "{shot}");
+    }
+
+    /// The pull requests merged lately list under the open ones in a
+    /// section of their own — whoever opened them, the row saying `merged`
+    /// and how long ago it landed — and the title's count stays the open
+    /// ones'. `is:merged` finds them alone. A merged row is read like any
+    /// other, but takes no agent, merge, close, draft or autofix: the
+    /// footer says why, and nothing opens.
+    #[test]
+    fn merged_rows_list_under_the_open_ones_and_take_no_verbs() {
+        pinned(|| {
+            let (mut app, project) = app_with(vec![rich(43, "Others' work", "sam", false)], true);
+            let mut landed = rich(39, "Speed up the grid", "me", true);
+            landed.meta.checks = None;
+            landed.meta.review = Review::None;
+            landed.meta.merged_at = orion_core::crashlog::format_timestamp(
+                orion_core::clock::now_secs() - 2 * 24 * 60 * 60,
+            );
+            let url = landed.url.clone();
+            app.prs.observe(
+                &url,
+                crate::pr_store::PrObservation::of_merged_row(&landed),
+                crate::fetch::Asked::Cached,
+            );
+            app.open_prs.get_mut(&project).unwrap().merged = vec![landed];
+            open(&mut app);
+            let shot = screen(&mut app, 240, 40);
+            let at = |needle: &str| {
+                shot.find(needle)
+                    .unwrap_or_else(|| panic!("{needle} missing from\n{shot}"))
+            };
+            assert!(shot.contains("Pull requests — demo (1)"), "{shot}");
+            assert!(at("#43  Others' work") < at(" ── Merged ─"), "{shot}");
+            assert!(
+                at(" ── Merged ─") < at("↗ #39  Speed up the grid"),
+                "{shot}"
+            );
+            let row = shot
+                .lines()
+                .find(|l| l.contains("#39  Speed up the grid"))
+                .unwrap_or_default();
+            assert!(row.contains("    merged      2d │"), "word, age: {row:?}");
+            assert!(
+                !view(&app).prefetch.holds(&url),
+                "a merged page is read when the cursor rests on it"
+            );
+
+            let list = rows(&app, &project);
+            let shown = |query: &str| -> Vec<u64> {
+                visible_rows(query, &list, &app.prs)
+                    .iter()
+                    .map(|(i, _)| list[*i].number)
+                    .collect()
+            };
+            assert_eq!(shown("is:merged"), vec![39]);
+            assert_eq!(shown("is:ready"), vec![43]);
+            assert_eq!(shown("grid"), vec![39], "the words find it too");
+
+            // ↓ off the open row onto the merged one, which is read.
+            let mut out = Vec::new();
+            assert_eq!(selected_pr(&app).unwrap().number, 43);
+            handle_key(&mut app, key(KeyCode::Down), &mut out);
+            assert_eq!(selected_pr(&app).unwrap().number, 39);
+            assert_eq!(pending_url(&app), Some(url.as_str()));
+            for verb in [key(KeyCode::Enter), cmd('x'), cmd('w'), cmd('d'), cmd('g')] {
+                app.flash = None;
+                handle_key(&mut app, verb, &mut out);
+                assert!(view(&app).form.is_none(), "{verb:?}");
+                assert_eq!(app.flash.as_deref(), Some("#39 has merged"), "{verb:?}");
+            }
+        });
     }
 
     /// `key:value` tokens in the filter narrow by a facet — label, author,

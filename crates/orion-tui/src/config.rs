@@ -301,6 +301,15 @@ pub(crate) fn fits(value: &str, choices: &[impl AsRef<str>]) -> bool {
         .any(|c| c.as_ref().eq_ignore_ascii_case(value.trim()))
 }
 
+/// The Claude accounts in `all` that orion would launch: on, and with
+/// nothing wrong with their row.
+fn claude_accounts_on(all: &[HarnessDescriptor]) -> Vec<&HarnessDescriptor> {
+    orion_core::harness::usable(all)
+        .into_iter()
+        .filter(|entry| entry.is_claude_account())
+        .collect()
+}
+
 /// Step `current` through an owned choice list, wrapping around; a value
 /// off the list steps onto it. The owned twin of [`cycle_choice`], for
 /// rows the registry builds at runtime.
@@ -574,6 +583,9 @@ pub enum SettingKind {
     AutofixPreset,
     AutofixModel,
     AutofixEffort,
+    ReviewAccount,
+    ReviewModel,
+    ReviewEffort,
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
@@ -720,6 +732,9 @@ impl SettingKind {
             | SettingKind::AutofixModel
             | SettingKind::AutofixEffort
             | SettingKind::Spotify => (2026, 10, 6),
+            SettingKind::ReviewAccount | SettingKind::ReviewModel | SettingKind::ReviewEffort => {
+                (2026, 10, 10)
+            }
         }
     }
 
@@ -1057,6 +1072,24 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 label: "Autofix effort",
                 hint: "The autofix agent's effort",
                 group: "Autofix",
+            },
+            SettingSpec {
+                kind: SettingKind::ReviewAccount,
+                label: "Review account",
+                hint: "The Claude account My week in review is written through. Default is your default agent's (Settings → Agents) when that is a Claude account, else the first Claude account that is on; or pick one here. It is asked once, with no tools; no session is started",
+                group: "Week in review",
+            },
+            SettingSpec {
+                kind: SettingKind::ReviewModel,
+                label: "Review model",
+                hint: "The model that writes My week in review. Sonnet was the best blend of speed and judgement when it was measured",
+                group: "Week in review",
+            },
+            SettingSpec {
+                kind: SettingKind::ReviewEffort,
+                label: "Review effort",
+                hint: "How hard it thinks: medium takes about 45 seconds on a busy week, low about 30 with fewer details",
+                group: "Week in review",
             },
         ]),
     },
@@ -1692,6 +1725,15 @@ pub struct Config {
     pub autofix_model: String,
     /// The autofix agent's effort; empty = the default agent's own default.
     pub autofix_effort: String,
+    /// The Claude account the WEEK IN REVIEW is written through, by its
+    /// harness id (`claude`, `claude-2`); empty, or one that is off, = the
+    /// default agent's when that is a Claude account, else the first on.
+    pub review_account: String,
+    /// The model the WEEK IN REVIEW is written by (`week_review::MODELS`);
+    /// empty = the first of them.
+    pub review_model: String,
+    /// Its effort (`week_review::EFFORTS`); empty = the first of them.
+    pub review_effort: String,
     /// RETIRED with the line counts always drawn. Through 0.37 the **Card
     /// line counts** SETTING (Settings → Appearance, off by default)
     /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
@@ -2058,6 +2100,9 @@ impl Default for Config {
             autofix_preset: String::new(),
             autofix_model: String::new(),
             autofix_effort: String::new(),
+            review_account: String::new(),
+            review_model: String::new(),
+            review_effort: String::new(),
             card_line_changes: false,
             skip_session_naming: false,
             confirm_on_archive: false,
@@ -3243,6 +3288,54 @@ impl Config {
         (kind, custom, model, effort)
     }
 
+    /// The Claude accounts that are switched on and usable, by harness id:
+    /// built-in Claude and every extra account.
+    fn claude_account_ids(&self) -> Vec<String> {
+        let all = self.harness_registry();
+        claude_accounts_on(&all)
+            .into_iter()
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// The Claude account the WEEK IN REVIEW is written through: the
+    /// **Review account** row's when it names one that is on, else the
+    /// default agent's when that is a Claude account
+    /// ([`Config::quick_prompt_harness`]), else the first Claude account
+    /// that is on. None with no Claude account on at all.
+    pub fn review_account(&self) -> Option<HarnessDescriptor> {
+        let all = self.harness_registry();
+        let on = claude_accounts_on(&all);
+        let (kind, custom) = self.quick_prompt_harness();
+        let default_agent = match kind {
+            AgentKind::Custom => custom.unwrap_or_default(),
+            other => other.as_str().to_string(),
+        };
+        let chosen = [self.review_account.trim(), default_agent.as_str()]
+            .into_iter()
+            .find_map(|id| on.iter().find(|entry| entry.id == id))
+            .or(on.first())
+            .map(|entry| (*entry).clone());
+        chosen
+    }
+
+    /// What the WEEK IN REVIEW is written by: the **Review model** and
+    /// **Review effort** rows, each the first of its choices when blank or
+    /// off the list. `(model, effort)`.
+    pub fn review_launch(&self) -> (String, String) {
+        let pick = |value: &str, choices: &[&str]| {
+            choices
+                .iter()
+                .find(|c| c.eq_ignore_ascii_case(value.trim()))
+                .unwrap_or(&choices[0])
+                .to_string()
+        };
+        (
+            pick(&self.review_model, crate::week_review::MODELS),
+            pick(&self.review_effort, crate::week_review::EFFORTS),
+        )
+    }
+
     /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
     /// starts on: the last launch's while REMEMBER HARNESS is on — read
     /// through [`Config::quick_prompt_harness`], so one switched off since
@@ -3439,6 +3532,19 @@ impl Config {
             SettingKind::AutofixPreset => blank_as(&self.autofix_preset, BUILT_IN),
             SettingKind::AutofixModel => blank_as(&self.autofix_model, DEFAULT_CHOICE),
             SettingKind::AutofixEffort => blank_as(&self.autofix_effort, DEFAULT_CHOICE),
+            // The one picked, by name — or, with none picked (or one that
+            // is off now), which account the default comes to.
+            SettingKind::ReviewAccount => {
+                let picked = self.review_account.trim();
+                let is_on = self.claude_account_ids().iter().any(|id| id == picked);
+                match self.review_account() {
+                    Some(entry) if is_on => entry.display_label().to_string(),
+                    Some(entry) => format!("{DEFAULT_CHOICE} · {}", entry.display_label()),
+                    None => "no Claude account on".into(),
+                }
+            }
+            SettingKind::ReviewModel => self.review_launch().0,
+            SettingKind::ReviewEffort => self.review_launch().1,
             // A project row with no project to speak of: what one without
             // an entry would show.
             SettingKind::RunCommand | SettingKind::OpenCommand => {
@@ -3659,6 +3765,20 @@ impl Config {
             SettingKind::AutofixEffort => {
                 let choices = self.autofix_effort_choices();
                 self.autofix_effort = cycle_owned(&self.autofix_effort, &choices, step);
+            }
+            SettingKind::ReviewAccount => {
+                let mut choices = vec![String::new()];
+                choices.extend(self.claude_account_ids());
+                self.review_account = cycle_owned(&self.review_account, &choices, step);
+            }
+            SettingKind::ReviewModel => {
+                let current = self.review_launch().0;
+                self.review_model = cycle_choice(&current, crate::week_review::MODELS, step).into();
+            }
+            SettingKind::ReviewEffort => {
+                let current = self.review_launch().1;
+                self.review_effort =
+                    cycle_choice(&current, crate::week_review::EFFORTS, step).into();
             }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}

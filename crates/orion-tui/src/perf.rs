@@ -175,6 +175,7 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::Onboard(_)) => "Onboard",
         Some(Overlay::Autofix(_)) => "Autofix",
         Some(Overlay::Todos(_)) => "Todos",
+        Some(Overlay::WeekReview(_)) => "WeekReview",
     }
 }
 

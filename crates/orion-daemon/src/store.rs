@@ -343,6 +343,14 @@ pub struct Store {
 
 pub type TreeRows = (Vec<Project>, Vec<Worktree>, Vec<Agent>, Vec<TerminalTab>);
 
+/// How long a pull request's read mark outlives the last time it was read
+/// ([`Store::prune_pr_seen`]). Long, because losing one is not free: a
+/// pull request still open then, with comments on it, reads as unread once
+/// more. Half a year leaves that to the pull requests nobody has opened
+/// since, while the table stops at the ones a person could still be
+/// following rather than every one ever read.
+const PR_SEEN_KEEP_MS: i64 = 180 * 24 * 60 * 60 * 1000;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -356,6 +364,11 @@ impl Store {
             conn: Mutex::new(conn),
         };
         store.migrate()?;
+        // Once per DAEMON start: the read marks nobody has moved in half a
+        // year go. Best effort — a prune that failed is a few rows kept.
+        if let Err(err) = store.prune_pr_seen(now_ms() - PR_SEEN_KEEP_MS) {
+            tracing::warn!("pull-request read marks not pruned: {err:#}");
+        }
         Ok(store)
     }
 
@@ -933,6 +946,19 @@ impl Store {
         Ok(())
     }
 
+    /// Forget the read marks last moved before `before` (unix ms):
+    /// reading a pull request again stamps its mark anew
+    /// ([`mark_pr_seen`](Self::mark_pr_seen)), so what goes is what nobody
+    /// has opened since. How many went.
+    pub fn prune_pr_seen(&self, before: i64) -> Result<usize> {
+        let gone = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM pr_seen WHERE seen_at < ?1", params![before])?;
+        Ok(gone)
+    }
+
     pub fn load_pr_seen(&self) -> Result<Vec<PrSeen>> {
         let conn = self.conn.lock().unwrap();
         let seen = conn
@@ -1384,6 +1410,34 @@ mod tests {
         // An empty marker is a real answer: opened, nobody had posted yet.
         store.mark_pr_seen(url, "").unwrap();
         assert_eq!(store.load_pr_seen().unwrap()[0].marker, "");
+    }
+
+    /// A read mark goes once nobody has moved it in the keep: one read
+    /// since stays, and reading a pull request again is what keeps its
+    /// mark.
+    #[test]
+    fn pr_seen_marks_nobody_moved_are_pruned() {
+        let store = Store::open_in_memory().unwrap();
+        let (old, read) = (
+            "https://github.com/o/r/pull/7",
+            "https://github.com/o/r/pull/9",
+        );
+        store.mark_pr_seen(old, "a").unwrap();
+        store.mark_pr_seen(read, "b").unwrap();
+        let long_ago = now_ms() - PR_SEEN_KEEP_MS - 1;
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE pr_seen SET seen_at = ?1", params![long_ago])
+            .unwrap();
+        store.mark_pr_seen(read, "c").unwrap();
+
+        assert_eq!(store.prune_pr_seen(now_ms() - PR_SEEN_KEEP_MS).unwrap(), 1);
+        let seen = store.load_pr_seen().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!((seen[0].url.as_str(), seen[0].marker.as_str()), (read, "c"));
+        assert_eq!(store.prune_pr_seen(now_ms() - PR_SEEN_KEEP_MS).unwrap(), 0);
     }
 
     #[test]

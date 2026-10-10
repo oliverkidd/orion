@@ -2440,6 +2440,9 @@ pub enum Overlay {
     Autofix(Box<crate::autofix::AutofixForm>),
     /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
     Todos(crate::todos::TodoView),
+    /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
+    /// days, written up to read aloud (`crate::week_review`).
+    WeekReview(Box<crate::week_review::WeekReviewView>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -3539,6 +3542,12 @@ pub struct OpenPrs {
     /// finished one (`pull_request::drafts_last`, applied as the answer
     /// lands).
     pub list: Vec<OpenPr>,
+    /// The pull requests merged within `pull_request::MERGED_DAYS`, the
+    /// latest merge first: the PULL REQUESTS MODAL's `Merged` section, and
+    /// no other surface's — the group, the counts, the palette and AUTOFIX
+    /// read `list`. Kept from the last answer that said, where one did not
+    /// (`ListAnswer::merged`).
+    pub merged: Vec<OpenPr>,
     /// When this answer landed. Switching projects pulls the next lookup
     /// forward, but never past this plus [`OPEN_PRS_MIN_AGE`] — otherwise
     /// bouncing between two projects would spend an API call per keystroke.
@@ -4490,6 +4499,15 @@ pub struct App {
     /// `couldn't refresh` rather than pass it off as current; the next
     /// answer that lands clears it.
     pub open_prs_failed: std::collections::HashSet<ProjectId>,
+    /// Projects whose merged tail (`OpenPrs::merged`) is not the whole
+    /// week — the walk through its pages stopped early
+    /// (`ListAnswer::merged_short`) — so the PULL REQUESTS MODAL's `Merged`
+    /// count says there are more rather than pass it off as exact.
+    pub merged_short: std::collections::HashSet<ProjectId>,
+    /// When each project's merged tail was last walked to its end: a list
+    /// asked sooner than `pull_request::MERGED_WALK_EVERY` after reads the
+    /// first page alone.
+    pub merged_walked: HashMap<ProjectId, std::time::Instant>,
     /// Bodies and conversations of the pull requests the cursor has rested
     /// on, keyed by URL. A second API call on top of the list, so it is
     /// fetched only for the row actually being read (and, while the PULL
@@ -4558,6 +4576,9 @@ pub struct App {
     /// pull request, a merge (`pr_actions::Answer`); None in unit tests,
     /// which send nothing.
     pub pr_actions_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::pr_actions::Answer>>,
+    /// The WEEK IN REVIEW's fetches and the review being written: on the
+    /// app, not its modal, so closing the modal loses neither.
+    pub week_review: crate::week_review::State,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
     /// this instance has one: the main loop installs the real one at
     /// startup and hydrates from it; the unit tests leave it `None`, so no
@@ -4582,6 +4603,9 @@ pub struct App {
     /// fetches a fresh copy over the top, as it would fetch a missing one,
     /// and the answer takes the URL out of here.
     pub pr_detail_stale: std::collections::HashSet<String>,
+    /// Bodies in `pr_detail` read since the PR CACHE last wrote: the ones
+    /// its next flush writes, each to its own file (`pr_cache::snapshot`).
+    pub pr_detail_unsaved: std::collections::HashSet<String>,
     /// What `gh issue list` last said about each project's open issues —
     /// the ISSUES MODAL's rows, kept for the session. Prefetched in the
     /// background once the cursor rests on a project and kept fresh on a
@@ -4902,6 +4926,8 @@ impl App {
             open_prs: HashMap::new(),
             open_prs_inflight: Default::default(),
             open_prs_failed: std::collections::HashSet::new(),
+            merged_short: std::collections::HashSet::new(),
+            merged_walked: HashMap::new(),
             pr_detail: HashMap::new(),
             pr_detail_inflight: Default::default(),
             pr_detail_failed: std::collections::HashSet::new(),
@@ -4919,12 +4945,14 @@ impl App {
             pr_comment_drafts: HashMap::new(),
             pr_comment_tx: None,
             pr_actions_tx: None,
+            week_review: Default::default(),
             pr_cache: None,
             pr_cache_dirty: false,
             autofix: crate::autofix::State::default(),
             autofix_mode: crate::autofix::Mode::Off,
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
+            pr_detail_unsaved: std::collections::HashSet::new(),
             issues: HashMap::new(),
             issues_flights: Default::default(),
             issues_failed: std::collections::HashSet::new(),
@@ -5276,7 +5304,9 @@ impl App {
                 .as_ref()
                 .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
                 || self.update_available.is_some()
-                || self.spotify.as_ref().is_some_and(|np| np.playing))
+                || self.spotify.as_ref().is_some_and(|np| np.playing)
+                // A WEEK IN REVIEW's `Show` lines sweep while it is read.
+                || matches!(&self.overlay, Some(Overlay::WeekReview(v)) if v.shimmers()))
     }
 
     /// Whether `agent`'s dot is the turning WORKING SPINNER: a session
@@ -6551,14 +6581,14 @@ impl App {
     }
 
     /// Every pull request still on some row, by URL: each project's open
-    /// list, and each checkout's own PR ROW whatever its state — a merged
-    /// pull request stays on that row (see `pull_request::PullRequest`).
-    /// What the per-URL caches — bodies in memory, diffs on disk — are
-    /// pruned to.
+    /// list and its merged tail, and each checkout's own PR ROW whatever
+    /// its state — a merged pull request stays on that row (see
+    /// `pull_request::PullRequest`). What the per-URL caches — bodies in
+    /// memory, diffs on disk — are pruned to.
     pub fn live_pr_urls(&self) -> std::collections::HashSet<String> {
         self.open_prs
             .values()
-            .flat_map(|o| o.list.iter().map(|pr| pr.url.clone()))
+            .flat_map(|o| o.list.iter().chain(&o.merged).map(|pr| pr.url.clone()))
             .chain(
                 self.pull_requests
                     .values()

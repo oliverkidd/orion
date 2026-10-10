@@ -2599,6 +2599,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::Todos(view) => crate::todos::draw(f, app, &view, th, false),
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
+        Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::Stacks(view) => crate::stacks::draw(f, app, &view, th),
