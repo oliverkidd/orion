@@ -1,0 +1,33 @@
+crates/orion-tui/src/vim_term.rs
+  s_def27374c1d0a0::t_212eb95ad34375 75-78
+  s_def27374c1d0a0::t_df2a504375cb3a 284-295
+  s_def27374c1d0a0::t_39af4105775fbf 235
+crates/orion-tui/src/event_loop.rs
+  s_def27374c1d0a0::t_312231c3b6e1d5 6630-6632,32196
+  s_def27374c1d0a0::t_01ff2766df475a 3654
+  s_def27374c1d0a0::t_bcedabe88daae9 6672,6678-6701
+  s_def27374c1d0a0::t_66741e8a13b94d 32093-32168,32175-32195,32197-32202
+  s_def27374c1d0a0::t_e776b1fef09391 11778
+  s_def27374c1d0a0::t_38c7a763879dba 32169-32174
+  s_def27374c1d0a0::t_202cf0aa420863 6702-6703
+crates/orion-tui/src/editor.rs
+  s_def27374c1d0a0::t_451a95b6f02522 200-226
+docs/keys.md
+  s_def27374c1d0a0::t_cf2f0ca97abb8c 361-365
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b83fa1b0fabd56788552b56b5163fbd615104651",
+  "prompts": {},
+  "sessions": {
+    "s_def27374c1d0a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ba09ff5f-a15c-4997-9fac-29171cdc19a0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
