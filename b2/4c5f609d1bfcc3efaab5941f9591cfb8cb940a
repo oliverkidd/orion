@@ -1,0 +1,38 @@
+crates/orion-tui/src/week_review.rs
+  s_c84dbce6aea6f5::t_0e01fb1f5bc611 1711,2548,2744,3157-3204
+  s_c84dbce6aea6f5::t_fd7ff86a1ee15e 3511-3515
+  s_c84dbce6aea6f5::t_ccdfcd156dd549 13-16,790,794-800,805-830
+  s_c84dbce6aea6f5::t_f69e009d26c23c 1113-1114,1236-1237,1388,1696-1699,1704-1710,1714,1735,1739,1741,1752,2542-2547,2702-2705,2742,3516-3517
+  s_c84dbce6aea6f5::t_8614f60cf97d3e 791-793,801-804,2467-2468,2539-2541
+  s_c84dbce6aea6f5::t_e08f872376020a 2549,3205-3206
+docs/sessions.md
+  s_c84dbce6aea6f5::t_87b3f73a5bac16 762-768,790
+  s_c84dbce6aea6f5::t_aafc02c6b7d060 769-773
+docs/2026-10-10-week-in-review/week-in-review.md
+  s_c84dbce6aea6f5::t_87b3f73a5bac16 369
+crates/orion-tui/src/config.rs
+  s_c84dbce6aea6f5::t_8614f60cf97d3e 1079,1729-1730,3535-3543,3545,3773
+  s_c84dbce6aea6f5::t_40a6d35d00c10d 304-312,3294-3295,3297,3307-3308,3316-3317
+  s_c84dbce6aea6f5::t_dbc8e7acefcb9f 3314,3318-3319
+  s_c84dbce6aea6f5::t_ccdfcd156dd549 586,735-737,1076-1078,1080-1081,1085,1728,1731,2103,3291-3293,3296,3298-3306,3309-3313,3315,3320-3321,3544,3769-3772
+docs/keys.md
+  s_c84dbce6aea6f5::t_87b3f73a5bac16 261
+docs/configuration.md
+  s_c84dbce6aea6f5::t_87b3f73a5bac16 113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b24c5f609d1bfcc3efaab5941f9591cfb8cb940a",
+  "prompts": {},
+  "sessions": {
+    "s_c84dbce6aea6f5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d2dab53-7ec9-49fd-ac17-961de14a4bc8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
