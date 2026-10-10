@@ -239,12 +239,12 @@ pub(crate) fn str_at(v: &serde_json::Value, key: &str) -> String {
 }
 
 /// `v[key]` as a number, 0 when absent or not one.
-fn u64_at(v: &serde_json::Value, key: &str) -> u64 {
+pub(crate) fn u64_at(v: &serde_json::Value, key: &str) -> u64 {
     v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
 }
 
 /// `v[key]` as a flag, false when absent or not one.
-fn bool_at(v: &serde_json::Value, key: &str) -> bool {
+pub(crate) fn bool_at(v: &serde_json::Value, key: &str) -> bool {
     v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
 }
 
@@ -613,6 +613,34 @@ fn check_state(word: &str) -> CheckState {
 /// calls per refresh filling rows nobody scrolls to.
 pub const LIST_LIMIT: usize = 100;
 
+/// How far back the PULL REQUESTS MODAL's `Merged` section reaches: a
+/// week of what landed, under the open rows, so the list reads as a
+/// lineage and not only as what is left to do.
+pub const MERGED_DAYS: i64 = 7;
+
+/// How many merged pull requests one page asks for, most recently touched
+/// first: all GitHub gives in a request. GitHub cannot be asked for
+/// "merged since", but a pull request merged inside the window was updated
+/// inside it too — so the pages are read on ([`rest_of_merged`]) until one
+/// ends on a pull request last touched before the window, and by then
+/// every merge of the week has been seen. There is no cap on how many that
+/// is: a busy repo merges a hundred a week, and the list is exact.
+pub const MERGED_PAGE: usize = 100;
+
+/// How many pages [`rest_of_merged`] reads before it stops and says the
+/// list is short ([`ListAnswer::merged_short`]): a guard against a walk
+/// that never ends, set where no repo's week reaches — a thousand merged
+/// pull requests touched in seven days.
+pub(crate) const MERGED_PAGES_MAX: usize = 10;
+
+/// How often a project's merged tail is walked past its first page. The
+/// list is asked every few seconds, and a busy repo's week runs to a
+/// second page: walking it on every ask would cost a request each time to
+/// learn nothing, since a new merge always lands on the first page. In
+/// between, that page is folded into the tail already held
+/// ([`fold_merged`]).
+pub(crate) const MERGED_WALK_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// The one GraphQL query [`list`] runs — `gh pr list`'s own fields, in its
 /// own newest-first order, save the checks, and what the PULL REQUESTS
 /// MODAL's rows say under their titles ([`PrMeta`]). `gh pr list --json
@@ -624,7 +652,11 @@ pub const LIST_LIMIT: usize = 100;
 /// the `28/29` beside it is GitHub's own tally too (`*CountsByState`),
 /// one number per state, never a context listed. `viewer` names the
 /// signed-in user, whose review requests the modal sorts to the top.
-const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!) { \
+///
+/// `merged` rides along: the pull requests that landed lately, for the
+/// modal's `Merged` section ([`merged_page`]) — a row's name, author and
+/// `mergedAt`, never its checks, so it adds next to nothing to the ask.
+const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $merged: Int!) { \
     viewer { login } \
     repository(owner: $owner, name: $repo) { \
     pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
@@ -635,7 +667,25 @@ const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!) {
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state \
     contexts(first: 1) { checkRunCountsByState { state count } \
-    statusContextCountsByState { state count } } } } } } } } } }";
+    statusContextCountsByState { state count } } } } } } } } \
+    merged: pullRequests(states: MERGED, first: $merged, orderBy: {field: UPDATED_AT, direction: DESC}) { \
+    pageInfo { hasNextPage endCursor } \
+    nodes { number url title headRefName isCrossRepository \
+    headRepositoryOwner { login } viewerDidAuthor headRefOid \
+    createdAt updatedAt mergedAt author { login } comments { totalCount } \
+    labels(first: 10) { nodes { name color } } } } } }";
+
+/// [`LIST_QUERY`]'s `merged` connection on its own, from `$after` on: the
+/// pages past the first, for a repo whose week of merges runs past one
+/// ([`rest_of_merged`]).
+const MERGED_QUERY: &str = "query($owner: String!, $repo: String!, $merged: Int!, $after: String!) { \
+    repository(owner: $owner, name: $repo) { \
+    merged: pullRequests(states: MERGED, first: $merged, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) { \
+    pageInfo { hasNextPage endCursor } \
+    nodes { number url title headRefName isCrossRepository \
+    headRepositoryOwner { login } viewerDidAuthor headRefOid \
+    createdAt updatedAt mergedAt author { login } comments { totalCount } \
+    labels(first: 10) { nodes { name color } } } } } }";
 
 /// [`LIST_QUERY`] as it was before the rows grew their meta line: the
 /// fields the panels need and nothing else. [`list`] falls back on it when
@@ -719,6 +769,9 @@ pub struct PrMeta {
     pub labels: Vec<PrLabel>,
     /// None where the head commit has no checks, or nobody asked.
     pub checks: Option<CheckTally>,
+    /// `mergedAt`, RFC 3339: set on the `Merged` section's rows
+    /// ([`merged_page`]), empty on every open one.
+    pub merged_at: String,
 }
 
 /// Which part of the PULL REQUESTS MODAL a row lists under.
@@ -729,6 +782,8 @@ pub enum PrSection {
     /// Someone asked the signed-in user to review it.
     ReviewRequested,
     Others,
+    /// It landed within [`MERGED_DAYS`]: read, never acted on.
+    Merged,
 }
 
 impl PrSection {
@@ -737,11 +792,15 @@ impl PrSection {
             PrSection::Yours => "Yours",
             PrSection::ReviewRequested => "Review requested",
             PrSection::Others => "Others",
+            PrSection::Merged => "Merged",
         }
     }
 }
 
-/// One row of a project's open-pull-request list.
+/// One row of a project's open-pull-request list — or of its merged tail
+/// (`ListAnswer::merged`), which the PULL REQUESTS MODAL lists under the
+/// open rows: the same row with `meta.merged_at` set, and nothing said of
+/// a draft, conflicts or checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenPr {
     pub number: u64,
@@ -819,10 +878,18 @@ impl OpenPr {
             || self.meta.checks.is_some_and(|tally| tally.failed > 0)
     }
 
+    /// One of the merged tail's rows, not an open one.
+    pub fn is_merged(&self) -> bool {
+        !self.meta.merged_at.is_empty()
+    }
+
     /// The PULL REQUESTS MODAL's section for it: yours first, then the
-    /// ones waiting on your review, then the rest.
+    /// ones waiting on your review, then the rest — and what has merged
+    /// under them all, whoever opened it.
     pub fn section(&self) -> PrSection {
-        if self.mine {
+        if self.is_merged() {
+            PrSection::Merged
+        } else if self.mine {
             PrSection::Yours
         } else if self.meta.review_requested {
             PrSection::ReviewRequested
@@ -883,16 +950,33 @@ impl PrLaunch {
 /// list`, whose checks field times out on a busy repo; `gh` still fills
 /// in `{owner}` and `{repo}` from the checkout, the way `gh pr list`
 /// resolves its repo.
-pub async fn list(dir: &Path) -> Option<ListAnswer> {
+///
+/// `whole_week` walks the merged tail to its end ([`rest_of_merged`]);
+/// without it a week that runs past the first page brings that page alone
+/// ([`ListAnswer::merged_head`]).
+pub async fn list(dir: &Path, whole_week: bool) -> Option<ListAnswer> {
     let limit = format!("limit={LIST_LIMIT}");
-    match run_repo_graphql(dir, LIST_QUERY, &[&limit], TIMEOUT).await {
+    let merged = format!("merged={MERGED_PAGE}");
+    match run_repo_graphql(dir, LIST_QUERY, &[&limit, &merged], TIMEOUT).await {
         Ok(out) => {
             if let Some(mut rows) = parse_list(&out) {
                 let cut = recheck_failing(dir, &mut rows).await;
+                let now = orion_core::clock::now_secs() as i64;
+                let (merged, merged_short, merged_head) = match merged_page(&out, now) {
+                    Some(first) if whole_week || first.more.is_none() => {
+                        let (rows, short) = rest_of_merged(dir, first, now).await;
+                        (Some(rows), short, false)
+                    }
+                    Some(first) => (Some(latest_first(first.rows)), false, true),
+                    None => (None, false, false),
+                };
                 return Some(ListAnswer {
                     rows,
                     slim: false,
                     cut,
+                    merged,
+                    merged_short,
+                    merged_head,
                 });
             }
         }
@@ -909,7 +993,43 @@ pub async fn list(dir: &Path) -> Option<ListAnswer> {
         rows,
         slim: true,
         cut,
+        merged: None,
+        merged_short: false,
+        merged_head: false,
     })
+}
+
+/// The week's merges in full: `first`'s rows, and every page after it
+/// until one ends on a pull request last touched before the window
+/// ([`MergedPage::more`]). One extra ask per hundred merged pull requests
+/// touched in the week — none at all for most repos. True beside the rows
+/// when the walk stopped early — a page GitHub would not give, or
+/// [`MERGED_PAGES_MAX`] of them — so the caller can say the list is short
+/// instead of passing it off as the week.
+async fn rest_of_merged(dir: &Path, first: MergedPage, now: i64) -> (Vec<OpenPr>, bool) {
+    let page_size = format!("merged={MERGED_PAGE}");
+    let mut rows = first.rows;
+    let mut more = first.more;
+    let mut pages = 1;
+    let mut short = false;
+    while let Some(cursor) = more.take() {
+        if pages == MERGED_PAGES_MAX {
+            short = true;
+            break;
+        }
+        let after = format!("after={cursor}");
+        let page = repo_graphql(dir, MERGED_QUERY, &[&page_size, &after], TIMEOUT)
+            .await
+            .and_then(|out| merged_page(&out, now));
+        let Some(page) = page else {
+            short = true;
+            break;
+        };
+        rows.extend(page.rows);
+        more = page.more;
+        pages += 1;
+    }
+    (latest_first(rows), short)
 }
 
 /// What [`list`] got back: the rows, and whether they came from
@@ -928,6 +1048,17 @@ pub struct ListAnswer {
     pub rows: Vec<OpenPr>,
     pub slim: bool,
     pub cut: std::collections::HashSet<String>,
+    /// The pull requests merged within [`MERGED_DAYS`], the latest merge
+    /// first ([`rest_of_merged`]). `None` where the answer did not say — the
+    /// slim query never asks — and the caller keeps the last ones it had.
+    pub merged: Option<Vec<OpenPr>>,
+    /// `merged` is not the whole week: the walk through its pages stopped
+    /// early ([`rest_of_merged`]).
+    pub merged_short: bool,
+    /// `merged` is the tail's first page alone, of a week that runs on
+    /// past it: the caller folds it into the tail it holds
+    /// ([`fold_merged`]) rather than take it for the week.
+    pub merged_head: bool,
 }
 
 /// How many failing rows one refresh reads the checks of
@@ -1049,7 +1180,7 @@ fn tally(contexts: &[serde_json::Value]) -> Option<CheckTally> {
 /// `$owner` and `$repo` filled in by `gh` from the checkout and `vars`
 /// (`name=value`) any more it takes. `None` when `gh`
 /// couldn't answer within `timeout`.
-async fn repo_graphql(
+pub(crate) async fn repo_graphql(
     dir: &Path,
     query: &str,
     vars: &[&str],
@@ -1118,24 +1249,102 @@ pub(crate) fn parse_list(json: &str) -> Option<Vec<OpenPr>> {
         .pointer("/data/viewer/login")
         .and_then(|l| l.as_str())
         .unwrap_or_default();
-    Some(
-        rows.iter()
-            .filter_map(|v| {
-                let url = web_url(v)?;
-                Some(OpenPr {
-                    number: v.get("number")?.as_u64()?,
-                    title: str_at(v, "title"),
-                    url,
-                    answered_draft: bool_at(v, "isDraft"),
-                    answered: answered(v),
-                    head: checkout_branch(v),
-                    mine: bool_at(v, "viewerDidAuthor"),
-                    head_sha: str_at(v, "headRefOid"),
-                    meta: meta(v, viewer),
-                })
-            })
-            .collect(),
-    )
+    Some(rows.iter().filter_map(|v| row(v, viewer)).collect())
+}
+
+/// One [`LIST_QUERY`] node as a row; `None` for one that could never be
+/// opened — no number, or a url that is not a web link.
+fn row(v: &serde_json::Value, viewer: &str) -> Option<OpenPr> {
+    let url = web_url(v)?;
+    Some(OpenPr {
+        number: v.get("number")?.as_u64()?,
+        title: str_at(v, "title"),
+        url,
+        answered_draft: bool_at(v, "isDraft"),
+        answered: answered(v),
+        head: checkout_branch(v),
+        mine: bool_at(v, "viewerDidAuthor"),
+        head_sha: str_at(v, "headRefOid"),
+        meta: meta(v, viewer),
+    })
+}
+
+/// The merged tail of a [`LIST_QUERY`] answer — the rows under
+/// `data.repository.merged.nodes` — cut to the ones merged within
+/// [`MERGED_DAYS`] of `now` (unix seconds), the latest merge first. The
+/// query's own order is by last update, which a comment on an old pull
+/// request moves, so the window and the order are both worked out here,
+/// off `mergedAt`. `None` for an answer with no merged tail: the slim
+/// query's, or one from a `gh` that was never asked for it.
+#[cfg(test)]
+pub(crate) fn parse_merged(json: &str, now: i64) -> Option<Vec<OpenPr>> {
+    merged_page(json, now).map(|page| latest_first(page.rows))
+}
+
+/// One page of the merged tail: its rows inside the window, each with
+/// when it merged, and where the next page starts while there can be more
+/// of the week on it.
+struct MergedPage {
+    rows: Vec<(i64, OpenPr)>,
+    /// The cursor to read on from. `None` once GitHub has no further page,
+    /// or this one ended on a pull request last touched before the window:
+    /// the pages run newest-touched first, and nothing merged inside the
+    /// window was last touched before it.
+    more: Option<String>,
+}
+
+/// [`parse_merged`] for one page, the paging kept ([`MergedPage`]).
+fn merged_page(json: &str, now: i64) -> Option<MergedPage> {
+    let answer = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let tail = answer.pointer("/data/repository/merged")?;
+    let nodes = tail.get("nodes")?.as_array()?;
+    let since = now - MERGED_DAYS * 24 * 60 * 60;
+    let rows = nodes
+        .iter()
+        .filter_map(|v| {
+            let at = rfc3339_secs(&str_at(v, "mergedAt")).filter(|at| *at >= since)?;
+            Some((at, row(v, "")?))
+        })
+        .collect();
+    let past_window = nodes
+        .last()
+        .and_then(|v| rfc3339_secs(&str_at(v, "updatedAt")))
+        .is_some_and(|touched| touched < since);
+    let more = tail
+        .pointer("/pageInfo/endCursor")
+        .and_then(|c| c.as_str())
+        .filter(|_| bool_at(&tail["pageInfo"], "hasNextPage") && !past_window)
+        .map(str::to_string);
+    Some(MergedPage { rows, more })
+}
+
+/// The merged tail between two walks of the whole week: `head` — the
+/// first page, where every new merge lands — over the tail `held`, each
+/// pull request once (the fresher row, `head`'s, kept), the ones merged
+/// before the window gone, the latest merge first.
+pub(crate) fn fold_merged(head: Vec<OpenPr>, held: &[OpenPr], now: i64) -> Vec<OpenPr> {
+    let since = now - MERGED_DAYS * 24 * 60 * 60;
+    let rows = head
+        .into_iter()
+        .chain(held.iter().cloned())
+        .filter_map(|pr| {
+            let at = rfc3339_secs(&pr.meta.merged_at).filter(|at| *at >= since)?;
+            Some((at, pr))
+        })
+        .collect();
+    latest_first(rows)
+}
+
+/// The pages' rows as the list keeps them: the latest merge first, each
+/// pull request once — a page read a moment after the last can repeat one
+/// that was touched in between.
+fn latest_first(mut rows: Vec<(i64, OpenPr)>) -> Vec<OpenPr> {
+    rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .map(|(_, pr)| pr)
+        .filter(|pr| seen.insert(pr.url.clone()))
+        .collect()
 }
 
 /// A [`LIST_QUERY`] node's [`PrMeta`], `viewer` the signed-in login (empty
@@ -1177,6 +1386,7 @@ fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
         checks: v
             .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts")
             .and_then(check_tally),
+        merged_at: str_at(v, "mergedAt"),
     }
 }
 
@@ -2389,6 +2599,122 @@ mod tests {
         assert!(!LIST_QUERY.contains("nodes { ... on CheckRun"));
         assert!(LIST_QUERY_SLIM.contains("statusCheckRollup { state }"));
         assert!(!LIST_QUERY_SLIM.contains("contexts"));
+        // The merged tail rides the full query only, most recently
+        // touched first, and asks for no checks at all.
+        let (open, merged) = LIST_QUERY
+            .split_once("merged: pullRequests(states: MERGED, first: $merged")
+            .expect("the merged tail");
+        assert!(open.contains("statusCheckRollup"));
+        assert!(merged.contains("orderBy: {field: UPDATED_AT, direction: DESC}"));
+        assert!(merged.contains("mergedAt"));
+        assert!(!merged.contains("statusCheckRollup"));
+        assert!(!LIST_QUERY_SLIM.contains("MERGED"));
+    }
+
+    /// The merged tail is the week's merges, the latest first — by
+    /// `mergedAt`, not the order GitHub lists them in, which a comment on
+    /// an old pull request moves — and each row is merged whoever opened
+    /// it. An answer with no tail says nothing, which is not "none".
+    #[test]
+    fn the_merged_tail_is_the_weeks_merges_latest_first() {
+        let answer = r#"{"data":{"viewer":{"login":"me"},"repository":{
+          "pullRequests":{"nodes":[]},
+          "merged":{"nodes":[
+            {"number":30,"url":"https://github.com/o/r/pull/30","title":"Old, commented on today",
+             "mergedAt":"2026-09-20T10:00:00Z"},
+            {"number":31,"url":"https://github.com/o/r/pull/31","title":"Monday's","viewerDidAuthor":true,
+             "headRefName":"mon","mergedAt":"2026-10-05T10:00:00Z","author":{"login":"me"}},
+            {"number":33,"url":"https://github.com/o/r/pull/33","title":"Thursday's",
+             "mergedAt":"2026-10-08T10:00:00Z","author":{"login":"sam"}},
+            {"number":34,"url":"file:///etc/passwd","mergedAt":"2026-10-08T11:00:00Z"},
+            {"number":35,"url":"https://github.com/o/r/pull/35","title":"No merge time"}
+          ]}}}}"#;
+        let now = rfc3339_secs("2026-10-10T10:00:00Z").expect("a stamp");
+        let merged = parse_merged(answer, now).expect("a tail");
+        let numbers: Vec<u64> = merged.iter().map(|pr| pr.number).collect();
+        assert_eq!(numbers, [33, 31], "inside the week, latest merge first");
+        assert!(merged.iter().all(|pr| pr.is_merged()));
+        assert!(merged[1].mine);
+        assert_eq!(merged[1].section(), PrSection::Merged, "even yours");
+        assert_eq!(merged[1].head, "mon");
+        assert_eq!(merged[0].meta.author, "sam");
+        let badge = |pr: &OpenPr| status_of(PrObservation::of_merged_row(pr)).word();
+        assert_eq!(badge(&merged[0]), "merged");
+        assert_eq!(
+            parse_list(answer),
+            Some(vec![]),
+            "the open rows are their own"
+        );
+        assert_eq!(parse_merged(&list_answer("[]"), now), None, "never asked");
+    }
+
+    /// The merged tail has no cap: a full page whose last pull request was
+    /// touched inside the window is read on from, and the walk ends on the
+    /// page that reaches back past it — or the last GitHub has. A pull
+    /// request two pages both carried is listed once.
+    #[test]
+    fn the_merged_tail_reads_on_until_it_is_past_the_week() {
+        let page = |next: bool, last_touched: &str| {
+            format!(
+                r#"{{"data":{{"repository":{{"merged":{{
+                  "pageInfo":{{"hasNextPage":{next},"endCursor":"c1"}},
+                  "nodes":[
+                    {{"number":40,"url":"https://github.com/o/r/pull/40",
+                      "mergedAt":"2026-10-09T10:00:00Z","updatedAt":"2026-10-09T11:00:00Z"}},
+                    {{"number":12,"url":"https://github.com/o/r/pull/12",
+                      "mergedAt":"2026-08-01T10:00:00Z","updatedAt":"{last_touched}"}}
+                  ]}}}}}}}}"#
+            )
+        };
+        let now = rfc3339_secs("2026-10-10T10:00:00Z").expect("a stamp");
+        let more = |json: String| merged_page(&json, now).expect("a page").more;
+        assert_eq!(
+            more(page(true, "2026-10-08T09:00:00Z")).as_deref(),
+            Some("c1"),
+            "an old pull request commented on this week: the week may run on"
+        );
+        assert_eq!(more(page(true, "2026-09-30T09:00:00Z")), None, "past it");
+        assert_eq!(more(page(false, "2026-10-08T09:00:00Z")), None, "the last");
+
+        let first = merged_page(&page(true, "2026-10-08T09:00:00Z"), now).expect("a page");
+        let again = merged_page(&page(false, "2026-09-30T09:00:00Z"), now).expect("a page");
+        let rows: Vec<_> = first.rows.into_iter().chain(again.rows).collect();
+        let numbers: Vec<u64> = latest_first(rows).iter().map(|pr| pr.number).collect();
+        assert_eq!(numbers, [40], "once, and only the week's");
+        assert!(MERGED_QUERY.contains("after: $after"));
+
+        // Between walks the first page is folded into the tail held: a new
+        // merge joins, a row both carry is the fresher one, and one that
+        // has aged out of the week leaves.
+        let row = |number: u64, title: &str, merged_at: &str| {
+            let json = format!(
+                r#"{{"data":{{"repository":{{"merged":{{"nodes":[
+                  {{"number":{number},"url":"https://github.com/o/r/pull/{number}",
+                    "title":"{title}","mergedAt":"{merged_at}"}}]}}}}}}}}"#
+            );
+            let wide = rfc3339_secs("2026-01-01T00:00:00Z").expect("a stamp");
+            merged_page(&json, wide).expect("a page").rows.remove(0).1
+        };
+        let held = [
+            row(40, "Old title", "2026-10-09T10:00:00Z"),
+            row(30, "Aged out", "2026-10-01T10:00:00Z"),
+            row(35, "On page two", "2026-10-05T10:00:00Z"),
+        ];
+        let head = vec![
+            row(41, "Just merged", "2026-10-10T09:00:00Z"),
+            row(40, "Renamed", "2026-10-09T10:00:00Z"),
+        ];
+        let folded = fold_merged(head, &held, now);
+        let got: Vec<(u64, &str)> = folded
+            .iter()
+            .map(|pr| (pr.number, pr.title.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [(41, "Just merged"), (40, "Renamed"), (35, "On page two")]
+        );
+        assert!(LIST_QUERY
+            .contains("pageInfo { hasNextPage endCursor } nodes { number url title headRefName"));
     }
 
     /// The meta line's fields come off the node; the sections off who

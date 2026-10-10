@@ -541,7 +541,7 @@ fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
 }
 
 /// `dir`'s list read in, unless it already is.
-fn load_list(app: &mut App, dir: PathBuf) {
+pub(crate) fn load_list(app: &mut App, dir: PathBuf) {
     if app.todos.contains_key(&dir) {
         return;
     }

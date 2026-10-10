@@ -574,6 +574,8 @@ pub enum SettingKind {
     AutofixPreset,
     AutofixModel,
     AutofixEffort,
+    ReviewModel,
+    ReviewEffort,
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
@@ -720,6 +722,7 @@ impl SettingKind {
             | SettingKind::AutofixModel
             | SettingKind::AutofixEffort
             | SettingKind::Spotify => (2026, 10, 6),
+            SettingKind::ReviewModel | SettingKind::ReviewEffort => (2026, 10, 10),
         }
     }
 
@@ -1057,6 +1060,18 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 label: "Autofix effort",
                 hint: "The autofix agent's effort",
                 group: "Autofix",
+            },
+            SettingSpec {
+                kind: SettingKind::ReviewModel,
+                label: "Review model",
+                hint: "The model that writes My week in review, through the claude command with no tools. Sonnet was the best blend of speed and judgement when it was measured",
+                group: "Week in review",
+            },
+            SettingSpec {
+                kind: SettingKind::ReviewEffort,
+                label: "Review effort",
+                hint: "How hard it thinks: medium takes about 45 seconds on a busy week, low about 30 with fewer details",
+                group: "Week in review",
             },
         ]),
     },
@@ -1692,6 +1707,11 @@ pub struct Config {
     pub autofix_model: String,
     /// The autofix agent's effort; empty = the default agent's own default.
     pub autofix_effort: String,
+    /// The model the WEEK IN REVIEW is written by (`week_review::MODELS`);
+    /// empty = the first of them.
+    pub review_model: String,
+    /// Its effort (`week_review::EFFORTS`); empty = the first of them.
+    pub review_effort: String,
     /// RETIRED with the line counts always drawn. Through 0.37 the **Card
     /// line counts** SETTING (Settings → Appearance, off by default)
     /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
@@ -2058,6 +2078,8 @@ impl Default for Config {
             autofix_preset: String::new(),
             autofix_model: String::new(),
             autofix_effort: String::new(),
+            review_model: String::new(),
+            review_effort: String::new(),
             card_line_changes: false,
             skip_session_naming: false,
             confirm_on_archive: false,
@@ -3243,6 +3265,23 @@ impl Config {
         (kind, custom, model, effort)
     }
 
+    /// What the WEEK IN REVIEW is written by: the **Review model** and
+    /// **Review effort** rows, each the first of its choices when blank or
+    /// off the list. `(model, effort)`.
+    pub fn review_launch(&self) -> (String, String) {
+        let pick = |value: &str, choices: &[&str]| {
+            choices
+                .iter()
+                .find(|c| c.eq_ignore_ascii_case(value.trim()))
+                .unwrap_or(&choices[0])
+                .to_string()
+        };
+        (
+            pick(&self.review_model, crate::week_review::MODELS),
+            pick(&self.review_effort, crate::week_review::EFFORTS),
+        )
+    }
+
     /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
     /// starts on: the last launch's while REMEMBER HARNESS is on — read
     /// through [`Config::quick_prompt_harness`], so one switched off since
@@ -3439,6 +3478,8 @@ impl Config {
             SettingKind::AutofixPreset => blank_as(&self.autofix_preset, BUILT_IN),
             SettingKind::AutofixModel => blank_as(&self.autofix_model, DEFAULT_CHOICE),
             SettingKind::AutofixEffort => blank_as(&self.autofix_effort, DEFAULT_CHOICE),
+            SettingKind::ReviewModel => self.review_launch().0,
+            SettingKind::ReviewEffort => self.review_launch().1,
             // A project row with no project to speak of: what one without
             // an entry would show.
             SettingKind::RunCommand | SettingKind::OpenCommand => {
@@ -3659,6 +3700,15 @@ impl Config {
             SettingKind::AutofixEffort => {
                 let choices = self.autofix_effort_choices();
                 self.autofix_effort = cycle_owned(&self.autofix_effort, &choices, step);
+            }
+            SettingKind::ReviewModel => {
+                let current = self.review_launch().0;
+                self.review_model = cycle_choice(&current, crate::week_review::MODELS, step).into();
+            }
+            SettingKind::ReviewEffort => {
+                let current = self.review_launch().1;
+                self.review_effort =
+                    cycle_choice(&current, crate::week_review::EFFORTS, step).into();
             }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}

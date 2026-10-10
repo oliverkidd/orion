@@ -801,6 +801,7 @@ mod tests {
                 "super+u",
                 "super+l",
                 "super+i",
+                "super+shift+y",
                 "super+shift+a",
                 "super+shift+u",
                 "super+backspace",

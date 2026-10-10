@@ -110,6 +110,8 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `autofix_preset` | string | `""` | Review | **Autofix instructions**: empty (`built-in`) tells the agent orion's own instructions for each ticked issue; an AGENT PRESET's name sends that preset's prefix and postfix around the pull request, its branches and what failed instead (its agent, model and effort are not used — the rows below are). A preset deleted since falls back to the built-in instructions, and the footer says so. |
 | `autofix_model` | string | `""` | Review | **Autofix model**: the autofix agent's model, from the default agent's list (the Agents tab's **Agent**); empty, or a model that agent no longer offers, is its own default. |
 | `autofix_effort` | string | `""` | Review | **Autofix effort**: the same for its effort, fitted to the model. |
+| `review_model` | string | `""` | Review | **Review model**: the model that writes My week in review (`⌘⇧Y`) — `sonnet`, `opus` or `haiku`, the names the `claude` command takes. Empty is `sonnet`: measured on a week of 162 pull requests it wrote the best review in 40 to 50 seconds, where Opus took longer for no better and Haiku was slower and less accurate. Anything off the list reads as `sonnet`. |
+| `review_effort` | string | `""` | Review | **Review effort**: `medium`, `low` or `high`. Empty is `medium`; `low` is about a third quicker and drops some of the **Say** lines. |
 | `card_line_changes` | bool | `false` | — (retired) | Through 0.37, **Card line counts** (Settings → Appearance): on, each GRID card followed its checkout's changed-file count with the lines behind it. Every card does now — `↳ feat +3 files +120 -45`, the added in the DIFF VIEWER's green and the removed in its red, counted as the DIFF VIEWER shows them (tracked files against HEAD, staged or not, and every line of an untracked file as added; a binary file, or an untracked one over 1 MiB, adds nothing) by one `git diff --numstat` beside each `git status` the file count already runs; on a narrow card the word `files` goes first, then the lines, before the branch gives up a letter — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `projects` | object | `{}` | Project | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Project** tab — `{"projects": {"/Users/me/src/app": {"run_command": "npm run dev", "open_command": "open http://localhost:3000"}}}`. Two rows: **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees — the same shell line a `.orion.json` `run` would carry, and the way to set one without committing a file; while it is set, **Start stack** runs it and never opens the file, and empty (shown as `.orion.json`) hands the decision back to the checkout's PROJECT FILE, so a project that has one needs nothing here. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer puts `.orion.json` back. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same precedence over the file's `open` and the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. The tab edits the selected project and names it on its first line; with no project in the tree its rows read `n/a`. A project with no entry reads as the defaults (an empty command in each row), and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty `run_command` or `open_command` is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
 | `hide_root_worktree` | bool | `false` | — (retired) | Through 0.27 one switch for every project (**Hide root worktree**, Settings → Experimental), then through 0.35 the fallback for a project whose `projects` entry had no **Hide root worktree** row of its own: on, that project's ROOT WORKTREE was left out of everything the grid launched into. The root is always listed now — a launch that must not land in the shared checkout cuts a fresh worktree instead (**+ new worktree** in the QUICK PROMPT's WORKTREE PICKER, `⌘.`) — so this build never reads the key, here or inside an entry, and no tab edits it; both are still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
@@ -787,6 +789,28 @@ macOS — the `directories` crate has no state dir there, so orion falls back to
   its logs beside its own data.
 
 `ORION_LOG=debug` for more. No `daemon.log` at all means the DAEMON never started.
+
+Neither grows without end: a log past 5 MB when its process starts is set aside as `daemon.log.1`
+(or `tui.log.1`), replacing the one set aside before, and a new one begun. A DAEMON that stays up
+keeps writing the file it opened, so the cap is checked at each start, not while it runs.
+
+## What orion keeps, and for how long
+
+Everything orion fetches is cut at the ask, and everything it stores is pruned to what is still on
+screen, so a year of use reads and writes what a week does:
+
+| What | Kept |
+|---|---|
+| Open pull requests | the 100 newest per project |
+| Merged pull requests | every one merged in the last 7 days, read a page of 100 at a time until the week is covered |
+| Linear issues | open ones — 100 of yours, 250 of your teams' — and the ones done in the last 7 days, 50 of each |
+| GitHub issues | the 100 newest open per project |
+| Pull request pages and diffs (`pr-cache/details/`, `pr-cache/diffs/`) | one file each, while the pull request is on a row; written only when read again |
+| Linear branch links (`linear-links.json`) | until 90 days after they were last linked, once no checkout is on the branch and no open pull request is from it |
+| Week in review (`reviews/`) | the last 12 per project, each with what it was written from; a second one for the same week and scope takes the first's place |
+| Pull request read marks (the DAEMON's `pr_seen`) | 180 days after you last read the pull request; pruned when the DAEMON starts |
+| Files dropped or pasted into a prompt (`attachments/`) | 7 days |
+| Logs | 5 MB, and the 5 MB before it |
 
 ## Environment variables
 

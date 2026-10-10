@@ -126,11 +126,33 @@ fn log_filter() -> tracing_subscriber::EnvFilter {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
+/// How big a log may be when a process opens it. Past this the file is
+/// set aside as `<name>.1` — the one before it dropped — and a new one
+/// started, so the two together never hold more than this and one run's
+/// worth: a daemon log grows by a few megabytes a month, and nothing else
+/// ever trims it.
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Set `log_path` aside as `<name>.1` once it is past `max` bytes. Only
+/// ever at open: a process already writing it keeps its handle, and its
+/// lines land in the file set aside. Best effort — a log that could not
+/// be moved is appended to as before.
+fn rotate_log(log_path: &Path, max: u64) {
+    let past = std::fs::metadata(log_path).is_ok_and(|meta| meta.len() > max);
+    if past {
+        let mut aside = log_path.as_os_str().to_owned();
+        aside.push(".1");
+        let _ = std::fs::rename(log_path, aside);
+    }
+}
+
 /// Route tracing to `log_path` (created on demand, appended, no ANSI) —
 /// neither binary can log to the terminal: the TUI owns it and the daemon
-/// has no stderr.
+/// has no stderr. A log past [`LOG_MAX_BYTES`] is set aside first
+/// ([`rotate_log`]).
 fn init_file_logging(log_path: &Path) -> Result<()> {
     std::fs::create_dir_all(orion_core::paths::log_dir())?;
+    rotate_log(log_path, LOG_MAX_BYTES);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -206,5 +228,35 @@ fn run_tui() -> Result<()> {
             Ok(())
         }
         orion_tui::Exit::Quit => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A log past its cap is set aside as `.1` when it is next opened,
+    /// taking the place of the one set aside before; one under it is left
+    /// to be appended to.
+    #[test]
+    fn a_log_past_its_cap_is_set_aside_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("daemon.log");
+        let aside = dir.path().join("daemon.log.1");
+        std::fs::write(&log, "short").unwrap();
+        rotate_log(&log, 10);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "short");
+        assert!(!aside.exists());
+
+        std::fs::write(&aside, "the one before").unwrap();
+        std::fs::write(&log, "longer than ten bytes").unwrap();
+        rotate_log(&log, 10);
+        assert!(!log.exists(), "a new one starts");
+        assert_eq!(
+            std::fs::read_to_string(&aside).unwrap(),
+            "longer than ten bytes"
+        );
+        rotate_log(&log, 10);
+        assert!(aside.exists(), "no log is nothing to move");
     }
 }

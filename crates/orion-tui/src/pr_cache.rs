@@ -21,15 +21,20 @@
 //! parallel instances, like everything else there):
 //!
 //! ```text
-//! pr-cache/pull-requests.json   rows, lists and bodies, one document
+//! pr-cache/pull-requests.json   rows and lists, one document
+//! pr-cache/details/<url>.json   one pull request's page: body, tabs, talk
 //! pr-cache/diffs/<url>.diff     one whole `gh pr diff` per pull request
 //! ```
 //!
 //! The document is rewritten whole, atomically, whenever something in it
-//! changed — at most once per GIT POLL, and once more on quit. Diffs are
+//! changed — at most once per GIT POLL, and once more on quit. It is
+//! small: a line or two per row. A page is tens of kilobytes — nine tenths
+//! of what the cache holds — so each lives in a file of its own, written
+//! only when that page was read again, and a busy repo's hundred pages are
+//! never rewritten because one row's checks moved. Diffs are
 //! big and change on their own schedule, so each lives in its own file,
-//! read only when `g` asks for it, and pruned along with the document to
-//! the pull requests still on some row.
+//! read only when `g` asks for it. Pages and diffs are pruned along with
+//! the document to the pull requests still on some row.
 //!
 //! Nothing here touches the disk unless an [`App`] carries a [`PrCache`]:
 //! the main loop installs one at startup, the unit tests never do, so no
@@ -52,6 +57,8 @@ const DIR: &str = "pr-cache";
 const STORE_FILE: &str = "pull-requests.json";
 /// Where the per-pull-request diffs go, inside [`DIR`].
 const DIFFS_DIR: &str = "diffs";
+/// Where the per-pull-request pages go, inside [`DIR`].
+const DETAILS_DIR: &str = "details";
 /// Bumped when the document's shape changes incompatibly; an older
 /// document is ignored rather than half-read. Field additions don't need
 /// it — `#[serde(default)]` covers those. 2: an open row's `head` is the
@@ -63,8 +70,9 @@ const DIFFS_DIR: &str = "diffs";
 /// of them, its counts reading zero rather than loading.
 const VERSION: u32 = 3;
 
-/// The document on disk. Keyed the way the app keys the same things:
-/// checkout rows by worktree id, open lists by project id, bodies by URL.
+/// The document on disk, and the pages beside it. Keyed the way the app
+/// keys the same things: checkout rows by worktree id, open lists by
+/// project id, bodies by URL.
 /// Only *found* pull requests are written for the checkouts — a checkout
 /// without one paints the same whether the fact is remembered or not, and
 /// remembering it would only stop a new PR from showing up until the
@@ -78,7 +86,15 @@ pub struct Store {
     pub worktrees: HashMap<WorktreeId, PullRequest>,
     #[serde(default)]
     pub projects: HashMap<ProjectId, Vec<OpenPr>>,
+    /// Each project's merged tail (`OpenPrs::merged`), beside its open
+    /// list.
     #[serde(default)]
+    pub merged: HashMap<ProjectId, Vec<OpenPr>>,
+    /// The pages, each in a file of its own ([`PrCache::store_detail`]),
+    /// never in the document: [`PrCache::load_store`] gathers them here,
+    /// and [`PrCache::save_store`] writes the ones here out. Still read
+    /// from a document written before they moved, which carried them.
+    #[serde(default, skip_serializing)]
     pub details: HashMap<String, PrDetail>,
     /// AUTOFIX's ledger, by pull request URL: the breakage last sent or
     /// dismissed, so a relaunch does not ask about it again.
@@ -111,30 +127,89 @@ impl PrCache {
         self.root.join(DIFFS_DIR)
     }
 
-    /// The document, when there is one this build can read. A missing,
-    /// malformed or older-versioned file is simply no cache.
+    fn details_dir(&self) -> PathBuf {
+        self.root.join(DETAILS_DIR)
+    }
+
+    /// The document and every page beside it, when there is a document
+    /// this build can read. A missing, malformed or older-versioned file
+    /// is simply no cache.
+    ///
+    /// A document written before the pages had files of their own carries
+    /// them inline: each moves out to its file here, once — a page already
+    /// in a file is the newer — and the document is written back without
+    /// them.
     pub fn load_store(&self) -> Option<Store> {
         let path = self.store_path();
         let raw = std::fs::read_to_string(&path).ok()?;
-        let store: Store = match serde_json::from_str(&raw) {
+        let mut store: Store = match serde_json::from_str(&raw) {
             Ok(store) => store,
             Err(err) => {
                 tracing::warn!("ignoring malformed {}: {err}", path.display());
                 return None;
             }
         };
-        (store.version == VERSION).then_some(store)
+        if store.version != VERSION {
+            return None;
+        }
+        let inline = std::mem::replace(&mut store.details, self.load_details());
+        if !inline.is_empty() {
+            for (url, detail) in inline {
+                if store.details.contains_key(&url) {
+                    continue;
+                }
+                if let Err(err) = self.store_detail(&url, &detail) {
+                    tracing::warn!("pull-request page not moved to its file: {err}");
+                }
+                store.details.insert(url, detail);
+            }
+            if let Err(err) = write_json_atomic(&path, &store) {
+                tracing::warn!("pull-request cache not rewritten: {err}");
+            }
+        }
+        Some(store)
     }
 
-    /// Write the document whole. Atomic — a temp file beside it, then a
-    /// rename — so a crash mid-write leaves the previous document, not
-    /// half of the new one.
+    /// Write the document whole, and each of `store`'s pages to its file.
+    /// Atomic — a temp file beside it, then a rename — so a crash
+    /// mid-write leaves the previous document, not half of the new one.
+    /// A flush's `store` holds only the pages read since the last one
+    /// ([`snapshot`]), so the rest are not written again.
     pub fn save_store(&self, store: &Store) -> std::io::Result<()> {
-        write_json_atomic(&self.store_path(), store)
+        write_json_atomic(&self.store_path(), store)?;
+        for (url, detail) in &store.details {
+            self.store_detail(url, detail)?;
+        }
+        Ok(())
+    }
+
+    /// Keep `detail` as the page last read for `url`, the URL beside it:
+    /// two URLs can sanitise to one file name, and the URL inside is what
+    /// [`load_details`](Self::load_details) keys the page by.
+    fn store_detail(&self, url: &str, detail: &PrDetail) -> std::io::Result<()> {
+        let path = self.details_dir().join(file_name(url, "json"));
+        write_json_atomic(&path, &DetailFile { url, detail })
+    }
+
+    /// Every page kept, by the URL in its file. One that cannot be read —
+    /// half a write a crash left, another build's shape — is no page.
+    fn load_details(&self) -> HashMap<String, PrDetail> {
+        let Ok(entries) = std::fs::read_dir(self.details_dir()) else {
+            return HashMap::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .filter_map(|entry| {
+                let raw = std::fs::read_to_string(entry.path()).ok()?;
+                let file: OwnedDetailFile = serde_json::from_str(&raw).ok()?;
+                Some((file.url, file.detail))
+            })
+            .collect()
     }
 
     fn diff_path(&self, url: &str) -> PathBuf {
-        self.diffs_dir().join(diff_file_name(url))
+        self.diffs_dir().join(file_name(url, "diff"))
     }
 
     /// The last diff read for `url`, if one was kept. The file's first line
@@ -164,32 +239,64 @@ impl PrCache {
     /// directory is orion's own, so anything in it that isn't a live diff
     /// is garbage by definition.
     pub fn prune_diffs(&self, live: &HashSet<String>) {
-        let keep: HashSet<String> = live.iter().map(|url| diff_file_name(url)).collect();
-        let Ok(entries) = std::fs::read_dir(self.diffs_dir()) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if !keep.contains(name.to_string_lossy().as_ref()) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        prune_dir(&self.diffs_dir(), live, "diff");
+    }
+
+    /// [`prune_diffs`](Self::prune_diffs) for the pages: one whose pull
+    /// request left every row goes, so the directory holds what is on
+    /// screen and never a history of what was.
+    pub fn prune_details(&self, live: &HashSet<String>) {
+        prune_dir(&self.details_dir(), live, "json");
+    }
+}
+
+/// A page's file: the URL it was read for, then the page.
+#[derive(Serialize)]
+struct DetailFile<'a> {
+    url: &'a str,
+    detail: &'a PrDetail,
+}
+
+/// [`DetailFile`] as it is read back.
+#[derive(Deserialize)]
+struct OwnedDetailFile {
+    url: String,
+    detail: PrDetail,
+}
+
+/// Remove every file in `dir` that isn't the `ext` file of one of
+/// `live`'s URLs.
+fn prune_dir(dir: &Path, live: &HashSet<String>, ext: &str) {
+    let keep: HashSet<String> = live.iter().map(|url| file_name(url, ext)).collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !keep.contains(name.to_string_lossy().as_ref()) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-/// A file name for a pull request's diff: the URL with everything that
-/// isn't a letter or digit turned into `_`. Readable in a directory
-/// listing, safe on every filesystem, and unique enough for GitHub's
-/// `owner/repo/pull/N` shape — [`PrCache::load_diff`] checks the URL it
-/// finds inside the file anyway.
-pub fn diff_file_name(url: &str) -> String {
+/// A file name for what is kept about one pull request — its diff, its
+/// page: the URL with everything that isn't a letter or digit turned into
+/// `_`. Readable in a directory listing, safe on every filesystem, and
+/// unique enough for GitHub's `owner/repo/pull/N` shape — the file says
+/// inside which URL it is for anyway ([`PrCache::load_diff`]).
+fn file_name(url: &str, ext: &str) -> String {
     let stem: String = url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    format!("{stem}.diff")
+    format!("{stem}.{ext}")
+}
+
+/// [`file_name`] for a diff.
+pub fn diff_file_name(url: &str) -> String {
+    file_name(url, "diff")
 }
 
 /// Write `value` to `path` as pretty JSON with a trailing newline, creating
@@ -271,6 +378,10 @@ pub fn install(app: &mut App, store: Store) {
         app.prs
             .observe(&pr.url, PrObservation::of_list_row(pr), Asked::Cached);
     }
+    for pr in store.merged.values().flatten() {
+        app.prs
+            .observe(&pr.url, PrObservation::of_merged_row(pr), Asked::Cached);
+    }
     for (url, detail) in &store.details {
         app.prs
             .observe(url, PrObservation::of_detail(detail), Asked::Cached);
@@ -280,6 +391,7 @@ pub fn install(app: &mut App, store: Store) {
     }
     let now = std::time::Instant::now();
     let at = now.checked_sub(OPEN_PRS_MIN_AGE).unwrap_or(now);
+    let mut merged = store.merged;
     for (project, list) in store.projects {
         if app.open_prs.contains_key(&project) {
             continue;
@@ -289,10 +401,12 @@ pub fn install(app: &mut App, store: Store) {
         } else {
             OPEN_PRS_REFRESH
         };
+        let merged = merged.remove(&project).unwrap_or_default();
         app.open_prs.insert(
             project,
             OpenPrs {
                 list,
+                merged,
                 at,
                 due: now,
                 step,
@@ -312,7 +426,9 @@ pub fn install(app: &mut App, store: Store) {
     app.dirty = true;
 }
 
-/// The document as the app would write it now.
+/// The document as the app would write it now, and the pages read since
+/// the last flush (`App::pr_detail_unsaved`) — the only ones a flush has
+/// to write.
 pub fn snapshot(app: &App) -> Store {
     Store {
         version: VERSION,
@@ -327,7 +443,17 @@ pub fn snapshot(app: &App) -> Store {
             .iter()
             .map(|(project, open)| (project.clone(), open.list.clone()))
             .collect(),
-        details: app.pr_detail.clone(),
+        merged: app
+            .open_prs
+            .iter()
+            .filter(|(_, open)| !open.merged.is_empty())
+            .map(|(project, open)| (project.clone(), open.merged.clone()))
+            .collect(),
+        details: app
+            .pr_detail_unsaved
+            .iter()
+            .filter_map(|url| Some((url.clone(), app.pr_detail.get(url)?.clone())))
+            .collect(),
         // Only open pull requests' — a merged or closed one never breaks
         // again.
         autofix: {
@@ -357,16 +483,20 @@ pub fn take_flush(app: &mut App) -> Option<(PrCache, Store, HashSet<String>)> {
         return None;
     }
     let cache = app.pr_cache.clone()?;
-    Some((cache, snapshot(app), app.live_pr_urls()))
+    let store = snapshot(app);
+    app.pr_detail_unsaved.clear();
+    Some((cache, store, app.live_pr_urls()))
 }
 
-/// Write a flush out: the document, then the diff prune. Failures are
+/// Write a flush out: the document and the pages read since the last
+/// one, then the prune of the pages and diffs no row names. Failures are
 /// logged, never surfaced — a cache that couldn't be written is a slower
 /// next launch, not a broken one.
 pub fn write_all(cache: &PrCache, store: &Store, live: &HashSet<String>) {
     if let Err(err) = cache.save_store(store) {
         tracing::warn!("pull-request cache not written: {err}");
     }
+    cache.prune_details(live);
     cache.prune_diffs(live);
 }
 
@@ -428,6 +558,14 @@ mod tests {
         }
     }
 
+    /// A row of a project's merged tail.
+    fn merged(number: u64) -> OpenPr {
+        let mut pr = open(number);
+        pr.answered_draft = false;
+        pr.meta.merged_at = "2024-04-26T21:44:55Z".into();
+        pr
+    }
+
     fn detail(number: u64) -> PrDetail {
         PrDetail {
             number,
@@ -469,6 +607,9 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            merged: [(ProjectId("p1".into()), vec![merged(5)])]
+                .into_iter()
+                .collect(),
             details: [(detail(7).url.clone(), detail(7))].into_iter().collect(),
             autofix: [(
                 open(7).url,
@@ -539,7 +680,77 @@ mod tests {
         assert!(!raw.to_string().contains("health"), "{raw}");
         std::fs::create_dir_all(cache.store_path().parent().unwrap()).unwrap();
         std::fs::write(cache.store_path(), raw.to_string()).unwrap();
-        assert_eq!(cache.load_store().expect("readable"), store());
+        let mut rows = store();
+        rows.details.clear();
+        assert_eq!(cache.load_store().expect("readable"), rows);
+    }
+
+    /// The pages are files of their own, never in the document, and a
+    /// flush writes only the ones read since the last: a row's checks
+    /// moving does not rewrite every page. A page whose pull request left
+    /// every row is pruned with it.
+    #[test]
+    fn pages_are_files_of_their_own_written_when_read() {
+        let (_dir, cache) = cache();
+        let mut app = App::new();
+        app.pr_cache = Some(cache.clone());
+        install(&mut app, store());
+        let seven = detail(7).url;
+        let page = |url: &str| cache.details_dir().join(file_name(url, "json"));
+
+        // Hydrated pages are on disk already: nothing to write.
+        app.pr_cache_dirty = true;
+        let (_, flush, live) = take_flush(&mut app).expect("dirty");
+        assert!(flush.details.is_empty(), "no page was read");
+        write_all(&cache, &flush, &live);
+        assert!(!page(&seven).exists());
+        let document = std::fs::read_to_string(cache.store_path()).unwrap();
+        assert!(!document.contains("details"), "{document}");
+        assert!(!document.contains("Makes the row"), "{document}");
+
+        // One page is read: that one is written, once.
+        app.pr_detail_unsaved.insert(seven.clone());
+        app.pr_cache_dirty = true;
+        let (_, flush, live) = take_flush(&mut app).expect("dirty");
+        assert_eq!(flush.details.keys().collect::<Vec<_>>(), [&seven]);
+        assert!(app.pr_detail_unsaved.is_empty(), "spent");
+        write_all(&cache, &flush, &live);
+        assert!(page(&seven).exists());
+        let back = cache.load_store().expect("readable");
+        assert_eq!(back.details[&seven], detail(7));
+
+        // Its pull request leaves every row: the page goes with it.
+        std::fs::write(cache.details_dir().join("leftover.json.tmp"), "x").unwrap();
+        cache.prune_details(&HashSet::new());
+        assert_eq!(std::fs::read_dir(cache.details_dir()).unwrap().count(), 0);
+        assert!(cache.load_store().expect("readable").details.is_empty());
+    }
+
+    /// A document written before the pages had files carries them inline:
+    /// the first read moves each to its file — one already there is the
+    /// newer — and writes the document back without them.
+    #[test]
+    fn a_document_with_its_pages_inline_moves_them_out() {
+        let (_dir, cache) = cache();
+        let mut old = serde_json::to_value(store()).unwrap();
+        let mut newer = detail(9);
+        newer.body = "read since".into();
+        let mut stale = newer.clone();
+        stale.body = "the document's".into();
+        old["details"] = serde_json::json!({
+            detail(7).url: detail(7),
+            newer.url.clone(): stale,
+        });
+        std::fs::create_dir_all(cache.store_path().parent().unwrap()).unwrap();
+        std::fs::write(cache.store_path(), old.to_string()).unwrap();
+        cache.store_detail(&newer.url, &newer).unwrap();
+
+        let back = cache.load_store().expect("readable");
+        assert_eq!(back.details[&detail(7).url], detail(7));
+        assert_eq!(back.details[&newer.url].body, "read since");
+        let document = std::fs::read_to_string(cache.store_path()).unwrap();
+        assert!(!document.contains("Makes the row"), "{document}");
+        assert_eq!(cache.load_store().expect("readable"), back, "and stays so");
     }
 
     /// Hydration paints the rows, arms every list to be re-asked at once
@@ -575,6 +786,12 @@ mod tests {
         let p1 = ProjectId("p1".into());
         let p2 = ProjectId("p2".into());
         assert_eq!(app.open_prs[&p1].list.len(), 2);
+        assert_eq!(app.open_prs[&p1].merged, vec![merged(5)]);
+        assert_eq!(
+            app.prs.status(&merged(5).url).map(|s| s.word()),
+            Some("merged"),
+            "a cached merged row is purple from the first frame too"
+        );
         assert!(app.open_prs_lookup_due(&p1), "hydrated lists are due");
         assert_eq!(app.open_prs[&p1].step, OPEN_PRS_REFRESH);
         assert_eq!(
@@ -605,7 +822,13 @@ mod tests {
         ids.sort();
         assert_eq!(ids, ["w1", "w2"]);
         assert_eq!(snap.projects.len(), 2);
-        assert_eq!(snap.details.len(), 1);
+        assert_eq!(snap.merged[&ProjectId("p1".into())], vec![merged(5)]);
+        assert!(
+            snap.details.is_empty(),
+            "a hydrated page is on disk already"
+        );
+        app.pr_detail_unsaved.insert(detail(7).url);
+        assert_eq!(snapshot(&app).details.len(), 1, "one read since is not");
     }
 
     /// A flush is taken once per change, and only by an app with a cache.

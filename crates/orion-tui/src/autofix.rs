@@ -1484,6 +1484,7 @@ mod tests {
         app.open_prs.insert(
             project,
             crate::app::OpenPrs {
+                merged: Vec::new(),
                 list,
                 at: now,
                 due: now,

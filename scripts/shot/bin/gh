@@ -8,7 +8,12 @@ real repository. Anything else is "couldn't ask" (exit 1) — exactly what orion
   gh repo view --json …                   → fixtures/repo.json, the repo's merge methods, else exit 1
   gh api graphql … pullRequests …         → fixtures/pr-list.json, rows in `gh pr list --json` shape, handed back as
                                             the open list's GraphQL answer (a row's `statusCheckRollup` checks
-                                            become the rollup `state` on its last commit). With
+                                            become the rollup `state` on its last commit), with
+                                            fixtures/pr-merged.json's rows as its merged tail when there is one
+                                            (a row's `mergedHoursAgo` becomes a `mergedAt` that long before now,
+                                            so a fixture never ages out of the week the modal lists). The
+                                            WEEK IN REVIEW's own ask (it names `changedFiles`) gets those same
+                                            merged rows as its page, each with a body and a size. With
                                             fixtures/pr-list.ok-count holding N, only the first N calls answer and
                                             every later one fails the way GitHub's 504 did in #106.
   gh pr view --json …                     → fixtures/pr-view-<cwd basename>.json, else exit 1 (no PR on this branch)
@@ -56,6 +61,38 @@ def rollup(checks):
     return {"state": "PENDING"}
 
 
+def merged_rows():
+    """fixtures/pr-merged.json's rows, each `mergedHoursAgo` turned into a `mergedAt` that long ago."""
+    path = os.path.join(FIX, "pr-merged.json")
+    if not os.path.isfile(path):
+        return None
+    rows = json.load(open(path))
+    for row in rows:
+        ago = row.pop("mergedHoursAgo", None)
+        if ago is not None:
+            at = time.gmtime(time.time() - ago * 3600)
+            row["mergedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", at)
+    return rows
+
+
+def week_page():
+    """The WEEK IN REVIEW's page: the merged rows with what its ask adds to them."""
+    rows = merged_rows()
+    if rows is None:
+        return 1
+    for row in rows:
+        row.setdefault("body", "## Summary\n" + row.get("title", ""))
+        row.setdefault("additions", 120)
+        row.setdefault("deletions", 14)
+        row.setdefault("changedFiles", 3)
+        row.setdefault("baseRefName", "main")
+        row["updatedAt"] = row.get("mergedAt")
+        row.setdefault("author", {"login": "shot-user"})["__typename"] = "User"
+    page = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": rows}
+    json.dump({"data": {"repository": {"pullRequests": page}}}, sys.stdout)
+    return 0
+
+
 def open_list():
     ok = os.path.join(FIX, "pr-list.ok-count")
     if os.path.isfile(ok):
@@ -73,11 +110,17 @@ def open_list():
         checks = row.pop("statusCheckRollup", None)
         row["commits"] = {"nodes": [{"commit": {"statusCheckRollup": rollup(checks)}}]}
         nodes.append(row)
-    json.dump({"data": {"repository": {"pullRequests": {"nodes": nodes}}}}, sys.stdout)
+    repository = {"pullRequests": {"nodes": nodes}}
+    rows = merged_rows()
+    if rows is not None:
+        repository["merged"] = {"nodes": rows}
+    json.dump({"data": {"repository": repository}}, sys.stdout)
     return 0
 
 
 def main(argv):
+    if argv[:2] == ["api", "graphql"] and any("changedFiles" in a for a in argv):
+        return week_page()
     if argv[:2] == ["api", "graphql"] and any("pullRequests" in a for a in argv):
         return open_list()
     if argv[:2] == ["api", "graphql"] and any("commits(last" in a for a in argv):
