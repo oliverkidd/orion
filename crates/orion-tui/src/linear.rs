@@ -4307,11 +4307,22 @@ async fn attach_pr(dir: &Path, issue_id: &str, url: &str) -> Result<(), String> 
         serde_json::json!({ "issueId": issue_id, "url": url }),
     )
     .await?;
-    mutation_result(
+    match mutation_result(
         &json,
         "attachmentLinkGitHubPR",
         "Linear did not attach the pull request",
-    )
+    ) {
+        Err(why) if already_attached(&why) => Ok(()),
+        result => result,
+    }
+}
+
+/// Whether Linear refused an attach because the pull request is on the
+/// issue already — its own GitHub integration links one whose branch or
+/// title names the issue, often before orion asks. That is the link made,
+/// not a failure.
+fn already_attached(why: &str) -> bool {
+    why.to_ascii_lowercase().contains("duplicate attachment")
 }
 
 async fn graphql(
@@ -7696,6 +7707,44 @@ pub(crate) mod tests {
             app.linear_links.gave_up_on(&project, "feature-x"),
             ["ENG-1"]
         );
+    }
+
+    /// A pull request Linear's own GitHub integration linked first is
+    /// refused as a duplicate: that is the link made, so it is spent
+    /// silently and never tried again.
+    #[test]
+    fn a_link_linear_already_made_counts_as_attached() {
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        app.linear_links
+            .remember(&project, "feature-x", &[issue("1", "ENG-1", "Login")]);
+        let mut fresh = app.open_prs[&project].list.clone();
+        let mut opened = open_pr(43, "Feature X");
+        opened.head = "feature-x".into();
+        fresh.insert(0, opened);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, _| {
+                Ok(serde_json::json!({"errors": [
+                    {"message": "Duplicate attachment for duplicate url"}]}))
+            },
+            || {
+                rt.block_on(async {
+                    attach_new_prs(&mut app, &project, None, &fresh);
+                    let answer = rx.recv().await.expect("an answer");
+                    land_answer(&mut app, answer);
+                    attach_new_prs(&mut app, &project, None, &fresh);
+                });
+                graphql_sent()
+            },
+        );
+        assert_eq!(sent.len(), 1, "not asked again");
+        assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
+        assert!(app.linear_links.pending(&project, "feature-x").is_empty());
+        assert_eq!(app.linear_links.branches_of("1"), ["feature-x"]);
     }
 
     /// A ⌘L launch onto a worktree whose pull request is open already has
