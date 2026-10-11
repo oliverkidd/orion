@@ -1,8 +1,8 @@
 //! First-run ONBOARDING: a short setup over the empty grid — the agents to
 //! turn on (and install), their Claude accounts, the editors, worktree
 //! defaults, Linear and autofix — ending on what was chosen and the keys
-//! to press next. In a terminal that sends no ⌘ it starts on the GHOSTTY
-//! STEP, which reopens orion in Ghostty (`ghostty_host`). Opened once from
+//! to press next. On a Mac, anywhere but in its own app, it starts on the APP
+//! STEP, which reopens orion in Orion.app (`app_bundle`). Opened once from
 //! `main_loop` while `config.onboarded` is still false; Esc / a click
 //! outside skips and stamps the flag so it does not come back.
 //!
@@ -53,36 +53,36 @@ enum Page {
     Linear,
     /// AUTOFIX: what happens when one of your pull requests breaks.
     Autofix,
-    /// The GHOSTTY STEP, first while the terminal orion runs in sends no ⌘:
-    /// Enter reopens orion in Ghostty, installing it first when it is
-    /// missing.
-    Ghostty,
+    /// The APP STEP, first while orion runs anywhere but its own app on a
+    /// Mac that has the Ghostty the app is made from: Enter reopens orion
+    /// in Orion.app (`app_bundle`).
+    App,
     Ready,
 }
 
 /// The SETUP VERSION: bumped by a release that adds a step, so a machine
 /// that went through an older setup is shown the new steps on its next
 /// launch ([`pending`]). Each page says which version brought it.
-pub const SETUP_VERSION: u32 = 3;
+pub const SETUP_VERSION: u32 = 4;
 
 impl Page {
-    /// The SETUP VERSION this page's offer arrived in: installing Ghostty
-    /// from setup is what 2 added. Reopening orion in Ghostty kept that
-    /// number on purpose — a machine already through setup 2 has made its
-    /// peace with its terminal, and Run setup still offers the step.
+    /// The SETUP VERSION this page's offer arrived in. The App step is 4's:
+    /// every machine set up before Orion.app existed is shown it once, on
+    /// the launch after the upgrade, which is how an orion kept in a
+    /// terminal is moved over.
     fn added(self) -> u32 {
         match self {
-            Page::Ghostty => 2,
+            Page::App => 4,
             Page::Autofix => 3,
             _ => 1,
         }
     }
 
-    /// Whether a page has anything to offer this machine: the Ghostty step
-    /// only in a terminal that sends no ⌘.
+    /// Whether a page has anything to offer this machine: the App step
+    /// only on a Mac, to an orion not already in its app.
     fn offered(self) -> bool {
         match self {
-            Page::Ghostty => crate::ghostty_host::offered(),
+            Page::App => crate::app_bundle::offered(),
             _ => true,
         }
     }
@@ -98,13 +98,13 @@ impl Page {
             Page::Worktrees => "Worktrees",
             Page::Linear => "Linear",
             Page::Autofix => "Autofix",
-            Page::Ghostty => "Ghostty",
+            Page::App => "App",
             Page::Ready => "Ready",
         }
     }
 }
 
-/// The wizard's pages, in order: the GHOSTTY STEP first while it is
+/// The wizard's pages, in order: the APP STEP first while it is
 /// offered, so nothing is set up twice; the CLAUDE ACCOUNTS step right
 /// after Agents while a Claude account is on there — with Claude off there
 /// is nothing to sign in. Accounts are switched on and off on the Agents
@@ -115,7 +115,7 @@ fn pages(cfg: &Config) -> Vec<Page> {
         .iter()
         .any(|entry| entry.is_claude_account() && entry.enabled);
     [
-        Page::Ghostty,
+        Page::App,
         Page::Welcome,
         Page::Agents,
         Page::Accounts,
@@ -201,8 +201,7 @@ const AUTOFIX_ROWS: &[SettingKind] = &[
     SettingKind::AutofixEffort,
 ];
 
-/// A Mac without Ghostty.app: ⌘O's terminal opens Terminal.app instead,
-/// and the GHOSTTY STEP installs it before reopening orion there.
+/// A Mac without Ghostty.app: ⌘O's terminal opens Terminal.app instead.
 fn ghostty_missing() -> bool {
     cfg!(target_os = "macos") && !crate::install::installed(crate::install::GHOSTTY)
 }
@@ -314,7 +313,7 @@ impl OnboardView {
 /// the palette's **Run setup**, Settings' **Setup** row and `orion setup`.
 pub fn open(app: &mut App, cfg: &Config, since: u32) {
     // Ghostty is the default outside terminal; without it, start on the
-    // one this Mac has. Installing Ghostty from setup switches back.
+    // one this Mac has. Installing Ghostty from Settings switches back.
     if ghostty_missing() && cfg.outside_terminal() == OutsideTerminal::Ghostty {
         persist(|cfg| cfg.outside_terminal = OutsideTerminal::Terminal.as_str().into());
     }
@@ -324,11 +323,10 @@ pub fn open(app: &mut App, cfg: &Config, since: u32) {
     app.dirty = true;
 }
 
-/// Ghostty just installed from setup: make it the outside terminal again,
-/// its config block written.
+/// Ghostty just installed from Settings: make it the outside terminal
+/// again.
 pub fn use_ghostty() {
     persist(|cfg| cfg.outside_terminal = OutsideTerminal::Ghostty.as_str().into());
-    crate::ghostty_config::ensure_for(&Config::load());
 }
 
 /// Leave the wizard and remember it was seen, so the next launch goes
@@ -482,7 +480,7 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
             _ => vec![keys::ENTER.hint_as("sign in").kept()],
         },
         Page::Editor => vec![keys::ENTER.hint_as("choose").kept()],
-        Page::Ghostty => vec![keys::ENTER.hint_as(GhosttyStep::now().enter()).kept()],
+        Page::App => vec![keys::ENTER.hint_as("open as an app").kept()],
         Page::Worktrees | Page::Linear | Page::Autofix => {
             match setting_rows(page).get(view.row).map(|spec| spec.kind) {
                 Some(kind) if kind.is_status() => vec![keys::ENTER.hint_as("test").kept()],
@@ -498,7 +496,7 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
     }
     match page {
         Page::Ready => {}
-        Page::Ghostty => hints.push(keys::NEXT_PAGE.hint_as("stay here")),
+        Page::App => hints.push(keys::NEXT_PAGE.hint_as("stay here")),
         _ => hints.push(keys::NEXT_PAGE.hint()),
     }
     if view.page > 0 {
@@ -546,7 +544,7 @@ fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
     }
     let page = view.current(cfg);
     match page {
-        Page::Welcome | Page::Ghostty | Page::Ready => String::new(),
+        Page::Welcome | Page::App | Page::Ready => String::new(),
         Page::WhatsNew if view_pages(cfg, view.since).len() > 1 => {
             "↑/↓ walk the releases. Enter goes on to the setup steps they added.".into()
         }
@@ -882,7 +880,7 @@ fn page_body(app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16)
         Page::Agents => agents(&mut body, cfg, view, th, width),
         Page::Accounts => accounts(&mut body, cfg, view, th, width),
         Page::Editor => editors(&mut body, cfg, view, th, width, &app.keymap),
-        Page::Ghostty => ghostty(&mut body, th, width),
+        Page::App => app_page(&mut body, th, width),
         Page::Worktrees | Page::Linear | Page::Autofix => {
             settings_page(&mut body, app, cfg, view, page, th, width)
         }
@@ -985,92 +983,52 @@ fn welcome(body: &mut Body, app: &App, th: Theme, width: u16) {
     );
 }
 
-/// What Enter does on the GHOSTTY STEP — the one answer its hint, its
-/// words and its Enter all read.
-enum GhosttyStep {
-    /// Ghostty is here: reopen orion in it.
-    Reopen,
-    /// Ghostty is missing and Homebrew can install it with this.
-    Install(Plan),
-    /// Ghostty is missing and only its download page can help.
-    Download(Plan),
-}
-
-impl GhosttyStep {
-    fn now() -> Self {
-        if !ghostty_missing() {
-            return Self::Reopen;
-        }
-        let plan = Tools::here().ghostty_plan();
-        if plan.runnable() {
-            Self::Install(plan)
-        } else {
-            Self::Download(plan)
-        }
-    }
-
-    /// Enter's key hint.
-    fn enter(&self) -> &'static str {
-        match self {
-            Self::Reopen => "reopen in Ghostty",
-            Self::Install(_) => "install Ghostty",
-            Self::Download(_) => "open its download page",
-        }
-    }
-}
-
 /// The terminal orion runs in, by name when it is the usual one.
 fn this_terminal() -> Option<&'static str> {
     (std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal")).then_some("Terminal.app")
 }
 
-/// The GHOSTTY STEP: why ⌘ needs Ghostty, and what Enter does about it —
-/// reopen orion there, or install it first.
-fn ghostty(body: &mut Body, th: Theme, width: u16) {
+/// The APP STEP: orion's ⌘ shortcuts work in Orion.app and nowhere else
+/// on a Mac, and Enter reopens orion there.
+fn app_page(body: &mut Body, th: Theme, width: u16) {
     let text = Style::default().fg(th.text);
-    let dim = Style::default().fg(th.dim);
+    let terminal = this_terminal();
+    let enter = keys::ENTER.label();
     body.lines.push(Line::from(Span::styled(
-        " Orion's ⌘ shortcuts need Ghostty",
+        " Orion's ⌘ shortcuts need its own app",
         Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
     )));
     body.blank();
     body.prose(
         &format!(
-            "⌘N starts an agent, ⌘K jumps anywhere, ⌘P finds a file — but only in a terminal that \
-             passes ⌘ on. {} doesn't, so here each answers to its ^ twin instead: ^N, ^K, ^P.",
-            this_terminal().unwrap_or("This one")
+            "⌘N starts an agent, ⌘K jumps anywhere, ⌘P finds a file — in Orion.app. {} keeps ⌘ \
+             for itself or never passes it on, so here each answers to its ^ twin instead: ^N, \
+             ^K, ^P.",
+            terminal.unwrap_or("A terminal")
         ),
         width,
         text,
     );
     body.blank();
-    let enter = keys::ENTER.label();
-    let does = match GhosttyStep::now() {
-        GhosttyStep::Reopen => format!(
-            "{enter} reopens Orion in Ghostty and carries on with setup there, Ghostty's own ⌘ \
-             keys moved out of Orion's way. Any sessions keep running. Close this window once \
-             it's open."
+    body.prose(
+        &format!(
+            "{enter} makes Orion.app in ~/Applications — the Ghostty on this Mac under Orion's \
+             name, in the Dock from then on — and carries on with setup there. It is a window \
+             onto this same Orion: sessions keep running, and projects, settings and history \
+             stay where they are. Close this window once it's open."
         ),
-        GhosttyStep::Install(plan) => format!(
-            "Ghostty isn't installed — {enter} installs it ({}), then {enter} again reopens Orion \
-             in it and carries on with setup there.",
-            plan.line
-        ),
-        GhosttyStep::Download(_) => format!(
-            "Ghostty isn't installed — {enter} opens its download page. Once it's in, start orion \
-             from Ghostty and setup carries on there."
-        ),
-    };
-    body.prose(&does, width, text);
+        width,
+        text,
+    );
     body.blank();
     body.prose(
         &format!(
-            "{} stays in {} with the ^ twins.",
+            "{} stays in {} with the ^ twins. `orion app` makes the move any time.",
             keys::NEXT_PAGE.label(),
-            this_terminal().unwrap_or("this terminal")
+            terminal.unwrap_or("this terminal")
         ),
         width,
-        dim,
+        Style::default().fg(th.dim),
     );
 }
 
@@ -1624,12 +1582,7 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
         },
         Chosen {
             what: "Terminal",
-            value: match cfg.outside_terminal() {
-                OutsideTerminal::Ghostty if cfg.ghostty_keybinds && !ghostty_missing() => {
-                    format!("{} · ⌘ chords unbound in its config", terminal_name(cfg))
-                }
-                _ => terminal_name(cfg),
-            },
+            value: terminal_name(cfg),
             warn: false,
         },
     ]
@@ -1799,7 +1752,7 @@ fn page_rows(page: Page, cfg: &Config) -> usize {
         Page::Editor => editor_rows().len(),
         Page::Worktrees | Page::Linear | Page::Autofix => setting_rows(page).len(),
         Page::WhatsNew => crate::whats_new::unseen(cfg).len(),
-        Page::Welcome | Page::Ghostty | Page::Ready => 0,
+        Page::Welcome | Page::App | Page::Ready => 0,
     }
 }
 
@@ -1850,7 +1803,7 @@ fn activate(app: &mut App) {
             }
         }
         Page::Editor => choose_editor_row(app, row),
-        Page::Ghostty => ghostty_step(app),
+        Page::App => app_step(app),
         // The overlay's rows, doing what Enter does there: a typed row
         // opens for typing, a status row tests the connection, the rest
         // flip or step.
@@ -1881,25 +1834,11 @@ fn cycle_setting(app: &mut App, kind: SettingKind) {
     app.dirty = true;
 }
 
-/// Enter on the GHOSTTY STEP: with Ghostty here, quit into a new Ghostty
-/// window running orion ([`crate::Exit::Ghostty`]), setup not stamped seen
-/// so it carries on there; without it, ask to install it — the cask, or
-/// its download page without Homebrew — and the step's Enter after that
-/// reopens.
-fn ghostty_step(app: &mut App) {
-    let plan = match GhosttyStep::now() {
-        GhosttyStep::Reopen => {
-            app.move_to_ghostty = true;
-            app.should_quit = true;
-            return;
-        }
-        GhosttyStep::Install(plan) | GhosttyStep::Download(plan) => plan,
-    };
-    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-        view.install = Some(plan);
-        view.note = None;
-    }
-    app.dirty = true;
+/// Enter on the APP STEP: quit into Orion.app ([`crate::Exit::App`]),
+/// setup not stamped seen so it carries on there.
+fn app_step(app: &mut App) {
+    app.move_to_app = true;
+    app.should_quit = true;
 }
 
 /// Enter or Space on an Editor page row: that editor, or that app, is the
@@ -2051,7 +1990,7 @@ fn toggle(app: &mut App) {
                 _ => {}
             }
         }
-        Page::WhatsNew | Page::Welcome | Page::Accounts | Page::Ghostty | Page::Ready => {}
+        Page::WhatsNew | Page::Welcome | Page::Accounts | Page::App | Page::Ready => {}
     }
     app.dirty = true;
 }
@@ -2085,8 +2024,8 @@ mod tests {
 
     /// A first run gets every step; a machine on this SETUP VERSION none;
     /// one through an older setup only the steps added since — Autofix
-    /// from 2, and in a terminal that sends no ⌘ the Ghostty step from 1 —
-    /// and Ready to finish on.
+    /// from 2, and on a Mac where orion is not yet in its own app the App
+    /// step from 3 — and Ready to finish on.
     #[test]
     fn an_older_setup_opens_on_whats_new() {
         with_temp_config(|| {
@@ -2100,12 +2039,13 @@ mod tests {
                 let cfg = Config::load();
                 assert_eq!(pending(&cfg), Some(1));
                 assert_eq!(view_pages(&cfg, 1), vec![Page::Autofix, Page::Ready]);
-                crate::ghostty_host::with_offered(true, || {
+                crate::app_bundle::with_offered(true, || {
                     assert_eq!(
                         view_pages(&cfg, 1),
-                        vec![Page::Ghostty, Page::Autofix, Page::Ready]
+                        vec![Page::App, Page::Autofix, Page::Ready]
                     );
-                    assert_eq!(view_pages(&cfg, 2), vec![Page::Autofix, Page::Ready]);
+                    assert_eq!(view_pages(&cfg, 3), vec![Page::App, Page::Ready]);
+                    assert_eq!(view_pages(&cfg, SETUP_VERSION), vec![Page::Ready]);
                 });
                 persist(|cfg| cfg.setup_version = 2);
                 assert_eq!(pending(&Config::load()), Some(2));
@@ -2115,6 +2055,60 @@ mod tests {
                 );
                 persist(|cfg| cfg.setup_version = SETUP_VERSION);
                 assert_eq!(pending(&Config::load()), None);
+            });
+        });
+    }
+
+    /// The move to Orion.app after an upgrade: a machine set up before the
+    /// app existed opens on the App step alone, once — Enter quits into
+    /// the app with setup unstamped, so the orion opened there, where the
+    /// step is no longer offered, stamps it and goes straight to the grid.
+    #[test]
+    fn an_upgrade_offers_the_move_to_the_app_once() {
+        with_temp_config(|| {
+            with_programs(&[crate::install::GHOSTTY], || {
+                persist(|cfg| {
+                    cfg.onboarded = true;
+                    cfg.setup_version = 3;
+                    cfg.seen_version = crate::whats_new::current().into();
+                });
+                crate::app_bundle::with_offered(true, || {
+                    let cfg = Config::load();
+                    assert_eq!(pending(&cfg), Some(3));
+                    let mut app = App::new();
+                    open(&mut app, &cfg, 3);
+                    assert_eq!(view(&app).current(&cfg), Page::App);
+                    press(&mut app, KeyCode::Enter);
+                    assert!(app.should_quit && app.move_to_app);
+                    assert_eq!(Config::load().setup_version, 3, "carries on there");
+                });
+                // Inside the app the step has nothing to offer.
+                assert_eq!(pending(&Config::load()), None);
+                assert_eq!(Config::load().setup_version, SETUP_VERSION);
+            });
+        });
+    }
+
+    /// Staying put is remembered too: → past the App step and Enter on
+    /// Ready stamp this setup seen, and the step is not offered again.
+    #[test]
+    fn staying_in_the_terminal_is_asked_once() {
+        with_temp_config(|| {
+            with_programs(&[crate::install::GHOSTTY], || {
+                persist(|cfg| {
+                    cfg.onboarded = true;
+                    cfg.setup_version = 3;
+                    cfg.seen_version = crate::whats_new::current().into();
+                });
+                crate::app_bundle::with_offered(true, || {
+                    let mut app = App::new();
+                    open(&mut app, &Config::load(), 3);
+                    press(&mut app, KeyCode::Right);
+                    assert_eq!(view(&app).current(&Config::load()), Page::Ready);
+                    press(&mut app, KeyCode::Enter);
+                    assert!(app.overlay.is_none() && !app.should_quit);
+                    assert_eq!(pending(&Config::load()), None);
+                });
             });
         });
     }
@@ -2145,8 +2139,8 @@ mod tests {
         });
     }
 
-    /// The steps in order: the Ghostty step first, only in a terminal that
-    /// sends no ⌘; the CLAUDE ACCOUNTS step follows Agents while Claude is
+    /// The steps in order: the App step first, only where it is offered;
+    /// the CLAUDE ACCOUNTS step follows Agents while Claude is
     /// on there, and is skipped with it off; the Editor step comes before
     /// Worktrees, Ready is last.
     #[test]
@@ -2166,9 +2160,9 @@ mod tests {
                     Page::Ready,
                 ]
             );
-            crate::ghostty_host::with_offered(true, || {
+            crate::app_bundle::with_offered(true, || {
                 let all = pages(&cfg);
-                assert_eq!(all[..2], [Page::Ghostty, Page::Welcome]);
+                assert_eq!(all[..2], [Page::App, Page::Welcome]);
                 assert_eq!(all.len(), 9);
             });
             let off: Config = serde_json::from_str(r#"{"claude_enabled": false}"#).unwrap();
@@ -2748,22 +2742,34 @@ mod tests {
         });
     }
 
-    /// In a terminal that sends no ⌘ setup opens on the Ghostty step; with
-    /// Ghostty here Enter quits into it, setup left unstamped so it carries
-    /// on there, and → stays in this terminal instead.
+    /// Where it is offered setup opens on the App step; with Ghostty here
+    /// Enter quits into Orion.app, setup left unstamped so it carries on
+    /// there, and → stays in this terminal instead.
     #[test]
-    fn the_ghostty_step_reopens_orion_in_ghostty() {
+    fn the_app_step_reopens_orion_in_its_app() {
         with_temp_config(|| {
-            crate::ghostty_host::with_offered(true, || {
+            crate::app_bundle::with_offered(true, || {
                 with_programs(&[crate::install::GHOSTTY], || {
                     let mut app = App::new();
                     open(&mut app, &Config::load(), 0);
-                    assert_eq!(view(&app).current(&Config::load()), Page::Ghostty);
+                    assert_eq!(view(&app).current(&Config::load()), Page::App);
                     let shot = draw_text(&mut app);
                     let said = words(&shot);
-                    assert!(said.contains("Orion's ⌘ shortcuts need Ghostty"), "{shot}");
+                    assert!(
+                        said.contains("Orion's ⌘ shortcuts need its own app"),
+                        "{shot}"
+                    );
                     assert!(said.contains("its ^ twin instead"), "{shot}");
-                    assert!(shot.contains("Enter reopen in Ghostty"), "{shot}");
+                    assert!(
+                        said.contains("`orion app` makes the move any time"),
+                        "{shot}"
+                    );
+                    assert!(said.contains("makes Orion.app in ~/Applications"), "{shot}");
+                    assert!(
+                        said.contains("projects, settings and history stay where they are"),
+                        "{shot}"
+                    );
+                    assert!(shot.contains("Enter open as an app"), "{shot}");
                     assert!(shot.contains("stay here"), "{shot}");
 
                     press(&mut app, KeyCode::Right);
@@ -2772,112 +2778,8 @@ mod tests {
 
                     press(&mut app, KeyCode::Left);
                     press(&mut app, KeyCode::Enter);
-                    assert!(app.should_quit && app.move_to_ghostty);
-                    assert!(!Config::load().onboarded, "setup carries on in Ghostty");
-                });
-            });
-        });
-    }
-
-    /// On a Mac without Ghostty, Enter on the Ghostty step asks to run the
-    /// cask, Enter runs it and says so in the footer, and its end lands in
-    /// the footer and on the page — a failure keeping Terminal.app, a
-    /// success switching to Ghostty, after which Enter reopens there.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_ghostty_step_installs_ghostty_first() {
-        use crate::flash::FlashKind;
-        with_temp_config(|| {
-            crate::ghostty_host::with_offered(true, || {
-                let mut app = with_programs(&["brew"], || {
-                    let mut app = App::new();
-                    open(&mut app, &Config::load(), 0);
-                    assert_eq!(
-                        Config::load().outside_terminal(),
-                        OutsideTerminal::Terminal,
-                        "starts on the terminal this Mac has"
-                    );
-                    let shot = draw_text(&mut app);
-                    assert!(shot.contains("Enter install Ghostty"), "{shot}");
-                    assert!(
-                        words(&shot).contains("brew install --cask ghostty"),
-                        "{shot}"
-                    );
-
-                    press(&mut app, KeyCode::Enter);
-                    assert!(view(&app).asking(), "Enter asks before it runs");
-                    assert!(!app.should_quit);
-                    let shot = draw_text(&mut app);
-                    assert!(
-                        words(&shot).contains("Install ghostty? Enter runs this here"),
-                        "{shot}"
-                    );
-                    press(&mut app, KeyCode::Enter);
-                    assert_eq!(
-                        crate::install::take_ran()[0].args,
-                        ["install", "--cask", "ghostty"]
-                    );
-                    let flash = app.flash.clone().expect("the footer says it started");
-                    assert_eq!(flash.kind, FlashKind::Working);
-                    assert_eq!(
-                        flash.text,
-                        "installing ghostty — brew install --cask ghostty…"
-                    );
-
-                    // brew failed: Ghostty still isn't here.
-                    crate::install::closed(&mut app, crate::install::GHOSTTY);
-                    let flash = app.flash.clone().unwrap();
-                    assert_eq!(flash.kind, FlashKind::Failed);
-                    assert!(
-                        flash.text.starts_with("ghostty didn't install"),
-                        "{flash:?}"
-                    );
-                    assert!(view(&app)
-                        .note
-                        .as_deref()
-                        .is_some_and(|note| note.starts_with("✗ ghostty didn't install")));
-                    assert_eq!(Config::load().outside_terminal(), OutsideTerminal::Terminal);
-                    app
-                });
-
-                with_programs(&["brew", "ghostty"], || {
-                    crate::install::closed(&mut app, crate::install::GHOSTTY);
-                    let flash = app.flash.clone().unwrap();
-                    assert_eq!(flash.kind, FlashKind::Done);
-                    assert_eq!(flash.text, "ghostty is installed");
-                    assert_eq!(view(&app).note.as_deref(), Some("✓ ghostty is installed"));
-                    assert_eq!(Config::load().outside_terminal(), OutsideTerminal::Ghostty);
-                    let shot = draw_text(&mut app);
-                    assert!(shot.contains("Enter reopen in Ghostty"), "{shot}");
-                    press(&mut app, KeyCode::Enter);
-                    assert!(app.should_quit && app.move_to_ghostty);
-                });
-            });
-        });
-    }
-
-    /// Without Homebrew, Enter on the Ghostty step points at Ghostty's
-    /// download page, and Enter again opens it.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn without_homebrew_the_ghostty_step_opens_ghosttys_page() {
-        with_temp_config(|| {
-            crate::ghostty_host::with_offered(true, || {
-                with_programs(&[], || {
-                    let mut app = App::new();
-                    open(&mut app, &Config::load(), 0);
-                    let shot = draw_text(&mut app);
-                    assert!(shot.contains("Enter open its download page"), "{shot}");
-                    press(&mut app, KeyCode::Enter);
-                    let shot = draw_text(&mut app);
-                    assert!(shot.contains("ghostty.org/download"), "{shot}");
-                    press(&mut app, KeyCode::Enter);
-                    assert!(crate::install::take_ran().is_empty());
-                    assert_eq!(
-                        crate::event_loop::take_opened(),
-                        ["https://ghostty.org/download"]
-                    );
-                    assert!(!app.should_quit);
+                    assert!(app.should_quit && app.move_to_app);
+                    assert!(!Config::load().onboarded, "setup carries on in the app");
                 });
             });
         });

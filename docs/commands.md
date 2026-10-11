@@ -23,6 +23,7 @@ orion browser              serve this TUI in a web browser via ttyd
 orion ssh <host>           open orion on a remote host over ssh
 orion tunnel <host>        open a remote host's orion in a tab here
 orion setup                open orion on its setup, every step
+orion app                  open orion as a Mac app of its own (Orion.app)
 orion doctor               check what orion needs on this machine
 orion upgrade              install the latest published orion
 ```
@@ -91,7 +92,7 @@ See [Configuration](configuration.md#backup-restore-and-other-machines).
 orion doctor             # one line for each thing orion leans on, with the fix for a missing one:
                           # git, gh (installed and signed in: `gh auth status`), the File editor
                           # and what really opens when it isn't installed, the Open in app editor,
-                          # Ghostty and orion's keybind block in its config, the CLI of every
+                          # Orion.app and the Ghostty it is made from, the CLI of every
                           # agent turned on, and the LINEAR_API_KEY of the project you are
                           # standing in — where it was found, never the key — and the docker
                           # compose projects whose checkout is gone, each with the
@@ -109,9 +110,8 @@ orion doctor --json      # the same report as {"ok": …, "checks": [{name, stat
   ✗ File editor       hx isn't installed — files open in fresh instead
                       fix: brew install helix
   ✓ Open in app       auto → Cursor
-  ✓ Ghostty           installed
-  ✗ Ghostty keybinds  orion's block in ~/.config/ghostty/config is out of date
-                      fix: open orion in Ghostty (it rewrites the block), then reload Ghostty's config (⌘⇧,)
+  ✗ Orion.app         not made yet — orion's ⌘ shortcuts work in it, and answer to their ^ twins in a terminal
+                      fix: orion app
   ✓ Agent claude      ~/.local/bin/claude
   ✗ Agent codex       `codex` isn't on PATH
                       fix: brew install --cask codex

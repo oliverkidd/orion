@@ -1,7 +1,7 @@
 //! `orion doctor`: what this machine has of what orion leans on, a line
 //! each — git, gh and its sign-in, the **File editor** and what really
-//! opens, the **Open in app** editor, Ghostty and orion's keybind block in
-//! its config, the CLI of every agent turned on, and the project's
+//! opens, the **Open in app** editor, Orion.app and the Ghostty it is made
+//! from, the CLI of every agent turned on, and the project's
 //! `LINEAR_API_KEY` (where it was found, never the key), and the docker
 //! compose projects whose checkout is gone — with the command that fixes
 //! whatever is missing. It never installs anything itself:
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::config::{Config, OutsideTerminal};
+use crate::config::Config;
 use crate::install::{which, Tools};
 
 /// How a check came out.
@@ -84,9 +84,9 @@ impl Check {
 }
 
 /// Where the checks look: the PATH programs are found and run on, the
-/// home (Ghostty's config), the folders holding an `Applications` folder,
-/// the directory whose project is checked for Linear, and the variables
-/// that steer the editor and Ghostty's config.
+/// home (Orion.app's), the folders holding an `Applications` folder, the
+/// directory whose project is checked for Linear, and the variable that
+/// steers the editor.
 #[derive(Debug, Clone, Default)]
 pub struct Machine {
     pub path: OsString,
@@ -96,9 +96,6 @@ pub struct Machine {
     pub macos: bool,
     /// `ORION_EDITOR`.
     pub editor_env: Option<String>,
-    /// `ORION_GHOSTTY_CONFIG`: another file, or `off`.
-    pub ghostty_config: Option<String>,
-    pub xdg_config_home: Option<PathBuf>,
 }
 
 impl Machine {
@@ -118,8 +115,6 @@ impl Machine {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             macos,
             editor_env: orion_core::env::non_empty(orion_core::env::EDITOR),
-            ghostty_config: orion_core::env::non_empty(orion_core::env::GHOSTTY_CONFIG),
-            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
         }
     }
 
@@ -182,7 +177,7 @@ fn probe_output(m: &Machine, program: &Path, args: &[&str], cwd: &Path) -> Optio
 /// Every check, in the report's order.
 pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
     let mut out = vec![git(m), gh(m), editor(cfg, m), open_in_app(cfg, m)];
-    out.extend(ghostty(cfg, m));
+    out.push(orion_app(m));
     out.extend(agents(cfg, m));
     out.push(linear(m));
     out.push(containers(cfg, m));
@@ -335,80 +330,41 @@ fn open_in_app(cfg: &Config, m: &Machine) -> Check {
     }
 }
 
-/// Ghostty, on a Mac: installed, and — with **Ghostty keybinds** on —
-/// orion's block current in its config, so ⌘ chords reach orion.
-fn ghostty(cfg: &Config, m: &Machine) -> Vec<Check> {
-    use crate::ghostty_config::{block_state, config_path, BlockState};
+/// Orion.app, on a Mac: the Ghostty it is made from installed, and the app
+/// made — the one place orion's ⌘ chords reach it.
+fn orion_app(m: &Machine) -> Check {
+    const NAME: &str = "Orion.app";
     if !m.macos {
-        return vec![Check::new("Ghostty", Status::Skipped, "macOS only")];
+        return Check::new(NAME, Status::Skipped, "macOS only");
     }
-    let app = crate::event_loop::ghostty_app_in(&m.app_roots);
-    let wanted = cfg.outside_terminal() == OutsideTerminal::Ghostty;
-    let installed = match (&app, wanted) {
-        (Some(_), _) => Check::new("Ghostty", Status::Ok, "installed"),
-        (None, true) => Check::new(
-            "Ghostty",
+    if crate::event_loop::ghostty_app_in(&m.app_roots).is_none() {
+        return Check::new(
+            NAME,
             Status::Missing,
-            "not installed — the outside terminal opens in Terminal.app instead",
+            "Ghostty isn't installed, and the app is made from it — ⌘ shortcuts answer to \
+             their ^ twins, and the outside terminal opens in Terminal.app",
         )
-        .fix(plan_fix(m.tools().ghostty_plan())),
-        (None, false) => Check::new(
-            "Ghostty",
-            Status::Skipped,
-            "not installed; Terminal.app is the outside terminal",
+        .fix(plan_fix(m.tools().ghostty_plan()));
+    }
+    match m
+        .home
+        .as_deref()
+        .map(crate::app_bundle::bundle_in)
+        .filter(|bundle| bundle.is_dir())
+    {
+        Some(bundle) => Check::new(
+            NAME,
+            Status::Ok,
+            format!("at {}", crate::skills::tilde(&bundle, m.home.as_deref())),
         ),
-    };
-    let keybinds = if app.is_none() {
-        None
-    } else if !cfg.ghostty_keybinds {
-        Some(Check::new(
-            "Ghostty keybinds",
-            Status::Skipped,
-            "off in Settings → Tools — Ghostty's config is left alone",
-        ))
-    } else {
-        let path = match m.ghostty_config.as_deref() {
-            Some(v) if v.eq_ignore_ascii_case("off") => None,
-            Some(v) => Some(PathBuf::from(v)),
-            None => m
-                .home
-                .as_deref()
-                .map(|home| config_path(home, m.xdg_config_home.as_deref())),
-        };
-        Some(match path {
-            None => Check::new(
-                "Ghostty keybinds",
-                Status::Skipped,
-                "ORION_GHOSTTY_CONFIG=off — Ghostty's config is left alone",
-            ),
-            Some(path) => {
-                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                let shown = crate::skills::tilde(&path, m.home.as_deref());
-                let fix = "open orion in Ghostty (it rewrites the block), then reload Ghostty's \
-                           config (⌘⇧,)";
-                match block_state(&text, &cfg.keymap()) {
-                    BlockState::Current => Check::new(
-                        "Ghostty keybinds",
-                        Status::Ok,
-                        format!("orion's block is current in {shown}"),
-                    ),
-                    BlockState::Stale => Check::new(
-                        "Ghostty keybinds",
-                        Status::Missing,
-                        format!("orion's block in {shown} is out of date"),
-                    )
-                    .fix(fix),
-                    BlockState::Missing => Check::new(
-                        "Ghostty keybinds",
-                        Status::Missing,
-                        format!("no orion block in {shown} — Ghostty keeps ⌘K, ⌘N, ⌘⇧P…"),
-                    )
-                    .fix(fix),
-                }
-            }
-        })
-    };
-    std::iter::once(installed).chain(keybinds).collect()
+        None => Check::new(
+            NAME,
+            Status::Missing,
+            "not made yet — orion's ⌘ shortcuts work in it, and answer to their ^ twins in a \
+             terminal",
+        )
+        .fix("orion app"),
+    }
 }
 
 /// The CLI of every agent turned on.
@@ -628,8 +584,6 @@ mod tests {
                 cwd: root.join("project"),
                 macos: true,
                 editor_env: None,
-                ghostty_config: None,
-                xdg_config_home: None,
             }
         }
     }
@@ -816,40 +770,36 @@ mod tests {
         assert_eq!(all[0].status, Status::Skipped);
     }
 
-    /// Ghostty installed, and orion's block in its config: current ✓,
-    /// written for other keys ✗, absent ✗ — each with the way to fix it.
+    /// Orion.app: ✗ without the Ghostty it is made from, ✗ until it is made,
+    /// ✓ once it is in ~/Applications — each ✗ with the way to fix it.
     #[test]
-    fn ghostty_and_its_keybind_block() {
+    fn orion_app_and_the_ghostty_it_is_made_from() {
         let stubs = Stubs::new();
-        let cfg = claude_only("");
         let mut m = stubs.machine();
-        let checks = ghostty(&cfg, &m);
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].status, Status::Missing, "Ghostty is the default");
-
-        std::fs::create_dir_all(stubs.dir.path().join("root/Applications/Ghostty.app")).unwrap();
-        let file = stubs.dir.path().join("ghostty-config");
-        m.ghostty_config = Some(file.display().to_string());
-        std::fs::write(&file, "font-size = 14\n").unwrap();
-        let checks = ghostty(&cfg, &m);
-        assert_eq!(checks[0].status, Status::Ok);
-        assert_eq!(checks[1].status, Status::Missing);
+        let check = orion_app(&m);
+        assert_eq!(check.status, Status::Missing);
         assert!(
-            checks[1].detail.starts_with("no orion block"),
-            "{:?}",
-            checks[1]
+            check.detail.starts_with("Ghostty isn't installed"),
+            "{check:?}"
         );
 
-        let current = crate::ghostty_config::with_block("font-size = 14\n", &cfg.keymap());
-        std::fs::write(&file, &current).unwrap();
-        assert_eq!(ghostty(&cfg, &m)[1].status, Status::Ok);
-        std::fs::write(&file, current.replace("super+k", "super+q")).unwrap();
-        assert!(ghostty(&cfg, &m)[1].detail.ends_with("is out of date"));
+        std::fs::create_dir_all(stubs.dir.path().join("root/Applications/Ghostty.app")).unwrap();
+        let check = orion_app(&m);
+        assert_eq!(check.status, Status::Missing);
+        assert!(check.detail.starts_with("not made yet"), "{check:?}");
+        assert_eq!(check.fix.as_deref(), Some("orion app"));
 
-        m.ghostty_config = Some("off".into());
-        assert_eq!(ghostty(&cfg, &m)[1].status, Status::Skipped);
+        let home = m.home.clone().expect("the stub machine has a home");
+        std::fs::create_dir_all(crate::app_bundle::bundle_in(&home)).unwrap();
+        let check = orion_app(&m);
+        assert_eq!(check.status, Status::Ok);
+        assert!(
+            check.detail.ends_with("Applications/Orion.app"),
+            "{check:?}"
+        );
+
         m.macos = false;
-        assert_eq!(ghostty(&cfg, &m)[0].status, Status::Skipped);
+        assert_eq!(orion_app(&m).status, Status::Skipped);
     }
 
     /// The project's key: where it was found, never what it is.

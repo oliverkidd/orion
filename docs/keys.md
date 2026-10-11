@@ -41,10 +41,12 @@ its key, and `Enter` runs it.
   attention walk, archive, delete ([Sessions](sessions.md)).
 - **⌘ for the entry points, as in Cursor.** The things you open from anywhere — a new agent, the
   jump list, go to file, changes, the pane — are `⌘` chords, and each has a `Ctrl` twin (`⌘P` and
-  `^P`) for a terminal that never sends ⌘. Ghostty and kitty send ⌘ (the KITTY PROTOCOL);
-  Terminal.app, tmux and `orion browser` never do, so there only the twin arrives. Settings →
-  Hotkeys shows the chords this terminal can actually press, and setup starts by offering to reopen
-  orion in Ghostty from a terminal that sends no ⌘.
+  `^P`). The `⌘` chords work in Orion.app, orion's own app on a Mac (`orion app`), which hands
+  orion every one but copy, paste, quit, close window, full screen and the text size. Anywhere
+  else — a Ghostty window of your own, which keeps `⌘K`, `⌘N` and the rest for itself;
+  Terminal.app, tmux and `orion browser`, which never send ⌘ — only the twin arrives, and Help and
+  the footers print the twins. Settings → Hotkeys shows the chords this terminal can actually
+  press, and setup starts by offering to reopen orion in its app.
 - **⌘ reaches orion from inside a pane.** No one types a ⌘ chord as text, so `⌘K`, `⌘P`, `⌘E`,
   `⌘⇧P` and the rest leave a locked pane and run, the agent losing nothing. The `Ctrl` twins stay
   the agent's while its pane is locked — `^P` there is the agent's `^P`.
@@ -60,11 +62,10 @@ its key, and `Enter` runs it.
   card under the cursor (below). Everything else lives behind `⌘O` (open outside orion), the
   right-click menu, or the COMMAND PALETTE.
 
-orion writes a line into Ghostty's config for every ⌘ chord it answers to, inside an orion-managed
-block it keeps in place, so `⌘⇧P`, `⌘N`, `⌘,` and the rest reach it rather than Ghostty — and `⌘.`,
-which macOS turns into Escape, arrives as `⌘.` — see
-[Configuration](configuration.md#outside-terminal-and-ghostty-keybinds). Ghostty reads them at launch or on its own
-reload (`⌘⇧,`), which orion asks the Ghostty it runs in for whenever it changes them.
+Orion.app's Ghostty is started with a key table of orion's own, so `⌘⇧P`, `⌘N`, `⌘,`, `⌘T` and the
+rest reach orion rather than Ghostty — and `⌘.`, which macOS turns into Escape, arrives as `⌘.` —
+see [Configuration](configuration.md#ghosttys-keys-in-orionapp). Nothing is written into your own
+Ghostty config.
 
 ## Entry points
 
@@ -88,7 +89,7 @@ reload (`⌘⇧,`), which orion asks the Ghostty it runs in for whenever it chan
 | Toggle pane | `⌘J` | `^J` | fold the pane beside the cards away or bring it back; `⌘J` works from inside the pane, `^J` from the cards only (in the pane it is the agent's newline) |
 | Full-screen session | `^F` | | give the session in the pane the whole screen, or bring it back down |
 | Settings | `⌘,` | `s` | the SETTINGS OVERLAY |
-| Home | `⌘G` | `^G` | HOME: orion's animation over the grid, with the ways into a project; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. A click on the footer's `vX.Y.Z` does the same |
+| Home | `⌘G` | `^G` | HOME: orion's animation over the grid — the hunter, the name small in his chest, and one line under the sky, `Enter to begin`; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. With a newer release waiting that line reads `⇡ vX.Y.Z available · Enter to upgrade` on the upgrade's green, and `Enter` asks to install it — once: turned down, it begins again. A click on the footer's `vX.Y.Z` does the same |
 | Quit | `^C` | | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
 
 ## The grid
@@ -369,9 +370,9 @@ the editor binds that action to:
 - **Ghostty keeps `⌘←`/`⌘→` and `⌥←`/`⌥→`** and types the shell's keys for them — `^A`/`^E`, `⎋b`/`⎋f`
   — so in the editor a bare `^A` and `^E` are the line's start and end, as in any Mac text field.
   micro's command bar, `^E` elsewhere, is `⌘⇧P` (`⌥:`) here.
-- **Released from Ghostty** ([Configuration](configuration.md#outside-terminal-and-ghostty-keybinds)):
-  `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓` — Ghostty's jump to prompt — and `⌥⌘↑`/`⌥⌘↓` — its split up and down,
-  in every Ghostty window; `⌥⌘←`/`⌥⌘→` stay its split left and right.
+- **Not Ghostty's in Orion.app** ([Configuration](configuration.md#ghosttys-keys-in-orionapp)):
+  `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓` — Ghostty's jump to prompt — and `⌥⌘↑`/`⌥⌘↓`, `⌥⌘←`/`⌥⌘→` — its
+  splits — all reach the editor there.
 - **Not there:** Edit has no multiple cursors, comment toggle or line select; vim, Helix and emacs
   get every key as it is typed.
 
@@ -569,7 +570,7 @@ skips the rest — or, while the step asks something, backs out of the question.
 | Where | Key | Action |
 |---|---|---|
 | Any typed field | `←→`/`⌥←→`, `^A`/`^E`, `⌥⌫`, `^U`/`^K` | every prompt, filter and query is the same line editor: move by character / word, jump to ends, delete word, kill line |
-| Any typed field | `⇧←`/`⇧→`, `⌥⇧←`/`⌥⇧→`, `⌘⇧←`/`⌘⇧→` (`⇧Home`/`⇧End`), `⌘A` | select, as a macOS text field does: by character, by word, to the line's start or end, everything. The same key without `⇧` lets the selection go — `←`/`→` land on its edge — and typing, a paste, a line break, `⌫` or any delete replace or remove just the selection. It draws on the theme's selection background. `⌘C` copies the selection and `⌘X` cuts it, to the system clipboard (over `orion ssh`, the near terminal's, by OSC 52); with nothing selected they are the modal's own — Go to file's `⌘C` still copies the path. `⌘A` reaches orion once the [Ghostty keybinds](configuration.md#outside-terminal-and-ghostty-keybinds) block releases it from Ghostty's own select-all; `^A` stays the line's start (Ghostty types it for `⌘←`) |
+| Any typed field | `⇧←`/`⇧→`, `⌥⇧←`/`⌥⇧→`, `⌘⇧←`/`⌘⇧→` (`⇧Home`/`⇧End`), `⌘A` | select, as a macOS text field does: by character, by word, to the line's start or end, everything. The same key without `⇧` lets the selection go — `←`/`→` land on its edge — and typing, a paste, a line break, `⌫` or any delete replace or remove just the selection. It draws on the theme's selection background. `⌘C` copies the selection and `⌘X` cuts it, to the system clipboard (over `orion ssh`, the near terminal's, by OSC 52); with nothing selected they are the modal's own — Go to file's `⌘C` still copies the path. `⌘A` reaches orion in [Orion.app](configuration.md#ghosttys-keys-in-orionapp), which clears Ghostty's own select-all; `^A` stays the line's start (Ghostty types it for `⌘←`) |
 | Any multi-row box | `↑`/`↓`, `⌥↑`/`⌥↓`, `^Home`/`^End`, `PgUp`/`PgDn`, wheel, click | the quick prompt, the task and comment boxes, a preset's prefix and postfix, an issue's description: `↑`/`↓` move a row and keep the column; past the top or bottom a form steps to its next field. `⌥↑`/`⌥↓` jump by paragraph, `^Home`/`^End` (`⌘↑`/`⌘↓` where the terminal passes ⌘ on) to the start or end of the text, `PgUp`/`PgDn` a boxful. `↑ 3 more` / `↓ 5 more` on the border say what is out of sight. With `⇧` they select: `⇧↑`/`⇧↓` by row (on the first or last row, on to the start or end), `⌘⇧↑`/`⌘⇧↓` to the ends of the text, `⇧PgUp`/`⇧PgDn` a boxful |
 
 ## Chips and readouts

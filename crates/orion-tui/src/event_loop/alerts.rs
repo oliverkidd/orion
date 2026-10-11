@@ -79,70 +79,96 @@ pub(super) fn alert_for(tree: &Tree, agent: &AgentId, kind: AlertKind) -> Option
     })
 }
 
-/// What one desktop notification says: its headline, the line under it
-/// (empty for none), and the group a newer one of the same name replaces.
+/// What one desktop notification says: its headline and the line under
+/// it (empty for none).
 #[derive(Debug, Clone)]
 struct Note {
     summary: String,
     place: String,
-    group: String,
 }
 
 impl Note {
     /// A session's alert: the edge as headline, `<project> · <branch>`
-    /// under it, grouped per session.
+    /// under it.
     fn of(alert: &FeedbackAlert) -> Self {
         Self {
             summary: summary(alert),
             place: alert.place.clone(),
-            group: alert.session.clone(),
         }
     }
 }
 
-/// Post one desktop notification per alert, detached, on a helper thread
-/// that also reaps it. On macOS that is the NOTIFIER APP — orion's name and
-/// logo, a click brings the terminal back (`notifier_app`) — or
-/// `osascript` when it can't be built; elsewhere `notify-send`. A notifier
-/// that is missing or exits non-zero is logged at debug and otherwise
-/// ignored: the sound already rang (or was folded into one that just did),
-/// and a box with no desktop is not an error.
+/// Post one desktop notification per alert. In Orion.app the app posts
+/// them itself — its name, its icon, and a click that brings its window
+/// back — asked through the terminal it is ([`host_escape`]): they are
+/// queued here and written by the loop ([`write_host_notes`]). Anywhere
+/// else a notifier is run, detached, on a helper thread that also reaps
+/// it: `osascript` on macOS, `notify-send` elsewhere. One that is missing
+/// or exits non-zero is logged at debug and otherwise ignored: the sound
+/// already rang (or was folded into one that just did), and a box with no
+/// desktop is not an error.
 pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
     post(alerts.iter().map(Note::of).collect());
 }
 
 /// A desktop notification that is not about a session — `summary` over
-/// `body` — through the same notifier [`notify_desktop`] uses, grouped by
-/// its summary.
+/// `body` — through the same notifier [`notify_desktop`] uses.
 pub(crate) fn notify_text(summary: &str, body: &str) {
     post(vec![Note {
         summary: summary.to_string(),
         place: body.to_string(),
-        group: summary.to_string(),
     }]);
 }
 
+/// Notifications waiting to be written to the terminal orion is drawn in.
+static HOST_NOTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Write the escapes [`post`] has queued to the terminal orion is drawn
+/// in, `backend` — the loop's own writer, between frames, never another
+/// thread's mid-frame.
+pub(super) fn write_host_notes<W: std::io::Write>(backend: &mut W) {
+    let notes = HOST_NOTES
+        .lock()
+        .map(|mut notes| std::mem::take(&mut *notes))
+        .unwrap_or_default();
+    if notes.is_empty() {
+        return;
+    }
+    for note in notes {
+        let _ = backend.write_all(note.as_bytes());
+    }
+    let _ = backend.flush();
+}
+
+/// `note` as the escape that asks the terminal to post it (OSC 777
+/// `notify`, which Ghostty takes): the summary as its title, the place as
+/// its body. A `;` ends a field and a control character the escape, so a
+/// name holding one loses it.
+fn host_escape(note: &Note) -> String {
+    let field = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .map(|c| if c == ';' { ',' } else { c })
+            .collect()
+    };
+    format!(
+        "\x1b]777;notify;{};{}\x1b\\",
+        field(&note.summary),
+        field(&note.place)
+    )
+}
+
 fn post(notes: Vec<Note>) {
+    if crate::app_bundle::inside() {
+        if let Ok(mut queued) = HOST_NOTES.lock() {
+            queued.extend(notes.iter().map(host_escape));
+        }
+        return;
+    }
     std::thread::spawn(move || {
-        let macos = cfg!(target_os = "macos");
-        let app = if macos {
-            super::notifier_app::executable()
-        } else {
-            None
-        };
-        let activate = app.and_then(|_| super::notifier_app::terminal_bundle_id());
         for note in &notes {
-            let (program, args) = match app {
-                Some(exe) => (
-                    exe.to_string_lossy().into_owned(),
-                    notifier_app_args(note, activate.as_deref()),
-                ),
-                None => {
-                    let (program, args) = notifier_command(note, macos);
-                    (program.to_string(), args)
-                }
-            };
-            match Command::new(&program)
+            let (program, args) = notifier_command(note, cfg!(target_os = "macos"));
+            match Command::new(program)
                 .args(&args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -172,32 +198,8 @@ fn summary(alert: &FeedbackAlert) -> String {
     }
 }
 
-/// `terminal-notifier` argv for the NOTIFIER APP: *orion* / the summary /
-/// the place, grouped so a newer notification for the same thing replaces
-/// its last, and `-activate`-ing the terminal on click. It reads the
-/// message from stdin when `-message` is empty, so a placeless note
-/// carries the summary as its message instead.
-fn notifier_app_args(note: &Note, activate: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = vec!["-title".into(), "orion".into()];
-    if note.place.is_empty() {
-        args.extend(["-message".into(), note.summary.clone()]);
-    } else {
-        args.extend([
-            "-subtitle".into(),
-            note.summary.clone(),
-            "-message".into(),
-            note.place.clone(),
-        ]);
-    }
-    args.extend(["-group".into(), format!("orion:{}", note.group)]);
-    if let Some(id) = activate {
-        args.extend(["-activate".into(), id.into()]);
-    }
-    args
-}
-
-/// The fallback notifier for `note`, as a program and its argv — never a
-/// shell line, so the only quoting is AppleScript's own. macOS shows
+/// The notifier for `note` outside Orion.app, as a program and its argv —
+/// never a shell line, so the only quoting is AppleScript's own. macOS shows
 /// *orion* / the summary / the place; `notify-send` gets the same as app
 /// name, summary and body.
 fn notifier_command(note: &Note, macos: bool) -> (&'static str, Vec<String>) {
@@ -370,45 +372,21 @@ mod tests {
         assert_eq!(edge(Fresh, Running), None);
     }
 
-    /// The NOTIFIER APP gets orion as the title, what happened as the
-    /// subtitle and the place as the message, grouped per session and
-    /// bringing the terminal back on click; with no place the summary is
-    /// the message (an empty `-message` would read stdin).
+    /// In Orion.app a notification is one escape: what happened as the
+    /// title, the place as the body, and nothing in a name able to end a
+    /// field or the escape early.
     #[test]
-    fn notifier_app_args_name_the_edge_and_bring_the_terminal_back() {
+    fn a_note_in_the_app_is_one_escape() {
         let finished = FeedbackAlert {
             kind: AlertKind::Finished,
             ..alert("Fix Login", "demo · main")
         };
-        let args = notifier_app_args(&Note::of(&finished), Some("com.mitchellh.ghostty"));
         assert_eq!(
-            args,
-            [
-                "-title",
-                "orion",
-                "-subtitle",
-                "Fix Login finished",
-                "-message",
-                "demo · main",
-                "-group",
-                "orion:Fix Login",
-                "-activate",
-                "com.mitchellh.ghostty",
-            ]
+            host_escape(&Note::of(&finished)),
+            "\x1b]777;notify;Fix Login finished;demo · main\x1b\\"
         );
-
-        let args = notifier_app_args(&Note::of(&alert("agent-2", "")), None);
-        assert_eq!(
-            args,
-            [
-                "-title",
-                "orion",
-                "-message",
-                "agent-2 needs feedback",
-                "-group",
-                "orion:agent-2",
-            ]
-        );
+        let odd = host_escape(&Note::of(&alert("a;b\x07c\x1b", "")));
+        assert_eq!(odd, "\x1b]777;notify;a,bc needs feedback;\x1b\\");
     }
 
     /// The bell path writes exactly one BEL through the backend; `off` is

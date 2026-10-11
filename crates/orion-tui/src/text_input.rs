@@ -927,8 +927,8 @@ impl TextInput {
             }
 
             // ---- selection ----
-            // ⌘A, where the terminal hands ⌘ over (Ghostty, once the
-            // GHOSTTY KEYBINDS block releases it from its select-all).
+            // ⌘A, where the terminal hands ⌘ over (Orion.app, which
+            // clears Ghostty's own select-all).
             // Never Ctrl+A: that is the line's start, and what Ghostty
             // types for ⌘←.
             KeyCode::Char('a' | 'A') if cmd && !ctrl && !alt => {
@@ -1344,12 +1344,12 @@ pub mod keys {
     )
     .show(2);
     /// ⌘A — never `^A`, which is the line's start and what Ghostty types
-    /// for ⌘←. Ghostty keeps ⌘A for its own select-all until the GHOSTTY
-    /// KEYBINDS block releases it (`ghostty_config::EDITOR_CHORDS`).
+    /// for ⌘←. Ghostty keeps ⌘A for its own select-all; Orion.app's key
+    /// table clears it (`ghostty_config`).
     pub const SELECT_ALL: Key = Key::new(&["cmd+a"], "select all");
     /// ⌘C / ⌘X on the SELECTION. Ghostty answers ⌘C itself only while
-    /// its own (mouse) selection exists — the GHOSTTY KEYBINDS block makes
-    /// its copy `performable` — and releases ⌘X outright.
+    /// its own (mouse) selection exists — Orion.app binds its copy
+    /// `performable` — and hands ⌘X over outright.
     pub const COPY_CUT: Key = Key::new(&["cmd+c", "cmd+x"], "copy / cut").show(2);
     pub const ALL: &[Key] = &[
         WORD,

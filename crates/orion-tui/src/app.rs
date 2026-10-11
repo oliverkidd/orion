@@ -3939,9 +3939,9 @@ pub struct App {
     /// **Upgrade orion** confirmed: quit into [`crate::Exit::Upgrade`].
     pub upgrade: bool,
     pub restart: bool,
-    /// Set with `should_quit` by setup's Ghostty step: after teardown the
-    /// binary opens orion in a new Ghostty window (`crate::open_in_ghostty`).
-    pub move_to_ghostty: bool,
+    /// Set with `should_quit` by setup's App step: after teardown the
+    /// binary opens orion in its own app (`crate::open_app`).
+    pub move_to_app: bool,
     /// The FOOTER's one line in place of its key hints, until the next key.
     pub flash: Option<crate::flash::Flash>,
     /// The newest release published on GitHub (`0.22.0`) when it is newer
@@ -4150,6 +4150,10 @@ pub struct App {
     /// splash's Enter, `+`, `o`, `/` — clears it
     /// ([`App::reopen_projects`]). Remembered across restarts.
     pub projects_closed: bool,
+    /// The upgrade confirm has been put up this run: the SPLASH's Enter,
+    /// which offers a waiting release first, goes back to beginning — the
+    /// footer's `⇡ v…` still offers it. Never remembered across a restart.
+    pub splash_upgrade_asked: bool,
     /// HOME is up: the SPLASH, with orion's animation, drawn over a grid
     /// that is still there underneath, cursor and all — `⌘G` (or a click
     /// on the footer's nameplate) puts it up, and Esc, Enter, an arrow or
@@ -4805,7 +4809,8 @@ impl App {
             should_quit: false,
             pending_ssh: None,
             restart: false,
-            move_to_ghostty: false,
+            move_to_app: false,
+            splash_upgrade_asked: false,
             upgrade: false,
             flash: None,
             update_available: None,
@@ -5076,6 +5081,15 @@ impl App {
             return None;
         }
         repo.file_name().map(|n| n.to_string_lossy().into_owned())
+    }
+
+    /// The release the SPLASH's Enter installs rather than beginning: a
+    /// newer one that is known and has not been offered yet this run.
+    pub fn splash_upgrade(&self) -> Option<&str> {
+        if self.splash_upgrade_asked || !self.splash_showing() || self.vim.is_some() {
+            return None;
+        }
+        self.update_available.as_deref()
     }
 
     /// The LAUNCHER VIEW is what the body draws — which is orion's only

@@ -524,7 +524,6 @@ pub enum SettingKind {
     LinkEnvFiles,
     WorktreeContainers,
     OutsideTerminal,
-    GhosttyKeybinds,
     Editor,
     OutsideEditor,
     CloseFinderOnOpen,
@@ -709,7 +708,6 @@ impl SettingKind {
             SettingKind::HighlightCurrentCard => (2026, 9, 28),
             SettingKind::LinkEnvFiles
             | SettingKind::OutsideTerminal
-            | SettingKind::GhosttyKeybinds
             | SettingKind::LinearAccount
             | SettingKind::LinearAutoAttach
             | SettingKind::LinearTaskTemplate
@@ -829,12 +827,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::OutsideTerminal,
                 label: "Outside terminal",
                 hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
-                group: "Terminal",
-            },
-            SettingSpec {
-                kind: SettingKind::GhosttyKeybinds,
-                label: "Ghostty keybinds",
-                hint: "Keep a marked block in Ghostty's config releasing every ⌘ chord orion's keys use, rebinds included (written when Ghostty is in use)",
                 group: "Terminal",
             },
             SettingSpec {
@@ -1473,10 +1465,13 @@ pub struct Config {
     /// fallback when Ghostty.app isn't installed. See
     /// [`Config::outside_terminal`].
     pub outside_terminal: String,
-    /// GHOSTTY KEYBINDS: orion keeps a marked block in Ghostty's config
-    /// unbinding the ⌘ chords its keymap needs (`ghostty_config`), written
-    /// at startup whenever orion runs inside Ghostty or Ghostty is the
-    /// outside terminal. Off leaves Ghostty's config alone.
+    /// RETIRED with Orion.app carrying its own key table. Through 1.6 the
+    /// **Ghostty keybinds** SETTING (Settings → Tools, on by default) had
+    /// orion keep a marked block in the user's Ghostty config unbinding
+    /// the ⌘ chords its keymap used. Nothing writes that block now — the
+    /// first launch takes it out (`ghostty_config`) — so no tab shows the
+    /// row and nothing reads it. Still loaded and written back as stored,
+    /// so an older build sharing the file keeps the choice its user made.
     pub ghostty_keybinds: bool,
     /// Editor command the file finder (`f`), tree browser (`b`),
     /// find-in-files (`F`), ⌥click file links and a MARKDOWN PAGE's Enter
@@ -3472,7 +3467,6 @@ impl Config {
                     chosen.into()
                 }
             }
-            SettingKind::GhosttyKeybinds => on_off(self.ghostty_keybinds).into(),
             SettingKind::RunSetup => "Enter opens it".into(),
             SettingKind::Git => installed_label("git"),
             SettingKind::Gh => installed_label("gh"),
@@ -3635,9 +3629,6 @@ impl Config {
             SettingKind::OutsideTerminal => {
                 self.outside_terminal =
                     cycle_choice(self.outside_terminal().as_str(), OUTSIDE_TERMINALS, step).into();
-            }
-            SettingKind::GhosttyKeybinds => {
-                self.ghostty_keybinds = !self.ghostty_keybinds;
             }
             SettingKind::Editor => {
                 self.editor = cycle_choice(&self.editor, EDITORS, step).into();

@@ -10,6 +10,9 @@ use cli::{Cli, Command, ConfigCommand};
 use std::path::Path;
 
 fn main() -> Result<()> {
+    // As Orion.app's own executable this binary is only the launcher: it
+    // becomes the app's Ghostty here, before an argument is read.
+    orion_tui::app_bundle::run_if_launcher();
     let cli = Cli::parse();
     // A `orion ssh` / `orion tunnel` from another machine may have sent its
     // settings along. Merge them before anything reads a setting, and before
@@ -104,7 +107,7 @@ fn main() -> Result<()> {
             println!("{}", orion_daemon::lifecycle::BUILD_FINGERPRINT);
             Ok(())
         }
-        Some(Command::OpenInGhostty) => orion_tui::open_in_ghostty(),
+        Some(Command::App | Command::OpenApp) => orion_tui::open_app(),
         None => match cli.dir {
             Some(dir) => orion_tui::run_add_project(dir),
             None => run_tui(),
@@ -218,16 +221,19 @@ fn run_tui() -> Result<()> {
                 orion_tui::restart()
             }
         }
-        // Setup's Ghostty step: orion opens in a new Ghostty window, the
-        // daemon and its sessions left up for it. Failing that, this
-        // terminal is left as it is, with the reason.
-        orion_tui::Exit::Ghostty => {
-            if let Err(why) = orion_tui::open_in_ghostty() {
+        // Setup's App step: orion opens in its own app, the daemon and its
+        // sessions left up for it. Failing that, this terminal is left as
+        // it is, with the reason.
+        orion_tui::Exit::App => {
+            if let Err(why) = orion_tui::open_app() {
                 eprintln!("orion: {why:#} — run orion again to carry on here");
             }
             Ok(())
         }
-        orion_tui::Exit::Quit => Ok(()),
+        orion_tui::Exit::Quit => {
+            orion_tui::app_bundle::refresh_on_quit();
+            Ok(())
+        }
     }
 }
 

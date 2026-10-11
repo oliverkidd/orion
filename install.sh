@@ -7,10 +7,12 @@
 # falling back to `cargo install --git` when no release (or no matching asset)
 # exists. Then makes sure of what orion leans on: git (required), an editor it
 # opens files in (fresh, unless fresh, micro or Microsoft Edit is already
-# here), gh for pull requests and issues and, on a Mac, Ghostty, the terminal
-# its ⌘ shortcuts need. A first install on a Mac then opens orion in Ghostty,
-# so setup starts where those shortcuts work. Running it again updates in
-# place, and says nothing about dependencies that are already here.
+# here), gh for pull requests and issues and, on a Mac, Ghostty, which orion's
+# own app is made from. A first install on a Mac then opens orion as that app
+# — Orion.app in ~/Applications — so setup starts where its ⌘ shortcuts work
+# and orion is in the Dock from then on.
+# Running it again updates in place, and says nothing about dependencies that
+# are already here.
 #
 #   curl -fsSL …/install.sh | sh -s -- --no-deps    orion alone
 #   curl -fsSL …/install.sh | sh -s -- --no-launch  don't open orion after
@@ -18,7 +20,7 @@
 # Environment overrides:
 #   ORION_INSTALL_DIR   install destination (default: ~/.local/bin)
 #   ORION_NO_DEPS=1     skip the dependency step (same as --no-deps)
-#   ORION_NO_LAUNCH=1   don't open orion in Ghostty (same as --no-launch)
+#   ORION_NO_LAUNCH=1   don't open orion as an app (same as --no-launch)
 set -eu
 
 REPO="oliverkidd/orion"
@@ -144,30 +146,58 @@ have_ghostty() {
     [ -d /Applications/Ghostty.app ] || [ -d "$HOME/Applications/Ghostty.app" ]
 }
 
-# Whether this is a Mac at its own keyboard, in a terminal that passes no ⌘
-# on to the program inside it: anything but Ghostty and kitty, or either of
-# them under tmux, which never passes ⌘ on. Over ssh the Mac is not the one
-# being typed at, so it doesn't count.
-wants_ghostty() {
+# Whether this is a Mac at its own keyboard, outside tmux. Over ssh the Mac is
+# not the one being typed at, and tmux is a choice a new window would undo.
+at_this_mac() {
     [ "$(uname -s)" = Darwin ] || return 1
     [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ] || return 1
-    [ -n "${TMUX:-}" ] && return 1
-    [ "${TERM_PROGRAM:-}" != ghostty ] && [ -z "${KITTY_WINDOW_ID:-}" ]
+    [ -z "${TMUX:-}" ]
 }
 
-# Ghostty, where wants_ghostty says: orion's ⌘ shortcuts — ⌘N new agent, ⌘K
-# jump, ⌘P files — need a terminal that passes ⌘ on. Installed with
-# Homebrew's cask when there is one, else pointed at.
+# Ghostty's own releases: the feed its updater reads, and the Apple team its
+# builds are signed by.
+GHOSTTY_FEED="https://release.files.ghostty.org/appcast.xml"
+GHOSTTY_TEAM="24VZTF6M5V"
+
+# Ghostty without Homebrew: the newest disk image its feed lists, copied into
+# /Applications — or ~/Applications when that can't be written — once the app
+# inside is seen to be whole and signed by Ghostty's own team.
+install_ghostty_dmg() {
+    dmg_url=$(curl -fsSL "$GHOSTTY_FEED" |
+        sed -n 's/.*url="\(https:\/\/release\.files\.ghostty\.org\/[^"]*\/Ghostty\.dmg\)".*/\1/p' |
+        tail -1)
+    [ -n "$dmg_url" ] || return 1
+    dmg_dir=$(mktemp -d) || return 1
+    dmg_ok=""
+    if curl -fsSL "$dmg_url" -o "$dmg_dir/Ghostty.dmg" &&
+        hdiutil attach -nobrowse -readonly -quiet -mountpoint "$dmg_dir/mnt" "$dmg_dir/Ghostty.dmg"; then
+        if codesign --verify --deep --strict "$dmg_dir/mnt/Ghostty.app" 2>/dev/null &&
+            codesign -dv "$dmg_dir/mnt/Ghostty.app" 2>&1 | grep -q "TeamIdentifier=$GHOSTTY_TEAM"; then
+            dmg_dest=/Applications
+            [ -w "$dmg_dest" ] || dmg_dest="$HOME/Applications"
+            mkdir -p "$dmg_dest" &&
+                ditto "$dmg_dir/mnt/Ghostty.app" "$dmg_dest/Ghostty.app" && dmg_ok=1
+        fi
+        hdiutil detach -quiet "$dmg_dir/mnt" || true
+    fi
+    rm -rf "$dmg_dir"
+    [ -n "$dmg_ok" ]
+}
+
+# Ghostty, where at_this_mac says: Orion.app is a copy of it under orion's
+# name, and the one place orion's ⌘ shortcuts — ⌘N new agent, ⌘K jump, ⌘P
+# files — reach it. From Homebrew's cask when there is one, else from
+# Ghostty's own download.
 ensure_ghostty() {
-    wants_ghostty || return 0
+    at_this_mac || return 0
     have_ghostty && return 0
     if have brew; then
-        say "installing Ghostty, the terminal orion's ⌘ shortcuts need (brew install --cask ghostty)…"
+        say "installing Ghostty, which Orion.app is made from (brew install --cask ghostty)…"
         brew install --cask ghostty && return 0
-        say "warning: couldn't install Ghostty — orion's ⌘ shortcuts need it: https://ghostty.org/download"
-    else
-        say "note: orion's ⌘ shortcuts need Ghostty (Terminal.app never passes ⌘ on) — install it from https://ghostty.org/download"
     fi
+    say "installing Ghostty, which Orion.app is made from (ghostty.org)…"
+    install_ghostty_dmg && return 0
+    say "warning: couldn't install Ghostty — Orion.app is made from it: https://ghostty.org/download"
 }
 
 ensure_deps() {
@@ -177,18 +207,20 @@ ensure_deps() {
     ensure_ghostty
 }
 
-# A first install, where wants_ghostty says, opens orion in Ghostty — its
-# keybinds written into Ghostty's config first — so setup starts where the
-# ⌘ shortcuts work. Not on an update (orion was here already) or from
-# `orion upgrade`, not with --no-launch, and not without Ghostty.
-open_in_ghostty() {
+# A first install, where at_this_mac says and Ghostty is here, opens orion as
+# an app of its own: Orion.app in ~/Applications, made from that Ghostty — so
+# setup starts where the ⌘ shortcuts work, and orion is in the Dock from then
+# on. Not on an update (orion was here already: its own setup offers the
+# move) or from `orion upgrade`, and not with --no-launch. The hook keeps the
+# name every release has answered to.
+open_app() {
     [ -z "$had_orion" ] || return 0
     [ "$NO_LAUNCH" != 1 ] || return 0
     [ -z "${ORION_UPGRADE_HANDOFF:-}" ] || return 0
-    wants_ghostty || return 0
+    at_this_mac || return 0
     have_ghostty || return 0
-    say "opening orion in Ghostty…"
-    "$1" _open-in-ghostty || say "run orion from Ghostty to get started"
+    say "opening orion…"
+    "$1" _open-in-ghostty || say "run orion to get started"
 }
 
 main() {
@@ -247,7 +279,7 @@ main() {
         fi
     fi
 
-    open_in_ghostty "$installed"
+    open_app "$installed"
 }
 
 main "$@"

@@ -4,7 +4,7 @@
 //! --cask ghostty`), the vendor's documented command for an agent (`curl
 //! -fsSL https://claude.ai/install.sh | bash`).
 //!
-//! The onboarding wizard's Agents and Editor pages and its Ghostty step,
+//! The onboarding wizard's Agents and Editor pages and its App step,
 //! and the SETTINGS OVERLAY's **File editor**, CLAUDE ACCOUNTS and harness
 //! rows share it: `i` on a program that isn't on PATH shows its [`Plan`] — the line it
 //! would run — and Enter runs that line in the editor modal's PTY, the
@@ -132,7 +132,7 @@ pub fn editor_plan(editor: &str, brew: Option<&Path>) -> Option<Plan> {
 }
 
 /// Ghostty's download page, which documents the Homebrew cask too.
-const GHOSTTY_LINK: &str = "https://ghostty.org/download";
+pub(crate) const GHOSTTY_LINK: &str = "https://ghostty.org/download";
 
 /// The program [`ghostty_plan`] installs.
 pub const GHOSTTY: &str = "ghostty";

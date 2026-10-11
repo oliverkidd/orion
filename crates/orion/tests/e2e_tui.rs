@@ -471,7 +471,7 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
     let mut tui = TuiHarness::spawn();
     let first = tui.make_repo("cwd-first").canonicalize().unwrap();
     let second = tui.make_repo("cwd-second").canonicalize().unwrap();
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &first, "cwd-first");
     tui.wait_for_working_directory(&first);
     add_project(&mut tui, &second, "cwd-second");
@@ -486,7 +486,7 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
 #[test]
 fn tui_help_modal_grouped_keymap() {
     let mut tui = TuiHarness::spawn();
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
 
     // The grouped two-column keymap: every section header on screen at
     // once (the old single list clipped its tail on short terminals).
@@ -514,7 +514,7 @@ fn orion_open_from_inside_a_session_raises_the_file_tabs() {
     std::fs::write(&alpha, "# alpha opened from the session\n").unwrap();
     std::fs::write(&beta, "fn beta() {}\n").unwrap();
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "open-proj");
 
     // ---- an agent (the stand-in shell), stepped into and locked ----
@@ -552,7 +552,7 @@ fn tui_project_rename_shows_the_folder_and_empty_undoes_it() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("acme-repo");
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "acme-repo");
 
     // ---- rename: the tab takes the label ----
@@ -586,7 +586,7 @@ fn tui_manual_link_add_is_unavailable() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("link-proj");
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "link-proj");
 
     tui.send(b"L");
@@ -633,7 +633,7 @@ fn tui_issues_are_prefetched_before_the_modal_opens() {
 
     let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
     let repo = tui.make_repo("issues-proj");
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "issues-proj");
 
     // No `i` yet: the list is asked for because the project is selected.
@@ -709,7 +709,7 @@ fn tui_issues_modal_edits_the_issue_in_place() {
 
     let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
     let repo = tui.make_repo("issues-proj");
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "issues-proj");
     tui.send(b"i");
     tui.wait_for_text("#15 Fix login redirect");
@@ -753,7 +753,7 @@ fn tui_git_diff_modal() {
         TuiHarness::spawn_with_settings(r#", "diff_start": "files", "diff_tree_view": false"#);
     let repo = tui.make_repo("diff-proj");
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "diff-proj");
     // The root worktree row must exist before g has anything to diff.
 
@@ -860,7 +860,7 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     repo_git(&repo, &["add", "."]);
     repo_git(&repo, &["commit", "-m", "add beta"]);
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "commits-proj");
 
     // ---- nothing uncommitted: the whole branch, every commit ticked ----
@@ -931,7 +931,7 @@ fn tui_branch_switcher_moves_the_root_checkout() {
     repo_git(&repo, &["branch", "feature-login"]);
     repo_git(&repo, &["branch", "release-2"]);
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "switch-proj");
 
     // ---- a clean checkout switches on Enter ----
@@ -1021,7 +1021,7 @@ fn tui_skills_browser_lists_filters_reads_and_trashes() {
         "# Deploy",
     );
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "skills-proj");
 
     // Three, not five: `.claude/skills` and `.cursor/skills` are one folder.
@@ -1123,7 +1123,7 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
     let repo = tui.make_repo("drag-proj");
 
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "drag-proj");
 
     start_session(&mut tui, "hello");
@@ -1240,7 +1240,7 @@ fn tui_autofix_asks_when_my_pr_conflicts() {
 
     let mut tui = TuiHarness::spawn_with(&[("PATH", path)], r#", "pr_autofix": "ask""#);
     let repo = tui.make_repo("autofix-proj");
-    tui.wait_for_text("open your first project");
+    tui.wait_for_text("to begin");
     run_command(&mut tui, "open a folder");
     tui.wait_for_text("Open project");
     tui.type_str(&repo.to_string_lossy());

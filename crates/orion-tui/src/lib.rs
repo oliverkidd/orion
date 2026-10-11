@@ -1,6 +1,7 @@
 pub mod agent_picker;
 pub mod agent_presets;
 pub mod app;
+pub mod app_bundle;
 pub mod autofix;
 pub mod base_sync;
 pub mod branch_name;
@@ -27,7 +28,6 @@ pub mod file_tabs;
 pub mod flash;
 pub mod fuzzy;
 pub mod ghostty_config;
-pub mod ghostty_host;
 pub mod git_diff;
 pub(crate) mod git_proc;
 pub mod git_sync;
@@ -126,13 +126,13 @@ pub fn run_tui() -> Result<Exit> {
     runtime()?.block_on(event_loop::run_app())
 }
 
-/// Open orion in a new Ghostty window, in this folder, and say so — after
-/// setup's Ghostty step has quit the TUI, and from `install.sh` on a first
-/// install (`orion _open-in-ghostty`). The daemon and its sessions stay
-/// up; the new window attaches to them. See [`ghostty_host`].
-pub fn open_in_ghostty() -> Result<()> {
-    ghostty_host::open_orion().map_err(|why| anyhow::anyhow!("couldn't open Ghostty: {why}"))?;
-    eprintln!("orion: opened in Ghostty — you can close this window.");
+/// Open orion in its own app, in this folder, and say so — after setup's
+/// App step has quit the TUI, from `install.sh` on a first install
+/// (`orion _open-in-ghostty`) and from `orion app`. The daemon and its
+/// sessions stay up; the new window attaches to them. See [`app_bundle`].
+pub fn open_app() -> Result<()> {
+    app_bundle::open().map_err(|why| anyhow::anyhow!("couldn't open Orion.app: {why}"))?;
+    eprintln!("orion: opened as its own app — you can close this window.");
     Ok(())
 }
 
