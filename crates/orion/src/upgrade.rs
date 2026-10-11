@@ -262,7 +262,7 @@ fn stage_script(url: &str, dir: &Path) -> Result<PathBuf> {
 /// `target/debug`, or the `deps/` dir test binaries run from). Symlinks
 /// resolve first: the usual dev setup is a `~/.cargo/bin/orion` symlink
 /// pointing into `target/release`, and it's that symlink an upgrade replaces.
-fn dev_build() -> Option<PathBuf> {
+pub(crate) fn dev_build() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let dir = exe.parent()?;

@@ -63,16 +63,20 @@ enum Page {
 /// The SETUP VERSION: bumped by a release that adds a step, so a machine
 /// that went through an older setup is shown the new steps on its next
 /// launch ([`pending`]). Each page says which version brought it.
-pub const SETUP_VERSION: u32 = 4;
+pub const SETUP_VERSION: u32 = 5;
 
 impl Page {
-    /// The SETUP VERSION this page's offer arrived in. The App step is 4's:
-    /// every machine set up before Orion.app existed is shown it once, on
-    /// the launch after the upgrade, which is how an orion kept in a
-    /// terminal is moved over.
+    /// The SETUP VERSION this page's offer arrived in. The App step is
+    /// 5's. It was 4's, where it stood behind WHAT'S NEW and one Esc on
+    /// the notes dismissed it unseen; a machine that went through 4 is
+    /// shown it again, in front. The installed orion never reaches it on a
+    /// Mac with Ghostty — a bare `orion` opens the app before setup runs
+    /// (`app_bundle::opens_in_app`) — so it is what is left for an orion
+    /// that stayed in a terminal: the app would not open, or it was told
+    /// to stay.
     fn added(self) -> u32 {
         match self {
-            Page::App => 4,
+            Page::App => 5,
             Page::Autofix => 3,
             _ => 1,
         }
@@ -82,7 +86,7 @@ impl Page {
     /// only on a Mac, to an orion not already in its app.
     fn offered(self) -> bool {
         match self {
-            Page::App => crate::app_bundle::offered(),
+            Page::App => crate::app_bundle::can_move(),
             _ => true,
         }
     }
@@ -134,7 +138,10 @@ fn pages(cfg: &Config) -> Vec<Page> {
 /// The pages a run of setup walks: all of them from `since` 0, else
 /// WHAT'S NEW while there are releases this machine has not seen, then
 /// the steps a later SETUP VERSION added that have something to offer
-/// here, and Ready to finish on after those.
+/// here, and Ready to finish on after those. The App step, when it is one
+/// of them, leads even the notes: it reopens orion somewhere else, where
+/// setup carries on and the notes are read, and a step behind the notes
+/// is one Esc from never being seen.
 fn view_pages(cfg: &Config, since: u32) -> Vec<Page> {
     let all = pages(cfg);
     let news = !crate::whats_new::unseen(cfg).is_empty();
@@ -146,15 +153,18 @@ fn view_pages(cfg: &Config, since: u32) -> Vec<Page> {
     // than stamping them seen unread.
     if since == 0 {
         out.extend(all);
-        return out;
+    } else {
+        let steps: Vec<Page> = all
+            .into_iter()
+            .filter(|page| *page != Page::Ready && page.added() > since)
+            .collect();
+        if !steps.is_empty() || !news {
+            out.extend(steps);
+            out.push(Page::Ready);
+        }
     }
-    let steps: Vec<Page> = all
-        .into_iter()
-        .filter(|page| *page != Page::Ready && page.added() > since)
-        .collect();
-    if !steps.is_empty() || !news {
-        out.extend(steps);
-        out.push(Page::Ready);
+    if let Some(at) = out.iter().position(|page| *page == Page::App) {
+        out[..=at].rotate_right(1);
     }
     out
 }
@@ -2085,6 +2095,41 @@ mod tests {
                 // Inside the app the step has nothing to offer.
                 assert_eq!(pending(&Config::load()), None);
                 assert_eq!(Config::load().setup_version, SETUP_VERSION);
+            });
+        });
+    }
+
+    /// The move comes before the notes. In 2.0 it stood behind WHAT'S NEW,
+    /// where one Esc on the notes stamped it seen unshown; a machine that
+    /// went through that setup is asked again, with the step in front.
+    #[test]
+    fn the_app_step_leads_the_release_notes() {
+        with_temp_config(|| {
+            crate::whats_new::with_releases(NEWS, || {
+                with_programs(&[crate::install::GHOSTTY], || {
+                    persist(|cfg| {
+                        cfg.onboarded = true;
+                        cfg.setup_version = 4;
+                        cfg.seen_version = "0.9.8".into();
+                    });
+                    crate::app_bundle::with_offered(true, || {
+                        let cfg = Config::load();
+                        assert_eq!(pending(&cfg), Some(4));
+                        assert_eq!(
+                            view_pages(&cfg, 4),
+                            vec![Page::App, Page::WhatsNew, Page::Ready]
+                        );
+                        assert_eq!(
+                            view_pages(&cfg, 0)[..3],
+                            [Page::App, Page::WhatsNew, Page::Welcome]
+                        );
+                        let mut app = App::new();
+                        open(&mut app, &cfg, 4);
+                        assert_eq!(view(&app).current(&cfg), Page::App);
+                    });
+                    // In the app there is no step to lead: the notes alone.
+                    assert_eq!(view_pages(&Config::load(), 4), vec![Page::WhatsNew]);
+                });
             });
         });
     }

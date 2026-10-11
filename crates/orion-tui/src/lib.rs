@@ -126,14 +126,25 @@ pub fn run_tui() -> Result<Exit> {
     runtime()?.block_on(event_loop::run_app())
 }
 
-/// Open orion in its own app, in this folder, and say so — after setup's
-/// App step has quit the TUI, from `install.sh` on a first install
-/// (`orion _open-in-ghostty`) and from `orion app`. The daemon and its
-/// sessions stay up; the new window attaches to them. See [`app_bundle`].
-pub fn open_app() -> Result<()> {
-    app_bundle::open().map_err(|why| anyhow::anyhow!("couldn't open Orion.app: {why}"))?;
-    eprintln!("orion: opened as its own app — you can close this window.");
-    Ok(())
+/// Open orion in its own app, in this folder, and say so — whenever a bare
+/// `orion` is started in a terminal on a Mac ([`app_bundle::opens_in_app`]),
+/// after setup's App step has quit the TUI, from `install.sh` on a first
+/// install (`orion _open-in-ghostty`) and from `orion app`. The daemon and
+/// its sessions stay up; the new window attaches to them. See
+/// [`app_bundle`].
+pub fn open_app() -> Result<app_bundle::Opened> {
+    use app_bundle::Opened;
+    let opened =
+        app_bundle::open().map_err(|why| anyhow::anyhow!("couldn't open Orion.app: {why}"))?;
+    match opened {
+        Opened::Started => {
+            eprintln!("orion: opened in Orion.app, its own app — you can close this window.")
+        }
+        Opened::Raised => {
+            eprintln!("orion: Orion.app is already open — brought it to the front.")
+        }
+    }
+    Ok(opened)
 }
 
 /// **Restart orion** (`⌘⇧R`), once the TUI has quit and restored the
@@ -162,7 +173,9 @@ pub fn relaunch() -> Result<()> {
         Some(arg0) => std::path::PathBuf::from(arg0),
         None => std::env::current_exe().context("resolve current_exe")?,
     };
-    let err = std::process::Command::new(&program).args(args).exec();
+    let mut cmd = std::process::Command::new(&program);
+    app_bundle::carry_inside(&mut cmd);
+    let err = cmd.args(args).exec();
     Err(err).with_context(|| format!("restart {}", program.display()))
 }
 
