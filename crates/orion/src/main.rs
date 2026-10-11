@@ -13,6 +13,7 @@ fn main() -> Result<()> {
     // As Orion.app's own executable this binary is only the launcher: it
     // becomes the app's Ghostty here, before an argument is read.
     orion_tui::app_bundle::run_if_launcher();
+    orion_tui::app_bundle::settle_inside();
     let cli = Cli::parse();
     // A `orion ssh` / `orion tunnel` from another machine may have sent its
     // settings along. Merge them before anything reads a setting, and before
@@ -83,7 +84,7 @@ fn main() -> Result<()> {
         }),
         Some(Command::Setup) => {
             orion_tui::reset_setup();
-            run_tui()
+            run_tui(true)
         }
         Some(Command::Doctor { json }) => {
             if !orion_tui::run_doctor(json) {
@@ -107,10 +108,10 @@ fn main() -> Result<()> {
             println!("{}", orion_daemon::lifecycle::BUILD_FINGERPRINT);
             Ok(())
         }
-        Some(Command::App | Command::OpenApp) => orion_tui::open_app(),
+        Some(Command::App | Command::OpenApp) => orion_tui::open_app().map(|_| ()),
         None => match cli.dir {
             Some(dir) => orion_tui::run_add_project(dir),
-            None => run_tui(),
+            None => run_tui(false),
         },
     }
 }
@@ -193,7 +194,29 @@ fn init_tui_logging() -> Result<()> {
 }
 
 /// The TUI, and what its exit asks for next.
-fn run_tui() -> Result<()> {
+/// Open the TUI — `setup` when `orion setup` asked for every step of it.
+fn run_tui(setup: bool) -> Result<()> {
+    // On a Mac orion lives in its own app: a bare `orion` in a terminal
+    // opens it there and leaves the terminal. An upgrade moves an orion
+    // kept in a terminal over the same way — it reopens orion, and the
+    // reopening lands here, before anything of the new release is drawn.
+    // Should the app not open, orion runs where it was started and says
+    // why once it has drawn.
+    let dev_build = upgrade::dev_build().is_some();
+    if orion_tui::app_bundle::opens_in_app(dev_build) {
+        match orion_tui::open_app() {
+            Ok(orion_tui::app_bundle::Opened::Raised) if setup => {
+                // A running app takes no new command: its orion shows
+                // setup the next time it starts.
+                eprintln!("orion: setup opens when Orion.app next starts — or run it now from its command palette: Run setup.");
+                return Ok(());
+            }
+            Ok(_) => return Ok(()),
+            Err(why) => orion_tui::app_bundle::note_not_opened(format!(
+                "{why:#} — orion is in this terminal instead"
+            )),
+        }
+    }
     init_tui_logging()?;
     let exit = log_fatal(orion_tui::run_tui(), &orion_core::paths::tui_log_path())?;
     match exit {
@@ -231,7 +254,7 @@ fn run_tui() -> Result<()> {
             Ok(())
         }
         orion_tui::Exit::Quit => {
-            orion_tui::app_bundle::refresh_on_quit();
+            orion_tui::app_bundle::refresh_on_quit(dev_build);
             Ok(())
         }
     }

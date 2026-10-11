@@ -14,8 +14,14 @@
 //! Nothing of orion's moves into it. The app is a window: what it runs is
 //! the installed `orion`, the sessions live in the daemon, and the
 //! projects, settings and history stay in the data dir. An orion opened
-//! here finds everything the one in a terminal left, and `orion` in a
-//! terminal goes on working beside it.
+//! here finds everything the one in a terminal left.
+//!
+//! And it is where orion lives on a Mac. A bare `orion` typed in a
+//! terminal opens the app and leaves the terminal ([`opens_in_app`]) — which
+//! is also how an upgrade moves an orion kept in a terminal over: the
+//! upgrade reopens orion, and the reopening lands here. tmux, ssh and
+//! `orion browser` keep orion where it was started, as does a Mac without
+//! Ghostty to make the app from.
 //!
 //! macOS starts an app as its bundle's executable with no arguments, and
 //! Ghostty is told what to run by argument, so that executable is a
@@ -46,7 +52,7 @@ const NAME: &str = "Orion";
 /// Bump when the bundle's layout, [`host_args`] or the icon changes, so
 /// an existing copy is rebuilt. Its config ([`app_config`]) is in the
 /// STAMP by itself.
-const LAYOUT: u32 = 1;
+const LAYOUT: u32 = 2;
 const STAMP_FILE: &str = "orion-stamp";
 /// Where the bundle keeps the path of the installed `orion` it runs.
 const EXE_FILE: &str = "orion-exe";
@@ -154,10 +160,79 @@ const KEPT_VARS: &[&str] = &[
     orion_core::env::LOG,
 ];
 
-/// Whether orion is running inside the app right now. LaunchServices hands
-/// its bundle id to every process an app starts.
+/// What the launcher sets for the orion it starts — the app's own word
+/// that this orion is the one inside it — and, set to [`STAY`] by a
+/// person, the way to keep a bare `orion` in the terminal it was typed
+/// in. Not in `orion_core::env` with the other variables: the daemon
+/// never reads it.
+const INSIDE_VAR: &str = "ORION_APP";
+/// [`INSIDE_VAR`]'s value that keeps orion out of the app.
+const STAY: &str = "off";
+/// The variable LaunchServices hands every process an app starts: the
+/// app's bundle id.
+const BUNDLE_ID_VAR: &str = "__CFBundleIdentifier";
+
+/// Whether this orion is the one inside the app, as [`settle_inside`]
+/// found it.
+static INSIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// What the environment says: the launcher's word, or the app's bundle id
+/// (all a bundle built by 2.0 gives).
+fn marked_inside() -> bool {
+    orion_core::env::non_empty(INSIDE_VAR).is_some_and(|v| v != STAY)
+        || orion_core::env::non_empty(BUNDLE_ID_VAR).as_deref() == Some(BUNDLE_ID)
+}
+
+/// The first thing `main` does after the launcher's check, before a
+/// thread or a child exists: note whether this orion is the one inside
+/// the app, and take the marks that say so out of its environment. They
+/// are true of this process alone. Left in, the daemon it spawns would
+/// hand them to every session, and an orion started in a pane — a test
+/// run, say — would take itself for the app's and rebuild the app around
+/// its own binary as it quit; so would an editor it opens outside.
+pub fn settle_inside() {
+    let inside = *INSIDE.get_or_init(marked_inside);
+    if inside {
+        std::env::remove_var(INSIDE_VAR);
+        std::env::remove_var(BUNDLE_ID_VAR);
+    }
+}
+
+/// Whether orion is running inside the app right now.
 pub fn inside() -> bool {
-    orion_core::env::non_empty("__CFBundleIdentifier").as_deref() == Some(BUNDLE_ID)
+    *INSIDE.get_or_init(marked_inside)
+}
+
+/// Mark `cmd` — this orion started afresh ([`crate::relaunch`]) — as
+/// inside the app when this one is: the marks are gone from the
+/// environment it would inherit, and without one it would open the app
+/// instead of drawing in it.
+pub fn carry_inside(cmd: &mut Command) {
+    if inside() {
+        cmd.env(INSIDE_VAR, "1");
+    }
+}
+
+/// Whether this is the orion the app is for: the installed one, on its
+/// own data. Not a build from a checkout (`dev_build`: a cargo build
+/// dir's binary, or any build with debug assertions), which would point
+/// the app at itself, and not one sent to another daemon or data dir — a
+/// test, a second instance.
+fn the_installed_orion(dev_build: bool) -> bool {
+    let redirected = [orion_core::env::RUNTIME_DIR, orion_core::env::DATA_DIR]
+        .iter()
+        .any(|name| orion_core::env::non_empty(name).is_some());
+    !dev_build && !cfg!(debug_assertions) && !redirected
+}
+
+/// Whether a bare `orion` in a terminal is answered by opening the app
+/// and leaving the terminal: wherever orion [`can_move`], for
+/// [`the_installed_orion`], unless `ORION_APP=off` says to stay — the way
+/// back into a terminal should the app ever not come up.
+pub fn opens_in_app(dev_build: bool) -> bool {
+    can_move()
+        && the_installed_orion(dev_build)
+        && orion_core::env::non_empty(INSIDE_VAR).as_deref() != Some(STAY)
 }
 
 /// Where the app lives: `~/Applications`, which Launchpad and Spotlight
@@ -171,12 +246,14 @@ pub fn bundle_in(home: &Path) -> PathBuf {
     home.join("Applications").join(format!("{NAME}.app"))
 }
 
-/// Whether to offer moving orion into its app — setup's App step: on a
-/// local Mac with the Ghostty the app is made from, to an orion not
-/// already in it, in tmux (a choice the app would undo) or on `orion
-/// browser`'s page.
+/// Whether orion can move into its app from where it is running: on a
+/// local Mac with the Ghostty the app is made from, when it is not in the
+/// app already, in tmux (a choice the app would undo) or on `orion
+/// browser`'s page. A bare `orion` moves by itself where this holds
+/// ([`opens_in_app`]); setup's App step offers the move wherever it has
+/// not happened.
 #[cfg(not(test))]
-pub fn offered() -> bool {
+pub fn can_move() -> bool {
     cfg!(target_os = "macos")
         && !orion_core::host::is_remote_session()
         && !inside()
@@ -185,9 +262,9 @@ pub fn offered() -> bool {
         && crate::event_loop::ghostty_app().is_some()
 }
 
-/// [`offered`] under test: what [`with_offered`] set on this thread.
+/// [`can_move`] under test: what [`with_offered`] set on this thread.
 #[cfg(test)]
-pub fn offered() -> bool {
+pub fn can_move() -> bool {
     OFFERED.with(std::cell::Cell::get)
 }
 
@@ -196,7 +273,7 @@ thread_local! {
     static OFFERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Run `f` with [`offered`] answering `on` on this test's thread.
+/// Run `f` with [`can_move`] answering `on` on this test's thread.
 #[cfg(test)]
 pub fn with_offered<T>(on: bool, f: impl FnOnce() -> T) -> T {
     let was = OFFERED.with(|o| o.replace(on));
@@ -240,18 +317,23 @@ fn installed_orion(resources: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("orion"))
 }
 
-/// What the login shell runs: `orion`, its own folder put on the front of
-/// PATH so the `orion` an agent's hook calls is found. Spelled so sh, zsh,
-/// bash and fish all read it alike.
+/// What the login shell runs: `orion`, told it is the one inside the app
+/// ([`INSIDE_VAR`]), its own folder put on the front of PATH so the
+/// `orion` an agent's hook calls is found. Spelled so sh, zsh, bash and
+/// fish all read it alike.
 fn hosted_command(orion: &Path) -> String {
     let quoted = orion_core::shell::single_quote(&orion.to_string_lossy());
-    match orion.parent().filter(|dir| dir.is_absolute()) {
-        Some(dir) => format!(
-            "exec /usr/bin/env PATH={}:\"$PATH\" {quoted}",
-            orion_core::shell::single_quote(&dir.to_string_lossy())
-        ),
-        None => format!("exec {quoted}"),
-    }
+    let path = orion
+        .parent()
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| {
+            format!(
+                " PATH={}:\"$PATH\"",
+                orion_core::shell::single_quote(&dir.to_string_lossy())
+            )
+        })
+        .unwrap_or_default();
+    format!("exec /usr/bin/env {INSIDE_VAR}=1{path} {quoted}")
 }
 
 /// What the LAUNCHER hands Ghostty: the bundle's config file, whatever
@@ -500,16 +582,27 @@ fn launch_env() -> Vec<(&'static str, OsString)> {
         .collect()
 }
 
+/// What [`open`] found the app doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// It was not running, and has been started.
+    Started,
+    /// It was running already, and has been brought to the front as it
+    /// is: a running app takes no folder to start in and no new command.
+    Raised,
+}
+
 /// Open orion in its app, in the folder this one runs in: the bundle
 /// built first when it is missing or stale. An app already running is
 /// brought to the front as it is. Ghostty makes its first window when the
 /// app first comes to the front, which `open` asks for and macOS withholds
 /// from someone busy in another app: the window is then one click on the
 /// Dock icon away. What went wrong, when something did.
-pub fn open() -> Result<(), String> {
+pub fn open() -> Result<Opened, String> {
     let (source, target, orion) = parts()?;
     let stamp = stamp(&source, &orion);
-    if !is_current(&target, &stamp) && !(target.is_dir() && running(&target)) {
+    let was_running = target.is_dir() && running(&target);
+    if !was_running && !is_current(&target, &stamp) {
         build(&source, &target, &orion, &stamp)?;
     }
     let mut working_dir = OsString::from("--working-directory=");
@@ -527,19 +620,24 @@ pub fn open() -> Result<(), String> {
         .envs(launch_env())
         .status()
         .map_err(|e| format!("couldn't run open: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("open {} failed ({status})", target.display()))
+    if !status.success() {
+        return Err(format!("open {} failed ({status})", target.display()));
     }
+    Ok(if was_running {
+        Opened::Raised
+    } else {
+        Opened::Started
+    })
 }
 
 /// As orion quits inside its app: rebuild a bundle whose STAMP has gone
 /// stale — Ghostty was updated, `orion` moved, or a newer orion lays the
 /// bundle out differently — so the next click opens the new one. The one
-/// rebuild under a running app, which is closing with orion.
-pub fn refresh_on_quit() {
-    if !inside() {
+/// rebuild under a running app, which is closing with orion; and only by
+/// [`the_installed_orion`], since the bundle is rebuilt around whichever
+/// binary asks.
+pub fn refresh_on_quit(dev_build: bool) {
+    if !inside() || !the_installed_orion(dev_build) {
         return;
     }
     let Ok((source, target, orion)) = parts() else {
@@ -553,6 +651,23 @@ pub fn refresh_on_quit() {
     if let Err(why) = build(&source, &target, &orion, &stamp) {
         eprintln!("orion: couldn't update it: {why}");
     }
+}
+
+/// Why the app could not be opened for a bare `orion`, for the TUI that
+/// starts in the terminal after all to say in its footer — a line printed
+/// before it draws is gone the moment it does.
+static NOT_OPENED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Keep `why` for [`take_not_opened`].
+pub fn note_not_opened(why: String) {
+    if let Ok(mut note) = NOT_OPENED.lock() {
+        *note = Some(why);
+    }
+}
+
+/// What [`note_not_opened`] kept, once.
+pub fn take_not_opened() -> Option<String> {
+    NOT_OPENED.lock().ok()?.take()
 }
 
 #[cfg(test)]
@@ -598,7 +713,7 @@ mod tests {
                 "--working-directory=/Users/me/code/app",
                 concat!(
                     "--initial-command=shell:'/bin/zsh' -l -i -c ",
-                    r#"'exec /usr/bin/env PATH='\''/Users/me/.local/bin'\'':"$PATH" "#,
+                    r#"'exec /usr/bin/env ORION_APP=1 PATH='\''/Users/me/.local/bin'\'':"$PATH" "#,
                     r#"'\''/Users/me/.local/bin/orion'\'''"#,
                 ),
             ]
@@ -644,7 +759,10 @@ mod tests {
         assert_eq!(installed_orion(tmp.path()), Path::new("orion"));
         std::fs::write(tmp.path().join(EXE_FILE), "/nowhere/orion").unwrap();
         assert_eq!(installed_orion(tmp.path()), Path::new("orion"));
-        assert_eq!(hosted_command(Path::new("orion")), "exec 'orion'");
+        assert_eq!(
+            hosted_command(Path::new("orion")),
+            "exec /usr/bin/env ORION_APP=1 'orion'"
+        );
 
         let exe = tmp.path().join("orion");
         std::fs::write(&exe, "").unwrap();

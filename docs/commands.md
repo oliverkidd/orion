@@ -33,7 +33,8 @@ orion upgrade              install the latest published orion
 ```sh
 orion                    # launch the TUI (auto-starts the daemon). With no project yet, a
                           # launch from inside a git repo offers it on the splash — Enter
-                          # opens it; anywhere else, Enter browses for one
+                          # opens it; anywhere else, Enter browses for one. On a Mac with
+                          # Ghostty this opens Orion.app and leaves the terminal
 ```
 
 ## Projects and the daemon

@@ -315,6 +315,10 @@ async fn main_loop(
     if let Some(note) = crate::ghostty_config::retire_block() {
         app.flash = Some(note);
     }
+    // A bare `orion` that should have opened Orion.app and could not: why.
+    if let Some(why) = crate::app_bundle::take_not_opened() {
+        app.flash = Some(crate::flash::Flash::failed(why));
+    }
     // So does the re-badged terminal-notifier older orions built to post
     // notifications under orion's name: Orion.app posts its own.
     let _ = std::fs::remove_dir_all(orion_core::paths::data_dir().join("notifier"));

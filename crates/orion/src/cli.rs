@@ -292,8 +292,9 @@ pub(crate) enum Command {
     /// Ghostty on this Mac under orion's name and icon — and opens orion
     /// in it: in the Dock, Launchpad and Spotlight from then on. The app
     /// is a window onto this same orion, so sessions keep running and
-    /// projects, settings and history stay where they are; `orion` in a
-    /// terminal goes on working beside it. macOS only, and needs Ghostty.
+    /// projects, settings and history stay where they are. A bare `orion`
+    /// does the same on a Mac with Ghostty; this is the command that says
+    /// why when the app can't be made. macOS only, and needs Ghostty.
     App,
     /// Check what orion needs on this machine.
     ///
