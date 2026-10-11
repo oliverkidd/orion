@@ -168,3 +168,7 @@ orion upgrade            # install the latest release (--force on a dev build). 
                           # When the new build speaks another protocol, and so can't attach to
                           # that daemon, it says that too and offers the restart then and there
 ```
+
+From source: `cargo install --path crates/orion --locked`, then `orion kill && orion` to restart the daemon.
+
+The agent CLIs orion runs, one of which it needs: [Claude](https://code.claude.com/docs/en/setup), [Codex](https://github.com/openai/codex), [Cursor](https://cursor.com/install), [Pi](https://pi.dev), [Muse](https://developer.meta.com/ai/lp/muse-code), [OpenCode](https://opencode.ai/docs/) and [Grok](https://github.com/xai-org/grok-build). Setup's Agents step installs the ones you turn on.
