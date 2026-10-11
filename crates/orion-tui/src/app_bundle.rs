@@ -49,10 +49,10 @@ const ICON: &[u8] = include_bytes!("../assets/orion.icns");
 pub const BUNDLE_ID: &str = "dev.orion.app";
 /// Its name in the Dock, the menu bar and ⌘-Tab.
 const NAME: &str = "Orion";
-/// Bump when the bundle's layout, [`host_args`] or the icon changes, so
-/// an existing copy is rebuilt. Its config ([`app_config`]) is in the
-/// STAMP by itself.
-const LAYOUT: u32 = 2;
+/// Bump when the bundle's layout, [`host_args`], its signature or the icon
+/// changes, so an existing copy is rebuilt. Its config ([`app_config`]) is
+/// in the STAMP by itself.
+const LAYOUT: u32 = 3;
 const STAMP_FILE: &str = "orion-stamp";
 /// Where the bundle keeps the path of the installed `orion` it runs.
 const EXE_FILE: &str = "orion-exe";
@@ -504,7 +504,7 @@ fn fill(source: &Path, building: &Path, orion: &Path, stamp: &str) -> Result<(),
 
 /// Sign `bundle` ad hoc — the edits broke Ghostty's own signature, and
 /// macOS runs nothing unsigned on Apple silicon — with the entitlements
-/// `source` carries: Ghostty's binary, then the bundle around it.
+/// `source` carries, in [`signing_steps`]' order.
 fn sign(source: &Path, bundle: &Path) -> Result<(), String> {
     let entitlements = bundle.with_extension("entitlements");
     let carried = run(Command::new("codesign")
@@ -513,20 +513,53 @@ fn sign(source: &Path, bundle: &Path) -> Result<(), String> {
         .arg(source))
     .is_ok()
         && std::fs::metadata(&entitlements).is_ok_and(|m| m.len() > 0);
-    let sign = |path: &Path, deep: bool| {
+    let signed = signing_steps(bundle).into_iter().try_for_each(|step| {
         let mut cmd = Command::new("codesign");
-        cmd.args(["--force", "--sign", "-"]);
-        if deep {
-            cmd.arg("--deep");
-        }
+        cmd.args(["--force", "--sign", "-"]).args(step.flags);
         if carried {
             cmd.arg("--entitlements").arg(&entitlements);
         }
-        run(cmd.arg(path))
-    };
-    let signed = sign(&macos_dir(bundle).join(HOST), false).and_then(|()| sign(bundle, true));
+        run(cmd.arg(step.path))
+    });
     let _ = std::fs::remove_file(&entitlements);
     signed
+}
+
+/// One `codesign` run of [`sign`]: what is signed, and the flags it takes
+/// beyond the ad-hoc signature itself.
+#[derive(Debug, PartialEq, Eq)]
+struct SigningStep {
+    path: PathBuf,
+    flags: Vec<&'static str>,
+}
+
+/// The signatures `bundle` takes, in order. Everything in it first
+/// (`--deep`: its frameworks and plug-ins); then Ghostty's binary again,
+/// under the app's bundle id; then the bundle around it, not deep, which
+/// seals that binary as it is.
+///
+/// The id is what lets the app post notifications. The process that asks
+/// macOS for them is Ghostty's binary, which the LAUNCHER became, and
+/// macOS only takes a request for `dev.orion.app` from code signed as
+/// `dev.orion.app`. Signed by itself the binary is named after its file
+/// (`ghostty-<hash>`), which is also what `--deep` renames it to — hence
+/// the order. An app refused this way never asks, and is not listed in
+/// System Settings → Notifications.
+fn signing_steps(bundle: &Path) -> [SigningStep; 3] {
+    [
+        SigningStep {
+            path: bundle.to_path_buf(),
+            flags: vec!["--deep"],
+        },
+        SigningStep {
+            path: macos_dir(bundle).join(HOST),
+            flags: vec!["--identifier", BUNDLE_ID],
+        },
+        SigningStep {
+            path: bundle.to_path_buf(),
+            flags: vec![],
+        },
+    ]
 }
 
 /// Tell LaunchServices about `bundle` now, so its name and icon are known
@@ -785,6 +818,53 @@ mod tests {
         std::fs::write(contents.join("MacOS").join(HOST), "").unwrap();
         assert!(is_current(&target, "1:a::b"));
         assert!(!is_current(&target, "2:a::b"), "a newer layout");
+    }
+
+    /// Ghostty's binary is signed under the app's bundle id — macOS takes
+    /// no notification from it otherwise — after the deep signature, which
+    /// would rename it, and before the one that seals the bundle.
+    #[test]
+    fn ghostty_is_signed_as_the_app_between_the_bundles_signatures() {
+        let bundle = Path::new("/Users/me/Applications/Orion.app");
+        let steps = signing_steps(bundle);
+        assert_eq!(steps[0].path, bundle);
+        assert_eq!(steps[0].flags, ["--deep"]);
+        assert_eq!(steps[1].path, bundle.join("Contents/MacOS/ghostty"));
+        assert_eq!(steps[1].flags, ["--identifier", "dev.orion.app"]);
+        assert_eq!(steps[2].path, bundle);
+        assert!(steps[2].flags.is_empty(), "deep would rename Ghostty");
+    }
+
+    /// The real thing, where there is a Ghostty to copy: a built bundle
+    /// passes `codesign`'s own check, and its Ghostty is signed as the app.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_built_bundles_ghostty_carries_the_apps_id() {
+        let source = Path::new("/Applications/Ghostty.app");
+        if !source.join("Contents/MacOS/ghostty").is_file() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("Orion.app");
+        let orion = std::env::current_exe().unwrap();
+        fill(source, &bundle, &orion, "stamp").unwrap();
+
+        run(Command::new("codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&bundle))
+        .unwrap();
+        let described = Command::new("codesign")
+            .arg("-dv")
+            .arg(macos_dir(&bundle).join(HOST))
+            .output()
+            .unwrap();
+        let described = String::from_utf8_lossy(&described.stderr).into_owned();
+        assert!(
+            described
+                .lines()
+                .any(|l| l == format!("Identifier={BUNDLE_ID}")),
+            "{described}"
+        );
     }
 
     /// The app is opened with a Dock click's PATH, not this terminal's.
