@@ -4,13 +4,9 @@
 
 **Mission control for your coding agents.**
 
-Run Claude Code, Codex, Cursor, Pi, Muse, Grok and OpenCode across every project and worktree, from one terminal grid. They keep working when you close it.
+Run Claude Code, Codex, Cursor, Pi, Muse, Grok and OpenCode across every project and worktree, from one grid. They keep working when you close it.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh | sh
-```
-
-macOS · Linux · one Rust binary
+macOS · Linux
 
 <img src="assets/screenshot.png" alt="orion home screen: the ORION wordmark under a starfield" width="100%">
 
@@ -19,59 +15,40 @@ macOS · Linux · one Rust binary
 > [!NOTE]
 > Built for my own workflow and my colleagues'. Keys and features move. Fork it if you want something stable.
 
-## Get going
+## Install
 
 ```sh
-cd ~/code/my-app
-orion
+curl -fsSL https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh | sh
 ```
 
-First launch walks you through setup (agents, accounts, editor). `⌘,` changes it later. `orion doctor` checks what's missing.
+That is the whole install. It needs git. On a Mac it also gets Ghostty if you don't have it, then opens orion as its own app, **Orion.app**.
 
-On a Mac, orion runs as an app of its own: **Orion.app** (in `~/Applications`, so in the Dock, Launchpad and Spotlight). The installer opens it, and so does a bare `orion` typed in a terminal, which then leaves the terminal; an upgrade from a release that ran in a terminal moves over the same way. The app is the Ghostty on your Mac under orion's name — the installer fetches Ghostty when it's missing — and it is where the `⌘` shortcuts work. It is only a window: sessions, projects and settings are the ones you already had. Under tmux, over ssh and on Linux orion runs in the terminal, where each `⌘` shortcut answers to its `^` twin.
+## Run
 
-## Keys
+- **Mac:** open **Orion** from the Dock or Spotlight. Typing `orion` in a terminal opens the same app.
+- **Linux, ssh, tmux:** run `orion` in a terminal.
+
+The first launch walks you through setup, including installing an agent if you have none. `orion upgrade` gets the latest release.
+
+## Core features
+
+- **One grid for every agent.** Each project and git worktree gets a band; each agent is a card showing what it is doing and whether it needs you.
+- **Agents keep running.** A background daemon owns every session, so you can close orion and come back to the same agents and their scrollback.
+- **A worktree per task.** Start an agent on a fresh worktree in one step, so parallel tasks never share a checkout.
+- **Review without leaving.** Read the diff, find a file, search the code and open an editor on any checkout.
+- **Pull requests and Linear.** See each checkout's pull request and checks, and start an agent straight from a Linear issue.
+- **It tells you when to look.** A sound and a notification when an agent finishes, crashes or needs an answer.
 
 | Key | Does |
 |---|---|
 | `⌘N` | New agent: type the task, `Enter` |
-| `Tab` / `⌘.` | In the prompt: pick harness / checkout or new worktree |
-| `↑` `↓` | Walk the grid |
-| `Enter` / `Esc` | Step into a session / back out |
-| `Space` | Send the next turn without opening |
-| `⌘E` · `⌘P` · `⌘⇧F` · `⌘B` | Diff · find file · grep · file tree |
-| `⌘L` | Linear issues assigned to you |
-| `⌘S` | Browse agent skills |
+| `↑` `↓` · `Enter` · `Esc` | Walk the grid · step into a session · back out |
+| `⌘K` | Jump to any project, worktree or session |
+| `⌘E` · `⌘P` · `⌘⇧F` | Diff · find file · search |
+| `⌘L` | Linear issues |
 | `⌘,` | Settings |
-| `^C` | Quit the TUI (sessions keep running) |
 
-No ⌘ in your terminal? Use `Ctrl`. Full list: [docs/keys.md](docs/keys.md).
-
-**Status dots:** red ● waiting on you · red ✕ crashed · accent ● finished, unread · gold ◐ working · gray ● idle.
-
-## Agents
-
-orion runs these CLIs; install at least one.
-
-| Harness | Install |
-|---|---|
-| [Claude](https://code.claude.com/docs/en/setup) | `curl -fsSL https://claude.ai/install.sh \| bash` |
-| [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` |
-| [Cursor](https://cursor.com/install) | `curl -fsSL https://cursor.com/install \| bash` |
-| [Pi](https://pi.dev) | `curl -fsSL https://pi.dev/install.sh \| sh` |
-| [Muse](https://developer.meta.com/ai/lp/muse-code) | `curl -fsSL https://dev.meta.ai/install.sh \| bash` |
-| [OpenCode](https://opencode.ai/docs/) | `curl -fsSL https://opencode.ai/install \| bash` |
-| [Grok](https://github.com/xai-org/grok-build) | `curl -fsSL https://x.ai/cli/install.sh \| bash` |
-
-## Updating
-
-```sh
-orion upgrade
-```
-
-Versions say what an upgrade costs: a patch release (1.2.**3**) changes only the TUI and CLI, so orion reopens and every session keeps running; a minor release (1.**3**.0) changes the daemon, which has to restart to run the new code: **Upgrade orion** in the app does that for you, while `orion upgrade` leaves it to you when sessions are live (agents resume; terminals start a new shell).
-
-From source: `cargo install --path crates/orion --locked`, then `orion kill && orion` to restart the daemon.
+In a terminal use `Ctrl` in place of `⌘`. Every key: [docs/keys.md](docs/keys.md).
 
 ## Docs
 
