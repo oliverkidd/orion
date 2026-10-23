@@ -6515,6 +6515,61 @@ fn open_selected_file(app: &mut App) {
     }
 }
 
+/// ⌘N in the file finder: make the file its query names, folders and
+/// all, then open it as Enter opens a row. A path already there just
+/// opens; one that leaves the checkout, or is a folder, flashes why.
+fn create_typed_file(app: &mut App) {
+    let Some(Overlay::Files(finder)) = &app.overlay else {
+        return;
+    };
+    let (root, editor) = (finder.root.clone(), finder.editor.clone());
+    let path = match create_file_in(&root, finder.query.as_str()) {
+        Ok(path) => path,
+        Err(err) => {
+            app.flash = Some(crate::flash::Flash::failed(err));
+            app.dirty = true;
+            return;
+        }
+    };
+    let size = vim_size_guess(app);
+    if open_file(app, &editor, &root, &path, 1, size) {
+        close_finder_behind_editor(app);
+    }
+}
+
+/// Make `typed` under `root`, with any folders it needs, and give back
+/// the path relative to `root`. An existing file is left as it is.
+fn create_file_in(root: &std::path::Path, typed: &str) -> Result<String, String> {
+    use std::path::Component;
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Err("type a path to create".into());
+    }
+    let rel = std::path::Path::new(typed);
+    if typed.ends_with('/') || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(format!(
+            "can't create {typed}: not a file path inside the checkout"
+        ));
+    }
+    let full = root.join(rel);
+    if full.is_dir() {
+        return Err(format!("{typed} is a folder"));
+    }
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("can't create {typed}: {e}"))?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&full)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("can't create {typed}: {e}")),
+    }
+    Ok(typed.to_string())
+}
+
 /// Enter on a tree-browser file row: spawn the editor embedded in the
 /// preview pane — the pane becomes the editor, keys flow to it, and
 /// quitting lands back on the tree with the preview reloaded. A markdown
@@ -8579,6 +8634,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // closes the finder unless `close_finder_on_open` is off —
                 // a markdown file beside its rendered page.
                 KeyCode::Enter => open_selected_file(app),
+                // ⌘N (^N) makes the typed path — `.env.local` in a fresh
+                // checkout — and opens it the way Enter would.
+                _ if ui::finder_keys::NEW.matches(&key) => create_typed_file(app),
                 // ⌘C (Ctrl+y without ⌘) copies the selected path (relative
                 // to the worktree root) to the clipboard — ready to paste
                 // into an agent. A selection in the query is the query's.
@@ -32556,6 +32614,52 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(finder(&app).matches.len(), 1, "b matches only beta.rs");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "one Esc closes the finder");
+    }
+
+    #[test]
+    fn file_finder_new_file_makes_the_typed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.overlay = Some(Overlay::Files(FileFinder::new(
+            dir.path().to_path_buf(),
+            "main".into(),
+            "vim".into(),
+            vec!["src/alpha.rs".into()],
+        )));
+        let mut out = Vec::new();
+        for c in "config/.env.local".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
+        press(
+            &mut app,
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        let made = dir.path().join("config/.env.local");
+        assert!(made.is_file(), "^N makes the file, folder and all");
+
+        std::fs::write(&made, "KEEP=1").unwrap();
+        assert_eq!(
+            create_file_in(dir.path(), " config/.env.local "),
+            Ok("config/.env.local".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&made).unwrap(),
+            "KEEP=1",
+            "an existing file is opened, not emptied"
+        );
+    }
+
+    #[test]
+    fn file_finder_new_file_stays_inside_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        for typed in ["", "../escape", "/tmp/abs", "a/../../b", "dir/"] {
+            assert!(create_file_in(dir.path(), typed).is_err(), "{typed:?}");
+        }
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        assert!(create_file_in(dir.path(), "src").is_err(), "a folder");
+        assert!(!dir.path().parent().unwrap().join("escape").exists());
     }
 
     #[test]

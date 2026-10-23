@@ -2349,6 +2349,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
                 modal_block(title, th),
                 &[
                     finder_keys::OPEN.hint_as(format!("edit in {}", editor_name(&finder.editor))),
+                    finder_keys::NEW.hint(),
                     crate::hints::COPY_PATH.hint(),
                     crate::hints::in_app_hint(),
                     crate::hints::ESC_CLOSE.hint(),
@@ -2368,6 +2369,14 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
 
             if finder.listing.is_some() {
                 empty_list_row(f, list_inner, "listing files…", th);
+            } else if finder.matches.is_empty() && !finder.query.is_empty() {
+                // Nothing by that name: say how to make it.
+                let text = format!(
+                    "{NO_MATCHES} — {} creates {}",
+                    finder_keys::NEW.label(),
+                    finder.query.as_str().trim()
+                );
+                empty_list_row(f, list_inner, &text, th);
             } else if finder.matches.is_empty() {
                 empty_list_row(f, list_inner, NO_MATCHES, th);
             }
@@ -3095,11 +3104,13 @@ pub(crate) mod finder_keys {
     pub const SCROLL: Key = Key::new(&["shift+up", "shift+down"], "scroll").show(2);
     /// A markdown preview between its rendered page and its source.
     pub const SOURCE: Key = Key::new(&["cmd+r", "ctrl+r"], "source");
+    /// Go to file: make the typed path and open it.
+    pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new file");
 
     #[cfg(test)]
     #[test]
     fn every_finder_key_parses() {
-        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE] {
+        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE, NEW] {
             assert!(key.parses(), "{:?}", key.chords);
         }
     }
