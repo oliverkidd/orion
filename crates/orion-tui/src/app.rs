@@ -4674,6 +4674,10 @@ pub struct App {
     pub linear_linked: crate::linear::LinkedAsks,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
+    /// The worktree whose linked issues **Copy linked Linear issues** will
+    /// copy once its project's list lands — asked for because orion had
+    /// not read it yet.
+    pub linear_copy: Option<WorktreeId>,
     /// Each project's TODOS list, by its checkout, read when the modal
     /// first opens on it and kept for the session — saved on every change
     /// (`todos::store`).
@@ -4979,6 +4983,7 @@ impl App {
             linear_edits: crate::linear::LocalEdits::default(),
             linear_linked: crate::linear::LinkedAsks::default(),
             linear_links: crate::linear::LinkStore::default(),
+            linear_copy: None,
             todos: HashMap::new(),
             todo_pending: HashMap::new(),
             todo_creates: std::collections::HashSet::new(),

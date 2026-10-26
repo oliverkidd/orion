@@ -20,7 +20,10 @@
 //! and Enter moves the issue to one (`issueUpdate`), the row saying so
 //! before Linear has answered and put back if it refuses. `⌘P` sets its
 //! priority and `⌘I` whose it is — you, nobody, or one of its team — the
-//! same way ([`Change`]).
+//! same way ([`Change`]). `⌘C` copies the marked issues as an agent is
+//! given them ([`issue_sections`]); **Copy linked Linear issues**, in the
+//! COMMAND PALETTE, copies every issue a worktree works on
+//! ([`copy_worktree_issues`]).
 //!
 //! The key is the project's `LINEAR_API_KEY` (`.env.local`, then `.env`,
 //! then the process env). Only that one name is read. It is never logged,
@@ -1663,6 +1666,72 @@ pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Op
     })
 }
 
+/// **Copy linked Linear issues** (COMMAND PALETTE): every issue the
+/// worktree under the cursor works on — those whose row names it
+/// ([`work_of`]) — copied by status as [`issue_sections`] writes them. A
+/// project whose list orion has not read yet is asked for it, and the
+/// copy made as it lands (`App::linear_copy`).
+pub(crate) fn copy_worktree_issues(app: &mut App) {
+    let Some(wt) = crate::git_sync::target(app)
+        .and_then(|id| app.tree.worktrees.iter().find(|w| w.id == id))
+        .cloned()
+    else {
+        return;
+    };
+    if wt.is_main {
+        app.flash = Some(crate::flash::Flash::failed(
+            "the root checkout has no linked issues: pick a worktree",
+        ));
+        return;
+    }
+    if app.linear.contains_key(&wt.project_id) {
+        copy_linked(app, &wt);
+        return;
+    }
+    let Some(dir) = app
+        .tree
+        .projects
+        .iter()
+        .find(|p| p.id == wt.project_id)
+        .map(|p| p.repo_path.clone())
+    else {
+        return;
+    };
+    app.linear_copy = Some(wt.id.clone());
+    app.flash = Some(crate::flash::Flash::working("reading Linear…"));
+    request_list(app, wt.project_id.clone(), dir, false);
+}
+
+/// The issues `wt` works on, to the clipboard — or a flash saying it has
+/// none.
+fn copy_linked(app: &mut App, wt: &orion_core::Worktree) {
+    let issues = linked_to(app, wt);
+    if issues.is_empty() {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "no Linear issues linked to {}",
+            wt.branch
+        )));
+        return;
+    }
+    copy_issues(app, &issues, &format!(" from {}", wt.branch));
+}
+
+/// The issues in `wt`'s project's list whose worktree it is, by status.
+fn linked_to(app: &App, wt: &orion_core::Worktree) -> Vec<LinearIssue> {
+    let mut issues: Vec<LinearIssue> = rows(app, &wt.project_id)
+        .iter()
+        .filter(|issue| {
+            work_of(app, &wt.project_id, issue)
+                .and_then(|w| w.branch)
+                .as_deref()
+                == Some(wt.branch.as_str())
+        })
+        .cloned()
+        .collect();
+    issues.sort_by(by_status);
+    issues
+}
+
 /// `⌘L` on the grid: browse assigned issues for the selected project.
 pub(crate) fn open(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
@@ -1873,6 +1942,16 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 return;
             };
             let project = ticket.key.clone();
+            // A palette copy waiting on this list ([`copy_worktree_issues`]).
+            let waiting = app
+                .linear_copy
+                .as_ref()
+                .and_then(|id| app.tree.worktrees.iter().find(|w| &w.id == id))
+                .filter(|w| w.project_id == project)
+                .cloned();
+            if waiting.is_some() {
+                app.linear_copy = None;
+            }
             match list {
                 Ok(mut fetched) => {
                     let old = app.linear.remove(&project).unwrap_or_default();
@@ -1887,6 +1966,9 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                     app.linear_failed.remove(&project);
                     app.linear.insert(project.clone(), fetched);
                     follow_cursor(app, &project, &old.list);
+                    if let Some(wt) = waiting {
+                        copy_linked(app, &wt);
+                    }
                 }
                 Err(err) => {
                     app.linear_failed.insert(project.clone());
@@ -2416,10 +2498,14 @@ pub(crate) mod keys {
     /// A run of rows marked, as the TODOS MODAL selects one: what `⌘S`,
     /// `⌘P`, `⌘I` and `Enter` then act on.
     pub const SELECT: Key = crate::todos::view::keys::SELECT;
+    /// The marked issues, else the one under the cursor, to the clipboard
+    /// as an agent is given them — the TODOS MODAL's own copy key. A
+    /// selection in the filter line copies that instead.
+    pub const COPY: Key = crate::todos::view::keys::COPY;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
-        PICK, SET, LEVEL, LINK, TABS, FILTER, JUMP, SELECT,
+        PICK, SET, LEVEL, LINK, TABS, FILTER, JUMP, SELECT, COPY,
     ];
 }
 
@@ -2473,6 +2559,7 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::PRIORITY.hint(),
             keys::ASSIGN.hint(),
             keys::SELECT.hint(),
+            keys::COPY.hint(),
             keys::JUMP.hint(),
             keys::ATTACH.hint(),
             keys::WORKTREE.hint(),
@@ -2978,6 +3065,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
         _ if keys::WORKTREE.matches(&key) => open_worktree_pick(app),
         _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
+        _ if keys::COPY.matches(&key) && view.query.selected().is_none() => copy_picked(app),
         // Everything else edits the filter — and typing on the rows takes
         // the keys back to the search line.
         _ => {
@@ -3327,6 +3415,26 @@ fn picked(app: &App) -> Vec<LinearIssue> {
     }
 }
 
+/// `⌘C`: the issues `Enter` would launch on, copied as their agent would
+/// be given them — to hand to an AI outside orion.
+fn copy_picked(app: &mut App) {
+    let issues = picked(app);
+    copy_issues(app, &issues, "");
+}
+
+/// `issues` to the clipboard as [`issue_sections`] writes them, the flash
+/// counting them and ending in `whence`.
+fn copy_issues(app: &mut App, issues: &[LinearIssue], whence: &str) {
+    if issues.is_empty() {
+        return;
+    }
+    let label = format!(
+        "copied {}{whence}",
+        crate::bundle::plural(issues.len(), "issue")
+    );
+    crate::event_loop::copy_and_flash(app, &issue_sections(issues), &label);
+}
+
 fn confirm(app: &mut App) {
     let issues = picked(app);
     if issues.is_empty() {
@@ -3492,14 +3600,16 @@ fn filtered(query: &str, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
         |i| list[i].label(),
         |i, key| facet_values(&list[i], key),
     );
-    rows.sort_by(|(a, _), (b, _)| {
-        let (a, b) = (&list[*a], &list[*b]);
-        status_rank(a)
-            .cmp(&status_rank(b))
-            .then_with(|| a.status_order.cmp(&b.status_order))
-            .then_with(|| a.status.cmp(&b.status))
-    });
+    rows.sort_by(|(a, _), (b, _)| by_status(&list[*a], &list[*b]));
     rows
+}
+
+/// The list's own order of states, a state's issues kept in their order.
+fn by_status(a: &LinearIssue, b: &LinearIssue) -> std::cmp::Ordering {
+    status_rank(a)
+        .cmp(&status_rank(b))
+        .then_with(|| a.status_order.cmp(&b.status_order))
+        .then_with(|| a.status.cmp(&b.status))
 }
 
 /// [`filtered`]'s rows on `tab`.
@@ -7092,6 +7202,119 @@ pub(crate) mod tests {
         assert!(
             row("ENG-1 ─").contains("● ⎇ solar-lemur"),
             "the border\n{screen}"
+        );
+    }
+
+    /// `⌘C` copies the marked issues, else the one under the cursor —
+    /// marks kept — and a selection in the filter line copies that
+    /// instead.
+    #[test]
+    fn cmd_c_copies_the_marked_issues_else_the_one_under_the_cursor() {
+        let (mut app, _dir, _rx) = paired();
+        browse_marked(&mut app);
+        press(&mut app, cmd('c'));
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done("copied 2 issues"))
+        );
+        assert_eq!(the_view(&app).marked.len(), 2, "copying spends nothing");
+
+        press(&mut app, plain(KeyCode::Esc));
+        app.flash = None;
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.flash, Some(crate::flash::Flash::done("copied 1 issue")));
+
+        app.flash = None;
+        press(&mut app, plain(KeyCode::Char('l')));
+        press(&mut app, cmd('a'));
+        press(&mut app, cmd('c'));
+        assert_ne!(
+            app.flash,
+            Some(crate::flash::Flash::done("copied 1 issue")),
+            "the filter's selection is the field's to copy"
+        );
+    }
+
+    /// What **Copy linked Linear issues** copies: the issues whose
+    /// worktree it is — linked by hand or named in its branch — by
+    /// status, and none of another's.
+    #[test]
+    fn a_worktrees_linked_issues_are_the_ones_its_rows_name() {
+        let mut app = view_on(vec![
+            rich(
+                "1",
+                "ENG-1",
+                "Linked, started",
+                ("In Progress", "started"),
+                2,
+            ),
+            rich("2", "ENG-2", "Elsewhere", ("Todo", "unstarted"), 3),
+            rich("3", "ENG-3", "Named, todo", ("Todo", "unstarted"), 3),
+        ]);
+        worktree_on(&mut app, 1, "fix/eng-3-thing", false);
+        worktree_on(&mut app, 2, "other", false);
+        let project = ProjectId("p1".into());
+        app.linear_links.remember_attached(
+            &project,
+            "fix/eng-3-thing",
+            &[("1".into(), "ENG-1".into())],
+            &[],
+        );
+        app.linear_links
+            .remember_attached(&project, "other", &[("2".into(), "ENG-2".into())], &[]);
+        let wt = app.tree.worktrees[0].clone();
+        let ids: Vec<String> = linked_to(&app, &wt)
+            .into_iter()
+            .map(|i| i.identifier)
+            .collect();
+        assert_eq!(ids, ["ENG-3", "ENG-1"], "todo before started");
+
+        copy_linked(&mut app, &wt);
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done(
+                "copied 2 issues from fix/eng-3-thing"
+            ))
+        );
+        worktree_on(&mut app, 3, "bare", false);
+        let bare = app.tree.worktrees[2].clone();
+        copy_linked(&mut app, &bare);
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::failed(
+                "no Linear issues linked to bare"
+            ))
+        );
+    }
+
+    /// Asked before orion has read the project's list, the copy waits for
+    /// it and is made as it lands.
+    #[test]
+    fn a_worktree_copy_waits_for_the_list() {
+        let mut app = App::new();
+        worktree_on(&mut app, 1, "fix/eng-1-login", false);
+        app.linear_copy = Some(orion_core::WorktreeId("w1".into()));
+        let ticket = app
+            .linear_flights
+            .begin(ProjectId("p1".into()), crate::fetch::now())
+            .expect("no list out");
+        land_answer(
+            &mut app,
+            LinearAnswer::List {
+                ticket,
+                dir: PathBuf::from("/nonexistent"),
+                list: listed(vec![issue("1", "ENG-1", "Login")]),
+            },
+        );
+        assert_eq!(app.linear_copy, None);
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done(
+                "copied 1 issue from fix/eng-1-login"
+            ))
         );
     }
 

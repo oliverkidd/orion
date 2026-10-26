@@ -4632,6 +4632,7 @@ fn dispatch_action(
         Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
+        Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
         Action::WeekReview => crate::week_review::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),

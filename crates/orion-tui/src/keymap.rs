@@ -111,6 +111,10 @@ pub enum Action {
     PullRequests,
     /// `⌘L`: the LINEAR VIEW — open Linear issues assigned to you.
     Linear,
+    /// The selected worktree's Linear issues — the ones the LINEAR VIEW
+    /// shows it working on — copied to the clipboard in full. Unbound:
+    /// the COMMAND PALETTE runs it.
+    CopyLinearIssues,
     /// `⌘I`: the TODOS MODAL — every project's todo list, a tab each.
     Todos,
     /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
@@ -511,6 +515,17 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+l", "ctrl+l"],
+    },
+    ActionSpec {
+        action: Action::CopyLinearIssues,
+        id: "copy_linear_issues",
+        label: "Copy linked Linear issues",
+        hint: "Copy the selected worktree's Linear issues — linked to it, named in its branch, or on its pull request — each with its title, status, link and description, as its agent was given them",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        // No key: ⌘C is the terminal's on the grid, and this is run
+        // seldom enough for the COMMAND PALETTE.
+        defaults: &[],
     },
     ActionSpec {
         action: Action::Todos,
