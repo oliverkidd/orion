@@ -828,6 +828,24 @@ fn step(app: &mut App, delta: i64) {
     }
 }
 
+/// `⌘↓`/`⌘↑`: the cursor onto the next section's first row, or back to
+/// the top of its own — then the one before's.
+fn jump(app: &mut App, down: bool) {
+    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+        return;
+    };
+    let list = &rows(app, &view.project);
+    let Some(current) = cursor_index(view, list, &app.prs) else {
+        return;
+    };
+    let visible = visible_rows(&view.query, list, &app.prs);
+    let keys: Vec<PrSection> = visible.iter().map(|(i, _)| list[*i].section()).collect();
+    let at = visible.iter().position(|(i, _)| *i == current).unwrap_or(0);
+    if let Some(next) = crate::ui::section_jump(&keys, at, down) {
+        select(app, visible[next].0 as i64);
+    }
+}
+
 /// The filter's text changed: the cursor goes to its best match — the
 /// pane rewinds onto it and its body is asked for, as any move does — or
 /// stays where it is once nothing is typed, so the row just found keeps
@@ -1085,6 +1103,12 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
             let delta = if key.code == KeyCode::Right { 1 } else { -1 };
             let tab = view.tabs.tab.step(delta);
             switch_tab(view, tab);
+        }
+        // ⌘↑/⌘↓ from section to section of the list, wherever the keys
+        // are.
+        _ if keys::JUMP.matches(&key) => {
+            view.focus = PrFocus::List;
+            jump(app, key.code == KeyCode::Down);
         }
         // ↑/↓ walk a listing's rows or scroll prose with the keys on the
         // page, and ⇧↑/⇧↓ do from the list; on the list ↑/↓ walk the rows
@@ -1370,10 +1394,12 @@ pub(crate) mod keys {
     pub const ROWS: Key = crate::pr_preview::keys::MODAL_ROWS;
     /// The FILTER PICK — the LINEAR VIEW's too.
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
+    /// From one section's rows to the next's — the TODOS MODAL's groups'.
+    pub const JUMP: Key = crate::todos::view::keys::JUMP;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, ATTACH, TABS, ROWS, FILTER,
+        MERGE, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, ATTACH, TABS, ROWS, FILTER, JUMP,
     ];
 }
 
@@ -1438,6 +1464,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
         keys::PANEL.hint().kept(),
         keys::FILTER.hint(),
         keys::TABS.hint(),
+        keys::JUMP.hint(),
     ];
     if tab.lists() {
         hints.push(keys::ROWS.hint());
@@ -3669,6 +3696,39 @@ mod tests {
         assert_eq!(selected_pr(&app).unwrap().number, 41);
         handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
         assert_eq!(selected_pr(&app).unwrap().number, 43);
+    }
+
+    /// `⌘↓` goes to the next section's first row and `⌘↑` back to the top
+    /// of the cursor's own, then the one before's — the TODOS MODAL's
+    /// group keys.
+    #[test]
+    fn cmd_arrows_jump_between_sections() {
+        let mut asked = rich(41, "Asked", "jacobrvl", false);
+        asked.meta.review_requested = true;
+        let (mut app, _) = app_with(
+            vec![
+                rich(43, "Others' work", "sam", false),
+                asked,
+                rich(42, "My fix", "me", true),
+                rich(44, "My other fix", "me", true),
+            ],
+            true,
+        );
+        open(&mut app);
+        let cmd = |code| KeyEvent::new(code, KeyModifiers::SUPER);
+        let number = |app: &App| selected_pr(app).unwrap().number;
+        handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
+        assert_eq!(number(&app), 44);
+        handle_key(&mut app, cmd(KeyCode::Up), &mut Vec::new());
+        assert_eq!(number(&app), 42, "the top of Yours");
+        handle_key(&mut app, cmd(KeyCode::Down), &mut Vec::new());
+        assert_eq!(number(&app), 41);
+        handle_key(&mut app, cmd(KeyCode::Down), &mut Vec::new());
+        assert_eq!(number(&app), 43);
+        handle_key(&mut app, cmd(KeyCode::Down), &mut Vec::new());
+        assert_eq!(number(&app), 43, "the last section");
+        handle_key(&mut app, cmd(KeyCode::Up), &mut Vec::new());
+        assert_eq!(number(&app), 41);
     }
 
     /// A list that is all one section still sits under its rule, as a

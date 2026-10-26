@@ -5330,6 +5330,19 @@ pub(crate) fn sections<K: PartialEq>(keys: &[K], always: bool) -> Vec<ListEntry>
     entries
 }
 
+/// `⌘↓`/`⌘↑` over a sectioned list's rows, `keys` their section keys and
+/// `at` the cursor's: the next section's first row, or — going up — the
+/// cursor's own section's first row, else the one before's. None at
+/// either end.
+pub(crate) fn section_jump<K: PartialEq>(keys: &[K], at: usize, down: bool) -> Option<usize> {
+    let starts = |v: &usize| *v == 0 || keys[*v - 1] != keys[*v];
+    if down {
+        (at + 1..keys.len()).find(starts)
+    } else {
+        (0..at.min(keys.len())).rev().find(starts)
+    }
+}
+
 /// Lay a sectioned list out in `area`: rows `row_h(row)` lines tall,
 /// headers [`HEADER_H`], the cursor's row — and the header over it, when
 /// it is its section's first — kept on screen ([`stacked_rows`]). The
@@ -5596,6 +5609,20 @@ pub(crate) fn truncate_left(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `⌘↓` lands on the next section's first row; `⌘↑` on the top of the
+    /// cursor's own, else the one before's; nothing past either end.
+    #[test]
+    fn section_jump_walks_section_starts() {
+        let keys = ["a", "a", "b", "c", "c"];
+        assert_eq!(section_jump(&keys, 0, true), Some(2));
+        assert_eq!(section_jump(&keys, 2, true), Some(3));
+        assert_eq!(section_jump(&keys, 4, true), None);
+        assert_eq!(section_jump(&keys, 4, false), Some(3));
+        assert_eq!(section_jump(&keys, 3, false), Some(2));
+        assert_eq!(section_jump(&keys, 1, false), Some(0));
+        assert_eq!(section_jump(&keys, 0, false), None);
+    }
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// The selection highlight paints the part of the selection on screen

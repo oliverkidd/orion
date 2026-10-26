@@ -3,8 +3,8 @@
 //! The order is the list's own: `⌥↑`/`⌥↓` walk an item anywhere in it —
 //! into a nested group and back out — and a priority set puts an item at
 //! the end of its level's run. `⌥→` groups items, `⌥←` takes them out
-//! again. Ticking an item strikes it through at the bottom of its group
-//! while the modal is up; once it goes, so does the item — kept in the
+//! again. Ticking an item strikes it through where it stands while the
+//! modal is up; once it goes, so does the item — kept in the
 //! file for the DONE page (`history`), what was ticked today or this
 //! week. A group with everything in it ticked is complete, and goes the
 //! same way. A list pasted in as indented Markdown becomes groups and
@@ -208,15 +208,11 @@ impl TodoFile {
     }
 
     /// Everything in it ticked: a group with items, every one of them done
-    /// — its nested groups' too. It goes to the bottom of where it stands.
+    /// — its nested groups' too. It leaves the list once its ticks are no
+    /// longer held.
     pub fn complete(&self, group: u64) -> bool {
         let mut items = self.subtree_items(group).peekable();
         items.peek().is_some() && items.all(|i| i.done.is_some())
-    }
-
-    /// When a complete group was finished: its last tick.
-    fn completed_at(&self, group: u64) -> Option<DateTime<Local>> {
-        self.subtree_items(group).filter_map(|i| i.done).max()
     }
 
     /// In the list: open, or complete with a tick in it from while the
@@ -230,9 +226,16 @@ impl TodoFile {
     /// names (`Group::before`) — or the next open one after it — else
     /// after them all.
     pub fn open_children(&self, group: u64) -> Vec<Child> {
+        self.children(group, &[])
+    }
+
+    /// `group`'s contents as drawn: [`TodoFile::open_children`], with what
+    /// was ticked while the modal has been up (`held`) — an item, or a
+    /// nested group it completed — kept where it stood.
+    pub fn children(&self, group: u64, held: &[u64]) -> Vec<Child> {
         let subs: Vec<&Group> = self
             .subgroups(Some(group))
-            .filter(|g| !self.complete(g.id))
+            .filter(|g| self.group_shown(g.id, held))
             .collect();
         let mut placed = vec![false; subs.len()];
         let mut out = Vec::new();
@@ -244,7 +247,7 @@ impl TodoFile {
                     waiting.push(Child::Group(sub.id));
                 }
             }
-            if item.done.is_none() {
+            if item.done.is_none() || held.contains(&item.id) {
                 out.append(&mut waiting);
                 out.push(Child::Item(item.id));
             }
@@ -255,54 +258,18 @@ impl TodoFile {
         out
     }
 
-    /// What is done under `parent` (`None`: the top) and still shown: the
-    /// items ticked while the modal has been up, and the complete groups
-    /// with such a tick in them, in the order they were finished.
-    fn done_children(&self, parent: Option<u64>, held: &[u64]) -> Vec<Child> {
-        let mut done: Vec<(DateTime<Local>, Child)> = Vec::new();
-        if let Some(group) = parent {
-            let ticked = self
-                .items
-                .iter()
-                .filter(|i| i.group == group && held.contains(&i.id));
-            done.extend(ticked.filter_map(|i| Some((i.done?, Child::Item(i.id)))));
-        }
-        for sub in self.subgroups(parent) {
-            if self.complete(sub.id) && self.group_shown(sub.id, held) {
-                if let Some(at) = self.completed_at(sub.id) {
-                    done.push((at, Child::Group(sub.id)));
-                }
-            }
-        }
-        done.sort_by_key(|(at, _)| *at);
-        done.into_iter().map(|(_, child)| child).collect()
-    }
-
-    /// `group`'s contents as drawn: what is open, then what is done.
-    pub fn children(&self, group: u64, held: &[u64]) -> Vec<Child> {
-        let mut out = self.open_children(group);
-        out.extend(self.done_children(Some(group), held));
-        out
-    }
-
-    /// The top-level groups as drawn: the open ones in the order they
-    /// stand, then the complete ones still shown.
+    /// The top-level groups as drawn, in the order they stand: the open
+    /// ones, and the complete ones with a held tick in them.
     pub fn top_groups(&self, held: &[u64]) -> Vec<u64> {
-        let mut out = self.open_top_groups();
-        let done = self.done_children(None, held).into_iter();
-        out.extend(done.filter_map(|c| match c {
-            Child::Group(g) => Some(g),
-            Child::Item(_) => None,
-        }));
-        out
+        self.subgroups(None)
+            .filter(|g| self.group_shown(g.id, held))
+            .map(|g| g.id)
+            .collect()
     }
 
     /// The top-level groups not complete, in the order they stand.
     fn open_top_groups(&self) -> Vec<u64> {
-        self.subgroups(None)
-            .filter(|g| !self.complete(g.id))
-            .map(|g| g.id)
-            .collect()
+        self.top_groups(&[])
     }
 
     /// `group`'s own items as drawn, its nested groups left out.
@@ -965,11 +932,11 @@ mod tests {
         );
     }
 
-    /// A tick goes to the bottom of its group at once, in tick order,
-    /// while the modal that ticked it is up (`held`); after that it is
-    /// out of the list.
+    /// A tick stays where it stood while the modal that ticked it is up
+    /// (`held`) — nothing moves under the cursor; after that it is out of
+    /// the list.
     #[test]
-    fn a_tick_sinks_while_held_then_goes() {
+    fn a_tick_stays_put_while_held_then_goes() {
         let mut file = TodoFile::new(Path::new("/r"));
         let g = file.add_group(None, "G");
         let a = file.add_item(g, "a", day(6));
@@ -977,18 +944,18 @@ mod tests {
         file.add_item(g, "c", day(6));
         file.toggle(b, at(6, 9));
         file.toggle(a, at(6, 10));
-        assert_eq!(drawn(&file, g, &[a, b]), ["c", "b", "a"]);
+        assert_eq!(drawn(&file, g, &[a, b]), ["a", "b", "c"]);
         assert_eq!(drawn(&file, g, &[]), ["c"]);
-        // Unticked, back where it stood.
+        // Unticked, still where it stood.
         file.toggle(a, at(6, 11));
-        assert_eq!(drawn(&file, g, &[a, b]), ["a", "c", "b"]);
+        assert_eq!(drawn(&file, g, &[a, b]), ["a", "b", "c"]);
     }
 
-    /// A group with every item in it ticked is complete: at the bottom of
-    /// the group around it — or of the list — while its ticks are held,
+    /// A group with every item in it ticked is complete: where it stood in
+    /// the group around it — or in the list — while its ticks are held,
     /// then out of sight. An empty group is not complete.
     #[test]
-    fn a_complete_group_sinks_then_goes() {
+    fn a_complete_group_stays_put_then_goes() {
         let mut file = TodoFile::new(Path::new("/r"));
         let top = file.add_group(None, "Top");
         let a = file.add_item(top, "a", day(6));
@@ -1003,11 +970,11 @@ mod tests {
         assert!(file.complete(sub));
         assert_eq!(drawn(&file, top, &[s1]), ["a", "b", "[Sub]"]);
         file.toggle(a, at(6, 8));
-        assert_eq!(drawn(&file, top, &[s1, a]), ["b", "a", "[Sub]"]);
+        assert_eq!(drawn(&file, top, &[s1, a]), ["a", "b", "[Sub]"]);
         assert_eq!(drawn(&file, top, &[]), ["b"]);
         let b = file.items.iter().find(|i| i.text == "b").unwrap().id;
         file.toggle(b, at(6, 10));
-        assert_eq!(file.top_groups(&[b]), [next, empty, top]);
+        assert_eq!(file.top_groups(&[b]), [top, next, empty]);
         assert_eq!(file.top_groups(&[]), [next, empty]);
     }
 

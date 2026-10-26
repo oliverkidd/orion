@@ -188,6 +188,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             open(app, week);
         }
         _ if keys::UNDO.matches(&key) => undo(app),
+        _ if keys::JUMP.matches(&key) => jump(app, key.code == KeyCode::Down),
         KeyCode::Down => step(app, 1),
         KeyCode::Up => step(app, -1),
         KeyCode::PageDown => step(app, page_rows),
@@ -210,6 +211,30 @@ fn step(app: &mut App, delta: i32) {
     let next = (here + i64::from(delta)).clamp(0, items.len() as i64 - 1) as usize;
     if let Some(page) = page_mut(app) {
         page.selected = items[next];
+    }
+}
+
+/// `⌘↓`/`⌘↑`: the cursor onto the next group's first item, or back to
+/// the top of its own — then the one before's — as on the list.
+fn jump(app: &mut App, down: bool) {
+    let Some((rows, Some(at))) = rows_now(app) else {
+        return;
+    };
+    // Each item, with the header — a project's or a group's — over it.
+    let mut header = 0;
+    let mut items = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            Row::Item { .. } => items.push((i, header)),
+            _ => header = i,
+        }
+    }
+    let keys: Vec<usize> = items.iter().map(|(_, h)| *h).collect();
+    let here = items.iter().position(|(i, _)| *i == at).unwrap_or(0);
+    if let Some(next) = crate::ui::section_jump(&keys, here, down) {
+        if let Some(page) = page_mut(app) {
+            page.selected = items[next].0;
+        }
     }
 }
 

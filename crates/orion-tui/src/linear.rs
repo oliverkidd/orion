@@ -31,10 +31,11 @@
 //! project's key was found, with **Test connection** asking Linear whose
 //! key it is ([`status_value`], [`test_connection`]).
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use orion_core::{ClientRequest, ProjectId};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -333,12 +334,14 @@ impl Change {
     }
 }
 
-/// `⌘S`, `⌘P` or `⌘I`: the issue under the cursor, and what its status,
-/// priority or assignee can be set to, in the reading pane's place.
+/// `⌘S`, `⌘P` or `⌘I`: the marked issues — else the one under the
+/// cursor — and what their status, priority or assignee can be set to,
+/// in the reading pane's place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropPick {
-    pub issue_id: String,
-    pub identifier: String,
+    /// Each issue's id and identifier, the cursor's (or the first
+    /// marked) first: the rows are its team's.
+    pub issues: Vec<(String, String)>,
     pub prop: Prop,
     pub rows: Vec<Change>,
     pub selected: usize,
@@ -494,6 +497,14 @@ impl LinearTab {
         issue.mine == (self == LinearTab::Mine)
     }
 
+    fn of(issue: &LinearIssue) -> Self {
+        if issue.mine {
+            LinearTab::Mine
+        } else {
+            LinearTab::Others
+        }
+    }
+
     fn other(self) -> Self {
         match self {
             LinearTab::Mine => LinearTab::Others,
@@ -541,6 +552,67 @@ pub struct LinearView {
     /// Which part of the list panel has the keys: the search line, where
     /// it opens and `space` types, or the rows, where `space` marks.
     pub focus: LinearFocus,
+    /// Where `⇧↑`/`⇧↓` started, by issue id, and what was marked before
+    /// it: the run from it to the cursor is marked on top of those.
+    pub anchor: Option<(String, BTreeSet<String>)>,
+    /// The issues `⌘S`, `⌘P` or `⌘I` changed while the view has stood
+    /// as it is, each with what it had before: the list keeps them where
+    /// that put them — the cursor with them — until the tab, the filter
+    /// or a `⌘R` changes the view, the row saying where it is headed.
+    pub held: HashMap<String, Place>,
+}
+
+/// What puts an issue where it stands in the LINEAR VIEW — its section,
+/// its tab, what the filter's facets read — as it was before an edit
+/// ([`LinearView::held`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    status: String,
+    status_type: String,
+    status_order: i64,
+    state_color: String,
+    priority: u8,
+    assignee: String,
+    assignee_id: String,
+    mine: bool,
+}
+
+impl Place {
+    fn of(issue: &LinearIssue) -> Self {
+        Self {
+            status: issue.status.clone(),
+            status_type: issue.status_type.clone(),
+            status_order: issue.status_order,
+            state_color: issue.state_color.clone(),
+            priority: issue.priority,
+            assignee: issue.assignee.clone(),
+            assignee_id: issue.assignee_id.clone(),
+            mine: issue.mine,
+        }
+    }
+
+    fn put_on(&self, issue: &mut LinearIssue) {
+        issue.status = self.status.clone();
+        issue.status_type = self.status_type.clone();
+        issue.status_order = self.status_order;
+        issue.state_color = self.state_color.clone();
+        issue.priority = self.priority;
+        issue.assignee = self.assignee.clone();
+        issue.assignee_id = self.assignee_id.clone();
+        issue.mine = self.mine;
+    }
+
+    /// Where `issue` goes once the view lets it: the other tab, else
+    /// another section; None while it would stay put.
+    fn headed(&self, issue: &LinearIssue) -> Option<String> {
+        if issue.mine != self.mine {
+            Some(LinearTab::of(issue).name().to_string())
+        } else if issue.status != self.status {
+            Some(issue.status.clone())
+        } else {
+            None
+        }
+    }
 }
 
 /// Where the LINEAR VIEW's keys go. `↓` off the search line hands them to
@@ -582,6 +654,8 @@ impl LinearView {
             row_rects: Vec::new(),
             filter_pick: None,
             focus: LinearFocus::Search,
+            anchor: None,
+            held: HashMap::new(),
         }
     }
 
@@ -2337,10 +2411,15 @@ pub(crate) mod keys {
     pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
     /// The FILTER PICK — the PULL REQUESTS MODAL's too.
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
+    /// From one status's rows to the next's — the TODOS MODAL's groups'.
+    pub const JUMP: Key = crate::todos::view::keys::JUMP;
+    /// A run of rows marked, as the TODOS MODAL selects one: what `⌘S`,
+    /// `⌘P`, `⌘I` and `Enter` then act on.
+    pub const SELECT: Key = crate::todos::view::keys::SELECT;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
-        PICK, SET, LEVEL, LINK, TABS, FILTER,
+        PICK, SET, LEVEL, LINK, TABS, FILTER, JUMP, SELECT,
     ];
 }
 
@@ -2350,6 +2429,8 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let esc = if !view.query.is_empty() {
         "clear"
+    } else if !view.marked.is_empty() {
+        "unmark"
     } else if matches!(
         view.mode,
         LinearMode::Attach { .. } | LinearMode::Link { .. }
@@ -2391,6 +2472,8 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::STATUS.hint(),
             keys::PRIORITY.hint(),
             keys::ASSIGN.hint(),
+            keys::SELECT.hint(),
+            keys::JUMP.hint(),
             keys::ATTACH.hint(),
             keys::WORKTREE.hint(),
             keys::PRESET.hint(),
@@ -2413,24 +2496,36 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::STATUS.hint(),
             keys::PRIORITY.hint(),
             keys::ASSIGN.hint(),
+            keys::SELECT.hint(),
+            keys::JUMP.hint(),
             keys::BROWSER.hint(),
             Hint::new("Esc", esc),
         ],
     }
 }
 
-/// A property picker for `issue` in the reading pane's place: `rows`,
-/// the one `issue` stands on marked, and the cursor on it — or, `on_top`,
-/// on the first whatever the issue has.
-fn open_prop_pick(app: &mut App, issue: &LinearIssue, prop: Prop, rows: Vec<Change>, on_top: bool) {
-    let current = rows.iter().position(|row| row.stands_on(issue));
+/// A property picker for `issues` in the reading pane's place: `rows`,
+/// the one they all stand on marked, and the cursor on it — or, `on_top`,
+/// on the first whatever they have.
+fn open_prop_pick(
+    app: &mut App,
+    issues: &[LinearIssue],
+    prop: Prop,
+    rows: Vec<Change>,
+    on_top: bool,
+) {
+    let current = rows
+        .iter()
+        .position(|row| issues.iter().all(|issue| row.stands_on(issue)));
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
     view.filter_pick = None;
     view.prop_pick = Some(PropPick {
-        issue_id: issue.id.clone(),
-        identifier: issue.identifier.clone(),
+        issues: issues
+            .iter()
+            .map(|i| (i.id.clone(), i.identifier.clone()))
+            .collect(),
         prop,
         rows,
         selected: current.filter(|_| !on_top).unwrap_or(0),
@@ -2438,10 +2533,24 @@ fn open_prop_pick(app: &mut App, issue: &LinearIssue, prop: Prop, rows: Vec<Chan
     });
 }
 
-/// `⌘S`: the status picker for the issue under the cursor, on the
-/// state it is in. An issue whose team's states were not read says so.
+/// The issues `⌘S`, `⌘P` and `⌘I` set: the marked ones, else the one
+/// under the cursor — the cursor's first when it is among them, as the
+/// picker's rows are its team's.
+fn edit_targets(app: &App) -> Vec<LinearIssue> {
+    let mut issues = picked(app);
+    let cursor = selected_issue(app).map(|i| i.id.clone());
+    if let Some(at) = issues.iter().position(|i| Some(&i.id) == cursor.as_ref()) {
+        issues[..=at].rotate_right(1);
+    }
+    issues
+}
+
+/// `⌘S`: the status picker for the issues [`edit_targets`] gives, on
+/// the state they are in. An issue whose team's states were not read
+/// says so.
 fn open_status_pick(app: &mut App) {
-    let Some(issue) = selected_issue(app).cloned() else {
+    let issues = edit_targets(app);
+    let Some(issue) = issues.first().cloned() else {
         return;
     };
     let Some(Overlay::Linear(view)) = &app.overlay else {
@@ -2462,25 +2571,28 @@ fn open_status_pick(app: &mut App) {
         return;
     }
     let rows = states.into_iter().map(Change::Status).collect();
-    open_prop_pick(app, &issue, Prop::Status, rows, false);
+    open_prop_pick(app, &issues, Prop::Status, rows, false);
 }
 
-/// `⌘P`: Linear's priorities for the issue under the cursor, urgent
-/// first, on its own.
+/// `⌘P`: Linear's priorities for the issues [`edit_targets`] gives,
+/// urgent first, on their own.
 fn open_priority_pick(app: &mut App) {
-    let Some(issue) = selected_issue(app).cloned() else {
+    let issues = edit_targets(app);
+    if issues.is_empty() {
         return;
-    };
+    }
     let rows = PRIORITY_ORDER.into_iter().map(Change::Priority).collect();
-    open_prop_pick(app, &issue, Prop::Priority, rows, false);
+    open_prop_pick(app, &issues, Prop::Priority, rows, false);
 }
 
-/// `⌘I`: who the issue under the cursor can go to — the configured user
-/// first, so `Enter` is "assign to me", then nobody, then the rest of its
-/// team by name. The cursor opens on the top row, never on whose it is
-/// now: that row is only marked. An issue Linear named nobody for says so.
+/// `⌘I`: who the issues [`edit_targets`] gives can go to — the
+/// configured user first, so `Enter` is "assign to me", then nobody, then
+/// the rest of the first one's team by name. The cursor opens on the top
+/// row, never on whose they are now: that row is only marked. An issue
+/// Linear named nobody for says so.
 fn open_assign_pick(app: &mut App) {
-    let Some(issue) = selected_issue(app).cloned() else {
+    let issues = edit_targets(app);
+    let Some(issue) = issues.first().cloned() else {
         return;
     };
     let Some(Overlay::Linear(view)) = &app.overlay else {
@@ -2511,7 +2623,7 @@ fn open_assign_pick(app: &mut App) {
         .chain(others.map(Some))
         .map(Change::Assignee)
         .collect();
-    open_prop_pick(app, &issue, Prop::Assignee, rows, true);
+    open_prop_pick(app, &issues, Prop::Assignee, rows, true);
 }
 
 /// Keys while a property picker is up. A priority's digit sets it at
@@ -2548,12 +2660,14 @@ fn handle_pick_key(app: &mut App, key: KeyEvent) {
     app.dirty = true;
 }
 
-/// Enter in a property picker: the row says the new value at once, and
-/// `issueUpdate` runs off the loop — put back if Linear refuses
+/// Enter in a property picker: each issue's row says the new value at
+/// once, and `issueUpdate` runs off the loop — put back if Linear refuses
 /// ([`land_edit`]). One edit per property of an issue is out at a time: a
 /// second to that property while one is out queues behind it, the latest
-/// asked for winning, so Linear ends where the row does. The value the
-/// issue already has closes the picker with nothing sent.
+/// asked for winning, so Linear ends where the row does. An issue that
+/// already has the value is left alone. A state is its team's: an issue
+/// in another team moves to the state of that name in its own, and one
+/// whose team has none stays, the flash saying so.
 fn set_prop(app: &mut App) {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
@@ -2565,30 +2679,86 @@ fn set_prop(app: &mut App) {
     let Some(change) = pick.rows.get(pick.selected).cloned() else {
         return;
     };
-    let me = me_id(app, &project);
+    let mut missed = Vec::new();
+    for (issue_id, identifier) in &pick.issues {
+        let change = match &change {
+            Change::Status(state) => match team_state(app, &project, issue_id, state) {
+                Some(state) => Change::Status(state),
+                None => {
+                    missed.push(identifier.clone());
+                    continue;
+                }
+            },
+            change => change.clone(),
+        };
+        set_one(app, &project, &dir, issue_id, identifier, change);
+    }
+    if let (Change::Status(state), false) = (&change, missed.is_empty()) {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "{} has no {} state — left where it is",
+            missed.join(", "),
+            state.name
+        )));
+    }
+}
+
+/// The state named as `state` is in `issue_id`'s own team: `state`
+/// itself when the team is the one it came from.
+fn team_state(
+    app: &App,
+    project: &ProjectId,
+    issue_id: &str,
+    state: &LinearState,
+) -> Option<LinearState> {
+    let list = app.linear.get(project)?;
+    let issue = list.list.iter().find(|i| i.id == issue_id)?;
+    let states = list.states.get(&issue.team_id)?;
+    states
+        .iter()
+        .find(|s| s.id == state.id)
+        .or_else(|| states.iter().find(|s| s.name == state.name))
+        .cloned()
+}
+
+/// [`set_prop`] for one issue: the row says `change` and holds its place
+/// ([`LinearView::held`]), and the edit goes out unless one to that
+/// property is already out.
+fn set_one(
+    app: &mut App,
+    project: &ProjectId,
+    dir: &Path,
+    issue_id: &str,
+    identifier: &str,
+    change: Change,
+) {
+    let me = me_id(app, project);
     let Some(issue) = app
         .linear
-        .get_mut(&project)
-        .and_then(|l| l.list.iter_mut().find(|i| i.id == pick.issue_id))
+        .get_mut(project)
+        .and_then(|l| l.list.iter_mut().find(|i| i.id == issue_id))
     else {
         return;
     };
     if change.stands_on(issue) {
         return;
     }
+    let place = Place::of(issue);
     let prop = change.prop();
     let before = Change::of(issue, prop);
     change.put_on(issue, me.as_deref());
+    if let Some(view) = linear_view_mut(&mut app.overlay) {
+        view.held.entry(issue_id.to_string()).or_insert(place);
+    }
     let edits = &mut app.linear_edits;
     edits.next_seq += 1;
     let seq = edits.next_seq;
     let mv = edits
         .moves
-        .entry((pick.issue_id.clone(), prop))
+        .entry((issue_id.to_string(), prop))
         .or_insert_with(|| Move {
             project: project.clone(),
-            dir: dir.clone(),
-            identifier: pick.identifier.clone(),
+            dir: dir.to_path_buf(),
+            identifier: identifier.to_string(),
             want: change.clone(),
             seq,
             sending: None,
@@ -2597,10 +2767,10 @@ fn set_prop(app: &mut App) {
         });
     mv.want = change;
     mv.seq = seq;
-    mv.dir = dir;
+    mv.dir = dir.to_path_buf();
     mv.landed = None;
     if mv.sending.is_none() {
-        send_edit(app, &pick.issue_id, prop);
+        send_edit(app, issue_id, prop);
     }
 }
 
@@ -2758,14 +2928,20 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let page = view.view_height.max(1) as i32;
     let on_list = view.focus == LinearFocus::List;
+    // Any key but `⇧↑`/`⇧↓` ends a run; what it marked stays marked.
+    if !keys::SELECT.matches(&key) {
+        view.anchor = None;
+    }
     match key.code {
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
+        KeyCode::Esc if !view.marked.is_empty() => view.marked.clear(),
         KeyCode::Esc => close(app),
-        KeyCode::Down if shift => view.scroll_by(1),
-        KeyCode::Up if shift => view.scroll_by(-1),
+        _ if keys::SELECT.matches(&key) => {
+            select(app, if key.code == KeyCode::Up { -1 } else { 1 })
+        }
+        _ if keys::JUMP.matches(&key) => jump(app, key.code == KeyCode::Down),
         // ↓ off the search line hands the rows the keys, the cursor where
         // it was; ↑ off the top row hands them back.
         KeyCode::Down if !on_list => view.focus = LinearFocus::List,
@@ -2860,6 +3036,7 @@ pub(crate) fn handle_mouse(
                     view.selected = i;
                     view.scroll = 0;
                     view.focus = LinearFocus::List;
+                    view.anchor = None;
                 }
             }
         }
@@ -2888,6 +3065,7 @@ fn switch_tab(app: &mut App, tab: LinearTab) {
         return;
     }
     view.tab = tab;
+    view.held.clear();
     view.list_start = 0;
     view.scroll = 0;
     let list = app
@@ -2995,11 +3173,15 @@ fn close(app: &mut App) {
     }
 }
 
+/// `⌘R`: the lists asked again, and the issues held where an edit found
+/// them let go to where they now stand.
 fn refresh(app: &mut App) {
-    let Some(Overlay::Linear(view)) = &app.overlay else {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
-    request_list(app, view.project.clone(), view.dir.clone(), true);
+    view.held.clear();
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    request_list(app, project, dir, true);
 }
 
 fn clear_query(app: &mut App) {
@@ -3009,10 +3191,14 @@ fn clear_query(app: &mut App) {
     query_changed(app);
 }
 
+/// The filter changed: a new view, so the issues held where an edit
+/// found them go to where they now stand, and the cursor onto the rows
+/// it leaves.
 fn query_changed(app: &mut App) {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return;
     };
+    view.held.clear();
     view.scroll = 0;
     let list = app
         .linear
@@ -3045,6 +3231,72 @@ fn step(app: &mut App, delta: i32) -> bool {
         view.scroll = 0;
     }
     next != here
+}
+
+/// `⇧↓`/`⇧↑`: the cursor a row on, and the run from where the first
+/// one started to it marked — over what was marked before the run, the
+/// rows it leaves as it shrinks unmarked again.
+fn select(app: &mut App, delta: i32) {
+    let Some(here) = selected_issue(app).map(|i| i.id.clone()) else {
+        return;
+    };
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.focus = LinearFocus::List;
+        if view.anchor.is_none() {
+            view.anchor = Some((here, view.marked.clone()));
+        }
+    }
+    step(app, delta);
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let Some((anchor, base)) = view.anchor.clone() else {
+        return;
+    };
+    let list = rows(app, &view.project);
+    let visible = visible_rows(view, list);
+    let from = visible.iter().position(|(i, _)| list[*i].id == anchor);
+    let to = visible.iter().position(|(i, _)| *i == view.selected);
+    let (Some(from), Some(to)) = (from, to) else {
+        return;
+    };
+    let mut marked = base;
+    marked.extend(
+        visible[from.min(to)..=from.max(to)]
+            .iter()
+            .map(|(i, _)| list[*i].id.clone()),
+    );
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.marked = marked;
+    }
+}
+
+/// `⌘↓`/`⌘↑`: the cursor onto the next status's first row, or back to
+/// the top of its own — then the one before's.
+fn jump(app: &mut App, down: bool) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let list = rows(app, &view.project);
+    let placed = laid_out(view, list);
+    let visible = on_tab(view.tab, &filtered(&view.query, &placed), &placed);
+    let keys: Vec<&str> = visible
+        .iter()
+        .map(|(i, _)| placed[*i].status.as_str())
+        .collect();
+    let here = visible
+        .iter()
+        .position(|(i, _)| *i == view.selected)
+        .unwrap_or(0);
+    let Some(next) = crate::ui::section_jump(&keys, here, down) else {
+        return;
+    };
+    let index = visible[next].0;
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.selected = index;
+        view.scroll = 0;
+        view.focus = LinearFocus::List;
+    }
 }
 
 fn toggle_mark(app: &mut App) {
@@ -3089,6 +3341,10 @@ fn confirm(app: &mut App) {
             pr_url, pr_number, ..
         } => {
             let (url, number, dir) = (pr_url.clone(), *pr_number, view.dir.clone());
+            // Spent, as a ⌘U attach spends them.
+            if let Some(Overlay::Linear(view)) = &mut app.overlay {
+                view.marked.clear();
+            }
             attach_issues(app, dir, url, number, &issues);
         }
         // The issue under the cursor — one todo is one issue.
@@ -3258,9 +3514,25 @@ fn on_tab(
         .collect()
 }
 
+/// `list` as the view places it: each held issue where it stood before
+/// its edit ([`LinearView::held`]).
+fn laid_out<'a>(view: &LinearView, list: &'a [LinearIssue]) -> Cow<'a, [LinearIssue]> {
+    if view.held.is_empty() {
+        return Cow::Borrowed(list);
+    }
+    let mut placed = list.to_vec();
+    for issue in &mut placed {
+        if let Some(place) = view.held.get(&issue.id) {
+            place.put_on(issue);
+        }
+    }
+    Cow::Owned(placed)
+}
+
 /// The issues the view shows: the tab's, as [`filtered`] leaves them.
 fn visible_rows(view: &LinearView, list: &[LinearIssue]) -> Vec<(usize, Vec<usize>)> {
-    on_tab(view.tab, &filtered(&view.query, list), list)
+    let list = laid_out(view, list);
+    on_tab(view.tab, &filtered(&view.query, &list), &list)
 }
 
 /// The issue under the cursor: `selected` while the view shows it, else
@@ -3300,16 +3572,19 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         .get(&view.project)
         .is_some_and(|l| l.more_on(view.tab));
     let parsed = crate::list_filter::parse(&view.query, FACETS);
+    // Where the rows stand — an issue just edited where it was — apart
+    // from what they say.
+    let placed = laid_out(view, &issues);
     // One pass of the filter over both tabs: the tab's rows, and each
     // tab's count for its label.
-    let all = filtered(&view.query, &issues);
-    let visible = on_tab(view.tab, &all, &issues);
+    let all = filtered(&view.query, &placed);
+    let visible = on_tab(view.tab, &all, &placed);
     let cursor = crate::list_filter::cursor_in(&visible, view.selected);
     let cursor_row = cursor
         .and_then(|c| visible.iter().position(|(i, _)| *i == c))
         .unwrap_or(0);
 
-    let in_tab = issues.iter().filter(|i| view.tab.holds(i)).count();
+    let in_tab = placed.iter().filter(|i| view.tab.holds(i)).count();
     let count = if parsed.is_active() {
         format!("{}/{in_tab}", visible.len())
     } else {
@@ -3343,7 +3618,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let labels: Vec<String> = LinearTab::ALL
         .iter()
         .map(|tab| {
-            let n = all.iter().filter(|(i, _)| tab.holds(&issues[*i])).count();
+            let n = all.iter().filter(|(i, _)| tab.holds(&placed[*i])).count();
             format!("{} {n}", tab.name())
         })
         .collect();
@@ -3416,7 +3691,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     // A header over each status, a line per issue.
     let keys: Vec<&str> = visible
         .iter()
-        .map(|(i, _)| issues[*i].status.as_str())
+        .map(|(i, _)| placed[*i].status.as_str())
         .collect();
     let entries = sections(&keys, true);
     let (list_start, drawn) =
@@ -3425,7 +3700,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     for (entry, rect) in drawn {
         match entry {
             ListEntry::Header { first, count } => {
-                let issue = &issues[visible[first].0];
+                let issue = &placed[visible[first].0];
                 let (glyph, color) = state_mark(issue, th);
                 let mark = Span::styled(format!("{glyph} "), Style::default().fg(color));
                 let line = Line::from(list_header(&issue.status, count, Some(mark), th));
@@ -3440,7 +3715,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
                     widths,
                     spin,
                 };
-                let line = title_spans(issue, positions, marked, budget, &work, th);
+                let headed = view.held.get(&issue.id).and_then(|p| p.headed(issue));
+                let line = title_spans(issue, positions, marked, headed, budget, &work, th);
                 render_row(f, rect, line, Some(*index) == cursor, rows_focused, th);
                 row_rects.push((*index, rect));
             }
@@ -3510,7 +3786,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else if let Some(pick) = &view.worktree_pick {
         draw_worktree_pick(f, body_inner, pick, &view.project, &app.linear_links, th);
     } else if let Some(pick) = &mut filter_pick {
-        let facets = pick_facets(&issues, view.tab, th);
+        let facets = pick_facets(&placed, view.tab, th);
         pick.clamp(&facets);
         crate::list_filter::draw_pick(f, body_inner, &facets, &parsed, pick, th);
     } else {
@@ -3597,6 +3873,7 @@ fn title_spans(
     issue: &LinearIssue,
     positions: &[usize],
     marked: bool,
+    headed: Option<String>,
     budget: usize,
     work: &WorkColumn,
     th: Theme,
@@ -3620,8 +3897,12 @@ fn title_spans(
     spans.push(Span::styled(format!("{letter} "), style));
     // The tick, the state glyph and the priority, each with its space.
     const MARKS_W: usize = 6;
+    // An issue edited out of where it stands says where it goes when the
+    // view next changes, after its title.
+    let headed = headed.map(|to| format!(" → {to}"));
+    let headed_w = headed.as_ref().map_or(0, |h| h.chars().count());
     let full = issue.label();
-    let room = budget.saturating_sub(MARKS_W + work.width());
+    let room = budget.saturating_sub(MARKS_W + work.width() + headed_w);
     let label = truncate(&full, room);
     let positions = visible_positions(positions, &label, &full);
     let ident_w = issue.identifier.chars().count().min(label.chars().count());
@@ -3641,6 +3922,9 @@ fn title_spans(
         Style::default().fg(th.text),
         th,
     ));
+    if let Some(headed) = headed {
+        spans.push(Span::styled(headed, Style::default().fg(th.dim)));
+    }
     if work.width() > 0 {
         spans.push(Span::raw(
             " ".repeat(room.saturating_sub(label.chars().count())),
@@ -3817,10 +4101,16 @@ fn short_date(stamp: &str, now: i64) -> Option<String> {
 /// cursor's lit and the one the issue stands on marked.
 fn draw_prop_pick(f: &mut Frame, area: Rect, pick: &PropPick, me: Option<&str>, th: Theme) {
     let dim = Style::default().fg(th.dim);
+    // One issue by its identifier, several by how many.
+    let who = match pick.issues.as_slice() {
+        [(_, identifier)] => identifier.clone(),
+        issues => format!("{} issues", issues.len()),
+    };
     let heading = match pick.prop {
-        Prop::Status => format!("Move {} to…", pick.identifier),
-        Prop::Priority => format!("Set {}'s priority to…", pick.identifier),
-        Prop::Assignee => format!("Assign {} to…", pick.identifier),
+        Prop::Status => format!("Move {who} to…"),
+        Prop::Priority if pick.issues.len() == 1 => format!("Set {who}'s priority to…"),
+        Prop::Priority => format!("Set {who}' priority to…"),
+        Prop::Assignee => format!("Assign {who} to…"),
     };
     let rows = pick.rows.iter().enumerate().map(|(i, row)| {
         let mut spans = match row {
@@ -5146,6 +5436,7 @@ pub fn parse_env_key(text: &str) -> Option<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
 
     pub(crate) fn issue(id: &str, ident: &str, title: &str) -> LinearIssue {
         LinearIssue {
@@ -6534,7 +6825,15 @@ pub(crate) mod tests {
             shot(&mut app, w, 30);
             let budget = (the_view(&app).list_area.width as usize).saturating_sub(2);
             for issue in rows(&app, &the_view(&app).project) {
-                let title = title_spans(issue, &[], true, budget, &WorkColumn::none(), app.theme);
+                let title = title_spans(
+                    issue,
+                    &[],
+                    true,
+                    None,
+                    budget,
+                    &WorkColumn::none(),
+                    app.theme,
+                );
                 let width: usize = title.iter().map(|s| s.content.chars().count()).sum();
                 assert!(width <= budget, "title at {w}");
             }
@@ -7692,16 +7991,16 @@ pub(crate) mod tests {
         );
     }
 
-    /// The cursor on the row at `index`, on the tab that shows it.
+    /// The cursor on the row at `index`, on the tab that shows it — a
+    /// tab switch letting held issues go, as one by the keys does.
     fn cursor_on(app: &mut App, index: usize) {
-        let mine = app.linear[&ProjectId("p1".into())].list[index].mine;
+        let tab = LinearTab::of(&app.linear[&ProjectId("p1".into())].list[index]);
         if let Some(Overlay::Linear(view)) = &mut app.overlay {
             view.selected = index;
-            view.tab = if mine {
-                LinearTab::Mine
-            } else {
-                LinearTab::Others
-            };
+            if view.tab != tab {
+                view.tab = tab;
+                view.held.clear();
+            }
         }
     }
 
@@ -7783,6 +8082,146 @@ pub(crate) mod tests {
         assert_eq!(app.flash.as_deref(), None);
     }
 
+    /// [`moving`] with `issues` listed in its place.
+    fn moving_with(
+        issues: Vec<LinearIssue>,
+    ) -> (
+        App,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+    ) {
+        let (mut app, dir, rx) = moving();
+        app.linear
+            .insert(ProjectId("p1".into()), listed(issues).unwrap());
+        (app, dir, rx)
+    }
+
+    /// The ids of the rows the view shows, top to bottom.
+    fn shown(app: &App) -> Vec<String> {
+        let view = the_view(app);
+        let list = rows(app, &view.project);
+        visible_rows(view, list)
+            .iter()
+            .map(|(i, _)| list[*i].id.clone())
+            .collect()
+    }
+
+    /// The picker up: its cursor onto the state named `name`, and Enter.
+    fn set_state(app: &mut App, name: &str) {
+        if let Some(Overlay::Linear(view)) = &mut app.overlay {
+            let pick = view.prop_pick.as_mut().expect("the picker");
+            pick.selected = pick
+                .rows
+                .iter()
+                .position(|r| matches!(r, Change::Status(s) if s.name == name))
+                .expect("the state");
+        }
+        press(app, plain(KeyCode::Enter));
+    }
+
+    /// An issue `⌘S` moves stays where it stood, the cursor on it, its row
+    /// saying where it goes — `↓` the next row under it, not a jump to
+    /// its new section. A tab switch is a new view: it goes there then.
+    #[test]
+    fn an_edited_issue_holds_its_place_until_the_view_changes() {
+        let (mut app, _dir, _rx) = moving_with(vec![
+            in_state("1", "ENG-1", "Todo"),
+            in_state("2", "ENG-2", "Todo"),
+            in_state("3", "ENG-3", "In Progress"),
+        ]);
+        with_graphql_stub(took_it, || {
+            one_thread().block_on(async {
+                cursor_on(&mut app, 0);
+                // Off the search line: the rows have the keys.
+                press(&mut app, plain(KeyCode::Down));
+                press(&mut app, cmd('s'));
+                set_state(&mut app, "Done");
+                assert_eq!(row_of(&app, "1").status, "Done");
+                assert_eq!(shown(&app), ["1", "2", "3"]);
+                assert_eq!(selected_issue(&app).map(|i| i.id.as_str()), Some("1"));
+                let screen = shot(&mut app, 160, 30);
+                assert!(line_with(&screen, "ENG-1 x").contains("→ Done"), "{screen}");
+                assert!(!screen.contains("DONE"), "no section for it yet: {screen}");
+
+                press(&mut app, plain(KeyCode::Down));
+                assert_eq!(selected_issue(&app).map(|i| i.id.as_str()), Some("2"));
+
+                press(&mut app, plain(KeyCode::Right));
+                press(&mut app, plain(KeyCode::Left));
+                assert_eq!(shown(&app), ["2", "3", "1"]);
+                let screen = shot(&mut app, 160, 30);
+                assert!(!screen.contains("→ Done"), "{screen}");
+            });
+        });
+    }
+
+    /// `⇧↓`/`⇧↑` mark a run from where it started, shrinking as it comes
+    /// back; `⌘S` moves every marked issue, the picker saying how many,
+    /// and Esc lets the marks go before it closes anything.
+    #[test]
+    fn shift_arrows_mark_a_run_that_cmd_s_moves_together() {
+        let (mut app, _dir, _rx) = moving_with(vec![
+            in_state("1", "ENG-1", "Todo"),
+            in_state("2", "ENG-2", "Todo"),
+            in_state("3", "ENG-3", "Todo"),
+        ]);
+        let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        let marked = |app: &App| the_view(app).marked.iter().cloned().collect::<Vec<_>>();
+        with_graphql_stub(took_it, || {
+            one_thread().block_on(async {
+                cursor_on(&mut app, 0);
+                press(&mut app, shift(KeyCode::Down));
+                press(&mut app, shift(KeyCode::Down));
+                assert_eq!(marked(&app), ["1", "2", "3"]);
+                press(&mut app, shift(KeyCode::Up));
+                assert_eq!(marked(&app), ["1", "2"]);
+                assert_eq!(the_view(&app).focus, LinearFocus::List);
+
+                press(&mut app, cmd('s'));
+                assert_eq!(the_pick(&app).issues.len(), 2);
+                let screen = shot(&mut app, 160, 30);
+                assert!(screen.contains("Move 2 issues to…"), "{screen}");
+                set_state(&mut app, "Done");
+                let states: Vec<String> = ["1", "2", "3"]
+                    .iter()
+                    .map(|id| row_of(&app, id).status)
+                    .collect();
+                assert_eq!(states, ["Done", "Done", "Todo"]);
+                assert_eq!(marked(&app), ["1", "2"], "kept for the next edit");
+
+                press(&mut app, plain(KeyCode::Esc));
+                assert!(marked(&app).is_empty());
+                press(&mut app, plain(KeyCode::Esc));
+                assert!(app.overlay.is_none());
+            });
+        });
+    }
+
+    /// `⌘↓` goes to the next status's first row; `⌘↑` to the top of the
+    /// cursor's own, then the one before's — the TODOS MODAL's group keys.
+    #[test]
+    fn cmd_arrows_jump_between_statuses() {
+        let (mut app, _dir, _rx) = moving_with(vec![
+            in_state("1", "ENG-1", "Todo"),
+            in_state("2", "ENG-2", "Todo"),
+            in_state("3", "ENG-3", "In Progress"),
+            in_state("4", "ENG-4", "Done"),
+        ]);
+        let cmd_arrow = |code| KeyEvent::new(code, KeyModifiers::SUPER);
+        let at = |app: &App| selected_issue(app).map(|i| i.id.clone());
+        cursor_on(&mut app, 1);
+        press(&mut app, cmd_arrow(KeyCode::Up));
+        assert_eq!(at(&app).as_deref(), Some("1"));
+        press(&mut app, cmd_arrow(KeyCode::Down));
+        assert_eq!(at(&app).as_deref(), Some("3"));
+        press(&mut app, cmd_arrow(KeyCode::Down));
+        assert_eq!(at(&app).as_deref(), Some("4"));
+        press(&mut app, cmd_arrow(KeyCode::Down));
+        assert_eq!(at(&app).as_deref(), Some("4"), "the last section");
+        press(&mut app, cmd_arrow(KeyCode::Up));
+        assert_eq!(at(&app).as_deref(), Some("3"));
+    }
+
     /// A refused `⌘P` puts the priority Linear has back and says why.
     #[test]
     fn a_refused_cmd_p_puts_the_priority_back() {
@@ -7804,9 +8243,10 @@ pub(crate) mod tests {
         assert!(app.linear_edits.moves.is_empty());
     }
 
-    /// `⌘I` opens on `Me`, whoever has the issue: Enter makes it yours,
-    /// and it is on `My issues` at once. `No assignee` takes it off you
-    /// again, to `Other issues`.
+    /// `⌘I` opens on `Me`, whoever has the issue: Enter makes it yours —
+    /// its row staying on `Other issues`, the cursor on it, saying it goes
+    /// to `My issues` once the tab changes. `No assignee` takes it off you
+    /// again.
     #[test]
     fn cmd_i_assigns_the_issue_to_me_or_to_nobody() {
         let (mut app, dir, mut rx) = staffed();
@@ -7837,6 +8277,13 @@ pub(crate) mod tests {
                 press(&mut app, plain(KeyCode::Enter));
                 let mine = row_of(&app, "2");
                 assert_eq!((mine.assignee.as_str(), mine.mine), ("Ana", true));
+                assert_eq!(the_view(&app).tab, LinearTab::Others);
+                assert_eq!(selected_issue(&app).map(|i| i.id.as_str()), Some("2"));
+                let screen = shot(&mut app, 160, 30);
+                assert!(
+                    line_with(&screen, "ENG-2 x").contains("→ My issues"),
+                    "{screen}"
+                );
                 land_staffed(&mut app, before, &dir);
                 let mine = row_of(&app, "2");
                 assert_eq!(

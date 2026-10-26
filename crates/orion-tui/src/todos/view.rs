@@ -15,11 +15,10 @@
 //! ticked today and this week, across every project, day by day — and a
 //! click on either opens the DONE page on it (`history`).
 //!
-//! An item ticked goes to the bottom of its group, struck through, the
-//! next one coming up under the cursor; a group with everything in it
-//! ticked goes to the bottom of where it stands. Both stay in sight until
-//! the modal goes (`TodoView::held`), and are gone from the list the next
-//! time it opens. `⇧↑`/`⇧↓` select a run of items, and what acts on an
+//! An item ticked stays where it stood, struck through, the cursor on
+//! it — nothing moves under it; so does a group with everything in it
+//! ticked. Both stay in sight until the modal goes or the project's tab
+//! is left (`TodoView::held`), and are gone from the list after that. `⇧↑`/`⇧↓` select a run of items, and what acts on an
 //! item acts on them all — tick, `⌘P` priority, `⌥↑`/`⌥↓` move (a place
 //! through the list as drawn, into a nested group and out of it), `⌥→`
 //! group them, `⌥←` take them out of their group — or, on its header,
@@ -242,16 +241,15 @@ pub struct TodoView {
     pub page: Option<super::history::DonePage>,
     /// The cursor's row, by index into the rows as last drawn; and the row
     /// itself, which it follows when the rows move under it (a priority
-    /// re-sorts them). A tick lets go of the row, so the cursor stays put
-    /// and the next one is under it.
+    /// re-sorts them).
     pub selected: usize,
     pub cursor: Option<Entry>,
     /// Where `⇧↑`/`⇧↓` started: the items from it to the cursor's are
     /// selected.
     pub anchor: Option<u64>,
     /// The items ticked (or unticked) since the modal opened: a ticked
-    /// one stays in sight, struck through at the bottom of its group,
-    /// until the modal goes — and then it is out of the list.
+    /// one stays in sight, struck through where it stood, until the
+    /// modal goes — and then it is out of the list.
     pub held: Vec<u64>,
     pub query: TextInput,
     /// The filter row is up (`⌘F`): typing is the filter's, not the row's.
@@ -435,6 +433,7 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
             keys::UNDO.hint().kept(),
             keys::SPAN.hint(),
             keys::PICK.hint_as("move"),
+            keys::JUMP.hint(),
             Hint::new("Esc", "back"),
         ];
     }
@@ -1616,16 +1615,15 @@ fn jump(app: &mut App, down: bool) {
 }
 
 /// `space`: tick or untick the chosen items — all ticked unless every
-/// one already is. A tick goes to the bottom of its group, in sight until
-/// the modal goes (`TodoView::held`), the cursor staying put so the next
-/// item comes up under it; an untick goes back where it stood, the cursor
-/// with it. Or fold the header.
+/// one already is. Either way they stay where they stand, in sight until
+/// the modal goes (`TodoView::held`), and the cursor and the selection
+/// with them. Or fold the header.
 fn done(app: &mut App) {
     match current(app) {
         Some(Entry::Item { .. }) => {
             let ids = chosen(app);
             let now = super::now();
-            let ticked = edit(app, |file| {
+            edit(app, |file| {
                 let tick = ids
                     .iter()
                     .any(|id| file.item(*id).is_some_and(|i| i.done.is_none()));
@@ -1638,21 +1636,12 @@ fn done(app: &mut App) {
                         };
                     }
                 }
-                tick
             });
             if let Some(view) = view_mut(app) {
                 for id in &ids {
                     if !view.held.contains(id) {
                         view.held.push(*id);
                     }
-                }
-                // What was selected has moved apart: let it go.
-                view.anchor = None;
-                view.cursor = None;
-            }
-            if ticked == Some(false) {
-                if let Some(first) = ids.first() {
-                    land_on_item(app, *first);
                 }
             }
         }
@@ -3276,11 +3265,11 @@ mod tests {
             entries(&file, &v),
             [
                 Entry::Header { group: g, depth: 0 },
-                Entry::Item { id: open, depth: 1 },
                 Entry::Item {
                     id: shipped,
                     depth: 1
                 },
+                Entry::Item { id: open, depth: 1 },
                 Entry::Header {
                     group: done,
                     depth: 0

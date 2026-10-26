@@ -41626,13 +41626,13 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// A tick strikes the item through and sends it to the bottom of its
-    /// group, the next item coming up under the cursor; the summary says
-    /// so. Once the modal goes, so does the item — and its DONE page,
+    /// A tick strikes the item through where it stands, the cursor
+    /// staying on it — nothing moves under it; the summary says so. Once
+    /// the modal goes, so does the item — and its DONE page,
     /// opened by a click on the summary, has it under its group, where
     /// `space` puts it back on the list.
     #[test]
-    fn a_ticked_todo_sinks_then_leaves_the_list() {
+    fn a_ticked_todo_stays_put_then_leaves_the_list() {
         let mut out = Vec::new();
         crate::todos::with_now(todo_clock(6), || {
             let mut app = todos_with(TWO_EMAILS);
@@ -41657,12 +41657,12 @@ diff --git a/src/c.rs b/src/c.rs
                     .map(|i| i.text.clone())
                     .collect()
             };
-            assert_eq!(order(&app), ["setup resend", "run plan"]);
+            assert_eq!(order(&app), ["run plan", "setup resend"]);
             let file = todo_file(&app);
             assert!(matches!(
                 todo_view(&app).cursor,
                 Some(crate::todos::view::Entry::Item { id, .. })
-                    if file.item(id).is_some_and(|i| i.text == "setup resend")
+                    if file.item(id).is_some_and(|i| i.text == "run plan")
             ));
 
             // Closed and opened again: out of the list.
@@ -41701,10 +41701,10 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// Ticking the last open item in a nested group completes the group:
-    /// it goes to the bottom of the group around it, and once the modal
+    /// it stays where it stood in the group around it, and once the modal
     /// goes, it does too.
     #[test]
-    fn a_completed_group_sinks_then_leaves() {
+    fn a_completed_group_stays_put_then_leaves() {
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
             let mut app = todos_with("- UI\n    - Later\n        - one\n    - chips\n");
@@ -41732,10 +41732,10 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(
                 names(&app),
                 [
-                    crate::todos::Child::Item(chips),
-                    crate::todos::Child::Group(later)
+                    crate::todos::Child::Group(later),
+                    crate::todos::Child::Item(chips)
                 ],
-                "at the bottom"
+                "where it stood"
             );
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("✓ done"), "{text}");
@@ -41818,8 +41818,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `⇧↓` selects a run of items; `⌘P` sets them all, `space` ticks them
-    /// all — each to the bottom of its group, the selection let go, as
-    /// any plain move lets it go.
+    /// all — each where it stood, the selection kept — and a plain move
+    /// lets it go.
     #[test]
     fn shift_arrows_select_todos_to_act_on_together() {
         crate::todos::with_now(todo_clock(6), || {
@@ -41838,7 +41838,7 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_some()));
             assert_eq!(todo_texts(&app, 0), ["run plan", "setup resend"]);
-            assert!(todo_view(&app).anchor.is_none());
+            assert!(todo_view(&app).anchor.is_some());
             press(&mut app, KeyCode::Up, KeyModifiers::SHIFT, &mut out);
             assert!(todo_view(&app).anchor.is_some());
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
