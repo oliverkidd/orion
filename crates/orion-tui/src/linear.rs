@@ -14,7 +14,9 @@
 //! the one ATTACH ([`attach_issues`]). `⌘.` links the marked issues to a
 //! worktree instead ([`WorktreePick`]): the pull request its branch opens
 //! later is attached to them as a ⌘L launch's is, or the one open on it
-//! now there and then. `⌘S` on
+//! now there and then. A ⌘L launch also takes its issues on
+//! ([`start_issues`]): each not yet started moves to `In Progress`, and
+//! is given to you when nobody has it. `⌘S` on
 //! an issue lists its team's workflow states in the reading pane's place
 //! ([`PropPick`]) — read with the issues, so the list is up at once —
 //! and Enter moves the issue to one (`issueUpdate`), the row saying so
@@ -746,6 +748,15 @@ pub enum LinearAnswer {
         dir: PathBuf,
         refused: Option<(String, String)>,
     },
+    /// TAKING ISSUES ON ([`start_issues`]): whether any issue moved, and
+    /// the first Linear would not start, by identifier and why, when one
+    /// was.
+    Started {
+        project: ProjectId,
+        dir: PathBuf,
+        moved: bool,
+        refused: Option<(String, String)>,
+    },
     /// **Test connection**: who the key in `dir` belongs to.
     Viewer {
         dir: PathBuf,
@@ -819,6 +830,12 @@ impl LinkedIssue {
             priority: json_priority(v),
         })
     }
+}
+
+/// A state kind Linear counts as still to start: triage, the backlog or
+/// todo.
+fn unstarted_kind(kind: &str) -> bool {
+    matches!(kind, "triage" | "backlog" | "unstarted")
 }
 
 /// A state kind Linear counts as finished: done, or canceled.
@@ -1998,6 +2015,23 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
             }
             app.dirty = true;
         }
+        LinearAnswer::Started {
+            project,
+            dir,
+            moved,
+            refused,
+        } => {
+            if let Some((identifier, why)) = refused {
+                app.flash = Some(crate::flash::Flash::failed(format!(
+                    "couldn't start {identifier} in Linear: {why}"
+                )));
+            }
+            // The rows still show the issues where they were.
+            if moved {
+                request_list(app, project, dir, true);
+            }
+            app.dirty = true;
+        }
         LinearAnswer::Edited {
             project,
             issue_id,
@@ -2201,6 +2235,7 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
     let Some(batch) = &launch.linear else {
         return;
     };
+    start_issues(app, launch, &batch.issues);
     if !crate::config::Config::load().linear_auto_attach {
         return;
     }
@@ -2232,6 +2267,116 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
             attach_link(app, &project, dir, &branch, url, number);
         }
     }
+}
+
+/// TAKING ISSUES ON: a ⌘L launch moves each of its issues not yet started
+/// to its team's first started state (`In Progress`) and, when nobody has
+/// it, gives it to you — what Linear's pull request automations do, only
+/// now rather than once a pull request opens. The states and who you are
+/// come with the list the issues were picked from; each issue is read
+/// again first ([`start_issue`]), so one started, in review or done is
+/// left alone, whatever the list said. Off the loop, silent unless Linear
+/// refuses ([`LinearAnswer::Started`]).
+fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
+    let waiting: Vec<&LinearIssue> = issues
+        .iter()
+        .filter(|i| unstarted_kind(&i.status_type))
+        .collect();
+    if waiting.is_empty() {
+        return;
+    }
+    let (Some(tx), Some(project)) = (
+        app.linear_tx.clone(),
+        crate::launcher::project_of(app, &launch.target),
+    ) else {
+        return;
+    };
+    let Some(dir) = project_dir(app, &project) else {
+        return;
+    };
+    // `(issue id, identifier, the state it moves to, who it goes to)`.
+    let starts: Vec<(String, String, Option<String>, Option<String>)> = waiting
+        .into_iter()
+        .map(|issue| {
+            let list = app
+                .linear
+                .values()
+                .find(|l| l.states.contains_key(&issue.team_id));
+            let state_id = list
+                .and_then(|l| {
+                    l.states[&issue.team_id]
+                        .iter()
+                        .find(|s| s.kind == "started")
+                })
+                .map(|s| s.id.clone());
+            let me = list.and_then(|l| l.me.as_ref()).map(|me| me.id.clone());
+            (issue.id.clone(), issue.identifier.clone(), state_id, me)
+        })
+        .collect();
+    tokio::spawn(async move {
+        let mut moved = false;
+        let mut refused = None;
+        match read_linear_key(&dir) {
+            None => refused = Some((starts[0].1.clone(), NO_KEY.to_string())),
+            Some(key) => {
+                for (id, identifier, state_id, me) in starts {
+                    let result = match state_id {
+                        Some(state_id) => start_issue(&key, &id, &state_id, me.as_deref()).await,
+                        None => Err("its team has no started state".into()),
+                    };
+                    match result {
+                        Ok(started) => moved |= started,
+                        Err(why) => {
+                            refused.get_or_insert((identifier, why));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = tx.send(LinearAnswer::Started {
+            project,
+            dir,
+            moved,
+            refused,
+        });
+    });
+}
+
+/// Issue `issue_id` moved to state `state_id`, and given to `me` when
+/// nobody has it — `false` when Linear has it started already, or further
+/// on, and nothing was asked.
+async fn start_issue(
+    key: &str,
+    issue_id: &str,
+    state_id: &str,
+    me: Option<&str>,
+) -> Result<bool, String> {
+    let json = graphql(
+        key,
+        r#"query($id: String!) { issue(id: $id) { state { type } assignee { id } } }"#,
+        serde_json::json!({ "id": issue_id }),
+    )
+    .await?;
+    let Some(issue) = json.pointer("/data/issue").filter(|i| i.is_object()) else {
+        return Err(graphql_error(&json).unwrap_or_else(|| "Linear said nothing".into()));
+    };
+    if !unstarted_kind(&json_text(issue, "/state/type")) {
+        return Ok(false);
+    }
+    let mut input = serde_json::json!({ "stateId": state_id });
+    if let (true, Some(me)) = (issue["assignee"].is_null(), me) {
+        input["assigneeId"] = me.into();
+    }
+    let json = graphql(
+        key,
+        r#"mutation($id: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $id, input: $input) { success }
+        }"#,
+        serde_json::json!({ "id": issue_id, "input": input }),
+    )
+    .await?;
+    mutation_result(&json, "issueUpdate", "Linear did not start the issue")?;
+    Ok(true)
 }
 
 /// The branch `project`'s root checkout is on — the long-lived one feature
@@ -8855,41 +9000,195 @@ pub(crate) mod tests {
         assert_eq!(app.linear_links.branches_of("1"), ["feature-x"]);
     }
 
-    /// A ⌘L launch onto a worktree whose pull request is open already has
-    /// nothing to wait for: its issues are attached there and then.
-    #[test]
-    fn a_launch_onto_a_branch_with_an_open_pr_attaches_at_once() {
-        let (mut app, dir, mut rx) = paired_with_worktrees();
-        let project = ProjectId("p1".into());
-        crate::config::with_config_path(dir.path().join("config.json"), || {
+    /// A ⌘L launch fired with `issues` onto worktree `w1` — whose pull
+    /// request #41 is open — with Linear answered by `stub`: what it was
+    /// sent, and the app once the first answer `until` takes has landed.
+    fn launch_onto_w1(
+        mut app: App,
+        dir: &tempfile::TempDir,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<LinearAnswer>,
+        issues: Vec<LinearIssue>,
+        stub: GraphqlStub,
+        until: fn(&LinearAnswer) -> bool,
+    ) -> (App, Vec<serde_json::Value>) {
+        let sent = crate::config::with_config_path(dir.path().join("config.json"), || {
             let cfg = crate::config::Config::load();
             let target = QuickTarget::Worktree(orion_core::WorktreeId("w1".into()));
             let launch = QuickLaunch::from_config(target, &cfg).with_linear(Some(LinearBatch {
-                issues: vec![issue("2", "ENG-2", "Logout")],
+                issues,
                 task: "go".into(),
             }));
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            let sent = with_graphql_stub(
-                |_, _| {
-                    Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}}))
-                },
-                || {
-                    rt.block_on(async {
-                        remember_submit(&mut app, &launch);
-                        let answer = rx.recv().await.expect("an answer");
-                        land_answer(&mut app, answer);
-                    });
-                    graphql_sent()
-                },
-            );
-            assert_eq!(sent, [attached("2", 41)]);
+            with_graphql_stub(stub, || {
+                rt.block_on(async {
+                    remember_submit(&mut app, &launch);
+                    let wait = async {
+                        loop {
+                            let answer = rx.recv().await.expect("an answer");
+                            if until(&answer) {
+                                land_answer(&mut app, answer);
+                                break;
+                            }
+                        }
+                    };
+                    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+                        .await
+                        .expect("the answer waited for");
+                });
+                graphql_sent()
+            })
         });
+        (app, sent)
+    }
+
+    /// A ⌘L launch onto a worktree whose pull request is open already has
+    /// nothing to wait for: its issues are attached there and then.
+    #[test]
+    fn a_launch_onto_a_branch_with_an_open_pr_attaches_at_once() {
+        let (app, dir, rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        let (app, sent) = launch_onto_w1(
+            app,
+            &dir,
+            rx,
+            vec![issue("2", "ENG-2", "Logout")],
+            |_, _| Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})),
+            |answer| matches!(answer, LinearAnswer::Attach(_)),
+        );
+        assert_eq!(sent, [attached("2", 41)]);
         assert!(app.linear_links.pending(&project, "branch-41").is_empty());
         assert_eq!(app.linear_links.branches_of("2"), ["branch-41"]);
         assert!(app.flash.is_none(), "an auto-attach that worked is silent");
+    }
+
+    /// TAKING ISSUES ON, with team `t1`'s states and who you are read with
+    /// the list: In Review listed first, In Progress first in the workflow.
+    fn launch_taking_on(
+        issues: Vec<LinearIssue>,
+        stub: GraphqlStub,
+    ) -> (App, Vec<serde_json::Value>) {
+        let (mut app, dir, rx) = paired_with_worktrees();
+        let list = app.linear.get_mut(&ProjectId("p1".into())).unwrap();
+        let state = |id: &str, kind: &str| LinearState {
+            id: id.into(),
+            name: id.into(),
+            kind: kind.into(),
+            color: String::new(),
+        };
+        list.states.insert(
+            "t1".into(),
+            vec![
+                state("s-todo", "unstarted"),
+                state("s-progress", "started"),
+                state("s-review", "started"),
+            ],
+        );
+        list.me = Some(LinearUser {
+            id: "u-me".into(),
+            name: "Me".into(),
+        });
+        launch_onto_w1(app, &dir, rx, issues, stub, |answer| {
+            matches!(answer, LinearAnswer::Started { .. })
+        })
+    }
+
+    /// What Linear says of an issue asked for again before it is started.
+    fn issue_now(kind: &str, assignee: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"data": {"issue": {"state": {"type": kind}, "assignee": assignee}}})
+    }
+
+    /// The `issueUpdate`s a launch sent, by what they set.
+    fn starts(sent: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        sent.iter().filter(|v| v.get("input").is_some()).collect()
+    }
+
+    /// TAKING ISSUES ON: a launch on a triage issue nobody has moves it
+    /// to its team's first started state and gives it to you.
+    #[test]
+    fn a_launch_starts_its_untaken_issues_and_gives_them_to_you() {
+        let triage = LinearIssue {
+            status: "Triage".into(),
+            status_type: "triage".into(),
+            ..issue("1", "ENG-1", "Login")
+        };
+        let (app, sent) =
+            launch_taking_on(vec![triage, issue("2", "ENG-2", "Logout")], |_, query| {
+                Ok(if query.contains("issueUpdate") {
+                    serde_json::json!({"data": {"issueUpdate": {"success": true}}})
+                } else if query.contains("issue(id") {
+                    issue_now("triage", serde_json::Value::Null)
+                } else {
+                    serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})
+                })
+            });
+        assert_eq!(
+            starts(&sent),
+            [&serde_json::json!({"id": "1", "input": {
+                "stateId": "s-progress", "assigneeId": "u-me"}})],
+            "only the issue not yet started, and only once"
+        );
+        assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
+        assert!(
+            app.linear_flights.in_flight(&ProjectId("p1".into())),
+            "the list is read again"
+        );
+    }
+
+    /// Only ever forward: an issue the list had in Todo that Linear has
+    /// in review by now is left there; one somebody has keeps them.
+    #[test]
+    fn a_launch_leaves_issues_linear_has_further_on_or_given_away() {
+        let todo = |id: &str, ident: &str| LinearIssue {
+            status: "Todo".into(),
+            status_type: "unstarted".into(),
+            ..issue(id, ident, "x")
+        };
+        let (_, sent) =
+            launch_taking_on(vec![todo("1", "ENG-1"), todo("3", "ENG-3")], |_, query| {
+                Ok(if query.contains("issueUpdate") {
+                    serde_json::json!({"data": {"issueUpdate": {"success": true}}})
+                } else if query.contains("issue(id") {
+                    // ENG-1 is asked first, the issues going one after
+                    // another: it is further on; ENG-3 is somebody else's.
+                    static ASKED: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    match ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => issue_now("started", serde_json::Value::Null),
+                        _ => issue_now("unstarted", serde_json::json!({"id": "u-sam"})),
+                    }
+                } else {
+                    serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})
+                })
+            });
+        assert_eq!(
+            starts(&sent),
+            [&serde_json::json!({"id": "3", "input": {"stateId": "s-progress"}})]
+        );
+    }
+
+    /// A start Linear refuses is said, by issue.
+    #[test]
+    fn a_refused_start_says_which_issue_and_why() {
+        let (mut app, dir, _rx) = paired();
+        land_answer(
+            &mut app,
+            LinearAnswer::Started {
+                project: ProjectId("p1".into()),
+                dir: dir.path().into(),
+                moved: false,
+                refused: Some(("ENG-1".into(), "Entity not found".into())),
+            },
+        );
+        assert_eq!(
+            app.flash.as_ref().map(|f| (f.kind, f.text.as_str())),
+            Some((
+                crate::flash::FlashKind::Failed,
+                "couldn't start ENG-1 in Linear: Entity not found"
+            ))
+        );
     }
 
     /// ONE HOME: an issue linked to another branch leaves the one it was
