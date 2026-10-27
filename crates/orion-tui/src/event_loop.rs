@@ -41808,6 +41808,59 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
+    /// A nested group's header acts as an item does: `⌘P` sets its
+    /// priority and every item's in it, `space` ticks them all, `⌥↑`
+    /// moves it — and `Enter` folds it.
+    #[test]
+    fn a_nested_todo_group_acts_as_an_item() {
+        use crate::todos::view::Entry;
+        crate::todos::with_now(todo_clock(6), || {
+            let mut out = Vec::new();
+            let mut app = todos_with("- UI\n    - a\n    - Later\n        - x\n        - y\n");
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            let later = todo_file(&app).groups[1].id;
+            assert_eq!(
+                todo_view(&app).cursor,
+                Some(Entry::Header {
+                    group: later,
+                    depth: 1
+                })
+            );
+
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Char('1'), KeyModifiers::NONE, &mut out);
+            let file = todo_file(&app);
+            assert_eq!(file.group(later).unwrap().priority, 1);
+            assert!(file
+                .items
+                .iter()
+                .filter(|i| i.group == later)
+                .all(|i| i.priority == 1));
+            assert_eq!(todo_texts(&app, 0), ["a"]);
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("▾ U Later"), "{text}");
+
+            press(&mut app, KeyCode::Up, KeyModifiers::ALT, &mut out);
+            assert!(matches!(
+                todo_file(&app).children(todo_file(&app).groups[0].id, &[])[0],
+                crate::todos::Child::Group(g) if g == later
+            ));
+            assert!(
+                matches!(todo_view(&app).cursor, Some(Entry::Header { group, .. }) if group == later)
+            );
+
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert!(todo_file(&app).complete(later));
+            assert!(buffer_text(&draw_todos(&mut app)).contains("✓ done"));
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
+            assert!(!todo_file(&app).complete(later));
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(todo_file(&app).group(later).unwrap().collapsed);
+        });
+    }
+
     /// The texts of the seeded project's items in `group` (0-based, the
     /// top-level groups' order) as the modal draws them.
     fn todo_texts(app: &App, group: usize) -> Vec<String> {

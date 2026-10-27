@@ -61,6 +61,10 @@ pub struct Group {
     /// this one — or, with none, after them all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<u64>,
+    /// A nested group's priority, on Linear's scale as an item's is: the
+    /// last one set on it, which every item in it was set to then.
+    #[serde(default, skip_serializing_if = "crate::linear::is_zero")]
+    pub priority: u8,
 }
 
 /// One thing to do.
@@ -325,6 +329,7 @@ mod tests {
             name: "Emails".into(),
             collapsed: true,
             before: None,
+            priority: 0,
         });
         file.items.push(Item {
             id: 2,

@@ -1,11 +1,12 @@
 //! PROJECT TODOS (`⌘I`): a project's own todo list, kept on this machine
 //! only (`store`), in groups that fold, each item with Linear's priority.
 //! The order is the list's own: `⌥↑`/`⌥↓` walk an item anywhere in it —
-//! into a nested group and back out — and a priority set puts an item at
-//! the end of its level's run. `⌥→` groups items, `⌥←` takes them out
-//! again. Ticking an item strikes it through where it stands while the
-//! modal is up; once it goes, so does the item — kept in the
-//! file for the DONE page (`history`), what was ticked today or this
+//! into a nested group and back out — or a nested group past what is
+//! beside it, and a priority set puts an item (or a nested group, every
+//! item in it set the same) at the end of its level's run. `⌥→` groups
+//! items, `⌥←` takes them out again. Ticking an item strikes it through
+//! where it stands while the modal is up; once it goes, so does the item
+//! — kept in the file for the DONE page (`history`), what was ticked today or this
 //! week. A group with everything in it ticked is complete, and goes the
 //! same way. A list pasted in as indented Markdown becomes groups and
 //! items (`import`). The modal itself is `view`.
@@ -505,26 +506,49 @@ impl TodoFile {
         };
         let lead = *order.first()?;
         // The lead's step, worked out once: the guard and its own move.
-        let mut first = Some(self.step_target(lead, up)?);
+        let mut first = Some(self.step_target(Child::Item(lead), up)?);
         let mut entered = Vec::new();
         for id in order {
-            let Some((group, at)) = first.take().or_else(|| self.step_target(id, up)) else {
+            let Some((group, at)) = first
+                .take()
+                .or_else(|| self.step_target(Child::Item(id), up))
+            else {
                 continue;
             };
-            self.put(id, group, at);
+            self.put(Child::Item(id), group, at);
             entered.push(group);
         }
         Some(entered)
     }
 
-    /// Where one step up or down takes open `item`, if anywhere.
-    fn step_target(&self, item: u64, up: bool) -> Option<(u64, At)> {
-        let group = self.item(item).filter(|i| i.done.is_none())?.group;
+    /// `⌥↑`/`⌥↓` on a nested group's header: the group a place up or down
+    /// the list as drawn, as an item goes — past the item or group beside
+    /// it, never into one (groups nest one deep), and off its group's end
+    /// onto the start of the next top-level group (or the end of the one
+    /// before). The group it is now in; None when it has nowhere to go.
+    pub fn move_group(&mut self, group: u64, up: bool) -> Option<u64> {
+        let me = Child::Group(group);
+        let (to, at) = self.step_target(me, up)?;
+        self.put(me, to, at);
+        Some(to)
+    }
+
+    /// Where one step up or down takes `child` — an open item, or a nested
+    /// group not complete — if anywhere.
+    fn step_target(&self, child: Child, up: bool) -> Option<(u64, At)> {
+        let group = match child {
+            Child::Item(id) => self.item(id).filter(|i| i.done.is_none())?.group,
+            Child::Group(id) => self.parent_of(id)?,
+        };
         let kids = self.open_children(group);
-        let at = kids.iter().position(|c| *c == Child::Item(item))?;
+        let at = kids.iter().position(|c| *c == child)?;
         let beside = if up { at.checked_sub(1) } else { Some(at + 1) };
         match beside.and_then(|i| kids.get(i)).copied() {
-            Some(other @ Child::Item(_)) => Some((
+            // An item goes into a nested group it meets; a group past it.
+            Some(Child::Group(sub)) if matches!(child, Child::Item(_)) => {
+                Some((sub, if up { At::End } else { At::Start }))
+            }
+            Some(other) => Some((
                 group,
                 if up {
                     At::Before(other)
@@ -532,7 +556,6 @@ impl TodoFile {
                     At::After(other)
                 },
             )),
-            Some(Child::Group(sub)) => Some((sub, if up { At::End } else { At::Start })),
             None => match self.parent_of(group) {
                 Some(parent) => {
                     let me = Child::Group(group);
@@ -553,10 +576,15 @@ impl TodoFile {
         }
     }
 
-    /// Open `item` into `group`'s open contents `at` — the group it left
-    /// keeping the rest of its own in order.
-    fn put(&mut self, item: u64, group: u64, at: At) {
-        let Some(from) = self.item(item).map(|i| i.group) else {
+    /// `child` — an open item, or a nested group — into `group`'s open
+    /// contents `at`, the group it left keeping the rest of its own in
+    /// order.
+    fn put(&mut self, child: Child, group: u64, at: At) {
+        let from = match child {
+            Child::Item(id) => self.item(id).map(|i| i.group),
+            Child::Group(id) => self.parent_of(id),
+        };
+        let Some(from) = from else {
             return;
         };
         // Both worked out before it goes: the group it leaves stands in
@@ -564,12 +592,12 @@ impl TodoFile {
         let mut seq: Vec<Child> = self
             .open_children(group)
             .into_iter()
-            .filter(|c| *c != Child::Item(item))
+            .filter(|c| *c != child)
             .collect();
         let left: Vec<Child> = self
             .open_children(from)
             .into_iter()
-            .filter(|c| *c != Child::Item(item))
+            .filter(|c| *c != child)
             .collect();
         let index = match at {
             At::Start => 0,
@@ -580,10 +608,19 @@ impl TodoFile {
                 .position(|x| *x == c)
                 .map_or(seq.len(), |i| i + 1),
         };
-        seq.insert(index, Child::Item(item));
+        seq.insert(index, child);
         if from != group {
-            if let Some(it) = self.item_mut(item) {
-                it.group = group;
+            match child {
+                Child::Item(id) => {
+                    if let Some(it) = self.item_mut(id) {
+                        it.group = group;
+                    }
+                }
+                Child::Group(id) => {
+                    if let Some(g) = self.group_mut(id) {
+                        g.parent = Some(group);
+                    }
+                }
             }
             self.arrange(&left);
         }
@@ -694,33 +731,65 @@ impl TodoFile {
             return;
         }
         let group = me.group;
-        let rank = |file: &Self, c: &Child| match c {
-            Child::Item(id) => file
+        self.rerank(group, Child::Item(item), level);
+    }
+
+    /// `⌘P` on a nested group: it at Linear's `level`, and every item in
+    /// it reset to the same — one set on its own after that keeps its
+    /// own until the group's is set again. The group moves as an item
+    /// does ([`TodoFile::set_priority`]); set to none, it stays put.
+    pub fn set_group_priority(&mut self, group: u64, level: u8) {
+        let groups = self.subtree(group);
+        for g in self.groups.iter_mut().filter(|g| groups.contains(&g.id)) {
+            g.priority = level;
+        }
+        for item in self.items.iter_mut().filter(|i| groups.contains(&i.group)) {
+            item.priority = level;
+        }
+        if let Some(parent) = self.parent_of(group).filter(|_| level != 0) {
+            self.rerank(parent, Child::Group(group), level);
+        }
+    }
+
+    /// Where `child` ranks among its group's contents: an item by its
+    /// priority, a nested group by its own once it has one.
+    fn rank(&self, child: &Child) -> Option<usize> {
+        match child {
+            Child::Item(id) => self
                 .item(*id)
                 .map(|i| crate::linear::priority_rank(i.priority)),
-            Child::Group(_) => None,
-        };
+            Child::Group(id) => self
+                .group(*id)
+                .filter(|g| g.priority != 0)
+                .map(|g| crate::linear::priority_rank(g.priority)),
+        }
+    }
+
+    /// `child` of `group`, just set to `level` — moved to the end of the
+    /// run at its level when it now stands out of order with the ranked
+    /// ones either side of it.
+    fn rerank(&mut self, group: u64, child: Child, level: u8) {
         let mut seq = self.open_children(group);
-        let Some(at) = seq.iter().position(|c| *c == Child::Item(item)) else {
+        let Some(at) = seq.iter().position(|c| *c == child) else {
             return;
         };
         let mine = crate::linear::priority_rank(level);
-        let over = seq[..at].iter().rev().find_map(|c| rank(self, c));
-        let under = seq[at + 1..].iter().find_map(|c| rank(self, c));
+        let over = seq[..at].iter().rev().find_map(|c| self.rank(c));
+        let under = seq[at + 1..].iter().find_map(|c| self.rank(c));
         if over.is_none_or(|r| r <= mine) && under.is_none_or(|r| mine <= r) {
             return;
         }
         seq.remove(at);
         let to = seq
             .iter()
-            .position(|c| rank(self, c).is_some_and(|r| r > mine))
+            .position(|c| self.rank(c).is_some_and(|r| r > mine))
             .or_else(|| {
                 seq.iter()
-                    .rposition(|c| matches!(c, Child::Item(_)))
+                    .rposition(|c| self.rank(c).is_some())
                     .map(|i| i + 1)
             })
             .unwrap_or(0);
-        seq.insert(to, Child::Item(item));
+        seq.insert(to, child);
         self.arrange(&seq);
     }
 
@@ -733,6 +802,7 @@ impl TodoFile {
             name: name.to_string(),
             collapsed: false,
             before: None,
+            priority: 0,
         });
         id
     }
@@ -764,6 +834,29 @@ impl TodoFile {
             None => Some(now),
         };
         item.done.is_some()
+    }
+
+    /// `space` on a nested group: every open item in it ticked at `now` —
+    /// or, with none open, the ones ticked while the modal has been up
+    /// (`held`) open again; one ticked another time stays so. The items
+    /// it changed.
+    pub fn toggle_group(&mut self, group: u64, now: DateTime<Local>, held: &[u64]) -> Vec<u64> {
+        let groups = self.subtree(group);
+        let mine = |i: &Item| groups.contains(&i.group);
+        let tick = self.items.iter().any(|i| mine(i) && i.done.is_none());
+        let mut changed = Vec::new();
+        for item in self.items.iter_mut().filter(|i| mine(i)) {
+            let flip = if tick {
+                item.done.is_none()
+            } else {
+                held.contains(&item.id)
+            };
+            if flip {
+                item.done = tick.then_some(now);
+                changed.push(item.id);
+            }
+        }
+        changed
     }
 
     /// `item` gone — a nested group that stood before it now before the
@@ -1073,6 +1166,7 @@ mod tests {
             name: "old".into(),
             collapsed: false,
             before: None,
+            priority: 0,
         });
         assert_eq!(old.take_id(), 10);
     }
@@ -1284,5 +1378,106 @@ mod tests {
         assert_eq!(file.groups.len(), 1);
         assert_eq!(file.items.len(), 1);
         assert_eq!(file.items[0].text, "y");
+    }
+
+    /// `⌥↓` on a nested group walks it as an item goes: past the items
+    /// and groups beside it — never into one — then off its group's end
+    /// onto the start of the next; `⌥↑` back. A top-level group has
+    /// nowhere to go this way.
+    #[test]
+    fn a_nested_group_moves_as_an_item_does() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let top = file.add_group(None, "A");
+        let a1 = file.add_item(top, "a1", day(6));
+        let sub = file.add_group(Some(top), "Sub");
+        file.add_item(sub, "s1", day(6));
+        file.group_mut(sub).unwrap().before = Some(a1);
+        file.add_item(top, "a2", day(6));
+        let other = file.add_group(Some(top), "Other");
+        file.add_item(other, "o1", day(6));
+        let next = file.add_group(None, "B");
+        file.add_item(next, "b1", day(6));
+        assert_eq!(drawn(&file, top, &[]), ["[Sub]", "a1", "a2", "[Other]"]);
+
+        assert_eq!(file.move_group(sub, false), Some(top));
+        assert_eq!(drawn(&file, top, &[]), ["a1", "[Sub]", "a2", "[Other]"]);
+        file.move_group(sub, false);
+        file.move_group(sub, false);
+        assert_eq!(drawn(&file, top, &[]), ["a1", "a2", "[Other]", "[Sub]"]);
+        assert_eq!(drawn(&file, other, &[]), ["o1"], "past it, not into it");
+        assert_eq!(file.move_group(sub, false), Some(next));
+        assert_eq!(drawn(&file, next, &[]), ["[Sub]", "b1"]);
+        assert_eq!(drawn(&file, sub, &[]), ["s1"], "its items with it");
+
+        assert_eq!(file.move_group(sub, true), Some(top));
+        assert_eq!(drawn(&file, top, &[]), ["a1", "a2", "[Other]", "[Sub]"]);
+        assert!(file.move_group(top, true).is_none());
+    }
+
+    /// A nested group's priority resets every item in it and moves the
+    /// group as an item's would; one item set after that keeps its own;
+    /// none leaves the group where it stands.
+    #[test]
+    fn a_nested_groups_priority_trickles_down() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let top = file.add_group(None, "A");
+        let a = file.add_item(top, "a", day(6));
+        file.item_mut(a).unwrap().priority = 2;
+        let b = file.add_item(top, "b", day(6));
+        let sub = file.add_group(Some(top), "Sub");
+        let s1 = file.add_item(sub, "s1", day(6));
+        let s2 = file.add_item(sub, "s2", day(6));
+        file.item_mut(s2).unwrap().priority = 4;
+        assert_eq!(drawn(&file, top, &[]), ["a", "b", "[Sub]"]);
+
+        file.set_group_priority(sub, 1);
+        assert_eq!(file.group(sub).unwrap().priority, 1);
+        assert!([s1, s2]
+            .iter()
+            .all(|id| file.item(*id).unwrap().priority == 1));
+        assert_eq!(drawn(&file, top, &[]), ["[Sub]", "a", "b"]);
+
+        file.set_priority(s2, 3);
+        assert_eq!(file.item(s2).unwrap().priority, 3, "overridden");
+        file.set_group_priority(sub, 2);
+        assert!([s1, s2]
+            .iter()
+            .all(|id| file.item(*id).unwrap().priority == 2));
+        // An item set urgent goes ahead of the group, which ranks high.
+        file.set_priority(b, 1);
+        assert_eq!(drawn(&file, top, &[]), ["b", "[Sub]", "a"]);
+
+        file.set_group_priority(sub, 0);
+        assert_eq!(drawn(&file, top, &[]), ["b", "[Sub]", "a"], "stays put");
+        assert_eq!(file.item(s1).unwrap().priority, 0);
+    }
+
+    /// Ticking a nested group ticks everything open in it, keeping what
+    /// was ticked before as it was; ticking it again opens only what was
+    /// ticked while the modal has been up.
+    #[test]
+    fn a_nested_group_ticks_and_unticks_as_one() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let top = file.add_group(None, "A");
+        let sub = file.add_group(Some(top), "Sub");
+        let s1 = file.add_item(sub, "s1", day(6));
+        let s2 = file.add_item(sub, "s2", day(6));
+        let old = file.add_item(sub, "old", day(1));
+        file.toggle(old, at(2, 9));
+        file.toggle(s1, at(6, 8));
+
+        let ticked = file.toggle_group(sub, at(6, 10), &[s1]);
+        assert_eq!(ticked, [s2]);
+        assert!(file.complete(sub));
+        assert_eq!(file.item(s1).unwrap().done, Some(at(6, 8)), "kept");
+
+        let held = [s1, s2];
+        let opened = file.toggle_group(sub, at(6, 11), &held);
+        assert_eq!(opened, [s1, s2]);
+        assert!(
+            file.item(old).unwrap().done.is_some(),
+            "another day's stays"
+        );
+        assert_eq!(drawn(&file, sub, &[]), ["s1", "s2"]);
     }
 }

@@ -10,10 +10,16 @@
 //! days it has carried over. A top-level group's header is a section —
 //! its name in capitals, a rule across to what is open in it at each
 //! priority, nested groups and all, and what was ticked today; a group
-//! under it says only how many are open. Each folds (`space` on it), and
-//! `⌘↑`/`⌘↓` jump from header to header. The project row says what was
-//! ticked today and this week, across every project, day by day — and a
-//! click on either opens the DONE page on it (`history`).
+//! under it says only how many are open, and its priority once it has
+//! one. Each folds (`Enter` on it, or a click on its `▾`), a section's
+//! with `space` too, and `⌘↑`/`⌘↓` jump from header to header. A nested
+//! group's header acts as an item does: `space` ticks everything in it
+//! (or opens again what was ticked while the modal was up), `⌘P` sets
+//! its priority and every item's in it — one then set on its own keeps
+//! its own until the group's is set again — and `⌥↑`/`⌥↓` move it. The
+//! project row says what was ticked today and this week, across every
+//! project, day by day — and a click on either opens the DONE page on it
+//! (`history`).
 //!
 //! An item ticked stays where it stood, struck through, the cursor on
 //! it — nothing moves under it; so does a group with everything in it
@@ -134,8 +140,9 @@ impl MenuAction {
 pub enum PickKind {
     Menu(Vec<MenuAction>),
     Team(Vec<LinearTeam>),
-    /// `⌘P`: the priority for these items.
-    Priority(Vec<u64>),
+    /// `⌘P`: the priority for these items — or for a nested group, and
+    /// everything in it.
+    Priority(Vec<Target>),
 }
 
 /// The priority pick's rows, top to bottom: Linear's level for each.
@@ -333,7 +340,8 @@ impl TodoView {
 pub(crate) mod keys {
     use crate::hints::Key;
 
-    /// Tick or untick the item; fold a header.
+    /// Tick or untick the item, or everything in a nested group; fold a
+    /// section's header.
     pub const DONE: Key = Key::new(&["space"], "done");
     /// The project tabs, as the LINEAR VIEW walks its tabs: `←`/`→` — `⇧`
     /// too, the PULL REQUESTS MODAL's — round either end, and `Tab` on.
@@ -353,9 +361,10 @@ pub(crate) mod keys {
     );
     /// The previous or next group's header, nested ones included.
     pub const JUMP: Key = Key::new(&["cmd+up", "cmd+down"], "groups").show(2);
-    /// The item — or the selection — a place up or down the list as
-    /// drawn: past the next item, into a nested group and out of it, then
-    /// into the next group.
+    /// The item — or the selection, or a nested group from its header —
+    /// a place up or down the list as drawn: past the next item, into a
+    /// nested group and out of it (a group goes past one), then into the
+    /// next group.
     pub const MOVE: Key = Key::new(&["alt+up", "alt+down"], "move").show(2);
     /// `⌥→` the items into a new group of their own; `⌥←` them out of
     /// theirs — or, on its header, the group flattened into its place.
@@ -374,7 +383,8 @@ pub(crate) mod keys {
     /// character gone; any other character typed on it is added to its
     /// end.
     pub const EDIT: Key = Key::new(&["backspace"], "edit");
-    /// Linear's priorities in a pick: `P`, as Linear has it.
+    /// Linear's priorities in a pick: `P`, as Linear has it. On a nested
+    /// group's header, the group's — every item in it reset to it.
     pub const PRIORITY: Key = Key::new(&["cmd+p", "ctrl+p"], "priority");
     /// The grid's delete-worktree key, on a row: the item, or the group
     /// and everything in it. `^W` where no ⌘ arrives.
@@ -1116,7 +1126,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Enter => match current(app) {
             Some(Entry::AddRow) => start_item(app),
             Some(Entry::Item { .. }) => agent(app, out),
-            Some(Entry::Header { .. }) => done(app),
+            Some(Entry::Header { group, .. }) => fold(app, group),
             _ => {}
         },
         _ if keys::PRESET.matches(&key) => preset(app),
@@ -1188,6 +1198,12 @@ fn select(app: &mut App, delta: i32) {
 /// ([`TodoFile::move_items`]), the cursor and the selection going with
 /// them — a folded group they go into opened, so they stay in sight.
 fn move_chosen(app: &mut App, up: bool) {
+    if let Some(group) = nested_header(app) {
+        if view(app).is_some_and(|v| v.query.trim().is_empty()) {
+            move_group(app, group, up);
+        }
+        return;
+    }
     let ids = chosen(app);
     let Some(view) = view(app) else {
         return;
@@ -1208,6 +1224,29 @@ fn move_chosen(app: &mut App, up: bool) {
     if let Some(id) = cursor {
         land_on_item(app, id);
     }
+}
+
+/// `⌥↑`/`⌥↓` on a nested group's header: the group a place up or down
+/// ([`TodoFile::move_group`]), the cursor going with it — the group it
+/// went into opened.
+fn move_group(app: &mut App, group: u64, up: bool) {
+    let moved = edit_if(app, |file| {
+        let to = file.move_group(group, up)?;
+        file.reveal(to);
+        Some(())
+    });
+    if moved.is_some() {
+        land_on_group(app, Some(group));
+    }
+}
+
+/// The cursor's header, when it is a nested group's: one that acts as an
+/// item does — moved, ticked, given a priority.
+fn nested_header(app: &App) -> Option<u64> {
+    let Some(Entry::Header { group, .. }) = current(app) else {
+        return None;
+    };
+    list(app)?.parent_of(group).map(|_| group)
 }
 
 /// `⌥→`: the chosen items — open, in one top-level group — into a new
@@ -1617,7 +1656,8 @@ fn jump(app: &mut App, down: bool) {
 /// `space`: tick or untick the chosen items — all ticked unless every
 /// one already is. Either way they stay where they stand, in sight until
 /// the modal goes (`TodoView::held`), and the cursor and the selection
-/// with them. Or fold the header.
+/// with them. On a nested group's header, everything in it the same way
+/// ([`TodoFile::toggle_group`]); on a section's, fold it.
 fn done(app: &mut App) {
     match current(app) {
         Some(Entry::Item { .. }) => {
@@ -1637,38 +1677,66 @@ fn done(app: &mut App) {
                     }
                 }
             });
-            if let Some(view) = view_mut(app) {
-                for id in &ids {
-                    if !view.held.contains(id) {
-                        view.held.push(*id);
-                    }
-                }
-            }
+            hold(app, &ids);
         }
-        Some(Entry::Header { group, .. }) => {
-            let folded = list(app)
-                .and_then(|file| file.group(group))
-                .is_some_and(|g| g.collapsed);
-            edit(app, |file| {
-                if let Some(g) = file.group_mut(group) {
-                    g.collapsed = !folded;
-                }
-            });
+        Some(Entry::Header { group, .. }) if nested_header(app).is_some() => {
+            let now = super::now();
+            let held = view(app).map(|v| v.held.clone()).unwrap_or_default();
+            let ids = edit(app, |file| file.toggle_group(group, now, &held)).unwrap_or_default();
+            hold(app, &ids);
         }
+        Some(Entry::Header { group, .. }) => fold(app, group),
         _ => {}
     }
 }
 
-/// `⌘P`: the priority pick for the chosen items, on the cursor's own.
+/// `ids`, just ticked or unticked, kept in sight where they stand until
+/// the modal goes.
+fn hold(app: &mut App, ids: &[u64]) {
+    if let Some(view) = view_mut(app) {
+        for id in ids {
+            if !view.held.contains(id) {
+                view.held.push(*id);
+            }
+        }
+    }
+}
+
+/// `Enter` on a header, or a click on its `▾`/`▸`: the group folded, or
+/// opened.
+fn fold(app: &mut App, group: u64) {
+    let folded = list(app)
+        .and_then(|file| file.group(group))
+        .is_some_and(|g| g.collapsed);
+    edit(app, |file| {
+        if let Some(g) = file.group_mut(group) {
+            g.collapsed = !folded;
+        }
+    });
+}
+
+/// `⌘P`: the priority pick for the chosen items, on the cursor's own —
+/// or, on a nested group's header, for the group, on its own.
 fn open_priority(app: &mut App) {
-    let ids = chosen(app);
-    let Some(first) = ids.first().copied() else {
-        return;
+    let (first, targets, level) = match nested_header(app) {
+        Some(group) => {
+            let level = list(app)
+                .and_then(|f| f.group(group))
+                .map_or(0, |g| g.priority);
+            (group, vec![Target::Group(group)], level)
+        }
+        None => {
+            let ids = chosen(app);
+            let Some(first) = ids.first().copied() else {
+                return;
+            };
+            let level = list(app)
+                .and_then(|f| f.item(first))
+                .map_or(0, |i| i.priority);
+            (first, ids.into_iter().map(Target::Item).collect(), level)
+        }
     };
-    let level = list(app)
-        .and_then(|f| f.item(first))
-        .map_or(0, |i| i.priority);
-    let mut pick = Pick::new(first, PickKind::Priority(ids));
+    let mut pick = Pick::new(first, PickKind::Priority(targets));
     pick.selected = PRIORITY_ROWS.iter().position(|l| *l == level).unwrap_or(0);
     if let Some(view) = view_mut(app) {
         view.pick = Some(pick);
@@ -1677,11 +1745,15 @@ fn open_priority(app: &mut App) {
 
 /// The chosen items at Linear's `level` — each moved to the end of its
 /// level's run when it stood out of order ([`TodoFile::set_priority`]),
-/// the cursor going with its item.
-fn set_priority(app: &mut App, ids: &[u64], level: u8) {
+/// the cursor going with its item — or a nested group and everything in
+/// it ([`TodoFile::set_group_priority`]).
+fn set_priority(app: &mut App, targets: &[Target], level: u8) {
     edit(app, |file| {
-        for id in ids {
-            file.set_priority(*id, level);
+        for target in targets {
+            match *target {
+                Target::Item(id) => file.set_priority(id, level),
+                Target::Group(id) => file.set_group_priority(id, level),
+            }
         }
     });
 }
@@ -1967,9 +2039,9 @@ fn choose(app: &mut App, out: &mut Vec<ClientRequest>) {
                 create(app, item, Some(team));
             }
         }
-        PickKind::Priority(ids) => {
+        PickKind::Priority(targets) => {
             if let Some(level) = PRIORITY_ROWS.get(pick.selected) {
-                set_priority(app, &ids, *level);
+                set_priority(app, &targets, *level);
             }
         }
     }
@@ -2401,7 +2473,8 @@ fn click_row(app: &mut App, pos: Position) {
         view.anchor = None;
     }
     match entry {
-        Entry::Item { .. } | Entry::Header { .. } if on_mark => done(app),
+        Entry::Item { .. } if on_mark => done(app),
+        Entry::Header { group, .. } if on_mark => fold(app, group),
         Entry::AddRow => start_item(app),
         _ => {}
     }
@@ -2724,10 +2797,14 @@ fn draw_pick(f: &mut Frame, area: Rect, file: &TodoFile, pick: &mut Pick, th: Th
             format!("Linear · {}", linked.as_deref().unwrap_or("not linked")),
             actions.iter().map(|a| a.label(linked.as_deref())).collect(),
         ),
-        PickKind::Priority(ids) => (
-            match ids.len() {
-                1 => "Priority".into(),
-                n => format!("Priority · {n} todos"),
+        PickKind::Priority(targets) => (
+            match targets.as_slice() {
+                [Target::Group(id)] => format!(
+                    "Priority · {}",
+                    file.group(*id).map_or("", |g| g.name.as_str())
+                ),
+                [_] => "Priority".into(),
+                many => format!("Priority · {} todos", many.len()),
             },
             PRIORITY_ROWS
                 .iter()
@@ -2836,13 +2913,18 @@ fn header_spans(
         vec![open]
     };
     let fold = format!("{} ", crate::ui::fold_mark(!g.collapsed));
-    let left = vec![
+    let mut left = vec![
         indent(depth),
         Span::styled(
             fold,
             Style::default().fg(if top { th.muted } else { th.dim }),
         ),
     ];
+    // A nested group's own priority, once it has one, as an item's.
+    if !top && g.priority != 0 {
+        left.push(crate::linear::priority_mark(g.priority, th));
+        left.push(Span::raw(" "));
+    }
     let full = if top {
         g.name.to_uppercase()
     } else {
@@ -2868,7 +2950,6 @@ fn header_spans(
     if !top {
         return justify(left, name, right, budget);
     }
-    let mut left = left;
     left.extend(name);
     ruled(left, right, budget, th)
 }
@@ -3169,7 +3250,7 @@ mod tests {
         v.anchor = Some(1);
         check(&v);
         v.anchor = None;
-        v.pick = Some(Pick::new(1, PickKind::Priority(vec![1])));
+        v.pick = Some(Pick::new(1, PickKind::Priority(vec![Target::Item(1)])));
         check(&v);
         v.pick = None;
         v.input = Some((

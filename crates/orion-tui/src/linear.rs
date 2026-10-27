@@ -1209,7 +1209,7 @@ pub struct StaleAttachment {
     id: String,
 }
 
-fn is_zero(n: &u8) -> bool {
+pub(crate) fn is_zero(n: &u8) -> bool {
     *n == 0
 }
 
