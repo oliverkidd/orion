@@ -716,6 +716,9 @@ pub(crate) fn schedule_detail(app: &mut App) {
         return;
     };
     let dir = view.dir.clone();
+    if let Some(pr) = selected_pr(app) {
+        crate::conflicts::want(app, &pr.url, &dir);
+    }
     let pending = selected_pr(app).and_then(|pr| pending_for(app, pr.url, pr.number, dir));
     app.pending_pr_detail = pending.map(|p| (p, std::time::Instant::now() + DETAIL_DEBOUNCE));
 }
@@ -989,9 +992,11 @@ pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
 // ---- keys and mouse ----
 
 /// The row under the reading side's cursor, acted on — `⌘E` on a file or
-/// a commit, `⌘O` on a check (`pr_preview::run_act`). False with nothing
-/// to act on there: a tab of prose, or a body still on its way.
-fn act_on_row(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
+/// a commit, `⌘O` on a check (`pr_preview::run_act`); with `resolve`, a
+/// conflicted file is resolved rather than diffed (Enter, a click). False
+/// with nothing to act on there: a tab of prose, or a body still on its
+/// way.
+fn act_on_row(app: &mut App, out: &mut Vec<ClientRequest>, resolve: bool) -> bool {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return false;
     };
@@ -1006,7 +1011,7 @@ fn act_on_row(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
     else {
         return false;
     };
-    crate::pr_preview::run_act(app, pr.number, &pr.url, &pr.label(), act, out);
+    crate::pr_preview::run_act(app, pr.number, &pr.url, &pr.label(), act, resolve, out);
     true
 }
 
@@ -1017,7 +1022,7 @@ fn diff(app: &mut App, out: &mut Vec<ClientRequest>) {
         Some(Overlay::PullRequests(view)) => view.tabs.tab,
         _ => return,
     };
-    if matches!(on, PrTab::Changes | PrTab::Commits) && act_on_row(app, out) {
+    if matches!(on, PrTab::Changes | PrTab::Commits) && act_on_row(app, out, false) {
         return;
     }
     if let Some(pr) = selected_pr(app) {
@@ -1031,7 +1036,7 @@ fn browser(app: &mut App, out: &mut Vec<ClientRequest>) {
         Some(Overlay::PullRequests(view)) => view.tabs.tab,
         _ => return,
     };
-    if on == PrTab::Checks && act_on_row(app, out) {
+    if on == PrTab::Checks && act_on_row(app, out, false) {
         return;
     }
     open_in_browser(app, out);
@@ -1054,7 +1059,7 @@ fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
         _ => return,
     };
     if tab.lists() {
-        act_on_row(app, out);
+        act_on_row(app, out, true);
     } else if tab == PrTab::Reviews {
         crate::pr_actions::open_review(app);
     } else {
@@ -1144,6 +1149,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::CLOSE.matches(&key) => crate::pr_actions::open_close(app),
         _ if keys::READY.matches(&key) => crate::pr_actions::toggle_draft(app),
         _ if keys::AUTOFIX.matches(&key) => autofix(app),
+        _ if keys::CHECKOUT.matches(&key) => crate::pr_checkout::from_modal(app, out),
         // A PR PICK already came from the LINEAR VIEW: `⌘L` there would
         // stack the two views on each other, so it does nothing.
         _ if keys::LINEAR.matches(&key) && view.pick.is_some() => {}
@@ -1297,7 +1303,7 @@ pub(crate) fn handle_mouse(
             if let Some(row) = on_row {
                 view.tabs.select(row);
             }
-            act_on_row(app, out);
+            act_on_row(app, out, true);
         }
         // A `<details>` summary opens or shuts, as on github.com.
         MouseEventKind::Down(MouseButton::Left) if on_fold.is_some() => {
@@ -1387,6 +1393,9 @@ pub(crate) mod keys {
     /// The AUTOFIX form: an agent sent at the pull request's conflicts and
     /// failing checks (`crate::autofix`).
     pub const AUTOFIX: Key = Key::new(&["cmd+g", "ctrl+g"], "autofix");
+    /// The pull request's checkout, found or cut (`pr_checkout`): the
+    /// row menu's **Check out**. ⌘B for its branch.
+    pub const CHECKOUT: Key = Key::new(&["cmd+b", "ctrl+b"], "check out");
     /// Enter on the PR PICK's list: the pull request attached to the
     /// issues the LINEAR VIEW marked.
     pub const ATTACH: Key = Key::new(&["enter"], "attach to this PR");
@@ -1399,7 +1408,7 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, ATTACH, TABS, ROWS, FILTER, JUMP,
+        MERGE, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, TABS, ROWS, FILTER, JUMP,
     ];
 }
 
@@ -1445,6 +1454,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
             keys::CLOSE.hint(),
             keys::READY.hint(),
             keys::AUTOFIX.hint(),
+            keys::CHECKOUT.hint(),
             diff,
             browser,
             keys::READ.hint(),
@@ -1475,6 +1485,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
         keys::CLOSE.hint(),
         keys::READY.hint(),
         keys::AUTOFIX.hint(),
+        keys::CHECKOUT.hint(),
         keys::REVIEW.hint(),
         keys::COMMENT.hint(),
         diff,
@@ -1934,6 +1945,7 @@ pub(crate) fn draw(
         posting: app.pr_comment_inflight.contains(&pr.url),
         browser_key: keys::BROWSER.label(),
         diff_key: keys::DIFF.label(),
+        conflicts: crate::conflicts::of_page(app, &pr.url),
         now,
     });
     // The frame says where it stands, the number and the title — the page

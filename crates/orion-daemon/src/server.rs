@@ -490,6 +490,21 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         reply(&out_tx, req_id, result.map(Some)).await;
                     });
                 }
+                ClientRequest::CreatePrWorktree {
+                    req_id,
+                    project,
+                    pr_url,
+                    head,
+                } => {
+                    // A fetch, a `git worktree add` and the WORKTREE HOOK,
+                    // off the request loop as `CreatePrAgent`'s checkout is.
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let result = daemon.create_pr_worktree(&project, &pr_url, &head).await;
+                        reply(&out_tx, req_id, result.map(Some)).await;
+                    });
+                }
                 ClientRequest::PrewarmAgent {
                     worktree,
                     kind,

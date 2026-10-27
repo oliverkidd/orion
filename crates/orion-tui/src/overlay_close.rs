@@ -51,6 +51,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Autofix(v) => v.area,
         Overlay::Todos(v) => v.area,
         Overlay::WeekReview(v) => v.area,
+        Overlay::Conflicts(v) => v.area,
     }
 }
 
@@ -95,6 +96,9 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
                 crate::pr_modal::reopen(app, *back);
             }
         }
+        // The CONFLICT RESOLVER is a level inside the modal it came from,
+        // as the DIFF VIEWER is; its merge stays as it was left.
+        Some(Overlay::Conflicts(_)) => crate::conflicts::back(app),
         // Nothing to unwind on the way out.
         Some(
             Overlay::Help(_)

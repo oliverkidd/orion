@@ -2328,6 +2328,7 @@ fn land_detail(
     let url = landed.ticket.key.clone();
     let asked = landed.ticket.asked();
     land_pr_detail(app, url.clone(), landed.detail, asked, flight.owed, out);
+    crate::conflicts::want(app, &url, &landed.dir);
     if flight.owed && landed.dir.is_dir() {
         spawn_pr_detail(app, detail_tx, url, landed.number, landed.dir);
     }
@@ -3573,6 +3574,7 @@ fn close_vim(app: &mut App) {
         Some(Overlay::Tree(view)) => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
         Some(Overlay::Skills(_)) => crate::skills::editor_closed(app),
+        Some(Overlay::Conflicts(view)) => view.reload(),
         _ => {}
     }
 }
@@ -6274,6 +6276,7 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         }
         Answer::ClipboardImage(pasted) => land_clipboard_image(app, pasted),
         Answer::Flash(message) => app.flash = Some(crate::flash::Flash::failed(message)),
+        Answer::Conflicts(answer) => crate::conflicts::land(app, answer),
         Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
             Some(Overlay::Diff(view)) => crate::git_diff::diff_slow(view, ticket),
@@ -7163,6 +7166,7 @@ fn modal_takes_cmd_w(app: &App) -> bool {
                     | Overlay::Skills(_)
                     | Overlay::AgentPresets(_)
                     | Overlay::Stacks(_)
+                    | Overlay::Conflicts(_)
             )
         )
 }
@@ -7753,12 +7757,22 @@ fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
 
 /// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: a PR SESSION row per
 /// enabled harness (none when the PROJECT has no ROOT WORKTREE to launch
-/// in), then the row's browser and diff verbs.
+/// in), then **Check out** (`pr_checkout`) and the row's browser and diff
+/// verbs.
 fn pr_row_menu_items(app: &App, pr: &crate::pull_request::OpenPr) -> Vec<MenuItem> {
     let mut items = match selected_project_main_worktree(app) {
         Some(worktree) => agent_picker::pr_session_menu_rows(worktree, pr),
         None => Vec::new(),
     };
+    if let Some(project) = app.selected_project().map(|p| p.id.clone()) {
+        items.push(MenuItem::new(
+            "Check out",
+            MenuAction::CheckOutPr {
+                project,
+                pr: crate::pull_request::PrLaunch::of(pr),
+            },
+        ));
+    }
     items.extend([
         MenuItem::new("Open in browser", MenuAction::OpenLink(pr.url.clone())),
         MenuItem::new("View diff", MenuAction::ViewPrDiff),
@@ -8163,6 +8177,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
+        Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::Stacks(_) => crate::stacks::handle_key(app, key, out),
@@ -10492,6 +10507,9 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         MenuAction::OpenLink(url) => open_link(app, &url, out),
         MenuAction::ViewPrDiff => request_pr_diff(app),
         MenuAction::CommentPullRequest => open_pr_comment(app),
+        MenuAction::CheckOutPr { project, pr } => {
+            crate::pr_checkout::check_out(app, project, pr, crate::pr_checkout::Then::Show, out)
+        }
         // In the LAUNCHER VIEW the composer is a STRIP along the bottom
         // of the PANE, which has to be there and reading the right
         // session first: same intent, one step more, so this row and
@@ -10724,7 +10742,7 @@ fn land_pending_selection(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 /// Select the worktree row for `id` within the selected project; returns
 /// false when it isn't in the tree yet (its upsert hasn't arrived).
-pub(super) fn select_worktree_by_id(
+pub(crate) fn select_worktree_by_id(
     app: &mut App,
     id: &orion_core::WorktreeId,
     out: &mut Vec<ClientRequest>,
@@ -12987,6 +13005,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::week_review::handle_mouse(app, mouse);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::Conflicts(_))) {
+        crate::conflicts::handle_mouse(app, mouse);
+        return;
+    }
     // Hosts picker: the wheel moves the selection, a click on a row connects
     // (the context-menu convention — rows are actions, not editable items);
     // everything else inside the box is swallowed.
@@ -13593,7 +13615,7 @@ fn connection_lost(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
 }
 
-fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
+pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
     match event {
         ServerEvent::Snapshot {
             projects,
@@ -13847,6 +13869,9 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                     };
                     app.flash = Some(crate::flash::Flash::done(note));
                 }
+                (Some(PendingIntent::CheckOutPr { then }), Some(EntityId::Worktree(id))) => {
+                    crate::pr_checkout::landed(app, id, then, out);
+                }
                 (Some(PendingIntent::SelectCreatedProject), Some(EntityId::Project(id))) => {
                     // Its upsert usually lands just before this Ack; if not,
                     // stash the id and select once it does.
@@ -13961,6 +13986,8 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                     app.select_project_when_seen = None;
                 }
             }
+            // ...and on with a pull request's checkout whose Ack came first.
+            crate::pr_checkout::seen(app, out);
             // ...and onto a worktree we just created.
             if let Some(wt_id) = app.select_worktree_when_seen.clone() {
                 if select_worktree_by_id(app, &wt_id, out) {
@@ -40016,6 +40043,21 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "Conflicts",
+                |app| {
+                    seed_tree(app);
+                    app.overlay = Some(Overlay::Conflicts(Box::new(
+                        crate::conflicts::ConflictView::new(
+                            "/nonexistent".into(),
+                            "feat".into(),
+                            "main".into(),
+                            Vec::new(),
+                        ),
+                    )));
+                },
+                None,
+            ),
+            (
                 "BranchSwitch",
                 |app| {
                     seed_tree(app);
@@ -40241,6 +40283,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Onboard(_) => "Onboard",
             Overlay::Autofix(_) => "Autofix",
             Overlay::WeekReview(_) => "WeekReview",
+            Overlay::Conflicts(_) => "Conflicts",
             Overlay::Todos(_) => "Todos",
         }
     }
@@ -40270,7 +40313,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 26, "a variant came or went: {seen:?}");
         });
     }
 

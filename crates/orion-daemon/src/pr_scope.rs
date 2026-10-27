@@ -270,6 +270,20 @@ pub(crate) struct CreatePrAgentSpec {
 }
 
 impl Daemon {
+    /// CHECK OUT A PULL REQUEST: the checkout a PR SESSION would run in,
+    /// found or cut, with nothing launched in it.
+    pub(crate) async fn create_pr_worktree(
+        self: &Arc<Self>,
+        project: &ProjectId,
+        pr_url: &str,
+        head: &str,
+    ) -> Result<EntityId> {
+        let number = pr_number(&validate_pr_url(pr_url)?)?;
+        let head = validate_head(head)?;
+        let worktree = self.pr_worktree(project, number, &head).await?;
+        Ok(EntityId::Worktree(worktree.id))
+    }
+
     /// Create a PR SESSION: put a checkout of the PR's head branch under
     /// the PROJECT (or find the one already there), then create the AGENT
     /// in it with the PR URL as its launch context.

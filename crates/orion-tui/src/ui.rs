@@ -2609,6 +2609,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
+        Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
         Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::Stacks(view) => crate::stacks::draw(f, app, &view, th),
@@ -4135,6 +4136,7 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     };
     let detail = app.pr_detail.get(&pr.url).cloned();
     let failed = app.pr_detail_failed.contains(&pr.url);
+    let conflicts = crate::conflicts::of_page(app, &pr.url).map(<[String]>::to_vec);
     let title = pr
         .label
         .strip_prefix(&format!("#{}", pr.number))
@@ -4151,6 +4153,7 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         posting: false,
         browser_key: key_hint(app, Action::Activate),
         diff_key: key_hint(app, Action::GitDiff),
+        conflicts: conflicts.as_deref(),
         now: orion_core::clock::now_secs() as i64,
     };
 

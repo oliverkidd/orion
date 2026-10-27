@@ -5856,6 +5856,23 @@ mod tests {
             .unwrap();
         assert_eq!(again.id, fork.id, "and later launches share it");
 
+        // CHECK OUT A PULL REQUEST finds the same checkout a PR SESSION
+        // runs in — and refuses a bad URL or head before any git.
+        let checked_out = daemon
+            .create_pr_worktree(&project, "https://github.com/o/r/pull/7", "feat-x")
+            .await
+            .unwrap();
+        assert_eq!(checked_out, EntityId::Worktree(first.id.clone()));
+        for (url, head) in [
+            ("https://github.com/o/r/issues/7", "feat-x"),
+            ("https://github.com/o/r/pull/7", "--force"),
+        ] {
+            assert!(daemon
+                .create_pr_worktree(&project, url, head)
+                .await
+                .is_err());
+        }
+
         // A bad head never reaches git — it is refused ahead of the lookup.
         let err = daemon
             .create_pr_agent(crate::pr_scope::CreatePrAgentSpec {

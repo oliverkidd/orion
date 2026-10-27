@@ -446,6 +446,9 @@ pub struct PageInput<'a> {
     /// that reads its whole diff — what the page's own sentences name.
     pub browser_key: String,
     pub diff_key: String,
+    /// The files it conflicts in, as the repo merged them
+    /// (`conflicts::of_page`): the Changes tab marks them.
+    pub conflicts: Option<&'a [String]>,
     /// Unix seconds, for ages and durations.
     pub now: i64,
 }
@@ -712,7 +715,11 @@ fn tab_label(
     };
     match tab {
         PrTab::Description => (name, None, None),
-        PrTab::Changes => (name, Some(d.changed_files.to_string()), None),
+        PrTab::Changes => {
+            let conflicted = input.conflicts.map_or(0, <[String]>::len);
+            let verdict = (conflicted > 0).then(|| (format!("✗ {conflicted}"), th.err));
+            (name, Some(d.changed_files.to_string()), verdict)
+        }
         PrTab::Commits => (name, Some(d.commits.len().to_string()), None),
         PrTab::Checks => {
             let n = CheckCounts::of(&d.checks);
@@ -979,26 +986,59 @@ fn body(
         PrTab::Changes => {
             let total = detail.changed_files as usize;
             let noun = if total == 1 { "file" } else { "files" };
+            let conflicts = input.conflicts.unwrap_or_default();
+            let mut right = Vec::new();
+            if !conflicts.is_empty() {
+                right.push(Span::styled(
+                    format!("{} conflicting  ", conflicts.len()),
+                    Style::default().fg(th.err),
+                ));
+            }
             listed.lines.push(crate::ui::section_rule(
                 &format!("{total} {noun}"),
                 th.muted,
-                vec![
-                    Span::styled(
-                        format!("+{}", detail.additions),
-                        Style::default().fg(th.added),
-                    ),
-                    Span::styled(
-                        format!(" −{}", detail.deletions),
-                        Style::default().fg(th.removed),
-                    ),
-                ],
+                right
+                    .into_iter()
+                    .chain([
+                        Span::styled(
+                            format!("+{}", detail.additions),
+                            Style::default().fg(th.added),
+                        ),
+                        Span::styled(
+                            format!(" −{}", detail.deletions),
+                            Style::default().fg(th.removed),
+                        ),
+                    ])
+                    .collect(),
                 width,
                 th,
             ));
             let counts =
                 crate::ui::CountColumns::of(detail.files.iter().map(|f| Some(file_lines(f))));
             for file in &detail.files {
-                listed.row(file_row(file, &counts, width, th));
+                let conflicted = conflicts.contains(&file.path);
+                listed.row(file_row(file, conflicted, &counts, width, th));
+            }
+            if !conflicts.is_empty() {
+                listed.lines.push(Line::from(""));
+                listed.lines.extend(flow_lines(
+                    &[(
+                        format!(
+                            "{} conflicts with {} — Enter on it merges {} in and resolves it",
+                            if conflicts.len() == 1 {
+                                "1 file"
+                            } else {
+                                "these files"
+                            },
+                            detail.base,
+                            detail.base,
+                        ),
+                        Style::default().fg(th.err),
+                    )],
+                    width,
+                    BODY,
+                    BODY,
+                ));
             }
             if detail.files.len() < total {
                 listed.lines.push(Line::from(""));
@@ -1123,12 +1163,22 @@ fn count_text(sign: char, n: u64) -> String {
 /// stays — and its `+A −R` in the viewer's columns, a zero dim.
 fn file_row(
     file: &PrFile,
+    conflicted: bool,
     counts: &crate::ui::CountColumns,
     width: usize,
     th: Theme,
 ) -> Vec<Span<'static>> {
-    let xy = [file.status(), ' '];
-    let color = crate::ui::change_color(xy, th);
+    // A file the base conflicts with wears git's own `U`, in red.
+    let xy = if conflicted {
+        ['U', ' ']
+    } else {
+        [file.status(), ' ']
+    };
+    let color = if conflicted {
+        th.err
+    } else {
+        crate::ui::change_color(xy, th)
+    };
     let lead = BODY.len() + 3;
     // The counts go before the path shortens past [`MIN_TEXT_W`]; the path
     // keeps clear of them and of the cell of air `columns` leaves.
@@ -1144,7 +1194,11 @@ fn file_row(
         Some(i) => path.split_at(i + 1),
         None => ("", path.as_str()),
     };
-    let name_color = if xy[0] == 'D' { th.muted } else { th.text };
+    let name_color = match xy[0] {
+        'U' => th.err,
+        'D' => th.muted,
+        _ => th.text,
+    };
     let left = vec![
         Span::raw(BODY),
         Span::styled(
@@ -1626,16 +1680,26 @@ pub fn row_act(detail: &PrDetail, tabs: &PrTabs) -> Option<RowAct> {
 /// Run `act` for pull request `number` (`url`, titled `label`): the DIFF
 /// VIEWER opened through the pull request's own entry point — the one
 /// `⌘E` and the modal's `^G` take — at the file, or on the commit's own
-/// diff, fetched the same way; a check's page in the browser.
+/// diff, fetched the same way; a check's page in the browser. With
+/// `resolve`, a file its base conflicts with opens the CONFLICT RESOLVER
+/// instead (`conflicts::open`).
 pub(crate) fn run_act(
     app: &mut crate::app::App,
     number: u64,
     url: &str,
     label: &str,
     act: RowAct,
+    resolve: bool,
     out: &mut Vec<orion_core::ClientRequest>,
 ) {
     match act {
+        // A file the base conflicts with: the CONFLICT RESOLVER on it.
+        RowAct::File(path)
+            if resolve
+                && crate::conflicts::of_page(app, url).is_some_and(|f| f.contains(&path)) =>
+        {
+            crate::conflicts::open(app, url, label, Some(&path), out);
+        }
         RowAct::File(path) => {
             app.pr_diff_at = Some((url.to_string(), path));
             crate::event_loop::request_pr_diff_for(app, number, url.to_string(), label.to_string());
@@ -1693,7 +1757,7 @@ pub(crate) fn pane_key(
     }
     if activate {
         let act = detail.as_ref().and_then(|d| row_act(d, &app.pr_tabs))?;
-        run_act(app, pr.number, &pr.url, &pr.label, act, out);
+        run_act(app, pr.number, &pr.url, &pr.label, act, true, out);
         return Some("Open");
     }
     let nav = match key.code {
@@ -1744,7 +1808,7 @@ pub(crate) fn click_row(
         return;
     };
     if let Some(act) = row_act(&detail, &app.pr_tabs) {
-        run_act(app, pr.number, &pr.url, &pr.label, act, out);
+        run_act(app, pr.number, &pr.url, &pr.label, act, true, out);
     }
 }
 
@@ -1887,6 +1951,7 @@ mod tests {
             posting: false,
             browser_key: "Enter".into(),
             diff_key: "^E".into(),
+            conflicts: None,
             now: NOW,
         }
     }
@@ -2055,6 +2120,28 @@ mod tests {
             .find(|s| s.content.contains('✗'))
             .expect("a ✗");
         assert_eq!(cross.style.fg, Some(th.err));
+    }
+
+    /// A file the base conflicts with wears a red `U` in place of its
+    /// status, the rule and the tab count them, and a line under the list
+    /// says Enter resolves it.
+    #[test]
+    fn changes_marks_the_files_that_conflict() {
+        let d = full();
+        let th = Theme::default();
+        let conflicts = vec!["src/links.rs".to_string()];
+        let mut input = input(Some(&d));
+        input.conflicts = Some(&conflicts);
+        let page = page(&input, &on(PrTab::Changes), true, 100, th);
+        let changes = text(&page.body);
+        assert!(changes.contains("  U  src/links.rs"), "{changes}");
+        assert!(changes.contains("▌ M  src/app.rs"), "the rest as they were");
+        assert!(changes.contains("1 conflicting  +106 −4"), "{changes}");
+        assert!(
+            changes.contains("1 file conflicts with main — Enter on it merges main in"),
+            "{changes}"
+        );
+        assert_eq!(tab_texts(&input, th)[1], "Changes 2 ✗ 1");
     }
 
     /// Changes lists each file with its status and its + and − in columns

@@ -198,6 +198,17 @@ pub enum ClientRequest {
         #[serde(default)]
         mode: crate::harness::AgentMode,
     },
+    /// CHECK OUT A PULL REQUEST: the PROJECT's checkout of the pull
+    /// request's head branch — found, or cut exactly as a PR SESSION's is
+    /// (`head` under `CreatePrAgent`'s rules, a fork's seeded from
+    /// `refs/pull/N/head`) — with no session in it. The reply's `created`
+    /// is the WORKTREE; a cut one arrives as its own `EntityUpserted`.
+    CreatePrWorktree {
+        req_id: u64,
+        project: ProjectId,
+        pr_url: String,
+        head: String,
+    },
     /// Fire-and-forget: pre-spawn an agent CLI for this (worktree, kind) so
     /// the next CreateAgent adopts an already-booted session. Sent the
     /// moment the user picks the kind, before they type the name. No reply;

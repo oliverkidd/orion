@@ -129,6 +129,9 @@ pub enum Answer {
     /// The outcome of something a key started and did not wait for, in the
     /// footer's words (`Shift+G`: which page was opened, or why not).
     Flash(String),
+    /// A pull request's conflicted files, or the CONFLICT RESOLVER's merge
+    /// or commit, landed (`crate::conflicts`).
+    Conflicts(crate::conflicts::Answer),
 }
 
 /// A view's way onto the blocking pool and back. Cheap to clone — the

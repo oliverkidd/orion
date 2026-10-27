@@ -362,6 +362,12 @@ pub enum MenuAction {
     /// `ViewPrDiff`, carries no id: the row is the selection, and `y`
     /// reads it off the cursor the same way.
     CommentPullRequest,
+    /// **Check out** on a pull request row: its checkout, found or cut
+    /// (`pr_checkout`).
+    CheckOutPr {
+        project: ProjectId,
+        pr: crate::pull_request::PrLaunch,
+    },
     /// Expand the selected session card into its FOLLOW-UP COMPOSER, or
     /// fold it back up. Carries no id for the same reason `ViewPrDiff`
     /// doesn't: the card is the selection, and Space reads it off the
@@ -2443,6 +2449,9 @@ pub enum Overlay {
     /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
     /// days, written up to read aloud (`crate::week_review`).
     WeekReview(Box<crate::week_review::WeekReviewView>),
+    /// Enter on a conflicted file of a pull request: the CONFLICT
+    /// RESOLVER, its merge's files to settle (`crate::conflicts`).
+    Conflicts(Box<crate::conflicts::ConflictView>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -2608,6 +2617,11 @@ pub enum PendingIntent {
     },
     /// Select the added project and step into its Worktrees panel.
     SelectCreatedProject,
+    /// CHECK OUT A PULL REQUEST: the checkout the DAEMON found or cut, and
+    /// what it was for (`pr_checkout::landed`).
+    CheckOutPr {
+        then: crate::pr_checkout::Then,
+    },
     /// The NEW WORKTREE modal's create. The stand-in row `placeholder`
     /// went up and took the cursor when Enter was pressed, exactly as the
     /// Ack used to leave the real row: the Ack only swaps the real id in.
@@ -4215,6 +4229,9 @@ pub struct App {
     pub select_project_when_seen: Option<ProjectId>,
     /// Worktree created by us, awaiting its upsert to fix the selection.
     pub select_worktree_when_seen: Option<WorktreeId>,
+    /// A pull request's checkout whose Ack beat its upsert here, and what
+    /// it was for (`pr_checkout::seen`).
+    pub pr_checkout_waiting: Option<(WorktreeId, crate::pr_checkout::Then)>,
     /// Last selected worktree per project — switching back to a project
     /// returns to the worktree the user left it on.
     pub last_worktree_for_project: HashMap<ProjectId, WorktreeId>,
@@ -4610,6 +4627,10 @@ pub struct App {
     /// Bodies in `pr_detail` read since the PR CACHE last wrote: the ones
     /// its next flush writes, each to its own file (`pr_cache::snapshot`).
     pub pr_detail_unsaved: std::collections::HashSet<String>,
+    /// Which files each conflicting pull request conflicts in, as the
+    /// repo answered for its head, and the CONFLICT RESOLVER's merge and
+    /// commit on their way (`crate::conflicts`).
+    pub conflicts: crate::conflicts::Known,
     /// What `gh issue list` last said about each project's open issues —
     /// the ISSUES MODAL's rows, kept for the session. Prefetched in the
     /// background once the cursor rests on a project and kept fresh on a
@@ -4869,6 +4890,7 @@ impl App {
             just_launched: None,
             select_project_when_seen: None,
             select_worktree_when_seen: None,
+            pr_checkout_waiting: None,
             last_worktree_for_project: HashMap::new(),
             last_session_for_worktree: HashMap::new(),
             pending_prewarm: None,
@@ -4962,6 +4984,7 @@ impl App {
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
             pr_detail_unsaved: std::collections::HashSet::new(),
+            conflicts: crate::conflicts::Known::default(),
             issues: HashMap::new(),
             issues_flights: Default::default(),
             issues_failed: std::collections::HashSet::new(),
