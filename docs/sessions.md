@@ -826,11 +826,19 @@ ticked in and nested groups under theirs, with the time (today) or day (this wee
 The order is yours: `⌥↑`/`⌥↓` move an item a place up or down the list as it is drawn, whatever
 its priority — past the next item, into a nested group it meets and through it, out of the bottom
 of the nested group to just under it, and past the end of a top-level group onto the start of the
-next (or the end of the one before). `⌘P` puts an item set out of order at the end of the run of
-items at its new priority, so a list kept in priority order stays so. `⌥→` puts the item, or a
-selection in one top-level group, into a new group where they stood, its name typed at once (`Esc`
-keeps **New group**) — groups made this way go one deep. `⌥←` takes items in a nested group out to
-just under it; on all of its items, or on its header, it flattens the group into its place.
+next (or the end of the one before). On a header they move the group: a nested one the same way
+(past what is beside it, never into another), and off the end of the last top-level group (or the
+start of the first) out on its own as a top-level group; a top-level one past the top-level group
+beside it. `⌘P` puts an item set out of order at the end of the run of
+items at its new priority, so a list kept in priority order stays so. `⌥→` on one item makes it a
+nested group of that name, where it stood and at its priority, with the field for its first item
+open in it (an item linked to Linear or an agent is kept as that first item, link and all) — and
+typed into a new item's field, `⌥→` at the end of the text does the same, so `⌘N`, a name, `⌥→`
+starts a group. On a selection in one top-level group it puts them in a new group where they stood,
+its name typed at once (`Esc` keeps **New group**). Groups go one deep. `⌥←` takes items in a
+nested group out to just under it, and on all of them flattens the group into its place; on a
+nested group's header it makes it a top-level group of its own, right under the one it was in, and
+`⌥→` on a top-level group's header puts it back at the end of the one above.
 (Ghostty sends `⌥←`/`⌥→` as `⌥B`/`⌥F`; both work.) `⇧↑`/`⇧↓` select a run of items, across groups
 too, and ticking, `⌘P`, moving, grouping, deleting, `Enter` and cut/copy then act on them all.
 `⌘X` cuts and `⌘C` copies: the clipboard gets their text, a line each, and that text pasted back
@@ -841,7 +849,9 @@ A row is edited where it stands: typing on an item or a group header adds to its
 it with its last character gone; `Enter` saves, `↑`/`↓` save and move on, `Esc` puts it back.
 `⌘N` types a new item right under the cursor's (from a header or `+ new item`, at the group's
 end) — `Enter` adds it and opens the next under it, `Esc` stops; the field wraps as you
-type — `⌘⇧N` a new group beside it, `⌘P` picks the priority (`1`–`4` urgent to low, `0` none) and
+type — `⌘⇧N` a new group: in a top-level group (on an item, or a nested group or its items) one
+nested there right under the cursor's row, on a top-level header or `+ new item` a new top-level
+group at the end, either way with its first item's field open in it — `⌘P` picks the priority (`1`–`4` urgent to low, `0` none) and
 `⌘⌫` deletes, a group with items in it only after a second press.
 `⌘↑`/`⌘↓` jump from group to group. `⌘F` opens the filter, which keeps the matching items under
 their headers.

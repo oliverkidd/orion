@@ -1,10 +1,13 @@
 //! PROJECT TODOS (`⌘I`): a project's own todo list, kept on this machine
 //! only (`store`), in groups that fold, each item with Linear's priority.
 //! The order is the list's own: `⌥↑`/`⌥↓` walk an item anywhere in it —
-//! into a nested group and back out — or a nested group past what is
-//! beside it, and a priority set puts an item (or a nested group, every
-//! item in it set the same) at the end of its level's run. `⌥→` groups
-//! items, `⌥←` takes them out again. Ticking an item strikes it through
+//! into a nested group and back out — a nested group past what is beside
+//! it (off the list's end, out on its own at the top level), or a
+//! top-level group past the next, and a priority set puts an item (or a
+//! nested group, every item in it set the same) at the end of its level's
+//! run. `⌥→` groups items — one alone becomes a group of its name — and
+//! `⌥←` takes them out again; on a header, `⌥←` lifts a nested group to
+//! the top level and `⌥→` nests a top-level one in the one above. Ticking an item strikes it through
 //! where it stands while the modal is up; once it goes, so does the item
 //! — kept in the file for the DONE page (`history`), what was ticked today or this
 //! week. A group with everything in it ticked is complete, and goes the
@@ -521,16 +524,99 @@ impl TodoFile {
         Some(entered)
     }
 
-    /// `⌥↑`/`⌥↓` on a nested group's header: the group a place up or down
-    /// the list as drawn, as an item goes — past the item or group beside
-    /// it, never into one (groups nest one deep), and off its group's end
-    /// onto the start of the next top-level group (or the end of the one
-    /// before). The group it is now in; None when it has nowhere to go.
-    pub fn move_group(&mut self, group: u64, up: bool) -> Option<u64> {
+    /// `⌥↑`/`⌥↓` on a group's header: the group a place up or down the
+    /// list as drawn. A nested one goes as an item does — past the item or
+    /// group beside it, never into one (groups nest one deep), off its
+    /// group's end onto the start of the next top-level group (or the end
+    /// of the one before) — and off the last one's end (or the first's
+    /// start) out on its own, a top-level group. A top-level one goes past
+    /// the top-level group beside it. False when it has nowhere to go.
+    pub fn move_group(&mut self, group: u64, up: bool) -> bool {
+        let Some(parent) = self.parent_of(group) else {
+            return self.move_top_group(group, up);
+        };
         let me = Child::Group(group);
-        let (to, at) = self.step_target(me, up)?;
-        self.put(me, to, at);
-        Some(to)
+        if let Some((to, at)) = self.step_target(me, up) {
+            self.put(me, to, at);
+            return true;
+        }
+        // Not in sight — complete — it stays where it is.
+        let at_edge = self.parent_of(parent).is_none() && self.open_children(parent).contains(&me);
+        at_edge && self.promote(group, !up)
+    }
+
+    /// A top-level `group` past the open top-level group beside it.
+    fn move_top_group(&mut self, group: u64, up: bool) -> bool {
+        let tops = self.open_top_groups();
+        let Some(here) = tops.iter().position(|g| *g == group) else {
+            return false;
+        };
+        let beside = if up {
+            here.checked_sub(1)
+        } else {
+            Some(here + 1)
+        };
+        let Some(other) = beside.and_then(|i| tops.get(i)).copied() else {
+            return false;
+        };
+        self.stand_beside(group, other, !up);
+        true
+    }
+
+    /// `group` moved in [`TodoFile::groups`] to right after `other` — or,
+    /// not `after`, right before it: where a top-level group stands among
+    /// the others.
+    fn stand_beside(&mut self, group: u64, other: u64, after: bool) {
+        let Some(from) = self.groups.iter().position(|g| g.id == group) else {
+            return;
+        };
+        let moved = self.groups.remove(from);
+        let at = self
+            .groups
+            .iter()
+            .position(|g| g.id == other)
+            .map_or(self.groups.len(), |i| i + usize::from(after));
+        self.groups.insert(at, moved);
+    }
+
+    /// `⌥←` on a nested group's header: it out on its own, a top-level
+    /// group right after the one it was in — or, not `after`, right
+    /// before it — everything in it going with it. False when it is not
+    /// nested.
+    pub fn promote(&mut self, group: u64, after: bool) -> bool {
+        if self.parent_of(group).is_none() {
+            return false;
+        }
+        // The top-level group it was in, however deep.
+        let Some(top) = self.ancestors(group).last().copied() else {
+            return false;
+        };
+        if let Some(g) = self.group_mut(group) {
+            g.parent = None;
+            g.before = None;
+        }
+        self.stand_beside(group, top, after);
+        true
+    }
+
+    /// `⌥→` on a top-level group's header: it nested at the end of the
+    /// open top-level group above it. None when there is none, or it has
+    /// groups of its own — groups nest one deep. The group it went into.
+    pub fn demote(&mut self, group: u64) -> Option<u64> {
+        if self.parent_of(group).is_some() || self.subgroups(Some(group)).next().is_some() {
+            return None;
+        }
+        let tops = self.open_top_groups();
+        let here = tops.iter().position(|g| *g == group)?;
+        let into = *tops.get(here.checked_sub(1)?)?;
+        let mut seq = self.open_children(into);
+        seq.push(Child::Group(group));
+        if let Some(g) = self.group_mut(group) {
+            g.parent = Some(into);
+            g.before = None;
+        }
+        self.arrange(&seq);
+        Some(into)
     }
 
     /// Where one step up or down takes `child` — an open item, or a nested
@@ -637,8 +723,9 @@ impl TodoFile {
         groups.all(|g| g == Some(first)).then_some(first)
     }
 
-    /// `⌥←` on a nested group: it goes, what was in it standing in its
-    /// place in the group around it. False when it is not nested.
+    /// `⌥←` on every item of a nested group: it goes, what was in it
+    /// standing in its place in the group around it. False when it is not
+    /// nested.
     pub fn ungroup(&mut self, group: u64) -> bool {
         let Some(parent) = self.parent_of(group) else {
             return false;
@@ -716,6 +803,39 @@ impl TodoFile {
         }
         self.arrange(&seq);
         self.arrange(&inner);
+        Some(new)
+    }
+
+    /// `⌥→` on one open item of a top-level group: the item made a nested
+    /// group, named for it and at its priority, standing where it stood —
+    /// or, tied to a Linear issue or an agent, the item kept as the first
+    /// thing in it, so the tie is too. None when it is not in a top-level
+    /// group — groups nest one deep.
+    pub fn item_to_group(&mut self, item: u64) -> Option<u64> {
+        let group = self.shared_group(&[item])?;
+        if self.parent_of(group).is_some() {
+            return None;
+        }
+        let me = self.item(item)?.clone();
+        if me.linear.is_some() || me.agent.is_some() {
+            let new = self.group_items(&[item])?;
+            if let Some(g) = self.group_mut(new) {
+                g.name = me.text;
+            }
+            return Some(new);
+        }
+        let mut seq = self.open_children(group);
+        let new = self.add_group(Some(group), &me.text);
+        if let Some(g) = self.group_mut(new) {
+            g.priority = me.priority;
+        }
+        for child in &mut seq {
+            if *child == Child::Item(item) {
+                *child = Child::Group(new);
+            }
+        }
+        self.delete_item(item);
+        self.arrange(&seq);
         Some(new)
     }
 
@@ -804,6 +924,21 @@ impl TodoFile {
             before: None,
             priority: 0,
         });
+        id
+    }
+
+    /// [`TodoFile::add_group`], nested: standing right after `after` among
+    /// `parent`'s contents when it is there, else after them all.
+    pub fn add_group_after(
+        &mut self,
+        parent: Option<u64>,
+        name: &str,
+        after: Option<Child>,
+    ) -> u64 {
+        let id = self.add_group(parent, name);
+        if let (Some(parent), Some(after)) = (parent, after) {
+            self.put(Child::Group(id), parent, At::After(after));
+        }
         id
     }
 
@@ -1382,8 +1517,8 @@ mod tests {
 
     /// `⌥↓` on a nested group walks it as an item goes: past the items
     /// and groups beside it — never into one — then off its group's end
-    /// onto the start of the next; `⌥↑` back. A top-level group has
-    /// nowhere to go this way.
+    /// onto the start of the next; `⌥↑` back. Off the last group's end it
+    /// is a top-level group of its own.
     #[test]
     fn a_nested_group_moves_as_an_item_does() {
         let mut file = TodoFile::new(Path::new("/r"));
@@ -1399,19 +1534,134 @@ mod tests {
         file.add_item(next, "b1", day(6));
         assert_eq!(drawn(&file, top, &[]), ["[Sub]", "a1", "a2", "[Other]"]);
 
-        assert_eq!(file.move_group(sub, false), Some(top));
+        assert!(file.move_group(sub, false));
         assert_eq!(drawn(&file, top, &[]), ["a1", "[Sub]", "a2", "[Other]"]);
         file.move_group(sub, false);
         file.move_group(sub, false);
         assert_eq!(drawn(&file, top, &[]), ["a1", "a2", "[Other]", "[Sub]"]);
         assert_eq!(drawn(&file, other, &[]), ["o1"], "past it, not into it");
-        assert_eq!(file.move_group(sub, false), Some(next));
+        assert!(file.move_group(sub, false));
         assert_eq!(drawn(&file, next, &[]), ["[Sub]", "b1"]);
         assert_eq!(drawn(&file, sub, &[]), ["s1"], "its items with it");
 
-        assert_eq!(file.move_group(sub, true), Some(top));
+        assert!(file.move_group(sub, true));
         assert_eq!(drawn(&file, top, &[]), ["a1", "a2", "[Other]", "[Sub]"]);
-        assert!(file.move_group(top, true).is_none());
+
+        // Down through B and off its end: a top-level group after it.
+        file.move_group(sub, false);
+        file.move_group(sub, false);
+        assert_eq!(drawn(&file, next, &[]), ["b1", "[Sub]"]);
+        assert!(file.move_group(sub, false));
+        assert_eq!(file.parent_of(sub), None);
+        assert_eq!(file.top_groups(&[]), [top, next, sub]);
+        assert_eq!(drawn(&file, sub, &[]), ["s1"]);
+        assert!(!file.move_group(sub, false), "nowhere past the last");
+    }
+
+    /// A top-level group moves past the one beside it, never into it; the
+    /// first nested group's `⌥↑` off the top of the list is a top-level
+    /// group above them all.
+    #[test]
+    fn a_top_level_group_moves_past_its_neighbours() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let a = file.add_group(None, "A");
+        let sub = file.add_group(Some(a), "Sub");
+        file.add_item(sub, "s1", day(6));
+        let b = file.add_group(None, "B");
+        let c = file.add_group(None, "C");
+        assert!(file.move_group(c, true));
+        assert_eq!(file.top_groups(&[]), [a, c, b]);
+        assert!(file.move_group(a, false));
+        assert_eq!(file.top_groups(&[]), [c, a, b]);
+        assert_eq!(file.parent_of(sub), Some(a), "its nested groups with it");
+        assert!(!file.move_group(b, false));
+        file.move_group(a, true);
+        assert!(!file.move_group(a, true));
+
+        assert!(file.move_group(sub, true), "off the top: on its own");
+        assert_eq!(file.top_groups(&[]), [sub, a, c, b]);
+    }
+
+    /// `⌥←` on a nested group's header: a top-level group right under the
+    /// one it was in, its items with it; `⌥→` on a top-level one puts it
+    /// back at the end of the one above — not one with groups of its own,
+    /// nor the first.
+    #[test]
+    fn a_nested_group_promotes_and_demotes() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let a = file.add_group(None, "A");
+        file.add_item(a, "a1", day(6));
+        let sub = file.add_group(Some(a), "Sub");
+        file.add_item(sub, "s1", day(6));
+        file.group_mut(sub).unwrap().before = file.items.first().map(|i| i.id);
+        file.add_item(a, "a2", day(6));
+        let b = file.add_group(None, "B");
+        assert_eq!(drawn(&file, a, &[]), ["[Sub]", "a1", "a2"]);
+
+        assert!(file.promote(sub, true));
+        assert_eq!(file.top_groups(&[]), [a, sub, b]);
+        assert_eq!(drawn(&file, a, &[]), ["a1", "a2"]);
+        assert_eq!(drawn(&file, sub, &[]), ["s1"]);
+        assert!(!file.promote(sub, true), "already at the top");
+
+        assert_eq!(file.demote(sub), Some(a));
+        assert_eq!(drawn(&file, a, &[]), ["a1", "a2", "[Sub]"]);
+        assert_eq!(file.top_groups(&[]), [a, b]);
+        assert_eq!(file.demote(a), None, "it has a group in it");
+        file.promote(sub, true);
+        let other = file.add_group(Some(b), "Other");
+        assert_eq!(file.demote(b), None, "groups go one deep");
+        assert_eq!(file.demote(a), None, "nothing above the first");
+        let _ = other;
+    }
+
+    /// `⌥→` on one item makes it a nested group where it stood, named for
+    /// it and at its priority — the item gone — unless it is tied to
+    /// Linear, when it is kept as the first thing in it.
+    #[test]
+    fn an_item_becomes_a_group_of_its_name() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let top = file.add_group(None, "A");
+        file.add_item(top, "a", day(6));
+        let x = file.add_item(top, "storyline prompt", day(6));
+        file.item_mut(x).unwrap().priority = 2;
+        file.add_item(top, "b", day(6));
+        let sub = file.item_to_group(x).unwrap();
+        assert!(file.item(x).is_none());
+        let g = file.group(sub).unwrap();
+        assert_eq!(
+            (g.name.as_str(), g.priority, g.parent),
+            ("storyline prompt", 2, Some(top))
+        );
+        assert_eq!(drawn(&file, top, &[]), ["a", "[storyline prompt]", "b"]);
+        assert!(drawn(&file, sub, &[]).is_empty());
+
+        let linked = file.add_item(top, "RIP-1 thing", day(6));
+        file.item_mut(linked).unwrap().linear = Some("RIP-1".into());
+        let kept = file.item_to_group(linked).unwrap();
+        assert_eq!(file.group(kept).unwrap().name, "RIP-1 thing");
+        assert_eq!(drawn(&file, kept, &[]), ["RIP-1 thing"]);
+
+        let inner = file.add_item(sub, "inner", day(6));
+        assert!(file.item_to_group(inner).is_none(), "one deep");
+    }
+
+    /// A new nested group stands right after the row it was made on.
+    #[test]
+    fn a_new_group_stands_after_the_row_it_was_made_on() {
+        let mut file = TodoFile::new(Path::new("/r"));
+        let top = file.add_group(None, "A");
+        let a = file.add_item(top, "a", day(6));
+        file.add_item(top, "b", day(6));
+        let one = file.add_group_after(Some(top), "One", Some(Child::Item(a)));
+        assert_eq!(drawn(&file, top, &[]), ["a", "[One]", "b"]);
+        file.add_group_after(Some(top), "Two", Some(Child::Group(one)));
+        assert_eq!(drawn(&file, top, &[]), ["a", "[One]", "[Two]", "b"]);
+        file.add_group_after(Some(top), "End", None);
+        assert_eq!(
+            drawn(&file, top, &[]),
+            ["a", "[One]", "[Two]", "b", "[End]"]
+        );
     }
 
     /// A nested group's priority resets every item in it and moves the

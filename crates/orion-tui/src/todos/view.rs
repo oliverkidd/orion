@@ -16,7 +16,11 @@
 //! group's header acts as an item does: `space` ticks everything in it
 //! (or opens again what was ticked while the modal was up), `⌘P` sets
 //! its priority and every item's in it — one then set on its own keeps
-//! its own until the group's is set again — and `⌥↑`/`⌥↓` move it. The
+//! its own until the group's is set again — and `⌥↑`/`⌥↓` move it, off
+//! the last section's end out on its own; on a section's header they
+//! move the section past the one beside it. `⌥←` on a nested group's
+//! header makes it a section, right under the one it was in, and `⌥→` on
+//! a section's nests it at the end of the one above. The
 //! project row says what was ticked today and this week, across every
 //! project, day by day — and a click on either opens the DONE page on it
 //! (`history`).
@@ -27,8 +31,9 @@
 //! is left (`TodoView::held`), and are gone from the list after that. `⇧↑`/`⇧↓` select a run of items, and what acts on an
 //! item acts on them all — tick, `⌘P` priority, `⌥↑`/`⌥↓` move (a place
 //! through the list as drawn, into a nested group and out of it), `⌥→`
-//! group them, `⌥←` take them out of their group — or, on its header,
-//! flatten it — `⌘⌫` delete, `Enter` one agent at them all, and `⌘X`/`⌘C`
+//! group them — one item alone made a group of its name, as `⌥→` at the
+//! end of a new item's field does too — `⌥←` take them out of their
+//! group, `⌘⌫` delete, `Enter` one agent at them all, and `⌘X`/`⌘C`
 //! cut or copy them: the clipboard has their text, and pasted back into
 //! the modal — any project's — they land after the cursor as they were,
 //! their priority and all (`TodoClip`).
@@ -41,7 +46,9 @@
 //! selection) is let go. Every change is saved at once (`store::save`). A
 //! row is edited where it stands: typing on it adds to its end, `⌫` opens
 //! it with the last character gone, and `⌘⌫` deletes it. `⌘N` opens a new
-//! item right under the cursor's. `⌘F` opens the filter, which keeps the
+//! item right under the cursor's, `⌘⇧N` a new group — in a section, one
+//! nested there right under the cursor's row — the field for its first
+//! item open in it once it is named. `⌘F` opens the filter, which keeps the
 //! headers over the items that match; a paste of more than one line, with
 //! no field open, is read as an indented list and added in (`import`).
 //!
@@ -199,9 +206,11 @@ pub enum InputKind {
         group: Option<u64>,
         after: Option<u64>,
     },
-    /// A new group under `parent` (`None`: at the top).
+    /// A new group under `parent` (`None`: at the top), right after
+    /// `after` among its contents when there is one, else after them all.
     Group {
         parent: Option<u64>,
+        after: Option<Child>,
     },
     Rename(Target),
 }
@@ -361,13 +370,16 @@ pub(crate) mod keys {
     );
     /// The previous or next group's header, nested ones included.
     pub const JUMP: Key = Key::new(&["cmd+up", "cmd+down"], "groups").show(2);
-    /// The item — or the selection, or a nested group from its header —
-    /// a place up or down the list as drawn: past the next item, into a
-    /// nested group and out of it (a group goes past one), then into the
-    /// next group.
+    /// The item — or the selection, or a group from its header — a place
+    /// up or down the list as drawn: past the next item, into a nested
+    /// group and out of it (a group goes past one), then into the next
+    /// group; a nested group off the last one's end is a section of its
+    /// own, and a section goes past the one beside it.
     pub const MOVE: Key = Key::new(&["alt+up", "alt+down"], "move").show(2);
-    /// `⌥→` the items into a new group of their own; `⌥←` them out of
-    /// theirs — or, on its header, the group flattened into its place.
+    /// `⌥→` the items into a new group of their own — one item made that
+    /// group, named for it — `⌥←` them out of theirs. On a header, `⌥←`
+    /// lifts a nested group out to a section, `⌥→` nests a section in
+    /// the one above.
     /// Ghostty sends ⌥←/⌥→ as `⌥B`/`⌥F` (its word-jump default), so those
     /// are the same keys.
     pub const GROUP: Key = Key::new(&["alt+right", "alt+left", "alt+f", "alt+b"], "group").show(2);
@@ -376,8 +388,10 @@ pub(crate) mod keys {
     /// A new item right under the cursor's, at its priority — or at the
     /// end of the cursor's group.
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new item");
-    /// `^⇧N` arrives only where the KITTY PROTOCOL does: `^N` and `^⇧N`
-    /// are one byte in a legacy terminal.
+    /// A new group: nested in the cursor's section, right under its row —
+    /// or, from a section's header or `+ new item`, a section. `^⇧N`
+    /// arrives only where the KITTY PROTOCOL does: `^N` and `^⇧N` are one
+    /// byte in a legacy terminal.
     pub const NEW_GROUP: Key = Key::new(&["cmd+shift+n", "ctrl+shift+n"], "new group");
     /// The row under the cursor opened where it stands, its last
     /// character gone; any other character typed on it is added to its
@@ -399,6 +413,9 @@ pub(crate) mod keys {
     pub const SAVE: Key = Key::new(&["enter"], "save");
     /// The field's other way out: saved, and the cursor a row on.
     pub const SAVE_MOVE: Key = Key::new(&["up", "down"], "save & move").show(2);
+    /// A new item's field, the caret at the end of what was typed: it in
+    /// as a group of that name rather than an item — `⌥→` as on its row.
+    pub const SAVE_GROUP: Key = Key::new(&["alt+right", "alt+f"], "make a group");
     pub const CONFIRM: Key = Key::new(&["enter", "cmd+backspace", "ctrl+w"], "delete");
     /// The LINEAR VIEW's `Enter` and `⇧Tab`: an agent on the item, or
     /// one of the AGENT PRESETS — and on an item whose session is still
@@ -422,8 +439,8 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
-        CUT, COPY, FILTER, SAVE, SAVE_MOVE, CONFIRM, AGENT, PRESET, LINEAR, REFRESH, PICK, CHOOSE,
-        LEVEL, SPAN, UNDO,
+        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PRESET, LINEAR, REFRESH,
+        PICK, CHOOSE, LEVEL, SPAN, UNDO,
     ];
 }
 
@@ -447,12 +464,13 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "back"),
         ];
     }
-    if view.input.is_some() {
-        return vec![
-            keys::SAVE.hint().kept(),
-            keys::SAVE_MOVE.hint(),
-            Hint::new("Esc", "revert"),
-        ];
+    if let Some((kind, _)) = &view.input {
+        let mut hints = vec![keys::SAVE.hint().kept(), keys::SAVE_MOVE.hint()];
+        if matches!(kind, InputKind::Item { .. }) {
+            hints.push(keys::SAVE_GROUP.hint());
+        }
+        hints.push(Hint::new("Esc", "revert"));
+        return hints;
     }
     if view.confirm_delete.is_some() {
         return vec![keys::CONFIRM.hint().kept(), Hint::new("Esc", "keep")];
@@ -753,7 +771,7 @@ impl Walk<'_> {
         for group in self.file.top_groups(self.held) {
             self.group(group, 0, false, out);
         }
-        if self.input == Some(InputKind::Group { parent: None }) {
+        if matches!(self.input, Some(InputKind::Group { parent: None, .. })) {
             out.push(Entry::Input { depth: 0 });
         }
     }
@@ -778,14 +796,20 @@ impl Walk<'_> {
         if g.collapsed && !filtering {
             return;
         }
-        // A new item's field in this group, and the item it goes after.
+        // A new item's or group's field in this group, and what it goes
+        // after.
         let field = match self.input {
             Some(InputKind::Item {
                 group: Some(g),
                 after,
-            }) if g == group => Some(after),
+            }) if g == group => Some(after.map(Child::Item)),
+            Some(InputKind::Group {
+                parent: Some(p),
+                after,
+            }) if p == group => Some(after),
             _ => None,
         };
+        let new_group = matches!(self.input, Some(InputKind::Group { .. }));
         let mut found = false;
         let mut placed = false;
         // Under the last open item drawn: where one with nothing to go
@@ -810,8 +834,8 @@ impl Walk<'_> {
                             depth: depth + 1,
                         },
                     });
-                    // A new item after this one: its field right under it.
-                    if field == Some(Some(id)) {
+                    // A new row after this one: its field right under it.
+                    if field == Some(Some(child)) {
                         placed = true;
                         out.push(Entry::Input { depth: depth + 1 });
                     }
@@ -823,22 +847,20 @@ impl Walk<'_> {
                     let before = out.len();
                     self.group(sub, depth + 1, all, out);
                     found |= out.len() > before;
+                    if field == Some(Some(child)) {
+                        placed = true;
+                        out.push(Entry::Input { depth: depth + 1 });
+                    }
                 }
             }
         }
-        // One after an item not drawn goes there too, so the field is
-        // always on screen.
+        // One after a row not drawn goes there too, so the field is always
+        // on screen: a new item's under the last open item, a new group's
+        // after everything.
         if field.is_some() && !placed {
             found = true;
-            out.insert(slot, Entry::Input { depth: depth + 1 });
-        }
-        if self.input
-            == Some(InputKind::Group {
-                parent: Some(group),
-            })
-        {
-            found = true;
-            out.push(Entry::Input { depth: depth + 1 });
+            let at = if new_group { out.len() } else { slot };
+            out.insert(at, Entry::Input { depth: depth + 1 });
         }
         // Filtering, a group with nothing found in it goes.
         if filtering && !all && !found {
@@ -1196,9 +1218,10 @@ fn select(app: &mut App, delta: i32) {
 
 /// `⌥↑`/`⌥↓`: the chosen items a place up or down
 /// ([`TodoFile::move_items`]), the cursor and the selection going with
-/// them — a folded group they go into opened, so they stay in sight.
+/// them — a folded group they go into opened, so they stay in sight. On
+/// a header, its group.
 fn move_chosen(app: &mut App, up: bool) {
-    if let Some(group) = nested_header(app) {
+    if let Some(Entry::Header { group, .. }) = current(app) {
         if view(app).is_some_and(|v| v.query.trim().is_empty()) {
             move_group(app, group, up);
         }
@@ -1226,16 +1249,18 @@ fn move_chosen(app: &mut App, up: bool) {
     }
 }
 
-/// `⌥↑`/`⌥↓` on a nested group's header: the group a place up or down
+/// `⌥↑`/`⌥↓` on a group's header: the group a place up or down
 /// ([`TodoFile::move_group`]), the cursor going with it — the group it
 /// went into opened.
 fn move_group(app: &mut App, group: u64, up: bool) {
-    let moved = edit_if(app, |file| {
-        let to = file.move_group(group, up)?;
-        file.reveal(to);
-        Some(())
+    let moved = edit(app, |file| {
+        let moved = file.move_group(group, up);
+        if let Some(parent) = file.parent_of(group).filter(|_| moved) {
+            file.reveal(parent);
+        }
+        moved
     });
-    if moved.is_some() {
+    if moved == Some(true) {
         land_on_group(app, Some(group));
     }
 }
@@ -1250,9 +1275,12 @@ fn nested_header(app: &App) -> Option<u64> {
 }
 
 /// `⌥→`: the chosen items — open, in one top-level group — into a new
-/// group there, its name's field open on it. `⌥←`: on a nested group's
-/// header, the group flattened into its place; on items in one, them out
-/// of it, right under it — the group flattened when that is all of it.
+/// group there, its name's field open on it; one item alone made that
+/// group, named for it, its first item's field open in it. On a section's
+/// header, the section nested in the one above. `⌥←`: on a nested
+/// group's header, the group out on its own, a section right under the
+/// one it was in; on items in one, them out of it, right under it — the
+/// group flattened when that is all of it.
 fn group_chosen(app: &mut App, into: bool) {
     let note = |app: &mut App, text: &str| {
         app.flash = Some(crate::flash::Flash::note(text.to_string()));
@@ -1273,17 +1301,31 @@ fn group_chosen(app: &mut App, into: bool) {
     };
     let shared = file.shared_group(&ids);
     let nested = |group: u64| file.parent_of(group).is_some();
+    let has_groups = header.is_some_and(|g| file.subgroups(Some(g)).next().is_some());
     match (into, header) {
-        (false, Some(group)) if !nested(group) => {
-            note(app, "a top-level group has nowhere to flatten into")
-        }
+        (false, Some(group)) if !nested(group) => note(app, "already a top-level group"),
         (false, Some(group)) => {
-            edit(app, |file| file.ungroup(group));
-            if let Some(view) = view_mut(app) {
-                view.cursor = None;
+            edit(app, |file| file.promote(group, true));
+            land_on_group(app, Some(group));
+        }
+        (true, Some(group)) if nested(group) => {
+            note(app, "groups go one deep — this one is already in one")
+        }
+        (true, Some(_)) if has_groups => {
+            note(app, "groups go one deep — this one has groups in it")
+        }
+        (true, Some(group)) => {
+            let into = edit(app, |file| {
+                let into = file.demote(group)?;
+                file.reveal(into);
+                Some(into)
+            })
+            .flatten();
+            match into {
+                Some(_) => land_on_group(app, Some(group)),
+                None => note(app, "no group above to go into"),
             }
         }
-        (true, Some(_)) => note(app, "select items to group them"),
         (_, None) if ids.is_empty() => {}
         (_, None) if shared.is_none() => note(app, "pick open items in one group"),
         (false, None) if !shared.is_some_and(nested) => {
@@ -1296,6 +1338,7 @@ fn group_chosen(app: &mut App, into: bool) {
         (true, None) if shared.is_some_and(nested) => {
             note(app, "groups go one deep — these are already in one")
         }
+        (true, None) if ids.len() == 1 => item_to_group(app, ids[0]),
         (true, None) => {
             let made = edit(app, |file| file.group_items(&ids)).flatten();
             if let Some(view) = view_mut(app) {
@@ -1308,6 +1351,28 @@ fn group_chosen(app: &mut App, into: bool) {
             }
         }
     }
+}
+
+/// `⌥→` on one item: it made a nested group, named for it
+/// ([`TodoFile::item_to_group`]), the field for the group's first item
+/// open in it.
+fn item_to_group(app: &mut App, item: u64) {
+    let made = edit(app, |file| file.item_to_group(item)).flatten();
+    if let Some(view) = view_mut(app) {
+        view.anchor = None;
+    }
+    let Some(group) = made else {
+        return;
+    };
+    land_on_group(app, Some(group));
+    open_input(
+        app,
+        InputKind::Item {
+            group: Some(group),
+            after: None,
+        },
+        "",
+    );
 }
 
 /// `⌘X`/`⌘C`: the chosen items onto the clipboard — their text, a line
@@ -1447,16 +1512,44 @@ fn input_key(app: &mut App, key: KeyEvent) {
         return;
     };
     let kind = *kind;
+    // `⌥→` at the end of a new item's text: the item a group instead —
+    // anywhere else in the text, a word on.
+    let new_item = match kind {
+        InputKind::Item { group, after } => Some((group, after)),
+        _ => None,
+    };
+    let to_group = new_item.is_some()
+        && keys::SAVE_GROUP.matches(&key)
+        && input.caret_byte() == input.as_str().len()
+        && !input.trim().is_empty();
     match key.code {
         KeyCode::Esc => {
             view.input = None;
             view.cursor = None;
-            // Back on the item a new one was being put under.
-            if let InputKind::Item {
-                after: Some(id), ..
-            } = kind
-            {
-                land_on_item(app, id);
+            match kind {
+                // Back on the item a new one was being put under — or the
+                // group's header, when there is nothing in it.
+                InputKind::Item {
+                    after: Some(id), ..
+                } => land_on_item(app, id),
+                InputKind::Item {
+                    group: Some(group),
+                    after: None,
+                } if list(app).is_some_and(|f| f.children(group, &[]).is_empty()) => {
+                    land_on_group(app, Some(group))
+                }
+                _ => {}
+            }
+        }
+        _ if to_group => {
+            let (group, after) = new_item.unwrap_or_default();
+            let made = save_item(app, group, after);
+            if let Some(view) = view_mut(app) {
+                view.input = None;
+            }
+            if let Some(item) = made {
+                land_on_item(app, item);
+                group_chosen(app, true);
             }
         }
         _ if keys::SAVE.matches(&key) => save_field(app, kind),
@@ -1502,34 +1595,60 @@ fn save_field(app: &mut App, kind: InputKind) {
     }
 }
 
+/// [`save_field`] for a new item's field: the item it made.
+fn save_item(app: &mut App, group: Option<u64>, after: Option<u64>) -> Option<u64> {
+    let (_, input) = view_mut(app)?.input.take()?;
+    let text = input.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    add_item(app, group, after, &text)
+}
+
+/// A new item from the field — after `after` while it is still there,
+/// else at the end of `group` — and the next field open under it, for a
+/// run. The item made.
+fn add_item(app: &mut App, group: Option<u64>, after: Option<u64>, text: &str) -> Option<u64> {
+    let today = super::today();
+    let (group, next, id) = edit(app, |file| {
+        if let Some(id) = after.and_then(|a| file.insert_after(a, text, today)) {
+            return file.item(id).map(|i| (i.group, Some(id), id));
+        }
+        let group = file.group_or_inbox(group);
+        let id = file.add_item(group, text, today);
+        Some((group, None, id))
+    })
+    .flatten()?;
+    if let Some(view) = view_mut(app) {
+        let kind = InputKind::Item {
+            group: Some(group),
+            after: next,
+        };
+        view.input = Some((kind, TextInput::new()));
+    }
+    Some(id)
+}
+
 /// Put the field's `text` in.
 fn commit(app: &mut App, kind: InputKind, text: &str) {
-    let today = super::today();
     match kind {
         InputKind::Item { group, after } => {
-            let made = edit(app, |file| {
-                // After the item the field was opened under, while it is
-                // still there; else at the end of the group.
-                if let Some(id) = after.and_then(|a| file.insert_after(a, text, today)) {
-                    return file.item(id).map(|i| (i.group, Some(id)));
-                }
-                let group = file.group_or_inbox(group);
-                file.add_item(group, text, today);
-                Some((group, None))
-            })
-            .flatten();
-            // The next field opens under the item just made, for a run.
-            if let (Some((group, after)), Some(view)) = (made, view_mut(app)) {
-                let kind = InputKind::Item {
-                    group: Some(group),
-                    after,
-                };
-                view.input = Some((kind, TextInput::new()));
-            }
+            add_item(app, group, after, text);
         }
-        InputKind::Group { parent } => {
-            let id = edit(app, |file| file.add_group(parent, text));
+        // Its first item's field open in it at once.
+        InputKind::Group { parent, after } => {
+            let id = edit(app, |file| file.add_group_after(parent, text, after));
             land_on_group(app, id);
+            if id.is_some() {
+                open_input(
+                    app,
+                    InputKind::Item {
+                        group: id,
+                        after: None,
+                    },
+                    "",
+                );
+            }
         }
         InputKind::Rename(Target::Group(id)) => {
             edit(app, |file| {
@@ -1587,13 +1706,26 @@ fn start_item(app: &mut App) {
     open_input(app, InputKind::Item { group, after }, "");
 }
 
-/// `⌘⇧N`: a new group beside the cursor's.
+/// `⌘⇧N`: a new group. In a section — on one of its items, or on a group
+/// nested in it or an item of that — one nested there, right under the
+/// cursor's row (groups nest one deep, so beside a nested one); on a
+/// section's header, or below them all, a new section after the rest.
 fn start_group(app: &mut App) {
-    let parent = cursor_group(app).and_then(|g| {
-        let file = app.todos.get(&view(app)?.dir)?;
-        file.group(g)?.parent
-    });
-    open_input(app, InputKind::Group { parent }, "");
+    let Some(file) = list(app) else {
+        return;
+    };
+    // The cursor's group, and the item it is on, if any.
+    let (group, item) = match current(app) {
+        Some(Entry::Item { id, .. }) => (file.item(id).map(|i| i.group), Some(Child::Item(id))),
+        Some(Entry::Header { group, .. }) => (Some(group), None),
+        _ => (None, None),
+    };
+    let (parent, after) = match group.map(|g| (g, file.parent_of(g))) {
+        Some((g, Some(top))) => (Some(top), Some(Child::Group(g))),
+        Some((g, None)) => (item.map(|_| g), item),
+        None => (None, None),
+    };
+    open_input(app, InputKind::Group { parent, after }, "");
 }
 
 /// Typing on a row: the row opened where it stands, `append` added to its
@@ -3458,7 +3590,13 @@ mod tests {
             "right under the item it was opened on"
         );
         file.delete_item(y);
-        v.input = Some((InputKind::Group { parent: Some(a) }, TextInput::new()));
+        v.input = Some((
+            InputKind::Group {
+                parent: Some(a),
+                after: None,
+            },
+            TextInput::new(),
+        ));
         assert_eq!(entries(&file, &v)[3], Entry::Input { depth: 1 });
         v.input = Some((InputKind::Rename(Target::Item(item)), TextInput::new()));
         assert_eq!(entries(&file, &v)[1], Entry::Input { depth: 1 });
