@@ -4763,6 +4763,9 @@ pub struct App {
     /// Launch instant; the first-run splash animation and the status-sweep
     /// text animation are pure functions of time elapsed since this.
     pub splash_epoch: std::time::Instant,
+    /// The MERGE CONFETTI in the air, drawn over everything until it lands
+    /// (`confetti`); the event loop ticks while it is here.
+    pub confetti: Option<crate::confetti::Confetti>,
     /// The last frame drew the empty GRID's welcome, orion and all
     /// (`ui::launcher_view`). Cleared at the top of every `ui::draw` and
     /// set again by the welcome itself, so between frames it says what is
@@ -5023,6 +5026,7 @@ impl App {
             last_metrics: None,
             client_rss_bytes: 0,
             splash_epoch: std::time::Instant::now(),
+            confetti: None,
             welcome_on_screen: false,
             animations: true,
             card_issue_number: false,

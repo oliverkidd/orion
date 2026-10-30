@@ -177,7 +177,7 @@ pub fn random_name(taken: &[String]) -> String {
 
 /// Clock nanos mixed with a per-process counter: two names minted inside
 /// the same clock tick still differ.
-fn next_seed() -> u64 {
+pub(crate) fn next_seed() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -186,7 +186,7 @@ fn next_seed() -> u64 {
     nanos ^ splitmix64(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-fn splitmix64(seed: u64) -> u64 {
+pub(crate) fn splitmix64(seed: u64) -> u64 {
     let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

@@ -437,6 +437,7 @@ async fn main_loop(
     let mut next_metrics_poll = tokio::time::Instant::now();
     let mut next_tail_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
+    let mut next_confetti_frame = tokio::time::Instant::now();
     let mut next_sweep_frame = tokio::time::Instant::now();
     // The last sweep tick still had something to animate (see the tick).
     let mut sweep_was_ticking = false;
@@ -584,6 +585,15 @@ async fn main_loop(
             _ = tokio::time::sleep_until(next_splash_frame), if app.splash_active() || app.welcome_active() => {
                 app.dirty = true;
                 next_splash_frame = tokio::time::Instant::now() + SPLASH_FRAME;
+            }
+            // MERGE CONFETTI: a burst in the air repaints on its own
+            // cadence, and the tick after the last piece lands clears it.
+            _ = tokio::time::sleep_until(next_confetti_frame), if app.confetti.is_some() => {
+                if app.confetti.as_ref().is_some_and(|c| c.done(std::time::Instant::now())) {
+                    app.confetti = None;
+                }
+                app.dirty = true;
+                next_confetti_frame = tokio::time::Instant::now() + crate::confetti::FRAME;
             }
             // Status sweep: running / needs-feedback rows shimmer, so keep
             // repainting while any are visible (same pure-function-of-time

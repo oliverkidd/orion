@@ -13,6 +13,7 @@ pub mod clean_worktrees;
 pub mod clipboard_image;
 pub mod commit_list;
 pub mod completion;
+pub mod confetti;
 pub mod config;
 pub mod conflicts;
 pub mod cursor_catalogue;

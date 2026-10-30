@@ -168,6 +168,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.rows_memo.arm();
     draw_screen(f, app);
     app.rows_memo.disarm();
+    // The MERGE CONFETTI goes over everything, modals and all.
+    if let Some(confetti) = &app.confetti {
+        let area = f.area();
+        confetti.draw(f.buffer_mut(), area, std::time::Instant::now(), app.theme);
+    }
     if app.black_background {
         let area = f.area();
         draw_black_background(f.buffer_mut(), area);

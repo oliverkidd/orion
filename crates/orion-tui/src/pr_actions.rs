@@ -1102,10 +1102,12 @@ fn submit_merge(app: &mut App) {
         let result = merge(&dir, number, method, auto, bypass, &base, delete.as_deref())
             .await
             .map(|fate| merged_message(number, &base, method, auto, &fate));
+        let landed = (!auto).then(|| (number, base));
         let _ = tx.send(Answer::Merged {
             project,
             ticket,
             result,
+            landed,
         });
     });
 }
@@ -1722,11 +1724,14 @@ pub enum Answer {
         allowed: Vec<MergeMethod>,
         auto_delete: bool,
     },
-    /// `gh pr merge`: what to flash, or why it refused.
+    /// `gh pr merge`: what to flash, or why it refused. `landed` is the
+    /// pull request's number and base when it merged now — not auto-merge,
+    /// which lands later — for the MERGE CONFETTI.
     Merged {
         project: ProjectId,
         ticket: u64,
         result: Result<String, String>,
+        landed: Option<(u64, String)>,
     },
     /// `gh pr close`: what to flash, or why it refused.
     Closed {
@@ -1865,10 +1870,14 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             project,
             ticket,
             result,
+            landed,
         } => {
             // Origin's base just moved: bring the project's root after it.
             if result.is_ok() {
                 crate::base_sync::request_now(app, &project);
+                if let Some((number, base)) = &landed {
+                    crate::confetti::fire(app, *number, base);
+                }
             }
             land_done(app, &project, ticket, result, "merge")
         }
@@ -3348,5 +3357,31 @@ mod tests {
         assert_eq!(form.choices().len(), 1);
         assert!(form.take_pick());
         assert_eq!(form.from.as_str(), "fix/login");
+    }
+
+    /// A merge that landed fires the MERGE CONFETTI — with the modal long
+    /// closed too — and one that only switched auto-merge on, or was
+    /// refused, fires nothing.
+    #[test]
+    fn a_landed_merge_fires_confetti_and_nothing_else_does() {
+        let merged = |result: Result<String, String>, landed: Option<(u64, String)>| {
+            let mut app = App::new();
+            land_answer(
+                &mut app,
+                Answer::Merged {
+                    project: ProjectId("p".into()),
+                    ticket: 1,
+                    result,
+                    landed,
+                },
+            );
+            app.confetti.is_some()
+        };
+        assert!(merged(Ok("merged #482".into()), Some((482, "main".into()))));
+        assert!(!merged(Ok("#482 merges once…".into()), None), "auto-merge");
+        assert!(!merged(
+            Err("not mergeable".into()),
+            Some((482, "main".into()))
+        ));
     }
 }
