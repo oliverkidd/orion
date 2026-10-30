@@ -216,7 +216,8 @@ pub struct DoneIssue {
     pub identifier: String,
     pub title: String,
     pub assignee: String,
-    /// RFC 3339.
+    /// RFC 3339: when Linear completed it, else when the last of its pull
+    /// requests merged in the period did.
     pub done_at: String,
     #[serde(skip)]
     pub description: String,
@@ -405,9 +406,12 @@ fn projects_in(app: &App, project: &ProjectId, wher: Where) -> Vec<(ProjectId, S
 /// What a review of `scope` would be written from right now: the fetched
 /// pull requests, the done issues Linear's list holds and the todos
 /// ticked, each inside the last [`DAYS`] before `now` and each only when
-/// its source is ticked in `picks`. `Just mine` keeps what is yours;
-/// `Everyone` keeps all of it and leaves the todos out, which are nobody
-/// else's. An issue two projects' lists both hold is taken once.
+/// its source is ticked in `picks`. An issue is done when Linear completed
+/// it in the week or one of its pull requests merged in it — whatever a
+/// team calls the state it waits in after that (`In Dev`, `In Staging`),
+/// its work landed. `Just mine` keeps what is yours; `Everyone` keeps all
+/// of it and leaves the todos out, which are nobody else's. An issue two
+/// projects' lists both hold is taken once.
 pub fn gather(
     app: &App,
     project: &ProjectId,
@@ -419,13 +423,18 @@ pub fn gather(
     let mine = scope.whose == Whose::Mine;
     let mut material = Material::default();
     let mut seen_issues = HashSet::new();
-    for (id, _, dir) in projects_in(app, project, scope.wher) {
+    let projects = projects_in(app, project, scope.wher);
+    let fetched = |id: &ProjectId| app.week_review.fetched.get(id).and_then(|f| f.prs.as_ref());
+    // Every project's, not just the issue's own: one Linear workspace can
+    // hold the issues of several repos.
+    let merged: HashMap<String, &str> = projects
+        .iter()
+        .flat_map(|(id, _, _)| fetched(id).into_iter().flatten())
+        .filter_map(|pr| Some((pull_key(&pr.url)?, pr.merged_at.as_str())))
+        .collect();
+    for (id, _, dir) in projects {
         if picks[Source::Prs.index()] {
-            let fetched = app
-                .week_review
-                .fetched
-                .get(&id)
-                .and_then(|f| f.prs.as_ref());
+            let fetched = fetched(&id);
             material.prs.extend(
                 fetched
                     .into_iter()
@@ -437,14 +446,26 @@ pub fn gather(
         if picks[Source::Issues.index()] {
             let issues = app.linear.get(&id).map(|l| l.list.as_slice());
             for issue in issues.into_iter().flatten() {
-                let done = issue.status_type == "completed"
+                let completed = issue.status_type == "completed"
                     && rfc3339_secs(&issue.completed_at).is_some_and(|at| at >= since);
-                if done && (!mine || issue.mine) && seen_issues.insert(issue.id.clone()) {
+                let done_at = if completed {
+                    Some(issue.completed_at.as_str())
+                } else {
+                    issue
+                        .prs
+                        .iter()
+                        .filter_map(|pr| merged.get(&pull_key(&pr.url)?).copied())
+                        .max()
+                };
+                let Some(done_at) = done_at else {
+                    continue;
+                };
+                if (!mine || issue.mine) && seen_issues.insert(issue.id.clone()) {
                     material.issues.push(DoneIssue {
                         identifier: issue.identifier.clone(),
                         title: issue.title.clone(),
                         assignee: issue.assignee.clone(),
-                        done_at: issue.completed_at.clone(),
+                        done_at: done_at.to_string(),
                         description: issue.description.clone(),
                     });
                 }
@@ -469,6 +490,14 @@ pub fn gather(
     material.issues.sort_by(|a, b| b.done_at.cmp(&a.done_at));
     material.todos.sort_by_key(|t| std::cmp::Reverse(t.done_at));
     material
+}
+
+/// A pull request's URL as both GitHub and a Linear attachment spell it:
+/// the repo in lower case and the number, without a `/files` or `#…` after.
+fn pull_key(url: &str) -> Option<String> {
+    let (repo, rest) = url.split_once("/pull/")?;
+    let number: u64 = rest.split(['/', '#', '?']).next()?.parse().ok()?;
+    Some(format!("{}/pull/{number}", repo.to_ascii_lowercase()))
 }
 
 // ---- people ----
@@ -2990,6 +3019,54 @@ mod tests {
             ..Scope::default()
         };
         assert_eq!(gather(&app, &project, both, all, now).issues.len(), 1);
+    }
+
+    /// An issue Linear has not completed is done all the same when one of
+    /// its pull requests merged in the week, whatever its state is called,
+    /// and dated by that merge; one whose pull requests are all older or
+    /// still open is not.
+    #[test]
+    fn an_issue_whose_pull_request_merged_is_done() {
+        let (mut app, project, now) = app_with_week();
+        let waiting = |id: &str, urls: &[&str]| {
+            let mut issue = issue(id, true, now, 0);
+            issue.status = "In Dev".into();
+            issue.status_type = "started".into();
+            issue.completed_at = String::new();
+            issue.prs = urls
+                .iter()
+                .map(|url| crate::linear::IssuePr {
+                    url: url.to_string(),
+                    ..Default::default()
+                })
+                .collect();
+            issue
+        };
+        app.linear.insert(
+            project.clone(),
+            crate::linear::LinearList {
+                list: vec![
+                    waiting("1", &["https://github.com/O/R/pull/412/files"]),
+                    waiting("2", &["https://github.com/o/r/pull/7"]),
+                    waiting("3", &[]),
+                ],
+                ..Default::default()
+            },
+        );
+        let material = gather(&app, &project, Scope::default(), [true; 3], now);
+        let ids: Vec<&str> = material
+            .issues
+            .iter()
+            .map(|i| i.identifier.as_str())
+            .collect();
+        assert_eq!(ids, ["ENG-1"]);
+        assert_eq!(
+            material.issues[0].done_at,
+            stamp(now, 1),
+            "the merge's date"
+        );
+        let no_prs = gather(&app, &project, Scope::default(), [false, true, true], now);
+        assert_eq!(no_prs.issues.len(), 1, "the merges count, listed or not");
     }
 
     /// The prompt names every item; an ordinary description is cut short

@@ -21,12 +21,15 @@
 //!   view`) — whether its branch goes with it, and whether GitHub should
 //!   wait for its checks and reviews (auto-merge). What GitHub said that
 //!   stands in the way is spelled out first: a draft, conflicts, failing
-//!   or running checks, a review still owed. Enter runs `gh pr merge`.
+//!   or running checks, a review still owed. Enter runs `gh pr merge`;
+//!   the pull requests stacked on the branch are moved onto its base
+//!   before it is deleted, which GitHub would otherwise close them for.
 //!   The **Review** SETTINGS tab holds the defaults both open on.
 //! * **Close** (`⌘W`): the pull request under the cursor closed
 //!   without merging — a comment left on it first if one is written, and
 //!   its branch deleted on GitHub if that is ticked (only a branch of this
-//!   repo's; a fork's lives elsewhere). Enter runs `gh pr close`.
+//!   repo's; a fork's lives elsewhere), and kept while pull requests are
+//!   stacked on it. Enter runs `gh pr close`.
 //!
 //! * **Review** (`⌘⇧R`, or Enter on the Reviews tab): approve the pull
 //!   request under the cursor, request changes, or comment — a body
@@ -1096,9 +1099,9 @@ fn submit_merge(app: &mut App) {
         .flatten();
     let base = form.base.clone();
     tokio::spawn(async move {
-        let result = merge(&dir, number, method, auto, bypass, delete.as_deref())
+        let result = merge(&dir, number, method, auto, bypass, &base, delete.as_deref())
             .await
-            .map(|deleted| merged_message(number, &base, method, auto, deleted));
+            .map(|fate| merged_message(number, &base, method, auto, &fate));
         let _ = tx.send(Answer::Merged {
             project,
             ticket,
@@ -1107,16 +1110,18 @@ fn submit_merge(app: &mut App) {
     });
 }
 
-/// Merge pull request `number` — or switch auto-merge on for it — and
-/// delete `branch` on origin once it is merged. Whether the branch went.
+/// Merge pull request `number` into `base` — or switch auto-merge on for
+/// it — and delete `branch` on origin once it is merged, the pull
+/// requests stacked on it moved onto `base` first. What became of it.
 async fn merge(
     dir: &Path,
     number: u64,
     method: MergeMethod,
     auto: bool,
     bypass: bool,
+    base: &str,
     branch: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<BranchFate, String> {
     let number = number.to_string();
     let mut args = vec!["pr", "merge", number.as_str(), method.flag()];
     if auto {
@@ -1128,9 +1133,92 @@ async fn merge(
     // Auto-merge lands later, on GitHub, with nothing here to delete the
     // branch after it: only a repo that deletes merged branches does then.
     let Some(branch) = branch.filter(|_| !auto) else {
-        return Ok(false);
+        return Ok(BranchFate::Kept);
     };
-    Ok(delete_branch(dir, branch).await)
+    // GitHub moves the pull requests based on a merged branch onto its
+    // base only when it deletes the branch itself; one deleted through the
+    // API closes them. So they are moved here first, and the branch stays
+    // while any of them would not move.
+    let Some(stacked) = stacked_on(dir, branch).await else {
+        return Ok(BranchFate::Kept);
+    };
+    let mut held = Vec::new();
+    for &pr in &stacked {
+        if base.is_empty() || !retarget(dir, pr, base).await {
+            held.push(pr);
+        }
+    }
+    if !held.is_empty() {
+        return Ok(BranchFate::Held(held));
+    }
+    Ok(match delete_branch(dir, branch).await {
+        true => BranchFate::Deleted { moved: stacked },
+        false => BranchFate::Kept,
+    })
+}
+
+/// What became of a merged or closed pull request's branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BranchFate {
+    /// Not asked to go, or GitHub would not delete it.
+    Kept,
+    /// Deleted on GitHub, these stacked on it moved onto its base first.
+    Deleted { moved: Vec<u64> },
+    /// Left on GitHub: these are stacked on it, and deleting it would
+    /// have GitHub close them.
+    Held(Vec<u64>),
+}
+
+impl BranchFate {
+    /// What the flash adds for it, after the merge or the close.
+    fn suffix(&self, base: &str) -> String {
+        match self {
+            Self::Kept => String::new(),
+            Self::Deleted { moved } if moved.is_empty() => ", branch deleted".into(),
+            Self::Deleted { moved } => {
+                format!(", branch deleted; {} moved onto {base}", pr_list(moved))
+            }
+            Self::Held(held) => format!(", branch kept: {} stacked on it", pr_list(held)),
+        }
+    }
+}
+
+/// `#12, #14`.
+fn pr_list(numbers: &[u64]) -> String {
+    numbers
+        .iter()
+        .map(|n| format!("#{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The open pull requests based on `branch` — stacked on it. None when
+/// GitHub could not say, which leaves the branch where it is.
+async fn stacked_on(dir: &Path, branch: &str) -> Option<Vec<u64>> {
+    let list = gh(
+        dir,
+        &[
+            "pr", "list", "--base", branch, "--state", "open", "--limit", "100", "--json", "number",
+        ],
+    );
+    let out = run_piped(list, "", REQUEST_TIMEOUT).await.ok()?;
+    parse_numbers(&out)
+}
+
+/// `gh pr list --json number`'s answer, as numbers.
+fn parse_numbers(json: &str) -> Option<Vec<u64>> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    v.as_array()?
+        .iter()
+        .map(|pr| pr.get("number")?.as_u64())
+        .collect()
+}
+
+/// Base pull request `number` on `base`. Whether it moved.
+async fn retarget(dir: &Path, number: u64, base: &str) -> bool {
+    let number = number.to_string();
+    let edit = gh(dir, &["pr", "edit", &number, "--base", base]);
+    run_piped(edit, "", REQUEST_TIMEOUT).await.is_ok()
 }
 
 /// Delete `branch` on GitHub — only there: a checkout of it here is left
@@ -1147,14 +1235,14 @@ fn merged_message(
     base: &str,
     method: MergeMethod,
     auto: bool,
-    deleted: bool,
+    fate: &BranchFate,
 ) -> String {
     let into = if base.is_empty() {
         String::new()
     } else {
         format!(" into {base}")
     };
-    let gone = if deleted { ", branch deleted" } else { "" };
+    let gone = fate.suffix(base);
     if auto {
         format!(
             "#{number} merges{into} once GitHub's requirements are met ({}){gone}",
@@ -1289,7 +1377,7 @@ fn submit_close(app: &mut App) {
     tokio::spawn(async move {
         let result = close(&dir, number, &comment, delete.as_deref())
             .await
-            .map(|deleted| closed_message(number, deleted));
+            .map(|fate| closed_message(number, &fate));
         let _ = tx.send(Answer::Closed {
             project,
             ticket,
@@ -1299,30 +1387,39 @@ fn submit_close(app: &mut App) {
 }
 
 /// Close pull request `number` — `comment` left on it first, when there
-/// is one — and delete `branch` on GitHub once it is closed. Whether the
-/// branch went.
+/// is one — and delete `branch` on GitHub once it is closed, unless pull
+/// requests are stacked on it. What became of it.
 async fn close(
     dir: &Path,
     number: u64,
     comment: &str,
     branch: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<BranchFate, String> {
     let number = number.to_string();
     let mut args = vec!["pr", "close", number.as_str()];
     if !comment.is_empty() {
         args.extend(["--comment", comment]);
     }
     run_piped(gh(dir, &args), "", REQUEST_TIMEOUT).await?;
-    match branch {
-        Some(branch) => Ok(delete_branch(dir, branch).await),
-        None => Ok(false),
-    }
+    let Some(branch) = branch else {
+        return Ok(BranchFate::Kept);
+    };
+    // Nothing merged, so nowhere to move what is stacked on it: the
+    // branch stays rather than have GitHub close them.
+    let stacked = match stacked_on(dir, branch).await {
+        Some(stacked) if stacked.is_empty() => stacked,
+        Some(stacked) => return Ok(BranchFate::Held(stacked)),
+        None => return Ok(BranchFate::Kept),
+    };
+    Ok(match delete_branch(dir, branch).await {
+        true => BranchFate::Deleted { moved: stacked },
+        false => BranchFate::Kept,
+    })
 }
 
 /// The flash a close leaves.
-fn closed_message(number: u64, deleted: bool) -> String {
-    let gone = if deleted { ", branch deleted" } else { "" };
-    format!("closed #{number}{gone}")
+fn closed_message(number: u64, fate: &BranchFate) -> String {
+    format!("closed #{number}{}", fate.suffix(""))
 }
 
 // ---- reviewing ----
@@ -2935,6 +3032,41 @@ fn draw_review(f: &mut Frame, area: Rect, form: &ReviewForm, focused: bool, th: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stacked_pull_requests_are_read_from_gh() {
+        assert_eq!(
+            parse_numbers(r#"[{"number":12},{"number":14}]"#),
+            Some(vec![12, 14])
+        );
+        assert_eq!(parse_numbers("[]"), Some(vec![]));
+        assert_eq!(parse_numbers("not json"), None, "unsure keeps the branch");
+        assert_eq!(parse_numbers(r#"[{"title":"x"}]"#), None);
+    }
+
+    #[test]
+    fn the_flash_says_what_became_of_the_branch() {
+        let merged = |fate| merged_message(10, "dev", MergeMethod::Squash, false, &fate);
+        assert_eq!(merged(BranchFate::Kept), "merged #10 into dev (squash)");
+        assert_eq!(
+            merged(BranchFate::Deleted { moved: vec![] }),
+            "merged #10 into dev (squash), branch deleted"
+        );
+        assert_eq!(
+            merged(BranchFate::Deleted {
+                moved: vec![12, 14]
+            }),
+            "merged #10 into dev (squash), branch deleted; #12, #14 moved onto dev"
+        );
+        assert_eq!(
+            merged(BranchFate::Held(vec![12])),
+            "merged #10 into dev (squash), branch kept: #12 stacked on it"
+        );
+        assert_eq!(
+            closed_message(10, &BranchFate::Held(vec![12])),
+            "closed #10, branch kept: #12 stacked on it"
+        );
+    }
 
     #[test]
     fn the_fill_is_ghs() {
