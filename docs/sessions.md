@@ -793,9 +793,9 @@ there is said once.
 ## TODOS
 
 `⌘I` (`^Q` where the terminal sends no ⌘) opens the TODOS MODAL: every open PROJECT's own todo
-list, a tab each along the top in the projects' order, opened on the selected project's tab
-(`←`/`→`, `Tab` or a click for another, `⌘1`–`⌘9` straight to one; each comes back as it was left
-while the modal is up). Each
+list, a tab each along the top in the order of the grid's project tabs, then any project whose
+tab is closed, opened on the selected project's tab (`←`/`→`, `Tab` or a click for another,
+`⌘1`–`⌘9` straight to one; each comes back as it was left while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
 an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
 (`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the

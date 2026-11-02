@@ -1,7 +1,7 @@
 //! The TODOS MODAL: every open project's list, a tab each along the top
-//! in the projects' own order — `←`/`→` (or `Tab`) walk them, as the
-//! LINEAR VIEW walks its tabs, and `⌘1`–`⌘9` go straight to one, as on
-//! the grid — opened from anywhere on the selected project's. The list is
+//! in the order of the grid's PROJECT TABS — `←`/`→` (or `Tab`) walk them,
+//! as the LINEAR VIEW walks its tabs, and `⌘1`–`⌘9` go straight to one, as
+//! on the grid — opened from anywhere on the selected project's. The list is
 //! the project's groups with their open items, a nested group standing
 //! among its parent's items where it was put. A line per item
 //! — more where its text wraps: its box, its priority as the one letter
@@ -579,11 +579,20 @@ pub(crate) fn load_list(app: &mut App, dir: PathBuf) {
     app.todos.insert(dir, loaded.file);
 }
 
-/// The project tabs: every open project, in the projects' own order.
+/// The project tabs, in the grid's order: those with a PROJECT TAB as the
+/// header keeps them, so `⌘N` is the same project here and there, then every
+/// project with its tab closed, in the tree's order — its list is still kept.
 pub(super) fn projects(app: &App) -> Vec<(ProjectId, String, PathBuf)> {
-    app.tree
-        .projects
-        .iter()
+    let mut projects: Vec<_> = app.tree.projects.iter().collect();
+    // Stable: the projects with no tab all rank last and keep the tree's order.
+    projects.sort_by_key(|p| {
+        app.launcher_tabs
+            .iter()
+            .position(|id| *id == p.id)
+            .unwrap_or(usize::MAX)
+    });
+    projects
+        .into_iter()
         .map(|p| (p.id.clone(), p.name.clone(), p.repo_path.clone()))
         .collect()
 }
@@ -3364,6 +3373,37 @@ mod tests {
 
     fn view() -> TodoView {
         TodoView::new(ProjectId("p1".into()), "demo".into(), PathBuf::from("/r"))
+    }
+
+    /// The tabs stand as the grid's do, a drag there moving them here too,
+    /// with the projects whose tab is closed after them in the tree's order
+    /// and a tab whose project has gone ignored.
+    #[test]
+    fn the_tabs_follow_the_grids_project_tabs() {
+        let mut app = App::new();
+        app.tree.projects = ["api", "web", "docs", "site"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| orion_core::Project {
+                id: ProjectId(format!("p{i}")),
+                name: (*name).into(),
+                repo_path: format!("/tmp/{name}").into(),
+                sort_order: 0,
+            })
+            .collect();
+        let names = |app: &App| -> Vec<String> {
+            projects(app).into_iter().map(|(_, name, _)| name).collect()
+        };
+        assert_eq!(names(&app), ["api", "web", "docs", "site"], "no tabs open");
+
+        app.launcher_tabs = ["p2", "gone", "p1"]
+            .iter()
+            .map(|id| ProjectId((*id).into()))
+            .collect();
+        assert_eq!(names(&app), ["docs", "web", "api", "site"]);
+
+        assert!(app.move_project_tab(&ProjectId("p1".into()), &ProjectId("p2".into())));
+        assert_eq!(names(&app), ["web", "docs", "api", "site"], "after a drag");
     }
 
     /// Every hint the modal draws names a key in its table — the priority
