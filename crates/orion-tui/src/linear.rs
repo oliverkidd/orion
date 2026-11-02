@@ -5348,9 +5348,10 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
 
 /// The issues of both lists, in the order the LINEAR VIEW's sections go:
 /// by where their state stands (triage, todo, the backlog, started,
-/// done, duplicate, cancelled), the state's place in its workflow, its name, then — for the done — the
-/// latest finished first, then priority — urgent first, none last —
-/// and the most recently touched first.
+/// done, duplicate, cancelled), the state's place in its workflow, its
+/// name, then the latest filed first in triage, the latest finished first
+/// in the done, then priority — urgent first, none last — and the most
+/// recently touched first.
 fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
     if let Some(err) = graphql_error(json) {
         return Err(err);
@@ -5372,6 +5373,10 @@ fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
             .cmp(&status_rank(b))
             .then_with(|| a.status_order.cmp(&b.status_order))
             .then_with(|| a.status.cmp(&b.status))
+            .then_with(|| match a.status_type.as_str() {
+                "triage" => b.created_at.cmp(&a.created_at),
+                _ => std::cmp::Ordering::Equal,
+            })
             .then_with(|| b.completed_at.cmp(&a.completed_at))
             .then_with(|| priority_rank(a.priority).cmp(&priority_rank(b.priority)))
             .then_with(|| b.updated_at.cmp(&a.updated_at))
@@ -6729,6 +6734,39 @@ pub(crate) mod tests {
 
     fn selected_id(app: &App) -> Option<String> {
         selected_issue(app).map(|i| i.identifier.clone())
+    }
+
+    /// Triage reads newest first whatever the priority; other states
+    /// still put the urgent on top.
+    #[test]
+    fn triage_sorts_by_date_added_latest_first() {
+        let node = |n: &str, priority: u8, created: &str, kind: &str| {
+            serde_json::json!({"id": n, "identifier": n, "title": n, "url": "https://linear.app/x",
+                "priority": priority, "createdAt": created,
+                "state": {"name": kind, "type": kind}})
+        };
+        let json = serde_json::json!({"data": {
+            "mine": {"nodes": [
+                node("OLD-URGENT", 1, "2026-10-01T00:00:00.000Z", "triage"),
+                node("NEW-LOW", 4, "2026-10-03T00:00:00.000Z", "triage"),
+                node("MID-NONE", 0, "2026-10-02T00:00:00.000Z", "triage"),
+                node("TODO-NEW-LOW", 4, "2026-10-03T00:00:00.000Z", "unstarted"),
+                node("TODO-OLD-URGENT", 1, "2026-10-01T00:00:00.000Z", "unstarted"),
+            ]},
+            "others": {"nodes": []}
+        }});
+        let fetched = parse_lists(&json).unwrap();
+        let ids: Vec<&str> = fetched.list.iter().map(|i| i.identifier.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "NEW-LOW",
+                "MID-NONE",
+                "OLD-URGENT",
+                "TODO-OLD-URGENT",
+                "TODO-NEW-LOW"
+            ]
+        );
     }
 
     /// Both lists come in one answer: the configured user's (`mine`) and
