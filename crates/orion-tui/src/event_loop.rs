@@ -31448,7 +31448,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// where the provider has no cap that wide; a narrow screen drops DAY;
     /// `⇧U` again closes it.
     #[test]
-    fn usage_modal_draws_the_grid_and_closes_on_its_key() {
+    fn usage_modal_draws_each_limit_and_closes_on_its_key() {
         use crate::usage::{Cell, Provider, Reading, Row};
         let mut app = App::new();
         let mut out = Vec::new();
@@ -31511,24 +31511,32 @@ diff --git a/src/c.rs b/src/c.rs
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Account usage"), "title:\n{text}");
-        assert!(
-            text.contains("SESSION (5h)") && text.contains("DAY"),
-            "columns:\n{text}"
-        );
-        assert!(text.contains("62% · 2h14m"), "session left:\n{text}");
-        assert!(text.contains("41% · 3d4h"), "week left:\n{text}");
-        assert!(text.contains("73% · 19d"), "cursor month:\n{text}");
+        // Each limit in words, its bar filled by what is left.
+        for line in [
+            "5-hour   ████████████░░░░░░░░  62% left       resets in 2h 14m",
+            "Weekly   ████████░░░░░░░░░░░░  41% left       resets in 3d 4h",
+            "Monthly  ██████████████░░░░░░  73% left       resets in 19d",
+        ] {
+            assert!(text.contains(line), "{line}:\n{text}");
+        }
+        assert!(!text.contains("Daily"), "a limit nobody has:\n{text}");
         assert!(
             text.contains("not signed in · Enter signs in"),
             "signed out:\n{text}"
         );
+        let Some(Overlay::Usage(view)) = &app.overlay else {
+            panic!("usage closed");
+        };
+        let taken: Vec<usize> = view.hit_lines.iter().map(|(_, n)| *n).collect();
+        assert_eq!(taken, [3, 2, 2], "a heading and what is under it");
 
-        let mut narrow = Terminal::new(TestBackend::new(84, 30)).unwrap();
+        // Too narrow for a bar: the words stay.
+        let mut narrow = Terminal::new(TestBackend::new(52, 30)).unwrap();
         narrow.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&narrow);
         assert!(
-            text.contains("WEEK") && !text.contains(" DAY "),
-            "DAY dropped:\n{text}"
+            text.contains("62% left") && !text.contains('█'),
+            "no bar:\n{text}"
         );
 
         press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);

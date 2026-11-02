@@ -263,9 +263,10 @@ machine slept and Claude waits for an `Enter`, the row stays red without the lim
 meanwhile shows it as it was: the limit is kept on the session's row in the DAEMON. A DAEMON restart
 ends the CLI, and Claude's wait for the reset with it, so the row comes back gray, without the limit.
 
-To see a limit coming rather than hit it, `⇧U` opens ACCOUNT USAGE: every Claude account's share of
-its 5-hour session and its week left, and the time until each resets, beside Cursor's month. An
-account with a session stopped at its limit shows `▲ limit hit` there at once, before the next read.
+To see a limit coming rather than hit it, `⇧U` opens ACCOUNT USAGE: the share left on each limit a
+Claude account reports and the time until it resets, beside Cursor's month. An account with a
+session stopped at its limit turns red there, and its emptiest limit says `limit reached`, at once,
+before the next read.
 See [Keys](keys.md#the-grid).
 
 A second Claude account is one more Claude Code config dir with a login of its own: **Add

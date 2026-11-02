@@ -1,21 +1,21 @@
-//! ACCOUNT USAGE (`⇧U`): how much is left on every linked account, on one
-//! grid — a row per account, a column per window (SESSION, DAY, WEEK,
-//! MONTH), each cell the share left and how long until it resets, and `-`
-//! where the provider has no cap that wide.
+//! ACCOUNT USAGE (`⇧U`): how much is left on every linked account — a
+//! heading per account and under it a line per limit its provider reports,
+//! in words: a bar that empties as the limit is used, `72% left`, and
+//! `resets in 3d 9h`. A limit the provider doesn't report isn't drawn.
 //!
 //! Two providers, each asked the way its own client asks:
 //!
 //! * **Claude**, once per login: `GET api.anthropic.com/api/oauth/usage`
 //!   with the account's OAuth token — what Claude Code's own `/usage`
-//!   reads. `five_hour` is SESSION, `seven_day` WEEK, and the model-scoped
-//!   weeks (`seven_day_opus`, `seven_day_sonnet`) are rows of their own
-//!   under the account. The token is Claude Code's: on a Mac a Keychain
+//!   reads. `five_hour` is the 5-hour limit, `seven_day` the weekly, and the
+//!   model-scoped weeks (`seven_day_opus`, `seven_day_sonnet`) are limits of
+//!   their own under the account. The token is Claude Code's: on a Mac a Keychain
 //!   item named after the account's config dir ([`claude_service`]),
 //!   elsewhere `.credentials.json` in the dir.
 //! * **Cursor**, the one `cursor-agent` login: `GET
 //!   cursor.com/api/usage-summary` with the session cookie its dashboard
 //!   sends, built from `cursor-agent`'s token and account id. The billing
-//!   cycle is MONTH.
+//!   cycle is the monthly limit.
 //!
 //! Both endpoints are undocumented, and Anthropic's answers a client that
 //! asks every minute with 429s for good — so nothing here asks often: an
@@ -33,7 +33,7 @@
 //! Every ask runs on the blocking pool (`view_jobs`) and lands through
 //! [`land`]; the readings — percentages and reset times, never a token,
 //! an email or a cookie — are kept in `usage.json` in the DATA DIR, so the
-//! grid paints from the last run while the next ask is out.
+//! modal paints from the last run while the next ask is out.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -76,9 +76,9 @@ const CLAUDE_SERVICE: &str = "Claude Code-credentials";
 const CURSOR_SERVICE: &str = "cursor-access-token";
 const CURSOR_KEY_ACCOUNT: &str = "cursor-user";
 
-// ---- the grid ----
+// ---- the readings ----
 
-/// The grid's columns, in order.
+/// The kinds of limit, in the order an account lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Window {
     Session,
@@ -92,10 +92,10 @@ impl Window {
 
     pub fn title(self) -> &'static str {
         match self {
-            Window::Session => "SESSION (5h)",
-            Window::Day => "DAY",
-            Window::Week => "WEEK",
-            Window::Month => "MONTH",
+            Window::Session => "5-hour",
+            Window::Day => "Daily",
+            Window::Week => "Weekly",
+            Window::Month => "Monthly",
         }
     }
 
@@ -117,9 +117,16 @@ impl Cell {
     pub fn left_pct(&self) -> f64 {
         (100.0 - self.used_pct).clamp(0.0, 100.0)
     }
+
+    /// The share left as it is written, which the bar and its colour go by
+    /// too, so all three agree.
+    fn shown_left(&self) -> f64 {
+        self.left_pct().round()
+    }
 }
 
-/// One line of the grid: a cell per [`Window`], None for `-`.
+/// One line of a reading: a cell per [`Window`], None where the provider
+/// reports no such limit.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub label: String,
@@ -152,6 +159,33 @@ pub struct Reading {
     pub extra: Option<String>,
     /// Epoch seconds.
     pub fetched_at: i64,
+}
+
+impl Reading {
+    /// Every limit it reports, named: the account's own, then the
+    /// model-scoped ones.
+    fn limits(&self) -> Vec<(&str, &Cell)> {
+        let main = Window::ALL
+            .into_iter()
+            .filter_map(|w| Some((w.title(), self.main.cells[w.index()].as_ref()?)));
+        let sub = self.sub.iter().flat_map(|row| {
+            row.cells
+                .iter()
+                .flatten()
+                .map(|cell| (row.label.as_str(), cell))
+        });
+        main.chain(sub).collect()
+    }
+}
+
+/// Which of `limits` a stopped session is put down to: the one with least
+/// left. The provider doesn't say, and the first of a tie will do.
+fn emptiest(limits: &[(&str, &Cell)]) -> Option<usize> {
+    limits
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.1.left_pct().total_cmp(&b.1.left_pct()))
+        .map(|(i, _)| i)
 }
 
 /// Why an ask came back without a reading.
@@ -193,10 +227,10 @@ pub enum Provider {
     Cursor,
 }
 
-/// One account the grid lists, as config and the sign-in records name it.
+/// One account the modal lists, as config and the sign-in records name it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
-    /// The harness id: `claude`, `claude-2`, `cursor`. The row's key.
+    /// The harness id: `claude`, `claude-2`, `cursor`. The account's key.
     pub id: String,
     pub provider: Provider,
     /// `Work (a@b.co)`, `Cursor`.
@@ -210,11 +244,11 @@ pub struct Account {
     /// The config dir, for `.credentials.json`.
     pub dir: Option<PathBuf>,
     /// Other accounts signed in as the same login: one subscription, one
-    /// set of limits, so one row.
+    /// set of limits, so one heading.
     pub also: Vec<String>,
 }
 
-/// Everything the grid knows, kept on the app so the modal opens on it.
+/// Everything the modal knows, kept on the app so the modal opens on it.
 #[derive(Debug, Default)]
 pub struct Usage {
     pub accounts: Vec<Account>,
@@ -279,7 +313,7 @@ impl Usage {
     }
 }
 
-/// The accounts `cfg` links, in the order the grid lists them: every
+/// The accounts `cfg` links, in the order the modal lists them: every
 /// enabled Claude account, those signed in as one login folded into the
 /// first, then Cursor while its CLI is installed.
 pub fn accounts(cfg: &Config) -> Vec<Account> {
@@ -608,7 +642,7 @@ fn parse_claude_credentials(blob: &str) -> Result<ClaudeCreds, Problem> {
     })
 }
 
-/// `/api/oauth/usage`'s answer as the grid's rows. Unknown windows are
+/// `/api/oauth/usage`'s answer as a [`Reading`]. Unknown windows are
 /// left out rather than guessed at.
 fn claude_reading(json: &Value, plan: Option<String>, now: i64) -> Reading {
     let window = |key: &str| -> Option<Cell> {
@@ -710,7 +744,7 @@ fn jwt_subject(token: &str) -> Option<String> {
     Some(sub.rsplit('|').next().unwrap_or(sub).to_string())
 }
 
-/// `/api/usage-summary`'s answer as the grid's rows: the plan's share used
+/// `/api/usage-summary`'s answer as a [`Reading`]: the plan's share used
 /// this billing cycle — `totalPercentUsed`, else the larger of the Auto and
 /// API pools, else `used` of `limit` on a request-counted plan.
 fn cursor_reading(json: &Value, now: i64) -> Reading {
@@ -814,33 +848,33 @@ fn spend(what: &str, used_cents: f64, limit_cents: Option<f64>) -> String {
     }
 }
 
-/// How long until `at`: `38m`, `2h14m`, `3d4h`, `19d`; `now` once it has
-/// passed.
-pub fn until(at: i64, now: i64) -> String {
-    let s = at - now;
-    if s <= 0 {
-        return "now".into();
-    }
-    let (d, h, m) = (s / 86_400, s % 86_400 / 3600, s % 3600 / 60);
+/// How long `seconds` is, for a reset: `38m`, `2h 14m`, `3d 9h`, `19d`.
+fn span(seconds: i64) -> String {
+    let (d, h, m) = (
+        seconds / 86_400,
+        seconds % 86_400 / 3600,
+        seconds % 3600 / 60,
+    );
     match (d, h) {
         (0, 0) => format!("{}m", m.max(1)),
-        (0, _) => format!("{h}h{m:02}m"),
-        (1..=6, _) => format!("{d}d{h}h"),
+        (0, _) => format!("{h}h {m}m"),
+        (1..=6, _) => format!("{d}d {h}h"),
         _ => format!("{d}d"),
     }
 }
 
-/// A cell as the grid writes it: `62% · 2h14m`, or `-`.
-pub fn cell_text(cell: Option<&Cell>, now: i64) -> String {
-    match cell {
-        None => "-".into(),
-        Some(cell) => {
-            let left = format!("{:.0}%", cell.left_pct());
-            match cell.resets_at {
-                Some(at) => format!("{left} · {}", until(at, now)),
-                None => left,
-            }
-        }
+/// `72% left`.
+fn left_text(cell: &Cell) -> String {
+    format!("{:.0}% left", cell.shown_left())
+}
+
+/// `resets in 3d 9h`, `resets now` once it is due, or nothing when the
+/// provider gave no time.
+fn resets_text(cell: &Cell, now: i64) -> String {
+    match cell.resets_at {
+        None => String::new(),
+        Some(at) if at <= now => "resets now".into(),
+        Some(at) => format!("resets in {}", span(at - now)),
     }
 }
 
@@ -887,7 +921,7 @@ pub(crate) mod keys {
     pub const ALL: &[Key] = &[REFRESH, SIGN_IN, CLOSE];
 }
 
-/// `⇧U`: the grid on the last readings, the account list read afresh,
+/// `⇧U`: the modal on the last readings, the account list read afresh,
 /// and anything [`POLL`] old asked for.
 pub(crate) fn open(app: &mut App) {
     app.overlay = Some(Overlay::Usage(UsageView::default()));
@@ -991,7 +1025,7 @@ fn limited_harnesses(app: &App) -> BTreeSet<&str> {
 }
 
 impl Account {
-    /// Whether a session on this row's login — on it or on an account
+    /// Whether a session on this account's login — on it or on an account
     /// that shares it — is stopped at its limit.
     fn limit_hit(&self, limited: &BTreeSet<&str>) -> bool {
         std::iter::once(&self.id)
@@ -1000,73 +1034,133 @@ impl Account {
     }
 }
 
-const NAME_MIN: usize = 18;
-const NAME_MAX: usize = 34;
-const PLAN_W: usize = 6;
-const CELL_W: usize = 14;
-/// Below this share left a cell turns red…
-const SCARCE_LEFT_PCT: f64 = 10.0;
-/// …and below this one, yellow.
-const LOW_LEFT_PCT: f64 = 30.0;
+/// The modal's widest: a limit's whole line, a problem's words, the frame.
+const MODAL_W: u16 = 74;
+const INDENT: &str = "   ";
+const LIMIT_W: usize = 9;
+const BAR_W: usize = 20;
+/// Narrower than this a bar says nothing, and the line goes without.
+const BAR_MIN: usize = 5;
+const BAR_GAP: usize = 2;
+const LEFT_W: usize = 15;
+const RESETS_W: usize = 17;
+/// Below this share left a limit is red…
+const SCARCE_LEFT_PCT: f64 = 5.0;
+/// …and at or below this one, yellow. Above it, green.
+const LOW_LEFT_PCT: f64 = 25.0;
+
+fn left_color(cell: &Cell, th: Theme) -> Color {
+    let left = cell.shown_left();
+    if left < SCARCE_LEFT_PCT {
+        th.err
+    } else if left <= LOW_LEFT_PCT {
+        th.warn
+    } else {
+        th.ok
+    }
+}
+
+/// How many of a bar's `width` cells are filled: the share left, so a bar
+/// starts full and empties as the limit is used. Rounded down, so only 100%
+/// is full, but anything left at all still shows.
+fn bar_fill(cell: &Cell, width: usize) -> usize {
+    let left = cell.shown_left();
+    if left <= 0.0 {
+        return 0;
+    }
+    ((left / 100.0 * width as f64).floor() as usize).clamp(1, width.max(1))
+}
+
+/// How [`limit_line`] draws a limit.
+struct LimitLook {
+    /// A session on the account has stopped, and this is the limit it's put
+    /// down to.
+    reached: bool,
+    stale: bool,
+    bar_w: usize,
+    now: i64,
+}
+
+/// `Weekly   ██████████████░░░░░░  72% left       resets in 3d 9h`.
+fn limit_line(name: &str, cell: &Cell, look: LimitLook, th: Theme) -> Line<'static> {
+    let color = if look.reached {
+        th.err
+    } else if look.stale {
+        th.dim
+    } else {
+        left_color(cell, th)
+    };
+    let quiet = Style::default().fg(if look.stale { th.dim } else { th.muted });
+    let mut spans = vec![Span::styled(
+        format!(
+            "{INDENT}{:<LIMIT_W$}",
+            crate::ui::truncate(name, LIMIT_W - 1)
+        ),
+        quiet,
+    )];
+    if look.bar_w > 0 {
+        let filled = bar_fill(cell, look.bar_w);
+        spans.push(Span::styled("█".repeat(filled), Style::default().fg(color)));
+        spans.push(Span::styled(
+            "░".repeat(look.bar_w - filled),
+            Style::default().fg(th.faint),
+        ));
+        spans.push(Span::raw(" ".repeat(BAR_GAP)));
+    }
+    let left = if look.reached {
+        "limit reached".to_string()
+    } else {
+        left_text(cell)
+    };
+    spans.push(Span::styled(
+        format!("{left:<LEFT_W$}"),
+        Style::default().fg(color),
+    ));
+    spans.push(Span::styled(resets_text(cell, look.now), quiet));
+    Line::from(spans)
+}
 
 pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
     let now = orion_core::clock::now_secs() as i64;
     let screen = f.area();
-    let all = Window::ALL.len();
-    let widest = (NAME_MAX + PLAN_W + all * CELL_W + 3) as u16;
-    let width = screen.width.saturating_sub(4).min(widest);
-    // Narrow: DAY goes first — no provider caps a day yet — then the plan.
+    let width = screen.width.saturating_sub(4).min(MODAL_W);
     let inner_w = width.saturating_sub(2) as usize;
-    let show_day = inner_w > NAME_MIN + PLAN_W + all * CELL_W;
-    let show_plan = inner_w > NAME_MIN + PLAN_W + (all - 1) * CELL_W;
-    let windows: Vec<Window> = Window::ALL
-        .into_iter()
-        .filter(|w| show_day || *w != Window::Day)
-        .collect();
-    let fixed = windows.len() * CELL_W + if show_plan { PLAN_W } else { 0 };
-    let name_w = inner_w.saturating_sub(fixed + 1).max(NAME_MIN / 2);
-
+    let room = inner_w.saturating_sub(INDENT.len() + LIMIT_W + BAR_GAP + LEFT_W + RESETS_W);
+    let bar_w = if room < BAR_MIN { 0 } else { room.min(BAR_W) };
     let dim = Style::default().fg(th.dim);
-    let header = Style::default().fg(th.muted).add_modifier(Modifier::BOLD);
-    // A cell's colour: how much is left, dimmed while the reading is stale.
-    let cell_style = |cell: Option<&Cell>, stale: bool| match cell {
-        _ if stale => dim,
-        None => Style::default().fg(th.faint),
-        Some(c) if c.left_pct() < SCARCE_LEFT_PCT => Style::default().fg(th.err),
-        Some(c) if c.left_pct() < LOW_LEFT_PCT => Style::default().fg(th.warn),
-        Some(_) => Style::default().fg(th.ok),
-    };
 
     let usage = &app.usage;
     let limited = limited_harnesses(app);
     let selected = view.row_in(&usage.accounts);
     let mut lines: Vec<Line> = Vec::new();
-    let mut head = format!(" {:<name_w$}", "ACCOUNT");
-    if show_plan {
-        head.push_str(&format!("{:<PLAN_W$}", "PLAN"));
-    }
-    for w in &windows {
-        head.push_str(&format!("{:<CELL_W$}", w.title()));
-    }
-    lines.push(Line::from(Span::styled(head, header)));
-    let list_top = lines.len() as u16;
     let mut hit_lines = Vec::new();
 
     if usage.accounts.is_empty() {
         lines.push(Line::from(Span::styled(
-            " no Claude account or Cursor login to read — add one in Settings → Agents",
+            " no Claude account or Cursor login to read",
+            dim,
+        )));
+        lines.push(Line::from(Span::styled(
+            " add one in Settings → Agents",
             dim,
         )));
     }
     for (i, account) in usage.accounts.iter().enumerate() {
-        let first = lines.len() as u16 - list_top;
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        let first = lines.len() as u16;
         let reading = usage.readings.get(&account.id);
         let problem = usage.problems.get(&account.id);
         let stale = problem.is_some();
         let hit = account.limit_hit(&limited);
+        let signed_out = matches!(problem, Some(Problem::SignedOut))
+            || (account.signed_out && reading.is_none());
+
+        // The heading, the selected account's lit across the modal.
         let sel = |s: Style| {
             if i == selected {
-                s.bg(th.sel_bg).add_modifier(Modifier::BOLD)
+                s.bg(th.sel_bg)
             } else {
                 s
             }
@@ -1075,33 +1169,42 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
         if usage.inflight.contains(&account.id) {
             name.push_str(" …");
         }
-        let name_style = Style::default().fg(if hit { th.err } else { th.text });
-        let mut spans = vec![Span::styled(
-            format!(
-                " {:<name_w$}",
-                crate::ui::truncate(&name, name_w.saturating_sub(1))
+        let plan = reading.and_then(|r| r.plan.as_deref()).unwrap_or("");
+        let plan = format!("  {plan}");
+        let name = format!(
+            " {}",
+            crate::ui::truncate(&name, inner_w.saturating_sub(plan.chars().count() + 1))
+        );
+        let rest = inner_w.saturating_sub(name.chars().count() + plan.chars().count());
+        lines.push(Line::from(vec![
+            Span::styled(
+                name,
+                sel(Style::default()
+                    .fg(if hit { th.err } else { th.text })
+                    .add_modifier(Modifier::BOLD)),
             ),
-            sel(name_style),
-        )];
-        if show_plan {
-            let plan = reading.and_then(|r| r.plan.as_deref()).unwrap_or("");
-            spans.push(Span::styled(
-                format!("{:<PLAN_W$}", crate::ui::truncate(plan, PLAN_W - 1)),
-                sel(dim),
-            ));
-        }
-        let signed_out = matches!(problem, Some(Problem::SignedOut))
-            || (account.signed_out && reading.is_none());
+            Span::styled(plan, sel(dim)),
+            Span::styled(" ".repeat(rest), sel(Style::default())),
+        ]));
+
         match reading {
             Some(reading) if !signed_out => {
-                for w in &windows {
-                    let cell = reading.main.cells[w.index()].as_ref();
-                    let (text, style) = if hit && *w == Window::Session && cell.is_some() {
-                        ("▲ limit hit".to_string(), Style::default().fg(th.err))
-                    } else {
-                        (cell_text(cell, now), cell_style(cell, stale))
+                let limits = reading.limits();
+                let reached = emptiest(&limits).filter(|_| hit);
+                for (l, (limit, cell)) in limits.iter().enumerate() {
+                    let look = LimitLook {
+                        reached: reached == Some(l),
+                        stale,
+                        bar_w,
+                        now,
                     };
-                    spans.push(Span::styled(format!("{text:<CELL_W$}"), sel(style)));
+                    lines.push(limit_line(limit, cell, look, th));
+                }
+                if limits.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("{INDENT}no limits reported"),
+                        dim,
+                    )));
                 }
             }
             _ => {
@@ -1116,43 +1219,25 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
                 } else {
                     dim
                 };
-                spans.push(Span::styled(
-                    format!("{:<w$}", text, w = windows.len() * CELL_W),
-                    sel(style),
-                ));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{INDENT}{}",
+                        crate::ui::truncate(&text, inner_w.saturating_sub(INDENT.len() + 1))
+                    ),
+                    style,
+                )));
             }
         }
-        lines.push(Line::from(spans));
-        if let Some(reading) = reading.filter(|_| !signed_out) {
-            for sub in &reading.sub {
-                let mut spans = vec![Span::styled(
-                    format!("   {:<w$}", sub.label, w = name_w.saturating_sub(2)),
-                    dim,
-                )];
-                if show_plan {
-                    spans.push(Span::raw(" ".repeat(PLAN_W)));
-                }
-                for w in &windows {
-                    let cell = sub.cells[w.index()].as_ref();
-                    spans.push(Span::styled(
-                        format!("{:<CELL_W$}", cell_text(cell, now)),
-                        cell_style(cell, stale),
-                    ));
-                }
-                lines.push(Line::from(spans));
-            }
-        }
-        hit_lines.push((first, lines.len() - list_top as usize - first as usize));
+        hit_lines.push((first, lines.len() - first as usize));
     }
 
-    // The selected account in words: when it was read, what went wrong,
-    // what else shares it.
-    lines.push(Line::from(""));
+    // The selected account in words, a line a thing: when it was read, what
+    // went wrong, what else shares it.
     if let Some(account) = usage.accounts.get(selected) {
         let mut notes: Vec<String> = Vec::new();
         if let Some(reading) = usage.readings.get(&account.id) {
             notes.push(format!(
-                "read {}",
+                "updated {}",
                 crate::hosts::ago_label((now - reading.fetched_at) * 1000)
             ));
             if let Some(extra) = &reading.extra {
@@ -1169,16 +1254,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             notes.push(format!("same login as {}", account.also.join(", ")));
         }
         if !notes.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!(" {}", notes.join(" · ")),
-                dim,
-            )));
+            lines.push(Line::from(""));
+        }
+        for note in notes {
+            lines.push(Line::from(Span::styled(format!(" {note}"), dim)));
         }
     }
-    lines.push(Line::from(Span::styled(
-        " the share left in each window · - where the provider has no cap that wide",
-        Style::default().fg(th.faint),
-    )));
 
     let height = (lines.len() as u16 + 2).min(screen.height.saturating_sub(2));
     let area = crate::ui::centered_rect(screen, width, height);
@@ -1187,7 +1268,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
         keys::SIGN_IN.hint(),
         crate::hints::ESC_CLOSE.hint(),
     ];
-    let title = format!(" Account usage · read every {}m ", POLL.as_secs() / 60);
+    let title = " Account usage ".to_string();
     let inner = crate::ui::render_modal_frame(f, area, title, &hints, th);
     f.render_widget(Paragraph::new(lines), inner);
     let selected_id = app.usage.accounts.get(selected).map(|a| a.id.clone());
@@ -1196,12 +1277,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
         v.selected = selected;
         v.selected_id = selected_id;
         v.hit_lines = hit_lines;
-        v.list_area = Rect {
-            x: inner.x,
-            y: inner.y + list_top,
-            width: inner.width,
-            height: inner.height.saturating_sub(list_top),
-        };
+        v.list_area = inner;
     }
 }
 
@@ -1369,35 +1445,80 @@ mod tests {
         assert_eq!(jwt_subject("nope"), None);
     }
 
-    #[test]
-    fn cells_say_what_is_left_and_how_long_until_it_resets() {
-        let now = 1_000_000;
-        assert_eq!(cell_text(None, now), "-");
-        let cell = |used_pct, resets_at| Cell {
+    fn cell(used_pct: f64, resets_at: Option<i64>) -> Cell {
+        Cell {
             used_pct,
             resets_at,
-        };
-        assert_eq!(cell_text(Some(&cell(38.0, None)), now), "62%");
-        assert_eq!(
-            cell_text(Some(&cell(38.0, Some(now + 30))), now),
-            "62% · 1m"
+        }
+    }
+
+    #[test]
+    fn a_limit_says_what_is_left_and_how_long_until_it_resets() {
+        let now = 1_000_000;
+        assert_eq!(left_text(&cell(38.0, None)), "62% left");
+        assert_eq!(left_text(&cell(120.0, None)), "0% left");
+        assert_eq!(resets_text(&cell(38.0, None), now), "");
+        let resets = |seconds| resets_text(&cell(0.0, Some(now + seconds)), now);
+        assert_eq!(resets(30), "resets in 1m");
+        assert_eq!(resets(2 * 3600 + 14 * 60), "resets in 2h 14m");
+        assert_eq!(resets(3 * 86_400 + 9 * 3600), "resets in 3d 9h");
+        assert_eq!(resets(19 * 86_400), "resets in 19d");
+        assert_eq!(resets(-5), "resets now");
+    }
+
+    /// The bar is what is left, not what is used: full on a fresh limit,
+    /// empty on a spent one.
+    #[test]
+    fn the_bar_starts_full_and_empties_as_the_limit_is_used() {
+        let filled = |used| bar_fill(&cell(used, None), BAR_W);
+        assert_eq!(filled(0.0), 20, "nothing used: full");
+        assert_eq!(filled(2.0), 19, "only 100% is drawn full");
+        assert_eq!(filled(28.0), 14, "72% left");
+        assert_eq!(filled(75.0), 5, "25% left");
+        assert_eq!(filled(99.0), 1, "anything left still shows");
+        assert_eq!(filled(100.0), 0, "all used: empty");
+        assert_eq!(filled(120.0), 0, "past the limit: empty");
+    }
+
+    #[test]
+    fn green_above_25_left_yellow_down_to_5_and_red_below() {
+        let th = Theme::default();
+        let color = |left: f64| left_color(&cell(100.0 - left, None), th);
+        assert_eq!(color(100.0), th.ok);
+        assert_eq!(color(26.0), th.ok);
+        assert_eq!(color(25.0), th.warn);
+        assert_eq!(color(5.0), th.warn);
+        assert_eq!(color(4.0), th.err);
+        assert_eq!(color(0.0), th.err);
+        // By what is written, so `26% left` is never yellow.
+        assert_eq!(color(25.6), th.ok);
+    }
+
+    /// Only what the provider reports is drawn, the account's own limits
+    /// before the model-scoped ones, and a stopped session is put down to
+    /// whichever has least left.
+    #[test]
+    fn a_reading_lists_its_limits_and_finds_the_emptiest() {
+        let reading = claude_reading(
+            &serde_json::from_str(CLAUDE_FIXTURE).unwrap(),
+            None,
+            1_000_000,
         );
-        assert_eq!(
-            cell_text(Some(&cell(0.0, Some(now + 2 * 3600 + 14 * 60))), now),
-            "100% · 2h14m"
+        let limits = reading.limits();
+        let names: Vec<&str> = limits.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["5-hour", "Weekly", "Opus"]);
+        assert_eq!(emptiest(&limits), Some(1), "Weekly, at 59% used");
+
+        let no_five_hour = claude_reading(
+            &serde_json::from_str(r#"{"five_hour": null, "seven_day": {"utilization": 28}}"#)
+                .unwrap(),
+            None,
+            1_000_000,
         );
-        assert_eq!(
-            cell_text(Some(&cell(59.0, Some(now + 3 * 86_400 + 4 * 3600))), now),
-            "41% · 3d4h"
-        );
-        assert_eq!(
-            cell_text(Some(&cell(73.0, Some(now + 19 * 86_400))), now),
-            "27% · 19d"
-        );
-        assert_eq!(
-            cell_text(Some(&cell(120.0, Some(now - 5))), now),
-            "0% · now"
-        );
+        let limits = no_five_hour.limits();
+        let names: Vec<&str> = limits.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["Weekly"]);
+        assert_eq!(emptiest(&[]), None);
     }
 
     #[test]
