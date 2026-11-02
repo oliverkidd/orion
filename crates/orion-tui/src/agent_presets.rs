@@ -74,6 +74,21 @@ impl AgentPreset {
             .collect::<Vec<_>>()
             .join("\n\n")
     }
+
+    /// The preset's text for a prompt already open, whose task is not ours
+    /// to see: a prefix with the blank line its task goes under, a postfix
+    /// with the blank line parting it from the task above, and both as
+    /// [`Self::compose`] joins them with no task between. Empty when the
+    /// preset holds no text.
+    pub fn standalone_text(&self) -> String {
+        let (prefix, postfix) = (self.prefix.trim(), self.postfix.trim());
+        match (prefix.is_empty(), postfix.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!("{prefix}\n\n"),
+            (true, false) => format!("\n\n{postfix}"),
+            (false, false) => format!("{prefix}\n\n{postfix}"),
+        }
+    }
 }
 
 /// Which side of the task a preset's text goes: a PREFIX before it, a
@@ -345,6 +360,18 @@ mod tests {
         assert!(p.has_wrapping());
         p.postfix.clear();
         assert!(!p.has_wrapping());
+    }
+
+    #[test]
+    fn standalone_text_leaves_room_for_the_task_on_the_side_it_goes() {
+        let mut preset = preset("p", AgentKind::Claude);
+        assert_eq!(preset.standalone_text(), "");
+        preset.prefix = "  frame \n".into();
+        assert_eq!(preset.standalone_text(), "frame\n\n");
+        preset.postfix = " finish ".into();
+        assert_eq!(preset.standalone_text(), "frame\n\nfinish");
+        preset.prefix.clear();
+        assert_eq!(preset.standalone_text(), "\n\nfinish");
     }
 
     #[test]

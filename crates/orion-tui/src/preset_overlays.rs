@@ -141,13 +141,19 @@ impl AgentPresetsView {
         self.quick.as_ref().filter(|q| q.from_box)
     }
 
-    /// Does the list carry its own NEW WORKTREE row and `Tab`? Everywhere
-    /// but over the QUICK PROMPT, whose header names the checkout and
-    /// whose WORKTREE PICKER (`⌘.`) has a fresh worktree as its first row:
-    /// a second toggle for the same choice under the box was the clutter
-    /// the box lost its own for.
+    /// The agent whose prompt a pick is pasted into, when the list was
+    /// opened from its LOCKED PANE (`QuickReturn::into_pane`).
+    pub fn pane_target(&self) -> Option<&orion_core::SessionRef> {
+        self.quick.as_ref()?.into_pane.as_ref()
+    }
+
+    /// Does the list carry its own NEW WORKTREE row and `Tab`? Not over an
+    /// agent's pane, where nothing is launched, and not over the QUICK
+    /// PROMPT, whose header names the checkout and whose WORKTREE PICKER
+    /// (`⌘.`) has a fresh worktree as its first row: a second toggle for the
+    /// same choice under the box was the clutter the box lost its own for.
     pub fn has_worktree_row(&self) -> bool {
-        self.box_behind().is_none()
+        self.box_behind().is_none() && self.pane_target().is_none()
     }
 
     /// The rows `filter` leaves, top to bottom: indices into `presets`,
@@ -790,10 +796,15 @@ pub(crate) fn open_agent_preset_editor(
 /// Enter in the PRESET EDITOR: validate against the stored list, write the
 /// row (in place when editing, appended when new), and land back on it in
 /// the list — or, for a new preset made from a QUICK PROMPT's picker, on
-/// that box with the preset on it. A rejected form stays open, the reason on a banner at the top
+/// that box with the preset on it, and from an agent's pane, in its prompt.
+/// A rejected form stays open, the reason on a banner at the top
 /// of it and the caret on the field to fix (`AgentPresetEditor::reject`) —
 /// not in the FOOTER, which is nowhere near the form.
-pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEditor) {
+pub(crate) fn save_agent_preset_editor(
+    app: &mut App,
+    mut editor: AgentPresetEditor,
+    out: &mut Vec<ClientRequest>,
+) {
     let mut presets = crate::agent_presets::load();
     let preset = match editor.validate(&presets) {
         Ok(preset) => preset,
@@ -826,7 +837,16 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
     // even a skip-task one: the box comes back for its Enter. A harness
     // switched off stays on the list, whose Enter says so.
     match (created, editor.quick) {
-        (Some(preset), Some(back)) => {
+        // Over an agent's pane it goes straight in, where it was wanted;
+        // one with no text to paste stays on the list like any other row.
+        (
+            Some(preset),
+            Some(crate::quick_prompt::QuickReturn {
+                into_pane: Some(session),
+                ..
+            }),
+        ) if preset.has_wrapping() => insert_preset_into_pane(app, &preset, &session, out),
+        (Some(preset), Some(back)) if back.into_pane.is_none() => {
             let cfg = crate::config::Config::load();
             if cfg.preset_harness_usable(&preset) {
                 reopen_box_with_preset(app, back, preset, &cfg);
@@ -1056,7 +1076,8 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
 /// picker the row is handed to the box waiting behind the list
 /// (`view.quick`), which keeps that box's target, its text, its issue and
 /// its pull request; in the manager it launches into the list's worktree,
-/// through the preset's task box or past it. The one function both input
+/// through the preset's task box or past it; over an agent's pane it is
+/// pasted at that agent's caret. The one function both input
 /// handlers call: when the click ran a copy of the manager half whatever
 /// the mode, a click in the PR SESSION picker — whose worktree is the ROOT
 /// WORKTREE, there only to name the project — started a plain session in
@@ -1066,9 +1087,41 @@ fn activate_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
         return;
     };
     let view = view.clone();
+    if let Some(session) = view.pane_target() {
+        if let Some(preset) = view.presets.get(view.selected) {
+            insert_preset_into_pane(app, preset, session, out);
+        }
+        return;
+    }
     match view.aimed_quick() {
         Some(back) => apply_preset_to_quick_prompt(app, &view.presets, view.selected, back, out),
         None => open_agent_preset_task(app, &view, out),
+    }
+}
+
+/// Paste `preset`'s text at the caret of the agent in the pane and hand the
+/// keys back to it: nothing is sent, so the task can still be typed. Only
+/// the text travels — the session already has its harness, model and
+/// effort. A preset with no text stays on the list to say so.
+fn insert_preset_into_pane(
+    app: &mut App,
+    preset: &AgentPreset,
+    session: &orion_core::SessionRef,
+    out: &mut Vec<ClientRequest>,
+) {
+    let text = preset.standalone_text();
+    if text.is_empty() {
+        app.flash = Some(crate::flash::Flash::setup(format!(
+            "{} has no text to insert",
+            preset.name
+        )));
+        return;
+    }
+    app.overlay = None;
+    if !crate::event_loop::paste_unsent(app, session, &text, out) {
+        app.flash = Some(crate::flash::Flash::failed(
+            "this session isn't taking pasted text right now",
+        ));
     }
 }
 
@@ -1116,7 +1169,7 @@ pub(crate) fn toggle_new_worktree(app: &mut App) {
 
 /// Keys in the PRESET EDITOR: Tab order between fields, choice cycling,
 /// text editing, save and back.
-pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
+pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
         return;
     };
@@ -1164,7 +1217,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
                 .is_some_and(|input| input.takes_newline(&key)) =>
         {
             let editor = editor.clone();
-            save_agent_preset_editor(app, editor);
+            save_agent_preset_editor(app, editor, out);
         }
         KeyCode::Left if !editor.field.is_typed() => editor.cycle(-1),
         KeyCode::Right | KeyCode::Char(' ') if !editor.field.is_typed() => editor.cycle(1),
@@ -1254,7 +1307,13 @@ pub(crate) mod keys {
 /// box's picker and one opened on a pull request or an issue, until
 /// letters are typed, when Esc clears them.
 pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
-    let enter = if view.is_picker() { "use" } else { "launch" };
+    let enter = if view.pane_target().is_some() {
+        "insert"
+    } else if view.is_picker() {
+        "use"
+    } else {
+        "launch"
+    };
     let esc = if !view.filter.is_empty() {
         "clear"
     } else if view.box_behind().is_some() {
@@ -1307,7 +1366,9 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
     // verbs are the manager's.
     // The type-ahead shows in the title, as a submenu's does: `Agent
     // presets ⌕ rev`, the bare ⌕ while nothing is typed yet.
-    let title = if view.is_picker() {
+    let title = if view.pane_target().is_some() {
+        "Insert preset"
+    } else if view.is_picker() {
         "Use preset"
     } else {
         "Agent presets"

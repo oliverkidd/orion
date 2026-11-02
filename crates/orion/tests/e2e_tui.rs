@@ -37,6 +37,9 @@ const CTRL_S: &[u8] = &[0x13];
 const CTRL_A: &[u8] = &[0x01];
 const CTRL_W: &[u8] = &[0x17];
 const CTRL_G: &[u8] = &[0x07];
+const CTRL_F: &[u8] = &[0x06];
+/// `⌘U` as Ghostty's kitty protocol spells it.
+const CMD_U: &[u8] = b"\x1b[117;9u";
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 const SPACE: &[u8] = b" ";
 /// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
@@ -1252,4 +1255,58 @@ fn tui_autofix_asks_when_my_pr_conflicts() {
     tui.wait_for_text("[ ] Unit tests");
     tui.send(ESC);
     tui.wait_for_gone("Autofix #7");
+}
+
+/// `⌘U` in an agent's locked pane, as Ghostty's kitty protocol spells it:
+/// the preset list comes up over the running session, Enter pastes the
+/// preset into the agent's prompt as a bracketed paste, and the keys are
+/// still in the pane — no new box, no clipboard, nothing sent. The stand-in
+/// agent asks for bracketed paste as Claude Code does, and the terminal's
+/// echo shows the markers (`^[[200~`) it was handed.
+#[test]
+fn tui_cmd_u_pastes_a_preset_into_the_running_agent() {
+    let scripts = tempfile::tempdir().unwrap();
+    let agent = scripts.path().join("agent.sh");
+    std::fs::write(
+        &agent,
+        "#!/bin/sh\nprintf '\\033[?2004hagent-ready\\n'\nexec cat\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let mut tui =
+        TuiHarness::spawn_with_env(&[(orion_core::env::AGENT_CMD, agent.display().to_string())]);
+    std::fs::write(
+        tui.data_dir.join(orion_core::paths::PRESETS_FILE_NAME),
+        r#"[{"name": "reviewer", "kind": "claude", "prefix": "Be strict."}]"#,
+    )
+    .unwrap();
+    let repo = tui.make_repo("alpha");
+    add_project(&mut tui, &repo, "alpha");
+    start_session(&mut tui, "go");
+    // A session still starting up refuses the paste: wait for its prompt.
+    tui.wait_for_text("agent-ready");
+
+    tui.send(CMD_U);
+    tui.wait_for_text("Insert preset");
+    tui.wait_for_text("reviewer");
+    tui.send(ENTER);
+    tui.wait_for_gone("Insert preset");
+    tui.wait_for_text("^[[200~Be strict.");
+    tui.wait_for_text(FOOTER_TERMINAL_LOCKED);
+
+    // The next key is the agent's, where the task goes.
+    tui.type_str("the task");
+    tui.wait_for_text("the task");
+
+    // Over a full-screen session too, and Esc lands back in it.
+    tui.send(CTRL_F);
+    tui.wait_for_text("normal size");
+    tui.send(CMD_U);
+    tui.wait_for_text("Insert preset");
+    tui.send(ESC);
+    tui.wait_for_gone("Insert preset");
+    tui.wait_for_text("normal size");
+    tui.type_str("still here");
+    tui.wait_for_text("still here");
 }

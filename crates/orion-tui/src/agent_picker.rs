@@ -498,6 +498,7 @@ mod tests {
                 },
                 text: "typed so far".into(),
                 from_box: true,
+                into_pane: None,
             };
             open_kind_picker(
                 &mut app,
@@ -571,6 +572,7 @@ mod tests {
                     launch,
                     text: "typed so far".into(),
                     from_box: true,
+                    into_pane: None,
                 };
                 open_kind_picker(app, KindPicker::quick_prompt(worktree.clone(), back));
                 match &app.overlay {
@@ -650,6 +652,7 @@ mod tests {
                     },
                     text: String::new(),
                     from_box: true,
+                    into_pane: None,
                 };
                 open_kind_picker(&mut app, KindPicker::quick_prompt(worktree.clone(), back));
                 assert_eq!(

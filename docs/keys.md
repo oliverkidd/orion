@@ -49,7 +49,8 @@ its key, and `Enter` runs it.
   press, and setup starts by offering to reopen orion in its app.
 - **⌘ reaches orion from inside a pane.** No one types a ⌘ chord as text, so `⌘K`, `⌘P`, `⌘E`,
   `⌘⇧P` and the rest leave a locked pane and run, the agent losing nothing. The `Ctrl` twins stay
-  the agent's while its pane is locked — `^P` there is the agent's `^P`.
+  the agent's while its pane is locked — `^P` there is the agent's `^P`. One stays in the pane: over
+  an agent, `⌘U` pastes a preset into its prompt.
 - **Esc climbs one level.** Modal → pane → grid, everywhere: it leaves a locked pane (`⇧Esc` sends
   the agent its Esc), brings a full-screen session back down to its pane, hands the keys back from
   the pane to the grid, folds the open band, leaves the ARCHIVED VIEW and HOME, and closes any list
@@ -145,6 +146,7 @@ Settings → Hotkeys.
 | `Esc` | leave the pane, back to the card it reads |
 | `⇧Esc` | the agent's Esc: a bare Esc down the PTY |
 | `^Q`, `^]`, `^⇧H` | also leave the pane; `^Q` is the HARDWIRED UNLOCK, which no rebind can take away |
+| `⌘U` | over an agent: pick one of your saved AGENT PRESETS and its text is pasted at the caret, unsent, the pane still locked. A prefix ends on a blank line for the task, a postfix starts on one so it follows a task already typed, and a preset with both lands whole with the caret after it. Only the text travels, not the preset's harness or model. A long preset shows as the harness shows any long paste — Claude Code's `[Pasted text #1 +4 lines]` — and is sent in full. `⌘N` makes a new one from the list. Over a shell, `⌘U` is the pull requests modal as anywhere else |
 | any ⌘ chord orion binds | leave the pane and run it — `⌘K`, `⌘P`, `⌘E`, `⌘J`, `⌘⇧P` … |
 | `^F` | full-screen the session, or bring it back down; never forwarded to the agent. `Esc` and `^Q` also bring a full-screen session back down |
 | mouse wheel | a child that asked for the mouse (Claude Code's alt-screen UI, `vim` with `mouse=a`, `htop`) gets the notch as a real wheel report; an alternate-screen app that wants no mouse (`less`, plain `vim`) gets `↑`/`↓`; anything else scrolls orion's own scrollback, and the header counts how far back you are as `scroll N` |

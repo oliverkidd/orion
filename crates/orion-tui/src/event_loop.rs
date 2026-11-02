@@ -3859,6 +3859,30 @@ fn pasted(screen: &vt100::Screen, text: &str) -> Vec<u8> {
     }
 }
 
+/// `text` pasted at the caret of `session`, unsent, on orion's own account
+/// rather than the user's paste. False, with nothing sent, unless `session`
+/// is live in the pane and has bracketed paste on: without the markers each
+/// line break is an Enter, which would send the prompt half written.
+pub(crate) fn paste_unsent(
+    app: &mut App,
+    session: &SessionRef,
+    text: &str,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    let Some(term) = app.term.as_mut().filter(|term| {
+        &term.sref == session && !term.exited && term.parser.screen().bracketed_paste()
+    }) else {
+        return false;
+    };
+    term.set_scroll(0);
+    typed_into(app, session);
+    out.push(ClientRequest::Input {
+        session: session.clone(),
+        data: bracketed(text),
+    });
+    true
+}
+
 /// Route a bracketed paste into whatever text field the open overlay has
 /// live. Returns false when nothing is typing, so the paste falls through to
 /// the terminal pane.
@@ -4400,6 +4424,20 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             crate::key_combo::note(app, &[chord], Some(did));
             return;
         }
+        // `⌘U` over an agent fills its prompt, as it does in the new-session
+        // box, and the lock stays on under the list. Over a shell it falls
+        // through to the panels' meaning below.
+        if app.keymap.lookup(crate::keymap::Scope::Terminal, &chord)
+            == Some(crate::keymap::Action::InsertPreset)
+            && crate::quick_prompt::open_preset_picker_for_pane(app)
+        {
+            crate::key_combo::note(
+                app,
+                &[chord],
+                crate::keymap::spec_of(crate::keymap::Action::InsertPreset).map(|s| s.label),
+            );
+            return;
+        }
         // Every other ⌘ chord orion binds reaches it from inside the pane
         // too — ⌘K, ⌘P, ⌘E, ⌘⇧P — as if the keys were the cards': no one
         // types a ⌘ chord as text, so the agent loses nothing. The lock
@@ -4912,7 +4950,7 @@ fn dispatch_action(
         // (Cmd+T never reaches a TUI — the emulator opens its own tab.)
         Action::NewTerminal => create_terminal_for_context(app, out),
         // Terminal-scope only; never resolved here.
-        Action::UnlockTerminal => {}
+        Action::UnlockTerminal | Action::InsertPreset => {}
         // The grid's MULTI-SELECT (`launcher::handle_action`); off the
         // grid there is nothing to pick out.
         Action::ExtendUp | Action::ExtendDown | Action::ExtendLeft | Action::ExtendRight => {}
@@ -4945,6 +4983,7 @@ fn quick_return_of(prompt: &PromptDialog) -> Option<crate::quick_prompt::QuickRe
         launch: launch.clone(),
         text: prompt.input.as_str().to_string(),
         from_box: true,
+        into_pane: None,
     })
 }
 
@@ -4966,7 +5005,8 @@ fn live_launch_back_of(overlay: &Option<Overlay>) -> Option<crate::quick_prompt:
         Some(Overlay::Prompt(p)) => quick_return_of(p),
         Some(Overlay::Menu(m)) => menu_quick_return(m),
         Some(Overlay::ProjectPicker(p)) => Some(p.back.clone()),
-        Some(Overlay::AgentPresets(view)) => view.quick.clone(),
+        // A picker over an agent's pane has no launch to aim.
+        Some(Overlay::AgentPresets(view)) => view.quick.clone().filter(|q| q.into_pane.is_none()),
         _ => None,
     }
 }
@@ -8179,7 +8219,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
         }
         Overlay::AgentPresets(_) => crate::preset_overlays::handle_list_key(app, key, out),
-        Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key),
+        Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key, out),
         Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
@@ -37279,6 +37319,211 @@ diff --git a/src/c.rs b/src/c.rs
                 "an empty box parks nothing"
             );
             assert!(out.is_empty(), "none of this launches anything: {out:?}");
+        });
+    }
+
+    /// A LOCKED PANE on `sref`, its program having asked for bracketed
+    /// paste when `pastes` says so.
+    fn locked_pane(app: &mut App, sref: SessionRef, pastes: bool) {
+        let mut term = AttachedTerm::new(sref, 80, 24);
+        if pastes {
+            term.apply_output(0, b"\x1b[?2004h");
+        }
+        app.term = Some(term);
+        app.focus = Focus::Terminal;
+        app.term_locked = true;
+    }
+
+    fn agent_pane(app: &mut App, pastes: bool) -> SessionRef {
+        seed_tree(app);
+        let sref = SessionRef::Agent(AgentId("a1".into()));
+        locked_pane(app, sref.clone(), pastes);
+        sref
+    }
+
+    fn press_cmd_u(app: &mut App, out: &mut Vec<ClientRequest>) {
+        press(app, KeyCode::Char('u'), KeyModifiers::SUPER, out);
+    }
+
+    /// `⌘U` over an agent: the pick lands at its caret, a bracketed paste
+    /// with nothing sent, and the keys are still in the pane to type on.
+    #[test]
+    fn cmd_u_in_an_agent_pane_pastes_the_picked_preset_unsent() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let sref = agent_pane(&mut app, true);
+
+            press_cmd_u(&mut app, &mut out);
+            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
+                panic!("⌘U should open the presets, got {:?}", app.overlay);
+            };
+            assert_eq!(view.pane_target(), Some(&sref));
+            assert!(!view.has_worktree_row(), "nothing is launched from here");
+            assert!(app.term_locked, "the lock waits under the list");
+            assert!(out.is_empty(), "nothing goes down until the pick: {out:?}");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(app.term_locked && app.focus == Focus::Terminal);
+            match out.as_slice() {
+                [ClientRequest::Input { session, data }] => {
+                    assert_eq!(session, &sref);
+                    assert_eq!(data, b"\x1b[200~Be strict.\n\nRun the tests.\x1b[201~");
+                }
+                other => panic!("expected one Input request, got {other:?}"),
+            }
+
+            // The next key is the agent's again.
+            out.clear();
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut out);
+            assert!(matches!(out.as_slice(), [ClientRequest::Input { .. }]));
+        });
+    }
+
+    #[test]
+    fn esc_on_the_pane_preset_list_lands_back_at_the_agent() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            agent_pane(&mut app, true);
+
+            press_cmd_u(&mut app, &mut out);
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(app.term_locked && app.focus == Focus::Terminal);
+            assert!(out.is_empty(), "{out:?}");
+        });
+    }
+
+    /// With no bracketed paste on, every line break would be an Enter and
+    /// send the prompt half written, so nothing goes at all.
+    #[test]
+    fn a_pane_that_takes_no_paste_gets_no_preset() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            agent_pane(&mut app, false);
+
+            press_cmd_u(&mut app, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(out.is_empty(), "{out:?}");
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(app.flash.is_some(), "it says why nothing appeared");
+            assert!(app.term_locked);
+        });
+    }
+
+    #[test]
+    fn a_preset_with_no_text_stays_on_the_list_and_says_so() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            agent_pane(&mut app, true);
+
+            press_cmd_u(&mut app, &mut out);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(out.is_empty(), "{out:?}");
+            assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
+            assert!(app.flash.is_some());
+        });
+    }
+
+    /// The manage verbs keep the pane: a preset made from this list goes
+    /// straight in, and one abandoned comes back to this list, not a box.
+    #[test]
+    fn a_preset_made_from_the_pane_list_goes_straight_in() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let sref = agent_pane(&mut app, true);
+
+            press_cmd_u(&mut app, &mut out);
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
+                panic!("Esc goes back to the list, got {:?}", app.overlay);
+            };
+            assert_eq!(view.pane_target(), Some(&sref));
+
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
+                panic!("the editor, got {:?}", app.overlay);
+            };
+            editor.name = crate::text_input::TextInput::with_text("fresh");
+            editor.prefix = crate::text_input::TextInput::with_text("Look closely.");
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert!(app.term_locked);
+            match out.as_slice() {
+                [ClientRequest::Input { data, .. }] => {
+                    assert_eq!(data, b"\x1b[200~Look closely.\n\n\x1b[201~");
+                }
+                other => panic!("expected one Input request, got {other:?}"),
+            }
+        });
+    }
+
+    /// The box's launch chords have no launch to aim from this list.
+    #[test]
+    fn the_pane_preset_list_is_not_a_launch_box() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            agent_pane(&mut app, true);
+
+            press_cmd_u(&mut app, &mut out);
+            press(&mut app, KeyCode::Char('/'), KeyModifiers::SUPER, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::AgentPresets(_))),
+                "{:?}",
+                app.overlay
+            );
+            assert!(!launch_chord_targets_the_box(&app.overlay));
+        });
+    }
+
+    /// A shell has no prompt to fill, and an unlocked pane isn't typing:
+    /// both keep `⌘U` as the panels' pull requests.
+    #[test]
+    fn cmd_u_stays_the_pull_requests_modal_off_an_agents_locked_pane() {
+        with_seeded_presets(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            locked_pane(
+                &mut app,
+                SessionRef::Terminal(TerminalId("t1".into())),
+                true,
+            );
+            press_cmd_u(&mut app, &mut out);
+            assert!(!app.term_locked, "the ⌘ chord left the pane as ever");
+            assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
+
+            let mut app = App::new();
+            agent_pane(&mut app, true);
+            app.term_locked = false;
+            press_cmd_u(&mut app, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
+
+            // An exited agent has no prompt either.
+            let mut app = App::new();
+            agent_pane(&mut app, true);
+            app.term.as_mut().unwrap().exited = true;
+            press_cmd_u(&mut app, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
         });
     }
 

@@ -2617,13 +2617,8 @@ pub(super) fn click_box_field(app: &mut App, field: BoxField) {
     let Some(crate::app::Overlay::Prompt(prompt)) = &app.overlay else {
         return;
     };
-    let crate::app::PromptKind::QuickPrompt(launch) = &prompt.kind else {
+    let Some(back) = super::quick_return_of(prompt) else {
         return;
-    };
-    let back = QuickReturn {
-        launch: launch.clone(),
-        text: prompt.input.as_str().to_string(),
-        from_box: true,
     };
     open_box_field(app, field, back);
 }

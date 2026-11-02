@@ -35,7 +35,7 @@ use crate::config::{fit_effort, Config};
 use crate::pull_request::{OpenPr, PrLaunch};
 use crate::saved_draft::DraftPlace;
 use crate::text_input::TextInput;
-use orion_core::{AgentKind, AgentMode, ProjectId, WorktreeId};
+use orion_core::{AgentKind, AgentMode, ProjectId, SessionRef, WorktreeId};
 
 /// Where a QUICK PROMPT launch lands.
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +225,10 @@ pub struct QuickReturn {
     /// manager does: it used to put up an empty box nobody asked for. A
     /// pick opens the box either way.
     pub from_box: bool,
+    /// The agent's pane the picker was opened from (`⌘U` in a LOCKED PANE),
+    /// when the pick is pasted at that agent's caret rather than put on a
+    /// launch. `launch` then only names the checkout; no box comes back.
+    pub into_pane: Option<SessionRef>,
 }
 
 impl QuickReturn {
@@ -235,6 +239,7 @@ impl QuickReturn {
             launch,
             text: String::new(),
             from_box: false,
+            into_pane: None,
         }
     }
 }
@@ -987,6 +992,31 @@ pub(crate) fn open_preset_picker(app: &mut App, back: QuickReturn) {
     view.selected = selected;
     view.quick = Some(back);
     app.overlay = Some(Overlay::AgentPresets(view));
+}
+
+/// `⌘U` in a LOCKED PANE: the saved AGENT PRESETS as a picker over the
+/// agent in the pane, so a preset reaches a session already running without
+/// a trip through a new box and the clipboard. The pane stays locked under
+/// the list, so the pick and Esc both land back at the agent's prompt.
+/// False, with nothing opened, for a pane with no agent's prompt to fill:
+/// a shell, a stand-in, a session that has exited.
+pub(crate) fn open_preset_picker_for_pane(app: &mut App) -> bool {
+    let Some(id) = app.pane_prompt_agent() else {
+        return false;
+    };
+    let Some(agent) = app.tree.agents.iter().find(|agent| &agent.id == id) else {
+        return false;
+    };
+    let (session, worktree) = (SessionRef::Agent(id.clone()), agent.worktree_id.clone());
+    let launch = QuickLaunch::from_config(QuickTarget::Worktree(worktree), &Config::load());
+    open_preset_picker(
+        app,
+        QuickReturn {
+            into_pane: Some(session),
+            ..QuickReturn::fresh(launch)
+        },
+    );
+    true
 }
 
 /// `e` on a PROJECT OPEN PRS GROUP row: the saved AGENT PRESETS as a

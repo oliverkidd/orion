@@ -5692,6 +5692,16 @@ impl App {
         }
     }
 
+    /// The agent whose prompt is live in the pane, for `⌘U` to paste a preset
+    /// into. None for a shell, a stand-in or a session that has exited.
+    pub fn pane_prompt_agent(&self) -> Option<&AgentId> {
+        let term = self.term.as_ref().filter(|term| !term.exited)?;
+        let SessionRef::Agent(id) = &term.sref else {
+            return None;
+        };
+        (!self.is_placeholder_agent(id)).then_some(id)
+    }
+
     /// The pane is showing a stand-in: there is no PTY behind it to type
     /// into, and nothing to attach.
     pub fn pane_shows_placeholder(&self) -> bool {

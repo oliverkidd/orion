@@ -187,6 +187,10 @@ pub enum Action {
     Skills,
     // terminal
     UnlockTerminal,
+    /// `⌘U` in an agent's LOCKED PANE: the saved AGENT PRESETS as a picker,
+    /// the pick pasted at the agent's caret, unsent. A shell's pane has no
+    /// prompt to fill, so the chord stays the panels' there.
+    InsertPreset,
     // general
     /// `^~`: fold the LAUNCHER VIEW's PANE away and give the cards the
     /// whole body, or bring it back. Folding it also unselects the card
@@ -858,6 +862,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "TERMINAL",
         scope: Scope::Terminal,
         defaults: &["esc", "ctrl+q", "ctrl+]", "ctrl+shift+h"],
+    },
+    ActionSpec {
+        action: Action::InsertPreset,
+        id: "insert_preset",
+        label: "Insert preset",
+        hint: "In an agent's locked pane: pick a saved preset and its text goes in at the caret, unsent",
+        group: "TERMINAL",
+        scope: Scope::Terminal,
+        defaults: &["cmd+u"],
     },
     // ---- GENERAL ----
     ActionSpec {
@@ -2430,7 +2443,12 @@ mod tests {
             let chords = map.chords_at(i);
             // The tab slots are ⌘N alone by choice: digits stay free for
             // typing, and `[` / `]` walk the tabs in any terminal.
-            if matches!(spec.action, Action::SelectProjectTab(_)) {
+            // Insert preset is ⌘U alone too: in a locked pane every `^` chord
+            // is the agent's, so a twin would take one away from it.
+            if matches!(
+                spec.action,
+                Action::SelectProjectTab(_) | Action::InsertPreset
+            ) {
                 continue;
             }
             assert!(

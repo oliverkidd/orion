@@ -480,6 +480,8 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
                 if full { "normal size" } else { "full screen" },
             ),
             from_lock(km, Action::ClosePane, "close"),
+            app.pane_prompt_agent()
+                .and_then(|_| from_lock(km, Action::InsertPreset, "preset")),
             Some(Hint::new("drag", drag)),
             // ⌘ is read off the Mac's own keyboard, which a TUI on
             // another machine has none of.

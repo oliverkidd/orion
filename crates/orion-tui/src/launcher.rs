@@ -2860,6 +2860,7 @@ mod tests {
             ),
             text: "hello".into(),
             from_box: true,
+            into_pane: None,
         };
         let mut picker = ProjectPicker::new(&app, back);
         let listed: Vec<(&str, &str)> = picker
