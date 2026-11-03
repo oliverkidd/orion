@@ -15,6 +15,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::git_diff::git_command;
@@ -33,6 +34,8 @@ const STOP_POLL: Duration = Duration::from_millis(20);
 /// behind holding the pipe open (an `ssh` master gone to the background)
 /// must not hold the answer.
 const STDERR_WAIT: Duration = Duration::from_secs(1);
+/// How much of a call's stderr is kept for its one-line complaint.
+const SAID_KEPT: usize = 256 * 1024;
 /// How long a push may run: a pre-push hook can run a test suite, and
 /// the person who pressed the key is watching the footer say so.
 pub(crate) const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
@@ -123,22 +126,45 @@ pub(crate) fn remote_git(
     budget: Duration,
     quit: &AtomicBool,
 ) -> Result<(), String> {
-    use std::io::Read;
+    watched(root, args, budget, quit, None)
+}
+
+/// [`remote_git`] with everything git and its hooks say landing in `log`
+/// as it is said, the command first — for a screen that shows the wait.
+pub(crate) fn logged_git(
+    root: &Path,
+    args: &[&str],
+    budget: Duration,
+    quit: &AtomicBool,
+    log: &GitLog,
+) -> Result<(), String> {
+    log.say(LogKind::Command, format!("$ git {}", args.join(" ")));
+    watched(root, args, budget, quit, Some(log))
+}
+
+fn watched(
+    root: &Path,
+    args: &[&str],
+    budget: Duration,
+    quit: &AtomicBool,
+    log: Option<&GitLog>,
+) -> Result<(), String> {
     let mut child = detached(root, args)
-        .stdout(Stdio::null())
+        .stdout(if log.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to run git: {e}"))?;
-    // Drained on a thread of its own, so a remote that says a lot can't
-    // fill the pipe and stall git while this loop only polls.
-    let (said_tx, said_rx) = std::sync::mpsc::channel();
-    if let Some(mut pipe) = child.stderr.take() {
-        std::thread::spawn(move || {
-            let mut said = String::new();
-            let _ = pipe.read_to_string(&mut said);
-            let _ = said_tx.send(said);
-        });
-    }
+    // Each pipe drained on a thread of its own, so a remote that says a lot
+    // can't fill one and stall git while this loop only polls.
+    let said_rx = child
+        .stderr
+        .take()
+        .map(|pipe| drained(pipe, log, SAID_KEPT));
+    let out_rx = child.stdout.take().map(|pipe| drained(pipe, log, 0));
     let deadline = Instant::now() + budget;
     let ended = loop {
         match child.try_wait() {
@@ -152,12 +178,197 @@ pub(crate) fn remote_git(
     if ended.is_err() {
         stop(&mut child);
     }
-    let said = said_rx.recv_timeout(STDERR_WAIT).unwrap_or_default();
+    let said = said_rx
+        .and_then(|rx| rx.recv_timeout(STDERR_WAIT).ok())
+        .unwrap_or_default();
+    if let Some(rx) = out_rx {
+        let _ = rx.recv_timeout(STDERR_WAIT);
+    }
     match ended {
         Ok(true) => Ok(()),
         Ok(false) => Err(remote_error(&said)),
         Err(why) => Err(format!("{} {why}", args.first().copied().unwrap_or("git"))),
     }
+}
+
+/// [`drain`] on a thread of its own, its answer on the channel once `pipe`
+/// closes.
+fn drained(
+    pipe: impl std::io::Read + Send + 'static,
+    log: Option<&GitLog>,
+    keep: usize,
+) -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let log = log.cloned();
+    std::thread::spawn(move || {
+        let _ = tx.send(drain(pipe, log, keep));
+    });
+    rx
+}
+
+/// Read `pipe` until it closes, feeding `log` as it comes. Returns the last
+/// `keep` or so bytes: however much a hook prints, only git's complaint at
+/// the end is wanted.
+fn drain(mut pipe: impl std::io::Read, log: Option<GitLog>, keep: usize) -> String {
+    let mut tail = Vec::new();
+    let mut feed = log.map(LogFeed::new);
+    let mut chunk = [0u8; 4096];
+    while let Ok(n) = pipe.read(&mut chunk) {
+        if n == 0 {
+            break;
+        }
+        if keep > 0 {
+            tail.extend_from_slice(&chunk[..n]);
+            if tail.len() > 2 * keep {
+                tail.drain(..tail.len() - keep);
+            }
+        }
+        if let Some(feed) = &mut feed {
+            feed.push(&chunk[..n]);
+        }
+    }
+    if let Some(feed) = &mut feed {
+        feed.end();
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
+/// What a line of a [`GitLog`] is, which sets how it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    /// The command about to run.
+    Command,
+    /// What git or a hook said.
+    Output,
+    /// orion saying something went well.
+    Good,
+    /// orion saying where things stand.
+    Note,
+    /// orion saying it stopped, and why.
+    Bad,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub kind: LogKind,
+    pub text: String,
+}
+
+/// The newest lines a [`GitLog`] keeps.
+const LOG_LINES: usize = 2000;
+
+/// git's output on its way to the screen: written off the loop as it
+/// arrives, read by each draw, shared by every clone.
+#[derive(Debug, Clone, Default)]
+pub struct GitLog(Arc<Mutex<Vec<LogLine>>>);
+
+impl GitLog {
+    pub fn say(&self, kind: LogKind, text: impl Into<String>) {
+        let mut lines = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if lines.len() >= LOG_LINES {
+            lines.remove(0);
+        }
+        lines.push(LogLine {
+            kind,
+            text: text.into(),
+        });
+    }
+
+    /// The last line said again: a progress bar's next frame.
+    fn say_over(&self, text: String) {
+        let mut lines = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match lines.last_mut() {
+            Some(last) => last.text = text,
+            None => lines.push(LogLine {
+                kind: LogKind::Output,
+                text,
+            }),
+        }
+    }
+
+    pub fn lines(&self) -> Vec<LogLine> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// Bytes off a pipe cut into a [`GitLog`]'s lines. A line ended by a bare
+/// `\r` is one a program means to draw over, so the next takes its place:
+/// `git push --progress` reads as one line that counts up.
+struct LogFeed {
+    log: GitLog,
+    line: Vec<u8>,
+    /// The last line ended in `\r`.
+    over: bool,
+}
+
+impl LogFeed {
+    fn new(log: GitLog) -> Self {
+        Self {
+            log,
+            line: Vec::new(),
+            over: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            match b {
+                b'\n' if self.line.is_empty() && self.over => self.over = false,
+                b'\n' => {
+                    self.flush();
+                    self.over = false;
+                }
+                b'\r' => {
+                    self.flush();
+                    self.over = true;
+                }
+                _ => self.line.push(b),
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        let text = plain(&String::from_utf8_lossy(&self.line));
+        self.line.clear();
+        if self.over {
+            self.log.say_over(text);
+        } else {
+            self.log.say(LogKind::Output, text);
+        }
+    }
+
+    fn end(&mut self) {
+        if !self.line.is_empty() {
+            self.flush();
+        }
+    }
+}
+
+/// `line` as a pane can draw it: a hook's colors and other control
+/// sequences gone, tabs spread.
+fn plain(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+            '\t' => out.push_str("    "),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// [`git_error`], but a refused push says why rather than only that it
@@ -205,6 +416,83 @@ fn stop(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fed(chunks: &[&[u8]]) -> Vec<String> {
+        let log = GitLog::default();
+        let mut feed = LogFeed::new(log.clone());
+        for chunk in chunks {
+            feed.push(chunk);
+        }
+        feed.end();
+        log.lines().into_iter().map(|l| l.text).collect()
+    }
+
+    /// Lines survive being cut across reads; a line ended by `\r` is drawn
+    /// over by the next, so progress reads as one line; CRLF is one ending.
+    #[test]
+    fn a_log_keeps_lines_and_draws_progress_over_itself() {
+        assert_eq!(
+            fed(&[b"one\ntw", b"o\n", b"three"]),
+            ["one", "two", "three"]
+        );
+        assert_eq!(
+            fed(&[
+                b"Writing: 10%\rWriting: 60%\r",
+                b"Writing: 100%, done.\nTo origin\n"
+            ]),
+            ["Writing: 100%, done.", "To origin"]
+        );
+        assert_eq!(fed(&[b"one\r\ntwo\r\n"]), ["one", "two"]);
+    }
+
+    /// A hook's colors don't reach the pane.
+    #[test]
+    fn a_log_line_is_plain_text() {
+        assert_eq!(
+            plain("\u{1b}[1;31merror\u{1b}[0m:\tbad\u{7}"),
+            "error:    bad"
+        );
+    }
+
+    /// What git and its hooks say lands as it is said, the command first,
+    /// and a failure still answers with the one line.
+    #[test]
+    fn logged_git_reports_output_and_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = GitLog::default();
+        let quit = AtomicBool::new(false);
+        let budget = Duration::from_secs(30);
+        logged_git(dir.path(), &["init", "-b", "main"], budget, &quit, &log).unwrap();
+        let lines = log.lines();
+        assert_eq!(lines[0].text, "$ git init -b main");
+        assert_eq!(lines[0].kind, LogKind::Command);
+        assert!(
+            lines.iter().any(|l| l.text.contains("Initialized")),
+            "{lines:?}"
+        );
+        let why = logged_git(dir.path(), &["rev-parse", "nope"], budget, &quit, &log).unwrap_err();
+        assert!(!why.is_empty());
+    }
+
+    /// With no log there is no stdout to wait for: a call answers as soon
+    /// as git ends, not after the wait for a pipe that never was.
+    #[test]
+    fn remote_git_answers_as_soon_as_git_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let quit = AtomicBool::new(false);
+        let at = Instant::now();
+        remote_git(dir.path(), &["--version"], Duration::from_secs(30), &quit).unwrap();
+        assert!(at.elapsed() < STDERR_WAIT, "{:?}", at.elapsed());
+    }
+
+    /// A pipe that says a lot keeps its tail, and only that.
+    #[test]
+    fn drain_keeps_only_the_tail() {
+        let said = vec![b'x'; 10_000];
+        let kept = drain(&said[..], None, 100);
+        assert!(kept.len() <= 200 + 4096, "{}", kept.len());
+        assert!(drain(&said[..], None, 0).is_empty());
+    }
 
     #[test]
     fn git_errors_read_as_the_error_line_without_its_prefix() {

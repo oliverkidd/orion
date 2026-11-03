@@ -454,6 +454,18 @@ fn start_session(tui: &mut TuiHarness, task: &str) {
     tui.wait_for_text(FOOTER_TERMINAL_LOCKED);
 }
 
+/// What `git -C repo <args>` prints, trimmed.
+fn git_stdout(repo: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn repo_git(repo: &std::path::Path, args: &[&str]) {
     let ok = std::process::Command::new("git")
         .arg("-C")
@@ -1255,6 +1267,129 @@ fn tui_autofix_asks_when_my_pr_conflicts() {
     tui.wait_for_text("[ ] Unit tests");
     tui.send(ESC);
     tui.wait_for_gone("Autofix #7");
+}
+
+/// The CONFLICT RESOLVER, end to end against a real remote: Enter on a
+/// conflicted file opens it, taking a side hands the pane to the log, `^S`
+/// shows a hook's output while the hook is still running, and the push
+/// landing puts the pull request's Checks tab up, the merge on the remote.
+#[test]
+fn tui_conflict_resolver_runs_through_to_the_pull_request() {
+    let repos = tempfile::tempdir().unwrap();
+    let repo = repos.path().join("merge-proj");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| repo_git(&repo, args);
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@orion.dev"]);
+    git(&["config", "user.name", "orion-test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    let origin = repos.path().join("merge-origin.git");
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q", "--bare", "-b", "main"])
+        .arg(&origin)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "bare origin");
+    git(&["remote", "add", "origin", &origin.to_string_lossy()]);
+    std::fs::write(repo.join("a.txt"), "one\nshared\nthree\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "base"]);
+    git(&["switch", "-q", "-c", "feat"]);
+    std::fs::write(repo.join("a.txt"), "one\nfeature\nthree\n").unwrap();
+    git(&["commit", "-q", "-am", "feature"]);
+    git(&["switch", "-q", "main"]);
+    std::fs::write(repo.join("a.txt"), "one\nupstream\nthree\n").unwrap();
+    git(&["commit", "-q", "-am", "upstream"]);
+    git(&["push", "-q", "origin", "main"]);
+    git(&["switch", "-q", "feat"]);
+    git(&["push", "-q", "-u", "origin", "feat"]);
+    let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+    // A hook that is slow enough to watch, and says so first.
+    let hook = repo.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho hook-is-running\nsleep 2\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let stub_bin = tempfile::tempdir().unwrap();
+    let gh = stub_bin.path().join("gh");
+    let body = format!(
+        concat!(
+            "{{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
+            "\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"CONFLICTING\",",
+            "\"statusCheckRollup\":[],\"author\":{{\"login\":\"me\"}},\"baseRefName\":\"main\",",
+            "\"headRefName\":\"feat\",\"headRefOid\":\"{head}\",\"comments\":[],\"reviews\":[],",
+            "\"files\":[{{\"path\":\"a.txt\",\"additions\":1,\"deletions\":1,",
+            "\"changeType\":\"MODIFIED\"}}]}}"
+        ),
+        head = head
+    );
+    let list = format!(
+        concat!(
+            "{{\"data\":{{\"repository\":{{\"pullRequests\":{{\"nodes\":[",
+            "{{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
+            "\"isDraft\":false,\"headRefName\":\"feat\",\"isCrossRepository\":false,",
+            "\"headRepositoryOwner\":{{\"login\":\"o\"}},\"mergeable\":\"CONFLICTING\",",
+            "\"viewerDidAuthor\":true,\"headRefOid\":\"{head}\",",
+            "\"commits\":{{\"nodes\":[{{\"commit\":{{\"statusCheckRollup\":",
+            "{{\"state\":\"SUCCESS\"}}}}}}]}}}}]}}}}}}}}"
+        ),
+        head = head
+    );
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\ncase \"$1 $2 $3\" in\n  'api graphql'*) printf '%s' '{list}' ;;\n  'pr view 7') printf '%s' '{body}' ;;\n  *) exit 1 ;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        stub_bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut tui = TuiHarness::spawn_with(&[("PATH", path)], "");
+    tui.wait_for_text("to begin");
+    run_command(&mut tui, "open a folder");
+    tui.wait_for_text("Open project");
+    tui.type_str(&repo.to_string_lossy());
+    tui.send(ENTER);
+    tui.wait_for_gone("Open project");
+
+    tui.send(&[0x16]);
+    tui.wait_for_text("Add things");
+    tui.send(SHIFT_RIGHT);
+    tui.wait_for_text("a.txt");
+    tui.wait_for_text("✗ 1");
+    tui.send(TAB);
+    tui.send(ENTER);
+
+    tui.wait_for_text("Merge — #7");
+    tui.wait_for_text("● Resolve conflicts  1 left");
+    // `l` reads what the merge said, and goes back to the file.
+    tui.send(b"l");
+    tui.wait_for_text("CONFLICT (content)");
+    tui.send(b"l");
+    tui.wait_for_text("accept incoming ·");
+    tui.send(b"i");
+    tui.wait_for_text("Nothing is committed yet.");
+    tui.wait_for_text("● Commit the merge");
+
+    tui.send(CTRL_S);
+    tui.wait_for_text("Log · committing");
+    tui.wait_for_text("hook-is-running");
+    assert!(
+        tui.screen_text().contains("Log · committing"),
+        "the hook's words while it still runs:\n{}",
+        tui.screen_text()
+    );
+    tui.wait_for_text("Checks");
+    tui.wait_for_gone("Merge — #7");
+
+    let on_origin = git_stdout(&origin, &["rev-list", "--count", "--merges", "feat"]);
+    assert_eq!(on_origin, "1", "the merge reached the remote");
+    let merged = git_stdout(&origin, &["show", "feat:a.txt"]);
+    assert_eq!(merged, "one\nupstream\nthree", "the side taken");
 }
 
 /// `⌘U` in an agent's locked pane, as Ghostty's kitty protocol spells it:

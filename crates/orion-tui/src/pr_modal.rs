@@ -513,6 +513,43 @@ pub(crate) fn reopen(app: &mut App, view: PullRequestsView) {
     app.dirty = true;
 }
 
+/// The modal on `url`'s `tab`, its list and page asked for fresh: where a
+/// merge that was just pushed lands. `back` is the modal to put up again,
+/// when the merge was started from one; else it opens on the project the
+/// pull request is listed under.
+pub(crate) fn land_on(
+    app: &mut App,
+    back: Option<PullRequestsView>,
+    url: &str,
+    tab: crate::pr_preview::PrTab,
+) {
+    match back {
+        Some(view) => app.overlay = Some(Overlay::PullRequests(view)),
+        None => {
+            let listed = crate::pr_checkout::of_url(app, url)
+                .and_then(|(id, _)| app.tree.projects.iter().find(|p| p.id == id).cloned())
+                .or_else(|| app.selected_project().cloned());
+            let Some(project) = listed else {
+                return;
+            };
+            show(
+                app,
+                PullRequestsView::new(project.id, project.name, project.repo_path),
+            );
+        }
+    }
+    if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
+        view.selected_url = Some(url.to_string());
+        view.tabs.switch(tab);
+        view.scroll = 0;
+    }
+    list_changed(app);
+    schedule_detail(app);
+    // Last: a page read moments ago is one `schedule_detail` wouldn't ask for.
+    refresh(app);
+    app.dirty = true;
+}
+
 /// The project's open pull requests, as the group shows them (drafts and
 /// all: the modal lists everything open, whatever `hide_draft_prs` keeps
 /// out of the panel), then the ones merged lately (`OpenPrs::merged`) —

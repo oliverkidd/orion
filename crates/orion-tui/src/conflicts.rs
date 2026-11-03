@@ -10,45 +10,59 @@
 //! and base ([`Known`]): a push moves the head, and the next page that says
 //! it still conflicts is asked about again.
 //!
-//! **Settling them.** Enter on a conflicted file merges the base into the
-//! pull request's branch in the project's checkout of it — what GitHub's own
-//! *Resolve conflicts* does — and opens the RESOLVER on that file: the
-//! files git left conflicted down the left, the file on the right with each
-//! conflict drawn as its two sides, the current change (the pull request's
-//! branch) over the incoming one (the base), and a row of buttons on each.
+//! **Settling them.** Enter on a conflicted file opens the RESOLVER at once,
+//! and merges the base into the pull request's branch in the project's
+//! checkout of it — what GitHub's own *Resolve conflicts* does. The modal is
+//! three sections. Top left, where the merge stands: its steps (merge,
+//! resolve, commit, push) and what to do next. Under that, the files git left
+//! conflicted. On the right, the file while it has conflicts to settle,
+//! each drawn as its two sides, the current change (the pull request's
+//! branch) over the incoming one (the base), under a row of buttons; and the
+//! LOG otherwise, what git and its hooks said as they said it. `l` flips
+//! between the two, and Tab or a click reads a file back.
+//!
 //! `c`, `i` and `b` take the current side, the incoming side or both, `u`
 //! puts the last one back, and Enter opens the file in the BUILT-IN EDITOR
 //! at the conflict for anything the buttons can't say. A file is written
 //! the moment a side is taken; nothing is staged until the merge is
 //! committed, so Esc can leave it half done and Enter on a conflicted file
-//! comes back to it. `⌘S` stages the files, commits the merge and pushes it
-//! (`git_sync`'s PUSH); `⌘W` twice aborts it (`git merge --abort`), the
-//! checkout back as it was.
+//! comes back to it. `⌘W` twice aborts it (`git merge --abort`), the checkout
+//! back as it was.
+//!
+//! **Sending it.** `⌘S` stages the files and commits the merge, then pushes it
+//! (`git_sync`'s PUSH), the modal up and the LOG running throughout. A
+//! commit a hook stopped or a push that failed stays on screen with the
+//! reason, and `⌘S` tries that step again; a push never commits twice. Once
+//! the push lands the modal gives way to the PULL REQUESTS MODAL, on the pull
+//! request's Checks tab with its page asked for fresh. Esc while git is at
+//! work leaves it working: the view is PARKED on [`Known`], the FLASH says how
+//! it ends, and Enter on a conflicted file comes back to it.
 //!
 //! A checkout with uncommitted changes, or one an agent is working in, is
-//! never merged into: the FLASH says why. A checkout behind the pull
-//! request's head would merge into old commits, so it says to pull first.
+//! never merged into, and one behind the pull request's head would merge
+//! into old commits: the modal says why it did not start.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use orion_core::WorktreeId;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Overlay};
 use crate::flash::Flash;
-use crate::git_proc::{read, remote_git, run, FETCH_TIMEOUT};
+use crate::git_proc::{logged_git, read, remote_git, run, GitLog, LogKind, FETCH_TIMEOUT};
 use crate::theme::Theme;
 
-/// Lines one wheel notch scrolls the file.
+/// Lines one wheel notch scrolls the pane.
 const WHEEL_LINES: i32 = 3;
 /// Lines kept above a conflict the cursor moves to, so its context shows.
 const CONTEXT: usize = 4;
@@ -57,6 +71,15 @@ const LIST_PCT: u16 = 28;
 const MIN_LIST_W: u16 = 22;
 /// A tab as the file pane draws it.
 const TAB: &str = "    ";
+/// The state panel's rows, borders in: where the merge goes, its four steps,
+/// and two for what to do next.
+const STATE_H: u16 = 9;
+/// How long the merge, then the commit with its hooks, may run. A pre-commit
+/// hook can run a test suite.
+const MERGE_TIMEOUT: Duration = Duration::from_secs(300);
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(900);
+/// The file list's least room under the state panel: its borders and a row.
+const MIN_FILES_H: u16 = 3;
 
 // ---- the file: its conflicts, parsed ----
 
@@ -265,14 +288,14 @@ struct Entry {
 }
 
 /// Every pull request's conflicted files, by URL, as the repo answered
-/// for its head commit and base — and the RESOLVER being opened, if one
-/// is (`App::conflicts`).
+/// for its head commit and base — and the RESOLVER left at work, if one
+/// was (`App::conflicts`).
 #[derive(Debug, Default)]
 pub struct Known {
     by_url: HashMap<String, Entry>,
-    opening: Option<Opening>,
-    /// A commit of the merge on its way, by ticket.
-    committing: Option<u64>,
+    /// A RESOLVER Esc left with git at work, or with a result to read:
+    /// answers land on it, and Enter on a conflicted file brings it back.
+    parked: Option<Box<ConflictView>>,
 }
 
 impl Known {
@@ -519,19 +542,6 @@ pub enum Prepared {
     Clean,
 }
 
-/// A RESOLVER on its way up: the merge running off the loop.
-#[derive(Debug, Clone)]
-struct Opening {
-    ticket: u64,
-    url: String,
-    label: String,
-    path: Option<String>,
-    worktree: WorktreeId,
-    root: PathBuf,
-    branch: String,
-    base: String,
-}
-
 /// Whether a merge is underway in `root`.
 fn merging(root: &Path) -> bool {
     read(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
@@ -548,8 +558,10 @@ pub(crate) fn prepare(
     base: &str,
     head_sha: &str,
     quit: &AtomicBool,
+    log: &GitLog,
 ) -> Result<Prepared, String> {
     if merging(root) {
+        log.say(LogKind::Note, "Picking up the merge already underway.");
         return unmerged(root).map(Prepared::Conflicts);
     }
     let dirty = read(root, &["status", "--porcelain", "--untracked-files=no"])?;
@@ -565,17 +577,20 @@ pub(crate) fn prepare(
             "⎇ {branch} is behind the pull request — pull it first"
         ));
     }
-    remote_git(
+    logged_git(
         root,
-        &["fetch", "--quiet", "--no-tags", "origin", base],
+        &["fetch", "--no-tags", "origin", base],
         FETCH_TIMEOUT,
         quit,
+        log,
     )?;
     let base_ref = format!("origin/{base}");
-    match run(root, &["merge", "--no-edit", "--quiet", &base_ref]) {
+    let merge = ["merge", "--no-edit", &base_ref];
+    match logged_git(root, &merge, MERGE_TIMEOUT, quit, log) {
         Ok(_) => Ok(Prepared::Clean),
         Err(why) => match unmerged(root) {
-            Ok(files) if merging(root) && !files.is_empty() => Ok(Prepared::Conflicts(files)),
+            // Even with nothing unmerged: a hook stopped it, and it's underway.
+            Ok(files) if merging(root) => Ok(Prepared::Conflicts(files)),
             _ => Err(why),
         },
     }
@@ -645,11 +660,12 @@ fn count(root: &Path, file: &ConflictFile) -> usize {
     }
 }
 
-/// Enter on a conflicted file of pull request `url`'s page: merge its base
-/// into its branch in the project's checkout of it, off the loop, and
-/// open the RESOLVER on `path` once that lands ([`land_prepared`]). A pull
-/// request nobody has checked out is checked out first — the checkout a PR
-/// SESSION would run in (`pr_checkout`) — and the merge follows.
+/// Enter on a conflicted file of pull request `url`'s page: the RESOLVER up
+/// at once, merging its base into its branch in the project's checkout of
+/// it off the loop ([`land_prepared`]). A pull request nobody has checked out
+/// is checked out first — the checkout a PR SESSION would run in
+/// (`pr_checkout`) — and the merge follows. One Esc left at work comes back
+/// as it was.
 pub(crate) fn open(
     app: &mut App,
     url: &str,
@@ -657,6 +673,30 @@ pub(crate) fn open(
     path: Option<&str>,
     out: &mut Vec<orion_core::ClientRequest>,
 ) {
+    // One resolver at a time: a checkout landing under one on screen doesn't
+    // start another.
+    if let Some(Overlay::Conflicts(view)) = &app.overlay {
+        app.flash = Some(Flash::note(format!(
+            "⎇ {} is merging — finish that first",
+            view.branch
+        )));
+        return;
+    }
+    if let Some(parked) = &app.conflicts.parked {
+        if parked.url == url {
+            return unpark(app);
+        }
+        if parked.running() {
+            app.flash = Some(Flash::note(format!(
+                "⎇ {} has a merge at work — try again once it lands",
+                parked.branch
+            )));
+            return;
+        }
+        // Stopped, with nothing running: what git left is still there, for
+        // Enter on its file (mid-merge) or ⇧P (committed).
+        app.conflicts.parked = None;
+    }
     let Some(detail) = app.pr_detail.get(url).cloned() else {
         return;
     };
@@ -692,95 +732,157 @@ pub(crate) fn open(
         .agents
         .iter()
         .any(|a| a.worktree_id == worktree.id && !a.archived && app.spins(a));
-    if working {
-        app.flash = Some(Flash::failed(format!(
+    let refused = if working {
+        Some(format!(
             "an agent is working in ⎇ {} — resolve its conflicts once it stops",
             worktree.branch
-        )));
-        return;
-    }
-    if app.git_sync.inflight.contains_key(&worktree.id) {
-        app.flash = Some(Flash::failed(format!(
+        ))
+    } else if app.git_sync.inflight.contains_key(&worktree.id) {
+        Some(format!(
             "⎇ {} is syncing — try again once it lands",
             worktree.branch
+        ))
+    } else {
+        None
+    };
+    let mut view = ConflictView::new(
+        worktree.path.clone(),
+        worktree.branch.clone(),
+        detail.base.clone(),
+        Vec::new(),
+    );
+    view.url = url.to_string();
+    view.label = label.to_string();
+    view.worktree = worktree.id.clone();
+    view.want_path = path.map(str::to_string);
+    view.stage = Stage::Merging;
+    view.ticket = crate::view_jobs::ticket();
+    let (ticket, log) = (view.ticket, view.log.clone());
+    if let Some(why) = refused {
+        log.say(LogKind::Bad, why.clone());
+        view.stage = Stage::Refused;
+        if raise(app, Box::new(view)).is_err() {
+            app.flash = Some(Flash::failed(why));
+        }
+        return;
+    }
+    if let Err(view) = raise(app, Box::new(view)) {
+        app.flash = Some(Flash::working(format!(
+            "merging origin/{} into ⎇ {}…",
+            view.base, view.branch
         )));
-        return;
+        app.conflicts.parked = Some(view);
     }
-    if app.conflicts.opening.is_some() {
-        return;
-    }
-    let ticket = crate::view_jobs::ticket();
-    app.conflicts.opening = Some(Opening {
-        ticket,
-        url: url.to_string(),
-        label: label.to_string(),
-        path: path.map(str::to_string),
-        worktree: worktree.id.clone(),
-        root: worktree.path.clone(),
-        branch: worktree.branch.clone(),
-        base: detail.base.clone(),
-    });
-    app.flash = Some(Flash::working(format!(
-        "merging origin/{} into ⎇ {}…",
-        detail.base, worktree.branch
-    )));
     let (root, branch, base, head_sha) =
         (worktree.path, worktree.branch, detail.base, detail.head_sha);
     let quit = Arc::clone(&app.git_sync.quit);
     let work = move || Answer::Prepared {
         ticket,
-        result: prepare(&root, &branch, &base, &head_sha, &quit),
+        result: prepare(&root, &branch, &base, &head_sha, &quit, &log),
     };
     off_loop(app, work);
 }
 
-/// The merge for the RESOLVER being opened landed. Conflicts open it — over
-/// the PULL REQUESTS MODAL it was asked from, as a level inside it, or
-/// over the panels — unless something else was opened meanwhile, which
-/// is left alone and told how to come back.
-fn land_prepared(app: &mut App, ticket: u64, result: Result<Prepared, String>) {
-    let Some(opening) = app.conflicts.opening.take_if(|o| o.ticket == ticket) else {
-        return;
-    };
-    let files = match result {
-        Err(why) => {
-            app.flash = Some(Flash::failed(why));
-            return;
-        }
-        Ok(Prepared::Clean) => {
-            settled(app, &opening.url);
-            app.flash = Some(Flash::done(format!(
-                "merged origin/{} into ⎇ {} with nothing left to resolve — push it to update the pull request",
-                opening.base, opening.branch
-            )));
-            return;
-        }
-        Ok(Prepared::Conflicts(files)) => files,
-    };
-    let back = match app.overlay.take() {
-        Some(Overlay::PullRequests(view)) => Some(Box::new(view)),
-        None => None,
+/// `view` on screen — over the PULL REQUESTS MODAL it was asked from, as a
+/// level inside it, or over the panels. Something else opened meanwhile is
+/// left alone, and `view` handed back.
+fn raise(app: &mut App, mut view: Box<ConflictView>) -> Result<(), Box<ConflictView>> {
+    match app.overlay.take() {
+        Some(Overlay::PullRequests(under)) => view.back = Some(Box::new(under)),
+        None => {}
         other => {
             app.overlay = other;
-            app.flash = Some(Flash::note(format!(
-                "⎇ {} is mid-merge — Enter on a conflicted file opens it",
-                opening.branch
-            )));
-            return;
+            return Err(view);
         }
-    };
+    }
     app.flash = None;
-    let mut view = ConflictView::new(opening.root, opening.branch, opening.base, files);
-    view.back = back;
-    view.url = opening.url;
-    view.label = opening.label;
-    view.worktree = opening.worktree;
-    view.open_at(opening.path.as_deref());
-    app.overlay = Some(Overlay::Conflicts(Box::new(view)));
+    app.overlay = Some(Overlay::Conflicts(view));
+    app.dirty = true;
+    Ok(())
 }
 
-/// The merge for `url` is over — committed, or clean — so its page stops
-/// marking the files GitHub's stale answer still calls conflicted.
+/// The PARKED resolver back on screen, reading its files again: the editor,
+/// or git, may have moved them on.
+fn unpark(app: &mut App) {
+    let Some(mut view) = app.conflicts.parked.take() else {
+        return;
+    };
+    if !view.running() {
+        view.reload();
+    }
+    if let Err(view) = raise(app, view) {
+        app.conflicts.parked = Some(view);
+    }
+}
+
+/// The resolver waiting on `ticket`, on screen or PARKED, and which.
+fn waiting_on(app: &mut App, ticket: u64) -> Option<(&mut ConflictView, bool)> {
+    if let Some(Overlay::Conflicts(view)) = &mut app.overlay {
+        if view.ticket == ticket {
+            return Some((view, false));
+        }
+    }
+    app.conflicts
+        .parked
+        .as_mut()
+        .filter(|view| view.ticket == ticket)
+        .map(|view| (&mut **view, true))
+}
+
+/// The merge landed on the resolver waiting for it. On screen it stays up,
+/// its log saying how it went. Left PARKED, the FLASH says it; there are
+/// conflicts to settle or a refusal to read, and either way Enter on a
+/// conflicted file starts over from what the checkout holds.
+fn land_prepared(app: &mut App, ticket: u64, result: Result<Prepared, String>) {
+    let Some((view, parked)) = waiting_on(app, ticket) else {
+        return;
+    };
+    let branch = view.branch.clone();
+    let base = view.base.clone();
+    let flash = match result {
+        Err(why) => {
+            view.log.say(LogKind::Bad, why.clone());
+            view.stage = Stage::Refused;
+            Flash::failed(why)
+        }
+        Ok(Prepared::Clean) => {
+            view.log.say(
+                LogKind::Good,
+                format!("Merged origin/{base} with nothing to resolve. Nothing is pushed yet."),
+            );
+            view.stage = Stage::ReadyToPush;
+            Flash::done(format!(
+                "merged origin/{base} into ⎇ {branch} with nothing left to resolve — push it to update the pull request"
+            ))
+        }
+        Ok(Prepared::Conflicts(files)) => {
+            let stopped = match files.len() {
+                0 => "The merge stopped.".to_string(),
+                n => format!("The merge stopped on {}.", crate::bundle::plural(n, "file")),
+            };
+            view.log.say(
+                LogKind::Note,
+                format!("{stopped} Nothing is committed yet."),
+            );
+            view.files = files;
+            view.stage = Stage::Resolving;
+            let want = view.want_path.take();
+            view.open_at(want.as_deref());
+            Flash::note(format!(
+                "⎇ {branch} is mid-merge — Enter on a conflicted file opens it"
+            ))
+        }
+    };
+    if parked {
+        if view.stage != Stage::ReadyToPush {
+            app.conflicts.parked = None;
+        }
+        app.flash = Some(flash);
+    }
+}
+
+/// The merge for `url` is on GitHub, so its page stops marking the files
+/// GitHub's stale answer still calls conflicted.
 fn settled(app: &mut App, url: &str) {
     if let Some(entry) = app.conflicts.by_url.get_mut(url) {
         entry.asked = Asked::Files(Vec::new());
@@ -789,10 +891,60 @@ fn settled(app: &mut App, url: &str) {
 
 // ---- the RESOLVER ----
 
-/// The CONFLICT RESOLVER: the merge's conflicted files, and the one under
-/// the cursor with its conflicts drawn to settle.
+/// How far the merge has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Fetching the base and merging it in.
+    Merging,
+    /// The merge never started: the log's last line says why.
+    Refused,
+    /// Stopped on conflicts — [`ConflictView::left`] says how many are
+    /// still open; with none it waits for `⌘S`.
+    Resolving,
+    /// Staging and committing, hooks and all.
+    Committing,
+    /// The commit stopped — a hook, usually. The merge is still underway.
+    CommitFailed,
+    /// Committed with nothing to resolve; waiting for `⌘S` to push it.
+    ReadyToPush,
+    /// Pushing what was committed.
+    Pushing,
+    /// The push didn't land. The merge commit is made and kept.
+    PushFailed,
+}
+
+/// What the right-hand pane shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    /// What the stage calls for: the file while a conflict is open, else
+    /// the log.
+    Auto,
+    File,
+    Log,
+}
+
+/// The CONFLICT RESOLVER: where the merge stands, its conflicted files, and
+/// either the one under the cursor with its conflicts drawn to settle or
+/// the log of what git said.
 #[derive(Debug, Clone)]
 pub struct ConflictView {
+    pub stage: Stage,
+    /// What the right-hand pane was asked to show.
+    pub pane: Pane,
+    /// What git and its hooks said, written off the loop as it comes.
+    pub log: GitLog,
+    /// When the stage at work started, for its clock.
+    pub started: Instant,
+    /// The answer this view is waiting for.
+    pub ticket: u64,
+    /// The file Enter was pressed on, until the merge's files are known.
+    pub want_path: Option<String>,
+    /// The log's top row; None follows its tail.
+    pub log_top: Option<usize>,
+    /// The log's top row as last drawn, whichever that was.
+    pub log_at: usize,
+    /// The log said every conflict is settled, and none has opened since.
+    pub said_settled: bool,
     /// The PULL REQUESTS MODAL it was opened from: Esc puts it back.
     pub back: Option<Box<crate::pr_modal::PullRequestsView>>,
     pub url: String,
@@ -844,6 +996,15 @@ impl ConflictView {
         files: Vec<ConflictFile>,
     ) -> Self {
         Self {
+            stage: Stage::Resolving,
+            pane: Pane::Auto,
+            log: GitLog::default(),
+            started: Instant::now(),
+            ticket: 0,
+            want_path: None,
+            log_top: None,
+            log_at: 0,
+            said_settled: false,
             back: None,
             url: String::new(),
             label: String::new(),
@@ -865,6 +1026,95 @@ impl ConflictView {
             buttons: Vec::new(),
             row_rects: Vec::new(),
             view_height: 0,
+        }
+    }
+
+    /// Whether git is at work, so there is a clock and a log to watch.
+    pub(crate) fn running(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Merging | Stage::Committing | Stage::Pushing
+        )
+    }
+
+    /// Whether leaving should keep this view: git at work, or a result
+    /// that a fresh look at the checkout couldn't read back.
+    fn parks(&self) -> bool {
+        !matches!(self.stage, Stage::Resolving | Stage::Refused)
+    }
+
+    /// Whether a conflict still waits for a side to be taken.
+    fn conflicts_open(&self) -> bool {
+        self.stage == Stage::Resolving && self.left() > 0
+    }
+
+    /// On to `stage`, its log in the pane, following the tail.
+    fn enter(&mut self, stage: Stage) {
+        self.stage = stage;
+        self.show_log();
+    }
+
+    /// The pane back to what the stage calls for, the log at its tail.
+    fn show_log(&mut self) {
+        self.pane = Pane::Auto;
+        self.log_top = None;
+    }
+
+    /// Whether the merge can still be aborted: it hasn't been committed.
+    fn abortable(&self) -> bool {
+        matches!(self.stage, Stage::Resolving | Stage::CommitFailed)
+    }
+
+    /// What the right-hand pane is showing.
+    fn showing(&self) -> Pane {
+        match self.pane {
+            Pane::Auto if self.conflicts_open() => Pane::File,
+            Pane::Auto => Pane::Log,
+            pane => pane,
+        }
+    }
+
+    /// Tab or a click: read file `i`.
+    fn pick(&mut self, i: usize) {
+        self.select(i);
+        self.note = None;
+        self.pane = if self.conflicts_open() {
+            Pane::Auto
+        } else {
+            Pane::File
+        };
+    }
+
+    /// `l`: the log, or back to what the stage calls for.
+    fn toggle_log(&mut self) {
+        if self.files.is_empty() {
+            return;
+        }
+        self.pane = match self.showing() {
+            Pane::Log if self.conflicts_open() => Pane::Auto,
+            Pane::Log => Pane::File,
+            _ => Pane::Log,
+        };
+    }
+
+    /// How long the stage at work has been at it.
+    fn clock(&self) -> String {
+        crate::pull_request::duration_label(self.started.elapsed().as_secs() as i64)
+    }
+
+    /// The last conflict just went: the log says so, and takes the pane.
+    fn note_settled(&mut self) {
+        if self.stage != Stage::Resolving || self.files.is_empty() || self.left() > 0 {
+            self.said_settled = false;
+            return;
+        }
+        if !self.said_settled {
+            self.said_settled = true;
+            self.log.say(
+                LogKind::Good,
+                "Every conflict is settled. Nothing is committed yet.",
+            );
+            self.show_log();
         }
     }
 
@@ -903,6 +1153,7 @@ impl ConflictView {
             .map(|f| parse(&std::fs::read_to_string(root.join(&f.path)).unwrap_or_default()));
         let open = self.doc.as_ref().map_or(0, Doc::conflicts);
         self.hunk = self.hunk.min(open.saturating_sub(1));
+        self.note_settled();
     }
 
     /// The file pane's line the cursor's conflict starts on.
@@ -985,6 +1236,9 @@ fn take(view: &mut ConflictView, choice: Choice) {
     let Some(file) = view.file().cloned() else {
         return;
     };
+    if view.stage != Stage::Resolving || view.showing() != Pane::File {
+        return;
+    }
     view.abort_armed = false;
     if file.kind != Kind::Text {
         take_file(view, &file, choice);
@@ -1046,6 +1300,7 @@ fn take_file(view: &mut ConflictView, file: &ConflictFile, choice: Choice) {
             view.files[view.selected].left = 0;
             view.note = Some(Flash::done(format!("{path} {what}")));
             view.advance();
+            view.note_settled();
         }
         Err(why) => view.note = Some(Flash::failed(why)),
     }
@@ -1053,6 +1308,9 @@ fn take_file(view: &mut ConflictView, file: &ConflictFile, choice: Choice) {
 
 /// `u`: the file the last side was taken in, as it was before.
 fn undo(view: &mut ConflictView) {
+    if view.stage != Stage::Resolving {
+        return;
+    }
     let Some((path, text)) = view.undo.pop() else {
         view.note = Some(Flash::note("nothing to undo"));
         return;
@@ -1077,6 +1335,9 @@ fn edit(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = &app.overlay else {
         return;
     };
+    if !matches!(view.stage, Stage::Resolving | Stage::CommitFailed) {
+        return;
+    }
     let Some(file) = view.file().filter(|f| f.kind != Kind::DeletedCurrent) else {
         return;
     };
@@ -1098,16 +1359,21 @@ fn outside(app: &mut App) {
     crate::event_loop::open_file_outside(app, &root, &path, line);
 }
 
-/// `⌘S`: every file staged and the merge committed, off the loop; the push
-/// follows once it lands ([`land_committed`]). Refused while a conflict
-/// is left.
+/// `⌘S`: the step that is next. Every file staged and the merge committed,
+/// off the loop, its push following once it lands ([`land_committed`]); or,
+/// committed already, the push alone. Refused while a conflict is left.
 fn commit(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = &mut app.overlay else {
         return;
     };
     view.abort_armed = false;
-    if app.conflicts.committing.is_some() {
-        return;
+    match view.stage {
+        Stage::ReadyToPush | Stage::PushFailed => {
+            let ticket = view.ticket;
+            return start_push(app, ticket);
+        }
+        Stage::Resolving | Stage::CommitFailed => {}
+        Stage::Merging | Stage::Refused | Stage::Committing | Stage::Pushing => return,
     }
     let left = view.left();
     if left > 0 {
@@ -1121,60 +1387,175 @@ fn commit(app: &mut App) {
         return;
     }
     let ticket = crate::view_jobs::ticket();
-    app.conflicts.committing = Some(ticket);
-    view.note = Some(Flash::working("committing the merge…"));
+    view.ticket = ticket;
+    view.enter(Stage::Committing);
+    view.started = Instant::now();
+    view.note = None;
+    // Undo ends here, and a big file's copies needn't be carried along.
+    view.undo.clear();
     let root = view.root.clone();
+    let log = view.log.clone();
     let paths: Vec<String> = view
         .files
         .iter()
         .filter(|f| f.kind == Kind::Text)
         .map(|f| f.path.clone())
         .collect();
+    let quit = Arc::clone(&app.git_sync.quit);
     let work = move || Answer::Committed {
         ticket,
-        result: commit_merge(&root, &paths),
+        result: commit_merge(&root, &paths, &quit, &log),
     };
     off_loop(app, work);
 }
 
 /// `git add` the settled files, then `git commit --no-edit`: the merge's
-/// own message. Hooks run, detached (`git_proc`).
-fn commit_merge(root: &Path, paths: &[String]) -> Result<(), String> {
+/// own message. Hooks run, detached (`git_proc`), and what they say goes in
+/// `log`.
+fn commit_merge(
+    root: &Path,
+    paths: &[String],
+    quit: &AtomicBool,
+    log: &GitLog,
+) -> Result<(), String> {
     if !paths.is_empty() {
         let mut args = vec!["add", "--"];
         args.extend(paths.iter().map(String::as_str));
+        log.say(LogKind::Command, format!("$ git {}", args.join(" ")));
         run(root, &args)?;
     }
     if !read(root, &["ls-files", "-u"])?.trim().is_empty() {
         return Err("git still has files unmerged — settle them first".into());
     }
-    run(root, &["commit", "--no-edit", "--quiet"]).map(|_| ())
+    logged_git(root, &["commit", "--no-edit"], COMMIT_TIMEOUT, quit, log)
 }
 
-/// The merge committed: back to where the resolver was opened from, and
-/// the branch pushed so the pull request updates. A refusal — a hook that
-/// failed — stays in the resolver with git's reason.
+/// The merge committed: on to the push. A refusal — a hook that failed —
+/// stays on the resolver with git's reason, and `⌘S` tries again.
 fn land_committed(app: &mut App, ticket: u64, result: Result<(), String>) {
-    if app.conflicts.committing != Some(ticket) {
-        return;
-    }
-    app.conflicts.committing = None;
-    let Some(Overlay::Conflicts(view)) = &mut app.overlay else {
-        if result.is_err() {
-            app.flash = Some(Flash::failed(
-                "the merge didn't commit — open it again to see why",
-            ));
-        }
+    let Some((view, parked)) = waiting_on(app, ticket) else {
         return;
     };
     if let Err(why) = result {
-        view.note = Some(Flash::failed(why));
+        view.log
+            .say(LogKind::Bad, format!("The commit stopped: {why}"));
+        view.enter(Stage::CommitFailed);
+        if parked {
+            app.flash = Some(Flash::failed(format!(
+                "the merge didn't commit: {why} — Enter on a conflicted file comes back to it"
+            )));
+        }
         return;
     }
-    let (url, worktree) = (view.url.clone(), view.worktree.clone());
-    back(app);
-    settled(app, &url);
-    crate::git_sync::request(app, worktree, crate::git_sync::Op::PUSH);
+    view.log.say(LogKind::Good, "Merge committed.");
+    start_push(app, ticket);
+}
+
+/// The push, through `git_sync` like any other so the band rules and the
+/// one-per-checkout rule hold, its output landing in the resolver's log. A
+/// sync that wouldn't start says why in the FLASH; the log takes that.
+fn start_push(app: &mut App, ticket: u64) {
+    let Some((view, _)) = waiting_on(app, ticket) else {
+        return;
+    };
+    view.enter(Stage::Pushing);
+    view.started = Instant::now();
+    view.note = None;
+    let (worktree, log) = (view.worktree.clone(), view.log.clone());
+    app.git_sync.logs.insert(worktree.clone(), log);
+    crate::git_sync::request(app, worktree.clone(), crate::git_sync::Op::PUSH);
+    // Started, it took the log; another push already going answers this view
+    // too when it lands. Anything else — a pull running, whose landing would
+    // tell this view nothing — means it can't wait.
+    app.git_sync.logs.remove(&worktree);
+    if matches!(
+        app.git_sync.inflight.get(&worktree),
+        Some(crate::git_sync::Op::Push { .. })
+    ) {
+        return;
+    }
+    let why = app
+        .flash
+        .as_deref()
+        .unwrap_or("the push couldn't start")
+        .to_string();
+    if let Some((view, _)) = waiting_on(app, ticket) {
+        view.log.say(LogKind::Bad, why);
+        view.stage = Stage::PushFailed;
+    }
+}
+
+/// A PUSH of `worktree` landed (`git_sync::land`, which has already set the
+/// FLASH). The resolver showing it — or parked on it, or one a `⇧P` from the
+/// grid beat to it — hears how it went. Sent, it gives way to the pull
+/// request's Checks tab, unless it was left parked: nobody is pulled off
+/// whatever they went to. Not sent, it stays with the reason.
+pub(crate) fn push_landed(
+    app: &mut App,
+    worktree: &WorktreeId,
+    outcome: &crate::git_sync::Outcome,
+) {
+    use crate::git_sync::Outcome;
+    let wants = |view: &ConflictView| {
+        &view.worktree == worktree
+            && matches!(
+                view.stage,
+                Stage::Pushing | Stage::PushFailed | Stage::ReadyToPush
+            )
+    };
+    let on_screen = matches!(&app.overlay, Some(Overlay::Conflicts(view)) if wants(view));
+    let parked = app.conflicts.parked.as_deref().is_some_and(wants);
+    if !on_screen && !parked {
+        return;
+    }
+    match outcome {
+        Outcome::Pushed { .. } | Outcome::Published { .. } | Outcome::NothingToPush { .. } => {
+            if on_screen {
+                land_on_pull_request(app);
+            } else if let Some(view) = app.conflicts.parked.take() {
+                settled(app, &view.url);
+            }
+        }
+        _ => {
+            let said = app
+                .flash
+                .as_deref()
+                .unwrap_or("the push didn't land")
+                .to_string();
+            let view = if on_screen {
+                match &mut app.overlay {
+                    Some(Overlay::Conflicts(view)) => Some(&mut **view),
+                    _ => None,
+                }
+            } else {
+                app.conflicts.parked.as_deref_mut()
+            };
+            if let Some(view) = view {
+                let kind = if matches!(outcome, Outcome::ConfirmPush { .. }) {
+                    LogKind::Note
+                } else {
+                    LogKind::Bad
+                };
+                view.log.say(kind, said);
+                view.enter(Stage::PushFailed);
+            }
+            if on_screen {
+                app.flash = None;
+            }
+        }
+    }
+    app.dirty = true;
+}
+
+/// The merge is on GitHub: the PULL REQUESTS MODAL, on the pull request's
+/// Checks tab, where the rest of its story is told.
+fn land_on_pull_request(app: &mut App) {
+    let Some(Overlay::Conflicts(view)) = app.overlay.take() else {
+        return;
+    };
+    settled(app, &view.url);
+    let back = view.back.map(|back| *back);
+    crate::pr_modal::land_on(app, back, &view.url, crate::pr_preview::PrTab::Checks);
 }
 
 /// `⌘W`, twice: `git merge --abort`, the checkout back as it was.
@@ -1182,6 +1563,9 @@ fn abort(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = &mut app.overlay else {
         return;
     };
+    if !view.abortable() {
+        return;
+    }
     if !view.abort_armed {
         view.abort_armed = true;
         view.note = Some(Flash::setup(format!(
@@ -1192,8 +1576,8 @@ fn abort(app: &mut App) {
     }
     match run(&view.root, &["merge", "--abort"]) {
         Ok(_) => {
-            let branch = view.branch.clone();
-            back(app);
+            let (branch, under) = (view.branch.clone(), view.back.take());
+            close(app, under);
             app.flash = Some(Flash::done(format!(
                 "merge aborted — ⎇ {branch} is back as it was"
             )));
@@ -1206,28 +1590,50 @@ fn abort(app: &mut App) {
 }
 
 /// Leave the resolver for the PULL REQUESTS MODAL it was opened from, or
-/// the panels; a merge still underway is left as it is.
+/// the panels; a merge still underway is left as it is, and a view with git
+/// at work or a result to read is PARKED.
 pub(crate) fn back(app: &mut App) {
-    let Some(Overlay::Conflicts(view)) = app.overlay.take() else {
+    let Some(Overlay::Conflicts(mut view)) = app.overlay.take() else {
         return;
     };
-    match view.back {
-        Some(back) => crate::pr_modal::reopen(app, *back),
+    let under = view.back.take();
+    if view.parks() {
+        app.conflicts.parked = Some(view);
+    }
+    close(app, under);
+}
+
+/// What the resolver stood on back up: the modal, or the panels.
+fn close(app: &mut App, under: Option<Box<crate::pr_modal::PullRequestsView>>) {
+    match under {
+        Some(under) => crate::pr_modal::reopen(app, *under),
         None => app.overlay = None,
     }
 }
 
-/// Esc: [`back`], saying the merge waits when one does.
+/// Esc: [`back`], the FLASH saying what goes on without the modal.
 fn leave(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = &app.overlay else {
         return;
     };
-    let waiting = merging(&view.root).then(|| view.branch.clone());
+    let branch = view.branch.clone();
+    let flash = match view.stage {
+        Stage::Merging => Some(Flash::working(format!("merging into ⎇ {branch}…"))),
+        Stage::Committing => Some(Flash::working(format!("committing ⎇ {branch}'s merge…"))),
+        Stage::Pushing => Some(Flash::working(format!("pushing ⎇ {branch}…"))),
+        Stage::CommitFailed | Stage::Resolving => merging(&view.root).then(|| {
+            Flash::note(format!(
+                "⎇ {branch} is still mid-merge — Enter on a conflicted file comes back to it"
+            ))
+        }),
+        Stage::ReadyToPush | Stage::PushFailed => Some(Flash::note(format!(
+            "⎇ {branch}'s merge is committed, not pushed — Enter on a conflicted file comes back to it"
+        ))),
+        Stage::Refused => None,
+    };
     back(app);
-    if let Some(branch) = waiting {
-        app.flash = Some(Flash::note(format!(
-            "⎇ {branch} is still mid-merge — Enter on a conflicted file comes back to it"
-        )));
+    if flash.is_some() {
+        app.flash = flash;
     }
 }
 
@@ -1241,6 +1647,7 @@ pub(crate) mod keys {
     pub const STEP: Key = Key::new(&["down", "up"], "conflict").show(2);
     pub const FILE: Key = Key::new(&["tab", "shift+tab"], "file");
     pub const UNDO: Key = Key::new(&["u"], "undo");
+    pub const LOG: Key = Key::new(&["l"], "log");
     pub const COMMIT: Key = Key::new(&["cmd+s", "ctrl+s"], "commit & push");
     pub const ABORT: Key = Key::new(&["cmd+w", "ctrl+w"], "abort merge");
     pub const OUTSIDE: Key = crate::hints::IN_CURSOR;
@@ -1248,7 +1655,7 @@ pub(crate) mod keys {
 
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        CURRENT, INCOMING, BOTH, EDIT, STEP, FILE, UNDO, COMMIT, ABORT, OUTSIDE, BACK,
+        CURRENT, INCOMING, BOTH, EDIT, STEP, FILE, UNDO, LOG, COMMIT, ABORT, OUTSIDE, BACK,
     ];
 
     /// The key for `choice`.
@@ -1261,26 +1668,66 @@ pub(crate) mod keys {
     }
 }
 
-/// The keys along the bottom edge: the sides to take while one is left,
-/// committing once none is.
+/// The keys along the bottom edge: the ones the stage has a use for, what
+/// comes next first.
 pub(crate) fn hints(view: &ConflictView) -> Vec<crate::hints::Hint> {
+    let reading = view.showing();
+    let has_files = !view.files.is_empty();
+    let browse = || {
+        let log = if reading == Pane::Log {
+            keys::LOG.hint_as("file")
+        } else {
+            keys::LOG.hint()
+        };
+        if has_files {
+            vec![keys::FILE.hint(), log]
+        } else {
+            Vec::new()
+        }
+    };
     let mut hints = Vec::new();
-    if view.file().is_some_and(|f| f.left > 0) {
-        hints.extend([
-            keys::CURRENT.hint().kept(),
-            keys::INCOMING.hint().kept(),
-            keys::BOTH.hint(),
-        ]);
+    match view.stage {
+        Stage::Merging | Stage::Committing | Stage::Pushing => {
+            hints.extend(browse());
+            hints.push(keys::BACK.hint_as("leave, it keeps going").kept());
+        }
+        Stage::Refused => hints.push(keys::BACK.hint().kept()),
+        Stage::Resolving => {
+            let open_here = view.file().is_some_and(|f| f.left > 0) && reading == Pane::File;
+            if open_here {
+                hints.extend([
+                    keys::CURRENT.hint().kept(),
+                    keys::INCOMING.hint().kept(),
+                    keys::BOTH.hint(),
+                ]);
+            }
+            if view.left() == 0 {
+                hints.push(keys::COMMIT.hint().kept());
+            }
+            hints.push(keys::EDIT.hint());
+            hints.push(keys::STEP.hint());
+            hints.extend(browse());
+            if !view.undo.is_empty() {
+                hints.push(keys::UNDO.hint());
+            }
+            hints.extend([keys::ABORT.hint(), keys::OUTSIDE.hint(), keys::BACK.hint()]);
+        }
+        Stage::CommitFailed => {
+            hints.push(keys::COMMIT.hint_as("try the commit again").kept());
+            hints.push(keys::EDIT.hint());
+            hints.extend(browse());
+            hints.extend([keys::ABORT.hint(), keys::OUTSIDE.hint(), keys::BACK.hint()]);
+        }
+        Stage::ReadyToPush => {
+            hints.push(keys::COMMIT.hint_as("push").kept());
+            hints.push(keys::BACK.hint());
+        }
+        Stage::PushFailed => {
+            hints.push(keys::COMMIT.hint_as("push again").kept());
+            hints.extend(browse());
+            hints.push(keys::BACK.hint());
+        }
     }
-    hints.push(keys::EDIT.hint());
-    if view.left() == 0 {
-        hints.push(keys::COMMIT.hint().kept());
-    }
-    hints.extend([keys::STEP.hint(), keys::FILE.hint()]);
-    if !view.undo.is_empty() {
-        hints.push(keys::UNDO.hint());
-    }
-    hints.extend([keys::ABORT.hint(), keys::OUTSIDE.hint(), keys::BACK.hint()]);
     hints
 }
 
@@ -1311,21 +1758,34 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     }
     view.abort_armed = false;
     let page = usize::from(view.view_height.max(2) - 1);
+    let on_log = view.showing() == Pane::Log;
     match key.code {
+        KeyCode::Down if on_log => scroll_log(view, 1),
+        KeyCode::Up if on_log => scroll_log(view, -1),
+        KeyCode::PageDown if on_log => scroll_log(view, page as i64),
+        KeyCode::PageUp if on_log => scroll_log(view, -(page as i64)),
         KeyCode::Down => view.step(1),
         KeyCode::Up => view.step(-1),
-        KeyCode::Tab => view.select((view.selected + 1) % view.files.len().max(1)),
-        KeyCode::BackTab => {
-            view.select((view.selected + view.files.len().max(1) - 1) % view.files.len().max(1))
+        KeyCode::Tab if !view.files.is_empty() => view.pick((view.selected + 1) % view.files.len()),
+        KeyCode::BackTab if !view.files.is_empty() => {
+            view.pick((view.selected + view.files.len() - 1) % view.files.len())
         }
         KeyCode::PageDown => view.scroll += page,
         KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(page),
+        _ if keys::LOG.matches(&key) => view.toggle_log(),
         _ if keys::UNDO.matches(&key) => undo(view),
         _ => {}
     }
 }
 
-/// The wheel scrolls the file; a click on a file opens it, and one on a
+/// Move the log `by` rows; the draw takes it back to following the tail once
+/// it reaches the end.
+fn scroll_log(view: &mut ConflictView, by: i64) {
+    let top = view.log_top.unwrap_or(view.log_at) as i64;
+    view.log_top = Some((top + by).max(0) as usize);
+}
+
+/// The wheel scrolls the pane; a click on a file opens it, and one on a
 /// conflict's button presses it.
 pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     let pos = Position::new(mouse.column, mouse.row);
@@ -1333,7 +1793,14 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     let Some(Overlay::Conflicts(view)) = &mut app.overlay else {
         return;
     };
+    let on_log = view.showing() == Pane::Log;
     match mouse.kind {
+        MouseEventKind::ScrollDown if view.body_area.contains(pos) && on_log => {
+            scroll_log(view, i64::from(WHEEL_LINES));
+        }
+        MouseEventKind::ScrollUp if view.body_area.contains(pos) && on_log => {
+            scroll_log(view, -i64::from(WHEEL_LINES));
+        }
         MouseEventKind::ScrollDown if view.body_area.contains(pos) => {
             view.scroll += WHEEL_LINES as usize;
         }
@@ -1342,7 +1809,7 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(&(_, i)) = view.row_rects.iter().find(|(r, _)| r.contains(pos)) {
-                view.select(i);
+                view.pick(i);
                 return;
             }
             let Some(&(_, hunk, button)) = view.buttons.iter().find(|(r, ..)| r.contains(pos))
@@ -1440,7 +1907,150 @@ fn shown(text: &str) -> String {
     text.trim_end_matches(['\n', '\r']).replace('\t', TAB)
 }
 
-/// The RESOLVER: the files down the left, the selected one on the right.
+/// A step of the merge, as the state panel draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Done,
+    /// Waiting on you.
+    Next,
+    /// git is at it.
+    Running,
+    Failed,
+    Later,
+}
+
+/// The state panel's four steps: what each is called just now, how far along
+/// it is, and a word beside it.
+fn steps(view: &ConflictView) -> [(Mark, String, String); 4] {
+    let stage = view.stage;
+    let left = view.left();
+    let clock = view.clock();
+    let merge = match stage {
+        Stage::Merging => (
+            Mark::Running,
+            format!("Merging origin/{}", view.base),
+            clock.clone(),
+        ),
+        Stage::Refused => (Mark::Failed, "Merge not started".to_string(), String::new()),
+        _ => (
+            Mark::Done,
+            format!("Merged origin/{}", view.base),
+            String::new(),
+        ),
+    };
+    let resolve = match stage {
+        Stage::Merging | Stage::Refused => (Mark::Later, "Resolve conflicts", String::new()),
+        Stage::Resolving if left > 0 => (Mark::Next, "Resolve conflicts", format!("{left} left")),
+        _ if view.files.is_empty() => (Mark::Done, "Nothing to resolve", String::new()),
+        _ => (Mark::Done, "Resolve conflicts", String::new()),
+    };
+    let commit = match stage {
+        Stage::Merging | Stage::Refused => (Mark::Later, String::new()),
+        Stage::Resolving if left > 0 => (Mark::Later, String::new()),
+        Stage::Resolving => (Mark::Next, String::new()),
+        Stage::Committing => (Mark::Running, clock.clone()),
+        Stage::CommitFailed => (Mark::Failed, "stopped".to_string()),
+        Stage::ReadyToPush | Stage::Pushing | Stage::PushFailed => (Mark::Done, String::new()),
+    };
+    let push = match stage {
+        Stage::Pushing => (Mark::Running, clock),
+        Stage::PushFailed => (Mark::Failed, "commit kept".to_string()),
+        Stage::ReadyToPush => (Mark::Next, String::new()),
+        _ => (Mark::Later, String::new()),
+    };
+    [
+        merge,
+        (resolve.0, resolve.1.to_string(), resolve.2),
+        (commit.0, "Commit the merge".to_string(), commit.1),
+        (push.0, "Push to origin".to_string(), push.1),
+    ]
+}
+
+/// The state panel's last line: what to do now, or that there is nothing to
+/// do but wait.
+fn next_step(view: &ConflictView, th: Theme) -> Line<'static> {
+    let key = |k: String| {
+        Span::styled(
+            k,
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        )
+    };
+    let word = |w: &str| Span::styled(w.to_string(), Style::default().fg(th.text));
+    let label = |w: &str| Span::styled(format!("{w}  "), Style::default().fg(th.dim));
+    if view.abort_armed {
+        return Line::from(vec![
+            key(keys::ABORT.label()),
+            word(" again aborts. Every side taken is lost"),
+        ]);
+    }
+    let commit = keys::COMMIT.label();
+    let spans = match view.stage {
+        Stage::Merging => vec![label("Wait"), word("fetching and merging")],
+        Stage::Committing => vec![label("Wait"), word("committing, hooks and all")],
+        Stage::Pushing => vec![label("Wait"), word("pushing to origin")],
+        Stage::Refused => vec![label("Next"), word("sort that out, then come back")],
+        Stage::Resolving if view.left() == 0 => {
+            vec![label("Next"), key(commit), word(" commit & push")]
+        }
+        Stage::Resolving => vec![
+            label("Next"),
+            word("take a side: "),
+            key(keys::CURRENT.label()),
+            word(" "),
+            key(keys::INCOMING.label()),
+            word(" "),
+            key(keys::BOTH.label()),
+            word(", or "),
+            key(keys::EDIT.label()),
+            word(" to edit"),
+        ],
+        Stage::CommitFailed => vec![
+            label("Next"),
+            word("fix it, then "),
+            key(commit),
+            word(" again"),
+        ],
+        Stage::ReadyToPush => vec![label("Next"), key(commit), word(" push")],
+        Stage::PushFailed => vec![label("Next"), key(commit), word(" pushes again")],
+    };
+    Line::from(spans)
+}
+
+/// The sentence pinned under the log: where that leaves you.
+fn log_footer(view: &ConflictView, th: Theme) -> Option<(String, ratatui::style::Color)> {
+    let commit = keys::COMMIT.label();
+    match view.stage {
+        Stage::Resolving if view.left() == 0 => Some((
+            format!("Nothing is committed yet. {commit} commits the merge and pushes it."),
+            th.warn,
+        )),
+        Stage::Resolving => Some((
+            format!(
+                "{} still open. {} goes back to the file.",
+                crate::bundle::plural(view.left(), "conflict"),
+                keys::LOG.label()
+            ),
+            th.warn,
+        )),
+        Stage::CommitFailed => Some((
+            format!("The merge is still underway and nothing is lost. Fix it, then {commit}."),
+            th.err,
+        )),
+        Stage::PushFailed => Some((
+            format!("The merge commit is made, it just isn't on GitHub yet. {commit} won't commit twice."),
+            th.err,
+        )),
+        Stage::ReadyToPush => Some((
+            format!("{commit} pushes it to update the pull request."),
+            th.warn,
+        )),
+        Stage::Refused => Some(("The merge never started, so nothing changed.".to_string(), th.err)),
+        Stage::Merging | Stage::Committing | Stage::Pushing => None,
+    }
+}
+
+/// The RESOLVER: where the merge stands over its files on the left, and the
+/// file or the log on the right.
 pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ConflictView, th: Theme) {
     let area = crate::ui::centered_rect_pct(
         f.area(),
@@ -1451,35 +2061,75 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ConflictView, th: Theme)
     let list_w = (area.width * LIST_PCT / 100)
         .max(MIN_LIST_W)
         .min(area.width.saturating_sub(crate::ui::SPLIT_PANE_LAYOUT_MIN));
-    let [list_a, body_a] = Layout::horizontal([
+    let [column, body_a] = Layout::horizontal([
         Constraint::Length(list_w),
         Constraint::Min(crate::ui::SPLIT_PANE_LAYOUT_MIN),
     ])
     .areas(area);
+    let state_h = STATE_H.min(column.height.saturating_sub(MIN_FILES_H));
+    let [state_a, list_a] =
+        Layout::vertical([Constraint::Length(state_h), Constraint::Min(0)]).areas(column);
 
-    // ---- left: the files ----
-    let left = view.left();
-    let title = if left == 0 {
-        format!("Conflicts — {} · all resolved", view.label)
-    } else {
-        format!("Conflicts — {} · {} left", view.label, left)
-    };
+    // ---- top left: where the merge stands ----
+    let title = format!("Merge — {}", view.label);
+    let block = crate::ui::panel_block(&title, false, th);
+    let state_inner = block.inner(state_a);
+    f.render_widget(block, state_a);
+    let spinner = crate::app::spinner_frame(app.spin_phase());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("origin/{}", view.base),
+            Style::default().fg(th.modified),
+        ),
+        Span::styled(" into ", Style::default().fg(th.dim)),
+        Span::styled(format!("⎇ {}", view.branch), Style::default().fg(th.added)),
+    ])];
+    for (mark, name, beside) in steps(view) {
+        let (glyph, glyph_color, name_style) = match mark {
+            Mark::Done => ("✓", th.ok, Style::default().fg(th.muted)),
+            Mark::Next => (
+                "●",
+                th.accent,
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+            ),
+            Mark::Running => (
+                spinner,
+                th.warn,
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+            ),
+            Mark::Failed => (
+                "✕",
+                th.err,
+                Style::default().fg(th.err).add_modifier(Modifier::BOLD),
+            ),
+            Mark::Later => ("○", th.faint, Style::default().fg(th.faint)),
+        };
+        let beside_color = if mark == Mark::Failed { th.err } else { th.dim };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
+            Span::styled(name, name_style),
+            Span::styled(format!("  {beside}"), Style::default().fg(beside_color)),
+        ]));
+    }
+    // The steps a row each, however narrow; what's next wraps under them.
+    let [steps_a, next_a] =
+        Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
+            .areas(state_inner);
+    f.render_widget(Paragraph::new(lines), steps_a);
+    f.render_widget(
+        Paragraph::new(next_step(view, th)).wrap(Wrap { trim: false }),
+        next_a,
+    );
+
+    // ---- under it: the files ----
+    let settled = view.files.iter().filter(|f| f.left == 0).count();
+    let title = format!("Files · {settled} of {} settled", view.files.len());
     let block = crate::ui::panel_block(&title, false, th);
     let list_inner = block.inner(list_a);
     f.render_widget(block, list_a);
+    let reading_file = view.showing() == Pane::File;
     let mut row_rects = Vec::new();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("origin/{}", view.base),
-                Style::default().fg(th.modified),
-            ),
-            Span::styled(" into ", Style::default().fg(th.dim)),
-            Span::styled(format!("⎇ {}", view.branch), Style::default().fg(th.added)),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines = Vec::new();
     let width = usize::from(list_inner.width);
     for (i, file) in view.files.iter().enumerate() {
         let (mark, color) = if file.left == 0 {
@@ -1491,7 +2141,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ConflictView, th: Theme)
         let path = crate::ui::truncate_left(&file.path, width.saturating_sub(lead + 1));
         let mut style = Style::default().fg(if file.left == 0 { th.muted } else { th.text });
         let mut mark_style = Style::default().fg(color);
-        if i == view.selected {
+        if i == view.selected && reading_file {
             style = style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
             mark_style = mark_style.bg(th.sel_bg);
         }
@@ -1515,10 +2165,25 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ConflictView, th: Theme)
     }
     f.render_widget(Paragraph::new(lines), list_inner);
 
-    // ---- right: the file ----
+    // ---- right: the file, or the log ----
     let file = view.file();
-    let title = file.map_or("", |f| f.path.as_str());
-    let block = crate::ui::panel_block(title, true, th);
+    let title = if reading_file {
+        file.map_or(String::new(), |f| f.path.clone())
+    } else {
+        let doing = match view.stage {
+            Stage::Merging => " · merging",
+            Stage::Refused => " · merge not started",
+            Stage::Resolving if view.left() == 0 => " · waiting for you",
+            Stage::Resolving => "",
+            Stage::Committing => " · committing",
+            Stage::CommitFailed => " · commit failed",
+            Stage::ReadyToPush => " · waiting for you",
+            Stage::Pushing => " · pushing",
+            Stage::PushFailed => " · push failed",
+        };
+        format!("Log{doing}")
+    };
+    let block = crate::ui::panel_block(&title, true, th);
     let body = block.inner(body_a);
     f.render_widget(block, body_a);
     let note_h = u16::from(view.note.is_some());
@@ -1528,75 +2193,82 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ConflictView, th: Theme)
     };
     let mut buttons = Vec::new();
     let mut scroll = view.scroll;
-    let mut lines: Vec<Line> = Vec::new();
-    match (file, &view.doc) {
-        (None, _) => lines.push(Line::from(Span::styled(
-            "  nothing conflicted",
-            Style::default().fg(th.dim),
-        ))),
-        (Some(file), Some(doc)) => {
-            let rows = rows(doc);
-            let gutter = rows.len().to_string().len().max(3);
-            scroll = scroll.min(rows.len().saturating_sub(1));
-            if doc.conflicts() == 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("  ✓ no conflicts left in {}", file.path),
-                    Style::default().fg(th.ok),
-                )));
-                scroll = 0;
-            }
-            let shown_rows = rows
-                .iter()
-                .skip(scroll)
-                .take(usize::from(text_area.height).saturating_sub(lines.len()));
-            for row in shown_rows {
-                let y = text_area.y + lines.len() as u16;
-                lines.push(file_row(row, view, gutter, text_area, y, &mut buttons, th));
-            }
-        }
-        (Some(file), None) => {
-            let (what, current, incoming) = match file.kind {
-                Kind::DeletedCurrent => (
-                    "deleted on the current side, changed on the incoming one",
-                    "keep it deleted",
-                    "keep the incoming file",
-                ),
-                Kind::DeletedIncoming => (
-                    "changed on the current side, deleted on the incoming one",
-                    "keep the current file",
-                    "delete it",
-                ),
-                Kind::Binary | Kind::Text => (
-                    "changed on both sides, and not a file git merges line by line",
-                    "keep the current file",
-                    "keep the incoming file",
-                ),
-            };
-            let dim = Style::default().fg(th.dim);
-            lines.push(Line::from(Span::styled(format!("  {what}"), dim)));
-            lines.push(Line::from(""));
-            if file.left == 0 {
-                lines.push(Line::from(Span::styled(
-                    "  ✓ settled",
-                    Style::default().fg(th.ok),
-                )));
-            } else {
-                let y = text_area.y + lines.len() as u16;
-                let mut x = text_area.x + 2;
-                let mut spans = vec![Span::raw("  ")];
-                for (choice, does) in [(Choice::Current, current), (Choice::Incoming, incoming)] {
-                    let label = format!("[{}] {does}", keys::of(choice).label());
-                    let w = label.width() as u16;
-                    buttons.push((Rect::new(x, y, w, 1), 0, Button::Take(choice)));
-                    spans.push(Span::styled(label, Style::default().fg(th.accent)));
-                    spans.push(Span::raw("   "));
-                    x += w + 3;
+    let mut log_top = view.log_top;
+    let mut log_at = view.log_at;
+    if reading_file {
+        let mut lines: Vec<Line> = Vec::new();
+        match (file, &view.doc) {
+            (None, _) => lines.push(Line::from(Span::styled(
+                "  nothing conflicted",
+                Style::default().fg(th.dim),
+            ))),
+            (Some(file), Some(doc)) => {
+                let rows = rows(doc);
+                let gutter = rows.len().to_string().len().max(3);
+                scroll = scroll.min(rows.len().saturating_sub(1));
+                if doc.conflicts() == 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ✓ no conflicts left in {}", file.path),
+                        Style::default().fg(th.ok),
+                    )));
+                    scroll = 0;
                 }
-                lines.push(Line::from(spans));
+                let shown_rows = rows
+                    .iter()
+                    .skip(scroll)
+                    .take(usize::from(text_area.height).saturating_sub(lines.len()));
+                for row in shown_rows {
+                    let y = text_area.y + lines.len() as u16;
+                    lines.push(file_row(row, view, gutter, text_area, y, &mut buttons, th));
+                }
+            }
+            (Some(file), None) => {
+                let (what, current, incoming) = match file.kind {
+                    Kind::DeletedCurrent => (
+                        "deleted on the current side, changed on the incoming one",
+                        "keep it deleted",
+                        "keep the incoming file",
+                    ),
+                    Kind::DeletedIncoming => (
+                        "changed on the current side, deleted on the incoming one",
+                        "keep the current file",
+                        "delete it",
+                    ),
+                    Kind::Binary | Kind::Text => (
+                        "changed on both sides, and not a file git merges line by line",
+                        "keep the current file",
+                        "keep the incoming file",
+                    ),
+                };
+                let dim = Style::default().fg(th.dim);
+                lines.push(Line::from(Span::styled(format!("  {what}"), dim)));
+                lines.push(Line::from(""));
+                if file.left == 0 {
+                    lines.push(Line::from(Span::styled(
+                        "  ✓ settled",
+                        Style::default().fg(th.ok),
+                    )));
+                } else {
+                    let y = text_area.y + lines.len() as u16;
+                    let mut x = text_area.x + 2;
+                    let mut spans = vec![Span::raw("  ")];
+                    for (choice, does) in [(Choice::Current, current), (Choice::Incoming, incoming)]
+                    {
+                        let label = format!("[{}] {does}", keys::of(choice).label());
+                        let w = label.width() as u16;
+                        buttons.push((Rect::new(x, y, w, 1), 0, Button::Take(choice)));
+                        spans.push(Span::styled(label, Style::default().fg(th.accent)));
+                        spans.push(Span::raw("   "));
+                        x += w + 3;
+                    }
+                    lines.push(Line::from(spans));
+                }
             }
         }
+        f.render_widget(Paragraph::new(lines), text_area);
+    } else {
+        log_at = draw_log(f, view, text_area, &mut log_top, th);
     }
-    f.render_widget(Paragraph::new(lines), text_area);
     if let Some(note) = &view.note {
         let color = match note.kind {
             crate::flash::FlashKind::Failed => th.err,
@@ -1627,7 +2299,59 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ConflictView, th: Theme)
         v.row_rects = row_rects;
         v.view_height = text_area.height;
         v.scroll = scroll;
+        v.log_top = log_top;
+        v.log_at = log_at;
     }
+}
+
+/// The log in `area`, what stands to be done pinned under it. Returns the top
+/// row drawn; `top` is put back to following the tail once it reaches the end.
+fn draw_log(
+    f: &mut Frame,
+    view: &ConflictView,
+    area: Rect,
+    top: &mut Option<usize>,
+    th: Theme,
+) -> usize {
+    let width = usize::from(area.width).saturating_sub(3).max(1);
+    let foot = log_footer(view, th);
+    let foot_rows = foot
+        .as_ref()
+        .map_or(Vec::new(), |(text, _)| crate::pr_preview::wrap(text, width));
+    let foot_h = (foot_rows.len() as u16).min(area.height.saturating_sub(1));
+    let [log_a, foot_a] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(foot_h)]).areas(area);
+    let mut rows: Vec<Line> = Vec::new();
+    for line in view.log.lines() {
+        let style = match line.kind {
+            LogKind::Command => Style::default().fg(th.muted),
+            LogKind::Output => Style::default().fg(th.dim),
+            LogKind::Good => Style::default().fg(th.ok),
+            LogKind::Note => Style::default().fg(th.warn),
+            LogKind::Bad => Style::default().fg(th.err),
+        };
+        for row in crate::pr_preview::wrap(&line.text, width) {
+            rows.push(Line::from(Span::styled(format!(" {row}"), style)));
+        }
+    }
+    let room = usize::from(log_a.height);
+    let last = rows.len().saturating_sub(room);
+    let at = top.unwrap_or(last).min(last);
+    if at >= last {
+        *top = None;
+    } else {
+        *top = Some(at);
+    }
+    let shown: Vec<Line> = rows.into_iter().skip(at).take(room).collect();
+    f.render_widget(Paragraph::new(shown), log_a);
+    if let Some((_, color)) = foot {
+        let lines: Vec<Line> = foot_rows
+            .into_iter()
+            .map(|row| Line::from(Span::styled(format!(" {row}"), Style::default().fg(color))))
+            .collect();
+        f.render_widget(Paragraph::new(lines), foot_a);
+    }
+    at
 }
 
 /// One line of the file pane — `y` its screen row — with a conflict's
@@ -1918,7 +2642,9 @@ fn main() {
         let (_, clone) = conflicted_clone(&dir);
         let head = git(&clone, &["rev-parse", "HEAD"]);
         let quit = AtomicBool::new(false);
-        let Prepared::Conflicts(files) = prepare(&clone, "feature", "main", &head, &quit).unwrap()
+        let log = GitLog::default();
+        let Prepared::Conflicts(files) =
+            prepare(&clone, "feature", "main", &head, &quit, &log).unwrap()
         else {
             panic!("expected conflicts");
         };
@@ -1935,7 +2661,7 @@ fn main() {
         );
         // Opened again mid-merge: the same files, nothing merged twice.
         assert!(matches!(
-            prepare(&clone, "feature", "main", &head, &quit),
+            prepare(&clone, "feature", "main", &head, &quit, &log),
             Ok(Prepared::Conflicts(again)) if again == files
         ));
 
@@ -1963,7 +2689,16 @@ fn main() {
         crate::hints::assert_hints_from(&hints(&view), keys::ALL);
         assert!(hints(&view).iter().any(|h| h.does == "commit & push"));
 
-        commit_merge(&clone, &["a.txt".to_string()]).unwrap();
+        commit_merge(&clone, &["a.txt".to_string()], &quit, &log).unwrap();
+        let said = log.lines();
+        assert!(
+            said.iter().any(|l| l.text.contains("CONFLICT")),
+            "the merge's own words: {said:?}"
+        );
+        assert!(
+            said.iter().any(|l| l.text == "$ git commit --no-edit"),
+            "{said:?}"
+        );
         assert!(!merging(&clone));
         assert_eq!(
             git(&clone, &["rev-list", "--count", "--merges", "HEAD"]),
@@ -1981,7 +2716,8 @@ fn main() {
         let dir = tempfile::tempdir().unwrap();
         let (_, clone) = conflicted_clone(&dir);
         std::fs::write(clone.join("same.txt"), "mine\n").unwrap();
-        let why = prepare(&clone, "feature", "main", "", &AtomicBool::new(false)).unwrap_err();
+        let quit = AtomicBool::new(false);
+        let why = prepare(&clone, "feature", "main", "", &quit, &GitLog::default()).unwrap_err();
         assert!(why.contains("uncommitted changes"), "{why}");
         assert!(!merging(&clone));
     }
@@ -2099,8 +2835,13 @@ fn main() {
         handle_key(&mut app, KeyEvent::from(crossterm::event::KeyCode::BackTab));
         let shot = screen(&mut app, 140, 30);
         for words in [
-            "Conflicts — #7 t · 2 left",
+            "Merge — #7 t",
             "origin/main into ⎇ feature",
+            "✓ Merged origin/main",
+            "● Resolve conflicts  2 left",
+            "○ Commit the merge",
+            "○ Push to origin",
+            "Files · 0 of 2 settled",
             "current · ⎇ feature",
             "accept current · accept incoming · accept both · edit",
             "incoming · origin/main",
@@ -2128,6 +2869,346 @@ fn main() {
         handle_key(&mut app, abort);
         assert!(!merging(&clone), "{:?}", app.flash);
         assert!(app.overlay.is_none());
+    }
+
+    /// A project with `clone` checked out on `feature` as worktree `w`, and
+    /// pull request #7 its page says conflicts, up in the PULL REQUESTS
+    /// MODAL.
+    fn app_with_pull_request(clone: &Path) -> (App, String) {
+        let mut app = App::new();
+        let project = orion_core::ProjectId("p".into());
+        app.tree.projects.push(orion_core::Project {
+            id: project.clone(),
+            name: "demo".into(),
+            repo_path: clone.to_path_buf(),
+            sort_order: 0,
+        });
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: WorktreeId("w".into()),
+            project_id: project.clone(),
+            path: clone.to_path_buf(),
+            branch: "feature".into(),
+            is_main: false,
+            sort_order: 0,
+        });
+        let url = "https://github.com/o/r/pull/7".to_string();
+        let detail = crate::pull_request::PrDetail {
+            number: 7,
+            url: url.clone(),
+            title: "t".into(),
+            base: "main".into(),
+            head: "feature".into(),
+            head_sha: git(clone, &["rev-parse", "HEAD"]),
+            answered: crate::pull_request::Answered {
+                conflicts: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.prs.observe(
+            &url,
+            crate::pr_store::PrObservation::of_detail(&detail),
+            crate::fetch::Asked::Cached,
+        );
+        app.pr_detail.insert(url.clone(), detail);
+        want(&mut app, &url, clone);
+        let row = |number: u64, head: &str, url: String| crate::pull_request::OpenPr {
+            number,
+            title: "t".into(),
+            url,
+            answered_draft: false,
+            answered: Default::default(),
+            head: head.into(),
+            mine: false,
+            head_sha: String::new(),
+            meta: Default::default(),
+        };
+        let now = std::time::Instant::now();
+        app.open_prs.insert(
+            project.clone(),
+            crate::app::OpenPrs {
+                merged: Vec::new(),
+                // Another first, so landing on #7 has to go looking for it.
+                list: vec![
+                    row(3, "other", "https://github.com/o/r/pull/3".into()),
+                    row(7, "feature", url.clone()),
+                ],
+                at: now,
+                due: now + std::time::Duration::from_secs(60),
+                step: std::time::Duration::from_secs(60),
+            },
+        );
+        app.overlay = Some(Overlay::PullRequests(
+            crate::pr_modal::PullRequestsView::new(project, "demo".into(), clone.to_path_buf()),
+        ));
+        (app, url)
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> KeyEvent {
+        KeyEvent::from(code)
+    }
+
+    fn press_cmd_s(app: &mut App) {
+        handle_key(
+            app,
+            KeyEvent::new(
+                crossterm::event::KeyCode::Char('s'),
+                crossterm::event::KeyModifiers::SUPER,
+            ),
+        );
+    }
+
+    fn the_view(app: &App) -> &ConflictView {
+        match &app.overlay {
+            Some(Overlay::Conflicts(view)) => view,
+            other => panic!("no resolver: {other:?}"),
+        }
+    }
+
+    fn log_of(view: &ConflictView) -> String {
+        view.log
+            .lines()
+            .into_iter()
+            .map(|l| l.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Open #7's resolver and settle both its files.
+    fn settle(app: &mut App, url: &str) {
+        crate::pr_preview::run_act(
+            app,
+            7,
+            url,
+            "#7 t",
+            crate::pr_preview::RowAct::File("a.txt".into()),
+            true,
+            &mut Vec::new(),
+        );
+        assert_eq!(the_view(app).stage, Stage::Resolving, "{:?}", app.flash);
+        assert_eq!(the_view(app).showing(), Pane::File, "a conflict: the file");
+        handle_key(app, key(crossterm::event::KeyCode::Char('i')));
+        handle_key(app, key(crossterm::event::KeyCode::Char('c')));
+    }
+
+    /// The whole road: every conflict settled hands the pane to the log and
+    /// says what's next; a hook's stop stays up with its words, and ⌘S tries
+    /// again; a failed push stays up too, and ⌘S pushes without committing
+    /// twice; the push landing is the pull request's Checks tab.
+    #[test]
+    fn the_merge_runs_to_the_pull_request_in_one_modal() {
+        use crate::git_sync::{Answer as SyncAnswer, Op, Outcome};
+        use crossterm::event::KeyCode;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let (mut app, url) = app_with_pull_request(&clone);
+        settle(&mut app, &url);
+
+        let view = the_view(&app);
+        assert_eq!(view.left(), 0);
+        assert_eq!(view.showing(), Pane::Log, "settled: the log");
+        assert!(log_of(view).contains("Nothing is committed yet"));
+        let shot = screen(&mut app, 140, 30);
+        for words in [
+            "✓ Resolve conflicts",
+            "● Commit the merge",
+            "Next  ",
+            "Log · waiting for you",
+            "Nothing is committed yet.",
+            "Files · 2 of 2 settled",
+        ] {
+            assert!(shot.contains(words), "{words:?} in\n{shot}");
+        }
+        crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+
+        // `l` reads a file back, and Tab does too; `l` returns to the log.
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(the_view(&app).showing(), Pane::File);
+        handle_key(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(the_view(&app).showing(), Pane::Log);
+
+        // A hook says no: the modal stays, its words in the log.
+        let hook = clone.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho hook-said-no >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        press_cmd_s(&mut app);
+        let view = the_view(&app);
+        assert_eq!(view.stage, Stage::CommitFailed, "{}", log_of(view));
+        assert!(log_of(view).contains("hook-said-no"), "{}", log_of(view));
+        assert!(merging(&clone), "the merge is still underway");
+        crate::hints::assert_hints_from(&hints(view), keys::ALL);
+        let shot = screen(&mut app, 140, 30);
+        assert!(shot.contains("✕ Commit the merge"), "{shot}");
+
+        // Fixed, ⌘S commits, then the push goes (git_sync, which the tests
+        // land by hand).
+        std::fs::remove_file(&hook).unwrap();
+        press_cmd_s(&mut app);
+        let view = the_view(&app);
+        assert_eq!(view.stage, Stage::Pushing, "{}", log_of(view));
+        assert!(!merging(&clone), "committed");
+        assert!(app.status_anim_active(), "the log and its clock repaint");
+        assert!(app.git_sync.inflight.contains_key(&WorktreeId("w".into())));
+        crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+        let merges = git(&clone, &["rev-list", "--count", "--merges", "HEAD"]);
+        assert_eq!(merges, "1");
+
+        // The push fails: the modal stays, saying so.
+        let landed = |outcome| SyncAnswer {
+            worktree: WorktreeId("w".into()),
+            op: Op::PUSH,
+            outcome,
+        };
+        crate::git_sync::land(&mut app, landed(Outcome::Failed("no network".into())));
+        let view = the_view(&app);
+        assert_eq!(view.stage, Stage::PushFailed);
+        assert!(log_of(view).contains("no network"), "{}", log_of(view));
+        crate::hints::assert_hints_from(&hints(view), keys::ALL);
+        let shot = screen(&mut app, 140, 30);
+        assert!(shot.contains("✕ Push to origin"), "{shot}");
+        assert!(shot.contains("✓ Commit the merge"), "{shot}");
+
+        // ⌘W no longer aborts anything: the merge is committed.
+        let abort = KeyEvent::new(KeyCode::Char('w'), crossterm::event::KeyModifiers::SUPER);
+        handle_key(&mut app, abort);
+        handle_key(&mut app, abort);
+        assert_eq!(the_view(&app).stage, Stage::PushFailed);
+
+        // ⌘S pushes again, and doesn't commit again.
+        press_cmd_s(&mut app);
+        assert_eq!(the_view(&app).stage, Stage::Pushing);
+        let merges = git(&clone, &["rev-list", "--count", "--merges", "HEAD"]);
+        assert_eq!(merges, "1");
+
+        // It lands: the PULL REQUESTS MODAL, on #7's Checks.
+        crate::git_sync::land(
+            &mut app,
+            landed(Outcome::Pushed {
+                upstream: "origin/feature".into(),
+                commits: 2,
+            }),
+        );
+        let Some(Overlay::PullRequests(view)) = &app.overlay else {
+            panic!("not the pull request: {:?}", app.overlay);
+        };
+        assert_eq!(view.tabs.tab, crate::pr_preview::PrTab::Checks);
+        assert_eq!(view.selected_url.as_deref(), Some(url.as_str()));
+        assert_eq!(view.selected, 1, "the cursor on #7's row");
+        assert_eq!(
+            app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
+            Some(url.as_str()),
+            "its page asked for fresh, read moments ago or not"
+        );
+        assert!(of_page(&app, &url).is_none(), "the marks are gone");
+        assert!(app.conflicts.parked.is_none());
+        assert!(app.flash.as_deref().is_some_and(|f| f.contains("pushed")));
+    }
+
+    /// Esc while git is at work leaves it working: the answer still lands,
+    /// and Enter on a conflicted file comes back to the same view. A push
+    /// that lands then doesn't pull anyone off what they went to.
+    #[test]
+    fn esc_leaves_the_push_running_and_enter_comes_back() {
+        use crate::git_sync::{Answer as SyncAnswer, Op, Outcome};
+        use crate::pr_preview::RowAct;
+        use crossterm::event::KeyCode;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let (mut app, url) = app_with_pull_request(&clone);
+        settle(&mut app, &url);
+        press_cmd_s(&mut app);
+        assert_eq!(the_view(&app).stage, Stage::Pushing);
+
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(matches!(app.overlay, Some(Overlay::PullRequests(_))));
+        assert!(app.flash.as_deref().is_some_and(|f| f.contains("pushing")));
+        assert!(app.conflicts.parked.is_some());
+
+        let file = RowAct::File("a.txt".into());
+        crate::pr_preview::run_act(&mut app, 7, &url, "#7 t", file, true, &mut Vec::new());
+        assert_eq!(the_view(&app).stage, Stage::Pushing, "the same one, back");
+        assert!(the_view(&app).back.is_some(), "Esc still goes to the modal");
+        assert!(app.conflicts.parked.is_none());
+
+        handle_key(&mut app, key(KeyCode::Esc));
+        crate::git_sync::land(
+            &mut app,
+            SyncAnswer {
+                worktree: WorktreeId("w".into()),
+                op: Op::PUSH,
+                outcome: Outcome::Pushed {
+                    upstream: "origin/feature".into(),
+                    commits: 2,
+                },
+            },
+        );
+        assert!(app.conflicts.parked.is_none(), "it's over");
+        assert!(of_page(&app, &url).is_none());
+        assert!(matches!(app.overlay, Some(Overlay::PullRequests(_))));
+    }
+
+    /// A pull running in the checkout refuses the push, and its landing
+    /// would say nothing to the resolver: it doesn't wait for one, and ⌘S
+    /// tries again.
+    #[test]
+    fn a_push_a_pull_refused_does_not_leave_the_view_waiting() {
+        use crate::git_sync::Op;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let (mut app, url) = app_with_pull_request(&clone);
+        settle(&mut app, &url);
+        let id = WorktreeId("w".into());
+        app.git_sync.inflight.insert(id.clone(), Op::Pull);
+        press_cmd_s(&mut app);
+        let view = the_view(&app);
+        assert_eq!(view.stage, Stage::PushFailed, "{}", log_of(view));
+        assert!(!app.git_sync.logs.contains_key(&id), "no log left behind");
+        app.git_sync.inflight.remove(&id);
+        press_cmd_s(&mut app);
+        assert_eq!(the_view(&app).stage, Stage::Pushing);
+    }
+
+    /// A checkout landing under a resolver on screen doesn't start a second
+    /// one, whose answer would have nowhere to go.
+    #[test]
+    fn one_resolver_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let (mut app, url) = app_with_pull_request(&clone);
+        settle(&mut app, &url);
+        let ticket = the_view(&app).ticket;
+        open(&mut app, &url, "#7 t", None, &mut Vec::new());
+        assert_eq!(the_view(&app).ticket, ticket, "the same one");
+        assert!(app.flash.as_deref().is_some_and(|f| f.contains("finish")));
+        assert!(app.conflicts.parked.is_none());
+    }
+
+    /// A checkout that can't be merged into says so in the modal, in the
+    /// same steps, rather than a line in the footer.
+    #[test]
+    fn a_refusal_says_why_in_the_modal() {
+        use crate::pr_preview::RowAct;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        std::fs::write(clone.join("same.txt"), "mine\n").unwrap();
+        let (mut app, url) = app_with_pull_request(&clone);
+        let file = RowAct::File("a.txt".into());
+        crate::pr_preview::run_act(&mut app, 7, &url, "#7 t", file, true, &mut Vec::new());
+        let view = the_view(&app);
+        assert_eq!(view.stage, Stage::Refused);
+        crate::hints::assert_hints_from(&hints(view), keys::ALL);
+        let shot = screen(&mut app, 140, 30);
+        for words in [
+            "✕ Merge not started",
+            "uncommitted changes",
+            "nothing changed",
+        ] {
+            assert!(shot.contains(words), "{words:?} in\n{shot}");
+        }
+        handle_key(&mut app, key(crossterm::event::KeyCode::Esc));
+        assert!(matches!(app.overlay, Some(Overlay::PullRequests(_))));
+        assert!(app.conflicts.parked.is_none());
     }
 
     /// The pane's rows: numbered text, then each conflict's head, sides

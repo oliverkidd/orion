@@ -5335,6 +5335,12 @@ impl App {
     /// sweeps the footer's readout. The one-shots run out on the
     /// clock, so an idle app with everything read repaints nothing.
     pub fn status_anim_active(&self) -> bool {
+        // A CONFLICT RESOLVER at work has a log to show as it grows, spinner
+        // or no spinner.
+        if self.vim.is_none() && matches!(&self.overlay, Some(Overlay::Conflicts(v)) if v.running())
+        {
+            return true;
+        }
         let now = now_ms();
         self.animations
             && !self.collapsed

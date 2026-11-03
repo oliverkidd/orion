@@ -41,7 +41,9 @@ use orion_core::{Worktree, WorktreeId};
 use crate::app::{App, ConfirmDialog, Focus, Overlay, PendingAction};
 use crate::bundle::plural;
 use crate::flash::Flash;
-use crate::git_proc::{head_branch, read, remote_git, run, FETCH_TIMEOUT, PUSH_TIMEOUT};
+use crate::git_proc::{
+    head_branch, logged_git, read, remote_git, run, GitLog, FETCH_TIMEOUT, PUSH_TIMEOUT,
+};
 use crate::keymap::Action;
 
 /// How long a push held back from the base branch waits for the second
@@ -147,6 +149,9 @@ pub struct Shared {
     /// is stopped rather than holding the runtime's shutdown for its whole
     /// budget.
     pub quit: Arc<AtomicBool>,
+    /// Where the next push of a checkout says what it does, for the CONFLICT
+    /// RESOLVER that is showing it (`crate::conflicts`).
+    pub logs: HashMap<WorktreeId, GitLog>,
 }
 
 impl Drop for Shared {
@@ -287,6 +292,20 @@ pub fn pull(root: &Path, quit: &AtomicBool) -> Outcome {
     }
 }
 
+/// `git push <rest>`, quiet, or telling `log` how it goes.
+fn send(root: &Path, rest: &[&str], quit: &AtomicBool, log: Option<&GitLog>) -> Result<(), String> {
+    match log {
+        Some(log) => {
+            let args = [&["push", "--progress"], rest].concat();
+            logged_git(root, &args, PUSH_TIMEOUT, quit, log)
+        }
+        None => {
+            let args = [&["push", "--quiet"], rest].concat();
+            remote_git(root, &args, PUSH_TIMEOUT, quit)
+        }
+    }
+}
+
 /// The whole PUSH of the checkout at `root`. `base_setting` is the
 /// `worktree_base_branch` SETTING, naming the branch a push is held back
 /// from until confirmed: `confirmed` is the commit the held push was shown
@@ -297,6 +316,7 @@ pub fn push(
     base_setting: &str,
     confirmed: Option<&str>,
     quit: &AtomicBool,
+    log: Option<&GitLog>,
 ) -> Outcome {
     let Some(branch) = head_branch(root) else {
         return Outcome::Failed("HEAD is detached: no branch to push".into());
@@ -307,14 +327,7 @@ pub fn push(
             return Outcome::Failed("no origin to push to".into());
         }
         let publish = format!("{refspec}:{refspec}");
-        let args = [
-            "push",
-            "--quiet",
-            "--set-upstream",
-            "origin",
-            publish.as_str(),
-        ];
-        return match remote_git(root, &args, PUSH_TIMEOUT, quit) {
+        return match send(root, &["--set-upstream", "origin", &publish], quit, log) {
             Ok(()) => Outcome::Published {
                 upstream: format!("origin/{branch}"),
             },
@@ -363,9 +376,8 @@ pub fn push(
             from = head;
         }
     }
-    let send = format!("{from}:{}", t.merge);
-    let args = ["push", "--quiet", t.remote.as_str(), send.as_str()];
-    match remote_git(root, &args, PUSH_TIMEOUT, quit) {
+    let to = format!("{from}:{}", t.merge);
+    match send(root, &[t.remote.as_str(), to.as_str()], quit, log) {
         Ok(()) => Outcome::Pushed {
             upstream,
             commits: ahead,
@@ -466,6 +478,7 @@ pub(crate) fn start(app: &mut App, worktree: WorktreeId, op: Op) {
         return;
     };
     app.git_sync.inflight.insert(worktree.clone(), op.clone());
+    let log = app.git_sync.logs.remove(&worktree);
     app.flash = Some(Flash::working(format!("{} {name}…", op.doing())));
     app.dirty = true;
     let Some(tx) = app.git_sync.tx.clone() else {
@@ -477,7 +490,7 @@ pub(crate) fn start(app: &mut App, worktree: WorktreeId, op: Op) {
             Op::Pull => pull(&root, &quit),
             Op::Push { ref confirmed } => {
                 let base = crate::config::Config::load().worktree_base_branch;
-                push(&root, &base, confirmed.as_deref(), &quit)
+                push(&root, &base, confirmed.as_deref(), &quit, log.as_ref())
             }
         };
         let _ = tx.send(Answer {
@@ -499,7 +512,11 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
     } = answer;
     app.git_sync.inflight.remove(&worktree);
     app.dirty = true;
+    let is_push = matches!(op, Op::Push { .. });
     let Some(w) = app.tree.worktrees.iter().find(|w| w.id == worktree) else {
+        if is_push {
+            crate::conflicts::push_landed(app, &worktree, &outcome);
+        }
         return;
     };
     let project = w.project_id.clone();
@@ -538,6 +555,9 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
             .map(|w| w.id.clone())
             .collect();
         crate::event_loop::reread_checkouts(app, &ours);
+    }
+    if is_push {
+        crate::conflicts::push_landed(app, &worktree, &outcome);
     }
 }
 
@@ -893,7 +913,7 @@ mod tests {
         commit(&r.local, "c.txt", "one\n");
         commit(&r.local, "c.txt", "two\n");
         assert_eq!(
-            push(&r.local, "", None, &quit()),
+            push(&r.local, "", None, &quit(), None),
             Outcome::Pushed {
                 upstream: "origin/feat".into(),
                 commits: 2
@@ -914,7 +934,7 @@ mod tests {
         );
         commit(&r.local, "c.txt", "mine\n");
         assert_eq!(
-            push(&r.local, "", None, &quit()),
+            push(&r.local, "", None, &quit(), None),
             Outcome::Published {
                 upstream: "origin/feat".into()
             }
@@ -936,7 +956,7 @@ mod tests {
         let head = git(&r.local, &["rev-parse", "HEAD"]);
         let before = origin_tip(&r, "main");
         assert_eq!(
-            push(&r.local, "main", None, &quit()),
+            push(&r.local, "main", None, &quit(), None),
             Outcome::ConfirmPush {
                 upstream: "origin/main".into(),
                 ahead: 1,
@@ -945,7 +965,7 @@ mod tests {
         );
         assert_eq!(origin_tip(&r, "main"), before, "asking pushes nothing");
         assert_eq!(
-            push(&r.local, "main", Some(&head), &quit()),
+            push(&r.local, "main", Some(&head), &quit(), None),
             Outcome::Pushed {
                 upstream: "origin/main".into(),
                 commits: 1
@@ -967,7 +987,7 @@ mod tests {
         commit(&r.local, "c.txt", "an agent's, since\n");
         let before = origin_tip(&r, "main");
         assert_eq!(
-            push(&r.local, "main", Some(&asked), &quit()),
+            push(&r.local, "main", Some(&asked), &quit(), None),
             Outcome::ConfirmPush {
                 upstream: "origin/main".into(),
                 ahead: 2,
@@ -982,7 +1002,7 @@ mod tests {
         let r = repos();
         on_tracked_feature(&r);
         assert_eq!(
-            push(&r.local, "", None, &quit()),
+            push(&r.local, "", None, &quit(), None),
             Outcome::NothingToPush {
                 upstream: "origin/feat".into(),
                 behind: 0
@@ -993,7 +1013,7 @@ mod tests {
         commit(&r.other, "d.txt", "theirs\n");
         git(&r.other, &["push", "-q", "origin", "feat"]);
         assert_eq!(
-            push(&r.local, "", None, &quit()),
+            push(&r.local, "", None, &quit(), None),
             Outcome::NothingToPush {
                 upstream: "origin/feat".into(),
                 behind: 1
@@ -1009,7 +1029,7 @@ mod tests {
         let head = git(&r.local, &["rev-parse", "HEAD"]);
         let before = origin_tip(&r, "main");
         assert_eq!(
-            push(&r.local, "", Some(&head), &quit()),
+            push(&r.local, "", Some(&head), &quit(), None),
             Outcome::Diverged {
                 upstream: "origin/main".into(),
                 ahead: 1,
@@ -1024,7 +1044,7 @@ mod tests {
         let r = repos();
         git(&r.local, &["switch", "-q", "--detach", "HEAD"]);
         assert_eq!(
-            push(&r.local, "", None, &quit()),
+            push(&r.local, "", None, &quit(), None),
             Outcome::Failed("HEAD is detached: no branch to push".into())
         );
     }
@@ -1043,7 +1063,7 @@ mod tests {
             &["update-ref", "refs/pull/7/head", "refs/heads/main"],
         );
         git(&r.local, &["fetch", "-q", "origin", "refs/pull/7/head"]);
-        match push(&r.local, "", None, &quit()) {
+        match push(&r.local, "", None, &quit(), None) {
             Outcome::Failed(e) => assert!(e.contains("fork"), "{e}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -1060,7 +1080,7 @@ mod tests {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let before = origin_tip(&r, "feat");
         assert_eq!(
-            push(&r.local, "", None, &quit()),
+            push(&r.local, "", None, &quit(), None),
             Outcome::Failed("rejected: tests failed".into())
         );
         assert_eq!(origin_tip(&r, "feat"), before);

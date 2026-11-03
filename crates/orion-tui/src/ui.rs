@@ -24,6 +24,8 @@ use footer::draw_footer;
 pub const VIM_MODAL_PCT: (u16, u16) = (94, 92);
 /// Outer size of the two split modals (diff, tree), percent of the frame.
 pub(crate) const SPLIT_MODAL_PCT: (u16, u16) = (92, 90);
+/// The rows along the bottom the FOOTER takes.
+const FOOTER_ROWS: u16 = 2;
 /// Outer size of the find-in-files modal, percent of the frame.
 const GREP_MODAL_PCT: (u16, u16) = (88, 76);
 /// Fixed (width, height) of the jump palette — tall enough for a screenful
@@ -188,7 +190,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
     // The bar gets a blank row above it so it breathes off the panel
     // borders, matching the terminal's own padding below the last row.
     let [body, footer] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(f.area());
+        Layout::vertical([Constraint::Min(3), Constraint::Length(FOOTER_ROWS)]).areas(f.area());
 
     if app.collapsed {
         draw_terminal(f, app, body);
@@ -918,6 +920,22 @@ fn dim_backdrop(f: &mut Frame) {
 }
 
 fn draw_overlay(f: &mut Frame, app: &mut App) {
+    draw_overlay_over_backdrop(f, app);
+    // The backdrop dims the footer with everything else, but a FLASH is the
+    // app saying what it is doing or how something went: it stays readable.
+    if app.overlay.is_some() && app.flash.is_some() {
+        let area = f.area();
+        let footer = Rect {
+            y: area.y + area.height.saturating_sub(FOOTER_ROWS),
+            height: FOOTER_ROWS.min(area.height),
+            ..area
+        };
+        f.buffer_mut()
+            .set_style(footer, Style::default().remove_modifier(Modifier::DIM));
+    }
+}
+
+fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
     let th = app.theme;
     let Some(overlay) = app.overlay.clone() else {
         return;
