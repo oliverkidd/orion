@@ -351,14 +351,21 @@ pub(crate) fn forget_base(root: &Path) {
     }
 }
 
+/// The branch a `worktree_base_branch` SETTING means, read the way the
+/// DAEMON reads it: trimmed, a leading `origin/` meaning the same as the
+/// bare name. Empty for no name.
+pub(crate) fn base_name(setting: &str) -> &str {
+    let name = setting.trim();
+    name.strip_prefix("origin/").unwrap_or(name).trim()
+}
+
 /// The ref a branch named `name` is read from: origin's copy when origin
 /// has one — `origin/<name>` — else the local branch. A leading `origin/`
 /// means the same as the bare name. None for no name, for `HEAD` (always
 /// this checkout's, never a branch anyone meant) and for a branch the
 /// repo has neither of.
 pub(crate) fn branch_ref(root: &Path, name: &str) -> Option<String> {
-    let name = name.trim();
-    let name = name.strip_prefix("origin/").unwrap_or(name).trim();
+    let name = base_name(name);
     if name.is_empty() || name == "HEAD" {
         return None;
     }

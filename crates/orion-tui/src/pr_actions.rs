@@ -23,13 +23,17 @@
 //!   stands in the way is spelled out first: a draft, conflicts, failing
 //!   or running checks, a review still owed. Enter runs `gh pr merge`;
 //!   the pull requests stacked on the branch are moved onto its base
-//!   before it is deleted, which GitHub would otherwise close them for.
-//!   The **Review** SETTINGS tab holds the defaults both open on.
+//!   before it is deleted, which GitHub would otherwise close them for,
+//!   and go back if it won't go. A long-lived branch — the repo's default,
+//!   a protected one, the base new worktrees start from — is never deleted,
+//!   so a `dev` merged into `main` leaves what is based on it alone
+//!   ([`long_lived`]). The **Review** SETTINGS tab holds the defaults both
+//!   open on.
 //! * **Close** (`⌘W`): the pull request under the cursor closed
 //!   without merging — a comment left on it first if one is written, and
 //!   its branch deleted on GitHub if that is ticked (only a branch of this
-//!   repo's; a fork's lives elsewhere), and kept while pull requests are
-//!   stacked on it. Enter runs `gh pr close`.
+//!   repo's; a fork's lives elsewhere, and never a long-lived one), and
+//!   kept while pull requests are stacked on it. Enter runs `gh pr close`.
 //!
 //! * **Review** (`⌘⇧R`, or Enter on the Reviews tab): approve the pull
 //!   request under the cursor, request changes, or comment — a body
@@ -103,6 +107,17 @@ impl PrForm {
             PrForm::Close(f) => f.ticket,
             PrForm::Review(f) => f.ticket,
         }
+    }
+
+    /// GitHub says the branch is long-lived: its box goes off and stays off.
+    fn keep_branch(&mut self, why: String) {
+        let (stays, delete_branch) = match self {
+            PrForm::Merge(f) => (&mut f.stays, &mut f.delete_branch),
+            PrForm::Close(f) => (&mut f.stays, &mut f.delete_branch),
+            PrForm::Create(_) | PrForm::Review(_) => return,
+        };
+        *stays = Some(why);
+        *delete_branch = false;
     }
 
     /// Enter sent it and the answer is not in: it takes no keys but Esc.
@@ -876,6 +891,9 @@ pub struct MergeForm {
     pub delete_default: bool,
     /// The repo deletes merged branches itself.
     pub auto_delete: bool,
+    /// Why the branch can't go with it, once GitHub has said
+    /// ([`long_lived`]): the box stays off.
+    pub stays: Option<String>,
     /// `--auto`: GitHub merges once the checks and reviews it requires
     /// are in.
     pub auto: bool,
@@ -959,6 +977,7 @@ pub(crate) fn open_merge(app: &mut App) {
         delete_branch: false,
         delete_default: config.pr_delete_branch,
         auto_delete: false,
+        stays: None,
         auto: false,
         bypass: false,
         row: MergeRow::Method,
@@ -975,6 +994,7 @@ pub(crate) fn open_merge(app: &mut App) {
     );
     let ticket = form.ticket;
     put_form(app, PrForm::Merge(form));
+    ask_long_lived(app);
     if let Some(tx) = app.pr_actions_tx.clone() {
         tokio::spawn(async move {
             let (allowed, auto_delete) = repo_merge_options(&dir).await;
@@ -1020,9 +1040,15 @@ pub(crate) fn detail_landed(app: &mut App, url: &str) {
     };
     let status = app.prs.status_or_open(url);
     match form(app) {
-        Some(PrForm::Merge(form)) if form.pending => form.apply_detail(&pr, &status, Some(&detail)),
+        Some(PrForm::Merge(form)) if form.pending => {
+            form.apply_detail(&pr, &status, Some(&detail));
+            ask_long_lived(app);
+        }
         Some(PrForm::Merge(form)) => form.warnings = merge_warnings(&status, Some(&detail)),
-        Some(PrForm::Close(form)) => form.apply_detail(&pr, Some(&detail)),
+        Some(PrForm::Close(form)) => {
+            form.apply_detail(&pr, Some(&detail));
+            ask_long_lived(app);
+        }
         _ => {}
     }
     app.dirty = true;
@@ -1113,8 +1139,8 @@ fn submit_merge(app: &mut App) {
 }
 
 /// Merge pull request `number` into `base` — or switch auto-merge on for
-/// it — and delete `branch` on origin once it is merged, the pull
-/// requests stacked on it moved onto `base` first. What became of it.
+/// it — and delete `branch` on origin once it is merged
+/// ([`retire_merged_branch`]). What became of it.
 async fn merge(
     dir: &Path,
     number: u64,
@@ -1137,38 +1163,139 @@ async fn merge(
     let Some(branch) = branch.filter(|_| !auto) else {
         return Ok(BranchFate::Kept);
     };
-    // GitHub moves the pull requests based on a merged branch onto its
-    // base only when it deletes the branch itself; one deleted through the
-    // API closes them. So they are moved here first, and the branch stays
-    // while any of them would not move.
+    let setting = crate::config::Config::load().worktree_base_branch;
+    Ok(retire_merged_branch(dir, branch, base, &setting).await)
+}
+
+/// Delete `branch`, merged into `base`, from GitHub, unless it is
+/// long-lived. GitHub moves the pull requests based on a merged branch onto
+/// its base only when it deletes the branch itself; one deleted through the
+/// API closes them. So they are moved here first, and go back if the branch
+/// turns out to stay.
+async fn retire_merged_branch(dir: &Path, branch: &str, base: &str, setting: &str) -> BranchFate {
+    if let Some(guarded) = guard(dir, branch, setting).await {
+        return guarded;
+    }
     let Some(stacked) = stacked_on(dir, branch).await else {
-        return Ok(BranchFate::Kept);
+        return BranchFate::Guarded(UNLISTED.into());
     };
-    let mut held = Vec::new();
-    for &pr in &stacked {
-        if base.is_empty() || !retarget(dir, pr, base).await {
+    let (mut moved, mut held) = (Vec::new(), Vec::new());
+    for pr in stacked {
+        // One that won't move keeps the branch: the rest needn't try.
+        if !base.is_empty() && held.is_empty() && retarget(dir, pr, base).await {
+            moved.push(pr);
+        } else {
             held.push(pr);
         }
     }
-    if !held.is_empty() {
-        return Ok(BranchFate::Held(held));
+    if held.is_empty() && delete_branch(dir, branch).await {
+        return BranchFate::Deleted { moved };
     }
-    Ok(match delete_branch(dir, branch).await {
-        true => BranchFate::Deleted { moved: stacked },
-        false => BranchFate::Kept,
-    })
+    let mut stranded = Vec::new();
+    for pr in moved {
+        if !retarget(dir, pr, branch).await {
+            stranded.push(pr);
+        }
+    }
+    if held.is_empty() {
+        BranchFate::Refused { stranded }
+    } else {
+        BranchFate::Held {
+            stacked: held,
+            stranded,
+        }
+    }
+}
+
+/// Why [`stacked_on`] couldn't help: the branch stays rather than guess.
+const UNLISTED: &str = "GitHub would not say what is based on it";
+
+/// The fate of a `branch` that must stay: long-lived, or nobody could say
+/// it isn't. None when it may go.
+async fn guard(dir: &Path, branch: &str, setting: &str) -> Option<BranchFate> {
+    match long_lived(dir, branch, setting).await {
+        Ok(None) => None,
+        Ok(Some(why)) => Some(BranchFate::Guarded(why)),
+        Err(_) => Some(BranchFate::Guarded(
+            "GitHub would not say whether it is protected".into(),
+        )),
+    }
+}
+
+/// Why `branch` outlives any pull request merged from it: it is what other
+/// work is based on, so "stacked on it" means every open pull request of
+/// the repo's and deleting it is never what merging it meant. `dev` merged
+/// into `main` is the shape. `setting` is the `worktree_base_branch`
+/// SETTING, which names such a branch on a repo that doesn't protect it.
+/// `Err` when GitHub could not say.
+async fn long_lived(dir: &Path, branch: &str, setting: &str) -> Result<Option<String>, String> {
+    if branch == crate::commit_list::base_name(setting) {
+        return Ok(Some(format!("{branch} is what new worktrees start from")));
+    }
+    let view = gh(
+        dir,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ],
+    );
+    if run_piped(view, "", REQUEST_TIMEOUT).await?.trim() == branch {
+        return Ok(Some(format!("{branch} is the repo's default branch")));
+    }
+    let path = format!("repos/{{owner}}/{{repo}}/branches/{branch}");
+    let read = gh(dir, &["api", &path, "--jq", ".protected"]);
+    match run_piped(read, "", REQUEST_TIMEOUT).await?.trim() {
+        "true" => Ok(Some(format!("{branch} is protected on GitHub"))),
+        "false" => Ok(None),
+        other => Err(other.to_string()),
+    }
+}
+
+/// Ask GitHub whether the form's branch is long-lived, for the form to say
+/// so before Enter. Not the safeguard — [`guard`] is, at the moment it
+/// counts — so a question nobody could answer changes nothing here.
+fn ask_long_lived(app: &mut App) {
+    let Some(tx) = app.pr_actions_tx.clone() else {
+        return;
+    };
+    let (dir, branch, ticket) = match form(app) {
+        Some(PrForm::Merge(f)) => (f.dir.clone(), f.branch.clone(), f.ticket),
+        Some(PrForm::Close(f)) => (f.dir.clone(), f.branch.clone(), f.ticket),
+        _ => return,
+    };
+    let Some(branch) = branch else {
+        return;
+    };
+    tokio::spawn(async move {
+        let setting = crate::config::Config::load().worktree_base_branch;
+        if let Ok(Some(why)) = long_lived(&dir, &branch, &setting).await {
+            let _ = tx.send(Answer::BranchStays { ticket, why });
+        }
+    });
 }
 
 /// What became of a merged or closed pull request's branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BranchFate {
-    /// Not asked to go, or GitHub would not delete it.
+    /// Not asked to go.
     Kept,
+    /// Asked to go, but it must not: why. Nothing was touched.
+    Guarded(String),
     /// Deleted on GitHub, these stacked on it moved onto its base first.
     Deleted { moved: Vec<u64> },
-    /// Left on GitHub: these are stacked on it, and deleting it would
-    /// have GitHub close them.
-    Held(Vec<u64>),
+    /// Left on GitHub: `stacked` are based on it, and deleting it would
+    /// have GitHub close them. `stranded` had moved, and would not go back.
+    Held {
+        stacked: Vec<u64>,
+        stranded: Vec<u64>,
+    },
+    /// GitHub would not delete it. What had been moved off it went back,
+    /// but for `stranded`.
+    Refused { stranded: Vec<u64> },
 }
 
 impl BranchFate {
@@ -1180,9 +1307,26 @@ impl BranchFate {
             Self::Deleted { moved } => {
                 format!(", branch deleted; {} moved onto {base}", pr_list(moved))
             }
-            Self::Held(held) => format!(", branch kept: {} stacked on it", pr_list(held)),
+            Self::Guarded(why) => format!(", branch kept: {why}"),
+            Self::Held { stacked, stranded } => format!(
+                ", branch kept: {} stacked on it{}",
+                pr_list(stacked),
+                left_on(stranded, base)
+            ),
+            Self::Refused { stranded } => format!(
+                ", branch kept: GitHub would not delete it{}",
+                left_on(stranded, base)
+            ),
         }
     }
+}
+
+/// `; #12 left on main`, for what moved and would not go back.
+fn left_on(stranded: &[u64], base: &str) -> String {
+    if stranded.is_empty() {
+        return String::new();
+    }
+    format!("; {} left on {base}", pr_list(stranded))
 }
 
 /// `#12, #14`.
@@ -1292,6 +1436,9 @@ pub struct CloseForm {
     /// branch and the base are filled in when it does ([`detail_landed`]).
     pub pending: bool,
     pub delete_branch: bool,
+    /// Why the branch can't go with it, once GitHub has said
+    /// ([`long_lived`]): the box stays off.
+    pub stays: Option<String>,
     /// Left on the pull request as it closes, when anything is written.
     pub comment: TextInput,
     pub row: CloseRow,
@@ -1313,7 +1460,7 @@ impl CloseForm {
     }
 
     fn toggle_delete(&mut self) {
-        if self.branch.is_some() {
+        if self.branch.is_some() && self.stays.is_none() {
             self.delete_branch = !self.delete_branch;
             self.notice = None;
         }
@@ -1341,6 +1488,7 @@ pub(crate) fn open_close(app: &mut App) {
         head: pr.head.clone(),
         pending: true,
         delete_branch: false,
+        stays: None,
         comment: TextInput::multiline(),
         row: CloseRow::Comment,
         ticket: crate::view_jobs::ticket(),
@@ -1350,6 +1498,7 @@ pub(crate) fn open_close(app: &mut App) {
     };
     form.apply_detail(&pr, app.pr_detail.get(&pr.url));
     put_form(app, PrForm::Close(form));
+    ask_long_lived(app);
     app.dirty = true;
 }
 
@@ -1406,17 +1555,28 @@ async fn close(
     let Some(branch) = branch else {
         return Ok(BranchFate::Kept);
     };
-    // Nothing merged, so nowhere to move what is stacked on it: the
-    // branch stays rather than have GitHub close them.
-    let stacked = match stacked_on(dir, branch).await {
-        Some(stacked) if stacked.is_empty() => stacked,
-        Some(stacked) => return Ok(BranchFate::Held(stacked)),
-        None => return Ok(BranchFate::Kept),
-    };
-    Ok(match delete_branch(dir, branch).await {
-        true => BranchFate::Deleted { moved: stacked },
-        false => BranchFate::Kept,
-    })
+    let setting = crate::config::Config::load().worktree_base_branch;
+    Ok(retire_closed_branch(dir, branch, &setting).await)
+}
+
+/// Delete `branch`, its pull request closed unmerged, from GitHub. Nothing
+/// merged, so nowhere to move what is stacked on it: the branch stays
+/// rather than have GitHub close them — and stays if it is long-lived.
+async fn retire_closed_branch(dir: &Path, branch: &str, setting: &str) -> BranchFate {
+    if let Some(guarded) = guard(dir, branch, setting).await {
+        return guarded;
+    }
+    match stacked_on(dir, branch).await {
+        None => BranchFate::Guarded(UNLISTED.into()),
+        Some(stacked) if !stacked.is_empty() => BranchFate::Held {
+            stacked,
+            stranded: Vec::new(),
+        },
+        Some(_) if delete_branch(dir, branch).await => BranchFate::Deleted { moved: Vec::new() },
+        Some(_) => BranchFate::Refused {
+            stranded: Vec::new(),
+        },
+    }
 }
 
 /// The flash a close leaves.
@@ -1680,7 +1840,11 @@ pub(crate) fn toggle_draft(app: &mut App) {
 
 /// `gh <args>` in `dir`, for [`run_piped`].
 fn gh(dir: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("gh");
+    #[cfg(not(test))]
+    let program = "gh";
+    #[cfg(test)]
+    let program = tests::GH.with_borrow(|stub| stub.clone());
+    let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).current_dir(dir);
     cmd
 }
@@ -1724,6 +1888,8 @@ pub enum Answer {
         allowed: Vec<MergeMethod>,
         auto_delete: bool,
     },
+    /// The form's branch is long-lived, and why ([`long_lived`]).
+    BranchStays { ticket: u64, why: String },
     /// `gh pr merge`: what to flash, or why it refused. `landed` is the
     /// pull request's number and base when it merged now — not auto-merge,
     /// which lands later — for the MERGE CONFETTI.
@@ -1864,6 +2030,11 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
                 }
                 form.allowed = allowed;
                 form.auto_delete = auto_delete;
+            }
+        }
+        Answer::BranchStays { ticket, why } => {
+            if let Some(form) = form_for(app, ticket) {
+                form.keep_branch(why);
             }
         }
         Answer::Merged {
@@ -2368,7 +2539,7 @@ fn change_merge_row(form: &mut MergeForm, forward: bool) {
                 form.method = *method;
             }
         }
-        MergeRow::DeleteBranch if form.branch.is_some() => {
+        MergeRow::DeleteBranch if form.branch.is_some() && form.stays.is_none() => {
             form.delete_branch = !form.delete_branch;
         }
         MergeRow::DeleteBranch => {}
@@ -2570,6 +2741,11 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, form: &PrForm, focused: bool, th: 
         PrForm::Close(form) => draw_close(f, area, form, focused, th),
         PrForm::Review(form) => draw_review(f, area, form, focused, th),
     }
+}
+
+/// The Delete row's note for a branch that can't go: [`MergeForm::stays`].
+fn stays_note(why: &str) -> String {
+    format!("  {why} — it stays")
 }
 
 /// A `[x]` box.
@@ -2780,21 +2956,22 @@ fn draw_merge(f: &mut Frame, area: Rect, form: &MergeForm, focused: bool, th: Th
         method.push(Span::styled(" ▸", Style::default().fg(th.muted)));
     }
     lines.push((Some(MergeRow::Method), method));
-    let (delete_on, delete_note) = match (&form.branch, form.auto_delete) {
-        (None, _) if form.pending => (false, "  known once its details are in".to_string()),
-        (None, _) => (false, "  not a branch of this repo — it stays".to_string()),
-        (Some(_), true) => (
+    let (delete_on, delete_note) = match (&form.stays, &form.branch, form.auto_delete) {
+        (Some(why), ..) => (false, stays_note(why)),
+        (_, None, _) if form.pending => (false, "  known once its details are in".to_string()),
+        (_, None, _) => (false, "  not a branch of this repo — it stays".to_string()),
+        (_, Some(_), true) => (
             true,
             "  the repo deletes merged branches itself".to_string(),
         ),
-        (Some(_), false) if form.delete_branch && form.auto => (
+        (_, Some(_), false) if form.delete_branch && form.auto => (
             true,
             "  not after an auto-merge — the branch stays".to_string(),
         ),
-        (Some(branch), false) if form.delete_branch => {
+        (_, Some(branch), false) if form.delete_branch => {
             (true, format!("  {branch} on GitHub, once merged"))
         }
-        (Some(_), false) => (false, "  the branch stays on GitHub".to_string()),
+        (_, Some(_), false) => (false, "  the branch stays on GitHub".to_string()),
     };
     lines.push((
         Some(MergeRow::DeleteBranch),
@@ -2886,11 +3063,12 @@ fn draw_close(f: &mut Frame, area: Rect, form: &CloseForm, focused: bool, th: Th
         form.base.clone()
     };
     let from = form.branch.clone().unwrap_or_else(|| form.head.clone());
-    let delete_note = match &form.branch {
-        None if form.pending => "  known once its details are in".to_string(),
-        None => "  not a branch of this repo — it stays".to_string(),
-        Some(branch) if form.delete_branch => format!("  {branch} on GitHub, once closed"),
-        Some(_) => "  the branch stays on GitHub".to_string(),
+    let delete_note = match (&form.stays, &form.branch) {
+        (Some(why), _) => stays_note(why),
+        (_, None) if form.pending => "  known once its details are in".to_string(),
+        (_, None) => "  not a branch of this repo — it stays".to_string(),
+        (_, Some(branch)) if form.delete_branch => format!("  {branch} on GitHub, once closed"),
+        (_, Some(_)) => "  the branch stays on GitHub".to_string(),
     };
     let lines: [(Option<CloseRow>, Vec<Span<'static>>); CLOSE_ROWS as usize] = [
         (
@@ -3041,6 +3219,297 @@ fn draw_review(f: &mut Frame, area: Rect, form: &ReviewForm, focused: bool, th: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::os::unix::fs::PermissionsExt;
+
+    thread_local! {
+        /// What [`gh`] runs here: a stub, so nothing reaches GitHub.
+        pub(super) static GH: RefCell<PathBuf> = RefCell::new(PathBuf::from("/nonexistent/gh"));
+    }
+
+    /// What a stub `gh` answers.
+    struct Repo {
+        default_branch: &'static str,
+        /// `branches/<name>`'s `.protected`: a name not found is a 404.
+        protected: &'static str,
+        /// `pr list`'s answer.
+        stacked: &'static str,
+        delete_ok: bool,
+        /// A `pr edit` whose arguments start with this fails.
+        edit_fails: &'static str,
+    }
+
+    impl Default for Repo {
+        fn default() -> Self {
+            Self {
+                default_branch: "main",
+                protected: "false",
+                stacked: "[]",
+                delete_ok: true,
+                edit_fails: "none",
+            }
+        }
+    }
+
+    /// Run `retire` against `repo`, on this thread; what it returned and
+    /// every `gh` call it made, one line each.
+    fn with_stub<T>(repo: Repo, retire: impl AsyncFnOnce(&Path) -> T) -> (T, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls");
+        let stub = dir.path().join("gh");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$*" >> '{log}'
+case "$*" in
+  "repo view"*) echo {default} ;;
+  "api repos/{{owner}}/{{repo}}/branches/"*) echo {protected} ;;
+  "pr list"*) echo '{stacked}' ;;
+  "pr edit {fails}"*) exit 1 ;;
+  "pr edit "*) ;;
+  "api -X DELETE"*) {delete} ;;
+  *) exit 2 ;;
+esac
+"#,
+            log = log.display(),
+            default = repo.default_branch,
+            protected = repo.protected,
+            stacked = repo.stacked,
+            fails = repo.edit_fails,
+            delete = if repo.delete_ok { ":" } else { "exit 1" },
+        );
+        std::fs::write(&stub, script).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        GH.with_borrow_mut(|gh| *gh = stub);
+        let out = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(retire(dir.path()));
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        (out, calls.lines().map(str::to_string).collect())
+    }
+
+    fn merged_into_main(repo: Repo, branch: &'static str) -> (BranchFate, Vec<String>) {
+        with_stub(repo, async |dir| {
+            retire_merged_branch(dir, branch, "main", "").await
+        })
+    }
+
+    /// Nothing that changes GitHub: no base moved, nothing deleted.
+    fn only_read(calls: &[String]) -> bool {
+        !calls
+            .iter()
+            .any(|call| call.starts_with("pr edit") || call.contains("DELETE"))
+    }
+
+    /// `dev` merged into `main`, protected, with every open pull request
+    /// based on it: they must not move.
+    #[test]
+    fn a_promotion_leaves_what_is_based_on_the_protected_branch_alone() {
+        let (fate, calls) = merged_into_main(
+            Repo {
+                protected: "true",
+                stacked: r#"[{"number":12},{"number":14}]"#,
+                delete_ok: false,
+                ..Repo::default()
+            },
+            "dev",
+        );
+        assert_eq!(
+            fate,
+            BranchFate::Guarded("dev is protected on GitHub".into())
+        );
+        assert!(only_read(&calls), "{calls:?}");
+    }
+
+    /// Nothing protects this `dev`, and the setting is all that names it:
+    /// without it the same merge would delete the branch.
+    #[test]
+    fn the_worktree_base_setting_names_a_branch_nothing_protects() {
+        for setting in ["dev", " dev ", "origin/dev", " origin/dev "] {
+            let (fate, calls) = with_stub(
+                Repo {
+                    stacked: r#"[{"number":12}]"#,
+                    ..Repo::default()
+                },
+                async |dir| retire_merged_branch(dir, "dev", "main", setting).await,
+            );
+            assert_eq!(
+                fate,
+                BranchFate::Guarded("dev is what new worktrees start from".into()),
+                "{setting}"
+            );
+            assert!(calls.is_empty(), "the setting alone answers: {calls:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_branch_stays_though_nothing_protects_it() {
+        let (fate, calls) = with_stub(
+            Repo {
+                default_branch: "trunk",
+                stacked: r#"[{"number":12}]"#,
+                ..Repo::default()
+            },
+            async |dir| retire_merged_branch(dir, "trunk", "release", "").await,
+        );
+        assert_eq!(
+            fate,
+            BranchFate::Guarded("trunk is the repo's default branch".into())
+        );
+        assert!(only_read(&calls), "{calls:?}");
+    }
+
+    /// GitHub didn't answer: unsure keeps the branch and moves nothing.
+    #[test]
+    fn a_branch_nobody_can_vouch_for_stays() {
+        for protected in ["", "null"] {
+            let (fate, calls) = merged_into_main(
+                Repo {
+                    protected,
+                    stacked: r#"[{"number":12}]"#,
+                    ..Repo::default()
+                },
+                "feat",
+            );
+            assert!(matches!(fate, BranchFate::Guarded(_)), "{fate:?}");
+            assert!(only_read(&calls), "{calls:?}");
+        }
+    }
+
+    /// A real stack still does what it did: moved first, then deleted.
+    #[test]
+    fn a_feature_branch_goes_and_its_stack_moves_onto_the_base() {
+        let (fate, calls) = merged_into_main(
+            Repo {
+                stacked: r#"[{"number":12},{"number":14}]"#,
+                ..Repo::default()
+            },
+            "feat/x",
+        );
+        assert_eq!(
+            fate,
+            BranchFate::Deleted {
+                moved: vec![12, 14]
+            }
+        );
+        let at = |wanted: &str| calls.iter().position(|c| c.starts_with(wanted));
+        assert!(at("pr edit 12 --base main").is_some(), "{calls:?}");
+        assert!(at("api -X DELETE").is_some(), "{calls:?}");
+        assert!(
+            at("pr edit 14 --base main") < at("api -X DELETE"),
+            "{calls:?}"
+        );
+    }
+
+    /// The delete fails after the moves: they go back onto the branch that
+    /// is still there.
+    #[test]
+    fn a_refused_delete_puts_the_stack_back() {
+        let (fate, calls) = merged_into_main(
+            Repo {
+                stacked: r#"[{"number":12}]"#,
+                delete_ok: false,
+                ..Repo::default()
+            },
+            "feat",
+        );
+        assert_eq!(fate, BranchFate::Refused { stranded: vec![] });
+        let edits: Vec<&String> = calls.iter().filter(|c| c.starts_with("pr edit")).collect();
+        assert_eq!(
+            edits,
+            ["pr edit 12 --base main", "pr edit 12 --base feat"],
+            "{calls:?}"
+        );
+    }
+
+    /// One won't move: the ones before it go back, the ones after it are
+    /// never tried, and nothing is deleted.
+    #[test]
+    fn a_stack_that_will_not_move_keeps_the_branch() {
+        let (fate, calls) = merged_into_main(
+            Repo {
+                stacked: r#"[{"number":12},{"number":14},{"number":16}]"#,
+                edit_fails: "14",
+                ..Repo::default()
+            },
+            "feat",
+        );
+        assert_eq!(
+            fate,
+            BranchFate::Held {
+                stacked: vec![14, 16],
+                stranded: vec![],
+            }
+        );
+        assert!(
+            calls.iter().any(|c| c == "pr edit 12 --base feat"),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("pr edit 16")),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.contains("DELETE")), "{calls:?}");
+    }
+
+    /// One that moved and won't go back is left where it is, and named.
+    #[test]
+    fn what_will_not_go_back_is_named() {
+        let (fate, _) = merged_into_main(
+            Repo {
+                stacked: r#"[{"number":12}]"#,
+                delete_ok: false,
+                edit_fails: "12 --base feat",
+                ..Repo::default()
+            },
+            "feat",
+        );
+        assert_eq!(fate, BranchFate::Refused { stranded: vec![12] });
+        assert_eq!(
+            merged_message(10, "main", MergeMethod::Merge, false, &fate),
+            "merged #10 into main (merge), branch kept: GitHub would not delete it; #12 left on main"
+        );
+    }
+
+    #[test]
+    fn closing_a_long_lived_branchs_pull_request_keeps_the_branch() {
+        let (fate, calls) = with_stub(
+            Repo {
+                protected: "true",
+                ..Repo::default()
+            },
+            async |dir| retire_closed_branch(dir, "dev", "").await,
+        );
+        assert_eq!(
+            fate,
+            BranchFate::Guarded("dev is protected on GitHub".into())
+        );
+        assert!(only_read(&calls), "{calls:?}");
+    }
+
+    #[test]
+    fn closing_still_deletes_an_ordinary_branch_unless_something_is_stacked() {
+        let (fate, _) = with_stub(Repo::default(), async |dir| {
+            retire_closed_branch(dir, "feat", "").await
+        });
+        assert_eq!(fate, BranchFate::Deleted { moved: vec![] });
+        let (fate, calls) = with_stub(
+            Repo {
+                stacked: r#"[{"number":12}]"#,
+                ..Repo::default()
+            },
+            async |dir| retire_closed_branch(dir, "feat", "").await,
+        );
+        assert_eq!(
+            fate,
+            BranchFate::Held {
+                stacked: vec![12],
+                stranded: vec![],
+            }
+        );
+        assert!(only_read(&calls), "{calls:?}");
+    }
 
     #[test]
     fn stacked_pull_requests_are_read_from_gh() {
@@ -3067,13 +3536,32 @@ mod tests {
             }),
             "merged #10 into dev (squash), branch deleted; #12, #14 moved onto dev"
         );
+        let held = BranchFate::Held {
+            stacked: vec![12],
+            stranded: vec![],
+        };
         assert_eq!(
-            merged(BranchFate::Held(vec![12])),
+            merged(held.clone()),
             "merged #10 into dev (squash), branch kept: #12 stacked on it"
         );
         assert_eq!(
-            closed_message(10, &BranchFate::Held(vec![12])),
+            closed_message(10, &held),
             "closed #10, branch kept: #12 stacked on it"
+        );
+        assert_eq!(
+            merged(BranchFate::Held {
+                stacked: vec![12],
+                stranded: vec![14],
+            }),
+            "merged #10 into dev (squash), branch kept: #12 stacked on it; #14 left on dev"
+        );
+        assert_eq!(
+            merged(BranchFate::Guarded("dev is protected on GitHub".into())),
+            "merged #10 into dev (squash), branch kept: dev is protected on GitHub"
+        );
+        assert_eq!(
+            merged(BranchFate::Refused { stranded: vec![] }),
+            "merged #10 into dev (squash), branch kept: GitHub would not delete it"
         );
     }
 
@@ -3240,6 +3728,7 @@ mod tests {
             delete_branch: false,
             delete_default: false,
             auto_delete: false,
+            stays: None,
             auto: false,
             bypass: false,
             row: MergeRow::Auto,

@@ -2561,6 +2561,70 @@ mod tests {
         });
     }
 
+    /// GitHub says the branch is long-lived: on either form the box goes
+    /// off and stays off, and the row says why.
+    #[test]
+    fn a_long_lived_branch_keeps_the_delete_box_off() {
+        use crate::pr_actions::{Answer, PrForm};
+        pinned(|| {
+            let (mut app, project) = app_with(vec![pr(42, "Promote", false)], true);
+            let url = "https://github.com/o/r/pull/42".to_string();
+            let mut d = detail(42, "Promote");
+            d.head = "dev".into();
+            app.open_prs.get_mut(&project).unwrap().list[0].head = "dev".into();
+            app.pr_detail.insert(url, d);
+            open(&mut app);
+            let mut out = Vec::new();
+
+            handle_key(&mut app, ctrl('x'), &mut out);
+            let Some(PrForm::Merge(merge)) = view(&app).form.as_deref() else {
+                panic!("no merge form");
+            };
+            assert!(merge.delete_branch, "ticked until GitHub says otherwise");
+            let ticket = merge.ticket;
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            let why = "dev is protected on GitHub".to_string();
+            crate::pr_actions::land_answer(
+                &mut app,
+                Answer::BranchStays {
+                    ticket,
+                    why: why.clone(),
+                },
+            );
+            let shot = screen(&mut app, 140, 34);
+            assert!(
+                shot.contains("dev is protected on GitHub — it stays"),
+                "{shot}"
+            );
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            let Some(PrForm::Merge(merge)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert!(!merge.delete_branch, "Space can't tick it back on");
+
+            handle_key(&mut app, key(KeyCode::Esc), &mut out);
+            handle_key(&mut app, ctrl('w'), &mut out);
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
+                panic!("no close form");
+            };
+            assert!(close.delete_branch, "ticked by hand");
+            let ticket = close.ticket;
+            crate::pr_actions::land_answer(&mut app, Answer::BranchStays { ticket, why });
+            let shot = screen(&mut app, 140, 34);
+            assert!(
+                shot.contains("dev is protected on GitHub — it stays"),
+                "{shot}"
+            );
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
+                panic!("the form stays");
+            };
+            assert!(!close.delete_branch, "Space can't tick it back on");
+        });
+    }
+
     /// `⌘W` opens the close form on the row: the caret in its comment,
     /// the branch kept until it is known to be ours and ticked. A close
     /// that lands puts the page back and says so; a refused one says why
