@@ -1175,8 +1175,20 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             " {}",
             crate::ui::truncate(&name, inner_w.saturating_sub(plan.chars().count() + 1))
         );
-        let rest = inner_w.saturating_sub(name.chars().count() + plan.chars().count());
+        // The ACCOUNT TAG its sessions wear on the grid, ahead of the name.
+        let tag = crate::claude_accounts::tag_of(&account.id)
+            .filter(|_| account.provider == Provider::Claude)
+            .filter(|_| inner_w > name.chars().count() + plan.chars().count() + 4);
+        let tag_span = tag.as_ref().map(|t| {
+            Span::styled(
+                format!(" {}", t.letters),
+                sel(Style::default().fg(t.color()).add_modifier(Modifier::BOLD)),
+            )
+        });
+        let tag_w = tag.as_ref().map_or(0, |t| t.letters.chars().count() + 1);
+        let rest = inner_w.saturating_sub(name.chars().count() + plan.chars().count() + tag_w);
         lines.push(Line::from(vec![
+            tag_span.unwrap_or_else(|| Span::raw("")),
             Span::styled(
                 name,
                 sel(Style::default()

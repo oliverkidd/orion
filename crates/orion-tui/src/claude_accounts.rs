@@ -107,6 +107,7 @@ mod store {
 
     static KNOWN: Mutex<BTreeMap<PathBuf, Known>> = Mutex::new(BTreeMap::new());
     static SHORT: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+    static TAGS: Mutex<BTreeMap<String, AccountTag>> = Mutex::new(BTreeMap::new());
 
     pub(super) fn known<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Known>) -> T) -> T {
         f(&mut KNOWN.lock().unwrap_or_else(|e| e.into_inner()))
@@ -114,6 +115,10 @@ mod store {
 
     pub(super) fn short<T>(f: impl FnOnce(&mut BTreeMap<String, String>) -> T) -> T {
         f(&mut SHORT.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    pub(super) fn tags<T>(f: impl FnOnce(&mut BTreeMap<String, AccountTag>) -> T) -> T {
+        f(&mut TAGS.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     static MACHINE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -131,6 +136,7 @@ mod store {
     thread_local! {
         static KNOWN: RefCell<BTreeMap<PathBuf, Known>> = const { RefCell::new(BTreeMap::new()) };
         static SHORT: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+        static TAGS: RefCell<BTreeMap<String, AccountTag>> = const { RefCell::new(BTreeMap::new()) };
         static MACHINE: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }
 
@@ -140,6 +146,10 @@ mod store {
 
     pub(super) fn short<T>(f: impl FnOnce(&mut BTreeMap<String, String>) -> T) -> T {
         SHORT.with(|cell| f(&mut cell.borrow_mut()))
+    }
+
+    pub(super) fn tags<T>(f: impl FnOnce(&mut BTreeMap<String, AccountTag>) -> T) -> T {
+        TAGS.with(|cell| f(&mut cell.borrow_mut()))
     }
 
     pub(super) fn machine<T>(f: impl FnOnce(&mut Vec<PathBuf>) -> T) -> T {
@@ -254,6 +264,27 @@ pub fn refresh_now() -> bool {
     store::short(|short| {
         if *short != names {
             *short = names;
+            changed = true;
+        }
+    });
+    let tags = if accounts.len() > 1 {
+        let seeds: Vec<(String, String)> = accounts
+            .iter()
+            .map(|(id, name, record)| {
+                let email = match state_of(record) {
+                    Some(SignIn::As(email)) => Some(email),
+                    _ => None,
+                };
+                (id.clone(), tag_seed(name.as_deref(), email.as_deref(), id))
+            })
+            .collect();
+        account_tags(&seeds, &cfg.account_tags)
+    } else {
+        BTreeMap::new()
+    };
+    store::tags(|known| {
+        if *known != tags {
+            *known = tags;
             changed = true;
         }
     });
@@ -449,6 +480,140 @@ pub fn short_name(kind: AgentKind, custom: Option<&str>) -> Option<String> {
         _ => kind.as_str(),
     };
     store::short(|short| short.get(id).cloned())
+}
+
+// ---- the ACCOUNT TAG: two letters a row wears for its account ----
+
+/// The two letters a session row wears after its status dot to say which
+/// Claude account it runs on, and the tint they are drawn in, on a
+/// machine with more than one account. Fixed width, so a column of them
+/// lines up and the model and effort beside them never move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountTag {
+    pub letters: String,
+    /// An index into [`crate::theme::ACCOUNT_TINTS`].
+    pub tint: usize,
+}
+
+impl AccountTag {
+    pub fn color(&self) -> ratatui::style::Color {
+        let tints = crate::theme::ACCOUNT_TINTS;
+        tints[self.tint % tints.len()]
+    }
+}
+
+/// How many letters an [`AccountTag`] has.
+pub const TAG_LEN: usize = 2;
+
+/// What one account's tag is made from: the letters of its name, else of
+/// its email's local part, else of its id — lowercase, letters and digits
+/// only. `Work Laptop` → `wl…` (each word's first letter first), `Ops` →
+/// `ops`, `alex.kidd@x.io` → `alexkidd`.
+fn tag_seed(name: Option<&str>, email: Option<&str>, id: &str) -> String {
+    let clean = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    if let Some(name) = name {
+        let words: Vec<String> = name
+            .split_whitespace()
+            .map(clean)
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.len() > 1 {
+            let initials: String = words.iter().filter_map(|w| w.chars().next()).collect();
+            return initials + &words.concat();
+        }
+        if let Some(word) = words.into_iter().next() {
+            return word;
+        }
+    }
+    if let Some(local) = email.and_then(|e| e.split('@').next()) {
+        let local = clean(local);
+        if !local.is_empty() {
+            return local;
+        }
+    }
+    clean(id)
+}
+
+/// Every account's tag, from the seeds in registry order (the default
+/// account first, so it keeps the first tint): the seed's first two
+/// letters, or — when an account earlier in the list already has those —
+/// its first letter with a later one, then with a digit. An override the
+/// user set in `account_tags` wins, as written.
+fn account_tags(
+    seeds: &[(String, String)],
+    overrides: &BTreeMap<String, crate::config::AccountTagOverride>,
+) -> BTreeMap<String, AccountTag> {
+    let mut taken: Vec<String> = overrides
+        .values()
+        .filter_map(|o| o.tag.as_deref().map(fit_tag))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (index, (id, seed)) in seeds.iter().enumerate() {
+        let custom = overrides.get(id);
+        let letters = match custom.and_then(|o| o.tag.as_deref()) {
+            Some(tag) => fit_tag(tag),
+            None => {
+                let picked = pick_letters(seed, &taken);
+                taken.push(picked.clone());
+                picked
+            }
+        };
+        let tint = custom.and_then(|o| o.tint).unwrap_or(index);
+        out.insert(id.clone(), AccountTag { letters, tint });
+    }
+    out
+}
+
+/// A tag the user typed, held to [`TAG_LEN`] characters and padded out
+/// to them, so the column stays put.
+fn fit_tag(tag: &str) -> String {
+    let mut letters: String = tag.trim().chars().take(TAG_LEN).collect();
+    while letters.chars().count() < TAG_LEN {
+        letters.push(' ');
+    }
+    letters
+}
+
+/// The first pair of letters from `seed` that no tag in `taken` has.
+fn pick_letters(seed: &str, taken: &[String]) -> String {
+    let chars: Vec<char> = seed.chars().collect();
+    let Some(&first) = chars.first() else {
+        return fit_tag("?");
+    };
+    let candidates = chars
+        .iter()
+        .skip(1)
+        .map(|&second| format!("{first}{second}"))
+        .chain((2..=9).map(|n| format!("{first}{n}")));
+    candidates
+        .into_iter()
+        .find(|c| !taken.contains(c))
+        .unwrap_or_else(|| fit_tag(&first.to_string()))
+}
+
+/// The tag for a session's harness: an [`AccountTag`] when it runs on a
+/// Claude account on a machine with more than one, None everywhere else
+/// — one account, any other harness — and the row keeps its width.
+pub fn account_tag(kind: AgentKind, custom: Option<&str>) -> Option<AccountTag> {
+    match kind {
+        AgentKind::Custom => tag_of(custom?),
+        _ => tag_of(kind.as_str()),
+    }
+}
+
+/// [`account_tag`] by the account's registry id.
+pub fn tag_of(id: &str) -> Option<AccountTag> {
+    store::tags(|tags| tags.get(id.trim()).cloned())
+}
+
+/// Whether any account has a tag: a machine with more than one.
+pub fn any_tags() -> bool {
+    store::tags(|tags| !tags.is_empty())
 }
 
 /// The sessions that run on extra account `id`, archived ones too: what
@@ -1229,6 +1394,71 @@ pub fn remove(id: &str, trash: bool) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{account_tags, tag_seed, AccountTag};
+    use crate::config::AccountTagOverride;
+    use std::collections::BTreeMap as Map;
+
+    fn tags_of(seeds: &[(&str, &str)], overrides: &Map<String, AccountTagOverride>) -> Vec<String> {
+        let seeds: Vec<(String, String)> = seeds
+            .iter()
+            .map(|(id, seed)| (id.to_string(), seed.to_string()))
+            .collect();
+        let tags = account_tags(&seeds, overrides);
+        seeds
+            .iter()
+            .map(|(id, _)| tags[id].letters.clone())
+            .collect()
+    }
+
+    #[test]
+    fn tag_seeds_come_from_the_name_then_the_email_then_the_id() {
+        assert!(tag_seed(Some("Work Laptop"), Some("a@b.co"), "claude-2").starts_with("wl"));
+        assert_eq!(tag_seed(Some("Ops"), None, "claude-2"), "ops");
+        assert_eq!(tag_seed(None, Some("Rob.Kidd@x.io"), "claude-2"), "robkidd");
+        assert_eq!(tag_seed(None, None, "claude-2"), "claude2");
+    }
+
+    #[test]
+    fn tags_never_collide_and_keep_two_columns() {
+        let tags = tags_of(
+            &[
+                ("claude", "oliver"),
+                ("claude-2", "olive"),
+                ("claude-3", "o"),
+            ],
+            &Map::new(),
+        );
+        assert_eq!(tags, ["ol", "oi", "o2"]);
+        assert!(tags.iter().all(|t| t.chars().count() == super::TAG_LEN));
+    }
+
+    #[test]
+    fn an_override_wins_and_is_never_taken_by_another() {
+        let mut overrides = Map::new();
+        overrides.insert(
+            "claude-2".to_string(),
+            AccountTagOverride {
+                tag: Some("ol".into()),
+                tint: Some(4),
+            },
+        );
+        let seeds = [("claude", "oliver"), ("claude-2", "work")];
+        assert_eq!(tags_of(&seeds, &overrides), ["oi", "ol"]);
+        let seeds: Vec<(String, String)> = seeds
+            .iter()
+            .map(|(id, seed)| (id.to_string(), seed.to_string()))
+            .collect();
+        let tags = account_tags(&seeds, &overrides);
+        assert_eq!(
+            tags["claude-2"],
+            AccountTag {
+                letters: "ol".into(),
+                tint: 4
+            }
+        );
+        assert_eq!(tags["claude"].tint, 0, "registry order picks the rest");
+    }
+
     use super::*;
 
     /// A temp home holding the default account's dir, its record in
@@ -1934,7 +2164,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(cfg.section_title("claude-2"), "Claude (a@b.co) · ~/.claude-2");
             assert_eq!(
                 cfg.account_value(&AccountRow::Account("claude-2".into())),
-                "on · ~/.claude-2 · same as ~/.claude"
+                "on · ~/.claude-2 · same as ~/.claude · tag a3"
             );
             assert_eq!(cfg.account_value(&AccountRow::Add), "~/.claude-3");
             let rows = crate::config::settings_rows(crate::config::agents_tab(), 0);

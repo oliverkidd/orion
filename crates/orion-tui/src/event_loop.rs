@@ -30376,8 +30376,8 @@ diff --git a/src/c.rs b/src/c.rs
             for needle in [
                 "Claude accounts",
                 "Claude (a@b.co)",
-                "[on · ~/.claude · same as ~/.claude-2]",
-                "[on · ~/.claude-2 · same as ~/.claude]",
+                "[on · ~/.claude · same as ~/.claude-2 · tag a2]",
+                "[on · ~/.claude-2 · same as ~/.claude · tag a3]",
                 "Add account",
                 "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
                 "private browser window",

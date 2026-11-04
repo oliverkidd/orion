@@ -24,6 +24,19 @@ use ratatui::style::Color;
 /// gray the setting exists to get away from.
 pub const BLACK_BACKGROUND: Color = Color::Rgb(0, 0, 0);
 
+/// The tints an ACCOUNT TAG is drawn in, one an account in registry
+/// order (`crate::claude_accounts::AccountTag`). Fixed 256-color values
+/// like the status colors, and clear of them: no red (needs you), gold
+/// (working) or purple (merged), so a tag never reads as a status.
+pub const ACCOUNT_TINTS: [Color; 6] = [
+    Color::Indexed(75),  // blue
+    Color::Indexed(211), // pink
+    Color::Indexed(180), // tan
+    Color::Indexed(79),  // sea green
+    Color::Indexed(152), // pale cyan
+    Color::Indexed(150), // sage
+];
+
 /// Names the settings overlay cycles through; `by_name` accepts them
 /// case-insensitively and falls back to the first entry.
 pub const THEMES: &[&str] = &[

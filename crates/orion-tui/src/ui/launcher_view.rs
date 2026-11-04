@@ -1614,6 +1614,7 @@ fn draw_list_row(
     };
     struct Entry {
         lead: Span<'static>,
+        tag: Option<Span<'static>>,
         name: String,
         name_style: Style,
         ramp: Option<[Color; 3]>,
@@ -1643,6 +1644,7 @@ fn draw_list_row(
             };
             Entry {
                 lead: look.dot,
+                tag: account_tag_span(a, look.quiet),
                 name: a.name.clone(),
                 name_style: look.name_style,
                 ramp: look.ramp,
@@ -1657,6 +1659,7 @@ fn draw_list_row(
         }
         crate::launcher::Card::Terminal(t) => Entry {
             lead: terminal_mark(t, th),
+            tag: None,
             name: t.name.clone(),
             name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
             ramp: None,
@@ -1680,6 +1683,17 @@ fn draw_list_row(
     };
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
+    // The ACCOUNT TAG column, on every row while the machine has more
+    // than one Claude account — blank on a row that runs on none — so
+    // the names after it line up down the whole grid.
+    if crate::claude_accounts::any_tags() && room > ACCOUNT_TAG_W + 8 {
+        spans.push(
+            e.tag
+                .clone()
+                .unwrap_or_else(|| Span::raw(" ".repeat(ACCOUNT_TAG_W))),
+        );
+        room -= ACCOUNT_TAG_W;
+    }
     // The badge at the right end, while the name keeps a few letters.
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
@@ -1724,6 +1738,21 @@ fn draw_list_row(
         line = line.style(Style::default().bg(th.focus_tint));
     }
     line.render(r, buf);
+}
+
+/// Columns the ACCOUNT TAG takes on a row: its letters and a space.
+pub(crate) const ACCOUNT_TAG_W: usize = crate::claude_accounts::TAG_LEN + 1;
+
+/// The ACCOUNT TAG `a` wears, letters and a trailing space, in its
+/// account's tint — or in `quiet` on an archived row, which says nothing
+/// in color. None off a Claude account, or with only one.
+pub(crate) fn account_tag_span(a: &orion_core::Agent, quiet: Color) -> Option<Span<'static>> {
+    let tag = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref())?;
+    let color = if a.archived { quiet } else { tag.color() };
+    Some(Span::styled(
+        format!("{} ", tag.letters),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// Draw something the window's edges may cut — a card half scrolled off
@@ -2518,9 +2547,13 @@ fn draw_card(
     }
 
     let (ago, name_max) = fit_ago(ago, width);
-    let name = truncate(&a.name, name_max.saturating_sub(2));
+    // The ACCOUNT TAG between the dot and the name, as on a LIST row.
+    let tag = account_tag_span(a, quiet).filter(|_| name_max > ACCOUNT_TAG_W + 6);
+    let tag_w = tag.as_ref().map_or(0, |_| ACCOUNT_TAG_W);
+    let name = truncate(&a.name, name_max.saturating_sub(2 + tag_w));
     let mut first = vec![dot];
-    let used = name.chars().count() + 2;
+    first.extend(tag);
+    let used = name.chars().count() + 2 + tag_w;
     first.extend(status_name_spans(name, name_style, ramp, app.sweep_phase()));
     if !ago.is_empty() {
         let ago = ago.trim_start().to_string();
@@ -4934,6 +4967,58 @@ mod tests {
                 a.cloud_session_id = Some("c1".into());
                 a.model = Some("opus".into());
                 assert_eq!(list_runs_line(&a, &mut None), "cloud high");
+            })
+        });
+    }
+
+    /// With two Claude accounts every LIST row and card wears its
+    /// account's two-letter tag right after the status dot; with one, no
+    /// row does.
+    #[test]
+    fn rows_wear_their_accounts_tag_with_two_accounts() {
+        let home = tempfile::tempdir().unwrap();
+        let two = home.path().join(".claude-2");
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            two.join(".claude.json"),
+            serde_json::json!({"oauthAccount": {"emailAddress": "rk@b.co", "accountUuid": "u"}})
+                .to_string(),
+        )
+        .unwrap();
+        let config = home.path().join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let places = crate::claude_accounts::Places {
+            home: Some(home.path().to_path_buf()),
+            default_dir: Some(home.path().join(".claude")),
+            default_record: Some(orion_core::claude_account::Record {
+                file: home.path().join(".claude.json"),
+                legacy: home.path().join(".claude/.config.json"),
+            }),
+        };
+        crate::claude_accounts::with_places(places, || {
+            crate::config::with_config_path(config, || {
+                crate::claude_accounts::refresh_now();
+                let mut app = a_tree();
+                select(&mut app, "api");
+                app.tree.agents[0].kind = orion_core::AgentKind::Custom;
+                app.tree.agents[0].custom_harness = Some("claude-2".into());
+                let body = Rect::new(0, 0, 100, 30);
+                for list in [true, false] {
+                    app.launcher_list = list;
+                    let lines = drawn_lines(&mut app, body);
+                    let line = lines
+                        .iter()
+                        .find(|l| l.contains("s0"))
+                        .expect("the session's line");
+                    assert!(line.contains("rk s0"), "list {list}: {line:?}");
+                }
             })
         });
     }
