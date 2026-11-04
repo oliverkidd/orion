@@ -361,8 +361,17 @@ pub struct PropPick {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreePick {
     pub issues: Vec<LinearIssue>,
-    pub branches: Vec<String>,
+    /// The checkouts it offers, in the grid's band order, each with the
+    /// branch a link waits on.
+    pub worktrees: Vec<PickWorktree>,
     pub selected: usize,
+}
+
+/// One checkout the worktree picker offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickWorktree {
+    pub id: orion_core::WorktreeId,
+    pub branch: String,
 }
 
 impl LinearIssue {
@@ -3055,15 +3064,17 @@ fn open_worktree_pick(app: &mut App) {
     let Some(Overlay::Linear(view)) = &app.overlay else {
         return;
     };
-    let mut worktrees: Vec<&orion_core::Worktree> = app
-        .tree
-        .worktrees
-        .iter()
-        .filter(|w| w.project_id == view.project && !w.is_main && !w.branch.is_empty())
+    // The grid's own order, so a checkout sits where its band does.
+    let worktrees: Vec<PickWorktree> = app
+        .worktrees_in_band_order(&view.project)
+        .into_iter()
+        .filter(|w| !w.is_main && !w.branch.is_empty() && !app.is_placeholder_worktree(&w.id))
+        .map(|w| PickWorktree {
+            id: w.id.clone(),
+            branch: w.branch.clone(),
+        })
         .collect();
-    worktrees.sort_by_key(|w| w.sort_order);
-    let branches: Vec<String> = worktrees.iter().map(|w| w.branch.clone()).collect();
-    if branches.is_empty() {
+    if worktrees.is_empty() {
         app.flash = Some(crate::flash::Flash::failed(format!(
             "{} has no worktree to link to",
             view.project_name
@@ -3074,7 +3085,7 @@ fn open_worktree_pick(app: &mut App) {
         view.filter_pick = None;
         view.worktree_pick = Some(WorktreePick {
             issues,
-            branches,
+            worktrees,
             selected: 0,
         });
     }
@@ -3088,7 +3099,7 @@ fn handle_worktree_pick_key(app: &mut App, key: KeyEvent) {
     let Some(pick) = &mut view.worktree_pick else {
         return;
     };
-    let n = pick.branches.len();
+    let n = pick.worktrees.len();
     match key.code {
         KeyCode::Esc => view.worktree_pick = None,
         KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, n),
@@ -3110,7 +3121,7 @@ fn link_worktree(app: &mut App) {
     let Some(pick) = view.worktree_pick.take() else {
         return;
     };
-    let Some(branch) = pick.branches.get(pick.selected) else {
+    let Some(branch) = pick.worktrees.get(pick.selected).map(|w| &w.branch) else {
         return;
     };
     // Spent, as a ⌘U attach spends them.
@@ -4039,7 +4050,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         let me = app.linear.get(&view.project).and_then(|l| l.me_id());
         draw_prop_pick(f, body_inner, pick, me, th);
     } else if let Some(pick) = &view.worktree_pick {
-        draw_worktree_pick(f, body_inner, pick, &view.project, &app.linear_links, th);
+        draw_worktree_pick(f, body_inner, app, pick, &view.project, th);
     } else if let Some(pick) = &mut filter_pick {
         let facets = pick_facets(&placed, view.tab, th);
         pick.clamp(&facets);
@@ -4396,38 +4407,184 @@ fn draw_prop_pick(f: &mut Frame, area: Rect, pick: &PropPick, me: Option<&str>, 
 fn draw_worktree_pick(
     f: &mut Frame,
     area: Rect,
+    app: &App,
     pick: &WorktreePick,
     project: &ProjectId,
-    links: &LinkStore,
     th: Theme,
 ) {
-    let rows = pick.branches.iter().map(|branch| {
-        let mut spans = vec![Span::raw(branch.clone())];
-        let waiting = links.pending(project, branch);
-        if !waiting.is_empty() {
-            spans.push(Span::styled(
-                format!("  {} waiting", waiting.join(", ")),
-                Style::default().fg(th.dim),
-            ));
-        }
-        // Refused too often to be tried again: linking it here again does.
-        let refused = links.gave_up_on(project, branch);
-        if !refused.is_empty() {
-            spans.push(Span::styled(
-                format!("  {} · couldn't attach", refused.join(", ")),
-                Style::default().fg(th.dim),
-            ));
-        }
-        spans
-    });
-    draw_side_pick(
+    let links = &app.linear_links;
+    let width = usize::from(area.width);
+    let groups: Vec<PickGroup> = pick
+        .worktrees
+        .iter()
+        .map(|w| {
+            let branch = &w.branch;
+            let mut head = vec![Span::raw(format!("⎇ {branch}"))];
+            let waiting = links.pending(project, branch);
+            if !waiting.is_empty() {
+                head.push(Span::styled(
+                    format!("  {} waiting", waiting.join(", ")),
+                    Style::default().fg(th.dim),
+                ));
+            }
+            // Refused too often to be tried again: linking it here again does.
+            let refused = links.gave_up_on(project, branch);
+            if !refused.is_empty() {
+                head.push(Span::styled(
+                    format!("  {} · couldn't attach", refused.join(", ")),
+                    Style::default().fg(th.dim),
+                ));
+            }
+            PickGroup {
+                head,
+                sessions: pick_session_lines(
+                    app,
+                    &w.id,
+                    width.saturating_sub(PICK_INDENT.len()),
+                    th,
+                ),
+                dormant: app.worktree_dormant(&w.id),
+            }
+        })
+        .collect();
+    draw_grouped_pick(
         f,
         area,
         format!("Attach {} to the PR opened from…", ids_of(&pick.issues)),
-        rows,
+        &groups,
         pick.selected,
         th,
     );
+}
+
+/// How far a session's line sits in under its checkout's.
+const PICK_INDENT: &str = "   ";
+/// The most sessions a checkout lists under it in the worktree picker;
+/// the rest are a `+N more` line.
+const PICK_SESSIONS_MAX: usize = 3;
+
+/// One checkout in the worktree picker: its line, its sessions' lines
+/// under it, and whether it stands in the DORMANT group.
+struct PickGroup<'a> {
+    head: Vec<Span<'a>>,
+    sessions: Vec<Vec<Span<'static>>>,
+    dormant: bool,
+}
+
+/// The lines under checkout `worktree` in the worktree picker: each
+/// unarchived session the way the grid's LIST row draws it, most recent
+/// first, [`PICK_SESSIONS_MAX`] of them and a `+N more` after; `no
+/// sessions` when it has none.
+fn pick_session_lines(
+    app: &App,
+    worktree: &orion_core::WorktreeId,
+    width: usize,
+    th: Theme,
+) -> Vec<Vec<Span<'static>>> {
+    let mut agents: Vec<&orion_core::Agent> = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| &a.worktree_id == worktree && !a.archived)
+        .collect();
+    if agents.is_empty() {
+        return vec![vec![Span::styled(
+            format!("{PICK_INDENT}no sessions"),
+            Style::default().fg(th.faint),
+        )]];
+    }
+    agents.sort_by_key(|a| crate::app::recency_key(a));
+    let mut lines: Vec<Vec<Span<'static>>> = agents
+        .iter()
+        .take(PICK_SESSIONS_MAX)
+        .map(|a| {
+            let mut line = vec![Span::raw(PICK_INDENT)];
+            line.extend(crate::ui::session_line(app, a, width));
+            line
+        })
+        .collect();
+    if agents.len() > PICK_SESSIONS_MAX {
+        lines.push(vec![Span::styled(
+            format!("{PICK_INDENT}+{} more", agents.len() - PICK_SESSIONS_MAX),
+            Style::default().fg(th.dim),
+        )]);
+    }
+    lines
+}
+
+/// [`draw_side_pick`] for items that take several lines each: `heading`
+/// in bold, then each group's line with its own lines under it, the
+/// selected group's every line wearing the cursor's bar, scrolled so the
+/// whole selected group is in view. A faint `dormant` line, with a row of
+/// air either side, stands over the first dormant group when live ones
+/// are above it, as on the grid.
+fn draw_grouped_pick(
+    f: &mut Frame,
+    area: Rect,
+    heading: String,
+    groups: &[PickGroup],
+    selected: usize,
+    th: Theme,
+) {
+    if let Some(row) = row_rect(area, 0) {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                heading,
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            row,
+        );
+    }
+    const HEAD_ROWS: u16 = 2;
+    let list = Rect {
+        y: area.y.saturating_add(HEAD_ROWS),
+        height: area.height.saturating_sub(HEAD_ROWS),
+        ..area
+    };
+    // Every line top to bottom, with the group it belongs to (None for
+    // the divider's lines).
+    let divider_at = groups
+        .iter()
+        .position(|g| g.dormant)
+        .filter(|&first| first > 0);
+    let mut lines: Vec<(Option<usize>, Vec<Span>)> = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        if divider_at == Some(i) {
+            let rule: String = "┄┄ dormant "
+                .chars()
+                .chain(std::iter::repeat('┄'))
+                .take(usize::from(list.width).saturating_sub(2))
+                .collect();
+            lines.push((None, Vec::new()));
+            lines.push((
+                None,
+                vec![Span::styled(rule, Style::default().fg(th.faint))],
+            ));
+            lines.push((None, Vec::new()));
+        }
+        lines.push((Some(i), group.head.clone()));
+        lines.extend(group.sessions.iter().map(|l| (Some(i), l.clone())));
+    }
+    let first = lines
+        .iter()
+        .position(|(g, _)| *g == Some(selected))
+        .unwrap_or(0);
+    let last = lines
+        .iter()
+        .rposition(|(g, _)| *g == Some(selected))
+        .unwrap_or(0);
+    let height = list.height as usize;
+    let start = if last < height {
+        0
+    } else {
+        first.min(last + 1 - height)
+    };
+    for (row_i, (group, spans)) in lines.into_iter().enumerate().skip(start) {
+        let Some(row) = row_rect(list, row_i - start) else {
+            break;
+        };
+        render_row(f, row, spans, group == Some(selected), true, th);
+    }
 }
 
 /// A picker in the reading pane's place: `heading` in bold, then `rows`
@@ -6238,6 +6395,9 @@ pub(crate) mod tests {
     #[test]
     fn cmd_period_links_the_marked_issues_to_a_worktree_without_a_pr() {
         let (mut app, _dir, mut rx) = paired_with_worktrees();
+        agent_in(&mut app, 1, orion_core::AgentStatus::Running);
+        app.tree.agents.last_mut().unwrap().name = "fx-agent".into();
+        app.tree.agents.last_mut().unwrap().worktree_id = orion_core::WorktreeId("w2".into());
         browse_marked(&mut app);
         assert!(hints(the_view(&app))
             .iter()
@@ -6248,15 +6408,32 @@ pub(crate) mod tests {
         );
         let view = the_view(&app);
         let pick = view.worktree_pick.as_ref().expect("the worktree picker");
-        assert_eq!(pick.branches, ["branch-41", "feature-x"]);
+        let branches: Vec<&str> = pick.worktrees.iter().map(|w| w.branch.as_str()).collect();
+        assert_eq!(
+            branches,
+            ["feature-x", "branch-41"],
+            "the grid's order: live first, then dormant"
+        );
         crate::hints::assert_hints_from(&hints(view), keys::ALL);
         let screen = shot(&mut app, 140, 40);
         assert!(
             screen.contains("Attach ENG-1, ENG-3 to the PR opened from…"),
             "{screen}"
         );
+        // Each checkout lists its sessions under it, as the grid does.
+        let lines: Vec<&str> = screen.lines().collect();
+        let head = lines
+            .iter()
+            .position(|l| l.contains("⎇ feature-x"))
+            .expect("feature-x's line");
+        assert!(lines[head + 1].contains("fx-agent"), "{screen}");
+        let idle = lines
+            .iter()
+            .position(|l| l.contains("⎇ branch-41"))
+            .expect("branch-41's line");
+        assert!(lines[idle + 1].contains("no sessions"), "{screen}");
+        assert!(lines[idle - 2].contains("dormant"), "{screen}");
 
-        press(&mut app, plain(KeyCode::Down));
         press(&mut app, plain(KeyCode::Enter));
         let view = the_view(&app);
         assert!(view.worktree_pick.is_none());
@@ -6348,6 +6525,9 @@ pub(crate) mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
+        // branch-41 is the second checkout: the grid's order is the
+        // order they were made in.
+        press(&mut app, plain(KeyCode::Down));
         let sent = attach_through(&mut app, &mut rx, |app| press(app, plain(KeyCode::Enter)));
         assert_eq!(sent, [attached("1", 41), attached("3", 41)]);
         assert_eq!(

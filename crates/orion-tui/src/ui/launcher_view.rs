@@ -1740,6 +1740,41 @@ fn draw_list_row(
     line.render(r, buf);
 }
 
+/// One session as a single line for a picker that lists checkouts with
+/// their sessions under them (the Linear worktree picker): the status
+/// mark, the ACCOUNT TAG, the name as the grid draws it, what it runs on
+/// and its last prompt — the LIST row's parts, without its columns or
+/// age, cut to `width`.
+pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Vec<Span<'static>> {
+    let th = app.theme;
+    let look = session_look(app, a, false, th);
+    let mut spans = vec![look.dot];
+    let mut used = 2;
+    if let Some(tag) = account_tag_span(a, look.quiet) {
+        used += ACCOUNT_TAG_W;
+        spans.push(tag);
+    }
+    let name = truncate(&a.name, width.saturating_sub(used).min(LIST_NAME_MAX));
+    used += name.chars().count();
+    spans.push(Span::styled(name, look.name_style));
+    let runs = list_runs_line(a, &mut None);
+    if !runs.is_empty() && width > used + LIST_GAP + 6 {
+        let runs = truncate(&runs, (width - used - LIST_GAP).min(LIST_RUNS_MAX));
+        used += LIST_GAP + runs.chars().count();
+        spans.push(Span::raw(" ".repeat(LIST_GAP)));
+        spans.push(Span::styled(runs, Style::default().fg(th.dim)));
+    }
+    if let Some(prompt) = crate::launcher::last_prompt(a).filter(|p| !p.trim().is_empty()) {
+        if width > used + LIST_GAP + 2 + 6 {
+            let prompt = truncate(prompt, width - used - LIST_GAP - 2);
+            spans.push(Span::raw(" ".repeat(LIST_GAP)));
+            spans.push(Span::styled("› ", Style::default().fg(th.dim)));
+            spans.push(Span::styled(prompt, Style::default().fg(look.prompt)));
+        }
+    }
+    spans
+}
+
 /// Columns the ACCOUNT TAG takes on a row: its letters and a space.
 pub(crate) const ACCOUNT_TAG_W: usize = crate::claude_accounts::TAG_LEN + 1;
 

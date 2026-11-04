@@ -15,6 +15,7 @@ use ratatui::Frame;
 mod diff_view;
 pub(crate) mod footer;
 mod launcher_view;
+pub(crate) use launcher_view::session_line;
 
 pub(crate) use diff_view::diff_keys;
 use footer::draw_footer;
