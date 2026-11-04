@@ -1,0 +1,21 @@
+crates/orion-tui/src/event_loop.rs
+  s_a9e1095d76a291::t_ff1162488fc9a8 2118-2119,2195,2205
+  s_a9e1095d76a291::t_617584e354100f 17631-17661
+  s_a9e1095d76a291::t_eb70ab0d6c2629 1820-1822,1933,2113-2117,2120-2138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2612b21864e6aa0c4eb7b8eedabe8f7ba691ab8e",
+  "prompts": {},
+  "sessions": {
+    "s_a9e1095d76a291": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "56f0ac0d-29af-4d92-8082-1489e6a77a59",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
