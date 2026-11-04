@@ -19,20 +19,28 @@
 //!   session at work in a checkout of the PR's branch — any, not only an
 //!   `autofix-<n>` — holds the ask back until it is done, and a PR already
 //!   being asked about is not asked about twice.
-//! * **Asking.** **When a PR breaks** (`Config::pr_autofix`): `ask` queues
-//!   the AUTOFIX MODAL — the issues as a checklist, the detected ones
-//!   ticked, and a note — which opens only on a free screen ([`tick`]: no
-//!   modal up, no terminal pane taking keys), with a desktop notification
-//!   while the window is away; `auto` sends at once, until
-//!   [`AUTO_ATTEMPTS`] tries in a row have not turned the PR green, when it
-//!   asks instead. `⌘G` in the PULL REQUESTS MODAL ([`open_for`]) opens the
-//!   same form for any PR, whatever the setting.
-//! * **Sending.** [`dispatch`] launches a PR SESSION (`CreatePrAgent`, so
-//!   the DAEMON finds or cuts the PR's worktree) named `autofix-<n>` on the
-//!   default agent at the **Autofix model** / **Autofix effort**
-//!   (`Config::autofix_launch`), its first prompt [`prompt`]: the pull
-//!   request and what failed, under orion's own instructions or an AGENT
-//!   PRESET's text in their place (**Autofix instructions**).
+//! * **Sending, unasked.** **Auto-fix PRs** (`Config::pr_autofix`, on by
+//!   default) sends the agent the moment a breakage has settled — no modal,
+//!   nothing to confirm — until [`AUTO_ATTEMPTS`] tries in a row have not
+//!   turned the PR green, when it stops and says so (a flash, and a desktop
+//!   notification while the window is away). `⌘G` in the PULL REQUESTS
+//!   MODAL ([`open_for`]) still opens the AUTOFIX MODAL for any PR — the
+//!   issues as a checklist and a note — whatever the setting.
+//! * **As the worktree's agent.** [`dispatch`] launches a PR SESSION
+//!   (`CreatePrAgent`, so the DAEMON finds or cuts the PR's worktree) named
+//!   `autofix-<n>` on the harness, account, model and effort of the session
+//!   that did the work on the branch ([`source_agent`]) — the **Autofix
+//!   fallback model** / **effort** only when there is none — its first
+//!   prompt [`prompt`]: the pull request and what failed, wrapped in the
+//!   **PR autofix** SYSTEM PRESET's text, or orion's own instructions while
+//!   that holds none.
+//! * **Standing down.** Another session live on the branch — mid-turn, or
+//!   waiting on the user — does not hold the agent back. It is told where
+//!   that session's conversation is ([`stand_down_preamble`]) and reads it
+//!   first: when that session is already on this fix, the agent runs
+//!   `orion autofix stand-down "<why>"`, which archives it, and the flash
+//!   says why ([`note_stand_downs`]). A live session whose conversation
+//!   can't be read holds it back instead, as every busy one used to.
 //!
 //! Unit vs e2e is read off each check's name ([`classify`]) — GitHub has
 //! no such distinction.
@@ -53,7 +61,7 @@ use ratatui::text::Span;
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -68,12 +76,11 @@ pub const SETTLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// asks.
 pub const AUTO_ATTEMPTS: u8 = 3;
 
-/// **When a PR breaks** (Settings → Review).
+/// **Auto-fix PRs** (Settings → Review): on or off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
     Off,
-    Ask,
     Auto,
 }
 
@@ -81,17 +88,16 @@ impl Mode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Mode::Off => "off",
-            Mode::Ask => "ask",
             Mode::Auto => "auto",
         }
     }
 
-    /// The stored word; anything else is off.
+    /// The stored word: `off` is off, and anything else on — the `ask` an
+    /// older orion stored too, which sends now that nothing asks.
     pub fn parse(word: &str) -> Self {
         match word.trim().to_ascii_lowercase().as_str() {
-            "ask" => Mode::Ask,
-            "auto" => Mode::Auto,
-            _ => Mode::Off,
+            "off" => Mode::Off,
+            _ => Mode::Auto,
         }
     }
 }
@@ -358,8 +364,12 @@ pub struct State {
     pub ledger: HashMap<String, Record>,
     /// By PR URL.
     pub watching: HashMap<String, Watch>,
-    /// Asks waiting for a free screen, oldest first.
-    pub queue: VecDeque<AutofixForm>,
+    /// PRs whose send a live session nobody can read is holding back,
+    /// already said once ([`land_detail`]).
+    pub held: HashSet<String>,
+    /// Every stood-down `autofix-<n>` already flashed — and, before the
+    /// first look, every one archived by an earlier run (`None`).
+    pub stood_down: Option<HashSet<orion_core::AgentId>>,
     /// The ledger changed since the PR cache was last written.
     pub dirty: bool,
     /// `⌘G` asked for this pull request's form, waiting on a fresh body.
@@ -382,25 +392,19 @@ impl State {
         }
     }
 
-    /// Stop watching `url` and drop any ask about it still waiting.
+    /// Stop watching `url`.
     fn forget(&mut self, url: &str) {
         self.watching.remove(url);
-        self.queue.retain(|form| form.pr.url != url);
+        self.held.remove(url);
     }
-}
-
-/// Whether `url` is being asked about: queued, or the form on screen.
-fn asking(app: &App, url: &str) -> bool {
-    app.autofix.queue.iter().any(|form| form.pr.url == url)
-        || matches!(&app.overlay, Some(Overlay::Autofix(form)) if form.pr.url == url)
 }
 
 // ---- detection ----
 
 /// A project's open-PR list landed: watch each of the user's PRs in
 /// trouble that this breakage has not been handled for, read a watched
-/// one's body again now that its row moved, and forget the attempts — and
-/// any waiting ask — of each one that has gone green. Where each stands is
+/// one's body again now that its row moved, and forget the attempts of
+/// each one that has gone green. Where each stands is
 /// `App::prs`'s word, the list already observed into it. Green is known,
 /// never guessed ([`PrStatus::is_green`]): while GitHub has not said
 /// whether the branch merges, or checks are still running, a watch and its
@@ -435,7 +439,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         if status.trouble().is_none() {
             continue;
         }
-        if app.autofix_mode == Mode::Off || asking(app, &pr.url) {
+        if app.autofix_mode == Mode::Off {
             continue;
         }
         let handled = app
@@ -457,13 +461,6 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         .iter()
         .filter(|(url, w)| &w.project == project && !open.contains(url.as_str()))
         .map(|(url, _)| url.clone())
-        .chain(
-            app.autofix
-                .queue
-                .iter()
-                .filter(|f| &f.project == project && !open.contains(f.pr.url.as_str()))
-                .map(|f| f.pr.url.clone()),
-        )
         .collect();
     for url in gone {
         app.autofix.forget(&url);
@@ -555,39 +552,70 @@ pub fn land_detail(
     let settling = diagnosis.running
         && !diagnosis.conflicts_only()
         && watch.first_seen.elapsed() < SETTLE_LIMIT;
-    if settling || branch_busy(app, &watch.project, &pr) {
+    if settling || fixer_on_it(app, &watch.project, &pr) {
+        app.autofix.recheck_later(url);
+        return;
+    }
+    // The branch's other live sessions, each with the conversation the
+    // agent reads before it touches anything — or, for one whose
+    // conversation can't be found, nothing sent yet.
+    let mut peers = Vec::new();
+    let mut unreadable = None;
+    for agent in live_on_branch(app, &watch.project, &pr) {
+        match transcript_of(agent) {
+            Some(transcript) => peers.push(Peer {
+                name: agent.name.clone(),
+                waiting: agent.status == AgentStatus::NeedsFeedback,
+                transcript,
+            }),
+            None => {
+                unreadable = Some(agent.name.clone());
+                break;
+            }
+        }
+    }
+    if let Some(name) = unreadable {
+        if app.autofix.held.insert(url.to_string()) {
+            app.flash = Some(Flash::note(format!(
+                "Autofix held for #{}: {name} is busy on its branch",
+                pr.number
+            )));
+            app.dirty = true;
+        }
         app.autofix.recheck_later(url);
         return;
     }
     app.autofix.watching.remove(url);
+    app.autofix.held.remove(url);
     let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
-    let form = AutofixForm::new(watch.project, pr, detail, status.health.conflicts);
-    if record.handled.as_ref() == Some(&form.fingerprint()) || asking(app, url) {
+    let mut form = AutofixForm::new(watch.project, pr, detail, status.health.conflicts);
+    if record.handled.as_ref() == Some(&form.fingerprint()) {
         return;
     }
     match app.autofix_mode {
         Mode::Off => {}
-        Mode::Auto if record.attempts < AUTO_ATTEMPTS => dispatch(app, form, out),
-        Mode::Ask | Mode::Auto => ask(app, form, record.attempts),
+        Mode::Auto if record.attempts < AUTO_ATTEMPTS => {
+            form.peers = peers;
+            dispatch(app, form, out);
+        }
+        Mode::Auto => give_up(app, &form, record.attempts),
     }
     app.dirty = true;
 }
 
-/// Queue `form` for the next free screen — saying why when `auto` has run
-/// out of tries — and tell the desktop while the window is away.
-fn ask(app: &mut App, mut form: AutofixForm, attempts: u8) {
-    if attempts >= AUTO_ATTEMPTS {
-        form.notice = Some(format!(
-            "autofix has tried {attempts} times without the checks going green"
-        ));
-    }
+/// [`AUTO_ATTEMPTS`] sends have not turned the PR green: say so — a flash,
+/// and the desktop while the window is away — and leave this breakage be
+/// until a push or a different failure.
+fn give_up(app: &mut App, form: &AutofixForm, attempts: u8) {
+    let text = format!(
+        "{} is still failing after {attempts} autofix runs: over to you",
+        form.pr.label()
+    );
     if app.may_notify_desktop() {
-        crate::event_loop::alerts::notify_text(
-            "Autofix",
-            &format!("{}: {}", form.pr.label(), form.diagnosis.summary()),
-        );
+        crate::event_loop::alerts::notify_text("Autofix", &text);
     }
-    app.autofix.queue.push_back(form);
+    app.flash = Some(Flash::failed(text));
+    app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
 }
 
 /// `⌘G`'s body landed: the form, over the PULL REQUESTS MODAL if it is
@@ -634,54 +662,115 @@ pub fn agent_name(number: u64) -> String {
     format!("autofix-{number}")
 }
 
-/// A session is at work (or waiting on the user) in one of `project`'s
-/// checkouts of `pr`'s branch — someone is already on it, so an autofix
-/// agent would only be a second pair of hands on the same branch. An
-/// autofix agent counts from the moment it is sent, before its first turn.
-fn branch_busy(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
+/// Whether `agent` works in one of `project`'s checkouts of `pr`'s branch.
+fn on_branch(app: &App, agent: &orion_core::Agent, project: &ProjectId, pr: &OpenPr) -> bool {
+    app.tree
+        .worktrees
+        .iter()
+        .any(|w| w.id == agent.worktree_id && &w.project_id == project && w.branch == pr.head)
+}
+
+/// An `autofix-<n>` for `pr` is already starting, at work or waiting on
+/// the user: there is never a second one on a pull request.
+fn fixer_on_it(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
     let fixer = agent_name(pr.number);
     app.tree.agents.iter().any(|agent| {
         !agent.archived
-            && match agent.status {
-                AgentStatus::Running | AgentStatus::NeedsFeedback => true,
-                AgentStatus::Fresh => agent.name == fixer,
-                _ => false,
-            }
-            && app.tree.worktrees.iter().any(|w| {
-                w.id == agent.worktree_id && &w.project_id == project && w.branch == pr.head
-            })
+            && agent.name == fixer
+            && matches!(
+                agent.status,
+                AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
+            )
+            && on_branch(app, agent, project, pr)
     })
 }
 
-/// The git beat: raise the oldest queued ask that still stands once the
-/// screen is free — no modal up, and no terminal pane taking keys, where an
-/// Enter meant for the agent would send this instead. Asks left over from
-/// before autofix was switched off are dropped, and one whose branch a
-/// session has started work on since goes back to being watched.
-pub fn tick(app: &mut App) {
-    if app.autofix_mode == Mode::Off {
-        app.autofix.queue.clear();
+/// The other sessions live on `pr`'s branch — mid-turn, or waiting on the
+/// user — that the agent checks with before it starts ([`Peer`]).
+fn live_on_branch<'a>(
+    app: &'a App,
+    project: &ProjectId,
+    pr: &OpenPr,
+) -> Vec<&'a orion_core::Agent> {
+    app.tree
+        .agents
+        .iter()
+        .filter(|agent| {
+            !agent.archived
+                && !agent.name.starts_with("autofix-")
+                && matches!(
+                    agent.status,
+                    AgentStatus::Running | AgentStatus::NeedsFeedback
+                )
+                && on_branch(app, agent, project, pr)
+        })
+        .collect()
+}
+
+/// Where Claude Code keeps `agent`'s conversation: its account's config
+/// dir, `projects/<cwd slug>/<session id>.jsonl` — looked for under every
+/// slug, as `orion-daemon`'s CONTINUE ON does. None off a Claude account,
+/// before the session has an id, or with no such file.
+fn transcript_of(agent: &orion_core::Agent) -> Option<PathBuf> {
+    let session = agent.session_id.as_deref()?;
+    let id = match agent.kind {
+        orion_core::AgentKind::Custom => agent.custom_harness.as_deref()?.trim().to_string(),
+        kind => kind.as_str().to_string(),
+    };
+    let entry = crate::config::Config::load().effective_harness_by_id(&id);
+    let dir = crate::claude_accounts::dir_of(&entry)?;
+    let file = format!("{session}.jsonl");
+    std::fs::read_dir(dir.join("projects"))
+        .ok()?
+        .flatten()
+        .map(|slug| slug.path().join(&file))
+        .find(|path| path.is_file())
+}
+
+/// The session whose harness, account, model and effort the agent copies:
+/// the one that did the work on the branch — the most recently active
+/// there, `autofix-<n>`s aside. None when nothing has run on it here.
+fn source_agent<'a>(
+    app: &'a App,
+    project: &ProjectId,
+    pr: &OpenPr,
+) -> Option<&'a orion_core::Agent> {
+    app.tree
+        .agents
+        .iter()
+        .filter(|a| {
+            !a.archived && !a.name.starts_with("autofix-") && on_branch(app, a, project, pr)
+        })
+        .max_by_key(|a| crate::app::last_interaction_ms(a))
+}
+
+/// The name `orion autofix stand-down` gives the session it archives,
+/// ahead of its reason: what [`note_stand_downs`] knows it by.
+pub const STOOD_DOWN: &str = "autofix · stood down: ";
+
+/// The git beat: flash each `autofix-<n>` that stood down since the last
+/// look, with its reason. The first look only takes note — those were
+/// archived before this run.
+pub fn note_stand_downs(app: &mut App) {
+    let down: Vec<(orion_core::AgentId, String)> = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| a.archived)
+        .filter_map(|a| {
+            let why = a.name.strip_prefix(STOOD_DOWN)?;
+            Some((a.id.clone(), why.to_string()))
+        })
+        .collect();
+    let Some(seen) = &mut app.autofix.stood_down else {
+        app.autofix.stood_down = Some(down.into_iter().map(|(id, _)| id).collect());
         return;
-    }
-    if app.overlay.is_some() || app.term_locked {
-        return;
-    }
-    while let Some(form) = app.autofix.queue.pop_front() {
-        let handled = app
-            .autofix
-            .ledger
-            .get(&form.pr.url)
-            .and_then(|r| r.handled.as_ref());
-        if handled == Some(&form.fingerprint()) {
-            continue;
+    };
+    for (id, why) in down {
+        if seen.insert(id) {
+            app.flash = Some(Flash::note(format!("Autofix stood down: {why}")));
+            app.dirty = true;
         }
-        if branch_busy(app, &form.project, &form.pr) {
-            watch(app, &form.project, &form.pr, Instant::now() + RECHECK);
-            continue;
-        }
-        app.overlay = Some(Overlay::Autofix(Box::new(form)));
-        app.dirty = true;
-        return;
     }
 }
 
@@ -882,6 +971,47 @@ pub struct AutofixForm {
     /// As of the last draw: the modal, and each row's rect, for the mouse.
     pub area: Rect,
     pub rows: Vec<(Rect, Row)>,
+    /// The branch's other live sessions, for an unasked send to check
+    /// with first ([`stand_down_preamble`]). Empty from `⌘G`, which the
+    /// user asked for.
+    pub peers: Vec<Peer>,
+}
+
+/// Another session live on the pull request's branch when the agent is
+/// sent, and where its conversation is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peer {
+    pub name: String,
+    /// Waiting on the user, rather than mid-turn.
+    pub waiting: bool,
+    pub transcript: PathBuf,
+}
+
+/// What the agent is told ahead of its task while other sessions are live
+/// on the branch: read the end of each one's conversation, and stand down
+/// — archiving itself, every file untouched — when one is already on this
+/// fix; else carry on, and look again before pushing. Empty with none.
+pub fn stand_down_preamble(peers: &[Peer], pr: &OpenPr) -> String {
+    if peers.is_empty() {
+        return String::new();
+    }
+    let sessions: Vec<String> = peers
+        .iter()
+        .map(|p| {
+            let state = if p.waiting {
+                "waiting on the user"
+            } else {
+                "working"
+            };
+            format!("- \"{}\" ({state}): {}", p.name, p.transcript.display())
+        })
+        .collect();
+    format!(
+        "Before you change anything, check the other sessions on this branch. Read the end of each one's conversation:\n\n{}\n\nIf any of them is doing work that will land on this same pull request (#{n}): editing, committing or pushing on `{head}` to fix or extend this change, or asking the user something about it, run `orion autofix stand-down \"<session name>: <one-line reason>\"` and stop. Do not edit any files first. If none is, carry on with the task below, and read those conversations once more before you push, standing down the same way if one has started on this fix since.",
+        sessions.join("\n"),
+        n = pr.number,
+        head = pr.head,
+    )
 }
 
 impl AutofixForm {
@@ -907,6 +1037,7 @@ impl AutofixForm {
             under: None,
             area: Rect::default(),
             rows: Vec::new(),
+            peers: Vec::new(),
         }
     }
 
@@ -944,8 +1075,11 @@ fn close(app: &mut App) -> Option<AutofixForm> {
     Some(form)
 }
 
-/// Send the agent: a PR SESSION named `autofix-<n>` on the default agent,
-/// told [`prompt`]. The ledger counts it and the PR stops being watched.
+/// Send the agent: a PR SESSION named `autofix-<n>`, on the harness,
+/// account, model and effort of the session that did the work on the
+/// branch ([`source_agent`]) — the Autofix fallbacks without one — told
+/// [`prompt`], under [`stand_down_preamble`] while other sessions are live
+/// there. The ledger counts it and the PR stops being watched.
 pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) {
     let Some(worktree) = app.root_worktree(&form.project) else {
         app.flash = Some(Flash::failed(
@@ -953,17 +1087,21 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         ));
         return;
     };
-    let cfg = crate::config::Config::load();
-    let (kind, custom, model, effort) = cfg.autofix_launch();
-    let named = cfg.autofix_preset.trim();
-    let preset = (!named.is_empty())
-        .then(|| {
-            crate::agent_presets::load()
-                .into_iter()
-                .find(|p| p.name.eq_ignore_ascii_case(named))
-        })
-        .flatten();
-    let text = prompt(
+    let (kind, custom, model, effort) = match source_agent(app, &form.project, &form.pr) {
+        Some(a) => (
+            a.kind,
+            a.custom_harness.clone(),
+            a.model.clone(),
+            a.effort.clone(),
+        ),
+        None => crate::config::Config::load().autofix_launch(),
+    };
+    // The PR autofix SYSTEM PRESET's text, or orion's own while it has none.
+    let preset = Some(crate::agent_presets::system(
+        crate::agent_presets::SystemPreset::PrAutofix,
+    ))
+    .filter(AgentPreset::has_wrapping);
+    let task = prompt(
         &form.pr,
         &form.refs,
         &form.diagnosis,
@@ -971,6 +1109,11 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         form.note.as_str(),
         preset.as_ref(),
     );
+    let text = [stand_down_preamble(&form.peers, &form.pr), task]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let draft = crate::app::AgentLaunchDraft {
         custom,
         name: agent_name(form.pr.number),
@@ -991,13 +1134,9 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         .filter(|i| form.picks[i.index()])
         .map(|i| i.label())
         .collect();
-    let missing = if !named.is_empty() && preset.is_none() {
-        format!(" (preset \"{named}\" is gone — built-in instructions)")
-    } else {
-        String::new()
-    };
     app.flash = Some(Flash::working(format!(
-        "Autofix sent to #{}: {}{missing}",
+        "{} started on #{}: {}",
+        agent_name(form.pr.number),
         form.pr.number,
         sent.join(", ").to_lowercase()
     )));
@@ -1431,6 +1570,7 @@ mod tests {
             prefix: "Do it my way.".into(),
             postfix: "Then push.".into(),
             skip_task: true,
+            system: None,
         };
         let text = prompt(
             &pr(),
@@ -1456,9 +1596,14 @@ mod tests {
 
     #[test]
     fn modes_read_leniently() {
-        assert_eq!(Mode::parse("ASK"), Mode::Ask);
+        assert_eq!(
+            Mode::parse("ASK"),
+            Mode::Auto,
+            "an older orion's ask sends now"
+        );
         assert_eq!(Mode::parse("auto"), Mode::Auto);
-        assert_eq!(Mode::parse("sometimes"), Mode::Off);
+        assert_eq!(Mode::parse(" Off "), Mode::Off);
+        assert_eq!(Mode::parse(""), Mode::Auto, "on unless switched off");
     }
 
     // ---- detection, on an App ----
@@ -1532,11 +1677,61 @@ mod tests {
             crate::fetch::Asked::At(crate::fetch::now()),
         );
         let mut out = Vec::new();
-        crate::config::with_config_path(
-            tempfile::tempdir().unwrap().path().join("config.json"),
-            || land_detail(app, &detail.url.clone(), Some(detail), &mut out),
-        );
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
+            crate::config::with_config_path(dir.path().join("config.json"), || {
+                land_detail(app, &detail.url.clone(), Some(detail), &mut out)
+            })
+        });
         out
+    }
+
+    /// The prompt the agent `out` starts went with, if one did.
+    fn sent_prompt(out: &[ClientRequest]) -> Option<String> {
+        out.iter().find_map(|req| match req {
+            ClientRequest::CreatePrAgent {
+                starting_prompt, ..
+            } => starting_prompt.clone(),
+            _ => None,
+        })
+    }
+
+    /// A checkout of the PR's branch with session `name` in it.
+    fn session_on_branch(app: &mut App, name: &str, status: AgentStatus) -> orion_core::AgentId {
+        let wt = orion_core::WorktreeId("feat-wt".into());
+        if !app.tree.worktrees.iter().any(|w| w.id == wt) {
+            app.tree.worktrees.push(orion_core::Worktree {
+                id: wt.clone(),
+                project_id: ProjectId("p".into()),
+                path: "/tmp/repo-worktrees/feat".into(),
+                branch: pr().head,
+                is_main: false,
+                sort_order: 0,
+            });
+        }
+        let id = orion_core::AgentId(format!("id-{name}"));
+        app.tree.agents.push(orion_core::Agent {
+            id: id.clone(),
+            worktree_id: wt,
+            name: name.into(),
+            status,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: orion_core::AgentKind::Codex,
+            custom_harness: None,
+            model: Some("gpt-5.5".into()),
+            effort: Some("high".into()),
+            session_id: None,
+            cloud_session_id: None,
+            sort_order: 0,
+            status_changed_at: 1,
+            alive: true,
+            issue_url: None,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        });
+        id
     }
 
     fn handled(sha: &str, conflicts: bool) -> Option<Fingerprint> {
@@ -1553,7 +1748,7 @@ mod tests {
             mine: false,
             ..broken(true, false)
         };
-        let mut app = app_with(vec![theirs], Mode::Ask);
+        let mut app = app_with(vec![theirs], Mode::Auto);
         listed(&mut app);
         assert!(app.autofix.watching.is_empty(), "not mine");
 
@@ -1561,7 +1756,7 @@ mod tests {
         listed(&mut app);
         assert!(app.autofix.watching.is_empty(), "off");
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
         listed(&mut app);
         assert!(app.autofix.watching.contains_key(&pr().url));
         assert_eq!(
@@ -1574,7 +1769,7 @@ mod tests {
 
     #[test]
     fn running_checks_are_waited_out_but_conflicts_alone_are_not() {
-        let mut app = app_with(vec![broken(false, true)], Mode::Ask);
+        let mut app = app_with(vec![broken(false, true)], Mode::Auto);
         listed(&mut app);
         let running = detail(
             false,
@@ -1583,37 +1778,30 @@ mod tests {
                 check("e2e", "", CheckState::Running),
             ],
         );
-        landed(&mut app, &running);
-        assert!(app.autofix.queue.is_empty(), "still settling");
+        let out = landed(&mut app, &running);
+        assert!(out.is_empty(), "still settling");
         assert!(
             app.autofix.watching[&pr().url].next_fetch.is_some(),
             "asked again later"
         );
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
         listed(&mut app);
-        landed(
+        let out = landed(
             &mut app,
             &detail(true, vec![check("e2e", "", CheckState::Running)]),
         );
-        assert_eq!(app.autofix.queue.len(), 1, "conflicts go at once");
+        assert!(sent_prompt(&out).is_some(), "conflicts go at once");
         assert!(app.autofix.watching.is_empty());
     }
 
     #[test]
-    fn a_dismissed_breakage_is_not_asked_about_again_until_it_changes() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+    fn a_sent_breakage_is_not_sent_again_until_it_changes() {
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
         listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        tick(&mut app);
-        assert!(matches!(app.overlay, Some(Overlay::Autofix(_))));
-        handle_key(&mut app, KeyEvent::from(KeyCode::Esc), &mut Vec::new());
-        assert!(app.overlay.is_none());
-        assert_eq!(
-            app.autofix.ledger[&pr().url].attempts,
-            0,
-            "a dismissal is no attempt"
-        );
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        assert!(sent_prompt(&out).is_some(), "sent unasked");
+        assert!(app.overlay.is_none(), "no modal");
 
         listed(&mut app);
         assert!(
@@ -1627,7 +1815,7 @@ mod tests {
         assert!(app.autofix.watching.contains_key(&pr().url));
 
         // So is a push.
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
         app.autofix.ledger.insert(
             pr().url,
             Record {
@@ -1643,44 +1831,129 @@ mod tests {
         assert!(app.autofix.watching.contains_key(&pr().url));
     }
 
-    /// The form on screen is not asked about again while it waits for an
-    /// answer — the next list would otherwise queue a second one, and a
-    /// second Enter send a second agent.
+    /// One `autofix-<n>` at a time: while one is starting, at work or
+    /// waiting on the user, a second is never sent, and the watch waits.
     #[test]
-    fn a_pr_on_screen_is_not_asked_about_twice() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+    fn a_second_autofix_never_starts_for_one_pr() {
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        session_on_branch(&mut app, "autofix-7", AgentStatus::Fresh);
         listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        tick(&mut app);
-        assert!(matches!(app.overlay, Some(Overlay::Autofix(_))));
-        listed(&mut app);
-        assert!(app.autofix.watching.is_empty(), "it is up already");
-        assert!(app.autofix.queue.is_empty());
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        assert!(out.is_empty(), "{out:?}");
+        assert!(
+            app.autofix.watching.contains_key(&pr().url),
+            "still watched"
+        );
     }
 
+    /// A live session on the branch whose conversation can't be read holds
+    /// the agent back — said once — rather than send it in blind.
     #[test]
-    fn a_waiting_ask_goes_when_its_pr_is_fixed_merged_or_autofix_is_off() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+    fn a_live_session_with_no_conversation_to_read_holds_autofix() {
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        session_on_branch(&mut app, "billing", AgentStatus::Running);
         listed(&mut app);
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        assert!(out.is_empty(), "{out:?}");
+        assert!(app.autofix.watching.contains_key(&pr().url));
+        assert!(app
+            .flash
+            .as_deref()
+            .is_some_and(|f| f.contains("billing is busy")));
+        app.flash = None;
         landed(&mut app, &detail(true, Vec::new()));
-        assert_eq!(app.autofix.queue.len(), 1);
-        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![broken(false, false)];
-        listed(&mut app);
-        assert!(app.autofix.queue.is_empty(), "green");
+        assert_eq!(app.flash, None, "said once");
+    }
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+    /// The agent runs as the session that did the work on the branch —
+    /// its harness, model and effort — and, with another session live
+    /// there whose conversation it can read, opens on checking it.
+    #[test]
+    fn autofix_copies_the_branchs_agent_and_checks_with_the_live_one() {
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        session_on_branch(&mut app, "worker", AgentStatus::Finished);
         listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = Vec::new();
-        listed(&mut app);
-        assert!(app.autofix.queue.is_empty(), "merged");
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        let copied = out.iter().find_map(|req| match req {
+            ClientRequest::CreatePrAgent {
+                kind,
+                model,
+                effort,
+                ..
+            } => Some((*kind, model.clone(), effort.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            copied,
+            Some((
+                orion_core::AgentKind::Codex,
+                Some("gpt-5.5".into()),
+                Some("high".into())
+            ))
+        );
+        assert!(!sent_prompt(&out)
+            .unwrap()
+            .contains("Before you change anything"));
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
+        // A Claude session mid-turn, whose transcript is on disk.
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        let slug = claude.join("projects").join("-tmp-repo-worktrees-feat");
+        std::fs::create_dir_all(&slug).unwrap();
+        std::fs::write(slug.join("sid-1.jsonl"), "{}\n").unwrap();
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let live = session_on_branch(&mut app, "billing", AgentStatus::NeedsFeedback);
+        let agent = app.tree.agents.iter_mut().find(|a| a.id == live).unwrap();
+        agent.kind = orion_core::AgentKind::Claude;
+        agent.session_id = Some("sid-1".into());
         listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        app.autofix_mode = Mode::Off;
-        tick(&mut app);
-        assert!(app.overlay.is_none() && app.autofix.queue.is_empty(), "off");
+        let places = crate::claude_accounts::Places {
+            home: Some(home.path().to_path_buf()),
+            default_dir: Some(claude.clone()),
+            default_record: None,
+        };
+        let out = crate::claude_accounts::with_places(places, || {
+            landed(&mut app, &detail(true, Vec::new()))
+        });
+        let prompt = sent_prompt(&out).expect("sent");
+        assert!(prompt.starts_with("Before you change anything"), "{prompt}");
+        assert!(
+            prompt.contains("\"billing\" (waiting on the user)"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("sid-1.jsonl"), "{prompt}");
+        assert!(prompt.contains("orion autofix stand-down"), "{prompt}");
+        assert!(
+            prompt.contains("Merge conflicts"),
+            "the task follows: {prompt}"
+        );
+    }
+
+    /// A stand-down flashes its reason once; the ones archived before
+    /// this run are taken note of, never flashed.
+    #[test]
+    fn a_stand_down_is_flashed_once_with_its_reason() {
+        let mut app = app_with(Vec::new(), Mode::Auto);
+        let old = session_on_branch(&mut app, "old", AgentStatus::Finished);
+        let set = |app: &mut App, id: &orion_core::AgentId, why: &str| {
+            let a = app.tree.agents.iter_mut().find(|a| &a.id == id).unwrap();
+            a.archived = true;
+            a.name = format!("{STOOD_DOWN}{why}");
+        };
+        set(&mut app, &old, "from before");
+        note_stand_downs(&mut app);
+        assert_eq!(app.flash, None, "an earlier run's");
+
+        let new = session_on_branch(&mut app, "new", AgentStatus::Running);
+        set(&mut app, &new, "billing: already on it");
+        note_stand_downs(&mut app);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("Autofix stood down: billing: already on it")
+        );
+        app.flash = None;
+        note_stand_downs(&mut app);
+        assert_eq!(app.flash, None, "once");
     }
 
     /// Green is known, never guessed: while GitHub has not said whether
@@ -1696,7 +1969,7 @@ mod tests {
             },
             ..pr()
         };
-        let mut app = app_with(vec![unsure(Checks::Failing)], Mode::Ask);
+        let mut app = app_with(vec![unsure(Checks::Failing)], Mode::Auto);
         app.autofix.ledger.insert(
             pr().url,
             Record {
@@ -1733,11 +2006,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_sends_until_its_attempts_run_out_then_asks() {
+    fn auto_sends_until_its_attempts_run_out_then_says_so() {
         let mut app = app_with(vec![broken(true, false)], Mode::Auto);
         listed(&mut app);
         let out = landed(&mut app, &detail(true, Vec::new()));
-        assert!(app.autofix.queue.is_empty(), "sent, not asked");
+        assert!(app.overlay.is_none(), "sent, not asked");
         assert_eq!(app.autofix.ledger[&pr().url].attempts, 1);
         assert!(
             out.iter().any(|req| matches!(
@@ -1757,9 +2030,17 @@ mod tests {
             },
         );
         listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        assert_eq!(app.autofix.queue.len(), 1, "asks instead");
-        assert!(app.autofix.queue[0].notice.is_some());
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        assert!(out.is_empty(), "no fourth agent");
+        assert!(app.overlay.is_none(), "and no modal");
+        assert!(app
+            .flash
+            .as_deref()
+            .is_some_and(|f| f.contains("still failing after 3")));
+        assert!(
+            app.autofix.ledger[&pr().url].handled.is_some(),
+            "said once per breakage"
+        );
     }
 
     #[test]
@@ -1774,22 +2055,6 @@ mod tests {
         );
         listed(&mut app);
         assert_eq!(app.autofix.ledger[&pr().url].attempts, 0);
-    }
-
-    #[test]
-    fn a_queued_ask_waits_for_a_free_screen() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
-        app.autofix.queue.push_back(sample_form());
-        app.overlay = Some(Overlay::Help(crate::app::HelpView::default()));
-        tick(&mut app);
-        assert!(matches!(app.overlay, Some(Overlay::Help(_))));
-        app.overlay = None;
-        app.term_locked = true;
-        tick(&mut app);
-        assert!(app.overlay.is_none(), "not over a pane taking keys");
-        app.term_locked = false;
-        tick(&mut app);
-        assert!(matches!(app.overlay, Some(Overlay::Autofix(_))));
     }
 
     #[test]
@@ -1858,39 +2123,6 @@ mod tests {
         }
     }
 
-    /// A session on `feat` (the PR's branch) in a checkout of project `p`.
-    fn session_on_branch(app: &mut App, name: &str, status: AgentStatus) {
-        app.tree.worktrees.push(orion_core::Worktree {
-            id: orion_core::WorktreeId("feat".into()),
-            project_id: ProjectId("p".into()),
-            path: "/tmp/repo-feat".into(),
-            branch: "feat".into(),
-            is_main: false,
-            sort_order: 1,
-        });
-        app.tree.agents.push(orion_core::Agent {
-            id: orion_core::AgentId(name.into()),
-            worktree_id: orion_core::WorktreeId("feat".into()),
-            name: name.into(),
-            status,
-            archived: false,
-            archived_at: 0,
-            unseen: false,
-            kind: orion_core::AgentKind::Claude,
-            custom_harness: None,
-            model: None,
-            effort: None,
-            session_id: None,
-            cloud_session_id: None,
-            sort_order: 0,
-            status_changed_at: 0,
-            alive: true,
-            issue_url: None,
-            recent_prompts: Vec::new(),
-            usage_limit: None,
-        });
-    }
-
     /// The open list is the clock: a check finishing moves the row, and the
     /// body is read again on that beat rather than a minute later.
     #[test]
@@ -1909,7 +2141,7 @@ mod tests {
             },
             ..broken(false, true)
         };
-        let mut app = app_with(vec![row(1)], Mode::Ask);
+        let mut app = app_with(vec![row(1)], Mode::Auto);
         listed(&mut app);
         assert_eq!(due_fetches(&mut app).len(), 1);
         let running = detail(
@@ -1935,44 +2167,5 @@ mod tests {
         listed(&mut app);
         landed(&mut app, &running);
         assert_eq!(due_fetches(&mut app).len(), 1);
-    }
-
-    /// Anyone at work on the PR's branch holds the ask back, not only an
-    /// autofix agent — and an idle session does not.
-    #[test]
-    fn a_session_at_work_on_the_branch_holds_the_ask_back() {
-        for (status, held) in [
-            (AgentStatus::Running, true),
-            (AgentStatus::NeedsFeedback, true),
-            (AgentStatus::Finished, false),
-            (AgentStatus::Fresh, false),
-        ] {
-            let mut app = app_with(vec![broken(true, false)], Mode::Ask);
-            session_on_branch(&mut app, "mine", status);
-            listed(&mut app);
-            landed(&mut app, &detail(true, Vec::new()));
-            assert_eq!(app.autofix.queue.is_empty(), held, "{status:?}");
-            assert_eq!(app.autofix.watching.contains_key(&pr().url), held);
-        }
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
-        session_on_branch(&mut app, &agent_name(7), AgentStatus::Fresh);
-        listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        assert!(app.autofix.queue.is_empty(), "an autofix agent just sent");
-    }
-
-    /// A session that starts on the branch while the ask waits for a free
-    /// screen takes it off the queue, back to being watched.
-    #[test]
-    fn a_queued_ask_steps_aside_for_a_session_that_started_on_the_branch() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Ask);
-        listed(&mut app);
-        landed(&mut app, &detail(true, Vec::new()));
-        assert_eq!(app.autofix.queue.len(), 1);
-        session_on_branch(&mut app, "mine", AgentStatus::Running);
-        tick(&mut app);
-        assert!(app.overlay.is_none());
-        assert!(app.autofix.queue.is_empty());
-        assert!(app.autofix.watching.contains_key(&pr().url));
     }
 }

@@ -133,6 +133,14 @@ live in `agent_presets.json` beside `config.json`. The form's Harness row lists 
 by id alongside the built-ins — a preset on one launches with the entry's program and defaults, and
 refuses with the reason when its entry is switched off or gone.
 
+Two presets are **system presets**, on every list and marked `system`: **PR autofix**, whose text
+wraps what broke for the agent Settings → Review → **Auto-fix PRs** sends to a broken pull request,
+and **Linear Ticket**, whose text wraps the issues a Linear launch sends — with its harness, model
+and effort — unless `⇧Tab` picks another. An empty one leaves orion's own text in place. Their text
+can be edited like any preset's; they can't be deleted or renamed. A list from before they existed
+keeps a preset you had already named `PR autofix` or `Linear Ticket`, text and all, as that system
+preset.
+
 In the PULL REQUESTS MODAL (`v`), `Shift+Tab` on a pull request is a
 picker instead of the manager: the preset you pick launches a PR SESSION on that pull request. The
 box comes back with the preset applied and the PR in its title, and `Enter` starts the agent in the

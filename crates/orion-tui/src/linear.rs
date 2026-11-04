@@ -3698,7 +3698,16 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
         branch: batch.branch(&taken),
         existing: false,
     };
-    Some(QuickLaunch::from_config(target, &cfg).with_linear(Some(batch)))
+    // The Linear Ticket SYSTEM PRESET wraps the issues by default — its
+    // harness, model and effort with it — once it holds any text; ⇧Tab
+    // in the box still picks another.
+    let ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
+    let launch = if ticket.has_wrapping() {
+        QuickLaunch::of_preset(target, ticket, &cfg)
+    } else {
+        QuickLaunch::from_config(target, &cfg)
+    };
+    Some(launch.with_linear(Some(batch)))
 }
 
 fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {

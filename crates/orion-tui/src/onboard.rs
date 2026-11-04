@@ -206,7 +206,6 @@ const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::WorktreeBaseBranch, Setting
 /// The Autofix page's rows: Settings → Review's Autofix group.
 const AUTOFIX_ROWS: &[SettingKind] = &[
     SettingKind::PrAutofix,
-    SettingKind::AutofixPreset,
     SettingKind::AutofixModel,
     SettingKind::AutofixEffort,
 ];

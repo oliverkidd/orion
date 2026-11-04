@@ -44,6 +44,98 @@ pub struct AgentPreset {
     /// left to say. Off, the task is still asked for, but optional.
     #[serde(default)]
     pub skip_task: bool,
+    /// A SYSTEM PRESET: one orion itself reads its text from — the PR
+    /// autofix agent's, a Linear ticket launch's. Every list has one of
+    /// each ([`ensure_system`]); its text can be edited, but it cannot be
+    /// deleted or renamed. None on a preset the user made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemPreset>,
+}
+
+/// The SYSTEM PRESETS: what orion reads each one's text for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPreset {
+    /// The text around what broke, for the agent AUTOFIX sends to a pull
+    /// request (`crate::autofix::prompt`). Empty: orion's built-in
+    /// instructions.
+    PrAutofix,
+    /// The text around a Linear ticket launch's issues (`crate::linear`).
+    LinearTicket,
+}
+
+impl SystemPreset {
+    pub const ALL: [SystemPreset; 2] = [SystemPreset::PrAutofix, SystemPreset::LinearTicket];
+
+    /// The name the preset is listed under, and the name an older list's
+    /// own preset is adopted by.
+    pub const fn name(self) -> &'static str {
+        match self {
+            SystemPreset::PrAutofix => "PR autofix",
+            SystemPreset::LinearTicket => "Linear Ticket",
+        }
+    }
+
+    /// The preset as a list that never had one gets it: no text, so the
+    /// launch it is for says what orion always said.
+    pub fn default_preset(self) -> AgentPreset {
+        AgentPreset {
+            name: self.name().into(),
+            kind: AgentKind::default(),
+            custom_harness: None,
+            model: None,
+            effort: None,
+            prefix: String::new(),
+            postfix: String::new(),
+            skip_task: false,
+            system: Some(self),
+        }
+    }
+}
+
+/// Give `presets` one of each SYSTEM PRESET: a preset already named for
+/// one (an older list's own "PR autofix") becomes it, text and all; a
+/// missing one is added, empty, at the end — after the presets the user
+/// made, which keep their places. True when anything changed.
+pub fn ensure_system(presets: &mut Vec<AgentPreset>) -> bool {
+    let mut changed = false;
+    for which in SystemPreset::ALL {
+        if presets.iter().any(|p| p.system == Some(which)) {
+            continue;
+        }
+        changed = true;
+        match presets
+            .iter_mut()
+            .find(|p| p.system.is_none() && p.name.trim().eq_ignore_ascii_case(which.name()))
+        {
+            Some(own) => own.system = Some(which),
+            None => presets.push(which.default_preset()),
+        }
+    }
+    changed
+}
+
+/// The list as stored, with its SYSTEM PRESETS made sure of and saved
+/// when that changed it: run once as orion starts, so the presets list
+/// shows them from then on.
+pub fn seed_system() {
+    let mut presets = load();
+    if ensure_system(&mut presets) {
+        if let Err(err) = save(&presets) {
+            tracing::warn!(%err, "couldn't save the system presets");
+        }
+    }
+}
+
+/// SYSTEM PRESET `which` as the list holds it — or as it would once
+/// [`ensure_system`] ran, for a list that has not been seeded yet.
+pub fn system(which: SystemPreset) -> AgentPreset {
+    let mut presets = load();
+    ensure_system(&mut presets);
+    presets
+        .into_iter()
+        .find(|p| p.system == Some(which))
+        .unwrap_or_else(|| which.default_preset())
 }
 
 impl AgentPreset {
@@ -174,13 +266,21 @@ pub fn save(presets: &[AgentPreset]) -> std::io::Result<()> {
 }
 
 pub(crate) fn store_path() -> PathBuf {
+    // Never the developer's own list under test: a test that pinned none
+    // reads (and writes) a file of this thread's that starts out missing.
     #[cfg(test)]
-    {
-        if let Some(path) = PRESETS_PATH_OVERRIDE.with(|p| p.borrow().clone()) {
-            return path;
-        }
-    }
-    orion_core::paths::data_dir().join(orion_core::paths::PRESETS_FILE_NAME)
+    let path = PRESETS_PATH_OVERRIDE
+        .with(|p| p.borrow().clone())
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "orion-test-presets-{}-{:?}.json",
+                std::process::id(),
+                std::thread::current().id()
+            ))
+        });
+    #[cfg(not(test))]
+    let path = orion_core::paths::data_dir().join(orion_core::paths::PRESETS_FILE_NAME);
+    path
 }
 
 fn load_from(path: &Path) -> Vec<AgentPreset> {
@@ -268,7 +368,40 @@ mod tests {
             prefix: String::new(),
             postfix: String::new(),
             skip_task: false,
+            system: None,
         }
+    }
+
+    /// A list with its own "PR autofix" keeps it, text and all, as the
+    /// system preset; the Linear one it lacks is added empty; a second
+    /// pass changes nothing; and the tag survives the file.
+    #[test]
+    fn system_presets_adopt_a_preset_by_name_and_fill_in_the_rest() {
+        let (_dir, path) = store();
+        let mut presets = vec![
+            AgentPreset {
+                prefix: "Fix it my way.".into(),
+                ..preset("pr AUTOFIX", AgentKind::Claude)
+            },
+            preset("reviewer", AgentKind::Codex),
+        ];
+        assert!(ensure_system(&mut presets));
+        let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["pr AUTOFIX", "reviewer", "Linear Ticket"]);
+        assert_eq!(presets[0].system, Some(SystemPreset::PrAutofix));
+        assert_eq!(presets[0].prefix, "Fix it my way.", "the user's text kept");
+        assert_eq!(presets[2].system, Some(SystemPreset::LinearTicket));
+        assert!(!presets[2].has_wrapping());
+        assert!(!ensure_system(&mut presets), "once is enough");
+
+        save_to(&path, &presets).unwrap();
+        assert_eq!(load_from(&path), presets);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(r#""system": "pr_autofix""#), "{raw}");
+        assert!(
+            !raw.contains(r#""system": null"#),
+            "a user's preset has none"
+        );
     }
 
     #[test]

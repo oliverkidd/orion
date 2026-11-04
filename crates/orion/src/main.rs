@@ -6,7 +6,7 @@ mod upgrade;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand};
+use cli::{AutofixCommand, Cli, Command, ConfigCommand};
 use std::path::Path;
 
 fn main() -> Result<()> {
@@ -51,6 +51,9 @@ fn main() -> Result<()> {
             base,
         }) => orion_tui::run_spawn(task.join(" "), kind, worktree, base),
         Some(Command::Open { files }) => orion_tui::run_open(files),
+        Some(Command::Autofix(AutofixCommand::StandDown { reason })) => {
+            orion_tui::run_stand_down(reason.join(" "))
+        }
         Some(Command::Browser {
             port,
             bind,

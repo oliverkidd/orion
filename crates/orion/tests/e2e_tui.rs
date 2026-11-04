@@ -1216,12 +1216,13 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     }
 }
 
-/// AUTOFIX, end to end: with **When a PR breaks** on `ask`, a pull request
-/// of the user's that `gh` says conflicts raises the AUTOFIX MODAL on its
-/// own — the conflicts ticked — and `Esc` puts it away. A stub `gh` on
-/// PATH answers the open list (GraphQL) and the PR's body.
+/// AUTOFIX, end to end: with **Auto-fix PRs** on — an older orion's
+/// `ask` reads as on — a pull request of the user's that `gh` says
+/// conflicts sends an `autofix-<n>` agent at it on its own, with no modal
+/// to answer. A stub `gh` on PATH answers the open list (GraphQL) and the
+/// PR's body.
 #[test]
-fn tui_autofix_asks_when_my_pr_conflicts() {
+fn tui_autofix_sends_unasked_when_my_pr_conflicts() {
     let stub_bin = tempfile::tempdir().unwrap();
     let gh = stub_bin.path().join("gh");
     std::fs::write(
@@ -1262,11 +1263,12 @@ fn tui_autofix_asks_when_my_pr_conflicts() {
     tui.send(ENTER);
     tui.wait_for_gone("Open project");
 
-    tui.wait_for_text("Autofix #7");
-    tui.wait_for_text("[x] Merge conflicts");
-    tui.wait_for_text("[ ] Unit tests");
-    tui.send(ESC);
-    tui.wait_for_gone("Autofix #7");
+    tui.wait_for_text("autofix-7");
+    assert!(
+        !tui.screen_text().contains("[x] Merge conflicts"),
+        "no modal to answer:\n{}",
+        tui.screen_text()
+    );
 }
 
 /// The CONFLICT RESOLVER, end to end against a real remote: Enter on a
@@ -1348,7 +1350,9 @@ fn tui_conflict_resolver_runs_through_to_the_pull_request() {
         stub_bin.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut tui = TuiHarness::spawn_with(&[("PATH", path)], "");
+    // The pull request conflicts: autofix, on by default, would send an
+    // agent at it and the resolver would wait for that agent to stop.
+    let mut tui = TuiHarness::spawn_with(&[("PATH", path)], r#", "pr_autofix": "off""#);
     tui.wait_for_text("to begin");
     run_command(&mut tui, "open a folder");
     tui.wait_for_text("Open project");

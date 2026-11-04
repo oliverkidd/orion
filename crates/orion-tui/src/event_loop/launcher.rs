@@ -3861,6 +3861,7 @@ mod tests {
                         prefix: "Be strict.".into(),
                         postfix: String::new(),
                         skip_task: false,
+                        system: None,
                     }));
                 }
             }
@@ -4011,6 +4012,7 @@ mod tests {
                             prefix: String::new(),
                             postfix: String::new(),
                             skip_task: false,
+                            system: None,
                         }));
                     }
                 }

@@ -292,6 +292,9 @@ async fn main_loop(
     let cfg = crate::config::Config::load();
     apply_config(&mut app, &cfg);
     app.keymap = cfg.keymap();
+    // The SYSTEM PRESETS (PR autofix, Linear Ticket) on every list, so the
+    // presets list shows them and their text can be edited there.
+    crate::agent_presets::seed_system();
     // Every pull request the last run knew about, painted before the
     // daemon's snapshot even lands; the lookups below refresh them all in
     // the background (`pr_cache`).
@@ -519,7 +522,7 @@ async fn main_loop(
                 for (url, number, dir) in crate::autofix::due_fetches(&mut app) {
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
-                crate::autofix::tick(&mut app);
+                crate::autofix::note_stand_downs(&mut app);
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
                 crate::base_sync::tick(&mut app);
@@ -10181,7 +10184,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             quick,
         } => {
             let mut presets = crate::agent_presets::load();
-            if index < presets.len() {
+            if presets.get(index).is_some_and(|p| p.system.is_none()) {
                 presets.remove(index);
                 if let Err(err) = crate::agent_presets::save(&presets) {
                     app.flash = Some(crate::flash::Flash::failed(format!(
@@ -34695,6 +34698,7 @@ diff --git a/src/c.rs b/src/c.rs
                         prefix: "Be strict.".into(),
                         postfix: "Run the tests.".into(),
                         skip_task: false,
+                        system: None,
                     },
                     AgentPreset {
                         name: "scratch".into(),
@@ -34705,6 +34709,7 @@ diff --git a/src/c.rs b/src/c.rs
                         prefix: String::new(),
                         postfix: String::new(),
                         skip_task: false,
+                        system: None,
                     },
                 ])
                 .unwrap();
@@ -34752,6 +34757,7 @@ diff --git a/src/c.rs b/src/c.rs
                 prefix: "Investigate whether this pull request should be merged.".into(),
                 postfix: String::new(),
                 skip_task: true,
+                system: None,
             });
             crate::agent_presets::save(&presets).unwrap();
             let skip_row = presets.len() - 1;
@@ -35214,6 +35220,7 @@ diff --git a/src/c.rs b/src/c.rs
                 prefix: "Commit and push.".into(),
                 postfix: String::new(),
                 skip_task: true,
+                system: None,
             });
             crate::agent_presets::save(&presets).unwrap();
             out.extend(crate::event_loop::run_action(
@@ -38743,6 +38750,7 @@ diff --git a/src/c.rs b/src/c.rs
                 prefix: "Review this pull request.".into(),
                 postfix: String::new(),
                 skip_task: true,
+                system: None,
             });
             crate::agent_presets::save(&presets).unwrap();
             let skip_row = (presets.len() - 1) as u16;

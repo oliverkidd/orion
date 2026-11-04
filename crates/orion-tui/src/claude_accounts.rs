@@ -2017,6 +2017,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 prefix: String::new(),
                 postfix: String::new(),
                 skip_task: false,
+                system: None,
             };
             assert_eq!(preset.spec_label(), "c@d.co · opus");
         });

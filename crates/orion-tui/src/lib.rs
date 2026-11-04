@@ -200,6 +200,13 @@ pub fn run_worktree(name: String, base: Option<String>) -> Result<()> {
     runtime()?.block_on(ipc::enter_worktree_for_current_agent(&name, base))
 }
 
+/// `orion autofix stand-down <reason>` — an autofix session leaving its
+/// fix to the session already on it (see
+/// `ipc::stand_down_current_agent`).
+pub fn run_stand_down(reason: String) -> Result<()> {
+    runtime()?.block_on(ipc::stand_down_current_agent(&reason))
+}
+
 /// `orion open <file>…` — show files in every attached TUI's FILE TABS
 /// (see `ipc::open_files_for_current_agent`).
 pub fn run_open(files: Vec<String>) -> Result<()> {

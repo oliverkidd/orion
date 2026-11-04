@@ -182,6 +182,14 @@ pub(crate) enum Command {
         #[arg(required = true, num_args = 1.., value_name = "FILE")]
         files: Vec<String>,
     },
+    /// What an autofix session runs on itself.
+    ///
+    /// Run from inside an `autofix-<n>` session that orion started on a
+    /// broken pull request, when another session on the branch is already
+    /// fixing it. You never need to run it yourself, so `orion --help`
+    /// leaves it out.
+    #[command(subcommand, hide = true)]
+    Autofix(AutofixCommand),
     /// Back up, restore or locate this machine's settings.
     ///
     /// Settings live in `config.json` — the portable file an export, an
@@ -430,6 +438,22 @@ const UPGRADE_EXAMPLES: &str = "\
 Examples:
   orion upgrade                   install the latest release
   orion upgrade --force           do it over a local cargo build";
+
+#[derive(Subcommand)]
+pub(crate) enum AutofixCommand {
+    /// Leave the fix to the session already on it: name the reason on
+    /// this session's row and archive it. orion shows the reason.
+    #[command(
+        name = "stand-down",
+        after_help = "Example:\n  orion autofix stand-down \"billing: already fixing the unit test\""
+    )]
+    StandDown {
+        /// Why — which session is on it, and what it is doing; multiple
+        /// words need no quotes.
+        #[arg(required = true, num_args = 1.., value_name = "REASON")]
+        reason: Vec<String>,
+    },
+}
 
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {

@@ -101,17 +101,12 @@ pub const MERGE_METHODS: &[&str] = &[
     crate::pr_actions::MergeMethod::Rebase.as_str(),
 ];
 
-/// The **When a PR breaks** choices (Settings → Review), in the order the
-/// row cycles them (`crate::autofix::Mode`).
+/// The **Auto-fix PRs** words (Settings → Review), off and on, in the
+/// order the row cycles them (`crate::autofix::Mode`).
 pub const AUTOFIX_MODES: &[&str] = &[
     crate::autofix::Mode::Off.as_str(),
-    crate::autofix::Mode::Ask.as_str(),
     crate::autofix::Mode::Auto.as_str(),
 ];
-
-/// How the **Autofix instructions** row names orion's own instructions —
-/// the empty `autofix_preset`.
-pub const BUILT_IN: &str = "built-in";
 
 /// The **Preset text** choices (Settings → Sessions), in the order the row
 /// cycles them: the [`PresetText`] sides by label.
@@ -579,7 +574,6 @@ pub enum SettingKind {
     PrDraft,
     BaseFetch,
     PrAutofix,
-    AutofixPreset,
     AutofixModel,
     AutofixEffort,
     ReviewAccount,
@@ -725,11 +719,11 @@ impl SettingKind {
             SettingKind::BaseFetch => (2026, 10, 6),
             SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
             SettingKind::WorktreeContainers => (2026, 10, 5),
-            SettingKind::PrAutofix
-            | SettingKind::AutofixPreset
-            | SettingKind::AutofixModel
-            | SettingKind::AutofixEffort
-            | SettingKind::Spotify => (2026, 10, 6),
+            // Auto-fix PRs went from off / ask / auto to on by default.
+            SettingKind::PrAutofix => (2026, 11, 4),
+            SettingKind::AutofixModel | SettingKind::AutofixEffort | SettingKind::Spotify => {
+                (2026, 10, 6)
+            }
             SettingKind::ReviewAccount | SettingKind::ReviewModel | SettingKind::ReviewEffort => {
                 (2026, 10, 10)
             }
@@ -1043,26 +1037,20 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             },
             SettingSpec {
                 kind: SettingKind::PrAutofix,
-                label: "When a PR breaks",
-                hint: "One of your pull requests hits merge conflicts or failing checks: do nothing, ask (a modal to pick what to fix), or send the autofix agent at once. ^G in the pull requests modal sends it whatever this says",
-                group: "Autofix",
-            },
-            SettingSpec {
-                kind: SettingKind::AutofixPreset,
-                label: "Autofix instructions",
-                hint: "What the autofix agent is told to do: orion's built-in instructions, or an agent preset's text in their place (the pull request, its branches and what failed are always added)",
+                label: "Auto-fix PRs",
+                hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work. It is told the PR autofix system preset's text (Agent presets), or orion's own instructions while that is empty. ^G in the pull requests modal sends one whatever this says",
                 group: "Autofix",
             },
             SettingSpec {
                 kind: SettingKind::AutofixModel,
-                label: "Autofix model",
-                hint: "The autofix agent's model — it runs on your default agent (Settings → Agents)",
+                label: "Autofix fallback model",
+                hint: "The autofix agent's model when no session on the PR's branch has run here to copy — it then runs on your default agent (Settings → Agents)",
                 group: "Autofix",
             },
             SettingSpec {
                 kind: SettingKind::AutofixEffort,
-                label: "Autofix effort",
-                hint: "The autofix agent's effort",
+                label: "Autofix fallback effort",
+                hint: "The autofix agent's effort when there is no session to copy",
                 group: "Autofix",
             },
             SettingSpec {
@@ -1721,14 +1709,11 @@ pub struct Config {
     /// root fetches origin and fast-forwards on its base branch — `5m`,
     /// `15m` or `off` (`crate::base_sync`).
     pub base_fetch: String,
-    /// **When a PR breaks** (Settings → Review): what orion does when one
-    /// of your pull requests hits merge conflicts or failing checks —
-    /// `off`, `ask` (the AUTOFIX modal) or `auto` (send the agent at once).
-    /// See `crate::autofix`.
+    /// **Auto-fix PRs** (Settings → Review): when one of your pull
+    /// requests hits merge conflicts or failing checks, send an agent to
+    /// fix it at once — `auto`, the default — or not, `off`. An older
+    /// orion's `ask` reads as on. See `crate::autofix`.
     pub pr_autofix: String,
-    /// The AGENT PRESET whose text the autofix agent is told instead of
-    /// orion's built-in instructions; empty = the built-in ones.
-    pub autofix_preset: String,
     /// The autofix agent's model; empty = the default agent's own default.
     pub autofix_model: String,
     /// The autofix agent's effort; empty = the default agent's own default.
@@ -2111,8 +2096,7 @@ impl Default for Config {
             pr_delete_branch: true,
             pr_draft: false,
             base_fetch: crate::base_sync::INTERVALS[0].into(),
-            pr_autofix: crate::autofix::Mode::Off.as_str().into(),
-            autofix_preset: String::new(),
+            pr_autofix: crate::autofix::Mode::Auto.as_str().into(),
             autofix_model: String::new(),
             autofix_effort: String::new(),
             review_account: String::new(),
@@ -3260,7 +3244,7 @@ impl Config {
         out
     }
 
-    /// **When a PR breaks**, read: an unreadable word is off.
+    /// **Auto-fix PRs**, read: anything but `off` is on.
     pub fn autofix_mode(&self) -> crate::autofix::Mode {
         crate::autofix::Mode::parse(&self.pr_autofix)
     }
@@ -3551,8 +3535,9 @@ impl Config {
             SettingKind::BaseFetch => {
                 cycle_choice(&self.base_fetch, crate::base_sync::INTERVALS, 0).into()
             }
-            SettingKind::PrAutofix => self.autofix_mode().as_str().into(),
-            SettingKind::AutofixPreset => blank_as(&self.autofix_preset, BUILT_IN),
+            SettingKind::PrAutofix => {
+                on_off(self.autofix_mode() == crate::autofix::Mode::Auto).into()
+            }
             SettingKind::AutofixModel => blank_as(&self.autofix_model, DEFAULT_CHOICE),
             SettingKind::AutofixEffort => blank_as(&self.autofix_effort, DEFAULT_CHOICE),
             // The one picked, by name — or, with none picked (or one that
@@ -3767,12 +3752,8 @@ impl Config {
                     cycle_choice(&self.base_fetch, crate::base_sync::INTERVALS, step).into();
             }
             SettingKind::PrAutofix => {
-                self.pr_autofix = cycle_choice(&self.pr_autofix, AUTOFIX_MODES, step).into();
-            }
-            SettingKind::AutofixPreset => {
-                let mut choices = vec![String::new()];
-                choices.extend(crate::agent_presets::load().into_iter().map(|p| p.name));
-                self.autofix_preset = cycle_owned(&self.autofix_preset, &choices, step);
+                let on = self.autofix_mode() == crate::autofix::Mode::Auto;
+                self.pr_autofix = AUTOFIX_MODES[usize::from(!on)].into();
             }
             SettingKind::AutofixModel => {
                 let choices = self.autofix_model_choices();
@@ -5250,18 +5231,22 @@ mod tests {
         assert!(cfg.animations);
     }
 
-    /// The Autofix rows: off by default, cycling off → ask → auto; the
-    /// instructions built in until a preset is picked; and a model the
-    /// default agent no longer offers launching on its default instead.
+    /// The Autofix rows: **Auto-fix PRs** on by default, toggling off and
+    /// back on (an older orion's `ask` reading as on); and a fallback model
+    /// the default agent no longer offers launching on its default instead.
     #[test]
     fn autofix_rows_cycle_and_fall_back_to_the_defaults() {
         let mut cfg = Config::default();
+        assert_eq!(cfg.value_label(SettingKind::PrAutofix), "on");
+        cfg.cycle_kind(SettingKind::PrAutofix, 1);
+        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Off);
         assert_eq!(cfg.value_label(SettingKind::PrAutofix), "off");
         cfg.cycle_kind(SettingKind::PrAutofix, 1);
-        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Ask);
-        cfg.cycle_kind(SettingKind::PrAutofix, 1);
         assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Auto);
-        assert_eq!(cfg.value_label(SettingKind::AutofixPreset), BUILT_IN);
+        let old: Config = serde_json::from_str(r#"{"pr_autofix": "ask"}"#).unwrap();
+        assert_eq!(old.autofix_mode(), crate::autofix::Mode::Auto);
+        let missing: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.autofix_mode(), crate::autofix::Mode::Auto);
         assert_eq!(cfg.value_label(SettingKind::AutofixModel), DEFAULT_CHOICE);
         let defaults = cfg.autofix_launch();
         cfg.autofix_model = "no-such-model".into();

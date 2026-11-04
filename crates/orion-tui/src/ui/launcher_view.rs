@@ -4097,6 +4097,7 @@ mod tests {
             prefix: String::new(),
             postfix: String::new(),
             skip_task: false,
+            system: None,
         }
     }
 

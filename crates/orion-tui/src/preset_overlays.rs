@@ -684,6 +684,8 @@ impl AgentPresetEditor {
             prefix: side(self.text.has_prefix(), &self.prefix),
             postfix: side(self.text.has_postfix(), &self.postfix),
             skip_task: self.skip_task,
+            // The list's own, kept on save (`save_agent_preset_editor`).
+            system: None,
         }
     }
 
@@ -817,6 +819,13 @@ pub(crate) fn save_agent_preset_editor(
     let created = editor.editing.is_none().then(|| preset.clone());
     let index = match editor.editing {
         Some(index) if index < presets.len() => {
+            // A SYSTEM PRESET stays one, under its own name: orion finds
+            // it by what it is for, and the list by what it is called.
+            let mut preset = preset;
+            if let Some(which) = presets[index].system {
+                preset.system = Some(which);
+                preset.name = presets[index].name.clone();
+            }
             presets[index] = preset;
             index
         }
@@ -864,6 +873,14 @@ pub(crate) fn open_delete_preset_confirm(app: &mut App, view: &AgentPresetsView)
     let Some(preset) = view.presets.get(view.selected) else {
         return;
     };
+    if preset.system.is_some() {
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "'{}' is a system preset: it can't be deleted. Clear its text to go back to orion's own.",
+            preset.name
+        )));
+        app.dirty = true;
+        return;
+    }
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Delete preset".into(),
         message: format!(
@@ -1430,6 +1447,10 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
         if preset.skip_task {
             marks.push("no task");
         }
+        // One orion reads its text from: it can't be deleted or renamed.
+        if preset.system.is_some() {
+            marks.push("system");
+        }
         let marks = marks.join(" ");
         let marks_w = marks.chars().count();
         let text_budget = budget.saturating_sub(if marks_w > 0 { marks_w + 2 } else { 0 });
@@ -1772,6 +1793,31 @@ mod tests {
     use super::*;
     use orion_core::WorktreeId;
 
+    /// A SYSTEM PRESET can't be deleted: its delete says why and opens no
+    /// confirm; a preset the user made opens the confirm as ever.
+    #[test]
+    fn a_system_preset_refuses_the_delete() {
+        let presets = vec![
+            crate::agent_presets::SystemPreset::PrAutofix.default_preset(),
+            AgentPreset {
+                name: "mine".into(),
+                system: None,
+                ..crate::agent_presets::SystemPreset::PrAutofix.default_preset()
+            },
+        ];
+        let mut app = App::new();
+        let mut view = AgentPresetsView::new(orion_core::WorktreeId("w".into()), presets);
+        open_delete_preset_confirm(&mut app, &view);
+        assert!(app.overlay.is_none(), "no confirm");
+        assert!(app
+            .flash
+            .as_deref()
+            .is_some_and(|f| f.contains("can't be deleted")));
+        view.selected = 1;
+        open_delete_preset_confirm(&mut app, &view);
+        assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+    }
+
     fn pinned<T>(json: &str, f: impl FnOnce() -> T) -> T {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -1793,6 +1839,7 @@ mod tests {
             prefix: prefix.into(),
             postfix: postfix.into(),
             skip_task: false,
+            system: None,
         }
     }
 

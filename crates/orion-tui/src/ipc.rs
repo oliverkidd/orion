@@ -326,6 +326,43 @@ pub async fn rename_current_agent(title: &str, mode: RenameMode) -> Result<()> {
     Ok(())
 }
 
+/// CLI: `orion autofix stand-down <reason>` from inside an autofix
+/// session: name the reason on the session's row
+/// (`crate::autofix::STOOD_DOWN`, which the TUI flashes) and archive it,
+/// which ends this very process with its PTY. Never spawns a daemon.
+pub async fn stand_down_current_agent(reason: &str) -> Result<()> {
+    let agent_id = current_agent_id("autofix stand-down")?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("say why — `orion autofix stand-down <reason>`");
+    }
+    let sock = paths::socket_path();
+    let Ok(stream) = try_connect(&sock).await else {
+        bail!("no orion daemon is running");
+    };
+    let mut conn = handshake(stream).await?;
+    let id = AgentId(agent_id);
+    let rename = ClientRequest::RenameAgent {
+        req_id: ONE_SHOT_REQ_ID,
+        id: id.clone(),
+        name: format!("{}{reason}", crate::autofix::STOOD_DOWN),
+    };
+    write_frame(&mut conn.stream, &rename).await?;
+    if let Reply::Error(message) = await_reply(&mut conn, ONE_SHOT_REQ_ID).await? {
+        bail!("orion: {message}");
+    }
+    println!("standing down: {reason}");
+    let archive = ClientRequest::ArchiveAgent {
+        req_id: ONE_SHOT_REQ_ID + 1,
+        id,
+    };
+    write_frame(&mut conn.stream, &archive).await?;
+    // The archive takes this session's PTY, this process with it: an
+    // answer may never be read, and none is needed.
+    let _ = await_reply(&mut conn, ONE_SHOT_REQ_ID + 1).await;
+    Ok(())
+}
+
 /// CLI: `orion spawn "<task>" [--kind <claude|codex|cursor>]` from inside
 /// an agent session — ask the daemon to start a new agent beside this one,
 /// in the same worktree, opening on `task` as its first prompt. The caller
