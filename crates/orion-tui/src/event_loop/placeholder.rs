@@ -59,7 +59,13 @@ pub(super) fn stage_worktree(
     branch: String,
     out: &mut Vec<ClientRequest>,
 ) -> WorktreeId {
+    // The row goes in among the live checkouts, which can slide the one
+    // under the cursor down a row: put the cursor back on it first, so
+    // what `select_worktree_by_id` remembers as the row the user came
+    // from is that one, not whatever took its index.
+    let before = selection_snapshot(app);
     let worktree = push_worktree(app, project, branch);
+    reconcile_selection_inner(app, before, out);
     // False when the checkout's project is not the selected one (a
     // project menu's "New worktree" on another row): the row waits in the
     // tree for that project to be selected, as the real one would.
@@ -270,9 +276,12 @@ pub(super) fn stage_agent(
 /// already in and the stand-in goes; if the Ack came first the stand-in
 /// becomes the real row (same id) and the upsert overwrites it in place.
 /// A stand-in session under the checkout (a QUICK PROMPT's) moves under
-/// the real one either way, so the row keeps its place in RECENCY ORDER
-/// and its selection.
+/// the real one either way. The cursor follows the checkout by id: the
+/// real row's id is not the stand-in's, and the grid orders on ids.
 pub(super) fn resolve_worktree(app: &mut App, placeholder: &WorktreeId, real: &WorktreeId) {
+    let was_selected = app
+        .selected_worktree()
+        .is_some_and(|w| &w.id == placeholder);
     if app.tree.worktrees.iter().any(|w| &w.id == real) {
         app.tree.worktrees.retain(|w| &w.id != placeholder);
     } else if let Some(w) = app.tree.worktrees.iter_mut().find(|w| &w.id == placeholder) {
@@ -311,6 +320,11 @@ pub(super) fn resolve_worktree(app: &mut App, placeholder: &WorktreeId, real: &W
         }
     }
     forget_worktree(app, placeholder);
+    if was_selected {
+        if let Some(i) = app.worktree_row_of(real) {
+            app.sel_worktree = i;
+        }
+    }
     app.dirty = true;
 }
 

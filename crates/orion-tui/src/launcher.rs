@@ -247,6 +247,10 @@ pub struct Band {
     pub archived: Vec<LauncherRow>,
     /// The ARCHIVED DRAWER is unfolded (`App::archived_open`).
     pub drawer_open: bool,
+    /// Every session in the checkout is cold, or it has none
+    /// ([`App::worktree_dormant`]): the band stands in the DORMANT group
+    /// at the bottom. Never the ROOT WORKTREE's, which leads either way.
+    pub dormant: bool,
 }
 
 impl Band {
@@ -353,6 +357,7 @@ pub fn bands(app: &App) -> Vec<Band> {
             cards,
             archived,
             drawer_open,
+            dormant: !w.is_main && !app.show_archived && app.worktree_dormant(&w.id),
         });
     }
     out
@@ -533,6 +538,18 @@ pub const EMPTY_BAND_H: u16 = BAND_RULE_H + EMPTY_BAND_ROW_H;
 /// Gaps between cards: a column of air either side, a blank row under.
 pub const GAP_X: u16 = 2;
 pub const GAP_Y: u16 = 1;
+/// Rows the DORMANT DIVIDER takes over the first dormant band, on top of
+/// the [`GAP_Y`] every band has: the `┄┄ dormant ┄┄` line and a row of air
+/// under it, so the air over and under it matches.
+pub const DORMANT_DIVIDER_H: u16 = 2;
+
+/// The band the DORMANT DIVIDER stands over: the first dormant one, when
+/// a live band is above it — a panel that is all one group needs no line
+/// between groups.
+pub fn dormant_divider_at(bands: &[Band]) -> Option<usize> {
+    let first = bands.iter().position(|b| b.dormant)?;
+    (first > 0).then_some(first)
+}
 /// The margin the grid keeps off the body's edges.
 pub const PAD_X: u16 = 2;
 /// Rows above the grid: a blank, the PROJECT TABS, the rule under them,
@@ -1116,6 +1133,10 @@ pub struct PanelLayout {
     /// Where the bands go: the body under the header, inset by [`PAD_X`].
     pub area: Rect,
     pub bands: Vec<PanelBand>,
+    /// The DORMANT DIVIDER's line, in panel rows: the row under the gap
+    /// over the first dormant band ([`dormant_divider_at`]). None when the
+    /// panel is one group.
+    pub divider_y: Option<u16>,
     /// Rows the whole panel takes.
     height: u16,
 }
@@ -1141,7 +1162,13 @@ fn lay_out_panel(body: Rect, bands: &[Band], open: impl Fn(&Band) -> bool) -> Pa
     let mut y = 0u16;
     let mut out = Vec::with_capacity(bands.len());
     let strips = bands_layout(body);
-    for band in bands {
+    let divider_at = dormant_divider_at(bands);
+    let mut divider_y = None;
+    for (index, band) in bands.iter().enumerate() {
+        if divider_at == Some(index) {
+            divider_y = Some(y);
+            y += DORMANT_DIVIDER_H;
+        }
         let content = open(band).then(|| expanded_layout(body, band));
         let collapsed = if band.cards.is_empty() {
             EMPTY_BAND_H
@@ -1164,6 +1191,7 @@ fn lay_out_panel(body: Rect, bands: &[Band], open: impl Fn(&Band) -> bool) -> Pa
     PanelLayout {
         area: grid(body).area,
         bands: out,
+        divider_y,
         height: y.saturating_sub(GAP_Y),
     }
 }
@@ -1183,7 +1211,13 @@ pub fn list_panel_layout(
 ) -> PanelLayout {
     let mut y = 0u16;
     let mut out = Vec::with_capacity(bands.len());
+    let divider_at = dormant_divider_at(bands);
+    let mut divider_y = None;
     for (index, band) in bands.iter().enumerate() {
+        if divider_at == Some(index) {
+            divider_y = Some(y);
+            y += DORMANT_DIVIDER_H;
+        }
         let open = all_open || expanded == Some(&band.worktree);
         let pin = pin.filter(|p| p.band == index).map(|p| p.card);
         let content = list_layout(body, band, open, pin);
@@ -1201,6 +1235,7 @@ pub fn list_panel_layout(
     PanelLayout {
         area: grid(body).area,
         bands: out,
+        divider_y,
         height: y.saturating_sub(GAP_Y),
     }
 }
@@ -2257,6 +2292,38 @@ mod tests {
             !branches(&app).contains(&"idle".to_string()),
             "archived view"
         );
+    }
+
+    /// A checkout with nothing live in it stands below a DORMANT DIVIDER,
+    /// which takes its line plus a row of air under it, on top of the gap
+    /// every band has over it — in both layouts.
+    #[test]
+    fn dormant_checkouts_stand_below_a_divider() {
+        let mut app = app();
+        app.tree.worktrees.push(worktree("w5", "p1", "idle", false));
+        app.show_all_worktrees = true;
+        let bands = super::bands(&app);
+        let idle = bands
+            .iter()
+            .position(|b| b.branch == "idle")
+            .expect("on: every checkout");
+        assert!(bands[idle].dormant, "no sessions: dormant");
+        assert_eq!(idle, bands.len() - 1, "dormant last");
+        assert_eq!(super::dormant_divider_at(&bands), Some(idle));
+        let body = Rect::new(0, 0, 120, 60);
+        for panel in [
+            super::panel_layout(body, &bands, None),
+            super::list_panel_layout(body, &bands, None, false, None),
+        ] {
+            let above = &panel.bands[idle - 1];
+            let gap_end = above.rule_y + above.height + GAP_Y;
+            assert_eq!(panel.divider_y, Some(gap_end));
+            assert_eq!(panel.bands[idle].rule_y, gap_end + DORMANT_DIVIDER_H);
+        }
+
+        // All one group: no line.
+        let only_idle: Vec<_> = bands.into_iter().skip(idle).collect();
+        assert_eq!(super::dormant_divider_at(&only_idle), None);
     }
 
     /// The list is the SELECTED PROJECT's sessions, each carrying the

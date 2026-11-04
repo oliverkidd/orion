@@ -2792,24 +2792,15 @@ const PICKER_BRANCH_ROWS: usize = 12;
 /// Put the WORKTREE PICKER up for `back`, keeping what `keep` says of
 /// the one it replaces.
 fn show_worktree_picker(app: &mut App, back: QuickReturn, keep: Option<PickerKeep>) {
-    use std::cmp::Reverse;
     let Some(project) = view::project_of(app, &back.launch.target) else {
         return;
     };
-    let mut checkouts: Vec<_> = app
-        .tree
-        .worktrees
-        .iter()
-        .filter(|w| w.project_id == project && !app.is_placeholder_worktree(&w.id))
+    // The grid's own order, so a checkout sits where its band does.
+    let checkouts: Vec<_> = app
+        .worktrees_in_band_order(&project)
+        .into_iter()
+        .filter(|w| !app.is_placeholder_worktree(&w.id))
         .collect();
-    checkouts.sort_by_key(|w| {
-        let r = crate::app::worktree_recency(&app.tree, &w.id);
-        (
-            Reverse(w.is_main),
-            Reverse(r.interacted),
-            Reverse(r.stamped),
-        )
-    });
 
     let row = |label: String, target: QuickTarget| {
         MenuItem::new(

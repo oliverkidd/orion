@@ -874,6 +874,16 @@ fn draw_bands(
     let mut band_areas = Vec::with_capacity(bands.len());
     let facts: Vec<RuleFacts> = bands.iter().map(|b| rule_facts(app, b, th)).collect();
     let cols = RuleColumns::of(&facts);
+    if let Some(y) = panel.divider_y {
+        let line = Rect {
+            y,
+            height: 1,
+            ..g.area
+        };
+        if let Some(placed) = crate::launcher::place(window, scroll, line) {
+            draw_dormant_divider(f.buffer_mut(), placed.rect, th);
+        }
+    }
     for (index, band) in bands.iter().enumerate() {
         let pb = &panel.bands[index];
         let whole = Rect {
@@ -1105,6 +1115,24 @@ fn draw_bands(
 /// there is the FOOTER's to say, for the band under the cursor
 /// (`ui::footer`), not every empty band's at once.
 const EMPTY_BAND: &str = "nothing running";
+
+/// What the DORMANT DIVIDER says, ahead of the dashes that fill its row.
+const DORMANT_LABEL: &str = "┄┄ dormant ";
+
+/// The DORMANT DIVIDER: one faint `┄┄ dormant ┄┄┄…` line across the grid,
+/// over the checkouts whose sessions have all gone cold. Nothing to click.
+fn draw_dormant_divider(buf: &mut Buffer, r: Rect, th: Theme) {
+    let width = r.width as usize;
+    if width < DORMANT_LABEL.chars().count() {
+        return;
+    }
+    let text: String = DORMANT_LABEL
+        .chars()
+        .chain(std::iter::repeat('┄'))
+        .take(width)
+        .collect();
+    buf.set_string(r.x, r.y, text, Style::default().fg(th.faint));
+}
 
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
 /// in it, drawn only with **Show all worktrees** on — in place of the row
@@ -5652,6 +5680,7 @@ mod tests {
             })],
             archived: Vec::new(),
             drawer_open: false,
+            dormant: false,
         }
     }
 

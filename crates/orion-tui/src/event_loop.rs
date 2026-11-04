@@ -26138,38 +26138,36 @@ diff --git a/src/c.rs b/src/c.rs
         );
     }
 
-    /// Worktrees sort most-recently-interacted first below the root
-    /// checkout, which stays the first row no matter what; the cursor
-    /// follows its row across the re-sort.
+    /// Worktrees keep one order below the root checkout: the order they
+    /// were made in. A turn starting or finishing moves nothing; the one
+    /// move is a checkout whose sessions have all gone cold sinking to the
+    /// bottom, and coming back to its place when one wakes. The cursor
+    /// follows its row across that move.
     #[test]
-    fn worktrees_sort_by_last_interaction() {
+    fn worktrees_keep_creation_order_and_dormant_ones_sink() {
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app); // w1 "main" (root) / a1 never run
         let now = crate::app::now_ms();
         let mins = |n: i64| now - n * 60_000;
+        for (id, branch) in [("w2", "feat"), ("w3", "older")] {
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: wt_entity(id, "p1", branch, false),
+                },
+            );
+        }
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
-                entity: wt_entity("w2", "p1", "feat", false),
+                entity: agent_stamped("a2", "w2", mins(50)),
             },
         );
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
-                entity: wt_entity("w3", "p1", "older", false),
-            },
-        );
-        hse(
-            &mut app,
-            ServerEvent::EntityUpserted {
-                entity: agent_stamped("a2", "w2", mins(5)),
-            },
-        );
-        hse(
-            &mut app,
-            ServerEvent::EntityUpserted {
-                entity: agent_stamped("a3", "w3", mins(50)),
+                entity: agent_stamped("a3", "w3", mins(5)),
             },
         );
         let branches = |app: &App| -> Vec<String> {
@@ -26181,24 +26179,52 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(
             branches(&app),
             ["main", "feat", "older"],
-            "the never-run root stays on top; the rest sit newest first"
+            "made first, listed first, however recent the turns"
         );
 
-        // Rest on "older", then its session finishes: it overtakes "feat"
-        // but never the root, and the cursor follows it.
+        // A turn on "older" starting and finishing moves nothing.
         app.focus = Focus::Worktrees;
         app.sel_worktree = 2;
+        for status in [AgentStatus::Running, AgentStatus::Finished] {
+            hse(
+                &mut app,
+                ServerEvent::StatusChanged {
+                    agent: AgentId("a3".into()),
+                    status,
+                    changed_at: crate::app::now_ms(),
+                    unseen: false,
+                },
+            );
+            assert_eq!(branches(&app), ["main", "feat", "older"]);
+            assert_eq!(app.sel_worktree, 2);
+        }
+
+        // "feat"'s one session goes cold: the checkout sinks below
+        // "older", and the cursor stays on "older".
+        let mut cold = agent_stamped("a2", "w2", mins(50));
+        if let orion_core::Entity::Agent(a) = &mut cold {
+            a.alive = false;
+        }
+        hse(&mut app, ServerEvent::EntityUpserted { entity: cold });
+        assert!(app.worktree_dormant(&WorktreeId("w2".into())));
+        assert_eq!(branches(&app), ["main", "older", "feat"]);
+        assert_eq!(
+            app.selected_worktree().map(|w| w.branch.as_str()),
+            Some("older")
+        );
+
+        // It wakes: back to its place.
         hse(
             &mut app,
-            ServerEvent::StatusChanged {
-                agent: AgentId("a3".into()),
-                status: AgentStatus::Finished,
-                changed_at: now,
-                unseen: false,
+            ServerEvent::EntityUpserted {
+                entity: agent_stamped("a2", "w2", now),
             },
         );
-        assert_eq!(branches(&app), ["main", "older", "feat"]);
-        assert_eq!(app.sel_worktree, 1, "selection follows the \"older\" row");
+        assert_eq!(branches(&app), ["main", "feat", "older"]);
+        assert_eq!(
+            app.selected_worktree().map(|w| w.branch.as_str()),
+            Some("older")
+        );
     }
 
     #[test]

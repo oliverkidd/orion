@@ -8,7 +8,7 @@ use orion_core::{
     TerminalId, TerminalTab, Worktree, WorktreeId,
 };
 use ratatui::layout::{Position, Rect};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Frame duration of the status-sweep text animation: the event loop's
@@ -2993,6 +2993,14 @@ pub fn drawn_cold(agent: &Agent) -> bool {
         && agent.cloud_session_id.is_none()
         && agent.status != AgentStatus::Terminated
         && !unread_finish(agent)
+}
+
+/// A session put up as working before any PTY is behind it: a QUICK
+/// PROMPT's stand-in, there before the intent that marks it one is
+/// filed. A real row is never running without its process for longer
+/// than the daemon takes to say so.
+fn starting(agent: &Agent) -> bool {
+    agent.status == AgentStatus::Running && !agent.alive && agent.cloud_session_id.is_none()
 }
 
 /// A session that is mid-turn or blocked on the user. These count as
@@ -6107,10 +6115,7 @@ impl App {
         }
     }
 
-    /// Worktrees of the selected project: the root checkout first, always,
-    /// then the rest most recently interacted with first (mirrors the
-    /// sessions list). The stamp is the newest of the checkout's sessions;
-    /// a stable sort keeps never-run worktrees in tree order at the bottom.
+    /// Worktrees of the selected project, in [`App::worktree_order`].
     pub fn visible_worktrees(&self) -> Vec<&Worktree> {
         self.rows_memo
             .with(
@@ -6132,9 +6137,9 @@ impl App {
         }
     }
 
-    /// `project`'s checkouts in the order its BANDS stand on the grid —
-    /// the root first, then the most recently worked in — whichever
-    /// project is selected; the STACKS modal lists every project's so.
+    /// `project`'s checkouts in the order its BANDS stand on the grid
+    /// ([`App::worktree_order`]), whichever project is selected; the STACKS
+    /// modal lists every project's so.
     pub fn worktrees_in_band_order(&self, project: &ProjectId) -> Vec<&Worktree> {
         self.worktree_order(project)
             .into_iter()
@@ -6142,27 +6147,62 @@ impl App {
             .collect()
     }
 
-    /// [`App::worktrees_in_band_order`], as indices into `tree.worktrees`.
-    fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
+    /// `project`'s checkouts as indices into `tree.worktrees`, in the one
+    /// order every list of them uses: the root checkout first, then the
+    /// LIVE ones, then the DORMANT ones ([`App::worktree_dormant`]), each
+    /// group oldest first: in tree order, which is the order the DAEMON
+    /// registered them in (its store loads them by `created_at`), with a
+    /// checkout cut since appended.
+    ///
+    /// Never by recency. Ordering on the last turn moved a checkout every
+    /// time one of its sessions started or finished one, and the list
+    /// reshuffled under the reader all day. The one move left is a whole
+    /// checkout going cold, or waking up again.
+    pub fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
         let worktrees = &self.tree.worktrees;
         let mut rows: Vec<usize> = (0..worktrees.len())
             .filter(|&i| &worktrees[i].project_id == project)
             .collect();
-        // Rolled up once for every checkout rather than re-walked per
-        // comparison the sort makes (`worktree_recencies`).
-        let recencies = worktree_recencies(&self.tree);
+        let live = self.live_worktrees();
+        // A stable sort: inside each group, tree order stands.
         rows.sort_by_key(|&i| {
             let w = &worktrees[i];
-            // The raw stamp breaks the tie every checkout with a session
-            // mid-turn shares — see `recency_key`.
-            let r = recencies.get(&w.id).copied().unwrap_or_default();
-            (
-                std::cmp::Reverse(w.is_main),
-                std::cmp::Reverse(r.interacted),
-                std::cmp::Reverse(r.stamped),
-            )
+            (std::cmp::Reverse(w.is_main), !live.contains(&w.id))
         });
         rows
+    }
+
+    /// Whether checkout `id` is DORMANT: no session in it is doing anything
+    /// or has anything to say. Every unarchived session is drawn cold
+    /// ([`drawn_cold`]), or it has none. A checkout still being cut, or
+    /// with a session still starting up, is live.
+    pub fn worktree_dormant(&self, id: &WorktreeId) -> bool {
+        !self.live_worktrees().contains(id)
+    }
+
+    /// Every checkout with a live session in it, in one pass over the
+    /// sessions: a sort asks once per comparison.
+    fn live_worktrees(&self) -> HashSet<&WorktreeId> {
+        let mut live: HashSet<&WorktreeId> = self
+            .tree
+            .agents
+            .iter()
+            .filter(|a| {
+                !a.archived && (!drawn_cold(a) || starting(a) || self.is_placeholder_agent(&a.id))
+            })
+            .map(|a| &a.worktree_id)
+            .collect();
+        // A stand-in checkout has no path until the DAEMON's upsert names
+        // it — and that, unlike the in-flight intent, is true from the
+        // moment the row goes up, before the intent is filed.
+        live.extend(
+            self.tree
+                .worktrees
+                .iter()
+                .filter(|w| w.path.as_os_str().is_empty() || self.is_placeholder_worktree(&w.id))
+                .map(|w| &w.id),
+        );
+        live
     }
 
     /// Every branch `project` already has a checkout for — hidden ROOT
