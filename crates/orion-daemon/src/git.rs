@@ -66,11 +66,13 @@ pub struct WorktreeEntry {
 /// Parse `git worktree list --porcelain`. The first entry is the main
 /// checkout. Linked checkouts that are not the user's are left out, so the
 /// grid never adopts them (or links `.env` files into them): ones git marks
-/// prunable (directory gone), and a tool's scratch checkouts in the system
-/// temp dir — fallow's audit caches, say.
+/// prunable (directory gone), a tool's scratch checkouts in the system
+/// temp dir — fallow's audit caches, say — and the checkouts Claude's
+/// isolated subagents run in (see [`without_subagent_checkouts`]).
 pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
-    let mut entries = without_scratch(parse_worktree_list(&out), &temp_roots());
+    let entries = without_scratch(parse_worktree_list(&out), &temp_roots());
+    let mut entries = without_subagent_checkouts(entries);
     for entry in &mut entries {
         if entry.branch != "(detached)" && !entry.branch.starts_with("detached @ ") {
             continue;
@@ -158,6 +160,29 @@ fn without_scratch(mut entries: Vec<WorktreeEntry>, roots: &[PathBuf]) -> Vec<Wo
     if entries.first().is_some_and(|main| !in_temp(&main.path)) {
         entries.retain(|e| !in_temp(&e.path));
     }
+    entries
+}
+
+/// `entries` without the checkouts Claude makes for a subagent run with
+/// worktree isolation: `<main>/.claude/worktrees/agent-<id>`. That subagent
+/// lives inside its parent's process, so no orion session ever runs there —
+/// adopted, the checkout is a worktree row reading "nothing running" for as
+/// long as Claude keeps it. Claude's own EnterWorktree checkouts share the
+/// directory under other names, and stay: a session that moves into one is
+/// re-homed onto its row.
+fn without_subagent_checkouts(mut entries: Vec<WorktreeEntry>) -> Vec<WorktreeEntry> {
+    let Some(main) = entries.first().map(|e| e.path.clone()) else {
+        return entries;
+    };
+    let dir = main.join(".claude").join("worktrees");
+    entries.retain(|e| {
+        let Ok(rest) = e.path.strip_prefix(&dir) else {
+            return true;
+        };
+        !rest
+            .to_str()
+            .is_some_and(|name| name.starts_with("agent-") && !name.contains('/'))
+    });
     entries
 }
 
@@ -802,6 +827,36 @@ mod tests {
         ];
         assert_eq!(without_scratch(in_temp, &roots).len(), 2);
         assert!(without_scratch(Vec::new(), &roots).is_empty());
+    }
+
+    /// A subagent's isolated checkout is left out; an EnterWorktree
+    /// checkout beside it, and a linked checkout elsewhere, stay.
+    #[test]
+    fn without_subagent_checkouts_drops_only_claude_agent_worktrees() {
+        let entry = |path: &str| WorktreeEntry {
+            path: PathBuf::from(path),
+            branch: "b".into(),
+        };
+        let kept: Vec<PathBuf> = without_subagent_checkouts(vec![
+            entry("/src/app"),
+            entry("/src/app/.claude/worktrees/agent-a3256dd47a2a96331"),
+            entry("/src/app/.claude/worktrees/worktree-fix-login"),
+            entry("/src/app-worktrees/agent-1"),
+            entry("/src/other/.claude/worktrees/agent-x"),
+        ])
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+        assert_eq!(
+            kept,
+            vec![
+                PathBuf::from("/src/app"),
+                PathBuf::from("/src/app/.claude/worktrees/worktree-fix-login"),
+                PathBuf::from("/src/app-worktrees/agent-1"),
+                PathBuf::from("/src/other/.claude/worktrees/agent-x"),
+            ]
+        );
+        assert!(without_subagent_checkouts(Vec::new()).is_empty());
     }
 
     #[test]

@@ -1,19 +1,24 @@
 //! `orion spawn "<task>"` from inside an agent session: a new AGENT beside
-//! the caller — same WORKTREE, same harness unless another is named — that
-//! opens on the task as its STARTING PROMPT. The caller's own process is
+//! the caller — same WORKTREE (or, with `--worktree <name>`, that worktree
+//! of the caller's project, created when the branch has none), same harness
+//! unless another is named — that opens on the task as its STARTING PROMPT. The caller's own process is
 //! never touched (unlike `orion worktree`, nothing here waits on a turn
 //! end), so the model runs it, tells the user, and carries on.
 
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use orion_core::{AgentId, AgentKind, EntityId};
+use orion_core::{AgentId, AgentKind, EntityId, WorktreeId};
 
 use crate::registry::{CreateAgentSpec, Daemon};
 
 /// What orion appends to Claude's system prompt so "start a new orion
 /// session that …" becomes one `orion spawn` call instead of the model
-/// trying to launch an agent process itself. Claude and pi, like the
+/// trying to launch an agent process itself — and so "kick off an agent in
+/// a new worktree" becomes `orion spawn --worktree`, a real session on a
+/// real worktree row, instead of Claude's Agent tool with worktree
+/// isolation: that subagent lives inside this process, in a checkout under
+/// `.claude/worktrees/` no orion session ever runs in. Claude and pi, like the
 /// worktree guidance (both take `--append-system-prompt`): codex and cursor
 /// have no system-prompt flag.
 pub const CLAUDE_SPAWN_GUIDANCE: &str = "[orion] When the user asks you to start a new orion \
@@ -23,9 +28,15 @@ once:\n\n  orion spawn \"<task>\"\n\nwhere <task> is the work the user wants tha
 in their own words — the new session opens on it as its first prompt, so make it self-contained. \
 Add `--kind claude|codex|cursor|pi|muse|opencode` only when the user names the harness; otherwise the new session \
 matches this one. orion starts it beside this session, in the same worktree, and it shows up in \
-the sessions list on its own. This session is unaffected: carry on with whatever else the user \
-asked, and if starting the session was the whole request, tell the user in one line that it is \
-running. If the command fails, report the error.";
+the sessions list on its own. When the user wants that agent or session to work in a new \
+worktree, on its own branch or in its own checkout (\"kick off an agent in a new worktree to …\"), \
+add `--worktree <name>` (the branch name the user gave, or a short kebab-case name for the task; \
+`--base <ref>` picks the start point): orion creates the worktree, or takes the existing one on \
+that branch, and starts the session there. Use this instead of the Agent tool with `isolation: \
+\"worktree\"` for that request; subagents that stay in this checkout are fine as they are. This \
+session is unaffected: carry on with whatever else the user asked, and if starting the session was \
+the whole request, tell the user in one line that it is running. If the command fails, report the \
+error.";
 
 /// The first free `agent-N` among `taken` — the same default the TUI's
 /// name prompt offers, which is what makes the new row eligible for
@@ -38,7 +49,8 @@ pub(crate) fn sibling_name(taken: &[String]) -> String {
 }
 
 impl Daemon {
-    /// The create spec for a session started beside `id`: its worktree, its
+    /// The create spec for a session started beside `id`: its worktree
+    /// (`worktree` when given — the `--worktree` target, already resolved), its
     /// harness (and model / effort) unless `kind` overrides — a different
     /// CLI cannot take this one's model name — a default `agent-N` name so
     /// AUTO-TITLE applies, and `starting_prompt` as the first prompt (which
@@ -49,15 +61,17 @@ impl Daemon {
         id: &AgentId,
         kind: Option<AgentKind>,
         starting_prompt: &str,
+        worktree: Option<WorktreeId>,
     ) -> Result<CreateAgentSpec> {
         let caller = self.store.get_agent(id)?.context("agent not found")?;
         if caller.archived {
             bail!("agent is archived");
         }
+        let worktree = worktree.unwrap_or_else(|| caller.worktree_id.clone());
         let (_, _, agents, _) = self.store.load_tree()?;
         let taken = agents
             .iter()
-            .filter(|a| a.worktree_id == caller.worktree_id)
+            .filter(|a| a.worktree_id == worktree)
             .map(|a| a.name.clone())
             .collect::<Vec<_>>();
         let kind = kind.unwrap_or(caller.kind);
@@ -76,7 +90,7 @@ impl Daemon {
         };
         Ok(CreateAgentSpec {
             mode: Default::default(),
-            worktree: caller.worktree_id.clone(),
+            worktree,
             name: sibling_name(&taken),
             kind,
             custom_harness,
@@ -92,15 +106,33 @@ impl Daemon {
 
     /// `orion spawn`, run by the agent inside its own session: create and
     /// boot a new agent beside it with `starting_prompt` as its first
-    /// prompt. Returns the new row's id; the upsert reaches every client
+    /// prompt — in the caller's worktree, or in the worktree of the
+    /// caller's project on branch `worktree` (created from `base` when it
+    /// has none). Returns the new row's id; the upsert reaches every client
     /// through the ordinary create path.
     pub async fn spawn_sibling_agent(
         self: &Arc<Self>,
         id: &AgentId,
         kind: Option<AgentKind>,
         starting_prompt: &str,
+        worktree: Option<&str>,
+        base: Option<&str>,
     ) -> Result<EntityId> {
-        let spec = self.sibling_spec(id, kind, starting_prompt)?;
+        // Checked before any worktree is made: a refused spawn leaves no
+        // checkout behind.
+        let mut spec = self.sibling_spec(id, kind, starting_prompt, None)?;
+        crate::registry::validate_starting_prompt(starting_prompt)?;
+        if let Some(branch) = worktree {
+            let caller = self.store.get_agent(id)?.context("agent not found")?;
+            let current = self
+                .store
+                .get_worktree(&caller.worktree_id)?
+                .context("worktree not found")?;
+            let target = self
+                .worktree_for_branch(&current.project_id, branch, base)
+                .await?;
+            spec = self.sibling_spec(id, kind, starting_prompt, Some(target.id))?;
+        }
         self.create_agent(spec).await
     }
 }
@@ -192,7 +224,12 @@ mod tests {
             .unwrap();
 
         let spec = daemon
-            .sibling_spec(&AgentId("agent-1".into()), None, "Fix the login redirect")
+            .sibling_spec(
+                &AgentId("agent-1".into()),
+                None,
+                "Fix the login redirect",
+                None,
+            )
             .unwrap();
         assert_eq!(spec.worktree.to_string(), "feat");
         assert_eq!(spec.name, "agent-2");
@@ -219,6 +256,7 @@ mod tests {
                 &AgentId("agent-1".into()),
                 Some(AgentKind::Codex),
                 "Run the tests",
+                None,
             )
             .unwrap();
         assert_eq!(spec.kind, AgentKind::Codex);
@@ -232,6 +270,7 @@ mod tests {
                 &AgentId("agent-1".into()),
                 Some(AgentKind::Claude),
                 "Run the tests",
+                None,
             )
             .unwrap();
         assert_eq!(same.model.as_deref(), Some("opus"));
@@ -243,7 +282,7 @@ mod tests {
         // `CreateAgentSpec` is deliberately not Debug (it carries the
         // prompt), so the Err side is taken by hand.
         let missing = daemon
-            .sibling_spec(&AgentId("nope".into()), None, "x")
+            .sibling_spec(&AgentId("nope".into()), None, "x", None)
             .err()
             .expect("an unknown caller is refused");
         assert!(missing.to_string().contains("agent not found"));
@@ -252,7 +291,7 @@ mod tests {
         archived.archived = true;
         daemon.store.insert_agent(&archived).unwrap();
         let err = daemon
-            .sibling_spec(&AgentId("agent-1".into()), None, "x")
+            .sibling_spec(&AgentId("agent-1".into()), None, "x", None)
             .err()
             .expect("an archived caller is refused");
         assert!(err.to_string().contains("archived"));
@@ -268,7 +307,7 @@ mod tests {
             .insert_agent(&agent("agent-1", "feat", AgentKind::Claude, None))
             .unwrap();
         let err = daemon
-            .spawn_sibling_agent(&AgentId("agent-1".into()), None, " \n ")
+            .spawn_sibling_agent(&AgentId("agent-1".into()), None, " \n ", None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("is empty"), "{err}");

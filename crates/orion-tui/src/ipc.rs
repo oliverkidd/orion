@@ -335,7 +335,16 @@ pub async fn rename_current_agent(title: &str, mode: RenameMode) -> Result<()> {
 /// What this prints is read by the model that ran it, so it says what
 /// happened and that this session carries on. A daemon-side refusal (a
 /// blank task, a missing CLI) is a nonzero exit the model reports.
-pub async fn spawn_sibling_for_current_agent(task: &str, kind: Option<AgentKind>) -> Result<()> {
+///
+/// `worktree` (`--worktree <name>`) starts it in that worktree of this
+/// project instead — slugified like `orion worktree`'s name, and created
+/// from `base` when the branch has none.
+pub async fn spawn_sibling_for_current_agent(
+    task: &str,
+    kind: Option<AgentKind>,
+    worktree: Option<String>,
+    base: Option<String>,
+) -> Result<()> {
     let agent_id = current_agent_id("spawn")?;
     let task = task.trim();
     if task.is_empty() {
@@ -343,6 +352,12 @@ pub async fn spawn_sibling_for_current_agent(task: &str, kind: Option<AgentKind>
             "the task is empty — `orion spawn \"<task>\"` needs the work the new session starts on"
         );
     }
+    let worktree = match worktree.as_deref().map(crate::branch_name::slugify) {
+        Some(slug) if slug.is_empty() => {
+            bail!("the --worktree name is empty — give the branch the new session works on")
+        }
+        other => other,
+    };
     let sock = paths::socket_path();
     let Ok(stream) = try_connect(&sock).await else {
         bail!("no orion daemon is running — no session started");
@@ -356,14 +371,20 @@ pub async fn spawn_sibling_for_current_agent(task: &str, kind: Option<AgentKind>
             id: AgentId(agent_id),
             kind,
             starting_prompt: task.to_string(),
+            worktree: worktree.clone(),
+            base,
         },
     )
     .await?;
     await_ack(&mut conn, req_id).await?;
     let harness = kind.map(|k| format!("{} ", k.as_str())).unwrap_or_default();
+    let place = match &worktree {
+        Some(branch) => format!("in the worktree \"{branch}\""),
+        None => "in this worktree".to_string(),
+    };
     println!(
-        "started a new {harness}session in this worktree; it is working on that task now and \
-         shows in the sessions list. This session is unaffected — carry on."
+        "started a new {harness}session {place}; it is working on that task now and shows in \
+         the sessions list. This session is unaffected — carry on."
     );
     Ok(())
 }

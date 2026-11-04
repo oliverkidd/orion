@@ -143,9 +143,10 @@ pub(crate) enum Command {
     /// Start another agent session beside this one.
     ///
     /// Run from inside a orion agent session; agents run it when you ask for
-    /// a new orion session. The new session starts in the same worktree, on
-    /// the task you name as its first prompt, and shows up on the grid on
-    /// its own — this session carries on untouched.
+    /// a new orion session. The new session starts in the same worktree (or
+    /// the one `--worktree` names), on the task you name as its first
+    /// prompt, and shows up on the grid on its own — this session carries
+    /// on untouched.
     #[command(after_help = SPAWN_EXAMPLES)]
     Spawn {
         /// The task the new session starts on; multiple words need no quotes.
@@ -157,6 +158,15 @@ pub(crate) enum Command {
         /// Defaults to the harness this session is running.
         #[arg(long, value_name = "KIND", value_parser = parse_agent_kind)]
         kind: Option<orion_core::AgentKind>,
+        /// Start the session in this worktree of the project instead: the
+        /// branch's worktree, created when it has none. Spaces become
+        /// hyphens, as with `orion worktree`.
+        #[arg(long, value_name = "NAME")]
+        worktree: Option<String>,
+        /// Start point for a new --worktree branch (default: the
+        /// `worktree_base_branch` setting, else origin's default branch).
+        #[arg(long, value_name = "REF", requires = "worktree")]
+        base: Option<String>,
     },
     /// Show files to the user inside this orion.
     ///
@@ -375,7 +385,8 @@ Examples:
 const SPAWN_EXAMPLES: &str = "\
 Examples:
   orion spawn \"port the tests to the new fixture\"
-  orion spawn --kind codex \"review the diff on this branch\"";
+  orion spawn --kind codex \"review the diff on this branch\"
+  orion spawn --worktree fix-font-names \"stop matching font names by substring\"";
 
 const OPEN_EXAMPLES: &str = "\
 Examples:

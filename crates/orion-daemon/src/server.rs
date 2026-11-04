@@ -544,10 +544,18 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     id,
                     kind,
                     starting_prompt,
+                    worktree,
+                    base,
                 } => {
                     // Logged by mode only — never the prompt text.
                     let result = daemon
-                        .spawn_sibling_agent(&id, kind, &starting_prompt)
+                        .spawn_sibling_agent(
+                            &id,
+                            kind,
+                            &starting_prompt,
+                            worktree.as_deref(),
+                            base.as_deref(),
+                        )
                         .await;
                     match &result {
                         Ok(orion_core::EntityId::Agent(agent)) => tracing::info!(

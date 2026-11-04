@@ -206,11 +206,19 @@ pub fn run_open(files: Vec<String>) -> Result<()> {
     runtime()?.block_on(ipc::open_files_for_current_agent(&files))
 }
 
-/// `orion spawn "<task>" [--kind <kind>]` — start a new agent session
-/// beside the current one (see `ipc::spawn_sibling_for_current_agent`).
+/// `orion spawn "<task>" [--kind <kind>] [--worktree <name> [--base <ref>]]`
+/// — start a new agent session beside the current one, or in another
+/// worktree of its project (see `ipc::spawn_sibling_for_current_agent`).
 /// `kind` is the CLI's `--kind`, already parsed where the flag is.
-pub fn run_spawn(task: String, kind: Option<orion_core::AgentKind>) -> Result<()> {
-    runtime()?.block_on(ipc::spawn_sibling_for_current_agent(&task, kind))
+pub fn run_spawn(
+    task: String,
+    kind: Option<orion_core::AgentKind>,
+    worktree: Option<String>,
+    base: Option<String>,
+) -> Result<()> {
+    runtime()?.block_on(ipc::spawn_sibling_for_current_agent(
+        &task, kind, worktree, base,
+    ))
 }
 
 /// `orion add <dir>` / bare `orion <dir>` — register a directory as a

@@ -268,11 +268,19 @@ pub enum ClientRequest {
     /// the task at once. The caller's own process is untouched. Answered
     /// with `Ack { created: Some(EntityId::Agent(..)) }`; the row reaches
     /// every TUI as an ordinary `EntityUpserted`.
+    ///
+    /// `worktree` (`orion spawn --worktree <name>`) starts it in the
+    /// worktree on that branch of the caller's project instead, created
+    /// from `base` when the branch has none, the way `EnterWorktree` does.
     SpawnSiblingAgent {
         req_id: u64,
         id: AgentId,
         kind: Option<AgentKind>,
         starting_prompt: String,
+        #[serde(default)]
+        worktree: Option<String>,
+        #[serde(default)]
+        base: Option<String>,
     },
     /// `orion open <file>…`, run by the agent from inside its own session:
     /// show these files to the user in every attached TUI's FILE TABS —

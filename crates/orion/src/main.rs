@@ -44,7 +44,12 @@ fn main() -> Result<()> {
             orion_tui::run_rename(title.join(" "), mode)
         }
         Some(Command::Worktree { name, base }) => orion_tui::run_worktree(name.join(" "), base),
-        Some(Command::Spawn { task, kind }) => orion_tui::run_spawn(task.join(" "), kind),
+        Some(Command::Spawn {
+            task,
+            kind,
+            worktree,
+            base,
+        }) => orion_tui::run_spawn(task.join(" "), kind, worktree, base),
         Some(Command::Open { files }) => orion_tui::run_open(files),
         Some(Command::Browser {
             port,

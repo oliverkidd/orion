@@ -1675,6 +1675,35 @@ impl Daemon {
         Ok(())
     }
 
+    /// The project's worktree on `branch`, created from `base` when it has
+    /// none — what `orion worktree` moves into and `orion spawn --worktree`
+    /// starts a session in.
+    pub(crate) async fn worktree_for_branch(
+        self: &Arc<Self>,
+        project: &ProjectId,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<Worktree> {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            bail!("branch name is empty");
+        }
+        let (_, worktrees, _, _) = self.store.load_tree()?;
+        if let Some(w) = worktrees
+            .into_iter()
+            .find(|w| &w.project_id == project && w.branch == branch)
+        {
+            return Ok(w);
+        }
+        let created = self.create_worktree(project, branch, base, false).await?;
+        let EntityId::Worktree(new_id) = created else {
+            bail!("worktree creation returned a non-worktree entity");
+        };
+        self.store
+            .get_worktree(&new_id)?
+            .context("worktree not found")
+    }
+
     /// `orion worktree <branch>`, run by the agent inside its own session.
     /// The row moves under `branch`'s worktree of the same project now —
     /// created when the project has no checkout for that branch yet — and
@@ -1699,24 +1728,9 @@ impl Daemon {
             .store
             .get_worktree(&agent.worktree_id)?
             .context("worktree not found")?;
-        let (_, worktrees, _, _) = self.store.load_tree()?;
-        let existing = worktrees
-            .into_iter()
-            .find(|w| w.project_id == current.project_id && w.branch == branch);
-        let target = match existing {
-            Some(w) => w,
-            None => {
-                let created = self
-                    .create_worktree(&current.project_id, branch, base, false)
-                    .await?;
-                let EntityId::Worktree(new_id) = created else {
-                    bail!("worktree creation returned a non-worktree entity");
-                };
-                self.store
-                    .get_worktree(&new_id)?
-                    .context("worktree not found")?
-            }
-        };
+        let target = self
+            .worktree_for_branch(&current.project_id, branch, base)
+            .await?;
         if target.id == current.id {
             return Ok((target, EnterOutcome::AlreadyThere));
         }
@@ -3706,7 +3720,7 @@ fn push_system_prompt(
 /// Validate an AGENT PRESET's composed starting prompt before it becomes the
 /// CLI's positional argument. Same rules as a cloud task — it crosses the
 /// same login-shell `-c` string and argv — with its own wording.
-fn validate_starting_prompt(raw: &str) -> Result<String> {
+pub(crate) fn validate_starting_prompt(raw: &str) -> Result<String> {
     let text = raw.trim().to_string();
     if text.is_empty() {
         bail!("starting prompt is empty");
@@ -6471,6 +6485,63 @@ mod tests {
             rx.try_recv().unwrap(),
             ServerEvent::EntityUpserted { entity: Entity::Agent(a) } if a.worktree_id == target.id
         ));
+    }
+
+    /// `orion spawn --worktree`'s lookup: the branch's row when the
+    /// project has one, a new checkout in orion's layout when it has not —
+    /// and a refused spawn (a blank task) makes no checkout at all.
+    #[tokio::test]
+    async fn spawn_into_a_worktree_takes_or_creates_the_branch_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_in(&repo, &["init", "-b", "main"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        let daemon = test_daemon();
+        daemon
+            .store
+            .insert_project(&Project {
+                id: ProjectId("p".into()),
+                name: "p".into(),
+                repo_path: repo.clone(),
+                sort_order: 0,
+            })
+            .unwrap();
+        seed_worktree(&daemon, "p", "root", &repo.to_string_lossy(), true);
+        seed_agent(&daemon, "a1", "root", Some("s1"));
+        let a1 = AgentId("a1".into());
+
+        let err = daemon
+            .spawn_sibling_agent(&a1, None, "  ", Some("feat"), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("is empty"), "{err}");
+        assert!(
+            !root.join("repo-worktrees").join("feat").exists(),
+            "a refused spawn leaves no checkout behind"
+        );
+
+        let project = ProjectId("p".into());
+        let made = daemon
+            .worktree_for_branch(&project, "feat", None)
+            .await
+            .unwrap();
+        assert_eq!(made.path, root.join("repo-worktrees").join("feat"));
+        let again = daemon
+            .worktree_for_branch(&project, " feat ", None)
+            .await
+            .unwrap();
+        assert_eq!(again.id, made.id, "an existing branch row is reused");
+        let spec = daemon
+            .sibling_spec(&a1, None, "Fix fonts", Some(made.id.clone()))
+            .unwrap();
+        assert_eq!(spec.worktree, made.id);
+        assert_eq!(spec.name, "agent-1", "names count in the target worktree");
+        assert!(daemon
+            .worktree_for_branch(&project, " ", None)
+            .await
+            .is_err());
     }
 
     fn seed_pending_agent(daemon: &Daemon, id: &str, worktree: &str) {
