@@ -1817,14 +1817,9 @@ fn note_open_prs_answer_at(
     asked: crate::fetch::Asked,
     out: &mut Vec<ClientRequest>,
 ) {
-    // Which pull request the cursor is resting on, before the list under it
-    // changes. A refresh that retires a merged PR must not slide the
-    // selection onto whatever row inherits its index.
-    let cursor = app.selected_worktree_pr().cloned();
-    // And which checkout: the answer can move one under a pull request
-    // just opened from its branch (or back out, once that merges), and
-    // the cursor goes with it — a checkout is never lost to a re-list.
-    let checkout = app.selected_worktree().map(|w| w.id.clone());
+    // Where the cursor rests, before the list under it changes: see
+    // `WorktreeCursor`.
+    let kept = WorktreeCursor::take(app);
     let mut status_changed = false;
     let mut merged = None;
     // Whether the merged tail is the whole week is for an answer that
@@ -1935,8 +1930,7 @@ fn note_open_prs_answer_at(
         },
     );
     forget_retired_prs(app);
-    reconcile_open_pr_cursor(app, cursor, out);
-    follow_checkout(app, checkout.as_ref());
+    kept.restore(app, out);
     // An open `/` palette lists these rows too: a pull request marked
     // ready for review (or turned back into a draft) since the last answer
     // must change its word there as well, and one merged since must leave.
@@ -2116,6 +2110,32 @@ fn reconcile_open_pr_cursor(
     }
 }
 
+/// Where the Worktrees cursor rests — the pull request row it is on, or
+/// the checkout — taken before something changes the open-PR lists and
+/// put back after. A merge or a close retires a pull request's row, and
+/// the checkout nested under it moves back among the plain ones
+/// (`App::worktree_rows`): every row below shifts, and an index left
+/// alone lands on another worktree. Every path that changes the lists
+/// takes one first, so none can forget the checkout half.
+struct WorktreeCursor {
+    pr: Option<crate::pull_request::OpenPr>,
+    checkout: Option<WorktreeId>,
+}
+
+impl WorktreeCursor {
+    fn take(app: &App) -> Self {
+        Self {
+            pr: app.selected_worktree_pr().cloned(),
+            checkout: app.selected_worktree().map(|w| w.id.clone()),
+        }
+    }
+
+    fn restore(self, app: &mut App, out: &mut Vec<ClientRequest>) {
+        reconcile_open_pr_cursor(app, self.pr, out);
+        follow_checkout(app, self.checkout.as_ref());
+    }
+}
+
 /// Forget the description and conversation of every pull request that is no
 /// longer on any row. `pr_detail` is a session cache — deliberately, a PR's
 /// body doesn't change while you read it — so without this an instance left
@@ -2172,7 +2192,7 @@ fn adopt_pr_state(app: &mut App, url: &str, was_merged: bool) {
 /// the minute anyway; this is for the case where the user is looking
 /// straight at it.
 fn drop_retired_pr(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
-    let cursor = app.selected_worktree_pr().cloned();
+    let kept = WorktreeCursor::take(app);
     let mut removed = false;
     for open in app.open_prs.values_mut() {
         let before = open.list.len();
@@ -2182,7 +2202,7 @@ fn drop_retired_pr(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
     if !removed {
         return;
     }
-    reconcile_open_pr_cursor(app, cursor, out);
+    kept.restore(app, out);
     refresh_palette(app);
     crate::pr_modal::list_changed(app);
     app.dirty = true;
@@ -17606,6 +17626,37 @@ mod tests {
             prs.status_or_open(&draft.url).is_open(),
             "a draft is an open pull request"
         );
+    }
+
+    /// The cursor on a checkout nested under its pull request stays on that
+    /// checkout when a detail says the pull request merged: the PR's row
+    /// leaves, the checkout moves back among the plain ones, and every row
+    /// below shifts — an index left alone would land on another worktree.
+    #[test]
+    fn the_cursor_stays_on_a_checkout_whose_pull_request_merges() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_feat_worktree(&mut app, "w2", "pr-7-head");
+        seed_feat_worktree(&mut app, "w3", "spike");
+        seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Number lines")]);
+        app.focus = Focus::Worktrees;
+        let w2 = WorktreeId("w2".into());
+        let nested = app.worktree_row_of(&w2).expect("w2 is a row");
+        app.sel_worktree = nested;
+        assert_eq!(app.selected_worktree().map(|w| &w.id), Some(&w2));
+
+        drop_retired_pr(&mut app, &pr_url(7), &mut Vec::new());
+
+        assert_eq!(open_pr_numbers(&app), vec![9]);
+        assert_ne!(app.worktree_row_of(&w2), Some(nested), "the rows moved");
+        assert_eq!(app.selected_worktree().map(|w| &w.id), Some(&w2));
+        assert_eq!(Some(app.sel_worktree), app.worktree_row_of(&w2));
+
+        // The list answer that follows, without #7, leaves it there too.
+        let pid = app.selected_project().expect("a project").id.clone();
+        let listed = app.open_prs[&pid].list.clone();
+        note_open_prs_answer(&mut app, pid, Some(listed), &mut Vec::new());
+        assert_eq!(app.selected_worktree().map(|w| &w.id), Some(&w2));
     }
 
     /// The checkout's own PR ROW keeps a merged pull request, so GitHub's
