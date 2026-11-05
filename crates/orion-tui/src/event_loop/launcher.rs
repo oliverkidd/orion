@@ -7337,7 +7337,8 @@ mod tests {
             key(&mut by_x, KeyCode::Char('x'), KeyModifiers::NONE);
             assert_eq!(by_x.launcher_tabs, [ProjectId("p1".into())]);
 
-            for code in [KeyCode::Backspace] {
+            {
+                let code = KeyCode::Backspace;
                 let mut app = two_tabs();
                 keys(&mut app, &up);
                 let before = tab_state(&app);

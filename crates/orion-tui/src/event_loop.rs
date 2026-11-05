@@ -7357,12 +7357,10 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 // Forget the entry — no confirm, the next `orion ssh` to it
                 // just re-adds it.
-                _ if ui::hosts_keys::REMOVE.matches(&key) => {
-                    if view.selected < view.hosts.len() {
-                        let entry = view.hosts.remove(view.selected);
-                        view.selected = clamp_selection(view.selected as i64, view.hosts.len());
-                        crate::hosts::remove(&entry);
-                    }
+                _ if ui::hosts_keys::REMOVE.matches(&key) && view.selected < view.hosts.len() => {
+                    let entry = view.hosts.remove(view.selected);
+                    view.selected = clamp_selection(view.selected as i64, view.hosts.len());
+                    crate::hosts::remove(&entry);
                 }
                 _ => {}
             }
@@ -11367,10 +11365,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     app.dirty = true;
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if view.files_drag.take().is_some() {
-                    app.dirty = true;
-                }
+            MouseEventKind::Up(MouseButton::Left) if view.files_drag.take().is_some() => {
+                app.dirty = true;
             }
             _ => {}
         }
@@ -11530,10 +11526,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     app.dirty = true;
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if view.files_drag.take().is_some() {
-                    app.dirty = true;
-                }
+            MouseEventKind::Up(MouseButton::Left) if view.files_drag.take().is_some() => {
+                app.dirty = true;
             }
             _ => {}
         }
@@ -12062,13 +12056,12 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     let items = panel_menu_items(app, focus);
                     open_menu(app, items, at);
                 }
-                Some(target) => {
-                    if select_clicked_row(app, &target, out) {
-                        if let Some(items) = context_menu_items(app, app.focus) {
-                            open_menu(app, items, at);
-                        }
+                Some(target) if select_clicked_row(app, &target, out) => {
+                    if let Some(items) = context_menu_items(app, app.focus) {
+                        open_menu(app, items, at);
                     }
                 }
+                Some(_) => {}
                 None => {}
             }
             app.dirty = true;

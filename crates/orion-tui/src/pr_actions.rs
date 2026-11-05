@@ -1117,7 +1117,7 @@ fn submit_merge(app: &mut App) {
         let result = merge(&dir, number, method, auto, bypass, &base, delete.as_deref())
             .await
             .map(|fate| merged_message(number, &base, method, auto, &fate));
-        let landed = (!auto).then(|| (number, base));
+        let landed = (!auto).then_some((number, base));
         let _ = tx.send(Answer::Merged {
             project,
             ticket,
