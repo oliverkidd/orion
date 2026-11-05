@@ -8,6 +8,7 @@ The work lives on the branch `feature-cull` (worktree `orion-worktrees/feature-c
 
 ## How to work a step
 
+- Start from the tip of `feature-cull`. A builder in its own worktree runs `git reset --hard feature-cull` on its own branch first; the earlier waves are already merged there.
 - Read the step and its listed files first. Line numbers are approximate (`~`); find code by the names given.
 - Keep the step's scope. If a step needs something from another step that isn't there yet, stop and say so rather than building it.
 - Update the docs the step affects in the same commit: `docs/keys.md`, `docs/sessions.md`, `docs/configuration.md`, `docs/commands.md`, `docs/how-it-works.md`, `README.md`, `ARCHITECTURE.md`. Step 7 rewrites `configuration.md` as a whole, so in earlier steps it's enough to delete or correct the rows and sections you touch.
@@ -18,9 +19,11 @@ The work lives on the branch `feature-cull` (worktree `orion-worktrees/feature-c
   cargo fmt --all
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test -p orion-core -p orion-daemon -p orion-tui -p orion-fuzzy
-  cargo test -p orion --test e2e_tui --test help_cli --test config_cli --test install_sh
+  cargo test -p orion --no-fail-fast --test e2e_tui --test help_cli --test config_cli --test install_sh
   ```
-  Add `cargo test -p orion --test e2e_pty` when the step touches the daemon or the protocol. It spawns real daemons and is slow.
+  Add `cargo test -p orion --test e2e_pty` when the step touches the daemon or the protocol. It spawns real daemons and is slow. Without `--no-fail-fast`, an e2e_tui failure stops the other suites from running at all. Run the suites once before you change anything, so a failure you didn't cause is known up front.
+- A retired config key needs no list: the fixture test (`config_files_from_earlier_releases_still_load_every_key`) lets any key the build no longer reads load as nothing, as long as a save leaves it in the file.
+- Keep scratch scripts in a folder named after your step, not loose in a shared scratch folder.
 - Before committing code (not docs or tests), run the `simplify` skill over the diff.
 - Commit message style: one plain sentence saying what the user gets, the way `git log` already reads (`The run line says when it's stopping`), then a short body.
 
@@ -514,3 +517,15 @@ This replaces the warm spare pool, which never serves a launch today (it warms t
 6A  6B  6C  6D          (6D after 3A and 4B)
         7A
 ```
+
+## Build log
+
+**Wave 1 (done, merged into `feature-cull`).** 1A, 1B, 1C and 1D, then `cargo clippy -D warnings` made to pass (seven lints a newer clippy raises). Where the build differs from the steps above:
+- `PROTOCOL_VERSION` is 50 (cloud sessions and the terminal shell tail gone, `issue_url` off `CreateAgent`). Store migrations 30 and 31 archive cloud rows and Pi/Muse rows.
+- A pull request is attached to a waiting Linear issue when its **title** names it; the open-PR list doesn't fetch bodies.
+- Open in app's install is `i` then Enter, like every other install row.
+- The ⇧D / ⇧W / ⇧F shift-letter keys and the `^` chords inside modals stay; only the grid's ctrl twins went.
+- A paste of several lines into the todos with no field open adds one item per line. Groups nested deeper than two levels are lifted into their top-level group on load.
+- Moving a folder to the Trash is macOS-only (`paths_util::move_folder_to_trash`).
+- Known flaky: `tui_autofix_sends_unasked_when_my_pr_conflicts` (passes alone). Known failing on `main` too: `tui_diff_steps_through_a_branch_commit_by_commit` (times out on "the alpha body").
+
