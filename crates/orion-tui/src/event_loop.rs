@@ -9561,6 +9561,15 @@ pub(crate) fn jump_to_session(app: &mut App, id: AgentId, out: &mut Vec<ClientRe
     jump_to_target(app, PaletteTarget::Session(id), Landing::FocusOnly, out);
 }
 
+/// Close the overlay and land on `target` as the palette's `Enter` does:
+/// the LINEAR VIEW's **Go to session**.
+pub(crate) fn jump_as_palette(app: &mut App, target: PaletteTarget, out: &mut Vec<ClientRequest>) {
+    app.overlay = None;
+    let attaches = crate::config::Config::load().palette_enter_attaches;
+    let landing = Landing::for_enter_on(app, &target, attaches);
+    jump_to_target(app, target, landing, out);
+}
+
 /// Land the palette/finder on `target`, attaching without the debounce —
 /// the user typed a query and picked a row, which is as explicit as it gets.
 fn jump_to_target(

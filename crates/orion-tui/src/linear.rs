@@ -373,6 +373,30 @@ pub struct PickWorktree {
     pub branch: String,
 }
 
+/// `Enter` or `⇧Tab` on issues a worktree is on already ([`work_of`]):
+/// those worktrees, each with its sessions, in the reading pane's place —
+/// **Go to session** on them — and **New worktree anyway** under them, the
+/// only way to a second worktree for an issue that has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkPick {
+    pub issues: Vec<LinearIssue>,
+    /// The worktrees the issues are on, in the grid's band order, each
+    /// with the identifiers of those on it.
+    pub worktrees: Vec<(PickWorktree, Vec<String>)>,
+    /// A row of `worktrees`, or the one past them: **New worktree anyway**.
+    pub selected: usize,
+    /// A new worktree goes by the preset pick (`⇧Tab`), not straight to
+    /// the QUICK PROMPT.
+    pub preset: bool,
+}
+
+impl WorkPick {
+    /// On **New worktree anyway**.
+    fn on_new(&self) -> bool {
+        self.selected >= self.worktrees.len()
+    }
+}
+
 impl LinearIssue {
     pub fn label(&self) -> String {
         if self.title.trim().is_empty() {
@@ -565,6 +589,8 @@ pub struct LinearView {
     pub prop_pick: Option<PropPick>,
     /// The worktree picker, while it is up: every key but Esc is its own.
     pub worktree_pick: Option<WorktreePick>,
+    /// **Go to session**, while it is up: every key but Esc is its own.
+    pub work_pick: Option<WorkPick>,
     /// Which list shows: `My issues` or `Other issues`.
     pub tab: LinearTab,
     /// The tab strip's labels' screen x-ranges and its row, for the click.
@@ -677,6 +703,7 @@ impl LinearView {
             mode,
             prop_pick: None,
             worktree_pick: None,
+            work_pick: None,
             tab: LinearTab::Mine,
             tab_hits: Vec::new(),
             tab_row: Rect::default(),
@@ -2612,6 +2639,8 @@ pub(crate) mod keys {
     /// MODAL's.
     pub const LEVEL: Key = crate::todos::view::keys::LEVEL;
     pub const LINK: Key = Key::new(&["enter"], "link");
+    /// **Go to session**'s: to the worktree under the cursor, or a new one.
+    pub const GO: Key = Key::new(&["enter"], "go to session");
     /// `My issues` ⇄ `Other issues`: plain or with ⇧, as the PULL
     /// REQUESTS MODAL's tab keys are.
     pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
@@ -2629,7 +2658,7 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
-        PICK, SET, LEVEL, LINK, TABS, FILTER, JUMP, SELECT, COPY,
+        PICK, SET, LEVEL, LINK, GO, TABS, FILTER, JUMP, SELECT, COPY,
     ];
 }
 
@@ -2660,6 +2689,14 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             keys::PICK.hint(),
             Hint::new("Esc", "cancel"),
         ];
+    }
+    if let Some(pick) = &view.work_pick {
+        let go = if pick.on_new() {
+            keys::GO.hint_as("new worktree")
+        } else {
+            keys::GO.hint()
+        };
+        return vec![go.kept(), keys::PICK.hint(), Hint::new("Esc", "cancel")];
     }
     if view.filter_pick.is_some() {
         return crate::list_filter::hints();
@@ -3106,6 +3143,114 @@ fn link_worktree(app: &mut App) {
     detach_stale(app, &project, stale);
 }
 
+/// The project's worktrees `issues` are on already ([`work_of`]), in the
+/// grid's band order, each with the identifiers of those on it.
+fn worked_on(
+    app: &App,
+    project: &ProjectId,
+    issues: &[LinearIssue],
+) -> Vec<(PickWorktree, Vec<String>)> {
+    let on: Vec<(String, &str)> = issues
+        .iter()
+        .filter_map(|i| Some((work_of(app, project, i)?.branch?, i.identifier.as_str())))
+        .collect();
+    app.worktrees_in_band_order(project)
+        .into_iter()
+        .filter_map(|w| {
+            let ids: Vec<String> = on
+                .iter()
+                .filter(|(branch, _)| *branch == w.branch)
+                .map(|(_, id)| id.to_string())
+                .collect();
+            let wt = PickWorktree {
+                id: w.id.clone(),
+                branch: w.branch.clone(),
+            };
+            (!ids.is_empty()).then_some((wt, ids))
+        })
+        .collect()
+}
+
+/// `Enter` (or `⇧Tab`, `preset`) while browsing: an agent on `issues` in
+/// a fresh worktree — unless a worktree is on some of them already, when
+/// the [`WorkPick`] offers it first.
+fn launch_or_go(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let worktrees = worked_on(app, &view.project, &issues);
+    if worktrees.is_empty() {
+        launch_new(app, issues, preset);
+        return;
+    }
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.filter_pick = None;
+        view.work_pick = Some(WorkPick {
+            issues,
+            worktrees,
+            selected: 0,
+            preset,
+        });
+    }
+}
+
+/// An agent on `issues` in a fresh worktree: the QUICK PROMPT, or the
+/// preset pick in front of it.
+fn launch_new(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
+    if preset {
+        open_preset_on(app, issues);
+    } else {
+        open_prompt(app, issues);
+    }
+}
+
+/// Keys while **Go to session** is up.
+fn handle_work_pick_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(pick) = &mut view.work_pick else {
+        return;
+    };
+    let n = pick.worktrees.len() + 1;
+    match key.code {
+        KeyCode::Esc => view.work_pick = None,
+        KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, n),
+        KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, n),
+        _ if keys::GO.matches(&key) => {
+            let Some(pick) = view.work_pick.take() else {
+                return;
+            };
+            match pick.worktrees.get(pick.selected) {
+                Some((wt, _)) => go_to_work(app, &wt.id, out),
+                None => launch_new(app, pick.issues, pick.preset),
+            }
+        }
+        _ => {}
+    }
+    app.dirty = true;
+}
+
+/// **Go to session**: the view closed, and the cursor on the worktree's
+/// session that wants you most — the `/` palette's order — landed on as
+/// the palette's `Enter` lands; on the worktree's band when it has none.
+fn go_to_work(app: &mut App, worktree: &orion_core::WorktreeId, out: &mut Vec<ClientRequest>) {
+    use crate::palette::PaletteTarget;
+    let session = crate::palette::attention_sessions(&app.tree)
+        .into_iter()
+        .find(|id| {
+            app.tree
+                .agents
+                .iter()
+                .any(|a| &a.id == id && &a.worktree_id == worktree)
+        });
+    let target = match session {
+        Some(id) => PaletteTarget::Session(id),
+        None => PaletteTarget::Worktree(worktree.clone()),
+    };
+    crate::event_loop::jump_as_palette(app, target, out);
+}
+
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return false;
@@ -3122,6 +3267,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     }
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.worktree_pick.is_some()) {
         handle_worktree_pick_key(app, key);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.work_pick.is_some()) {
+        handle_work_pick_key(app, key, out);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.filter_pick.is_some()) {
@@ -3559,7 +3708,7 @@ fn confirm(app: &mut App) {
         return;
     };
     match &view.mode {
-        LinearMode::Browse => open_prompt(app, issues),
+        LinearMode::Browse => launch_or_go(app, issues, false),
         LinearMode::Attach {
             pr_url, pr_number, ..
         } => {
@@ -3618,6 +3767,10 @@ fn open_preset(app: &mut App) {
     if issues.is_empty() {
         return;
     }
+    launch_or_go(app, issues, true);
+}
+
+fn open_preset_on(app: &mut App, issues: Vec<LinearIssue>) {
     let Some(launch) = launch_for(app, issues) else {
         return;
     };
@@ -3828,8 +3981,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else {
         head
     };
-    let side_up =
-        view.prop_pick.is_some() || view.worktree_pick.is_some() || view.filter_pick.is_some();
+    let side_up = view.prop_pick.is_some()
+        || view.worktree_pick.is_some()
+        || view.work_pick.is_some()
+        || view.filter_pick.is_some();
     let list_focused = list_focused && !side_up;
     let rows_focused = list_focused && view.focus == LinearFocus::List;
     let block = panel_block(&title, list_focused, th);
@@ -4008,6 +4163,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         draw_prop_pick(f, body_inner, pick, me, th);
     } else if let Some(pick) = &view.worktree_pick {
         draw_worktree_pick(f, body_inner, app, pick, &view.project, th);
+    } else if let Some(pick) = &view.work_pick {
+        draw_work_pick(f, body_inner, app, pick, th);
     } else if let Some(pick) = &mut filter_pick {
         let facets = pick_facets(&placed, view.tab, th);
         pick.clamp(&facets);
@@ -4412,6 +4569,39 @@ fn draw_worktree_pick(
         pick.selected,
         th,
     );
+}
+
+/// **Go to session**: each worktree the issues are on — its branch, which
+/// of them, and its sessions under it — then **New worktree anyway**.
+fn draw_work_pick(f: &mut Frame, area: Rect, app: &App, pick: &WorkPick, th: Theme) {
+    let width = usize::from(area.width).saturating_sub(PICK_INDENT.len());
+    let mut groups: Vec<PickGroup> = pick
+        .worktrees
+        .iter()
+        .map(|(w, ids)| PickGroup {
+            head: vec![
+                Span::raw(format!("⎇ {}", w.branch)),
+                Span::styled(format!("  {}", ids.join(", ")), Style::default().fg(th.dim)),
+            ],
+            sessions: pick_session_lines(app, &w.id, width, th),
+            dormant: app.worktree_dormant(&w.id),
+        })
+        .collect();
+    groups.push(PickGroup {
+        head: vec![Span::raw("+ New worktree anyway")],
+        sessions: Vec::new(),
+        dormant: false,
+    });
+    let on: Vec<&str> = pick
+        .worktrees
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().map(String::as_str))
+        .collect();
+    let heading = match on.as_slice() {
+        [one] => format!("{one} is in a worktree already"),
+        _ => format!("{} are in worktrees already", on.join(", ")),
+    };
+    draw_grouped_pick(f, area, heading, &groups, pick.selected, th);
 }
 
 /// How far a session's line sits in under its checkout's.
@@ -7387,6 +7577,71 @@ pub(crate) mod tests {
             row("ENG-1 ─").contains("● ⎇ solar-lemur"),
             "the border\n{screen}"
         );
+    }
+
+    /// Whether the QUICK PROMPT is up on a fresh worktree of its own.
+    fn box_on_a_new_worktree(app: &App) -> bool {
+        matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(
+            &p.kind,
+            crate::app::PromptKind::QuickPrompt(launch)
+                if matches!(launch.target, QuickTarget::NewWorktree { .. })
+        ))
+    }
+
+    /// `Enter` on an issue a worktree is on already never cuts a second
+    /// one: it offers that worktree, and **Go to session** lands on its
+    /// session as the `⌘K` palette's `Enter` does. Only **New worktree
+    /// anyway** opens the box on a fresh one; `Esc` backs out of the
+    /// choice; an issue nothing is on goes straight to the box.
+    #[test]
+    fn enter_on_an_issue_with_a_worktree_goes_to_its_session() {
+        let (mut app, _dir, _rx) = paired();
+        worktree_on(&mut app, 0, "main", true);
+        worktree_on(&mut app, 1, "eng-1-login", false);
+        agent_in(&mut app, 1, orion_core::AgentStatus::Finished);
+        let enter_on = |app: &mut App, row: usize| {
+            open(app);
+            press(app, plain(KeyCode::Down));
+            for _ in 0..row {
+                press(app, plain(KeyCode::Down));
+            }
+            press(app, plain(KeyCode::Enter));
+        };
+
+        enter_on(&mut app, 0);
+        let pick = the_view(&app).work_pick.clone().expect("Go to session");
+        assert_eq!(pick.worktrees.len(), 1);
+        assert_eq!(pick.worktrees[0].1, ["ENG-1"]);
+        crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+        let screen = shot(&mut app, 200, 40);
+        assert!(
+            screen.contains("ENG-1 is in a worktree already"),
+            "{screen}"
+        );
+        assert!(screen.contains("⎇ eng-1-login"), "{screen}");
+        assert!(screen.contains("+ New worktree anyway"), "{screen}");
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(app.overlay.is_none(), "{:?}", app.overlay);
+        assert_eq!(
+            app.selected_session().map(|a| a.id.0.clone()).as_deref(),
+            Some("a1"),
+            "on the worktree's session"
+        );
+
+        enter_on(&mut app, 0);
+        press(&mut app, plain(KeyCode::Esc));
+        assert!(the_view(&app).work_pick.is_none(), "Esc backs out");
+        assert!(matches!(app.overlay, Some(Overlay::Linear(_))));
+
+        press(&mut app, plain(KeyCode::Enter));
+        press(&mut app, plain(KeyCode::Down));
+        assert!(the_view(&app).work_pick.as_ref().unwrap().on_new());
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(box_on_a_new_worktree(&app), "{:?}", app.overlay);
+
+        app.overlay = None;
+        enter_on(&mut app, 1);
+        assert!(box_on_a_new_worktree(&app), "ENG-2 has no worktree");
     }
 
     /// `⌘C` copies the marked issues, else the one under the cursor —
