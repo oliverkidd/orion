@@ -697,9 +697,9 @@ fn tui_git_diff_modal() {
 /// — the keys on the commits as it opens: a clean checkout with commits
 /// of its own opens on the whole branch, every commit ticked, instead of
 /// saying "no changes"; `^A` unticks them and the cursor's commit shows
-/// exactly its files under its message; `⇧←`/`⇧→` step older and newer
-/// from the files; ticked commits read together; and a dirty checkout
-/// opens on its uncommitted changes, as it always did.
+/// exactly its files, the reading pane's border naming it; `⇧←`/`⇧→` step
+/// older and newer from the files; ticked commits read together; and a
+/// dirty checkout opens on its uncommitted changes, as it always did.
 #[test]
 fn tui_diff_steps_through_a_branch_commit_by_commit() {
     let mut tui = TuiHarness::spawn();
@@ -717,16 +717,16 @@ fn tui_diff_steps_through_a_branch_commit_by_commit() {
     );
     std::fs::write(repo.join("alpha.txt"), "alpha line\n").unwrap();
     repo_git(&repo, &["add", "."]);
-    repo_git(
-        &repo,
-        &["commit", "-m", "add alpha", "-m", "the alpha body"],
-    );
+    repo_git(&repo, &["commit", "-m", "add alpha"]);
     std::fs::write(repo.join("beta.txt"), "beta line\n").unwrap();
     repo_git(&repo, &["add", "."]);
     repo_git(&repo, &["commit", "-m", "add beta"]);
 
     tui.wait_for_text("to begin");
     add_project(&mut tui, &repo, "commits-proj");
+    // The reading pane's top border, naming the commit it reads: the
+    // message itself is not drawn over the diff.
+    let reading = |subject: &str| format!("╭ {subject} ─");
 
     // ---- nothing uncommitted: the whole branch, every commit ticked ----
     tui.send(CMD_E);
@@ -739,28 +739,36 @@ fn tui_diff_steps_through_a_branch_commit_by_commit() {
     // newest commit, exactly its files ----
     tui.send(CTRL_A);
     tui.wait_for_text("Files (1)");
+    tui.wait_for_text(&reading("add beta"));
     tui.wait_for_text("+ beta line");
     tui.wait_for_gone("+ alpha line");
 
-    // ---- Enter hands the keys on; ⇧← is the commit before, its
-    // message over its diff; ⇧→ the one after ----
+    // ---- Enter hands the keys on; ⇧← is the commit before, the border
+    // naming it over its diff; ⇧→ the one after ----
     tui.send(ENTER);
     tui.send(SHIFT_LEFT);
-    tui.wait_for_text("the alpha body");
+    tui.wait_for_text(&reading("add alpha"));
     tui.wait_for_text("+ alpha line");
     tui.wait_for_gone("+ beta line");
     tui.send(SHIFT_RIGHT);
+    tui.wait_for_text(&reading("add beta"));
     tui.wait_for_text("+ beta line");
-    tui.wait_for_gone("the alpha body");
+    tui.wait_for_gone("+ alpha line");
 
-    // ---- tick both: read together ----
+    // ---- tick both: read together, both commits' files listed, the
+    // reading pane on one file at a time ----
     tui.send(SHIFT_TAB);
     tui.send(SPACE);
     tui.send(DOWN);
     tui.send(SPACE);
     tui.wait_for_text("all ticked · together");
+    tui.wait_for_text(&reading("The whole branch since origin/main"));
+    tui.wait_for_text("Files (2)");
     tui.wait_for_text("+ alpha line");
+    tui.send(ENTER);
+    tui.send(DOWN);
     tui.wait_for_text("+ beta line");
+    tui.wait_for_gone("+ alpha line");
     tui.send(ESC);
     tui.wait_for_gone("Commits ·");
 
