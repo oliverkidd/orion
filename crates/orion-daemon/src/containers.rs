@@ -5,10 +5,10 @@
 //! containers, never by name, so a project only goes when every one of its
 //! containers was started inside the deleted checkout.
 //!
-//! Like a WORKTREE HOOK it only reports: it runs after the git removal and
-//! the row drop, and whatever goes wrong — docker unreachable, a compose
-//! command failing or overrunning — is a warning in every client, never a
-//! rolled-back delete. No docker CLI on the machine is nothing to do.
+//! It only reports: it runs after the git removal and the row drop, and
+//! whatever goes wrong — docker unreachable, a compose command failing or
+//! overrunning — is a warning in every client, never a rolled-back
+//! delete. No docker CLI on the machine is nothing to do.
 
 use orion_core::compose::{self, WorktreeContainers};
 use std::ffi::OsString;
@@ -26,9 +26,8 @@ pub(crate) const COMPOSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Apply `policy` to the compose projects started in the deleted
 /// `worktree`. Returns the warnings for the clients; what it did goes to
-/// the log. Skipped while `worktree` is still on disk, for the same reason
-/// the delete hook is: the checkout — and what runs off it — is still
-/// someone's.
+/// the log. Skipped while `worktree` is still on disk: the checkout — and
+/// what runs off it — is still someone's.
 pub async fn release(worktree: &Path, policy: WorktreeContainers) -> Vec<String> {
     if policy == WorktreeContainers::Off || worktree.exists() {
         return Vec::new();

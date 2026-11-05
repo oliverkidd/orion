@@ -1892,7 +1892,7 @@ fn paint_stack_mark(buf: &mut Buffer, r: Rect, app: &App, worktree: &orion_core:
 }
 
 /// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
-/// RUN TERMINAL, `❯` for a plain shell, muted while its PTY lives and
+/// RUN or SETUP TERMINAL, `❯` for a plain shell, muted while its PTY lives and
 /// faint once it has exited.
 pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'static> {
     let glyph = if t.run_command.is_some() {
@@ -1928,8 +1928,11 @@ const RUN_MARK: &str = "$ ";
 /// exit, a red `exited 1` for any other; a run whose ending the DAEMON
 /// never saw (it restarted since) is a faint `stopped`. A dead shell is a
 /// faint `exited`. A stop that was asked for leaves no row to say any of
-/// it.
+/// it. A SETUP TERMINAL says [`setup_badge`].
 fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, Style) {
+    if t.setup {
+        return setup_badge(t, th);
+    }
     let faint = Style::default().fg(th.faint);
     if let Some(kill_at) = t.run.stopping_until {
         let doing = if t.run.restarting {
@@ -1950,6 +1953,21 @@ fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, 
         (true, false, Some(code)) => (format!("exited {code}"), Style::default().fg(th.err)),
         (true, false, None) => ("stopped".into(), faint),
     }
+}
+
+/// A SETUP TERMINAL's right end: `setting up…` in the working gold while
+/// it runs, then a red `setup failed (1)` — or `setup failed`, when the
+/// DAEMON that saw it end has restarted since. A clean exit leaves no row
+/// to say anything.
+fn setup_badge(t: &orion_core::TerminalTab, th: Theme) -> (String, Style) {
+    if t.alive {
+        return ("setting up…".into(), Style::default().fg(th.warn));
+    }
+    let failed = match t.run.exit_code {
+        Some(code) => format!("setup failed ({code})"),
+        None => "setup failed".into(),
+    };
+    (failed, Style::default().fg(th.err))
 }
 
 /// `ms` to go as `m:ss`, rounded up to the second and never below `0:00`.
@@ -3656,6 +3674,7 @@ mod tests {
                 sort_order: i,
                 alive: true,
                 run_command: None,
+                setup: false,
                 run: Default::default(),
             });
         }
@@ -3724,6 +3743,7 @@ mod tests {
                 sort_order: 0,
                 alive: true,
                 run_command: run.map(Into::into),
+                setup: false,
                 run: Default::default(),
             });
         }
@@ -3759,6 +3779,7 @@ mod tests {
             sort_order: 0,
             alive,
             run_command: Some("npm run dev".into()),
+            setup: false,
             run: Default::default(),
         }
     }
@@ -3883,6 +3904,39 @@ mod tests {
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
         let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
         assert!(line.trim_end().ends_with("exited 2"), "{line:?}");
+    }
+
+    /// A SETUP LINE looks like a run line — its command with the prompts,
+    /// its status at the far right — and says `setting up…` in the
+    /// working gold while it runs, then a red `setup failed (1)`.
+    #[test]
+    fn a_setup_line_says_setting_up_then_how_it_failed() {
+        let th = Theme::default();
+        let mut setup = orion_core::TerminalTab {
+            name: "setup".into(),
+            run_command: Some("just setup-worktree".into()),
+            setup: true,
+            ..a_run(true)
+        };
+        assert_eq!(
+            terminal_badge(&setup, 0, th),
+            ("setting up…".into(), Style::default().fg(th.warn))
+        );
+        setup.alive = false;
+        for (code, said) in [(Some(1), "setup failed (1)"), (None, "setup failed")] {
+            setup.run.exit_code = code;
+            let (badge, style) = terminal_badge(&setup, 0, th);
+            assert_eq!((badge.as_str(), style.fg), (said, Some(th.err)), "{code:?}");
+        }
+
+        let mut app = a_tree();
+        select(&mut app, "api");
+        setup.alive = true;
+        app.tree.terminals.push(setup);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("▶ setup")).unwrap();
+        assert!(line.contains("$ just setup-worktree"), "{line:?}");
+        assert!(line.trim_end().ends_with("setting up…"), "{line:?}");
     }
 
     /// A session's line says what it runs on — the model and the

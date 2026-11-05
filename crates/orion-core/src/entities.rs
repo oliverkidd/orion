@@ -340,13 +340,28 @@ pub struct TerminalTab {
     /// Set on a RUN TERMINAL — the one `r` starts on a worktree: the
     /// project's run command it was launched with, run through the
     /// login shell in place of an interactive one. While its PTY is alive
-    /// the worktree is RUNNING. None for a plain shell tab.
+    /// the worktree is RUNNING. On a SETUP TERMINAL, the setup command it
+    /// runs the same way. None for a plain shell tab.
     #[serde(default)]
     pub run_command: Option<String>,
+    /// A SETUP TERMINAL: the project's setup command, which the DAEMON
+    /// ran here once, as it created the worktree. Its row reads `setting
+    /// up…` while it runs, goes on a clean exit, and stays as `setup
+    /// failed (1)` otherwise. Never the worktree's RUN TERMINAL.
+    #[serde(default)]
+    pub setup: bool,
     /// Where a RUN TERMINAL's run is at, as the DAEMON knows it right now.
     /// Stamped on every send, never stored; the default on a plain shell.
     #[serde(default)]
     pub run: RunState,
+}
+
+impl TerminalTab {
+    /// The worktree's RUN TERMINAL — what **Start stack** starts and stops
+    /// — rather than a shell or its SETUP TERMINAL.
+    pub fn is_run(&self) -> bool {
+        self.run_command.is_some() && !self.setup
+    }
 }
 
 /// What a RUN LINE says about its run beyond whether its PTY lives
@@ -373,6 +388,10 @@ pub struct RunState {
     /// what ⌘O's **Open app** opens. Empty once the run has ended, and
     /// again from a start.
     pub ports: Vec<u16>,
+    /// On a SETUP TERMINAL: a **Start stack** pressed while it runs is
+    /// waiting for it. The run starts once the setup exits cleanly, and
+    /// the footer says so meanwhile.
+    pub run_queued: bool,
 }
 
 /// A URL pinned to a worktree — the pull request, the ticket, the design

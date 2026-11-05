@@ -20,13 +20,24 @@ pub(crate) fn listed(app: &mut App, stacks: Option<Vec<Stack>>) {
 }
 
 /// A checkout's menu item for `⌘⇧S`: **Stop stack** while its run is up,
-/// else **Start stack**.
+/// **Cancel start** while a start waits on its setup, else **Start stack**.
 pub(crate) fn menu_label(app: &App, worktree: &WorktreeId) -> &'static str {
     if app.worktree_running(worktree) {
         "Stop stack"
+    } else if run_queued(app, worktree) {
+        "Cancel start"
     } else {
         "Start stack"
     }
+}
+
+/// Whether a **Start stack** on `worktree` is waiting on its setup to
+/// finish — the DAEMON's word, on the setup line (`RunState::run_queued`).
+pub(crate) fn run_queued(app: &App, worktree: &WorktreeId) -> bool {
+    app.tree
+        .terminals
+        .iter()
+        .any(|t| &t.worktree_id == worktree && t.setup && t.run.run_queued)
 }
 
 /// **Restart stack**: `worktree`'s run stopped — a `^C`, so it winds down

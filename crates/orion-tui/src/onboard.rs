@@ -81,7 +81,11 @@ fn claude_rows(cfg: &Config) -> Vec<ClaudeRow> {
 
 /// The First project page's rows under the project: its rows of
 /// Settings → Projects, by kind.
-const PROJECT_ROWS: &[SettingKind] = &[SettingKind::BaseBranch, SettingKind::RunCommand];
+const PROJECT_ROWS: &[SettingKind] = &[
+    SettingKind::BaseBranch,
+    SettingKind::SetupCommand,
+    SettingKind::RunCommand,
+];
 
 /// The first-run wizard's live state. `area` is written back on draw so a
 /// click outside can dismiss it the same way Esc does.
@@ -1522,10 +1526,10 @@ mod tests {
     }
 
     /// The First project page: the project the grid is on, then its base
-    /// branch and run command, typed in place into that project's entry —
-    /// the rows Settings → Projects has for it.
+    /// branch, setup and run commands, typed in place into that project's
+    /// entry — the rows Settings → Projects has for it.
     #[test]
-    fn the_first_project_page_sets_its_base_branch_and_run_command() {
+    fn the_first_project_page_sets_its_base_branch_and_commands() {
         with_temp_config(|| {
             let mut app = App::new();
             open(&mut app);
@@ -1542,24 +1546,28 @@ mod tests {
                 for needle in [
                     "Project demo · /tmp/demo",
                     "› Base branch auto",
+                    "Setup command not set",
                     "Run command not set",
                 ] {
                     assert!(inner.contains(needle), "{needle}:\n{inner}");
                 }
-                press(app, KeyCode::Enter);
-                assert!(view(app).asking());
-                for c in "dev".chars() {
-                    press(app, KeyCode::Char(c));
+                for (i, value) in ["dev", "just setup-worktree", "just start"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if i > 0 {
+                        press(app, KeyCode::Down);
+                    }
+                    press(app, KeyCode::Enter);
+                    assert!(view(app).asking());
+                    for c in value.chars() {
+                        press(app, KeyCode::Char(c));
+                    }
+                    press(app, KeyCode::Enter);
                 }
-                press(app, KeyCode::Enter);
-                press(app, KeyCode::Down);
-                press(app, KeyCode::Enter);
-                for c in "just start".chars() {
-                    press(app, KeyCode::Char(c));
-                }
-                press(app, KeyCode::Enter);
                 let project = Config::load().project(std::path::Path::new("/tmp/demo"));
                 assert_eq!(project.base_branch, "dev");
+                assert_eq!(project.setup_command, "just setup-worktree");
                 assert_eq!(project.run_command, "just start");
                 let inner = words(&draw_text(app));
                 assert!(inner.contains("Base branch dev"), "{inner}");

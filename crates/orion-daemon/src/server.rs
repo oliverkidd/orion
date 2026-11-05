@@ -403,16 +403,15 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     mode,
                 } => {
                     // A PR SESSION whose checkout does not exist yet is a
-                    // fetch, a `git worktree add` and the WORKTREE HOOK
-                    // before the CLI spawns — seconds, each step bounded by
-                    // its own timeout. Off the request loop, like
-                    // `CreateWorktree` above: the client put stand-in rows
-                    // up precisely so the user keeps working meanwhile, and
-                    // run inline every Attach, Input and Resize on this
-                    // connection queued behind it — moving to another
-                    // session showed nothing until the Ack. `worktree_ops`
-                    // still serializes the checkout against every other
-                    // worktree op.
+                    // fetch and a `git worktree add` before the CLI spawns
+                    // — seconds, each step bounded by its own timeout. Off
+                    // the request loop, like `CreateWorktree` above: the
+                    // client put stand-in rows up precisely so the user
+                    // keeps working meanwhile, and run inline every
+                    // Attach, Input and Resize on this connection queued
+                    // behind it — moving to another session showed nothing
+                    // until the Ack. `worktree_ops` still serializes the
+                    // checkout against every other worktree op.
                     let daemon = daemon.clone();
                     let out_tx = out_tx.clone();
                     tokio::spawn(async move {
@@ -461,8 +460,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     pr_url,
                     head,
                 } => {
-                    // A fetch, a `git worktree add` and the WORKTREE HOOK,
-                    // off the request loop as `CreatePrAgent`'s checkout is.
+                    // A fetch and a `git worktree add`, off the request
+                    // loop as `CreatePrAgent`'s checkout is.
                     let daemon = daemon.clone();
                     let out_tx = out_tx.clone();
                     tokio::spawn(async move {

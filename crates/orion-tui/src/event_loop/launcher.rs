@@ -3723,6 +3723,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: None,
+                    setup: false,
                     run: Default::default(),
                 }),
             },
@@ -3742,6 +3743,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    setup: false,
                     run: orion_core::RunState {
                         ports,
                         ..Default::default()
@@ -3920,6 +3922,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    setup: false,
                     run: orion_core::RunState {
                         stopping_until: Some(crate::app::now_ms() + 90_000),
                         restarting: true,

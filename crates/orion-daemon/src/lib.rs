@@ -20,7 +20,6 @@ pub mod sibling;
 pub mod stacks;
 pub mod status;
 pub mod store;
-pub mod worktree_hooks;
 
 use anyhow::{bail, Context, Result};
 use orion_core::{env, paths};
