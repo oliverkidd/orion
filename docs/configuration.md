@@ -527,8 +527,9 @@ OVERLAY's Project tab (`s`), kept in `config.json` under the project's `projects
 selected worktree's checkout:
 
 - **Run command** — the RUN COMMAND: how a worktree's stack starts, `npm run dev` say. `⌘⇧S` on the
-  grid, or **Start stack** in a card's right-click menu (or the project tab's), starts it and moves the
-  pane onto it; the same key, or the row now **Stop stack**, stops it. The DAEMON runs it in a RUN
+  grid, or **Start stack** in a card's right-click menu (or the project tab's), starts it in the
+  background — its run line comes up in the band, and the cursor and the pane stay where they were;
+  the same key, or the row now **Stop stack**, stops it. The DAEMON runs it in a RUN
   TERMINAL: your login shell (`$SHELL -l -i -c`, the wrapper an agent launch uses, so `npm`, `bun` or
   `mise` resolve the way they do typed) running that line and nothing else. Its process is the
   worktree's RUNNING state — it is a terminal in the worktree's band, its `▶` lit while the process

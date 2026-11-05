@@ -195,7 +195,7 @@ pub enum Action {
     /// account, window by window.
     Usage,
     /// `⌘⇧S`: start the cursor's checkout's stack — its RUN COMMAND, in
-    /// the pane — or stop it.
+    /// the background — or stop it.
     ToggleStack,
     StopAllStacks,
     /// Delete every linked worktree, in every project, with no live
@@ -893,7 +893,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ToggleStack,
         id: "toggle_stack",
         label: "Start/stop stack",
-        hint: "Start the selected checkout's stack — its run command (Settings → Projects) — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
+        hint: "Start the selected checkout's stack — its run command (Settings → Projects) — in the background, its run line in the band; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+shift+s"],

@@ -5195,10 +5195,11 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// `⌘⇧S`, a menu's **Start stack** / **Stop stack**: start `worktree`'s
 /// stack, or stop it.
 ///
-/// Starting runs its RUN COMMAND in its RUN TERMINAL, and the pane follows
-/// it there to watch it boot; with none set, the DAEMON's refusal says so
-/// in the footer. Stopping sends that run a `^C`, so its own trap winds the
-/// stack down in view — a second press kills it.
+/// Starting runs its RUN COMMAND in its RUN TERMINAL in the background:
+/// the run line comes up in its band, and the cursor and the pane stay
+/// where they were ([`PendingIntent::RunStarted`]); with none set, the
+/// DAEMON's refusal says so in the footer. Stopping sends that run a `^C`,
+/// so its own trap winds the stack down — a second press kills it.
 pub(crate) fn toggle_stack_in(
     app: &mut App,
     worktree: &orion_core::WorktreeId,
@@ -5239,18 +5240,12 @@ pub(crate) fn toggle_stack_in(
         });
         return;
     }
-    send_with(
-        app,
-        out,
-        PendingIntent::AttachCreated {
-            focus: false,
-            placeholder: None,
-        },
-        |req_id| ClientRequest::StartRun {
+    send_with(app, out, PendingIntent::RunStarted, |req_id| {
+        ClientRequest::StartRun {
             req_id,
             worktree: id,
-        },
-    );
+        }
+    });
 }
 
 /// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
@@ -20014,6 +20009,70 @@ mod tests {
         assert!(app.worktree_running(&WorktreeId("w1".into())));
     }
 
+    /// `⌘⇧S` starts the run in the background: its line comes up in the
+    /// band, and the cursor, the pane and FOCUS stay on the session they
+    /// were on — whichever of the Ack and the upsert lands first.
+    #[test]
+    fn a_started_run_leaves_the_cursor_and_the_pane_where_they_were() {
+        use orion_core::{Entity, TerminalTab, WorktreeId};
+        for ack_first in [false, true] {
+            let mut app = App::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            let a1 = SessionRef::Agent(AgentId("a1".into()));
+            let mut out = Vec::new();
+            attach_now(&mut app, a1.clone(), &mut out);
+            let pane_hidden = app.launcher_pane_hidden;
+            out.clear();
+            out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+            let req_id = out
+                .iter()
+                .find_map(|r| match r {
+                    ClientRequest::StartRun { req_id, .. } => Some(*req_id),
+                    _ => None,
+                })
+                .expect("⌘⇧S sends StartRun");
+            let ack = ServerEvent::Ack {
+                req_id,
+                created: Some(EntityId::Terminal(TerminalId("run1".into()))),
+            };
+            let upsert = ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(TerminalTab {
+                    id: TerminalId("run1".into()),
+                    worktree_id: WorktreeId("w1".into()),
+                    name: "run".into(),
+                    sort_order: 0,
+                    alive: true,
+                    run_command: Some("npm run dev".into()),
+                }),
+            };
+            out.clear();
+            let events = if ack_first {
+                [ack, upsert]
+            } else {
+                [upsert, ack]
+            };
+            for ev in events {
+                handle_server_event(&mut app, ev, &mut out);
+            }
+            assert!(app.worktree_running(&WorktreeId("w1".into())));
+            assert!(
+                !out.iter()
+                    .any(|r| matches!(r, ClientRequest::Attach { .. })),
+                "nothing attaches the run: {out:?}"
+            );
+            assert_eq!(app.term.as_ref().map(|t| t.sref.clone()), Some(a1.clone()));
+            assert_eq!(
+                app.selected_session_row().and_then(|r| r.sref()),
+                Some(a1.clone()),
+                "the cursor stays on the session"
+            );
+            assert_eq!(app.focus, Focus::Sessions);
+            assert_eq!(app.launcher_pane_hidden, pane_hidden);
+            assert_eq!(app.select_when_seen, None, "nothing waits to follow it");
+        }
+    }
+
     /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
     /// the project's **Open command** setting — and without one says where
     /// to set it, without Enter's
@@ -27390,8 +27449,8 @@ mod tests {
         assert!(!app.status_anim_active());
     }
 
-    /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run,
-    /// the pane following — and stops it: a ^C to the run (the flash says
+    /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run —
+    /// and stops it: a ^C to the run (the flash says
     /// a second press kills it). A stack orion didn't start is only its
     /// `⬡`: the key starts the run as it would on a checkout with none.
     #[test]

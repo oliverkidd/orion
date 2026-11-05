@@ -2370,6 +2370,10 @@ pub enum PendingIntent {
     /// A row renamed, archived, unarchived or deleted on the keypress
     /// (`event_loop::optimistic`): put it back on Error.
     Undo(Undo),
+    /// `⌘⇧S`'s start: the run comes up in the background. Its Ack moves
+    /// nothing — no select, no attach, no pane — the upsert alone puts the
+    /// run line in its band; an Error says why in the footer.
+    RunStarted,
     None,
 }
 

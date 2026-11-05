@@ -2,7 +2,7 @@
 //! stack on the machine (`ServerEvent::StacksChanged`), which the band's
 //! `⬡` reads through [`App::stack_of`]. Starting and stopping a checkout's
 //! stack is `⌘⇧S`'s (`event_loop::toggle_stack_in`): its RUN COMMAND, in
-//! the pane.
+//! the background, on a run line in its band.
 
 use crate::app::App;
 use orion_core::compose::Stack;
