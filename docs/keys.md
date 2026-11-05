@@ -440,6 +440,7 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | `⇧←` / `⇧→` | anywhere | older / newer: the cursor's commit, with nothing ticked |
 | `Enter` | the commits / a file / a `U` file / a tree directory | on to the files / the diff takes the keys / the CONFLICT RESOLVER at that file / fold it |
 | `↑` / `↓`, `Space`, `←` | the diff | a row, a page, back to the files |
+| `Enter` | the diff | edit the file in the built-in editor (fresh) at the line at the top of the diff — a pull request's in the project's checkout of its branch, when there is one. When the editor closes the diff is read again, your place in it kept |
 | `⇧↑` / `⇧↓`, `PgUp` / `PgDn`, `Home` / `End` | anywhere | scroll the diff |
 | typing | anywhere | the files' fuzzy filter, which takes the keys; `^U` kills it |
 | `⌘R` | the files, the diff | mark the file reviewed ✓, which sinks it to the bottom — orion-side bookkeeping only: on the uncommitted changes it is stored until HEAD moves or the file changes again, on anything else it lasts while the modal is open |

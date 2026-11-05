@@ -1369,6 +1369,14 @@ impl DiffView {
             .unwrap_or(1)
     }
 
+    /// The file under the cursor and the line at the top of its diff
+    /// ([`Self::line_on_screen`]): where `⌘O` and `Enter` on the diff open
+    /// it. None on a directory's row, and for a file the change deletes.
+    pub fn file_at_line(&self) -> Option<(String, u64)> {
+        let file = self.selected_file().filter(|f| !f.xy.contains(&'D'))?;
+        Some((file.path.clone(), self.line_on_screen()))
+    }
+
     /// A page of the diff pane: its height, less a row of overlap.
     pub fn page(&self) -> i64 {
         i64::from(self.view_height.max(2) - 1)

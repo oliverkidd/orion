@@ -118,7 +118,10 @@
   exists and needs no network. Answers are kept by the two commits' SHAs, so opening the viewer
   again on the same commits costs two `rev-parse`s. `Enter` on a `U` file opens the CONFLICT
   RESOLVER on the checkout (`conflicts::resolve_in`), unless an `autofix-<n>` is already on the
-  pull request.
+  pull request. `Enter` on the diff edits its file in the built-in editor at the line at the top of
+  the pane (`DiffView::file_at_line`, the same line `⌘O` opens at); when the editor closes, the
+  viewer reads its scope again — the file list too where the working tree is part of it — the
+  cursor kept on the file and the diff on the same row (`git_diff::reload`).
 - **The diff pane is read, not paged — `diff_doc`.** A file's `git diff` is read once, as it lands,
   into lines that say what they are: its headers into the facts on the pane's edge (added, renamed
   from, `+20 −3`), each `@@` into the line it starts on, each line of code into its old and new

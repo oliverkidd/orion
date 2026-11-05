@@ -242,20 +242,31 @@ pub(crate) fn land(app: &mut App, ticket: u64, result: Result<crate::conflicts::
     }
 }
 
-/// The viewer back up after the CONFLICT RESOLVER that stood over it, its
-/// conflicts asked again: the merge may have settled them.
+/// The viewer back up after the CONFLICT RESOLVER that stood over it, read
+/// afresh: the merge may have changed its files and settled its conflicts.
 pub(crate) fn reopen(app: &mut App, view: DiffView) {
     app.overlay = Some(Overlay::Diff(view));
+    reread(app);
+}
+
+/// The viewer up read again where it stands — its diff, the reader's
+/// place kept (`git_diff::reload`), and its conflicts: the BUILT-IN EDITOR
+/// or the RESOLVER that stood over it may have changed both.
+pub(crate) fn reread(app: &mut App) {
+    if let Some(Overlay::Diff(view)) = &mut app.overlay {
+        crate::git_diff::reload(view);
+    }
     ask(app);
     app.dirty = true;
 }
 
 // ---- the keys ----
 
-/// The DIFF VIEWER's keys that reach past the diff: `⌘U`, and `Enter` on
-/// a conflicted file. True when `key` was one of them, and is spent.
+/// The DIFF VIEWER's keys that reach past the diff: `⌘U`, `Enter` on a
+/// conflicted file, and `Enter` on the diff. True when `key` was one of
+/// them, and is spent.
 pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequest>) -> bool {
-    use crate::ui::diff_keys::OPEN;
+    use crate::ui::diff_keys::{EDIT, OPEN};
     let chord = crate::keymap::KeyChord::from_event(key);
     let action = app.keymap.lookup(crate::keymap::Scope::Global, &chord);
     if action == Some(crate::keymap::Action::PullRequests) {
@@ -265,6 +276,10 @@ pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequ
     let Some(Overlay::Diff(view)) = &app.overlay else {
         return false;
     };
+    if EDIT.matches(key) && view.focus == DiffFocus::Diff {
+        edit_at_line(app);
+        return true;
+    }
     if !OPEN.matches(key) || view.focus != DiffFocus::Files {
         return false;
     }
@@ -273,6 +288,50 @@ pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequ
     };
     resolve(app, &path, out);
     true
+}
+
+/// `Enter` on the diff: its file in the BUILT-IN EDITOR at the line at the
+/// top of the diff (`DiffView::file_at_line`), in the checkout the viewer
+/// reads — for a pull request's viewer, the project's checkout of its
+/// branch, when there is one. The viewer is read again when the editor
+/// closes ([`reread`]).
+fn edit_at_line(app: &mut App) {
+    let Some(Overlay::Diff(view)) = &app.overlay else {
+        return;
+    };
+    let Some((path, line)) = view.file_at_line() else {
+        return;
+    };
+    let root = match &view.pr_review {
+        None => view.root.clone(),
+        Some(review) => match checkout_of_pr(app, &review.url) {
+            Some(root) => root,
+            None => {
+                app.flash = Some(Flash::note(format!(
+                    "#{} isn't checked out here — {} in the pull requests modal checks it out",
+                    review.number,
+                    crate::pr_modal::keys::CHECKOUT.label()
+                )));
+                return;
+            }
+        },
+    };
+    let editor = crate::config::Config::load().editor_command();
+    let size = crate::event_loop::editor_size_guess(app);
+    crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, line, size);
+}
+
+/// The project's checkout of pull request `url`'s branch, when there is
+/// one on disk (`pr_checkout::worktree_of`).
+fn checkout_of_pr(app: &App, url: &str) -> Option<std::path::PathBuf> {
+    let (project, head) = match crate::pr_checkout::of_url(app, url) {
+        Some((project, launch)) => (project, launch.head),
+        None => (
+            app.selected_project()?.id.clone(),
+            app.pr_detail.get(url)?.head.clone(),
+        ),
+    };
+    crate::pr_checkout::worktree_of(app, &project, &head).map(|w| w.path.clone())
 }
 
 /// `⌘U`, the pull-requests key everywhere: the PULL REQUESTS MODAL over the
@@ -629,5 +688,121 @@ mod tests {
         assert!(hints.ends_with("Esc back"), "{hints}");
         press(&mut app, KeyCode::Esc);
         assert_eq!(the_view(&app).id, id);
+    }
+
+    /// `f` with `/bin/sh` standing in for fresh, on an empty config.
+    fn with_sh_editor<T>(f: impl FnOnce() -> T) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+        crate::config::with_config_path(config, || crate::editor::with_command("/bin/sh", f))
+    }
+
+    /// A repo whose notes.txt, 300 lines, has every fourth line changed
+    /// and not committed: a diff far taller than the pane.
+    fn repo_with_long_diff(dir: &Path) {
+        git(dir, &["init", "-q", "-b", "main"]);
+        crate::conflicts::tests::identify(dir);
+        let text = |changed: &dyn Fn(usize) -> bool| -> String {
+            (1..=300)
+                .map(|n| match changed(n) {
+                    true => format!("changed {n}\n"),
+                    false => format!("line {n}\n"),
+                })
+                .collect()
+        };
+        std::fs::write(dir.join("notes.txt"), text(&|_| false)).unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("notes.txt"), text(&|n| n % 4 == 0)).unwrap();
+    }
+
+    /// `Enter` on the diff opens fresh on its file at the line at the top
+    /// of the pane, in the checkout; when the editor closes the diff is
+    /// read again — what was saved shows — with the reader's place kept.
+    #[test]
+    fn enter_on_the_diff_edits_at_the_line_and_the_diff_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_long_diff(dir.path());
+        let mut app = app_on(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.editor_tx = Some(tx);
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::GitDiff);
+        screen(&mut app);
+        let Some(Overlay::Diff(view)) = &mut app.overlay else {
+            panic!("no viewer");
+        };
+        view.focus = DiffFocus::Diff;
+        view.scroll_by(40);
+        let (scroll, line) = (view.scroll, view.line_on_screen());
+        assert!(scroll == 40 && line > 20, "scrolled: {scroll} {line}");
+
+        with_sh_editor(|| press(&mut app, KeyCode::Enter));
+        let editor = app.editor.as_ref().expect("Enter edits");
+        assert_eq!((editor.file.as_str(), editor.line), ("notes.txt", line));
+        assert_eq!(editor.cwd, dir.path());
+        assert!(!editor.embedded, "over the viewer");
+
+        let mut saved = std::fs::read_to_string(dir.path().join("notes.txt")).unwrap();
+        saved.push_str("saved in the editor\n");
+        std::fs::write(dir.path().join("notes.txt"), saved).unwrap();
+        crate::event_loop::close_editor(&mut app);
+        let view = the_view(&app);
+        assert!(view.diff.contains("saved in the editor"), "read again");
+        assert_eq!(
+            view.selected_file().map(|f| f.path.as_str()),
+            Some("notes.txt")
+        );
+        assert_eq!(view.scroll, scroll, "the reader's place kept");
+    }
+
+    /// A pull request's viewer edits in the project's checkout of its
+    /// branch, and says so when there is none.
+    #[test]
+    fn a_pull_requests_diff_edits_in_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_long_diff(dir.path());
+        let mut app = app_on(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.editor_tx = Some(tx);
+        let detail = crate::pull_request::PrDetail {
+            number: 7,
+            url: URL.into(),
+            head: "feature".into(),
+            ..Default::default()
+        };
+        app.pr_detail.insert(URL.into(), detail);
+        let file = crate::git_diff::DiffFile {
+            path: "notes.txt".into(),
+            orig_path: None,
+            xy: ['M', ' '],
+            lines: None,
+        };
+        let repo = std::path::PathBuf::from("/nonexistent-project-repo");
+        let mut viewer = DiffView::new(repo, "#7 Fix login".into(), vec![file], true);
+        viewer.pr_review = Some(crate::event_loop::PrReview {
+            number: 7,
+            url: URL.into(),
+            title: "#7 Fix login".into(),
+            at: crate::event_loop::PrReviewAt::Top,
+        });
+        viewer.focus = DiffFocus::Diff;
+        app.overlay = Some(Overlay::Diff(viewer.clone()));
+        with_sh_editor(|| press(&mut app, KeyCode::Enter));
+        let editor = app.editor.as_ref().expect("Enter edits");
+        assert_eq!(editor.cwd, dir.path(), "in the checkout of `feature`");
+        assert_eq!(editor.file, "notes.txt");
+
+        app.editor = None;
+        app.tree.worktrees.clear();
+        press(&mut app, KeyCode::Enter);
+        assert!(app.editor.is_none());
+        assert!(
+            app.flash
+                .as_deref()
+                .is_some_and(|f| f.contains("#7 isn't checked out")),
+            "{:?}",
+            app.flash
+        );
     }
 }

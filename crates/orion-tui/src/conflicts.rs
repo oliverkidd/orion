@@ -2736,7 +2736,7 @@ fn main() {
     }
 
     /// A committer for `repo`'s commits, unsigned.
-    fn identify(repo: &Path) {
+    pub(crate) fn identify(repo: &Path) {
         for (k, v) in [
             ("user.email", "t@t"),
             ("user.name", "t"),

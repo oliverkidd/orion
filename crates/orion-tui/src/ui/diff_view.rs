@@ -62,6 +62,9 @@ pub(crate) mod diff_keys {
     pub const PAGE: Key = Key::new(&["pgup", "pgdn", "space"], "page").show(2);
     /// The diff with the keys: back to the files.
     pub const BACK: Key = Key::new(&["left"], "files");
+    /// The diff with the keys: its file in the BUILT-IN EDITOR, at the line
+    /// at the top of the diff (`diff_actions`).
+    pub const EDIT: Key = Key::new(&["enter"], "edit");
     /// The diff's scroll from anywhere else.
     pub const SCROLL: Key = Key::new(&["shift+up", "shift+down"], "scroll").show(2);
     pub const REVIEWED: Key = Key::new(&["cmd+r", "ctrl+r"], "reviewed");
@@ -84,6 +87,7 @@ pub(crate) mod diff_keys {
         LINES,
         PAGE,
         BACK,
+        EDIT,
         SCROLL,
         REVIEWED,
         TREE,
@@ -143,6 +147,9 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
         DiffFocus::Diff => {
             hints.push(LINES.hint().kept());
             hints.push(PAGE.hint());
+            if view.file_at_line().is_some() {
+                hints.push(EDIT.hint().kept());
+            }
             hints.extend(step);
             hints.push(BACK.hint());
             hints.push(next);

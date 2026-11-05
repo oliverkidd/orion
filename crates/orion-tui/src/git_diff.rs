@@ -58,6 +58,18 @@ pub enum DiffScope {
     Ranges(Vec<Range>),
 }
 
+impl DiffScope {
+    /// Whether the working tree is part of it — the uncommitted changes, or
+    /// a range that runs up to them — so an edit changes its file list.
+    pub fn reads_worktree(&self) -> bool {
+        match self {
+            DiffScope::Uncommitted => true,
+            DiffScope::Commit { .. } => false,
+            DiffScope::Ranges(ranges) => ranges.iter().any(|r| r.to.is_none()),
+        }
+    }
+}
+
 /// One stretch of a branch a TOGETHER diff shows: `from` to `to`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
@@ -822,7 +834,9 @@ pub fn load_selected_diff(view: &mut DiffView) {
     };
     let Some(jobs) = view.jobs.clone() else {
         let diff = scoped_diff(&view.root, &view.scope, &file, view.head_ok);
-        view.show_diff(Some(&file.path), diff, false);
+        // The file already up, read again, keeps the reader's place.
+        let again = view.shown.as_deref() == Some(file.path.as_str());
+        view.show_diff(Some(&file.path), diff, again);
         return;
     };
     if let Some(text) = view.cached(&file.path) {
@@ -831,6 +845,23 @@ pub fn load_selected_diff(view: &mut DiffView) {
     let ticket = crate::view_jobs::ticket();
     view.waiting = Some(ticket);
     request_diff(view, &jobs, file, ticket, false);
+}
+
+/// Read what the DIFF VIEWER shows again — the BUILT-IN EDITOR or the
+/// CONFLICT RESOLVER closed over it, and may have changed the files on
+/// screen (`diff_actions::reread`) — the cursor kept on its
+/// file and the reader's place in its diff. A scope the working tree is
+/// part of reads its file list again too (`commit_list::reread_scope`);
+/// any other is a commit's, which an edit leaves as it was, so only the
+/// diff is read.
+pub fn reload(view: &mut DiffView) {
+    view.cache.clear();
+    if view.scope.reads_worktree() {
+        view.want_path = view.selected_file().map(|f| f.path.clone());
+        crate::commit_list::reread_scope(view);
+    } else {
+        load_selected_diff(view);
+    }
 }
 
 fn request_diff(
