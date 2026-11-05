@@ -5202,23 +5202,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             "what should Claude do?".into(),
             String::new(),
         ),
-        PromptKind::AgentPresetTask { preset, .. } => (
-            format!("Task for {}", preset.name).into(),
-            if preset.has_wrapping() {
-                format!(
-                    "{} — prefix + your task + postfix (empty = prefix + postfix only)",
-                    preset.spec_label()
-                )
-                .into()
-            } else {
-                format!(
-                    "{} — sent as the first prompt (empty = start with no prompt)",
-                    preset.spec_label()
-                )
-                .into()
-            },
-            String::new(),
-        ),
         PromptKind::QuickPrompt(launch) => {
             (launch.title().into(), launch.label().into(), String::new())
         }
@@ -8247,14 +8230,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         },
         Overlay::Prompt(prompt) => match key.code {
             KeyCode::Esc => {
-                // Abandoning a preset's task goes back to the list it came
-                // from, on the same row, rather than to the panels.
-                let back_to_presets = match &prompt.kind {
-                    PromptKind::AgentPresetTask { worktree, preset } => {
-                        Some((worktree.clone(), preset.name.clone()))
-                    }
-                    _ => None,
-                };
                 // A typed setting's prompt stood in for the overlay: Esc
                 // keeps the old value and puts the overlay back on its row.
                 let back_to_settings = matches!(
@@ -8304,12 +8279,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     crate::skills::reopen(app, *view);
                 } else if let Some(under) = back_to_modal {
                     under.reopen(app);
-                } else if let Some((worktree, name)) = back_to_presets {
-                    let index = crate::agent_presets::load()
-                        .iter()
-                        .position(|p| p.name == name)
-                        .unwrap_or(0);
-                    crate::preset_overlays::reopen_agent_presets(app, worktree, index);
                 }
             }
             // A line break in a task box — Shift+Enter, Option+Enter or
@@ -9701,13 +9670,10 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
     // dialog open on validation so the user can correct it in place (the
     // QUICK PROMPT opts out of the empty half of that — see below).
     if prompt.is_multiline() {
-        // The cloud prompts and a preset's task share the checks (the text
-        // crosses the same argv), not the wording. No length cap: the OS's
+        // The cloud prompts share the checks (the text crosses the same
+        // argv), not the wording. No length cap: the OS's
         // ARG_MAX is the only one, and the daemon's spawn reports it.
         let (needs, what) = match &prompt.kind {
-            // A preset's task is optional: its prefix and postfix make a
-            // first prompt on their own.
-            PromptKind::AgentPresetTask { .. } => (None, "task"),
             // An empty quick prompt starts the CLI with no first prompt
             // (`QuickLaunch::launches_empty`, below). Only its cloud box
             // needs the task, and that one is a change of mind rather than
@@ -9743,8 +9709,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
     // offered, an empty project name undoes the rename — the row goes back
     // to the folder's own name, which is the only way back from a rename —
     // an empty typed setting is that row's default (`auto`), which is the
-    // only way back to it, an AGENT PRESET's task is optional — its box,
-    // or a QUICK PROMPT it is on, launches on prefix + postfix alone — and
+    // only way back to it, an AGENT PRESET's task is optional — a QUICK
+    // PROMPT it is on launches on prefix + postfix alone — and
     // a QUICK PROMPT sent empty starts the CLI with no first prompt, the
     // way `n` does (its CLAUDE CLOUD box, which needs the task, aside).
     // For every other prompt an empty field is a cancel.
@@ -9754,8 +9720,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         | PromptKind::SettingText { .. }
         | PromptKind::ClaudeSignIn { .. }
         | PromptKind::AddClaudeAccount
-        | PromptKind::RenameClaudeAccount { .. }
-        | PromptKind::AgentPresetTask { .. } => true,
+        | PromptKind::RenameClaudeAccount { .. } => true,
         PromptKind::QuickPrompt(launch) => launch.launches_empty(),
         _ => false,
     };
@@ -9839,33 +9804,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             },
             out,
         ),
-        PromptKind::AgentPresetTask { worktree, preset } => {
-            // The launch a QUICK PROMPT with this preset on it sends, built
-            // by the same two functions: `QuickLaunch::of_preset` resolves
-            // the harness (a preset pins a model / effort or follows
-            // Settings → Agents) and `quick_launch::draft` composes prefix
-            // + task + postfix — sized above, so composing cannot fail, and
-            // an empty task on a bare preset composes to no STARTING PROMPT
-            // at all. Only what is this box's own is said here: it was
-            // walked to through the presets list, so it takes the pane, and
-            // a refusal brings this box back, not the quick prompt's.
-            let launch = crate::quick_prompt::QuickLaunch::of_preset(
-                crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
-                preset.clone(),
-                &crate::config::Config::load(),
-            );
-            let draft = AgentLaunchDraft {
-                reopen_on_error: Some((
-                    PromptKind::AgentPresetTask {
-                        worktree: worktree.clone(),
-                        preset,
-                    },
-                    value.clone(),
-                )),
-                ..quick_launch::draft(launch, worktree, value, true, None)
-            };
-            create_agent(app, draft, out);
-        }
         // A box opened over the ISSUES MODAL or the PULL REQUESTS MODAL
         // takes the modal with it when it launches: the grid is where the
         // new session's card goes up — and where the Ack puts the cursor on
@@ -34162,6 +34100,19 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A seeded app with FOCUS on the SESSIONS PANEL and the list open.
+    /// The QUICK PROMPT on screen with an AGENT PRESET on it — what Enter
+    /// on a presets list row opens: the preset's name and where the box
+    /// launches.
+    pub(super) fn preset_box(app: &App) -> Option<(&str, &crate::quick_prompt::QuickTarget)> {
+        let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+            return None;
+        };
+        let PromptKind::QuickPrompt(launch) = &prompt.kind else {
+            return None;
+        };
+        Some((launch.preset.as_ref()?.name.as_str(), &launch.target))
+    }
+
     fn open_presets(app: &mut App, out: &mut Vec<ClientRequest>) {
         seed_tree(app);
         app.focus = Focus::Sessions;
@@ -35536,15 +35487,12 @@ diff --git a/src/c.rs b/src/c.rs
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
-            // Enter launches the filtered row: "scratch" asks for its task.
+            // Enter launches the filtered row: "scratch" on the box.
             type_text(&mut app, "scr", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(p))
-                        if matches!(&p.kind, PromptKind::AgentPresetTask { preset, .. } if preset.name == "scratch")
-                ),
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
                 "{:?}",
                 app.overlay
             );
@@ -35556,12 +35504,9 @@ diff --git a/src/c.rs b/src/c.rs
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let area = list(&app).list_area;
             click(&mut app, area.x + 1, area.y, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(p))
-                        if matches!(&p.kind, PromptKind::AgentPresetTask { preset, .. } if preset.name == "scratch")
-                ),
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
                 "{:?}",
                 app.overlay
             );
@@ -35665,7 +35610,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn preset_enter_asks_for_a_task_and_launches_with_the_composed_prompt() {
+    fn preset_enter_opens_the_box_and_launches_with_the_composed_prompt() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -35673,20 +35618,17 @@ diff --git a/src/c.rs b/src/c.rs
             let worktree = app.selected_worktree().unwrap().id.clone();
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Enter should ask for the task, got {:?}", app.overlay);
+                panic!("Enter should open the box, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Task for reviewer");
-            assert!(
-                prompt.label.contains("claude · opus · high"),
-                "{}",
-                prompt.label
+            assert_eq!(
+                prompt.title,
+                "Quick prompt · reviewer (claude · opus · high)"
             );
-            assert!(
-                prompt.label.contains("prefix + your task + postfix"),
-                "{}",
-                prompt.label
+            assert_eq!(
+                prompt.input.as_str(),
+                "Be strict.\n\n\n\nRun the tests.",
+                "the preset's text written round the caret"
             );
-            assert!(prompt.is_multiline());
             assert!(out.is_empty(), "no prewarm for a preset launch: {out:?}");
 
             assert!(paste_into_overlay(&mut app, "Fix auth"));
@@ -35729,20 +35671,25 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert_eq!(app.flash.as_deref(), Some("claude is not installed"));
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("reviewer"),
+                "{:?}",
+                app.overlay
+            );
             assert!(matches!(
                 &app.overlay,
                 Some(Overlay::Prompt(prompt))
-                    if matches!(&prompt.kind, PromptKind::AgentPresetTask { preset, .. } if preset.name == "reviewer")
-                        && prompt.input.as_str() == "Fix auth\nShip it"
+                    if prompt.input.as_str() == "Be strict.\n\nFix auth\nShip it\n\nRun the tests."
             ));
         });
     }
 
-    /// The task is optional: Esc on the box goes back to the list on the
-    /// same row, and an empty Enter launches — prefix + postfix alone for a
-    /// wrapping preset, no STARTING PROMPT at all for a bare one.
+    /// The task is optional: an empty Enter on the box launches — the
+    /// prefix and postfix alone for a wrapping preset, no STARTING PROMPT
+    /// at all for a bare one.
     #[test]
-    fn preset_task_is_optional_and_esc_returns_to_the_list() {
+    fn preset_task_is_optional() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -35750,27 +35697,15 @@ diff --git a/src/c.rs b/src/c.rs
             let worktree = app.selected_worktree().unwrap().id.clone();
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Enter should ask for the task, got {:?}", app.overlay);
-            };
-            assert_eq!(prompt.title, "Task for scratch");
-            assert!(
-                prompt
-                    .label
-                    .contains("sent as the first prompt (empty = start with no prompt)"),
-                "{}",
-                prompt.label
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
+                "{:?}",
+                app.overlay
             );
-
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            match &app.overlay {
-                Some(Overlay::AgentPresets(view)) => assert_eq!(view.selected, 1, "same row"),
-                other => panic!("Esc goes back to the list, got {other:?}"),
-            }
             assert!(out.is_empty(), "{out:?}");
 
             // The bare preset, sent empty: the CLI starts with no first prompt.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 app.overlay.is_none(),
@@ -35791,7 +35726,8 @@ diff --git a/src/c.rs b/src/c.rs
                 "one create with no first prompt: {out:?}"
             );
 
-            // The wrapping preset, sent empty: prefix + postfix alone.
+            // The wrapping preset, sent empty: prefix + postfix alone, as
+            // the box shows them round the caret.
             out.clear();
             crate::preset_overlays::reopen_agent_presets(&mut app, worktree, 0);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -35804,7 +35740,7 @@ diff --git a/src/c.rs b/src/c.rs
                         custom_harness: None,
                         starting_prompt: Some(text),
                         ..
-                    }] if text == "Be strict.\n\nRun the tests."
+                    }] if text == "Be strict.\n\n\n\nRun the tests."
                 ),
                 "one create on the wrapping alone: {out:?}"
             );
@@ -35877,7 +35813,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "one create on prefix + postfix: {out:?}"
             );
 
-            // A refused create hands back the (empty) task box rather than
+            // A refused create hands back the (empty) box rather than
             // losing the launch without a word.
             let req_id = match &out[0] {
                 ClientRequest::CreateAgent { req_id, .. } => *req_id,
@@ -35892,11 +35828,12 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert_eq!(app.flash.as_deref(), Some("claude is not installed"));
-            assert!(matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(prompt))
-                    if matches!(&prompt.kind, PromptKind::AgentPresetTask { preset, .. } if preset.skip_task)
-            ));
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("reviewer"),
+                "{:?}",
+                app.overlay
+            );
         });
     }
 
@@ -38321,11 +38258,14 @@ diff --git a/src/c.rs b/src/c.rs
             };
             assert!(list.width > 0, "drawn list rect recorded");
             click(&mut app, list.x + 1, list.y + 1, &mut out);
-            match &app.overlay {
-                Some(Overlay::Prompt(prompt)) => assert_eq!(prompt.title, "Task for scratch"),
-                other => panic!("a click on the second row launches it, got {other:?}"),
-            }
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
+                "a click on the second row launches it: {:?}",
+                app.overlay
+            );
+            app.overlay = None;
+            out.extend(run_action(&mut app, crate::keymap::Action::AgentPresets));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
             click(&mut app, 0, 0, &mut out);
@@ -38956,9 +38896,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A box with text of its own — a refused launch handed back — keeps
-    /// that text and leaves the draft on disk alone; and the boxes that
-    /// are not the QUICK PROMPT (a preset's task, the FOLLOW-UP) never
-    /// open on it.
+    /// that text and leaves the draft on disk alone; and the FOLLOW-UP,
+    /// which is not the QUICK PROMPT, never opens on it.
     #[test]
     fn the_draft_never_lands_in_a_box_with_text_of_its_own() {
         with_seeded_presets(|| {
@@ -38978,12 +38917,6 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(box_text(&app), "refused");
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if !p.draft_restored));
             assert_eq!(saved_text(&path), "my draft");
-            app.overlay = None;
-
-            let worktree = app.selected_worktree().unwrap().id.clone();
-            let preset = crate::agent_presets::load().into_iter().next().unwrap();
-            open_prompt(&mut app, PromptKind::AgentPresetTask { worktree, preset });
-            assert_eq!(box_text(&app), "");
             app.overlay = None;
 
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);

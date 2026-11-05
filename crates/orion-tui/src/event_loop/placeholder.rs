@@ -572,8 +572,9 @@ fn forget_worktree(app: &mut App, id: &WorktreeId) {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        buffer_text, hse, pick_fresh_worktree, press, seed_feat_worktree, seed_open_prs, seed_tree,
-        with_config_json, with_default_config, with_seeded_presets, worktree_branches,
+        buffer_text, hse, pick_fresh_worktree, preset_box, press, seed_feat_worktree,
+        seed_open_prs, seed_tree, with_config_json, with_default_config, with_seeded_presets,
+        worktree_branches,
     };
     use super::super::{
         connection_lost, fire_pending_prewarm, handle_server_event, handle_terminal_event,
@@ -1349,7 +1350,7 @@ mod tests {
     // ---- an AGENT PRESET run off the modal's stand-in ----
 
     /// `n`, "feat", Enter, then **Agent presets** on the new row and Enter
-    /// on the "reviewer" preset: the task box is open with "Fix auth" typed, and
+    /// on the "reviewer" preset: the box is open with "Fix auth" typed, and
     /// the DAEMON has not answered the `CreateWorktree` yet. Returns the
     /// stand-in id and that request's id.
     fn type_preset_task(app: &mut App, out: &mut Vec<ClientRequest>) -> (WorktreeId, u64) {
@@ -1364,13 +1365,10 @@ mod tests {
             app.overlay
         );
         press(app, KeyCode::Enter, KeyModifiers::NONE, out);
-        assert!(
-            matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(prompt))
-                    if matches!(&prompt.kind, PromptKind::AgentPresetTask { worktree, preset } if *worktree == placeholder && preset.name == "reviewer")
-            ),
-            "Enter asks for the task: {:?}",
+        assert_eq!(
+            preset_box(app),
+            Some(("reviewer", &QuickTarget::Worktree(placeholder.clone()))),
+            "Enter opens the box on the preset: {:?}",
             app.overlay
         );
         assert!(paste_into_overlay(app, "Fix auth"));
@@ -1405,14 +1403,15 @@ mod tests {
 
             modal_worktree_created(&mut app, req_id, &mut out);
             assert!(!app.tree.worktrees.iter().any(|w| w.id == placeholder));
+            assert_eq!(
+                preset_box(&app).map(|(_, target)| target),
+                Some(&QuickTarget::Worktree(WorktreeId("w2".into()))),
+                "the box is addressed to the real checkout: {:?}",
+                app.overlay
+            );
             assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(prompt))
-                        if matches!(&prompt.kind, PromptKind::AgentPresetTask { worktree, .. } if worktree.0 == "w2")
-                            && prompt.input.as_str() == "Fix auth"
-                ),
-                "the box is addressed to the real checkout, text kept: {:?}",
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str().contains("Fix auth")),
+                "text kept: {:?}",
                 app.overlay
             );
             assert!(out.is_empty(), "the Ack sends nothing: {out:?}");
@@ -1458,12 +1457,9 @@ mod tests {
                 app.overlay
             );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(prompt))
-                        if matches!(&prompt.kind, PromptKind::AgentPresetTask { worktree, .. } if worktree.0 == "w2")
-                ),
+            assert_eq!(
+                preset_box(&app).map(|(_, target)| target),
+                Some(&QuickTarget::Worktree(WorktreeId("w2".into()))),
                 "{:?}",
                 app.overlay
             );
@@ -1575,10 +1571,11 @@ mod tests {
                 matches!(
                     app.pending.get(&create_id),
                     Some(PendingIntent::AttachCreatedWithCloudRetry {
-                        kind: PromptKind::AgentPresetTask { worktree, .. },
+                        kind: PromptKind::QuickPrompt(launch),
                         placeholder: Some(stand_in),
                         ..
-                    }) if worktree.0 == "w2" && *stand_in == agent
+                    }) if launch.target == QuickTarget::Worktree(WorktreeId("w2".into()))
+                        && *stand_in == agent
                 ),
                 "{:?}",
                 app.pending
@@ -1613,8 +1610,7 @@ mod tests {
                 out.iter().any(|r| matches!(r, ClientRequest::Attach { session, .. } if session == &SessionRef::Agent(AgentId("a9".into())))),
                 "the real session is attached: {out:?}"
             );
-            assert_eq!(app.focus, Focus::Terminal, "a preset launch takes the pane");
-            assert!(app.term_locked);
+            assert!(!app.term_locked, "a box launch leaves the keys on the grid");
         });
     }
 

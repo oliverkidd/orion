@@ -882,13 +882,6 @@ pub enum PromptKind {
         model: Option<String>,
         effort: Option<String>,
     },
-    /// The task for an AGENT PRESET launch: Enter composes
-    /// `prefix + task + postfix` into the CLI's starting prompt. Multi-row
-    /// like the cloud task — a framed request is rarely one line.
-    AgentPresetTask {
-        worktree: WorktreeId,
-        preset: crate::agent_presets::AgentPreset,
-    },
     /// The QUICK PROMPT's task: one multi-row box, opened by its hotkey
     /// from anywhere, that launches an AGENT in the selected WORKTREE with
     /// the typed text as its STARTING PROMPT. It carries the whole launch
@@ -1000,9 +993,7 @@ impl PromptKind {
     pub fn reaches_local_agent(&self) -> bool {
         matches!(
             self,
-            PromptKind::QuickPrompt(_)
-                | PromptKind::AgentPresetTask { .. }
-                | PromptKind::FollowUp { .. }
+            PromptKind::QuickPrompt(_) | PromptKind::FollowUp { .. }
         )
     }
 
@@ -1012,8 +1003,7 @@ impl PromptKind {
     /// one of its own.
     pub fn worktree_mut(&mut self) -> Option<&mut WorktreeId> {
         match self {
-            PromptKind::ClaudeCloudTask { worktree, .. }
-            | PromptKind::AgentPresetTask { worktree, .. } => Some(worktree),
+            PromptKind::ClaudeCloudTask { worktree, .. } => Some(worktree),
             PromptKind::QuickPrompt(launch) => launch.worktree_mut(),
             _ => None,
         }
@@ -1098,7 +1088,7 @@ impl PromptDialog {
     }
 
     /// The task prompts — the Claude Cloud launch task, a message to a live
-    /// cloud session, an AGENT PRESET's task and the QUICK PROMPT — an
+    /// cloud session and the QUICK PROMPT — an
     /// issue comment, and a typed setting that runs over lines (the Linear
     /// task template) are the ones with a multi-row editor.
     pub fn is_multiline(&self) -> bool {
@@ -1108,7 +1098,6 @@ impl PromptDialog {
                 | PromptKind::CloudMessage { .. }
                 | PromptKind::FollowUp { .. }
                 | PromptKind::PrComment { .. }
-                | PromptKind::AgentPresetTask { .. }
                 | PromptKind::QuickPrompt { .. }
                 | PromptKind::IssueComment { .. }
         ) || matches!(self.kind, PromptKind::SettingText { kind, .. } if kind.is_multiline_text())

@@ -145,7 +145,6 @@ fn root_of(app: &App, kind: &PromptKind) -> Option<PathBuf> {
                 .find(|p| &p.id == project)
                 .map(|p| p.repo_path.clone()),
         },
-        PromptKind::AgentPresetTask { worktree, .. } => worktree_path(worktree),
         PromptKind::FollowUp { id } => app
             .tree
             .agents

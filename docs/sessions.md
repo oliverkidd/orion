@@ -115,9 +115,9 @@ in Settings → Sessions names (`preset_text` in CONFIG.JSON) — `prefix` unles
 box, sent before your task — and cycling the row shows the other box or both; a side the row leaves
 out saves blank. Editing a preset also shows any side that already holds text, so one saved with
 both never loses either. `Enter` on a
-preset asks for the task in the same wrapped editor, then launches the CLI with `prefix + task + postfix`
-as its very first prompt, so the agent is already working when the pane opens. The task is optional:
-send the box empty and the prefix and postfix go on their own (a preset with neither starts the CLI
+preset opens the QUICK PROMPT on it, the prefix and postfix written round the caret, and `Enter` there
+launches the CLI with `prefix + task + postfix` as its very first prompt. The task is optional:
+send the box with nothing typed and the prefix and postfix go on their own (a preset with neither starts the CLI
 with no first prompt). Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
 and `Enter` launches it at once, no box at all; the list marks those rows `no task`. A `skip` preset
 picked with `Shift+Tab` in a quick prompt or in the issues modal launches the same way when
@@ -190,7 +190,7 @@ process that is still starting, so press `Enter` again once it is up.
 
 ## Dropping a screenshot on a prompt box
 
-Drag a file onto the QUICK PROMPT, an AGENT PRESET's task box or the FOLLOW-UP box, and the terminal
+Drag a file onto the QUICK PROMPT or the FOLLOW-UP box, and the terminal
 pastes its path. For a macOS screenshot dragged from its floating thumbnail, that path points at a
 temporary file (`…/TemporaryItems/NSIRD_screencaptureui_…/Screenshot 2026-09-21 at 11.13.58 PM.png`).
 macOS deletes that file soon after the drop, and the space before `PM` is a U+202F that the agent types
@@ -225,7 +225,7 @@ at the same place. A box a picker re-aims takes its draft with it.
 
 Sending the box deletes the draft, and so does emptying it by hand. A launch the daemon refuses
 comes back with its text, which is the draft again. Boxes that carry their own text — a refused
-launch, a preset's task, the FOLLOW-UP box — never open on the draft, and a box with text of its own
+launch, a preset's text, the FOLLOW-UP box — never open on the draft, and a box with text of its own
 writes nothing until you edit it, so opening one never overwrites what you were drafting.
 
 ## RECENT PROMPTS

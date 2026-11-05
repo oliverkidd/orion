@@ -9,11 +9,10 @@
 //! Sessions) for a new preset and on every side a stored one holds text
 //! for; a side the row leaves out saves blank. The presets themselves (and
 //! their file) are
-//! `crate::agent_presets`; the task prompt a launch opens is an ordinary
-//! multi-line `PromptDialog` (`PromptKind::AgentPresetTask`) — sent on at
-//! once, empty, for a `skip_task` preset (`event_loop::submit_prompt_now`)
-//! — and the create it ends in goes through `event_loop::create_agent`
-//! like every other session.
+//! `crate::agent_presets`; a launch goes through the QUICK PROMPT with the
+//! preset on it — sent on at once, empty, for a `skip_task` preset
+//! (`event_loop::submit_prompt_now`) — and the create it ends in goes
+//! through `event_loop::create_agent` like every other session.
 
 use crate::agent_presets::{AgentPreset, PresetText};
 use crate::app::{
@@ -920,31 +919,20 @@ pub(crate) fn open_agent_preset_task(
         return;
     }
     let skip = preset.skip_task;
-    // Flipped onto a fresh worktree: only the QUICK PROMPT's launch cuts
-    // one first, so the preset goes on that box — sent at once for a
-    // `skip`-task preset, as the task box would be.
-    if let Some(target @ QuickTarget::NewWorktree { .. }) = view.aim.clone() {
-        let launch = crate::quick_prompt::QuickLaunch::of_preset(
-            target,
-            preset,
-            &crate::config::Config::load(),
-        );
-        if skip {
-            crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
-        } else {
-            let (launch, head, tail) = launch.inline_preset("", None);
-            crate::quick_prompt::reopen_around(app, launch, &head, &tail);
-        }
-        return;
-    }
-    let kind = PromptKind::AgentPresetTask {
-        worktree: view.worktree.clone(),
-        preset,
+    // The QUICK PROMPT with the preset on it, aimed where the list was
+    // opened for or where `Tab` flipped it — sent at once for a
+    // `skip`-task preset, as Enter on that box would.
+    let target = match view.aim.clone() {
+        Some(target @ QuickTarget::NewWorktree { .. }) => target,
+        _ => QuickTarget::Worktree(view.worktree.clone()),
     };
+    let launch =
+        crate::quick_prompt::QuickLaunch::of_preset(target, preset, &crate::config::Config::load());
     if skip {
-        crate::event_loop::submit_prompt_now(app, kind, out);
+        crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
     } else {
-        crate::event_loop::open_prompt(app, kind);
+        let (launch, head, tail) = launch.inline_preset("", None);
+        crate::quick_prompt::reopen_around(app, launch, &head, &tail);
     }
 }
 
