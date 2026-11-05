@@ -401,6 +401,19 @@ pub enum ClientRequest {
     Shutdown,
 }
 
+/// What a new session launches as — its harness (a Claude account is
+/// `Claude` with the account's id beside it), model, effort and mode, as
+/// `CreateAgent` carries them. A SPARE WORKTREE's CLI was booted as one,
+/// and only a launch that is the same one can take it over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchSpec {
+    pub kind: AgentKind,
+    pub custom_harness: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: crate::harness::AgentMode,
+}
+
 /// How much of a pull request's conversation the user had already seen the
 /// last time they opened it. `marker` is the newest thing anyone else had
 /// posted at that moment, as GitHub's RFC 3339 stamp — those sort

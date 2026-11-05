@@ -67,7 +67,8 @@ impl Branch {
 /// current branch first, the other local branches next, then the remote
 /// branches with no local branch of the same name. Within each group git's
 /// newest-commit-first order holds. `origin/HEAD` points at a branch rather
-/// than being one, and is dropped.
+/// than being one, and is dropped; so is a SPARE WORKTREE's branch, the
+/// DAEMON's own until a launch takes it ([`orion_core::SPARE_PREFIX`]).
 pub fn parse_refs(out: &str) -> Vec<Branch> {
     let mut local: Vec<Branch> = Vec::new();
     let mut remote: Vec<Branch> = Vec::new();
@@ -86,6 +87,9 @@ pub fn parse_refs(out: &str) -> Vec<Branch> {
         let committed = date.trim().parse().unwrap_or(0);
         let subject = fields.next().unwrap_or("").trim().to_string();
         if let Some(name) = refname.strip_prefix("refs/heads/") {
+            if orion_core::is_spare_branch(name) {
+                continue;
+            }
             let current = head == "*";
             local.push(Branch {
                 name: name.to_string(),
@@ -348,6 +352,14 @@ mod tests {
                 "far away",
             ),
             record("refs/remotes/upstream/feat/deep", "", " ", "", 4, "nested"),
+            record(
+                "refs/heads/orion-spare-3kq9xa",
+                "",
+                " ",
+                "/repo-worktrees/orion-spare-3kq9xa",
+                3,
+                "on main",
+            ),
         ]
         .concat();
         let rows = parse_refs(&out);
@@ -361,7 +373,7 @@ mod tests {
                 "origin/only-remote",
                 "upstream/feat/deep"
             ],
-            "origin/HEAD is a pointer and origin/main has a local twin"
+            "origin/HEAD is a pointer, origin/main has a local twin, and the spare is the daemon's"
         );
         assert!(rows[0].current && rows[0].checked_out_at.is_none());
         assert_eq!(rows[2].checked_out_at, Some("/repo-worktrees/held".into()));

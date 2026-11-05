@@ -17,6 +17,7 @@ pub mod server;
 pub mod session_model;
 pub mod session_title;
 pub mod sibling;
+pub mod spare;
 pub mod stacks;
 pub mod status;
 pub mod store;
@@ -247,6 +248,22 @@ async fn serve() -> Result<()> {
                         ),
                     }
                 }
+            }
+        });
+    }
+
+    // SPARE WORKTREES: the warm next worktree of each project in use, cut,
+    // kept and taken away on their own tick (see `spare`).
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            let mut interval = env_interval(env::SPARE_TICK_MS, 30_000);
+            loop {
+                tokio::select! {
+                    _ = daemon.shutdown.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                daemon.tend_spares().await;
             }
         });
     }

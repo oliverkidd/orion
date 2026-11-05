@@ -64,7 +64,7 @@ const NO_RUN_COMMAND: &str =
 /// run ended before a DAEMON restart, typically.
 const RUN_NOT_RUNNING: &str = "this run has stopped — ⌘⇧S on its worktree starts it again";
 /// What a SETUP TERMINAL's row is called in the Sessions panel.
-const SETUP_TERMINAL_NAME: &str = "setup";
+pub(crate) const SETUP_TERMINAL_NAME: &str = "setup";
 /// Why a SETUP TERMINAL with nothing left to replay will not attach: the
 /// DAEMON that ran it has restarted since, and its output went with it.
 const SETUP_NOT_RUNNING: &str =
@@ -184,6 +184,9 @@ pub struct Daemon {
     /// STACK STATUS: the last docker compose listing, and the poke that
     /// asks for a fresh one now.
     pub stacks: crate::stacks::StackWatch,
+    /// SPARE WORKTREES: the warm next worktree of each project in use
+    /// (`spare`).
+    pub(crate) spares: crate::spare::SpareBook,
 }
 
 impl Daemon {
@@ -212,6 +215,7 @@ impl Daemon {
             stopping_runs: Mutex::new(HashMap::new()),
             queued_runs: Mutex::new(HashMap::new()),
             stacks: crate::stacks::StackWatch::default(),
+            spares: Default::default(),
         })
     }
 
@@ -231,6 +235,10 @@ impl Daemon {
         // record before every event, so the machine's copy cannot go stale
         // — and before the machines lock, so the two are never nested.
         let relocating = self.pending_moves.lock().unwrap().contains_key(agent_id);
+        // A SPARE WORKTREE's CLI is up once it says so, row or none.
+        if matches!(event, HookEvent::SessionStart { .. }) {
+            self.spares.note_boot(agent_id);
+        }
         let effects = {
             let mut machines = self.status_machines.lock().unwrap();
             match machines.entry(agent_id.clone()) {
@@ -376,6 +384,9 @@ impl Daemon {
     /// connection). While any attachment exists, the session — and its
     /// whole worktree — counts as "in view".
     pub fn note_attached(&self, sref: &SessionRef) {
+        if let Some(worktree) = self.session_worktree(sref) {
+            self.note_used_in(&worktree);
+        }
         *self
             .attach_counts
             .lock()
@@ -398,6 +409,14 @@ impl Daemon {
         }
         drop(counts);
         self.touch_session(sref);
+    }
+
+    /// Worktree `id`'s project was just used, which keeps it a SPARE
+    /// WORKTREE.
+    fn note_used_in(&self, id: &WorktreeId) {
+        if let Ok(Some(worktree)) = self.store.get_worktree(id) {
+            self.spares.note_used(&worktree.project_id);
+        }
     }
 
     /// Stamp `sref` as just-looked-at for the idle reaper.
@@ -673,6 +692,7 @@ impl Daemon {
             sort_order: self.store.next_project_sort_order()?,
         };
         self.store.insert_project(&project)?;
+        self.spares.note_used(&project.id);
         self.broadcast(ServerEvent::EntityUpserted {
             entity: Entity::Project(project.clone()),
         });
@@ -761,6 +781,7 @@ impl Daemon {
         if branch.trim().is_empty() {
             bail!("branch name is empty");
         }
+        self.spares.note_used(project_id);
         let ops = self.worktree_ops.lock().await;
         let project = self
             .store
@@ -961,7 +982,7 @@ impl Daemon {
     /// itself unless the project was added from a linked one — lends its
     /// ignored `.env*` files to `worktree`, always; a failure is a client
     /// warning, never a failed create.
-    async fn link_env_files(&self, repo: &Path, worktree: &Path) {
+    pub(crate) async fn link_env_files(&self, repo: &Path, worktree: &Path) {
         let main = git::list_worktrees(repo)
             .await
             .ok()
@@ -1151,6 +1172,7 @@ impl Daemon {
             .store
             .get_worktree(&worktree_id)?
             .context("worktree not found")?;
+        self.spares.note_used(&worktree.project_id);
         // Without this, a missing CLI still "succeeds" — the login shell
         // prints `command not found` into a PTY that dies at once, leaving
         // a dead row that looks identical to a fresh one.
@@ -1284,7 +1306,7 @@ impl Daemon {
     /// just-installed CLI gets picked up quickly. Probe trouble (timeout,
     /// spawn error) fails open — the spawn itself then gets to report.
     /// Custom harnesses pass their entry's program; built-ins their CLI.
-    async fn cli_available(&self, program: &str) -> bool {
+    pub(crate) async fn cli_available(&self, program: &str) -> bool {
         if std::env::var(env::AGENT_CMD).is_ok() {
             return true; // test override is spawned verbatim
         }
@@ -3087,7 +3109,7 @@ impl Daemon {
         dirs
     }
 
-    fn spawn_terminal_session(
+    pub(crate) fn spawn_terminal_session(
         self: &Arc<Self>,
         terminal: &TerminalTab,
         worktree: &Worktree,
@@ -3174,11 +3196,18 @@ impl Daemon {
                             break;
                         }
                         tracing::info!(session = ?sref, exit_code, "session exited");
+                        // A SPARE WORKTREE's setup has no row: its spare
+                        // hears how it went. Asked first, so a take that
+                        // puts its row in after this exit finds it ended.
                         if let SessionRef::Terminal(id) = &sref {
-                            match daemon.command_terminal(id) {
-                                Some(t) if t.setup => daemon.setup_ended(&t, &session, exit_code),
-                                Some(_) => daemon.run_ended(id, &session, exit_code),
-                                None => {}
+                            if !daemon.spares.setup_ended(id, exit_code) {
+                                match daemon.command_terminal(id) {
+                                    Some(t) if t.setup => {
+                                        daemon.setup_ended(&t, &session, exit_code)
+                                    }
+                                    Some(_) => daemon.run_ended(id, &session, exit_code),
+                                    None => {}
+                                }
                             }
                         }
                         if let SessionRef::Agent(id) = &sref {
@@ -3866,7 +3895,7 @@ fn cli_probe_line(program: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Claude argv: `args`, then orion's appended guidance (worktree and
@@ -4768,7 +4797,7 @@ mod tests {
         );
     }
 
-    fn test_daemon() -> Arc<Daemon> {
+    pub(crate) fn test_daemon() -> Arc<Daemon> {
         let store = Arc::new(Store::open_in_memory().unwrap());
         Daemon::new(
             store,
@@ -5997,14 +6026,14 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Save/restore around a process-wide env var a test has to set.
-    struct EnvGuard {
+    pub(crate) struct EnvGuard {
         key: &'static str,
         was: Option<String>,
         _held: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let held = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let was = std::env::var(key).ok();
             std::env::set_var(key, value);
@@ -6055,7 +6084,13 @@ mod tests {
         }
     }
 
-    fn seed_worktree(daemon: &Daemon, project: &str, id: &str, path: &str, is_main: bool) {
+    pub(crate) fn seed_worktree(
+        daemon: &Daemon,
+        project: &str,
+        id: &str,
+        path: &str,
+        is_main: bool,
+    ) {
         daemon
             .store
             .insert_worktree(&Worktree {
@@ -6816,7 +6851,7 @@ mod tests {
 
     /// A fresh repo with one commit, at a canonical path (the macOS
     /// tempdir is a symlink, and git reports worktrees canonically).
-    fn init_repo(root: &Path) -> PathBuf {
+    pub(crate) fn init_repo(root: &Path) -> PathBuf {
         let repo = root.join("repo");
         std::fs::create_dir(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
@@ -6832,7 +6867,7 @@ mod tests {
         path
     }
 
-    fn project_at(daemon: &Daemon, repo: &Path) -> Project {
+    pub(crate) fn project_at(daemon: &Daemon, repo: &Path) -> Project {
         let project = Project {
             id: ProjectId("p".into()),
             name: "p".into(),
@@ -7092,7 +7127,7 @@ mod tests {
         assert!(wt.join("notes.txt").exists(), "nothing removed");
     }
 
-    fn git_in(repo: &Path, args: &[&str]) {
+    pub(crate) fn git_in(repo: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)

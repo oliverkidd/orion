@@ -153,6 +153,19 @@ impl Project {
     }
 }
 
+/// What a SPARE WORKTREE's branch, and its directory in the WORKTREE DIR,
+/// are named after (`orion-spare-3kq9xa`): the warm next worktree the
+/// DAEMON keeps for each project in use, so whoever meets one in `git
+/// worktree list` or a branch list knows whose it is. Every listing orion
+/// shows leaves these out until a launch takes one — its branch is then
+/// renamed, its directory keeps the name.
+pub const SPARE_PREFIX: &str = "orion-spare-";
+
+/// Whether `branch` is a SPARE WORKTREE's ([`SPARE_PREFIX`]).
+pub fn is_spare_branch(branch: &str) -> bool {
+    branch.starts_with(SPARE_PREFIX)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {
     pub id: WorktreeId,

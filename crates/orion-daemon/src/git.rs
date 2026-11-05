@@ -67,12 +67,16 @@ pub struct WorktreeEntry {
 /// checkout. Linked checkouts that are not the user's are left out, so the
 /// grid never adopts them (or links `.env` files into them): ones git marks
 /// prunable (directory gone), a tool's scratch checkouts in the system
-/// temp dir — fallow's audit caches, say — and the checkouts Claude's
-/// isolated subagents run in (see [`without_subagent_checkouts`]).
+/// temp dir — fallow's audit caches, say — the checkouts Claude's
+/// isolated subagents run in (see [`without_subagent_checkouts`]), and the
+/// DAEMON's SPARE WORKTREES ([`list_spare_worktrees`] lists those).
 pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
     let entries = without_scratch(parse_worktree_list(&out), &temp_roots());
     let mut entries = without_subagent_checkouts(entries);
+    // A SPARE WORKTREE is the DAEMON's own until a launch takes it, and
+    // the take renames its branch before the row goes in.
+    entries.retain(|e| !orion_core::is_spare_branch(&e.branch));
     for entry in &mut entries {
         if entry.branch != "(detached)" && !entry.branch.starts_with("detached @ ") {
             continue;
@@ -184,6 +188,92 @@ fn without_subagent_checkouts(mut entries: Vec<WorktreeEntry>) -> Vec<WorktreeEn
             .is_some_and(|name| name.starts_with("agent-") && !name.contains('/'))
     });
     entries
+}
+
+/// The repo's SPARE WORKTREES: its linked checkouts on a branch named
+/// [`orion_core::SPARE_PREFIX`]…, in `git worktree list` order.
+pub async fn list_spare_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
+    let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
+    let mut entries = parse_worktree_list(&out);
+    entries.retain(|e| orion_core::is_spare_branch(&e.branch));
+    Ok(entries)
+}
+
+/// The commit `rev` names, in full; None when it names none.
+pub async fn rev_parse(repo: &Path, rev: &str) -> Option<String> {
+    let commit = format!("{rev}^{{commit}}");
+    let out = git(repo, &["rev-parse", "--verify", "--quiet", &commit])
+        .await
+        .ok()?;
+    Some(out.trim().to_string())
+}
+
+/// Where a new worktree nobody named a base for starts: the ref
+/// [`add_worktree_off_configured`] or [`add_worktree_off_default`] cut it
+/// from — origin's copy of the project's **Base branch** `configured`,
+/// else the local branch of that name, else `origin/HEAD`. None is the
+/// checkout's own HEAD: no origin, or one that could not be fetched.
+/// `fetch` fetches `origin` first; without it, the refs are as last
+/// fetched.
+pub async fn new_worktree_base(
+    repo: &Path,
+    configured: Option<&str>,
+    fetch: bool,
+) -> Option<String> {
+    let origin = if fetch {
+        fetch_origin_if_any(repo).await
+    } else {
+        git(repo, &["remote", "get-url", "origin"]).await.is_ok()
+    };
+    if let Some(configured) = configured {
+        if let Some(remote) = origin_branch(repo, configured).await {
+            return Some(remote);
+        }
+        if local_branch(repo, configured).await {
+            return Some(configured.to_string());
+        }
+    }
+    if origin {
+        origin_head(repo).await
+    } else {
+        None
+    }
+}
+
+/// Cut a SPARE WORKTREE: a new branch `branch` at commit `start`, checked
+/// out in the WORKTREE DIR under the branch's own name, tracking nothing —
+/// once a launch takes it, it is that launch's new work, like any branch
+/// cut off the base ([`add_worktree_off_default`]).
+pub async fn add_spare_worktree(repo: &Path, branch: &str, start: &str) -> Result<PathBuf> {
+    add_worktree_inner(repo, branch, Some(start), false).await
+}
+
+/// Take a SPARE WORKTREE off the disk: its checkout, whatever is in it,
+/// then its branch. A checkout already gone is pruned from git's list
+/// instead. Each step is tried whatever the one before it did; the first
+/// failure is the answer.
+pub async fn remove_spare_worktree(repo: &Path, path: &Path, branch: &str) -> Result<()> {
+    let path_str = path.to_string_lossy();
+    let mut result = if path.exists() {
+        git(
+            repo,
+            &["worktree", "remove", "--force", "--force", &path_str],
+        )
+        .await
+        .map(drop)
+    } else {
+        git(repo, &["worktree", "prune"]).await.map(drop)
+    };
+    if path.exists() {
+        // What git would not take — a checkout it no longer lists.
+        if let Err(e) = std::fs::remove_dir_all(path) {
+            result = result.and(Err(e.into()));
+        }
+    }
+    if local_branch(repo, branch).await {
+        result = result.and(git(repo, &["branch", "-D", branch]).await.map(drop));
+    }
+    result
 }
 
 /// The branch a paused rebase in `checkout` is replaying, if there is one —
