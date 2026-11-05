@@ -24,43 +24,6 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// The **Outside terminal** choices (Settings → Tools), in the order the
-/// row cycles them: the [`OutsideTerminal`] apps by name, the default first.
-pub const OUTSIDE_TERMINALS: &[&str] = &[
-    OutsideTerminal::Ghostty.as_str(),
-    OutsideTerminal::Terminal.as_str(),
-];
-
-/// The app ⇧T opens a terminal in, outside orion: a Ghostty tab, or a
-/// window of macOS's own Terminal.app.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OutsideTerminal {
-    #[default]
-    Ghostty,
-    Terminal,
-}
-
-impl OutsideTerminal {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            OutsideTerminal::Ghostty => "ghostty",
-            OutsideTerminal::Terminal => "terminal",
-        }
-    }
-
-    /// A stored word back to its app; anything unknown is the default.
-    pub fn parse(word: &str) -> Self {
-        if word
-            .trim()
-            .eq_ignore_ascii_case(OutsideTerminal::Terminal.as_str())
-        {
-            OutsideTerminal::Terminal
-        } else {
-            OutsideTerminal::Ghostty
-        }
-    }
-}
-
 /// The **Session pane** choices (Settings → Appearance), in the order the
 /// row cycles them: the [`crate::launcher::PaneSide`] sides by name, the
 /// default first.
@@ -512,7 +475,6 @@ pub enum SettingKind {
     WorktreeBaseBranch,
     LinkEnvFiles,
     WorktreeContainers,
-    OutsideTerminal,
     OutsideEditor,
     CloseFinderOnOpen,
     /// The Tools tab's action row: Enter opens ORION SETUP, every step.
@@ -690,7 +652,6 @@ impl SettingKind {
             SettingKind::ExpandAllWorktrees | SettingKind::FollowNewSession => (2026, 9, 26),
             SettingKind::HighlightCurrentCard => (2026, 9, 28),
             SettingKind::LinkEnvFiles
-            | SettingKind::OutsideTerminal
             | SettingKind::LinearAccount
             | SettingKind::LinearAutoAttach
             | SettingKind::LinearTaskTemplate
@@ -797,14 +758,8 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::RunSetup,
                 label: "Setup",
-                hint: "Enter opens Orion setup again, every step: agents and their CLIs, Claude accounts, editors, worktrees, Linear and the outside terminal",
+                hint: "Enter opens Orion setup again, every step: agents and their CLIs, Claude accounts, the Open in app editor, worktrees, Linear and autofix",
                 group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::OutsideTerminal,
-                label: "Outside terminal",
-                hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
-                group: "Terminal",
             },
             SettingSpec {
                 kind: SettingKind::OutsideEditor,
@@ -1433,11 +1388,6 @@ pub struct Config {
     /// `remove`, or `remove+volumes`. Owned by the daemon (`containers`);
     /// the TUI writes it so the settings overlay can cycle it.
     pub worktree_containers: String,
-    /// The app ⇧T opens a terminal in, outside orion: `ghostty` (the
-    /// default) or `terminal` (macOS's Terminal.app), which is also the
-    /// fallback when Ghostty.app isn't installed. See
-    /// [`Config::outside_terminal`].
-    pub outside_terminal: String,
     /// RETIRED with Orion.app carrying its own key table. Through 1.6 the
     /// **Ghostty keybinds** SETTING (Settings → Tools, on by default) had
     /// orion keep a marked block in the user's Ghostty config unbinding
@@ -2013,7 +1963,6 @@ impl Default for Config {
             worktree_base_branch: String::new(),
             link_env_files: true,
             worktree_containers: WorktreeContainers::Off.as_str().into(),
-            outside_terminal: OutsideTerminal::default().as_str().into(),
             ghostty_keybinds: true,
             outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
@@ -2331,11 +2280,6 @@ impl Config {
     /// out on.
     pub fn pane_side(&self) -> crate::launcher::PaneSide {
         crate::launcher::PaneSide::parse(&self.session_pane)
-    }
-
-    /// `outside_terminal` resolved to the app ⇧T opens.
-    pub fn outside_terminal(&self) -> OutsideTerminal {
-        OutsideTerminal::parse(&self.outside_terminal)
     }
 
     /// The task template ⌘L expands: `linear_task_template`, or
@@ -3415,15 +3359,6 @@ impl Config {
             SettingKind::WorktreeContainers => WorktreeContainers::parse(&self.worktree_containers)
                 .as_str()
                 .into(),
-            SettingKind::OutsideTerminal => {
-                let chosen = self.outside_terminal().as_str();
-                if cfg!(target_os = "macos") && !crate::install::installed(crate::install::GHOSTTY)
-                {
-                    format!("{chosen} · Ghostty install…")
-                } else {
-                    chosen.into()
-                }
-            }
             SettingKind::RunSetup => "Enter opens it".into(),
             SettingKind::Git => installed_label("git"),
             SettingKind::Gh => installed_label("gh"),
@@ -3581,10 +3516,6 @@ impl Config {
                 let current = WorktreeContainers::parse(&self.worktree_containers);
                 self.worktree_containers =
                     cycle_choice(current.as_str(), WORKTREE_CONTAINERS, step).into();
-            }
-            SettingKind::OutsideTerminal => {
-                self.outside_terminal =
-                    cycle_choice(self.outside_terminal().as_str(), OUTSIDE_TERMINALS, step).into();
             }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
@@ -4199,7 +4130,7 @@ mod tests {
 
     /// Keys a release wrote whose setting has since been removed: no field
     /// reads them any more.
-    const DROPPED_KEYS: &[&str] = &["ssh_sync_config", "editor"];
+    const DROPPED_KEYS: &[&str] = &["ssh_sync_config", "editor", "outside_terminal"];
 
     fn read_json_file(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()

@@ -293,7 +293,7 @@ fn orion_app(m: &Machine) -> Check {
             NAME,
             Status::Missing,
             "Ghostty isn't installed, and the app is made from it — orion's ⌘ shortcuts \
-             reach it only there, and the outside terminal opens in Terminal.app",
+             reach it only there, and a terminal in the checkout opens in it",
         )
         .fix(plan_fix(m.tools().ghostty_plan()));
     }

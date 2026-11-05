@@ -215,8 +215,8 @@ pub(crate) enum Command {
     },
     /// Open orion on its setup, every step.
     ///
-    /// Agents, Claude accounts, editors, worktrees, Linear and the outside
-    /// terminal, with `i` to install what's missing. The palette's Run
+    /// Agents, Claude accounts, the Open in app editor, worktrees, Linear
+    /// and autofix, with `i` to install what's missing. The palette's Run
     /// setup and Settings → Tools → Setup open the same thing.
     Setup,
     /// Open orion as a Mac app of its own.

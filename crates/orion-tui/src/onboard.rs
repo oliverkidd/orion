@@ -28,8 +28,7 @@ use ratatui::Frame;
 use crate::app::{App, Overlay};
 use crate::claude_accounts::NewAccount;
 use crate::config::{
-    program_installed, AccountRow, Config, OutsideTerminal, SettingKind, SettingSpec,
-    LINEAR_SETTINGS,
+    program_installed, AccountRow, Config, SettingKind, SettingSpec, LINEAR_SETTINGS,
 };
 use crate::install::{Plan, Tools};
 use crate::keymap::{Action, Keymap};
@@ -210,11 +209,6 @@ const AUTOFIX_ROWS: &[SettingKind] = &[
     SettingKind::AutofixEffort,
 ];
 
-/// A Mac without Ghostty.app: ⌘O's terminal opens Terminal.app instead.
-fn ghostty_missing() -> bool {
-    cfg!(target_os = "macos") && !crate::install::installed(crate::install::GHOSTTY)
-}
-
 /// The settings rows a page mirrors, in order — the overlay's own specs,
 /// so each row's label and explanation are its tab's word for word. The
 /// Linear page is the LINEAR TAB entire ([`LINEAR_SETTINGS`]).
@@ -307,21 +301,10 @@ impl OnboardView {
 /// VERSION `since` — 0 for all of them: at startup ([`pending`]), from
 /// the palette's **Run setup**, Settings' **Setup** row and `orion setup`.
 pub fn open(app: &mut App, cfg: &Config, since: u32) {
-    // Ghostty is the default outside terminal; without it, start on the
-    // one this Mac has. Installing Ghostty from Settings switches back.
-    if ghostty_missing() && cfg.outside_terminal() == OutsideTerminal::Ghostty {
-        persist(|cfg| cfg.outside_terminal = OutsideTerminal::Terminal.as_str().into());
-    }
     let mut view = OnboardView::new(cfg);
     view.since = since;
     app.overlay = Some(Overlay::Onboard(view));
     app.dirty = true;
-}
-
-/// Ghostty just installed from Settings: make it the outside terminal
-/// again.
-pub fn use_ghostty() {
-    persist(|cfg| cfg.outside_terminal = OutsideTerminal::Ghostty.as_str().into());
 }
 
 /// Leave the wizard and remember it was seen, so the next launch goes
@@ -1352,20 +1335,6 @@ fn setting_value(app: &App, cfg: &Config, kind: SettingKind) -> String {
     }
 }
 
-/// The outside terminal by name, and what stands in for Ghostty on a Mac
-/// without it.
-fn terminal_name(cfg: &Config) -> String {
-    match cfg.outside_terminal() {
-        OutsideTerminal::Ghostty
-            if cfg!(target_os = "macos") && crate::event_loop::ghostty_app().is_none() =>
-        {
-            "Ghostty — not installed, Terminal.app opens".into()
-        }
-        OutsideTerminal::Ghostty => "Ghostty".into(),
-        OutsideTerminal::Terminal => "Terminal.app".into(),
-    }
-}
-
 /// What `i` asks before anything runs: the command, or — with nothing
 /// orion can run — where to go instead.
 fn install_question(body: &mut Body, plan: &Plan, th: Theme, width: u16) {
@@ -1481,11 +1450,6 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
                     "pull requests not linked"
                 }
             ),
-            warn: false,
-        },
-        Chosen {
-            what: "Terminal",
-            value: terminal_name(cfg),
             warn: false,
         },
     ]

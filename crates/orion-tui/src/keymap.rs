@@ -80,10 +80,9 @@ pub enum Action {
     /// started from, in the browser. `i` lists the project's issues in
     /// orion; the shifted key goes to GitHub.
     OpenIssue,
-    /// `Shift+T`: a terminal *outside* orion — a new Ghostty tab or
-    /// Terminal.app window (the **Outside terminal** setting) in the
-    /// selected worktree's directory, where `t` opens one inside orion; a
-    /// silent no-op off macOS or over ssh.
+    /// A terminal *outside* orion — a new Ghostty tab in the selected
+    /// worktree's directory, where `t` opens one inside orion; a silent
+    /// no-op over ssh.
     OpenOutsideTerminal,
     /// `Shift+R`: reload from GitHub now, past every timer — the project's
     /// open pull requests and issues, the worktree's PR, the one the pane
@@ -237,7 +236,7 @@ pub enum Action {
     CommandPalette,
     /// `⌘O`: the OPEN MENU — what is under the cursor, outside orion: the
     /// repo, pull request or issue on GitHub, the open command, the OPEN
-    /// IN APP editor, the outside terminal.
+    /// IN APP editor, a Ghostty tab in the checkout.
     OpenOutside,
     /// The checkout under the cursor in the OPEN IN APP editor (the OPEN
     /// MENU's row). Its id keeps the name it shipped with, `open_in_cursor`,
@@ -595,7 +594,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenOutsideTerminal,
         id: "open_outside_terminal",
         label: "Terminal outside orion",
-        hint: "Open the selected worktree's directory in the Outside terminal setting's app — a Ghostty tab or a Terminal.app window",
+        hint: "Open the selected worktree's directory in a Ghostty tab",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &[],
@@ -991,7 +990,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::RunSetup,
         id: "run_setup",
         label: "Run setup",
-        hint: "Open Orion setup again, every step: agents and their CLIs, Claude accounts, editors, worktrees, Linear and the outside terminal, with i to install whatever is missing",
+        hint: "Open Orion setup again, every step: agents and their CLIs, Claude accounts, the Open in app editor, worktrees, Linear and autofix, with i to install whatever is missing",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],

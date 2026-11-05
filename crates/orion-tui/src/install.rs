@@ -195,7 +195,8 @@ pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
     Some(brew_plan(word, cask, true, link, brew))
 }
 
-/// How Ghostty, the outside terminal ⇧T opens, gets onto a Mac: `brew
+/// How Ghostty — Orion.app's base, and the terminal ⌘O opens in the
+/// checkout — gets onto a Mac: `brew
 /// install --cask ghostty` with Homebrew at `brew`, else its download page.
 /// The cask puts `ghostty` on PATH as well as the app in /Applications.
 pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
@@ -393,9 +394,6 @@ pub fn settings_row_plan(
     }
     let spec = crate::config::setting_at(tab, index)?;
     match spec.kind {
-        SettingKind::OutsideTerminal => {
-            (cfg!(target_os = "macos") && !installed(GHOSTTY)).then(|| tools.ghostty_plan())
-        }
         SettingKind::OutsideEditor => {
             let word = cfg.outside_editor.trim();
             (!installed(word)).then(|| tools.app_plan(word)).flatten()
@@ -531,10 +529,6 @@ pub fn closed(app: &mut App, program: &str) {
         Some(crate::app::Overlay::Onboard(view)) => view.note = Some(note),
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
         _ => {}
-    }
-    // Ghostty in: it is the outside terminal again, as by default.
-    if program == GHOSTTY && installed {
-        crate::onboard::use_ghostty();
     }
     app.dirty = true;
 }

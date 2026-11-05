@@ -5672,65 +5672,34 @@ fn open_repo_in_browser(app: &mut App) {
     }
 }
 
-/// A terminal app outside orion, ready to be handed a folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OutsideApp {
-    bundle: std::path::PathBuf,
-    /// What one hand-off opens, for a failure's flash: "Ghostty tab".
-    opens: &'static str,
-}
-
-/// macOS's own Terminal.app.
-const TERMINAL_APP: &str = "/System/Applications/Utilities/Terminal.app";
-
-/// The **Outside terminal** setting resolved to an installed app: Ghostty
-/// when chosen and installed, else Terminal.app. None off macOS.
-fn outside_app(choice: crate::config::OutsideTerminal) -> Option<OutsideApp> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    let terminal = || {
-        let bundle = std::path::PathBuf::from(TERMINAL_APP);
-        bundle.is_dir().then_some(OutsideApp {
-            bundle,
-            opens: "Terminal window",
-        })
-    };
-    match choice {
-        crate::config::OutsideTerminal::Ghostty => ghostty_app()
-            .map(|bundle| OutsideApp {
-                bundle,
-                opens: "Ghostty tab",
-            })
-            .or_else(terminal),
-        crate::config::OutsideTerminal::Terminal => terminal(),
-    }
-}
-
-/// A terminal outside orion (`Shift+T`) in the selected worktree's
-/// directory, or in the project's own clone when it has no worktrees yet:
-/// a Ghostty tab or a Terminal.app window, per the **Outside terminal**
-/// setting. `open -a` hands the app a folder, which Ghostty takes like one
-/// dropped on its Dock icon — a tab in the front window under the default
-/// `macos-dock-drop-behavior = new-tab` — and Terminal.app as a new window
-/// there. Silent when it opens, and when there is no app to hand it to:
-/// off macOS, or over ssh, where `open` would reach the remote machine's
-/// screen instead of the one being looked at. A failure says why.
+/// A terminal outside orion (**Terminal in the checkout**) in the selected
+/// worktree's directory, or in the project's own clone when it has no
+/// worktrees yet: a Ghostty tab. `open -a` hands Ghostty a folder, which it
+/// takes like one dropped on its Dock icon — a tab in the front window
+/// under the default `macos-dock-drop-behavior = new-tab`. Silent when it
+/// opens, and over ssh, where `open` would reach the remote machine's
+/// screen instead of the one being looked at. No Ghostty, or a failure,
+/// says so.
 fn open_outside_terminal(app: &mut App) {
-    let choice = crate::config::Config::load().outside_terminal();
-    open_outside_terminal_with(app, outside_app(choice));
+    open_outside_terminal_with(app, ghostty_app());
 }
 
-fn open_outside_terminal_with(app: &mut App, outside: Option<OutsideApp>) {
-    let Some(outside) = outside.filter(|_| !app.is_remote) else {
+fn open_outside_terminal_with(app: &mut App, ghostty: Option<std::path::PathBuf>) {
+    if app.is_remote {
+        return;
+    }
+    let Some(ghostty) = ghostty else {
+        app.flash = Some(crate::flash::Flash::setup(format!(
+            "Ghostty isn't installed — the terminal opens as a Ghostty tab ({})",
+            crate::install::GHOSTTY_LINK
+        )));
         return;
     };
     match context_dir(app) {
         Some(Ok(dir)) => {
-            if !open_in_app(&outside.bundle, &dir) {
+            if !open_in_app(&ghostty, &dir) {
                 app.flash = Some(crate::flash::Flash::failed(format!(
-                    "couldn't open a {} in {}",
-                    outside.opens,
+                    "couldn't open a Ghostty tab in {}",
                     dir.display()
                 )));
             }
@@ -15590,11 +15559,8 @@ mod tests {
         );
     }
 
-    fn ghostty() -> Option<OutsideApp> {
-        Some(OutsideApp {
-            bundle: "/Applications/Ghostty.app".into(),
-            opens: "Ghostty tab",
-        })
+    fn ghostty() -> Option<std::path::PathBuf> {
+        Some("/Applications/Ghostty.app".into())
     }
 
     #[test]
@@ -15611,48 +15577,32 @@ mod tests {
         );
         open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(app.flash, None, "the tab coming up is the answer");
-        open_outside_terminal_with(
-            &mut app,
-            Some(OutsideApp {
-                bundle: TERMINAL_APP.into(),
-                opens: "Terminal window",
-            }),
-        );
-        assert_eq!(app.flash, None);
     }
 
+    /// No Ghostty: it says so, Terminal.app standing in for nothing.
+    /// Over ssh: not a word, the tab would open elsewhere.
     #[test]
-    fn outside_terminal_is_silent_without_an_app_or_over_ssh() {
+    fn outside_terminal_needs_ghostty_and_is_silent_over_ssh() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new();
         app.is_remote = false;
         seed_worktree_at(&mut app, dir.path());
         app.flash = None;
         open_outside_terminal_with(&mut app, None);
-        assert_eq!(app.flash, None, "no app: not a word");
+        let flash = app.flash.take().expect("no Ghostty says so");
+        assert!(
+            flash.text.starts_with("Ghostty isn't installed"),
+            "{flash:?}"
+        );
 
         let mut empty = App::new();
         empty.flash = None;
-        open_outside_terminal_with(&mut empty, None);
-        assert_eq!(empty.flash, None, "nor a select-first nudge");
+        open_outside_terminal_with(&mut empty, ghostty());
+        assert_eq!(empty.flash, None, "nothing selected: no select-first nudge");
 
         app.is_remote = true;
         open_outside_terminal_with(&mut app, ghostty());
         assert_eq!(app.flash, None, "over ssh the tab would open elsewhere");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn terminal_app_is_the_choice_or_the_fallback() {
-        use crate::config::OutsideTerminal;
-        let terminal = outside_app(OutsideTerminal::Terminal).expect("every Mac has Terminal.app");
-        assert_eq!(terminal.bundle, std::path::PathBuf::from(TERMINAL_APP));
-        let chosen = outside_app(OutsideTerminal::Ghostty).unwrap();
-        if ghostty_app().is_some() {
-            assert_eq!(chosen.opens, "Ghostty tab");
-        } else {
-            assert_eq!(chosen, terminal, "no Ghostty.app: Terminal.app instead");
-        }
     }
 
     #[test]
