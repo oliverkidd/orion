@@ -3489,6 +3489,7 @@ mod tests {
                         name: "reviewer".into(),
                         kind: orion_core::AgentKind::Claude,
                         custom_harness: None,
+                        follow_box: None,
                         model: None,
                         effort: None,
                         prefix: "Be strict.".into(),
@@ -3640,6 +3641,7 @@ mod tests {
                             name: "reviewer".into(),
                             kind: orion_core::AgentKind::Claude,
                             custom_harness: None,
+                            follow_box: None,
                             model: None,
                             effort: None,
                             prefix: String::new(),
@@ -9895,11 +9897,10 @@ mod tests {
         });
     }
 
-    /// A second Claude account, as config.json writes one: a Claude
-    /// harness with its own `CLAUDE_CONFIG_DIR`.
-    const SECOND_ACCOUNT: &str = r#"{"harnesses": {"claude-b": {"label": "Claude B",
-        "program": "claude", "hooks": "claude", "resume_flag": "--resume",
-        "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}}}}"#;
+    /// A second Claude account, as config.json writes one: its id and
+    /// config dir, and its name in its own `harnesses` entry.
+    const SECOND_ACCOUNT: &str = r#"{"claude_accounts": [{"id": "claude-b",
+        "config_dir": "~/.claude-b"}], "harnesses": {"claude-b": {"label": "Claude B"}}}"#;
 
     /// The rows of the menu that is up.
     fn menu_labels(app: &App) -> Vec<String> {

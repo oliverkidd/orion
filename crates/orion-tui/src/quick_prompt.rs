@@ -361,7 +361,7 @@ pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
 /// ([`crate::claude_accounts::short_name`]).
 pub fn harness_name(kind: AgentKind, custom: Option<&str>) -> String {
     crate::claude_accounts::short_name(kind, custom)
-        .unwrap_or_else(|| custom.unwrap_or_else(|| kind.as_str()).to_string())
+        .unwrap_or_else(|| orion_core::harness::registry_id(kind, custom).to_string())
 }
 
 impl QuickLaunch {
@@ -478,21 +478,68 @@ impl QuickLaunch {
         self
     }
 
-    /// The launch an AGENT PRESET describes: its harness, its pinned
-    /// MODEL / EFFORT where it has them and that kind's defaults where it
-    /// does not — the same resolution an AGENT PRESET launch from the
-    /// SESSIONS PANEL does — and its prefix/postfix kept for the compose.
-    pub fn of_preset(target: QuickTarget, preset: AgentPreset, cfg: &Config) -> Self {
-        let mut launch = Self::of_kind(
-            target,
-            preset.kind,
-            preset.custom_harness.clone(),
-            preset.model.clone(),
-            preset.effort.clone(),
-            cfg,
-        );
+    /// The launch an AGENT PRESET describes, its prefix/postfix kept for
+    /// the compose. A preset that FOLLOWS THE BOX
+    /// ([`AgentPreset::follows_box`]) keeps the account and harness of
+    /// `on` — the box it is picked in — or, with no box up, the `⌘N`
+    /// default's, and its model and effort with them, taking only the
+    /// MODEL / EFFORT it pins that the harness offers. One that pins a
+    /// harness launches that, at its pinned MODEL / EFFORT where it has
+    /// them and that harness's defaults where it does not.
+    pub fn of_preset(
+        target: QuickTarget,
+        preset: AgentPreset,
+        on: Option<&QuickLaunch>,
+        cfg: &Config,
+    ) -> Self {
+        let mut launch = if preset.follows_box() {
+            let base = match on {
+                Some(on) => Self::of_kind(
+                    target,
+                    on.kind,
+                    on.custom.clone(),
+                    on.model.clone(),
+                    on.effort.clone(),
+                    cfg,
+                ),
+                None => Self::from_config(target, cfg),
+            };
+            base.pinned_to(preset.model.as_deref(), preset.effort.as_deref(), cfg)
+        } else {
+            Self::of_kind(
+                target,
+                preset.kind,
+                preset.custom_harness.clone(),
+                preset.model.clone(),
+                preset.effort.clone(),
+                cfg,
+            )
+        };
         launch.preset = Some(Box::new(preset));
         launch
+    }
+
+    /// The same launch at `model` and `effort` where its harness offers
+    /// them, each left as it was where it does not; the effort fitted to
+    /// the model, as every launch surface does.
+    pub(crate) fn pinned_to(
+        mut self,
+        model: Option<&str>,
+        effort: Option<&str>,
+        cfg: &Config,
+    ) -> Self {
+        let descriptor = cfg.effective_harness(self.kind, self.custom.as_deref());
+        if let Some(model) =
+            model.filter(|m| crate::config::fits(m, &crate::config::model_choices_in(&descriptor)))
+        {
+            self.model = Some(model.to_string());
+        }
+        let efforts = crate::config::effort_choices_in(&descriptor, self.model.as_deref());
+        if let Some(effort) = effort.filter(|e| crate::config::fits(e, &efforts)) {
+            self.effort = Some(effort.to_string());
+        }
+        self.effort = crate::config::fit_effort_in(&descriptor, self.model.as_deref(), self.effort);
+        self
     }
 
     /// The checkout this launch is addressed to, to rewrite when a
@@ -949,6 +996,7 @@ pub(crate) fn open_preset_picker_for_pr(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HarnessField;
 
     fn worktree() -> QuickTarget {
         QuickTarget::Worktree(WorktreeId::from("wt-1".to_string()))
@@ -967,6 +1015,7 @@ mod tests {
             name: name.into(),
             kind,
             custom_harness: None,
+            follow_box: Some(false),
             model: None,
             effort: None,
             prefix: String::new(),
@@ -978,13 +1027,13 @@ mod tests {
 
     #[test]
     fn the_setting_picks_the_harness_and_its_own_model_and_effort() {
-        let cfg = Config {
+        let mut cfg = Config {
             quick_prompt_kind: "codex".into(),
-            codex_model: "gpt-5.1-codex".into(),
-            codex_effort: "high".into(),
-            claude_model: "opus".into(),
             ..Config::default()
         };
+        cfg.set_default("codex", HarnessField::Model, "gpt-5.1-codex");
+        cfg.set_default("codex", HarnessField::Effort, "high");
+        cfg.set_default("claude", HarnessField::Model, "opus");
         let launch = QuickLaunch::from_config(worktree(), &cfg);
         assert_eq!(launch.kind, AgentKind::Codex);
         assert_eq!(launch.model.as_deref(), Some("gpt-5.1-codex"));
@@ -1020,11 +1069,9 @@ mod tests {
     /// kind's AGENTS TAB defaults, and a drilled-into submenu wins.
     #[test]
     fn a_picked_harness_fills_the_rest_from_its_own_defaults() {
-        let cfg = Config {
-            codex_model: "gpt-5.5".into(),
-            codex_effort: "high".into(),
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.set_default("codex", HarnessField::Model, "gpt-5.5");
+        cfg.set_default("codex", HarnessField::Effort, "high");
         let launch = QuickLaunch::of_kind(worktree(), AgentKind::Codex, None, None, None, &cfg);
         assert_eq!(launch.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(launch.effort.as_deref(), Some("high"));
@@ -1040,21 +1087,75 @@ mod tests {
         assert_eq!(launch.effort.as_deref(), Some("low"));
     }
 
+    /// FOLLOW THE BOX: a preset that follows, picked in a box on another
+    /// Claude account, keeps that account and the box's model, taking the
+    /// effort it pins; with no box up it starts where `⌘N` does. One that
+    /// pins a harness moves the box onto it.
+    #[test]
+    fn a_following_preset_keeps_the_boxs_account() {
+        let mut cfg = Config::default();
+        cfg.claude_accounts
+            .push(orion_core::claude_account::ClaudeAccount {
+                id: "claude-work".into(),
+                config_dir: "~/.claude-work".into(),
+                name: String::new(),
+                enabled: true,
+            });
+        cfg.quick_prompt_kind = "claude-work".into();
+        let on_work = QuickLaunch::of_kind(
+            worktree(),
+            AgentKind::Claude,
+            Some("claude-work".into()),
+            Some("sonnet".into()),
+            None,
+            &cfg,
+        );
+        let follows = AgentPreset {
+            follow_box: Some(true),
+            effort: Some("high".into()),
+            ..preset("ticket", AgentKind::Claude)
+        };
+        let launch = QuickLaunch::of_preset(worktree(), follows.clone(), Some(&on_work), &cfg);
+        assert_eq!(
+            (launch.kind, launch.custom.as_deref()),
+            (AgentKind::Claude, Some("claude-work"))
+        );
+        assert_eq!(launch.model.as_deref(), Some("sonnet"), "the box's model");
+        assert_eq!(
+            launch.effort.as_deref(),
+            Some("high"),
+            "the preset's effort"
+        );
+        let fresh = QuickLaunch::of_preset(worktree(), follows.clone(), None, &cfg);
+        assert_eq!(
+            fresh.custom.as_deref(),
+            Some("claude-work"),
+            "where ⌘N starts"
+        );
+        // On a box with no effort to take, a pinned one it lacks is dropped.
+        let on_opencode =
+            QuickLaunch::of_kind(worktree(), AgentKind::OpenCode, None, None, None, &cfg);
+        let launch = QuickLaunch::of_preset(worktree(), follows, Some(&on_opencode), &cfg);
+        assert_eq!((launch.kind, launch.effort), (AgentKind::OpenCode, None));
+
+        let pinned = preset("codex", AgentKind::Codex);
+        let launch = QuickLaunch::of_preset(worktree(), pinned, Some(&on_work), &cfg);
+        assert_eq!((launch.kind, launch.custom), (AgentKind::Codex, None));
+    }
+
     /// A preset pins what it names and inherits the rest, exactly as an
     /// AGENT PRESET launch from the SESSIONS PANEL does.
     #[test]
     fn a_preset_pins_what_it_names_and_wraps_the_task() {
-        let cfg = Config {
-            claude_effort: "high".into(),
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.set_default("claude", HarnessField::Effort, "high");
         let reviewer = AgentPreset {
             model: Some("opus".into()),
             prefix: "Be strict.".into(),
             postfix: "Run the tests.".into(),
             ..preset("reviewer", AgentKind::Claude)
         };
-        let launch = QuickLaunch::of_preset(worktree(), reviewer, &cfg);
+        let launch = QuickLaunch::of_preset(worktree(), reviewer, None, &cfg);
         assert_eq!(launch.kind, AgentKind::Claude);
         assert_eq!(launch.model.as_deref(), Some("opus"));
         assert_eq!(
@@ -1097,6 +1198,7 @@ mod tests {
                 prefix: "Plan first.".into(),
                 ..preset("linear", AgentKind::Claude)
             },
+            None,
             &cfg,
         )
         .with_linear(launch.linear.clone());
@@ -1114,6 +1216,7 @@ mod tests {
         assert!(here.aimed_like(&QuickLaunch::of_preset(
             worktree(),
             preset("reviewer", AgentKind::Codex),
+            None,
             &cfg
         )));
         assert!(!here.aimed_like(&QuickLaunch::from_config(
@@ -1164,6 +1267,7 @@ mod tests {
                 prefix: "Be strict.".into(),
                 ..preset("reviewer", AgentKind::Cursor)
             },
+            None,
             &cfg,
         );
         assert_eq!(wrapped.title(), "Quick prompt · reviewer (cursor)");
@@ -1172,7 +1276,8 @@ mod tests {
             "reviewer — prefix + your task + postfix (empty = prefix + postfix only)"
         );
 
-        let bare = QuickLaunch::of_preset(worktree(), preset("scratch", AgentKind::Cursor), &cfg);
+        let bare =
+            QuickLaunch::of_preset(worktree(), preset("scratch", AgentKind::Cursor), None, &cfg);
         assert_eq!(
             bare.label(),
             "scratch — sent as the first prompt (empty = start with no prompt)"
@@ -1205,6 +1310,7 @@ mod tests {
                 prefix: "Be strict.".into(),
                 ..preset("reviewer", AgentKind::Cursor)
             },
+            None,
             &cfg,
         )
         .with_pr(Some(pr.clone()));
@@ -1242,6 +1348,7 @@ mod tests {
         let wrapped = QuickLaunch::of_preset(
             new_worktree("yellow-fox-jumps"),
             preset("reviewer", AgentKind::Cursor),
+            None,
             &cfg,
         );
         assert_eq!(
@@ -1261,7 +1368,7 @@ mod tests {
             postfix: "Run the tests.".into(),
             ..preset("reviewer", AgentKind::Claude)
         };
-        let (launch, head, tail) = QuickLaunch::of_preset(worktree(), strict.clone(), &cfg)
+        let (launch, head, tail) = QuickLaunch::of_preset(worktree(), strict.clone(), None, &cfg)
             .inline_preset("Fix auth", None);
         assert_eq!(head, "Be strict.\n\nFix auth");
         assert_eq!(tail, "\n\nRun the tests.");
@@ -1275,7 +1382,7 @@ mod tests {
             prefix: "Plan first.".into(),
             ..preset("planner", AgentKind::Claude)
         };
-        let (_, head, tail) = QuickLaunch::of_preset(worktree(), planner.clone(), &cfg)
+        let (_, head, tail) = QuickLaunch::of_preset(worktree(), planner.clone(), None, &cfg)
             .inline_preset(&format!("{head}{tail}"), Some(&strict));
         assert_eq!(
             (head.as_str(), tail.as_str()),
@@ -1283,7 +1390,7 @@ mod tests {
         );
 
         let (_, head, _) =
-            QuickLaunch::of_preset(worktree(), planner, &cfg).inline_preset("", None);
+            QuickLaunch::of_preset(worktree(), planner, None, &cfg).inline_preset("", None);
         assert_eq!(head, "Plan first.\n\n", "a blank line to type the task on");
     }
 

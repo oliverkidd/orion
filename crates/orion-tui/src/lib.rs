@@ -101,17 +101,13 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 #[derive(Debug, Clone)]
 pub enum ConfigOp {
     Path,
-    Harnesses,
 }
 
-/// `orion config path | harnesses`: where each settings file lives, and
-/// the harness registry launches read.
+/// `orion config path`: where each settings file lives.
 pub fn run_config(op: ConfigOp) -> Result<()> {
-    use anyhow::Context as _;
     use orion_core::paths::{
         CONFIG_FILE_NAME, CONFIG_LOCAL_FILE_NAME, PRESETS_FILE_NAME, SSH_HOSTS_FILE_NAME,
     };
-    use std::io::Write as _;
     match op {
         ConfigOp::Path => {
             for (label, path) in [
@@ -126,20 +122,6 @@ pub fn run_config(op: ConfigOp) -> Result<()> {
                 println!("{label:<20}{}", path.display());
             }
             Ok(())
-        }
-        ConfigOp::Harnesses => {
-            // The registry as launches read it: the compiled-in rows with
-            // the `harnesses` map, the legacy list, the Claude accounts
-            // and the legacy keys folded in — labels as written, never an
-            // account's email. Copy a row into config.json `harnesses` to
-            // override it field by field (`null` clears a nullable row).
-            let registry = config::Config::load().raw_harness_registry();
-            let mut text = serde_json::to_string_pretty(&registry)?;
-            text.push('\n');
-            std::io::stdout()
-                .lock()
-                .write_all(text.as_bytes())
-                .context("writing to stdout")
         }
     }
 }

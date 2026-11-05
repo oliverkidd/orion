@@ -173,8 +173,7 @@ pub(crate) struct CreatePrAgentSpec {
     pub project: ProjectId,
     pub name: String,
     pub kind: AgentKind,
-    /// Registry id of the custom harness, when `kind` is
-    /// [`AgentKind::Custom`].
+    /// The registry id beside `kind`, as `CreateAgentSpec`'s.
     pub custom_harness: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,

@@ -289,6 +289,23 @@ pub fn fit_effort_in(
     }
 }
 
+/// The default effort new sessions on `descriptor` launch with; None =
+/// "default" = don't pass the flag. A composing harness fits the effort
+/// against its configured family ([`fit_effort`]). An effort with no
+/// flag mapped is None whatever the file holds — spawn would drop it
+/// anyway.
+pub fn launch_effort(descriptor: &HarnessDescriptor) -> Option<String> {
+    if descriptor.effort.flag.is_none()
+        && descriptor.effort.config_key.is_none()
+        && !descriptor.compose_model_effort
+    {
+        return None;
+    }
+    let model = descriptor.default_model().map(str::to_string);
+    let effort = descriptor.default_effort().map(str::to_string);
+    fit_effort_in(descriptor, model.as_deref(), effort)
+}
+
 /// The fallback effort for a static list: `high`, else `medium`, else the
 /// first the harness ships.
 fn static_fallback_effort(efforts: &[String]) -> Option<&str> {
@@ -307,19 +324,7 @@ fn static_fallback_effort(efforts: &[String]) -> Option<&str> {
 /// longer names degrades to a placeholder under its own name, so rows
 /// outliving their entry still render.
 fn describe(kind: AgentKind, custom: Option<&str>) -> orion_core::harness::HarnessDescriptor {
-    let id = match kind {
-        AgentKind::Custom => custom.unwrap_or_default().trim(),
-        _ => kind.as_str(),
-    };
-    let cfg = Config::load();
-    if let Some(descriptor) = cfg
-        .harness_registry()
-        .into_iter()
-        .find(|entry| entry.id == id)
-    {
-        return descriptor;
-    }
-    orion_core::harness::placeholder(id)
+    Config::load().effective_harness(kind, custom)
 }
 
 /// One setting row in the overlay; rows live inside a [`SettingsTab`].
@@ -423,8 +428,7 @@ pub enum HarnessField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountRow {
     /// A Claude account, by registry id: built-in Claude (the default
-    /// account), a `claude_accounts` entry, or a hand-written harness
-    /// whose `env` pins a config dir.
+    /// account) or a `claude_accounts` entry.
     Account(String),
     /// **Add account**: a new config dir and its entry.
     Add,
@@ -1023,12 +1027,14 @@ pub struct Config {
     /// rules: a value in here this build can't read costs the whole map,
     /// not one project.
     pub projects: BTreeMap<PathBuf, ProjectSettings>,
-    /// Default model/effort for new Claude / Codex / Cursor sessions.
-    /// "default" means "don't pass the flag" (the CLI picks); any other
-    /// value is passed through verbatim, so hand-edited configs can name
-    /// models the pickers don't list. Cursor's pair is a family plus the
-    /// effort suffix the daemon joins onto it (see `cursor_catalogue.rs`).
-    pub claude_model: String,
+    /// MOVED to `harnesses.<id>.model_default` / `effort_default`, the one
+    /// place every harness — every Claude account among them — keeps its
+    /// default model and effort: through 2.x the built-ins' flat keys,
+    /// `claude_model` and the rest. Read, never written;
+    /// [`Config::move_harness_keys`] carries them across on load, and the
+    /// save after drops them.
+    #[serde(skip_serializing)]
+    pub claude_model: Option<String>,
     /// The Claude model rows the pickers, the AGENTS TAB and the PRESET
     /// EDITOR offer, verbatim, in place of the built-in aliases — for an
     /// organization allowlist or a provider (Bedrock, Vertex, a gateway)
@@ -1037,16 +1043,18 @@ pub struct Config {
     /// list follows Claude Code's own `availableModels` when one is on
     /// disk, else the aliases; see `claude_catalogue.rs`. Hand-edited only.
     pub claude_models: Vec<String>,
-    pub claude_effort: String,
-    pub codex_model: String,
-    pub codex_effort: String,
-    pub cursor_model: String,
-    pub cursor_effort: String,
-    /// OpenCode's `--model` id (`provider/model`, passed verbatim). No
-    /// effort key: OpenCode has no effort flag — reasoning is a per-model
-    /// variant picked inside its own TUI — so its Accounts section has no
-    /// Effort row and nothing to store for one.
-    pub opencode_model: String,
+    #[serde(skip_serializing)]
+    pub claude_effort: Option<String>,
+    #[serde(skip_serializing)]
+    pub codex_model: Option<String>,
+    #[serde(skip_serializing)]
+    pub codex_effort: Option<String>,
+    #[serde(skip_serializing)]
+    pub cursor_model: Option<String>,
+    #[serde(skip_serializing)]
+    pub cursor_effort: Option<String>,
+    #[serde(skip_serializing)]
+    pub opencode_model: Option<String>,
     /// Which AGENT KINDS the NEW AGENT PICKER offers. Off leaves that
     /// harness out of the picker and the PR SESSION picker (and, for
     /// Claude, out of the standing PREWARM POOL slot); sessions that already
@@ -1276,14 +1284,14 @@ impl Default for Config {
             review_model: None,
             review_effort: None,
             projects: BTreeMap::new(),
-            claude_model: DEFAULT_CHOICE.into(),
+            claude_model: None,
             claude_models: Vec::new(),
-            claude_effort: DEFAULT_CHOICE.into(),
-            codex_model: DEFAULT_CHOICE.into(),
-            codex_effort: DEFAULT_CHOICE.into(),
-            cursor_model: DEFAULT_CHOICE.into(),
-            cursor_effort: DEFAULT_CHOICE.into(),
-            opencode_model: DEFAULT_CHOICE.into(),
+            claude_effort: None,
+            codex_model: None,
+            codex_effort: None,
+            cursor_model: None,
+            cursor_effort: None,
+            opencode_model: None,
             claude_enabled: cfg!(test),
             codex_enabled: cfg!(test),
             cursor_enabled: cfg!(test),
@@ -1484,7 +1492,7 @@ impl Config {
     /// elsewhere, each with whether its value is still waiting to move
     /// ([`Config::adopt_project_keys`]). Never written; a save drops each
     /// one once it is spent.
-    fn moved_keys(&self) -> [(&'static str, bool); 8] {
+    fn moved_keys(&self) -> [(&'static str, bool); 15] {
         [
             ("worktree_base_branch", self.worktree_base_branch.is_some()),
             ("worktree_containers", self.worktree_containers.is_some()),
@@ -1494,6 +1502,13 @@ impl Config {
             ("review_account", self.review_account.is_some()),
             ("review_model", self.review_model.is_some()),
             ("review_effort", self.review_effort.is_some()),
+            ("claude_model", self.claude_model.is_some()),
+            ("claude_effort", self.claude_effort.is_some()),
+            ("codex_model", self.codex_model.is_some()),
+            ("codex_effort", self.codex_effort.is_some()),
+            ("cursor_model", self.cursor_model.is_some()),
+            ("cursor_effort", self.cursor_effort.is_some()),
+            ("opencode_model", self.opencode_model.is_some()),
         ]
     }
 
@@ -1526,55 +1541,20 @@ impl Config {
     /// The effective registry as launches read it: the compiled-in known
     /// harnesses with the `harnesses` map applied — Claude's extra
     /// accounts (`claude_accounts`) right after it — then map-only new
-    /// ids — plus, for
-    /// built-ins, the legacy per-harness keys (`claude_model`,
-    /// `codex_enabled`, …) wherever the map stays silent on that field.
-    /// The map wins where both speak; the Accounts tab writes the legacy
-    /// keys for built-ins, so its edits apply without a migration. An
-    /// account takes Claude's model and effort defaults, legacy keys
-    /// included, until its own map entry names one. What `orion config
-    /// harnesses` prints: labels as written, no email.
+    /// ids — plus, for built-ins, the legacy per-harness switches
+    /// (`claude_enabled`, `codex_enabled`, …) wherever the map stays
+    /// silent on them. Every row's model, effort and label are its own
+    /// `harnesses.<id>` entry's: one store per harness, a Claude account
+    /// included. Labels as written, no email.
     pub fn raw_harness_registry(&self) -> Vec<HarnessDescriptor> {
         let mut all = orion_core::harness::registry(&self.harnesses, &self.claude_accounts);
         for entry in &mut all {
-            if orion_core::harness::builtin(&entry.id).is_none() {
-                continue;
-            }
-            let over = self.harnesses.get(&entry.id);
-            let (legacy_enabled, legacy_model, legacy_effort) =
-                self.legacy_harness_fields(&entry.id);
-            if over.and_then(|o| o.enabled).is_none() {
-                if let Some(enabled) = legacy_enabled {
-                    entry.enabled = enabled;
-                }
-            }
-            if over.and_then(|o| o.model_default.clone()).is_none() {
-                if let Some(default) = legacy_model {
-                    entry.model.default = default;
-                }
-            }
-            if over.and_then(|o| o.effort_default.clone()).is_none() {
-                if let Some(default) = legacy_effort {
-                    entry.effort.default = default;
-                }
-            }
-        }
-        let claude = all
-            .iter()
-            .find(|entry| entry.id == AgentKind::Claude.as_str())
-            .map(|claude| (claude.model.default.clone(), claude.effort.default.clone()));
-        if let Some((model, effort)) = claude {
-            for entry in &mut all {
-                if !self.is_extra_account(&entry.id) {
-                    continue;
-                }
-                let over = self.harnesses.get(&entry.id);
-                if over.and_then(|o| o.model_default.as_ref()).is_none() {
-                    entry.model.default = model.clone();
-                }
-                if over.and_then(|o| o.effort_default.as_ref()).is_none() {
-                    entry.effort.default = effort.clone();
-                }
+            let switched = self.harnesses.get(&entry.id).and_then(|o| o.enabled);
+            if let Some(enabled) = self
+                .legacy_enabled(&entry.id)
+                .filter(|_| switched.is_none())
+            {
+                entry.enabled = enabled;
             }
         }
         all
@@ -1586,38 +1566,18 @@ impl Config {
         self.claude_accounts.iter().any(|a| a.id.trim() == id)
     }
 
-    /// The legacy per-harness keys for a built-in id, as
-    /// `(enabled, model, effort)` — `Some` only where the file differs
-    /// from the default, i.e. where the user said something. Newer than
-    /// the table, older than the `harnesses` map.
-    fn legacy_harness_fields(&self, id: &str) -> (Option<bool>, Option<String>, Option<String>) {
-        let (enabled, model, effort) = match id {
-            "claude" => (
-                &self.claude_enabled,
-                &self.claude_model,
-                &self.claude_effort,
-            ),
-            "codex" => (&self.codex_enabled, &self.codex_model, &self.codex_effort),
-            "cursor" => (
-                &self.cursor_enabled,
-                &self.cursor_model,
-                &self.cursor_effort,
-            ),
-            // OpenCode has no effort key: nothing to fall back to there.
-            "opencode" => {
-                return (
-                    (!self.opencode_enabled).then_some(false),
-                    non_default(&self.opencode_model),
-                    None,
-                )
-            }
-            _ => return (None, None, None),
+    /// The legacy switch for a built-in id — `Some(false)` only where the
+    /// file switched it off, i.e. where the user said something. Newer
+    /// than the table, older than the `harnesses` map.
+    fn legacy_enabled(&self, id: &str) -> Option<bool> {
+        let enabled = match id {
+            "claude" => self.claude_enabled,
+            "codex" => self.codex_enabled,
+            "cursor" => self.cursor_enabled,
+            "opencode" => self.opencode_enabled,
+            _ => return None,
         };
-        (
-            (!enabled).then_some(false),
-            non_default(model),
-            non_default(effort),
-        )
+        (!enabled).then_some(false)
     }
 
     /// The effective built-in descriptor `kind` reads as, regardless of
@@ -1636,18 +1596,7 @@ impl Config {
     /// row, or a placeholder under its own name when the registry no
     /// longer names the id, so rows outliving their entry still render.
     pub fn effective_harness(&self, kind: AgentKind, custom: Option<&str>) -> HarnessDescriptor {
-        let id = match kind {
-            AgentKind::Custom => custom.unwrap_or_default().trim(),
-            _ => kind.as_str(),
-        };
-        if let Some(descriptor) = self
-            .harness_registry()
-            .into_iter()
-            .find(|entry| entry.id == id)
-        {
-            return descriptor;
-        }
-        orion_core::harness::placeholder(id)
+        self.effective_harness_by_id(orion_core::harness::registry_id(kind, custom))
     }
 
     /// The configured default model for new sessions of `kind`, as the
@@ -1663,25 +1612,13 @@ impl Config {
             .map(str::to_string)
     }
 
-    /// The configured default effort for new sessions of `kind`;
-    /// None = "default" = don't pass the flag. A composing harness fits
-    /// the effort against its configured family ([`fit_effort`]). An
-    /// effort with no flag mapped is None whatever the file holds — spawn
-    /// would drop it anyway.
+    /// The configured default effort for new sessions of `kind`, as
+    /// [`launch_effort`] reads it off the built-in's row.
     pub fn default_effort(&self, kind: AgentKind) -> Option<String> {
         if kind == AgentKind::Custom {
             return None;
         }
-        let descriptor = self.builtin_descriptor(kind);
-        if descriptor.effort.flag.is_none()
-            && descriptor.effort.config_key.is_none()
-            && !descriptor.compose_model_effort
-        {
-            return None;
-        }
-        let model = descriptor.default_model().map(str::to_string);
-        let effort = descriptor.default_effort().map(str::to_string);
-        fit_effort_in(&descriptor, model.as_deref(), effort)
+        launch_effort(&self.builtin_descriptor(kind))
     }
 
     /// Whether the NEW AGENT PICKER offers `kind` at all.
@@ -1703,8 +1640,10 @@ impl Config {
             .collect()
     }
 
-    /// Every harness the picker and presets offer, in registry order:
-    /// `(kind, None)` for built-ins, `(Custom, Some(id))` for customs.
+    /// Every harness the picker and presets offer, in registry order, as
+    /// a session on it stores them ([`HarnessDescriptor::session_kind`]):
+    /// `(kind, None)` for built-ins and the default Claude account,
+    /// `(Claude, Some(id))` for another, `(Custom, Some(id))` for customs.
     /// Disabled and broken entries are out (broken ones surface in the
     /// Accounts tab with their reason), and so is anything whose program is
     /// missing from PATH. The daemon stays authoritative at launch: it
@@ -1732,20 +1671,18 @@ impl Config {
         orion_core::harness::usable(&all)
             .into_iter()
             .filter(|entry| installed(&entry.program))
-            .map(|entry| match AgentKind::parse(&entry.id) {
-                Some(kind) => (kind, None),
-                None => (AgentKind::Custom, Some(entry.id.clone())),
-            })
+            .map(HarnessDescriptor::session_kind)
             .collect()
     }
 
     /// Whether a preset may launch: its harness's Accounts tab switch,
-    /// enabled and valid.
+    /// enabled and valid — always, for one that follows the box, which
+    /// runs on a harness the box already launches.
     pub fn preset_harness_usable(&self, preset: &crate::agent_presets::AgentPreset) -> bool {
-        let id = match preset.kind {
-            AgentKind::Custom => preset.custom_harness.clone().unwrap_or_default(),
-            _ => preset.kind.as_str().to_string(),
-        };
+        if preset.follows_box() {
+            return true;
+        }
+        let id = orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref());
         self.harness_registry()
             .iter()
             .find(|entry| entry.id == id)
@@ -2153,38 +2090,14 @@ impl Config {
         self.harness_override_mut(id).enabled = Some(enabled);
     }
 
-    /// Write a Model default: the map where it speaks, else the legacy
-    /// built-in model key.
+    /// Write a Model default: `harnesses.<id>.model_default`, the one
+    /// place a harness's — a Claude account's — model lives.
     fn set_harness_model(&mut self, id: &str, model: String) {
-        if self
-            .harnesses
-            .get(id)
-            .and_then(|o| o.model_default.clone())
-            .is_some()
-        {
-            self.harness_override_mut(id).model_default = Some(model);
-            return;
-        }
-        if orion_core::harness::builtin(id).is_some() {
-            self.set_legacy_model(id, model);
-            return;
-        }
         self.harness_override_mut(id).model_default = Some(model);
     }
 
-    /// Write an Effort default: the map where it speaks, else the legacy
-    /// built-in effort key.
+    /// Write an Effort default: `harnesses.<id>.effort_default`.
     fn set_harness_effort(&mut self, id: &str, effort: String) {
-        if orion_core::harness::builtin(id).is_some()
-            && self
-                .harnesses
-                .get(id)
-                .and_then(|o| o.effort_default.clone())
-                .is_none()
-        {
-            self.set_legacy_effort(id, effort);
-            return;
-        }
         self.harness_override_mut(id).effort_default = Some(effort);
     }
 
@@ -2203,25 +2116,6 @@ impl Config {
         }
     }
 
-    fn set_legacy_model(&mut self, id: &str, model: String) {
-        match id {
-            "claude" => self.claude_model = model,
-            "codex" => self.codex_model = model,
-            "cursor" => self.cursor_model = model,
-            "opencode" => self.opencode_model = model,
-            _ => self.harness_override_mut(id).model_default = Some(model),
-        }
-    }
-
-    fn set_legacy_effort(&mut self, id: &str, effort: String) {
-        match id {
-            "claude" => self.claude_effort = effort,
-            "codex" => self.codex_effort = effort,
-            "cursor" => self.cursor_effort = effort,
-            _ => self.harness_override_mut(id).effort_default = Some(effort),
-        }
-    }
-
     /// The AGENT KIND the QUICK PROMPT launches: the `quick_prompt_kind`
     /// setting, stepped on to the first enabled kind when that harness has
     /// been switched off on the AGENTS TAB since it was chosen (an
@@ -2237,23 +2131,25 @@ impl Config {
 
     /// The harness the QUICK PROMPT launches, as a picker row names one:
     /// `(kind, None)` for a built-in ([`Config::quick_prompt_kind`]), and
-    /// `(Custom, Some(id))` while `quick_prompt_kind` names another CLAUDE
+    /// `(Claude, Some(id))` while `quick_prompt_kind` names another CLAUDE
     /// ACCOUNT that is on and launches — so `⌘N` can start on any
     /// account. One switched off or gone since steps aside as a built-in
     /// does, and an older build reading the id falls back to Claude.
     pub fn quick_prompt_harness(&self) -> (AgentKind, Option<String>) {
         let name = self.quick_prompt_kind.trim();
-        if AgentKind::parse(name).is_none()
-            && self.raw_harness_registry().iter().any(|entry| {
+        if AgentKind::parse(name).is_some() {
+            return (self.quick_prompt_kind(), None);
+        }
+        self.raw_harness_registry()
+            .iter()
+            .find(|entry| {
                 entry.id == name
                     && entry.enabled
                     && entry.problem().is_none()
                     && entry.is_claude_account()
             })
-        {
-            return (AgentKind::Custom, Some(name.to_string()));
-        }
-        (self.quick_prompt_kind(), None)
+            .map(HarnessDescriptor::session_kind)
+            .unwrap_or_else(|| (self.quick_prompt_kind(), None))
     }
 
     /// What the Accounts tab's **New agents on** row cycles through: every built-in
@@ -2318,11 +2214,8 @@ impl Config {
         let all = self.harness_registry();
         let on = claude_accounts_on(&all);
         let (kind, custom) = self.quick_prompt_harness();
-        let default_agent = match kind {
-            AgentKind::Custom => custom.unwrap_or_default(),
-            other => other.as_str().to_string(),
-        };
-        let chosen = [pinned.trim(), default_agent.as_str()]
+        let default_agent = orion_core::harness::registry_id(kind, custom.as_deref());
+        let chosen = [pinned.trim(), default_agent]
             .into_iter()
             .find_map(|id| on.iter().find(|entry| entry.id == id))
             .or(on.first())
@@ -2334,13 +2227,13 @@ impl Config {
     /// starts itself onto their SYSTEM PRESETS in `presets`, which
     /// [`crate::agent_presets::ensure_system`] has seeded: the autofix
     /// agent's fallback model and effort onto **PR autofix**; the week
-    /// review's account, model and effort onto **Week review** — the
-    /// account as it resolves now, so the review goes on being written
-    /// where it was. A Week review preset `new_review` — just added — is
-    /// put on that account too, with no old key to say otherwise. The old
-    /// keys are spent, and the next save drops them. Whether any were
-    /// there to move.
-    pub fn move_into_presets(&mut self, presets: &mut [AgentPreset], new_review: bool) -> bool {
+    /// review's account, model and effort onto **Week review** — an
+    /// account the old key named pinned as it resolves now, so the review
+    /// goes on being written where it was; an empty one meant the default
+    /// agent's, which is what the preset following the box already does.
+    /// The old keys are spent, and the next save drops them. Whether any
+    /// were there to move.
+    pub fn move_into_presets(&mut self, presets: &mut [AgentPreset]) -> bool {
         use crate::agent_presets::SystemPreset;
         let (model, effort) = (self.autofix_model.take(), self.autofix_effort.take());
         let autofix = model.is_some() || effort.is_some();
@@ -2363,18 +2256,20 @@ impl Config {
             self.review_effort.take(),
         );
         let review = account.is_some() || model.is_some() || effort.is_some();
-        let through = (review || new_review)
-            .then(|| self.review_account(account.as_deref().unwrap_or_default()))
-            .flatten();
+        // Only the account it named, while it is still one: a fallback
+        // would pin whatever stood in for it today.
+        let through = account
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.review_account(id).filter(|entry| entry.id == id));
         if let Some(preset) = presets
             .iter_mut()
-            .find(|p| (review || new_review) && p.system == Some(SystemPreset::WeekReview))
+            .find(|p| review && p.system == Some(SystemPreset::WeekReview))
         {
             if let Some(entry) = through {
-                (preset.kind, preset.custom_harness) = match AgentKind::parse(&entry.id) {
-                    Some(kind) => (kind, None),
-                    None => (AgentKind::Custom, Some(entry.id)),
-                };
+                (preset.kind, preset.custom_harness) = entry.session_kind();
+                preset.follow_box = Some(false);
             }
             if let Some(model) = model.as_deref().and_then(non_default) {
                 preset.model = Some(model);
@@ -2526,7 +2421,7 @@ impl Config {
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
-                (AgentKind::Custom, Some(id)) => self
+                (_, Some(id)) => self
                     .effective_harness_by_id(&id)
                     .display_label()
                     .to_string(),
@@ -2785,6 +2680,84 @@ impl Config {
         if self.pr_autofix.trim().eq_ignore_ascii_case("ask") {
             self.pr_autofix = crate::autofix::Mode::Auto.as_str().into();
         }
+        self.move_harness_keys();
+    }
+
+    /// ONE STORE PER HARNESS: carry what an older release kept elsewhere
+    /// for a harness's model, effort and name into its `harnesses.<id>`
+    /// entry, where the map does not already say. The built-ins' flat
+    /// `claude_model`, `claude_effort`, `codex_model`, … keys; a Claude
+    /// account's copy of the default account's model and effort, which an
+    /// older release let it follow until it had its own — each gets its
+    /// own now, so it launches as it did; and a `claude_accounts` entry's
+    /// `name`, which becomes its label. The flat keys are spent and the
+    /// save after drops them; the name is never written again. Nothing
+    /// moves while `harnesses` is a map this build can't read, which a
+    /// save would write over.
+    fn move_harness_keys(&mut self) {
+        if self.skipped.contains("harnesses") {
+            return;
+        }
+        let flat = [
+            (
+                "claude",
+                self.claude_model.take(),
+                self.claude_effort.take(),
+            ),
+            ("codex", self.codex_model.take(), self.codex_effort.take()),
+            (
+                "cursor",
+                self.cursor_model.take(),
+                self.cursor_effort.take(),
+            ),
+            ("opencode", self.opencode_model.take(), None),
+        ];
+        // Every older release wrote the flat keys: a file holding one is
+        // a file from before an account had defaults of its own.
+        let older = flat.iter().any(|(_, m, e)| m.is_some() || e.is_some());
+        for (id, model, effort) in flat {
+            self.adopt_defaults(id, model.as_deref(), effort.as_deref());
+        }
+        let accounts = orion_core::harness::account_ids(&self.claude_accounts);
+        if older {
+            let claude = self.harnesses.get(AgentKind::Claude.as_str());
+            let (model, effort) = (
+                claude.and_then(|o| o.model_default.clone()),
+                claude.and_then(|o| o.effort_default.clone()),
+            );
+            for id in &accounts {
+                self.adopt_defaults(id, model.as_deref(), effort.as_deref());
+            }
+        }
+        for account in &mut self.claude_accounts {
+            let id = account.id.trim();
+            let name = std::mem::take(&mut account.name);
+            let name = name.trim();
+            if accounts.iter().any(|known| known == id) && !name.is_empty() {
+                let over = self.harnesses.entry(id.to_string()).or_default();
+                over.label.get_or_insert_with(|| name.to_string());
+            }
+        }
+    }
+
+    /// `model` and `effort` as `id`'s own defaults, each where its
+    /// `harnesses` entry names none and the value is more than the
+    /// `default` sentinel. No entry is made for nothing.
+    fn adopt_defaults(&mut self, id: &str, model: Option<&str>, effort: Option<&str>) {
+        let (model, effort) = (model.and_then(non_default), effort.and_then(non_default));
+        let over = self.harnesses.get(id);
+        let model = model.filter(|_| over.and_then(|o| o.model_default.as_ref()).is_none());
+        let effort = effort.filter(|_| over.and_then(|o| o.effort_default.as_ref()).is_none());
+        if model.is_none() && effort.is_none() {
+            return;
+        }
+        let over = self.harness_override_mut(id);
+        if let Some(model) = model {
+            over.model_default = Some(model);
+        }
+        if let Some(effort) = effort {
+            over.effort_default = Some(effort);
+        }
     }
 }
 
@@ -2878,6 +2851,28 @@ pub fn with_config_path<T>(path: PathBuf, f: impl FnOnce() -> T) -> T {
 /// Test-only accessors: nothing in the app reads these any more.
 #[cfg(test)]
 impl Config {
+    /// Harness `id`'s default model or effort, through the write path the
+    /// Accounts tab takes.
+    pub fn set_default(&mut self, id: &str, field: HarnessField, value: &str) {
+        match field {
+            HarnessField::Model => self.set_harness_model(id, value.into()),
+            HarnessField::Effort => self.set_harness_effort(id, value.into()),
+            HarnessField::Enabled => panic!("a default is a model or an effort"),
+        }
+    }
+
+    /// What `harnesses.<id>` holds for a default model or effort —
+    /// `default` while nothing has been written.
+    pub fn stored(&self, id: &str, field: HarnessField) -> String {
+        let over = self.harnesses.get(id);
+        let value = match field {
+            HarnessField::Model => over.and_then(|o| o.model_default.clone()),
+            HarnessField::Effort => over.and_then(|o| o.effort_default.clone()),
+            HarnessField::Enabled => panic!("a default is a model or an effort"),
+        };
+        value.unwrap_or_else(|| DEFAULT_CHOICE.into())
+    }
+
     /// [`Config::save`] into `path`, with its local layer beside it.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         self.write_layers(path, &sibling_local_path(path), false)
@@ -2982,7 +2977,8 @@ mod tests {
     /// exactly the value that release wrote — a type change would leave it
     /// unreadable, or read back as something else here — and a key this
     /// build has retired loads as nothing. A save writes every one of them
-    /// back as it was, the retired ones untouched.
+    /// back as it was, the retired ones untouched — all but a built-in's
+    /// flat model and effort, which move into its `harnesses` entry.
     #[test]
     fn the_newest_releases_config_still_loads_every_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -3009,14 +3005,46 @@ mod tests {
             ("review_model", &loaded.review_model),
             ("review_effort", &loaded.review_effort),
         ];
-        assert_eq!(moved.len(), loaded.moved_keys().len(), "every moved key");
+        // A built-in's flat model or effort moves into its `harnesses`
+        // entry as the file loads: checked there, and the map checked
+        // for holding all it was written with besides.
+        let into_harnesses = [
+            ("claude_model", "claude", HarnessField::Model),
+            ("claude_effort", "claude", HarnessField::Effort),
+            ("codex_model", "codex", HarnessField::Model),
+            ("codex_effort", "codex", HarnessField::Effort),
+            ("cursor_model", "cursor", HarnessField::Model),
+            ("cursor_effort", "cursor", HarnessField::Effort),
+            ("opencode_model", "opencode", HarnessField::Model),
+        ];
+        assert_eq!(
+            moved.len() + into_harnesses.len(),
+            loaded.moved_keys().len(),
+            "every moved key"
+        );
+        let holds_as_written = |map: &serde_json::Value, written: &serde_json::Value| {
+            for (id, entry) in written.as_object().unwrap() {
+                for (field, value) in entry.as_object().unwrap() {
+                    assert_eq!(&map[id][field], value, "harnesses.{id}.{field}");
+                }
+            }
+        };
         let mut retired = 0;
         for (key, value) in fixture {
             if let Some((_, held)) = moved.iter().find(|(name, _)| name == key) {
                 assert_eq!(held.as_deref(), value.as_str(), "`{key}` waits as written");
                 continue;
             }
+            if let Some((_, id, field)) = into_harnesses.iter().find(|(name, ..)| name == key) {
+                assert_eq!(
+                    loaded.stored(id, *field),
+                    value.as_str().unwrap(),
+                    "`{key}`"
+                );
+                continue;
+            }
             match known.get(key) {
+                Some(map) if key == "harnesses" => holds_as_written(map, value),
                 Some(loaded) => assert_eq!(loaded, value, "`{key}` no longer loads as written"),
                 None => retired += 1,
             }
@@ -3025,7 +3053,13 @@ mod tests {
         loaded.save_to(&path).unwrap();
         let saved = read_json_file(&path);
         for (key, value) in fixture {
-            assert_eq!(saved.get(key), Some(value), "`{key}` after a save");
+            if into_harnesses.iter().any(|(name, ..)| name == key) {
+                assert!(saved.get(key).is_none(), "`{key}` is spent after a save");
+            } else if key == "harnesses" {
+                holds_as_written(&saved[key], value);
+            } else {
+                assert_eq!(saved.get(key), Some(value), "`{key}` after a save");
+            }
         }
     }
 
@@ -3614,10 +3648,11 @@ mod tests {
     }
 
     /// The autofix and week review settings an older release kept in the
-    /// file move onto their system presets once — the review's account as
-    /// it resolved then, the default agent's — and the save after drops
+    /// file move onto their system presets once, and the save after drops
     /// the old keys. Empty values mean what they meant: the default
-    /// agent's own model, sonnet · medium for the review.
+    /// agent's own model, sonnet · medium for the review, and for its
+    /// account the default agent's — which the preset, following the box,
+    /// goes on reading; an account the key named is pinned.
     #[test]
     fn the_old_autofix_and_review_keys_move_onto_the_system_presets() {
         use crate::agent_presets::{ensure_system, SystemPreset};
@@ -3642,20 +3677,21 @@ mod tests {
             ..SystemPreset::PrAutofix.default_preset()
         }];
         ensure_system(&mut presets);
-        assert!(cfg.move_into_presets(&mut presets, true));
+        assert!(cfg.move_into_presets(&mut presets));
         let of = |which| presets.iter().find(|p| p.system == Some(which)).unwrap();
         let autofix = of(SystemPreset::PrAutofix);
         assert_eq!(autofix.model, None, "empty was the default agent's own");
         assert_eq!(autofix.effort.as_deref(), Some("high"));
         let review = of(SystemPreset::WeekReview);
+        assert!(review.follows_box(), "empty: the default agent's");
         assert_eq!(
-            (review.kind, review.custom_harness.as_deref()),
-            (AgentKind::Custom, Some("claude-work")),
+            cfg.review_account("").map(|entry| entry.id).as_deref(),
+            Some("claude-work"),
             "written where it was: the default agent's account"
         );
         assert_eq!(review.model.as_deref(), Some("sonnet"));
         assert_eq!(review.effort.as_deref(), Some("low"));
-        assert!(!cfg.move_into_presets(&mut presets, false), "once");
+        assert!(!cfg.move_into_presets(&mut presets), "once");
 
         cfg.save_to(&path).unwrap();
         let saved = read_json_file(&path);
@@ -3670,23 +3706,25 @@ mod tests {
         }
         assert_eq!(saved["quick_prompt_kind"], "claude-work");
 
-        // A file from before the review had keys of its own: a new Week
-        // review preset still goes on the account it was written through,
-        // the default agent's, and nothing in the file moved.
+        // An account the old key named stays where it was written.
         let mut cfg: Config = serde_json::from_str(&format!(
-            r#"{{"quick_prompt_kind": "claude-work",
+            r#"{{"review_account": "claude-work",
                 "claude_accounts": [{{"id": "claude-work", "config_dir": "{}"}}]}}"#,
             work.display()
         ))
         .unwrap();
         let mut presets = Vec::new();
         ensure_system(&mut presets);
-        assert!(!cfg.move_into_presets(&mut presets, true));
+        assert!(cfg.move_into_presets(&mut presets));
         let review = presets
             .iter()
             .find(|p| p.system == Some(SystemPreset::WeekReview))
             .unwrap();
-        assert_eq!(review.custom_harness.as_deref(), Some("claude-work"));
+        assert!(!review.follows_box());
+        assert_eq!(
+            (review.kind, review.custom_harness.as_deref()),
+            (AgentKind::Claude, Some("claude-work"))
+        );
     }
 
     /// SPOTIFY IN FOOTER: on out of the box, toggled off from its
@@ -4162,15 +4200,15 @@ mod tests {
         assert_eq!(saved["harnesses"]["grok"]["effort_default"], "high");
     }
 
-    /// A second Claude account's `env` survives the Accounts tab saving its
-    /// section — the map is written back typed — and makes it a place a
-    /// Claude session can be carried to; a Codex row has nowhere to go.
+    /// A second Claude account's own entry survives the Accounts tab
+    /// saving its section — the map is written back typed — and the
+    /// account is a place a Claude session can be carried to, and back; a
+    /// Codex row has nowhere to go.
     #[test]
-    fn a_second_accounts_env_survives_a_save_and_makes_it_a_target() {
+    fn a_second_accounts_entry_survives_a_save_and_makes_it_a_target() {
         let mut cfg: Config = serde_json::from_str(
-            r#"{"harnesses": {"claude-b": {"label": "Claude B", "program": "claude",
-                "hooks": "claude", "resume_flag": "--resume",
-                "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}}}}"#,
+            r#"{"claude_accounts": [{"id": "claude-b", "config_dir": "~/.claude-b"}],
+                "harnesses": {"claude-b": {"label": "Claude B"}}}"#,
         )
         .unwrap();
         cfg.set_harness_model("claude-b", "opus".into());
@@ -4180,8 +4218,8 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            saved["harnesses"]["claude-b"]["env"]["CLAUDE_CONFIG_DIR"],
-            "~/.claude-b"
+            saved["harnesses"]["claude-b"],
+            serde_json::json!({"label": "Claude B", "model_default": "opus"})
         );
         let loaded = load_from(&path);
         let agent = |kind: AgentKind, custom: Option<&str>| orion_core::Agent {
@@ -4208,7 +4246,7 @@ mod tests {
             vec![("claude-b".to_string(), "Claude B".to_string())]
         );
         assert_eq!(
-            loaded.continue_targets(&agent(AgentKind::Custom, Some("claude-b"))),
+            loaded.continue_targets(&agent(AgentKind::Claude, Some("claude-b"))),
             vec![("claude".to_string(), "Claude".to_string())]
         );
         assert!(loaded
@@ -4239,9 +4277,9 @@ mod tests {
         // (with their reason) so they can be fixed.
         let cfg: Config = serde_json::from_str(
             r#"{"harnesses": {
-                "agy": {"program": "agy"},
-                "off": {"program": "off", "enabled": false},
-                "broken": {"program": ""}
+                "agy": {},
+                "off": {"enabled": false},
+                "broken": {"env": {"MY-VAR": "x"}}
             }}"#,
         )
         .unwrap();
@@ -4263,8 +4301,8 @@ mod tests {
         std::fs::write(dir.path().join("agy"), "").unwrap();
         let hiding = serde_json::from_str::<Config>(
             r#"{"harnesses": {
-                "agy": {"program": "agy"},
-                "missing": {"program": "definitely-not-on-path"}
+                "agy": {},
+                "definitely-not-on-path": {}
             }}"#,
         )
         .unwrap();
@@ -4281,8 +4319,8 @@ mod tests {
     fn a_broken_harness_entry_isolates_itself() {
         let cfg: Config = serde_json::from_str(
             r#"{"harnesses": {
-                "codex": {"program": ""},
-                "agy": {"program": "agy", "resume_flag": "--resume"}
+                "codex": {"env": {"1ABC": "x"}},
+                "agy": {}
             }}"#,
         )
         .unwrap();
@@ -4304,10 +4342,10 @@ mod tests {
         // launches refuse it with the reason.
         let codex = cfg.effective_harness_by_id("codex");
         assert!(codex.problem().is_some());
-        assert_eq!(
+        assert!(
             orion_core::harness::resolve(&cfg.harness_registry(), AgentKind::Codex, None)
-                .unwrap_err(),
-            "harness `codex` has no program"
+                .unwrap_err()
+                .contains("env `1ABC`")
         );
     }
 
@@ -4338,8 +4376,8 @@ mod tests {
         assert_eq!(cfg.default_model(AgentKind::Codex), None);
         assert_eq!(cfg.default_effort(AgentKind::Codex), None);
 
-        cfg.claude_model = "opus".into();
-        cfg.codex_effort = "high".into();
+        cfg.set_default("claude", HarnessField::Model, "opus");
+        cfg.set_default("codex", HarnessField::Effort, "high");
         assert_eq!(
             cfg.default_model(AgentKind::Claude).as_deref(),
             Some("opus")
@@ -4356,7 +4394,7 @@ mod tests {
         // no effort key at all: no Effort row to locate.
         assert_eq!(cfg.default_model(AgentKind::OpenCode), None);
         assert_eq!(cfg.default_effort(AgentKind::OpenCode), None);
-        cfg.opencode_model = "anthropic/claude-sonnet-5".into();
+        cfg.set_default("opencode", HarnessField::Model, "anthropic/claude-sonnet-5");
         assert_eq!(
             cfg.default_model(AgentKind::OpenCode).as_deref(),
             Some("anthropic/claude-sonnet-5")
@@ -4369,7 +4407,7 @@ mod tests {
             locate_in(&cfg, "opencode", HarnessField::Effort).is_none(),
             "no Effort row"
         );
-        cfg.claude_effort = "xhigh".into();
+        cfg.set_default("claude", HarnessField::Effort, "xhigh");
         let (tab, row) = locate_in(&cfg, "claude", HarnessField::Effort).unwrap();
         cfg.cycle(tab, row, 1);
         assert_eq!(cfg.agent_value("claude", HarnessField::Effort), "max");
@@ -4379,18 +4417,18 @@ mod tests {
             DEFAULT_CHOICE,
             "wraps"
         );
-        cfg.claude_effort = DEFAULT_CHOICE.into();
+        cfg.set_default("claude", HarnessField::Effort, DEFAULT_CHOICE);
         // Cursor: the family is the model; the effort only counts when
         // that family ships it.
         assert_eq!(cfg.default_model(AgentKind::Cursor), None);
         assert_eq!(cfg.default_effort(AgentKind::Cursor), None);
-        cfg.cursor_effort = "high".into();
+        cfg.set_default("cursor", HarnessField::Effort, "high");
         assert_eq!(
             cfg.default_effort(AgentKind::Cursor),
             None,
             "no family, no suffix to join"
         );
-        cfg.cursor_model = "claude-opus-5".into();
+        cfg.set_default("cursor", HarnessField::Model, "claude-opus-5");
         assert_eq!(
             cfg.default_model(AgentKind::Cursor).as_deref(),
             Some("claude-opus-5")
@@ -4399,19 +4437,19 @@ mod tests {
             cfg.default_effort(AgentKind::Cursor).as_deref(),
             Some("high")
         );
-        cfg.cursor_effort = "max".into();
+        cfg.set_default("cursor", HarnessField::Effort, "max");
         assert_eq!(
             cfg.default_effort(AgentKind::Cursor).as_deref(),
             Some("high"),
             "Opus 5 has no max variant and no bare id: its fallback launches"
         );
-        cfg.cursor_model = "gpt-5.3-codex".into();
+        cfg.set_default("cursor", HarnessField::Model, "gpt-5.3-codex");
         assert_eq!(
             cfg.default_effort(AgentKind::Cursor),
             None,
             "a family with a bare id: default really is no suffix"
         );
-        cfg.cursor_effort = "high-fast".into();
+        cfg.set_default("cursor", HarnessField::Effort, "high-fast");
         assert_eq!(
             cfg.default_effort(AgentKind::Cursor).as_deref(),
             Some("high-fast")
@@ -4419,15 +4457,16 @@ mod tests {
 
         // The settings rows walk the same choice lists the submenus show.
         let (tab, row) = locate_in(&cfg, "claude", HarnessField::Model).unwrap();
-        cfg.claude_model = "default".into();
+        cfg.set_default("claude", HarnessField::Model, "default");
         cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.claude_model, "fable");
+        assert_eq!(cfg.stored("claude", HarnessField::Model), "fable");
         cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.claude_model, "default");
+        assert_eq!(cfg.stored("claude", HarnessField::Model), "default");
         let (tab, row) = locate_in(&cfg, "codex", HarnessField::Effort).unwrap();
         cfg.cycle(tab, row, 0);
         assert_eq!(
-            cfg.codex_effort, "xhigh",
+            cfg.stored("codex", HarnessField::Effort),
+            "xhigh",
             "activate steps forward from high"
         );
     }
@@ -4440,34 +4479,45 @@ mod tests {
         // No family: the effort row is n/a and does not cycle.
         assert_eq!(cfg.agent_value("cursor", HarnessField::Effort), "n/a");
         cfg.cycle(tab, effort_row, 1);
-        assert_eq!(cfg.cursor_effort, "default");
+        assert_eq!(cfg.stored("cursor", HarnessField::Effort), "default");
         // default → auto (still no efforts) → claude-fable-5, which has no
         // bare id, so the effort lands on its fallback at once.
         cfg.cycle(tab, model_row, 1);
-        assert_eq!(cfg.cursor_model, "auto");
+        assert_eq!(cfg.stored("cursor", HarnessField::Model), "auto");
         assert_eq!(cfg.agent_value("cursor", HarnessField::Effort), "n/a");
         cfg.cycle(tab, model_row, 1);
-        assert_eq!(cfg.cursor_model, "claude-fable-5");
-        assert_eq!(cfg.cursor_effort, "high");
+        assert_eq!(cfg.stored("cursor", HarnessField::Model), "claude-fable-5");
+        assert_eq!(cfg.stored("cursor", HarnessField::Effort), "high");
         cfg.cycle(tab, effort_row, 1);
-        assert_eq!(cfg.cursor_effort, "xhigh");
+        assert_eq!(cfg.stored("cursor", HarnessField::Effort), "xhigh");
         cfg.cycle(tab, effort_row, 1);
-        assert_eq!(cfg.cursor_effort, "max");
+        assert_eq!(cfg.stored("cursor", HarnessField::Effort), "max");
         // fable-5-thinking has max; Opus 5 doesn't → back to its fallback.
         cfg.cycle(tab, model_row, 1);
-        assert_eq!(cfg.cursor_model, "claude-fable-5-thinking");
-        assert_eq!(cfg.cursor_effort, "max", "a shared effort survives");
+        assert_eq!(
+            cfg.stored("cursor", HarnessField::Model),
+            "claude-fable-5-thinking"
+        );
+        assert_eq!(
+            cfg.stored("cursor", HarnessField::Effort),
+            "max",
+            "a shared effort survives"
+        );
         cfg.cycle(tab, model_row, 1);
-        assert_eq!(cfg.cursor_model, "claude-opus-5");
-        assert_eq!(cfg.cursor_effort, "high");
+        assert_eq!(cfg.stored("cursor", HarnessField::Model), "claude-opus-5");
+        assert_eq!(cfg.stored("cursor", HarnessField::Effort), "high");
         cfg.cycle(tab, effort_row, 1);
-        assert_eq!(cfg.cursor_effort, "high-fast", "-fast rides in the effort");
+        assert_eq!(
+            cfg.stored("cursor", HarnessField::Effort),
+            "high-fast",
+            "-fast rides in the effort"
+        );
         // A family with a bare id offers default again, and ← wraps onto
         // its last fast variant.
-        cfg.cursor_model = "gpt-5.3-codex".into();
-        cfg.cursor_effort = "default".into();
+        cfg.set_default("cursor", HarnessField::Model, "gpt-5.3-codex");
+        cfg.set_default("cursor", HarnessField::Effort, "default");
         cfg.cycle(tab, effort_row, -1);
-        assert_eq!(cfg.cursor_effort, "xhigh-fast");
+        assert_eq!(cfg.stored("cursor", HarnessField::Effort), "xhigh-fast");
     }
 
     #[test]
@@ -4548,21 +4598,135 @@ mod tests {
     fn save_persists_model_effort_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let cfg = Config {
-            claude_model: "sonnet".into(),
-            codex_effort: "xhigh".into(),
-            cursor_model: "gpt-5.6-sol".into(),
-            cursor_effort: "none".into(),
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.set_default("claude", HarnessField::Model, "sonnet");
+        cfg.set_default("codex", HarnessField::Effort, "xhigh");
+        cfg.set_default("cursor", HarnessField::Model, "gpt-5.6-sol");
+        cfg.set_default("cursor", HarnessField::Effort, "none");
         cfg.save_to(&path).unwrap();
         let reread = load_from(&path);
-        assert_eq!(reread.claude_model, "sonnet");
-        assert_eq!(reread.claude_effort, "default");
-        assert_eq!(reread.codex_model, "default");
-        assert_eq!(reread.codex_effort, "xhigh");
-        assert_eq!(reread.cursor_model, "gpt-5.6-sol");
-        assert_eq!(reread.cursor_effort, "none");
+        assert_eq!(reread.stored("claude", HarnessField::Model), "sonnet");
+        assert_eq!(reread.stored("claude", HarnessField::Effort), "default");
+        assert_eq!(reread.stored("codex", HarnessField::Model), "default");
+        assert_eq!(reread.stored("codex", HarnessField::Effort), "xhigh");
+        assert_eq!(reread.stored("cursor", HarnessField::Model), "gpt-5.6-sol");
+        assert_eq!(reread.stored("cursor", HarnessField::Effort), "none");
+        let saved = read_json_file(&path);
+        assert_eq!(saved["harnesses"]["claude"]["model_default"], "sonnet");
+        assert!(saved.get("claude_model").is_none(), "{saved}");
+    }
+
+    /// An account added since starts on `default` for its model and
+    /// effort, whatever the default account's are, and keeps its own
+    /// through a change to Claude's.
+    #[test]
+    fn an_account_never_follows_another_accounts_model() {
+        let mut cfg = Config::default();
+        cfg.claude_accounts
+            .push(orion_core::claude_account::ClaudeAccount {
+                id: "claude-2".into(),
+                config_dir: "~/.claude-2".into(),
+                name: String::new(),
+                enabled: true,
+            });
+        cfg.set_default("claude", HarnessField::Model, "opus");
+        cfg.set_default("claude", HarnessField::Effort, "xhigh");
+        let two = cfg.effective_harness_by_id("claude-2");
+        assert_eq!((two.default_model(), two.default_effort()), (None, None));
+        cfg.set_default("claude-2", HarnessField::Model, "sonnet");
+        cfg.set_default("claude", HarnessField::Model, "haiku");
+        assert_eq!(
+            cfg.effective_harness_by_id("claude-2").default_model(),
+            Some("sonnet")
+        );
+    }
+
+    /// ONE STORE PER ACCOUNT, from a file shaped like one a two-account
+    /// user's older release wrote: the default account's flat model and
+    /// effort and its `harnesses` label, the other account's `name` and
+    /// its own effort, the model it followed the default account on. Each
+    /// account comes out with its model, effort and name in its own
+    /// `harnesses` entry — every one as it launched before — the `⌘N`
+    /// default on the same account, and the save after drops the flat
+    /// keys and the entry's `name`. A later change to one account's model
+    /// leaves the other's alone.
+    #[test]
+    fn each_accounts_model_effort_and_name_move_into_its_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "claude_accounts": [{"config_dir": "~/.claude-engineering-riplo-ai",
+                                   "id": "claude-engineering-riplo-ai", "name": "Riplo"}],
+              "claude_effort": "xhigh", "claude_enabled": true, "claude_model": "opus",
+              "codex_effort": "default", "codex_enabled": false, "codex_model": "default",
+              "cursor_effort": "default", "cursor_enabled": true, "cursor_model": "auto",
+              "opencode_enabled": false, "opencode_model": "default",
+              "harnesses": {"claude": {"label": "Personal"},
+                            "claude-engineering-riplo-ai": {"effort_default": "medium"},
+                            "grok": {"enabled": false}},
+              "quick_prompt_kind": "claude-engineering-riplo-ai",
+              "future_key": 1
+            }"#,
+        )
+        .unwrap();
+        let riplo = "claude-engineering-riplo-ai";
+        let before = |cfg: &Config| {
+            let row = cfg.effective_harness_by_id(riplo);
+            (row.model.default.clone(), row.effort.default.clone())
+        };
+        let cfg = load_from(&path);
+        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
+        assert_eq!(before(&cfg), ("opus".into(), "medium".into()));
+        let claude = cfg.effective_harness_by_id("claude");
+        assert_eq!(
+            (
+                claude.model.default.as_str(),
+                claude.effort.default.as_str()
+            ),
+            ("opus", "xhigh")
+        );
+        assert_eq!(cfg.stored("cursor", HarnessField::Model), "auto");
+        assert_eq!(cfg.harnesses[riplo].label.as_deref(), Some("Riplo"));
+        assert_eq!(cfg.harnesses["claude"].label.as_deref(), Some("Personal"));
+        assert_eq!(
+            cfg.quick_prompt_harness(),
+            (AgentKind::Claude, Some(riplo.to_string())),
+            "⌘N stays on the same account"
+        );
+        assert!(!cfg.harnesses.contains_key("codex"), "nothing to say there");
+
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        for key in [
+            "claude_model",
+            "claude_effort",
+            "codex_model",
+            "cursor_model",
+            "opencode_model",
+        ] {
+            assert!(saved.get(key).is_none(), "`{key}` is spent: {saved}");
+        }
+        assert_eq!(
+            saved["harnesses"][riplo],
+            serde_json::json!({"label": "Riplo", "model_default": "opus", "effort_default": "medium"})
+        );
+        assert_eq!(
+            saved["harnesses"]["claude"],
+            serde_json::json!({"label": "Personal", "model_default": "opus", "effort_default": "xhigh"})
+        );
+        assert_eq!(
+            saved["claude_accounts"],
+            serde_json::json!([{"id": riplo, "config_dir": "~/.claude-engineering-riplo-ai"}])
+        );
+        assert_eq!(saved["claude_enabled"], true, "the switches stay put");
+        assert_eq!(saved["future_key"], 1);
+
+        let mut cfg = load_from(&path);
+        assert_eq!(before(&cfg), ("opus".into(), "medium".into()), "once");
+        cfg.set_default("claude", HarnessField::Model, "sonnet");
+        assert_eq!(before(&cfg).0, "opus", "one account's model is its own");
     }
 
     #[test]
@@ -4781,14 +4945,7 @@ mod tests {
             std::fs::write(
                 &path,
                 r#"{"harnesses": {
-                    "agy": {
-                        "program": "agy",
-                        "model_default": "big-1",
-                        "effort_flag": "--effort",
-                        "efforts": ["low", "high"],
-                        "resume_flag": "--resume",
-                        "hooks": "claude"
-                    }
+                    "agy": {"model_default": "big-1", "models": [{"id": "big-1"}, {"id": "big-2"}]}
                 }}"#,
             )
             .unwrap();
@@ -4817,9 +4974,10 @@ mod tests {
                 let (_, model_row) =
                     locate_agent("agy", HarnessField::Model).expect("the newcomer locates");
                 assert_eq!(cfg.agent_value("agy", HarnessField::Model), "big-1");
-                let (_, effort_row) =
-                    locate_agent("agy", HarnessField::Effort).expect("its effort row shows");
-                assert_eq!(cfg.agent_value("agy", HarnessField::Effort), "default");
+                assert!(
+                    locate_agent("agy", HarnessField::Effort).is_none(),
+                    "a CLI added by its name takes no effort"
+                );
                 assert_eq!(
                     tab_len(tab, 1),
                     ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
@@ -4830,18 +4988,16 @@ mod tests {
                     offered.last(),
                     Some(&(AgentKind::Custom, Some("agy".to_string())))
                 );
-                // Cycling its rows edits the map entry a save persists:
-                // an off-list hand edit steps onto the list, effort
-                // steps forward through its rows.
+                // Cycling its model row walks its own list in the map
+                // entry a save persists.
                 let mut cfg = cfg;
+                cfg.cycle(tab, model_row, 0);
+                assert_eq!(cfg.harnesses["agy"].model_default.as_deref(), Some("big-2"));
                 cfg.cycle(tab, model_row, 0);
                 assert_eq!(
                     cfg.harnesses["agy"].model_default.as_deref(),
-                    Some("default"),
-                    "an off-list hand edit steps onto the offered rows"
+                    Some("default")
                 );
-                cfg.cycle(tab, effort_row, 1);
-                assert_eq!(cfg.harnesses["agy"].effort_default.as_deref(), Some("low"));
             });
         });
     }

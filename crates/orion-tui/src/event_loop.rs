@@ -4550,8 +4550,8 @@ fn cycle_box_effort(app: &mut App, back: crate::quick_prompt::QuickReturn) {
         .unwrap_or(crate::config::DEFAULT_CHOICE);
     let next = crate::config::cycle_owned(current, &choices, 1);
     let mut cfg = crate::config::Config::load();
-    let id = custom.unwrap_or_else(|| kind.as_str()).to_string();
-    if cfg.set_agent_effort(&id, &next) {
+    let id = orion_core::harness::registry_id(kind, custom);
+    if cfg.set_agent_effort(id, &next) {
         let _ = cfg.try_save();
     }
     let effort = crate::config::fit_effort(kind, model, crate::config::non_default(&next), custom);
@@ -4590,10 +4590,7 @@ fn cycle_default_effort(app: &mut App) {
     if crate::config::effort_choices(kind, model.as_deref(), custom.as_deref()).is_empty() {
         return;
     }
-    let id = custom
-        .as_deref()
-        .unwrap_or_else(|| kind.as_str())
-        .to_string();
+    let id = orion_core::harness::registry_id(kind, custom.as_deref()).to_string();
     cfg.cycle_agent_row(&id, crate::config::HarnessField::Effort, 1);
     let next = cfg.agent_value(&id, crate::config::HarnessField::Effort);
     let _ = cfg.try_save();
@@ -7306,6 +7303,8 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
         .as_ref()
         .filter(|q| q.launch.kind == *kind && q.launch.custom.as_deref() == custom.as_deref())
         .map(|q| &q.launch);
+    // The row's own harness: a Claude account's defaults are its own.
+    let descriptor = cfg.effective_harness(*kind, custom.as_deref());
     let (title, choices, configured) = match sub {
         SubmenuKind::Models => (
             format!(
@@ -7315,21 +7314,18 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
             crate::config::model_choices(*kind, custom.as_deref()),
             from_box
                 .and_then(|l| l.model.clone())
-                .or_else(|| cfg.default_model(*kind)),
+                .or_else(|| descriptor.default_model().map(str::to_string)),
         ),
         SubmenuKind::Efforts => (
             format!("{} effort", kind_label(*kind)),
             crate::config::effort_choices(*kind, model.as_deref(), custom.as_deref()),
             from_box
                 .and_then(|l| l.effort.clone())
-                .or_else(|| cfg.default_effort(*kind)),
+                .or_else(|| crate::config::launch_effort(&descriptor)),
         ),
     };
     let configured = configured.unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into());
-    let catalog = cfg
-        .effective_harness(*kind, custom.as_deref())
-        .model
-        .catalog;
+    let catalog = descriptor.model.catalog;
     let items: Vec<MenuItem> = choices
         .iter()
         .map(|choice| {
@@ -8686,9 +8682,8 @@ fn confirm_sign_out(app: &mut App, index: usize) {
 
 /// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
 /// config.json, behind a confirm asking whether its config dir goes to
-/// the Trash too — kept unless `t` says so. The default account and a
-/// hand-written `harnesses` entry are not orion's to remove: the notice
-/// says what to do instead.
+/// the Trash too — kept unless `t` says so. The default account is not
+/// orion's to remove: the notice says to switch it off instead.
 fn confirm_remove_account(app: &mut App, index: usize) {
     let cfg = crate::config::Config::load();
     let id = match cfg.account_row(index) {
@@ -8696,13 +8691,8 @@ fn confirm_remove_account(app: &mut App, index: usize) {
         _ => return,
     };
     if !cfg.is_extra_account(&id) {
-        let why = if AgentKind::parse(&id) == Some(AgentKind::Claude) {
-            "the default account stays — ←/→ switches it off".to_string()
-        } else {
-            format!("{id} is a harnesses entry in config.json — edit the file to remove it")
-        };
         if let Some(view) = settings_mut(app) {
-            view.warn(why);
+            view.warn("the default account stays — ←/→ switches it off".to_string());
         }
         return;
     }
@@ -8863,13 +8853,10 @@ fn rename_claude_account(app: &mut App, id: &str, name: &str) {
 /// tab and row update too, so an Esc-then-`s` lands back where `?` left.
 fn open_harness_settings(app: &mut App, kind: AgentKind, custom: Option<String>) {
     use crate::config::{accounts_tab, locate_agent, HarnessField};
-    let id = match kind {
-        AgentKind::Custom => custom.unwrap_or_default(),
-        _ => kind.as_str().to_string(),
-    };
+    let id = orion_core::harness::registry_id(kind, custom.as_deref());
     let tab = accounts_tab();
     app.settings_tab = tab;
-    if let Some((_, row)) = locate_agent(&id, HarnessField::Enabled) {
+    if let Some((_, row)) = locate_agent(id, HarnessField::Enabled) {
         if let Some(slot) = app.settings_selected.get_mut(tab) {
             *slot = row;
         }
@@ -9370,21 +9357,33 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             if let Some(back) = quick {
                 // A model or an effort picked for the harness the box is
                 // already on tunes the launch it is, AGENT PRESET and all;
-                // a harness picked is a new launch spec, which drops it.
+                // a harness picked is a new launch spec, which drops a
+                // preset that pins its own — one that FOLLOWS THE BOX goes
+                // along, its pinned model and effort where none was picked.
                 let tuned = (model.is_some() || effort.is_some())
                     && kind == back.launch.kind
                     && custom == back.launch.custom;
+                let follows = back.launch.preset.as_ref().filter(|p| p.follows_box());
+                let (model_picked, effort_picked) = (model.is_some(), effort.is_some());
                 // The picker's `worktree` is only what its menu was built
                 // against; where the launch lands is the box's own target.
+                let cfg = crate::config::Config::load();
                 let mut launch = crate::quick_prompt::QuickLaunch::of_kind(
                     back.launch.target.clone(),
                     kind,
                     custom.clone(),
                     model.filter(|m| m != crate::config::DEFAULT_CHOICE),
                     effort.filter(|e| e != crate::config::DEFAULT_CHOICE),
-                    &crate::config::Config::load(),
+                    &cfg,
                 );
-                if tuned {
+                if let Some(preset) = follows.filter(|_| !tuned) {
+                    launch = launch.pinned_to(
+                        preset.model.as_deref().filter(|_| !model_picked),
+                        preset.effort.as_deref().filter(|_| !effort_picked),
+                        &cfg,
+                    );
+                }
+                if tuned || follows.is_some() {
                     launch.preset = back.launch.preset.clone();
                 }
                 let launch = launch
@@ -10585,8 +10584,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     // Nor does a PR SESSION: the DAEMON adopts no unscoped spare for one,
     // and `worktree` there is the ROOT WORKTREE, which only names the
     // project — a refill would boot a Claude in the main checkout for a
-    // launch that never runs there.
-    if kind == AgentKind::Claude && !with_first_prompt && pr_url.is_none() {
+    // launch that never runs there. A launch on another Claude account
+    // never takes the default account's spare either.
+    if kind == AgentKind::Claude && custom.is_none() && !with_first_prompt && pr_url.is_none() {
         out.extend(default_claude_prewarm(worktree));
     }
 }
@@ -27030,6 +27030,61 @@ mod tests {
         })
     }
 
+    /// `Tab` in the `⌘N` box switches between two Claude accounts for the
+    /// one launch: the box opens on the account `⌘N` is set to, the picker
+    /// lists the default account right before it, and each pick launches
+    /// on that account — the default one bare, the other as Claude with
+    /// its id beside.
+    #[test]
+    fn tab_in_the_box_switches_between_two_claude_accounts() {
+        with_two_accounts(|_| {
+            crate::config::persist(|cfg| cfg.quick_prompt_kind = "claude-2".into());
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            let launched = |app: &mut App, out: &mut Vec<ClientRequest>, rows_up: usize| {
+                press(app, KeyCode::Char('n'), KeyModifiers::SUPER, out);
+                assert!(paste_into_overlay(app, "Fix auth"));
+                press(app, KeyCode::Tab, KeyModifiers::NONE, out);
+                let Some(Overlay::Menu(menu)) = &app.overlay else {
+                    panic!("Tab should open the harness picker, got {:?}", app.overlay);
+                };
+                assert_eq!(menu.hover, 1, "on the box's own account: {:?}", menu.items);
+                for _ in 0..rows_up {
+                    press(app, KeyCode::Up, KeyModifiers::NONE, out);
+                }
+                press(app, KeyCode::Enter, KeyModifiers::NONE, out);
+                assert!(
+                    matches!(&app.overlay, Some(Overlay::Prompt(_))),
+                    "the pick hands the box back: {:?}",
+                    app.overlay
+                );
+                press(app, KeyCode::Enter, KeyModifiers::NONE, out);
+                let picked = out.iter().find_map(|req| match req {
+                    ClientRequest::CreateAgent {
+                        kind,
+                        custom_harness,
+                        ..
+                    } => Some((*kind, custom_harness.clone())),
+                    _ => None,
+                });
+                out.clear();
+                picked.expect("a launch")
+            };
+            assert_eq!(
+                launched(&mut app, &mut out, 1),
+                (AgentKind::Claude, None),
+                "Up to the default account"
+            );
+            assert_eq!(
+                launched(&mut app, &mut out, 0),
+                (AgentKind::Claude, Some("claude-2".to_string())),
+                "the box's own account"
+            );
+        });
+    }
+
     /// The settings overlay on the CLAUDE ACCOUNTS row `at` (0 = the
     /// default account).
     fn open_account_row(app: &mut App, at: usize, out: &mut Vec<ClientRequest>) {
@@ -27252,10 +27307,8 @@ mod tests {
             );
             let cfg = crate::config::Config::load();
             let account = &cfg.claude_accounts[0];
-            assert_eq!(
-                (account.id.as_str(), account.name.as_str()),
-                ("claude-2", "Work")
-            );
+            assert_eq!(account.id.as_str(), "claude-2");
+            assert_eq!(cfg.harnesses["claude-2"].label.as_deref(), Some("Work"));
             assert_eq!(account.dir(), root.join(".claude-2"));
             assert_eq!(
                 cfg.effective_harness_by_id("claude-2").display_label(),
@@ -27268,8 +27321,10 @@ mod tests {
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
             assert_eq!(
-                crate::config::Config::load().claude_accounts[0].name,
-                "Work"
+                crate::config::Config::load().harnesses["claude-2"]
+                    .label
+                    .as_deref(),
+                Some("Work")
             );
 
             // The default account.
@@ -31352,6 +31407,7 @@ mod tests {
                         name: "reviewer".into(),
                         kind: AgentKind::Claude,
                         custom_harness: None,
+                        follow_box: None,
                         model: Some("opus".into()),
                         effort: Some("high".into()),
                         prefix: "Be strict.".into(),
@@ -31363,6 +31419,7 @@ mod tests {
                         name: "scratch".into(),
                         kind: AgentKind::Codex,
                         custom_harness: None,
+                        follow_box: None,
                         model: Some("gpt-6-luna".into()),
                         effort: None,
                         prefix: String::new(),
@@ -31424,6 +31481,7 @@ mod tests {
                 name: "review and merge".into(),
                 kind: AgentKind::Claude,
                 custom_harness: None,
+                follow_box: None,
                 model: None,
                 effort: None,
                 prefix: "Investigate whether this pull request should be merged.".into(),
@@ -31882,6 +31940,7 @@ mod tests {
                 name: "ship".into(),
                 kind: AgentKind::Claude,
                 custom_harness: None,
+                follow_box: None,
                 model: None,
                 effort: None,
                 prefix: "Commit and push.".into(),
@@ -32011,6 +32070,8 @@ mod tests {
             // caret — `e`, `d`, `a` type rather than act.
             type_text(&mut app, "tested", &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            // The box's agent, then Claude, then Codex.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -34377,6 +34438,7 @@ mod tests {
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("editor should stay open, got {:?}", app.overlay);
@@ -34724,6 +34786,7 @@ mod tests {
                 name: "review and merge".into(),
                 kind: AgentKind::Claude,
                 custom_harness: None,
+                follow_box: None,
                 model: None,
                 effort: None,
                 prefix: "Review this pull request.".into(),

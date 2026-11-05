@@ -4,20 +4,19 @@
 //! and the config dirs on this machine no account runs in any more,
 //! which can be added back or moved to the Trash.
 //!
-//! An account is a registry harness that runs Claude in a config dir
-//! orion can see ([`HarnessDescriptor::is_claude_account`]): built-in
-//! Claude — the DEFAULT ACCOUNT — a `claude_accounts` entry, or a
-//! hand-written `harnesses` entry whose `env` pins `CLAUDE_CONFIG_DIR`.
+//! An account is a registry row that runs Claude in a config dir of its
+//! own ([`HarnessDescriptor::is_claude_account`]): built-in Claude — the
+//! DEFAULT ACCOUNT — or a `claude_accounts` entry, its sessions Claude's
+//! with the account's id beside.
 //! Everywhere one is listed it goes by its name and the email Claude
 //! Code records it signed in as, `Work (a@b.co)` — `Claude (a@b.co)`
 //! while it has no name of its own ([`label`], [`name_of`]); a card, a
 //! list row, the quick prompt and a preset — short of room — say the
 //! name alone, else the email, and only on a machine with more than one
 //! account, where `claude` would not say which ([`short_name`]). The
-//! name is the user's ([`rename`]): a `claude_accounts` entry's `name`,
-//! or a `harnesses` label for the default account and a hand-written
-//! one. The id and the dir never change with it — sessions point back
-//! at the id, and the login lives in the dir.
+//! name is the user's ([`rename`]): its `harnesses.<id>.label`, beside
+//! its model and effort. The id and the dir never change with it —
+//! sessions point back at the id, and the login lives in the dir.
 //!
 //! Removing an account leaves its dir, login and all, where it was —
 //! unless the remove sends it to the Trash — and a later add whose name
@@ -353,11 +352,10 @@ pub fn tilde(path: &Path) -> String {
 /// Claude's label, before the email it is signed in as.
 pub const DEFAULT_NAME: &str = "Claude";
 
-/// The name `entry` goes by when the user gave it one: a
-/// `claude_accounts` entry's `name`, a `harnesses` label on the default
-/// account or on a hand-written one. None while it has none — `Claude`
-/// wherever it is listed. Read off a raw registry row
-/// ([`Config::raw_harness_registry`]), not one [`label`] already named.
+/// The name `entry` goes by when the user gave it one: its `harnesses`
+/// label. None while it has none — `Claude` wherever it is listed. Read
+/// off a raw registry row ([`Config::raw_harness_registry`]), not one
+/// [`label`] already named.
 pub fn name_of(entry: &HarnessDescriptor) -> Option<String> {
     let label = entry.label.trim();
     (!label.is_empty() && label != DEFAULT_NAME).then(|| label.to_string())
@@ -391,10 +389,7 @@ pub fn label(base: &str, record: &Record) -> String {
 /// off the last refresh, so a grid never opens the config to ask; a
 /// rename asks for one at once.
 pub fn short_name(kind: AgentKind, custom: Option<&str>) -> Option<String> {
-    let id = match kind {
-        AgentKind::Custom => custom?.trim(),
-        _ => kind.as_str(),
-    };
+    let id = orion_core::harness::registry_id(kind, custom);
     store::short(|short| short.get(id).cloned())
 }
 
@@ -516,10 +511,7 @@ fn pick_letters(seed: &str, taken: &[String]) -> String {
 /// Claude account on a machine with more than one, None everywhere else
 /// — one account, any other harness — and the row keeps its width.
 pub fn account_tag(kind: AgentKind, custom: Option<&str>) -> Option<AccountTag> {
-    match kind {
-        AgentKind::Custom => tag_of(custom?),
-        _ => tag_of(kind.as_str()),
-    }
+    tag_of(orion_core::harness::registry_id(kind, custom))
 }
 
 /// [`account_tag`] by the account's registry id.
@@ -539,7 +531,8 @@ pub fn sessions_on<'a>(agents: &'a [orion_core::Agent], id: &str) -> Vec<&'a ori
     agents
         .iter()
         .filter(|a| {
-            a.kind == AgentKind::Custom && a.custom_harness.as_deref().map(str::trim) == Some(id)
+            a.custom_harness.is_some()
+                && orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref()) == id
         })
         .collect()
 }
@@ -1000,9 +993,10 @@ pub fn add(new: &NewAccount, share: bool) -> Result<String, String> {
     cfg.claude_accounts.push(ClaudeAccount {
         id: new.id.clone(),
         config_dir: new.config_dir.clone(),
-        name: new.name.trim().to_string(),
+        name: String::new(),
         enabled: true,
     });
+    set_name(&mut cfg, &new.id, &new.name);
     cfg.save()
         .map_err(|e| format!("couldn't save settings: {e}"))?;
     let shown = match new.name.trim() {
@@ -1043,34 +1037,21 @@ pub fn current_name(cfg: &Config, id: &str) -> String {
 
 /// Give account `id` the name `name` — empty takes its name away, back to
 /// `Claude (a@b.co)`. Only the name moves: the id its sessions point back
-/// at, and the dir its login lives in, stay as they are. A
-/// `claude_accounts` entry keeps it as its `name`; the default account
-/// and a hand-written `harnesses` entry as that map's `label` for the
-/// id. The answer is the line the footer shows.
+/// at, and the dir its login lives in, stay as they are. Every account
+/// keeps it in one place, its `harnesses.<id>.label`, beside its model and
+/// effort. The answer is the line the footer shows.
 pub fn rename(id: &str, name: &str) -> Result<String, String> {
-    use orion_core::harness::HarnessOverride;
     let name = name.trim();
     let mut cfg = Config::load();
     let is_default = AgentKind::parse(id) == Some(AgentKind::Claude);
-    if let Some(account) = cfg.claude_accounts.iter_mut().find(|a| a.id.trim() == id) {
-        account.name = name.to_string();
-    } else if is_default {
-        let over = cfg.harnesses.entry(id.to_string()).or_default();
-        over.label = (!name.is_empty()).then(|| name.to_string());
-        // A delta that said nothing but the name goes with it.
-        if *over == HarnessOverride::default() {
-            cfg.harnesses.remove(id);
-        }
-    } else if cfg
+    if !cfg
         .raw_harness_registry()
         .iter()
         .any(|entry| entry.id == id && entry.is_claude_account())
     {
-        let over = cfg.harnesses.entry(id.to_string()).or_default();
-        over.label = (!name.is_empty()).then(|| name.to_string());
-    } else {
         return Err(format!("`{id}` is no Claude account to rename"));
     }
+    set_name(&mut cfg, id, name);
     cfg.save()
         .map_err(|e| format!("couldn't save settings: {e}"))?;
     Ok(match name {
@@ -1078,6 +1059,17 @@ pub fn rename(id: &str, name: &str) -> Result<String, String> {
         "" => format!("{id} goes by Claude and its email again"),
         name => format!("{id} goes by {name} now"),
     })
+}
+
+/// Account `id`'s name as its `harnesses` label; empty takes it away, and
+/// an entry that said nothing but the name goes with it.
+fn set_name(cfg: &mut Config, id: &str, name: &str) {
+    let name = name.trim();
+    let over = cfg.harnesses.entry(id.to_string()).or_default();
+    over.label = (!name.is_empty()).then(|| name.to_string());
+    if *over == orion_core::harness::HarnessOverride::default() {
+        cfg.harnesses.remove(id);
+    }
 }
 
 /// Who `dir` is signed in as, at the last read: a dir an account ran in
@@ -1266,6 +1258,43 @@ mod tests {
         cfg.effective_harness_by_id(id).display_label().to_string()
     }
 
+    /// Two accounts stay signed in at once, each its own login read from
+    /// its own record — no warning, as two logins are two subscriptions —
+    /// and signing one out leaves the other signed in.
+    #[test]
+    fn both_accounts_stay_signed_in_at_once() {
+        let m = Machine::new("{}");
+        let two = m.home.path().join(".claude-2");
+        std::fs::write(
+            &m.config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        m.sign(".claude.json", Some("a@b.co"));
+        m.sign(".claude-2/.claude.json", Some("c@d.co"));
+        m.run(|| {
+            refresh_now();
+            let cfg = Config::load();
+            assert_eq!(label_of(&cfg, "claude"), "Claude (a@b.co)");
+            assert_eq!(label_of(&cfg, "claude-2"), "Claude (c@d.co)");
+            assert!(same_account_groups(&cfg.harness_registry()).is_empty());
+        });
+        m.sign(".claude.json", None);
+        m.run(|| {
+            refresh_now();
+            let cfg = Config::load();
+            assert_eq!(label_of(&cfg, "claude"), "Claude (not signed in)");
+            assert_eq!(
+                label_of(&cfg, "claude-2"),
+                "Claude (c@d.co)",
+                "the other stays signed in"
+            );
+        });
+    }
+
     /// Every account is named after the email its own record holds — the
     /// default one's in `~/.claude.json`, an extra one's inside its dir —
     /// and only once a read has landed.
@@ -1297,14 +1326,14 @@ mod tests {
                 short_name(AgentKind::Claude, None).as_deref(),
                 Some("a@b.co")
             );
-            assert_eq!(short_name(AgentKind::Custom, Some("claude-2")), None);
+            assert_eq!(short_name(AgentKind::Claude, Some("claude-2")), None);
             m.sign(".claude-2/.claude.json", Some("c@d.co"));
             assert!(refresh_now());
             assert!(!refresh_now(), "nothing moved since");
             let cfg = Config::load();
             assert_eq!(label_of(&cfg, "claude-2"), "Claude (c@d.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-2")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-2")).as_deref(),
                 Some("c@d.co")
             );
             assert!(same_account_groups(&cfg.harness_registry()).is_empty());
@@ -1338,11 +1367,11 @@ mod tests {
         });
     }
 
-    /// A hand-written harness whose env pins a dir is an account too: its
-    /// own label stays and gains the email. A wrapper that exports the
-    /// variable itself is not — nothing says which login it runs.
+    /// A `harnesses` entry is no account, whatever its `env` pins and
+    /// whatever an older release let it say about hooks: it runs the
+    /// program its id names, with no email to its name.
     #[test]
-    fn a_hand_written_account_keeps_its_label() {
+    fn a_harnesses_entry_is_no_account() {
         let m = Machine::new("{}");
         let b = m.home.path().join(".claude-b");
         std::fs::write(
@@ -1350,8 +1379,7 @@ mod tests {
             serde_json::json!({"harnesses": {
                 "claude-b": {"label": "Claude B", "program": "claude", "hooks": "claude",
                              "resume_flag": "--resume",
-                             "env": {"CLAUDE_CONFIG_DIR": b.display().to_string()}},
-                "wrapped": {"label": "Wrapped", "program": "/bin/claude-w", "hooks": "claude"}
+                             "env": {"CLAUDE_CONFIG_DIR": b.display().to_string()}}
             }})
             .to_string(),
         )
@@ -1360,8 +1388,14 @@ mod tests {
         m.run(|| {
             refresh_now();
             let cfg = Config::load();
-            assert_eq!(label_of(&cfg, "claude-b"), "Claude B (b@b.co)");
-            assert_eq!(label_of(&cfg, "wrapped"), "Wrapped");
+            assert_eq!(label_of(&cfg, "claude-b"), "Claude B");
+            let entry = cfg.effective_harness_by_id("claude-b");
+            assert!(!entry.is_claude_account());
+            assert_eq!(entry.program, "claude-b");
+            assert!(!cfg
+                .account_rows()
+                .contains(&crate::config::AccountRow::Account("claude-b".into())));
+            assert!(rename("claude-b", "X").is_err(), "no Claude account");
         });
     }
 
@@ -1667,13 +1701,13 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             ..agent(kind, custom)
         };
         let agents = vec![
-            named("one", AgentKind::Custom, Some("claude-2")),
+            named("one", AgentKind::Claude, Some("claude-2")),
             orion_core::Agent {
                 archived: true,
-                ..named("two", AgentKind::Custom, Some("claude-2"))
+                ..named("two", AgentKind::Claude, Some("claude-2"))
             },
             named("default", AgentKind::Claude, None),
-            named("other", AgentKind::Custom, Some("claude-3")),
+            named("other", AgentKind::Claude, Some("claude-3")),
         ];
         let on: Vec<&str> = sessions_on(&agents, "claude-2")
             .iter()
@@ -1720,7 +1754,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 )]
             );
             assert_eq!(
-                cfg.continue_targets(&agent(AgentKind::Custom, Some("claude-2"))),
+                cfg.continue_targets(&agent(AgentKind::Claude, Some("claude-2"))),
                 [(
                     "claude".to_string(),
                     "Claude (a@b.co) · same account".to_string()
@@ -1744,7 +1778,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             assert_eq!(
                 crate::agent_picker::session_harness_badge_in(
-                    &agent(AgentKind::Custom, Some("claude-2")),
+                    &agent(AgentKind::Claude, Some("claude-2")),
                     &cfg
                 ),
                 "c@d.co"
@@ -1755,8 +1789,9 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             let preset = crate::agent_presets::AgentPreset {
                 name: "r".into(),
-                kind: AgentKind::Custom,
+                kind: AgentKind::Claude,
                 custom_harness: Some("claude-2".into()),
+                follow_box: None,
                 model: Some("opus".into()),
                 effort: None,
                 prefix: String::new(),
@@ -1771,7 +1806,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             refresh_now();
             assert_eq!(
                 crate::agent_picker::session_harness_badge_in(
-                    &agent(AgentKind::Custom, Some("claude-2")),
+                    &agent(AgentKind::Claude, Some("claude-2")),
                     &Config::load()
                 ),
                 "claude-2",
@@ -1811,7 +1846,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(cfg.quick_prompt_kind, "claude-2");
             assert_eq!(
                 cfg.quick_prompt_harness(),
-                (AgentKind::Custom, Some("claude-2".to_string()))
+                (AgentKind::Claude, Some("claude-2".to_string()))
             );
             assert_eq!(
                 cfg.value_label(crate::config::SettingKind::QuickPromptKind),
@@ -1823,17 +1858,18 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             assert_eq!(
                 (launch.kind, launch.custom.as_deref()),
-                (AgentKind::Custom, Some("claude-2"))
+                (AgentKind::Claude, Some("claude-2"))
             );
             cfg.claude_accounts[0].enabled = false;
             assert_eq!(cfg.quick_prompt_harness(), (AgentKind::Claude, None));
         });
     }
 
-    /// An account takes Claude's model and effort defaults — the legacy
-    /// keys the Accounts tab writes included — until it is given its own.
+    /// An account an older release let follow Claude's model and effort
+    /// gets its own copy of them, so it launches as it did; from then on
+    /// each account's are its own, and a change to one leaves the other.
     #[test]
-    fn an_account_follows_claudes_defaults_until_it_has_its_own() {
+    fn an_account_keeps_the_defaults_it_followed_as_its_own() {
         let m = Machine::new("{}");
         let two = m.home.path().join(".claude-2");
         std::fs::write(
@@ -1974,7 +2010,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(label_of(&cfg, "claude-work"), "Work (not signed in)");
             assert_eq!(label_of(&cfg, "claude"), "Claude (a@b.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-work")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-work")).as_deref(),
                 Some("Work"),
                 "named, so not its id even signed out"
             );
@@ -1993,14 +2029,15 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             refresh_now();
             assert_eq!(label_of(&Config::load(), "claude-work"), "Work (w@corp.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-work")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-work")).as_deref(),
                 Some("Work")
             );
         });
     }
 
     /// What the name prompt types stays as typed — trimmed — and goes
-    /// into the entry; nothing typed is no name at all.
+    /// into the account's `harnesses` entry; nothing typed is no name at
+    /// all, and no entry.
     #[test]
     fn an_added_account_keeps_the_name_as_typed() {
         let m = Machine::new("{}");
@@ -2020,30 +2057,28 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             add(&unnamed, false).unwrap();
             let saved: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&m.config).unwrap()).unwrap();
-            assert_eq!(saved["claude_accounts"][0]["name"], "Work Laptop");
-            assert!(saved["claude_accounts"][1].get("name").is_none(), "{saved}");
+            assert_eq!(
+                saved["harnesses"]["claude-work-laptop"]["label"],
+                "Work Laptop"
+            );
+            assert!(saved["claude_accounts"][0].get("name").is_none(), "{saved}");
+            assert!(saved["harnesses"].get(&unnamed.id).is_none(), "{saved}");
         });
     }
 
     /// A rename moves the name and nothing else: the id sessions point
-    /// back at and the dir the login lives in stay. The default account's
-    /// name is a `harnesses` label, gone with the delta when cleared; a
-    /// hand-written entry's is its label.
+    /// back at and the dir the login lives in stay. Every account's name
+    /// is its `harnesses` label, beside its model and effort, gone with
+    /// the delta when cleared.
     #[test]
     fn renaming_moves_only_the_name() {
         let m = Machine::new("{}");
         let two = m.home.path().join(".claude-2");
-        let b = m.home.path().join(".claude-b");
         config(
             &m,
             serde_json::json!({
                 "claude_accounts": [{"id": "claude-2", "config_dir": two.display().to_string()}],
-                "harnesses": {
-                    "claude-2": {"model_default": "opus"},
-                    "claude-b": {"label": "Claude B", "program": "claude", "hooks": "claude",
-                                 "resume_flag": "--resume",
-                                 "env": {"CLAUDE_CONFIG_DIR": b.display().to_string()}}
-                }
+                "harnesses": {"claude-2": {"model_default": "opus"}}
             }),
         );
         m.sign(".claude.json", Some("a@b.co"));
@@ -2057,24 +2092,20 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             let cfg = Config::load();
             let account = &cfg.claude_accounts[0];
             assert_eq!(
-                (
-                    account.id.as_str(),
-                    account.config_dir.clone(),
-                    account.name.as_str()
-                ),
-                ("claude-2", two.display().to_string(), "Work")
+                (account.id.as_str(), account.config_dir.clone()),
+                ("claude-2", two.display().to_string())
             );
             assert_eq!(current_name(&cfg, "claude-2"), "Work");
+            let over = &cfg.harnesses["claude-2"];
             assert_eq!(
-                cfg.harnesses["claude-2"].model_default.as_deref(),
-                Some("opus")
-            );
-            assert!(
-                cfg.harnesses["claude-2"].label.is_none(),
-                "the entry holds it"
+                (over.label.as_deref(), over.model_default.as_deref()),
+                (Some("Work"), Some("opus")),
+                "beside its model"
             );
             rename("claude-2", "").unwrap();
-            assert_eq!(Config::load().claude_accounts[0].name, "");
+            let cfg = Config::load();
+            assert_eq!(current_name(&cfg, "claude-2"), "");
+            assert_eq!(cfg.harnesses["claude-2"].label, None, "the model stays");
 
             // The default account.
             rename("claude", "Personal").unwrap();
@@ -2092,21 +2123,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             let cfg = Config::load();
             assert!(!cfg.harnesses.contains_key("claude"), "nothing left of it");
             assert_eq!(label_of(&cfg, "claude"), "Claude (a@b.co)");
-
-            // A hand-written one.
-            assert_eq!(current_name(&cfg, "claude-b"), "Claude B");
-            rename("claude-b", "Side").unwrap();
-            let cfg = Config::load();
-            assert_eq!(cfg.harnesses["claude-b"].label.as_deref(), Some("Side"));
-            assert!(
-                matches!(
-                    cfg.harnesses["claude-b"].env,
-                    orion_core::harness::Clearable::Set(_)
-                ),
-                "the rest of it kept"
-            );
-            rename("claude-b", "").unwrap();
-            assert_eq!(current_name(&Config::load(), "claude-b"), "");
 
             assert!(rename("codex", "X").is_err(), "no Claude account");
         });
@@ -2131,7 +2147,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             let cfg = Config::load();
             assert_eq!(label_of(&cfg, "claude-work"), "work (me@work.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-work")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-work")).as_deref(),
                 Some("work")
             );
 
@@ -2139,7 +2155,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert!(note.contains("stays on disk"), "{note}");
             refresh_now();
             let cfg = Config::load();
-            assert_eq!(short_name(AgentKind::Custom, Some("claude-work")), None);
+            assert_eq!(short_name(AgentKind::Claude, Some("claude-work")), None);
             assert_eq!(
                 dir_state(&home.join(".claude-work")),
                 Some(SignIn::As("me@work.co".into()))

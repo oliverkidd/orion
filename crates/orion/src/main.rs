@@ -24,7 +24,6 @@ fn main() -> Result<()> {
         Some(Command::Add { path }) => orion_tui::run_add_project(path),
         Some(Command::Config { command }) => orion_tui::run_config(match command {
             ConfigCommand::Path => orion_tui::ConfigOp::Path,
-            ConfigCommand::Harnesses => orion_tui::ConfigOp::Harnesses,
         }),
         Some(Command::Kill) => orion_tui::run_kill(),
         Some(Command::Rename { title, force }) => {

@@ -344,8 +344,13 @@ pub struct AgentPresetEditor {
     /// Index into the stored list when editing; None when creating.
     pub editing: Option<usize>,
     pub name: TextInput,
+    /// FOLLOW THE BOX (`AgentPreset::follow_box`): the Harness row's
+    /// first choice, and where a new preset starts. Off, `kind` and
+    /// `custom` are the harness it pins.
+    pub follow: bool,
     pub kind: AgentKind,
-    /// Registry id when `kind` is [`AgentKind::Custom`].
+    /// The registry id beside `kind`: a Claude account's, a custom
+    /// harness's.
     pub custom: Option<String>,
     pub model: String,
     pub effort: String,
@@ -384,6 +389,7 @@ impl AgentPresetEditor {
             quick: None,
             editing: None,
             name: TextInput::new(),
+            follow: true,
             kind: AgentKind::Claude,
             custom: None,
             model: crate::config::DEFAULT_CHOICE.into(),
@@ -419,6 +425,7 @@ impl AgentPresetEditor {
             quick: None,
             editing: Some(index),
             name: TextInput::with_text(preset.name.clone()),
+            follow: preset.follows_box(),
             kind: preset.kind,
             custom: preset.custom_harness.clone(),
             model: choice(&preset.model),
@@ -490,10 +497,15 @@ impl AgentPresetEditor {
             // Every offered harness by id — built-ins and customs alike,
             // in registry order. Never a bare `custom`, which carries no
             // entry.
-            PresetField::Kind => crate::config::Config::load()
-                .offered_harnesses()
-                .into_iter()
-                .map(|(kind, custom)| custom.unwrap_or_else(|| kind.as_str().to_string()))
+            PresetField::Kind => std::iter::once(crate::agent_presets::FOLLOW_BOX.to_string())
+                .chain(
+                    crate::config::Config::load()
+                        .offered_harnesses()
+                        .into_iter()
+                        .map(|(kind, custom)| {
+                            orion_core::harness::registry_id(kind, custom.as_deref()).to_string()
+                        }),
+                )
                 .collect(),
             PresetField::Model => crate::config::model_choices(self.kind, self.custom.as_deref()),
             PresetField::Effort => {
@@ -510,11 +522,7 @@ impl AgentPresetEditor {
 
     fn row_value(&self) -> String {
         match self.field {
-            PresetField::Kind => self
-                .custom
-                .as_deref()
-                .unwrap_or_else(|| self.kind.as_str())
-                .to_string(),
+            PresetField::Kind => self.harness_value(),
             PresetField::Model => self.model.clone(),
             PresetField::Effort => self.effort.clone(),
             PresetField::Text => self.text.as_str().to_string(),
@@ -523,17 +531,31 @@ impl AgentPresetEditor {
         }
     }
 
+    /// What the Harness row says: [`crate::agent_presets::FOLLOW_BOX`], or
+    /// the registry id of the harness the form pins.
+    pub fn harness_value(&self) -> String {
+        match self.follow {
+            true => crate::agent_presets::FOLLOW_BOX.to_string(),
+            false => orion_core::harness::registry_id(self.kind, self.custom.as_deref()).into(),
+        }
+    }
+
     fn set_row_value(&mut self, value: &str) {
         match self.field {
             PresetField::Kind => {
-                if let Some(kind) = AgentKind::parse(value) {
-                    self.set_kind(kind, None);
-                } else if crate::config::Config::load()
+                if value == crate::agent_presets::FOLLOW_BOX {
+                    // Saved on the default Claude account, the harness an
+                    // older release reads a following preset as.
+                    self.follow = true;
+                    self.set_kind(AgentKind::Claude, None);
+                } else if let Some(entry) = crate::config::Config::load()
                     .harness_registry()
                     .iter()
-                    .any(|entry| entry.id == value)
+                    .find(|entry| entry.id == value)
                 {
-                    self.set_kind(AgentKind::Custom, Some(value.to_string()));
+                    let (kind, custom) = entry.session_kind();
+                    self.follow = false;
+                    self.set_kind(kind, custom);
                 }
             }
             PresetField::Model => {
@@ -685,6 +707,7 @@ impl AgentPresetEditor {
             name: self.name.trim().to_string(),
             kind: self.kind,
             custom_harness: self.custom.clone(),
+            follow_box: Some(self.follow),
             model: crate::config::non_default(&self.model),
             effort: crate::config::non_default(&self.effort),
             prefix: side(self.text.has_prefix(), &self.prefix),
@@ -913,13 +936,7 @@ pub(crate) fn open_agent_preset_task(
         return;
     };
     if !crate::config::Config::load().preset_harness_usable(&preset) {
-        app.flash = Some(crate::flash::Flash::setup(format!(
-            "{} is turned off in Settings → Accounts",
-            preset
-                .custom_harness
-                .as_deref()
-                .unwrap_or(preset.kind.as_str())
-        )));
+        app.flash = Some(turned_off(&preset));
         return;
     }
     let skip = preset.skip_task;
@@ -930,14 +947,26 @@ pub(crate) fn open_agent_preset_task(
         Some(target @ QuickTarget::NewWorktree { .. }) => target,
         _ => QuickTarget::Worktree(view.worktree.clone()),
     };
-    let launch =
-        crate::quick_prompt::QuickLaunch::of_preset(target, preset, &crate::config::Config::load());
+    let launch = crate::quick_prompt::QuickLaunch::of_preset(
+        target,
+        preset,
+        None,
+        &crate::config::Config::load(),
+    );
     if skip {
         crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
     } else {
         let (launch, head, tail) = launch.inline_preset("", None);
         crate::quick_prompt::reopen_around(app, launch, &head, &tail);
     }
+}
+
+/// What the footer says of a preset whose harness can't launch.
+fn turned_off(preset: &AgentPreset) -> crate::flash::Flash {
+    crate::flash::Flash::setup(format!(
+        "{} is turned off in Settings → Accounts",
+        orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref())
+    ))
 }
 
 /// The picker's Enter: adopt the hovered AGENT PRESET — its harness,
@@ -960,13 +989,7 @@ fn apply_preset_to_quick_prompt(
     };
     let cfg = crate::config::Config::load();
     if !cfg.preset_harness_usable(&preset) {
-        app.flash = Some(crate::flash::Flash::setup(format!(
-            "{} is turned off in Settings → Accounts",
-            preset
-                .custom_harness
-                .as_deref()
-                .unwrap_or(preset.kind.as_str())
-        )));
+        app.flash = Some(turned_off(&preset));
         return;
     }
     if preset.skip_task && back.text.trim().is_empty() {
@@ -1007,12 +1030,17 @@ fn preset_on_box(
     preset: AgentPreset,
     cfg: &crate::config::Config,
 ) -> crate::quick_prompt::QuickLaunch {
-    crate::quick_prompt::QuickLaunch::of_preset(back.launch.target, preset, cfg)
-        .with_pr(back.launch.pr)
-        .with_linear(back.launch.linear)
-        .with_todo(back.launch.todo)
-        .with_mode(back.launch.mode, cfg)
-        .with_under(back.launch.under)
+    crate::quick_prompt::QuickLaunch::of_preset(
+        back.launch.target.clone(),
+        preset,
+        Some(&back.launch),
+        cfg,
+    )
+    .with_pr(back.launch.pr)
+    .with_linear(back.launch.linear)
+    .with_todo(back.launch.todo)
+    .with_mode(back.launch.mode, cfg)
+    .with_under(back.launch.under)
 }
 
 /// Keys in the AGENT PRESETS list. Letters type ahead over the names — so
@@ -1648,11 +1676,7 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
             }
             _ => {
                 let value = match field {
-                    PresetField::Kind => editor
-                        .custom
-                        .as_deref()
-                        .unwrap_or_else(|| editor.kind.as_str())
-                        .to_string(),
+                    PresetField::Kind => editor.harness_value(),
                     PresetField::Model => editor.model.clone(),
                     PresetField::Effort => editor.effort.clone(),
                     PresetField::Text => editor.text.as_str().to_string(),
@@ -1683,7 +1707,7 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
                 }
                 // A CLAUDE ACCOUNT's id says which dir, its email whose
                 // login: with more than one account, the row says both.
-                if *field == PresetField::Kind {
+                if *field == PresetField::Kind && !editor.follow {
                     if let Some(email) =
                         crate::claude_accounts::short_name(editor.kind, editor.custom.as_deref())
                     {
@@ -1864,6 +1888,7 @@ mod tests {
             name: "reviewer".into(),
             kind: AgentKind::Claude,
             custom_harness: None,
+            follow_box: None,
             model: None,
             effort: None,
             prefix: prefix.into(),
@@ -2038,7 +2063,7 @@ mod tests {
         // A choice row has nowhere to paste, and changes nothing.
         editor.field = PresetField::Kind;
         assert!(!editor.paste("codex"));
-        assert_eq!(editor.row_value(), "claude");
+        assert_eq!(editor.row_value(), crate::agent_presets::FOLLOW_BOX);
         assert_eq!(editor.error.as_ref(), Some(&error));
 
         // The first change to the name is the fix.

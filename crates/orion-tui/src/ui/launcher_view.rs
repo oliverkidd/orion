@@ -2237,9 +2237,9 @@ fn draw_list_empty(f: &mut Frame, app: &mut App, area: Rect, what: &str) {
 /// with more than one, the email it is signed in as: `a@b.co opus`.
 ///
 /// `cfg` is the frame's CONFIG.JSON slot, filled on the first entry that
-/// needs it: only a CUSTOM harness's label comes out of the file — an
-/// account's email is the last read's — so a grid of built-ins never
-/// opens it at all.
+/// needs it: only a row with a registry id — a custom harness, another
+/// Claude account — reads the file, and an account's email is the last
+/// read's, so a grid of built-ins never opens it at all.
 fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
     let short = crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref());
     let mut out = match short {
@@ -2248,7 +2248,7 @@ fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
             let cfg = cfg.get_or_insert_with(crate::config::Config::load);
             crate::agent_picker::session_harness_badge_in(a, cfg)
         }
-        None => a.kind.as_str().to_string(),
+        None => orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref()).to_string(),
     };
     if let Some(model) = a.model.as_deref().filter(|m| !m.is_empty()) {
         out.push(' ');
@@ -2277,13 +2277,15 @@ fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>
     out
 }
 
-/// Whether `a` runs on a CLAUDE ACCOUNT rather than a harness of its own:
-/// one with a short name, or a custom harness entry that is an account.
+/// Whether `a` runs on a CLAUDE ACCOUNT other than the default one rather
+/// than a harness of its own: one with a short name, a Claude row with
+/// an account's id, or a custom harness entry that is an account.
 fn is_claude_account(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> bool {
     if crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref()).is_some() {
         return true;
     }
     match (a.kind, a.custom_harness.as_deref()) {
+        (orion_core::AgentKind::Claude, Some(_)) => true,
         (orion_core::AgentKind::Custom, Some(id)) => cfg
             .get_or_insert_with(crate::config::Config::load)
             .effective_harness_by_id(id)
@@ -3269,6 +3271,7 @@ mod tests {
             name: name.into(),
             kind: orion_core::AgentKind::Claude,
             custom_harness: None,
+            follow_box: None,
             model: None,
             effort: None,
             prefix: String::new(),
@@ -3484,7 +3487,7 @@ mod tests {
                     crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
                 let launch = QuickLaunch::of_kind(
                     target,
-                    orion_core::AgentKind::Custom,
+                    orion_core::AgentKind::Claude,
                     Some("claude-2".into()),
                     None,
                     None,
@@ -4147,7 +4150,7 @@ mod tests {
             crate::config::with_config_path(config, || {
                 crate::claude_accounts::refresh_now();
                 let mut a = a_tree().tree.agents[0].clone();
-                a.kind = orion_core::AgentKind::Custom;
+                a.kind = orion_core::AgentKind::Claude;
                 a.custom_harness = Some("claude-2".into());
                 a.model = Some("opus".into());
                 a.effort = Some("high".into());
@@ -4187,7 +4190,7 @@ mod tests {
                 crate::claude_accounts::refresh_now();
                 let mut app = a_tree();
                 select(&mut app, "api");
-                app.tree.agents[0].kind = orion_core::AgentKind::Custom;
+                app.tree.agents[0].kind = orion_core::AgentKind::Claude;
                 app.tree.agents[0].custom_harness = Some("claude-2".into());
                 let body = Rect::new(0, 0, 100, 30);
                 let lines = drawn_lines(&mut app, body);

@@ -1007,10 +1007,7 @@ fn limited_harnesses(app: &App) -> BTreeSet<&str> {
                     .as_ref()
                     .is_some_and(|l| l.reason == orion_core::LimitReason::RateLimit)
         })
-        .filter_map(|a| match a.kind {
-            orion_core::AgentKind::Custom => a.custom_harness.as_deref(),
-            kind => Some(kind.as_str()),
-        })
+        .map(|a| orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref()))
         .collect()
 }
 
@@ -1619,6 +1616,67 @@ mod tests {
             },
         );
         assert!(app.usage.readings.is_empty());
+    }
+
+    /// Usage reads each Claude account on its own: a row per account, the
+    /// second one asked through its own config dir's keychain item, and a
+    /// session stopped at its limit on the second account — a Claude
+    /// session with the account beside — marks that one, never the
+    /// default.
+    #[test]
+    fn usage_reads_each_account_on_its_own() {
+        let cfg = Config {
+            claude_accounts: vec![orion_core::claude_account::ClaudeAccount {
+                id: "claude-2".into(),
+                config_dir: "/srv/claude-2".into(),
+                name: String::new(),
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        let listed = accounts(&cfg);
+        let claude: Vec<&Account> = listed
+            .iter()
+            .filter(|a| a.provider == Provider::Claude)
+            .collect();
+        let ids: Vec<&str> = claude.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["claude", "claude-2"]);
+        assert_eq!(
+            claude[1].keychain_dir.as_deref(),
+            Some(Path::new("/srv/claude-2"))
+        );
+        assert_ne!(
+            claude_service(claude[0].keychain_dir.as_deref()),
+            claude_service(claude[1].keychain_dir.as_deref()),
+            "a keychain item each"
+        );
+
+        let mut app = App::new();
+        app.tree.agents.push(orion_core::Agent {
+            id: orion_core::AgentId("a".into()),
+            worktree_id: orion_core::WorktreeId("w".into()),
+            name: "on two".into(),
+            status: orion_core::AgentStatus::NeedsFeedback,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: orion_core::AgentKind::Claude,
+            custom_harness: Some("claude-2".into()),
+            model: None,
+            effort: None,
+            session_id: Some("sid".into()),
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: true,
+            recent_prompts: Vec::new(),
+            usage_limit: Some(orion_core::UsageLimit {
+                reason: orion_core::LimitReason::RateLimit,
+                message: None,
+            }),
+        });
+        let limited = limited_harnesses(&app);
+        assert!(claude[1].limit_hit(&limited), "the second account's limit");
+        assert!(!claude[0].limit_hit(&limited), "never the default's");
     }
 
     #[test]

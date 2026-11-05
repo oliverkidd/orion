@@ -17,16 +17,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// What a preset that follows the box says where a harness goes: the
+/// editor's Harness row, the presets list's line.
+pub const FOLLOW_BOX: &str = "the box's agent";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPreset {
     /// The row's label; unique (case-insensitively) within the list.
     pub name: String,
-    /// The CLI the preset launches.
+    /// The CLI the preset launches when it pins one ([`Self::follows_box`]
+    /// false).
     #[serde(default)]
     pub kind: AgentKind,
-    /// Registry id when `kind` is [`AgentKind::Custom`].
+    /// The registry id beside `kind`: a Claude account's, or a custom
+    /// harness's.
     #[serde(default)]
     pub custom_harness: Option<String>,
+    /// FOLLOW THE BOX: the preset runs on the account and harness of the
+    /// box it is picked in — the `⌘N` default's when no box is up — rather
+    /// than the one `kind` names: what every new preset does, so a preset
+    /// moves with the account the user is on. `false` pins `kind`. Unset
+    /// only on an entry an older release wrote, which reads by
+    /// [`Self::follows_box`]'s rule until the next save writes it out.
+    #[serde(default)]
+    pub follow_box: Option<bool>,
     /// Launch model; None = follow the Settings → Accounts default.
     #[serde(default)]
     pub model: Option<String>,
@@ -112,6 +126,7 @@ impl SystemPreset {
             name: self.name().into(),
             kind: AgentKind::default(),
             custom_harness: None,
+            follow_box: Some(true),
             model,
             effort,
             prefix: String::new(),
@@ -153,12 +168,8 @@ pub fn ensure_system(presets: &mut Vec<AgentPreset>) -> bool {
 pub fn seed_system() {
     let mut presets = load();
     let mut cfg = crate::config::Config::load();
-    let review = SystemPreset::WeekReview;
-    let new_review = !presets
-        .iter()
-        .any(|p| p.system == Some(review) || p.name.trim().eq_ignore_ascii_case(review.name()));
     let added = ensure_system(&mut presets);
-    let moved = cfg.move_into_presets(&mut presets, new_review);
+    let moved = cfg.move_into_presets(&mut presets);
     if !added && !moved {
         return;
     }
@@ -186,6 +197,16 @@ pub fn system(which: SystemPreset) -> AgentPreset {
 }
 
 impl AgentPreset {
+    /// Whether the preset runs on the box's own account and harness
+    /// ([`Self::follow_box`]). An entry an older release wrote names a
+    /// harness and no more; one left on the default Claude account — where
+    /// every preset started, with nothing to say "follow" — follows, and
+    /// one put on anything else keeps it.
+    pub fn follows_box(&self) -> bool {
+        self.follow_box
+            .unwrap_or(self.kind == AgentKind::Claude && self.custom_harness.is_none())
+    }
+
     /// The preset with the text it sends: a SYSTEM PRESET whose list holds
     /// no text of the user's says orion's ([`SystemPreset::builtin_text`]),
     /// so it is never blank. Any other preset as it is.
@@ -214,9 +235,13 @@ impl AgentPreset {
 
     /// `claude · opus · high` / `codex · gpt-5.5` / `cursor` — the kind plus
     /// whichever of model and effort the preset pins; a CLAUDE ACCOUNT's
-    /// email in place of the kind on a machine with more than one.
+    /// email in place of the kind on a machine with more than one, and
+    /// [`FOLLOW_BOX`] for a preset that follows the box.
     pub fn spec_label(&self) -> String {
-        let harness = crate::quick_prompt::harness_name(self.kind, self.custom_harness.as_deref());
+        let harness = match self.follows_box() {
+            true => FOLLOW_BOX.to_string(),
+            false => crate::quick_prompt::harness_name(self.kind, self.custom_harness.as_deref()),
+        };
         let mut parts = vec![harness];
         parts.extend(self.model.iter().cloned());
         parts.extend(self.effort.iter().cloned());
@@ -357,7 +382,13 @@ pub(crate) fn store_path() -> PathBuf {
 }
 
 fn load_from(path: &Path) -> Vec<AgentPreset> {
-    orion_core::settings::read_list(path).0
+    let mut presets: Vec<AgentPreset> = orion_core::settings::read_list(path).0;
+    // An entry an older release wrote says nothing of following: settle
+    // it by the rule it reads by, so the next save writes it out once.
+    for preset in &mut presets {
+        preset.follow_box = Some(preset.follows_box());
+    }
+    presets
 }
 
 /// The `name` a raw preset entry carries, as the file spells it.
@@ -436,6 +467,7 @@ mod tests {
             name: name.into(),
             kind,
             custom_harness: None,
+            follow_box: Some(false),
             model: None,
             effort: None,
             prefix: String::new(),
@@ -715,5 +747,55 @@ mod tests {
             ..preset("p", AgentKind::Codex)
         };
         assert_eq!(model_only.spec_label(), "codex · gpt-5.5");
+        let following = AgentPreset {
+            follow_box: Some(true),
+            ..full
+        };
+        assert_eq!(
+            following.spec_label(),
+            format!("{FOLLOW_BOX} · opus · high")
+        );
+    }
+
+    /// FOLLOW THE BOX: every new preset follows; an entry an older release
+    /// wrote follows when it sat on the default Claude account — where
+    /// every preset started — and keeps any other harness it named, a
+    /// Claude account among them. Load settles it, and the next save
+    /// writes it out.
+    #[test]
+    fn a_preset_follows_the_box_unless_it_named_a_harness() {
+        assert!(SystemPreset::LinearTicket.default_preset().follows_box());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent_presets.json");
+        std::fs::write(
+            &path,
+            r#"[
+              {"name": "Linear Ticket", "kind": "claude", "custom_harness": null,
+               "prefix": "Plan it.", "system": "linear_ticket"},
+              {"name": "On riplo", "kind": "claude",
+               "custom_harness": "claude-engineering-riplo-ai"},
+              {"name": "On codex", "kind": "codex"},
+              {"name": "Old riplo", "kind": "custom",
+               "custom_harness": "claude-engineering-riplo-ai"}
+            ]"#,
+        )
+        .unwrap();
+        let presets = load_from(&path);
+        let follows: Vec<bool> = presets.iter().map(AgentPreset::follows_box).collect();
+        assert_eq!(follows, [true, false, false, false]);
+        save_to(&path, &presets).unwrap();
+        let saved: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let written: Vec<&Value> = saved.iter().map(|entry| &entry["follow_box"]).collect();
+        assert_eq!(
+            written,
+            [
+                &Value::Bool(true),
+                &Value::Bool(false),
+                &Value::Bool(false),
+                &Value::Bool(false)
+            ]
+        );
+        assert_eq!(load_from(&path), presets, "settled once");
     }
 }

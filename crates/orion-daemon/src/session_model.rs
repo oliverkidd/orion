@@ -230,7 +230,8 @@ impl Daemon {
     }
 
     /// Store `seen` (a switch just read from the transcript) as the row's
-    /// model when it names another. Built-in Claude rows only: a custom
+    /// model when it names another. Claude rows only — on every CLAUDE
+    /// ACCOUNT, each Claude's own row in another config dir: a custom
     /// harness's model list is its own, and `--model opus` would mean
     /// nothing to it. Returns whether the row changed.
     fn adopt_claude_model(&self, id: &AgentId, seen: &str) -> bool {
@@ -359,6 +360,12 @@ mod tests {
     }
 
     fn seeded_daemon(kind: AgentKind) -> (Arc<Daemon>, AgentId) {
+        seeded_daemon_on(kind, None)
+    }
+
+    /// [`seeded_daemon`] with the registry id beside the kind: a Claude
+    /// account's, or a custom harness's.
+    fn seeded_daemon_on(kind: AgentKind, custom: Option<&str>) -> (Arc<Daemon>, AgentId) {
         use crate::hooks::HookEnv;
         use crate::store::Store;
         use orion_core::{Agent, AgentStatus, Project, ProjectId, Worktree, WorktreeId};
@@ -393,7 +400,7 @@ mod tests {
                     archived_at: 0,
                     unseen: false,
                     kind,
-                    custom_harness: None,
+                    custom_harness: custom.map(str::to_string),
                     model: Some("sonnet".into()),
                     effort: Some("high".into()),
                     session_id: None,
@@ -506,9 +513,25 @@ mod tests {
         assert_eq!(model(&daemon).as_deref(), Some("fable"));
     }
 
+    /// `/model` on another Claude account lands on its row as it does on
+    /// the default account's: the account is Claude, in its own dir.
     #[test]
-    fn only_builtin_claude_rows_follow_the_transcript() {
-        let (daemon, id) = seeded_daemon(AgentKind::Custom);
+    fn a_claude_accounts_row_follows_its_transcript() {
+        let (daemon, id) = seeded_daemon_on(AgentKind::Claude, Some("claude-work"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sid.jsonl");
+        let mut offsets = TranscriptOffsets::new();
+        daemon.sync_transcript_models(vec![(id.clone(), path.clone())], &mut offsets);
+        write(&path, &[SWITCH_BACKTICKS]);
+        daemon.sync_transcript_models(vec![(id.clone(), path.clone())], &mut offsets);
+        let row = daemon.store.get_agent(&id).unwrap().unwrap();
+        assert_eq!(row.model.as_deref(), Some("opus[1m]"));
+        assert_eq!(row.custom_harness.as_deref(), Some("claude-work"));
+    }
+
+    #[test]
+    fn custom_harness_rows_never_follow_the_transcript() {
+        let (daemon, id) = seeded_daemon_on(AgentKind::Custom, Some("agy"));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sid.jsonl");
         let mut offsets = TranscriptOffsets::new();

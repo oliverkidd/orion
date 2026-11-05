@@ -98,8 +98,8 @@ pub(crate) struct CreateAgentSpec {
     pub worktree: WorktreeId,
     pub name: String,
     pub kind: AgentKind,
-    /// Registry id of the custom harness, when `kind` is
-    /// [`AgentKind::Custom`].
+    /// The registry id beside `kind`: the Claude account, or the custom
+    /// harness ([`orion_core::harness::registry_id`]).
     pub custom_harness: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -1219,6 +1219,9 @@ impl Daemon {
         // with its reason, and a deleted entry breaks respawns the same
         // way at boot.
         let harness = resolve_harness(kind, custom_harness.as_deref())?;
+        // The row is stored as what its harness is — a Claude account as
+        // Claude with the account's id — whatever the request called it.
+        let (kind, custom_harness) = harness.session_kind();
         let program = harness.program.trim().to_string();
         // A launch that hands the CLI a first prompt is working from the
         // moment it spawns, so the row says so now instead of staying gray
@@ -1239,9 +1242,11 @@ impl Daemon {
         // name, so the create feels instant. A starting prompt rides the
         // CLI's argv, and a spare already booted bare cannot be handed one;
         // neither can it be handed a PR rule.
-        // Nor can one booted in edit mode be handed plan or ask.
+        // Nor can one booted in edit mode be handed plan or ask, nor one
+        // booted on the default account a launch on another account.
         let adopted = (pr_url.is_none()
             && starting_prompt.is_none()
+            && custom_harness.is_none()
             && mode == orion_core::harness::AgentMode::Edit)
             .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
             .flatten();
@@ -1272,11 +1277,7 @@ impl Daemon {
             archived_at: 0,
             unseen: false,
             kind,
-            custom_harness: custom_harness
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string),
+            custom_harness,
             model,
             effort,
             session_id: None,
@@ -3330,14 +3331,11 @@ impl Daemon {
     /// orion know — the roots the resume safeguards look in: the transcript
     /// checked before `--resume`, the transcript a failed resume is judged
     /// by, the background job a resume would be refused over. One dir when
-    /// the harness's `env` pins `CLAUDE_CONFIG_DIR` (a second account, built
-    /// on Claude's dialect or built-in Claude itself), since the spawn
-    /// restates that after the profile; built-in Claude otherwise looks
-    /// wherever its hooks have reported and in this process's default
-    /// ([`Self::claude_projects_dirs`]). None for every other harness, and
-    /// for a Claude-dialect wrapper that sets `CLAUDE_CONFIG_DIR` itself:
-    /// its transcripts are where only it knows, so it resumes unguarded,
-    /// as it always has.
+    /// the harness's `env` pins `CLAUDE_CONFIG_DIR` (a second account, or
+    /// built-in Claude itself), since the spawn restates that after the
+    /// profile; built-in Claude otherwise looks wherever its hooks have
+    /// reported and in this process's default
+    /// ([`Self::claude_projects_dirs`]). None for every other harness.
     pub(crate) fn claude_projects_roots(
         &self,
         agent: &Agent,
@@ -4032,7 +4030,7 @@ fn resolve_harness_in(
     id: Option<&str>,
     all: &[orion_core::harness::HarnessDescriptor],
 ) -> Result<orion_core::harness::HarnessDescriptor> {
-    if kind == AgentKind::Custom && id.map(str::trim).filter(|id| !id.is_empty()).is_none() {
+    if orion_core::harness::registry_id(kind, id).is_empty() {
         bail!("custom harness launch is missing its registry id");
     }
     orion_core::harness::resolve(all, kind, id)
@@ -4401,22 +4399,16 @@ mod tests {
         );
     }
 
-    /// A `harnesses` map entry for an id no built-in holds: `over` with
-    /// `agy` as its program.
+    /// A `harnesses` map entry for an id no built-in holds — `agy`, a CLI
+    /// by the name of its program — carrying `over`.
     fn agy(
         over: orion_core::harness::HarnessOverride,
     ) -> std::collections::BTreeMap<String, orion_core::harness::HarnessOverride> {
-        std::collections::BTreeMap::from([(
-            "agy".to_string(),
-            orion_core::harness::HarnessOverride {
-                program: orion_core::harness::Clearable::Set("agy".into()),
-                ..over
-            },
-        )])
+        std::collections::BTreeMap::from([("agy".to_string(), over)])
     }
 
     #[test]
-    fn custom_spawn_uses_entry_program_and_model_flag() {
+    fn custom_spawn_runs_the_entrys_program_with_a_model_flag() {
         // A map-only entry launches with its own program and model flag; a
         // stored session id is ignored (fresh boot) and effort is dropped.
         let all = harness_registry_in(&agy(Default::default()), &[]);
@@ -4435,128 +4427,6 @@ mod tests {
         assert_eq!(program, "agy");
         assert_eq!(args, vec!["--model", "big-1", "do it"]);
         assert!(!resumed);
-        // A custom model flag spelling is honored verbatim.
-        let gemini = orion_core::harness::HarnessOverride {
-            model_flag: orion_core::harness::Clearable::Set("-m".into()),
-            ..Default::default()
-        };
-        let all = harness_registry_in(&agy(gemini), &[]);
-        let harness = test_custom_harness(&all, "agy");
-        let (_, args, _) = agent_spawn_command_with(
-            &harness,
-            None,
-            Some(Path::new(TEST_CWD)),
-            Some("flash"),
-            None,
-            None,
-            None,
-            None,
-            true,
-        );
-        assert_eq!(args, vec!["-m", "flash"]);
-    }
-
-    #[test]
-    fn custom_spawn_honors_map_deltas_for_resume_and_hooks() {
-        // A map entry gains a resume flag and an effort flag purely
-        // through config — no code change, no new shape.
-        use orion_core::harness::{Clearable, HarnessOverride};
-        let overrides = agy(HarnessOverride {
-            resume_flag: Clearable::Set("--resume".into()),
-            effort_flag: Clearable::Set("--effort".into()),
-            effort_offered: Some(true),
-            hooks: Clearable::Set("claude".into()),
-            ..HarnessOverride::default()
-        });
-        let all = harness_registry_in(&overrides, &[]);
-        let harness = test_custom_harness(&all, "agy");
-        assert_eq!(
-            harness.hook_dialect(),
-            Some(AgentKind::Claude),
-            "the dialect installs Claude hooks for a third-party CLI"
-        );
-        let (program, args, resumed) = agent_spawn_command_with(
-            &harness,
-            Some("sid-1"),
-            Some(Path::new(TEST_CWD)),
-            Some("big-1"),
-            Some("high"),
-            None,
-            Some("do it"),
-            None,
-            true,
-        );
-        assert_eq!(program, "agy");
-        assert_eq!(
-            args,
-            vec!["--resume", "sid-1", "--model", "big-1", "--effort", "high", "do it"]
-        );
-        assert!(resumed);
-    }
-
-    /// A third-party CLI with every row mapped — shaped like xAI's
-    /// `grok` (`--model`, an effort flag, `--resume <id>`, `--rules`
-    /// appending to the system prompt, trailing prompt) — spawns, resumes
-    /// and carries guidance with config alone.
-    #[test]
-    fn third_party_harness_with_all_rows_mapped_spawns_and_resumes() {
-        use orion_core::harness::{Clearable, HarnessOverride};
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(
-            "grok".into(),
-            HarnessOverride {
-                program: Clearable::Set("grok".into()),
-                model_flag: Clearable::Set("--model".into()),
-                effort_flag: Clearable::Set("--effort".into()),
-                effort_offered: Some(true),
-                resume_flag: Clearable::Set("--resume".into()),
-                system_append_flag: Clearable::Set("--rules".into()),
-                ..HarnessOverride::default()
-            },
-        );
-        let all = harness_registry_in(&overrides, &[]);
-        let grok = test_custom_harness(&all, "grok");
-        assert_eq!(grok.problem(), None);
-
-        // Fresh boot: model, effort, guidance and prompt in order, no
-        // permissions flag the entry never named.
-        let (program, args, resumed) = agent_spawn_command_with(
-            &grok,
-            None,
-            Some(Path::new(TEST_CWD)),
-            Some("grok-code"),
-            Some("high"),
-            None,
-            Some("fix auth"),
-            None,
-            true,
-        );
-        assert_eq!(program, "grok");
-        assert!(!resumed);
-        let mut expected = vec![
-            "--model".to_string(),
-            "grok-code".to_string(),
-            "--effort".to_string(),
-            "high".to_string(),
-        ];
-        expected.append(&mut guided("--rules", &[]));
-        expected.push("fix auth".into());
-        assert_eq!(args, expected);
-
-        // Resume: the stored id rides the mapped flag.
-        let (_, args, resumed) = agent_spawn_command_with(
-            &grok,
-            Some("sid-9"),
-            Some(Path::new(TEST_CWD)),
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-        );
-        assert!(resumed);
-        assert_eq!(args, vec!["--resume", "sid-9"]);
     }
 
     #[test]
@@ -4576,11 +4446,16 @@ mod tests {
         let err = resolve_harness_in(AgentKind::Custom, Some("gone"), &all).unwrap_err();
         assert!(err.to_string().contains("no longer defined"), "{err}");
         // A broken entry refuses with its reason, never launches.
-        let mut broken = agy(Default::default());
-        broken.get_mut("agy").unwrap().program = Clearable::Clear;
+        let broken = agy(HarnessOverride {
+            env: Clearable::Set(std::collections::BTreeMap::from([(
+                "MY-VAR".to_string(),
+                "x".to_string(),
+            )])),
+            ..HarnessOverride::default()
+        });
         let all = harness_registry_in(&broken, &[]);
         let err = resolve_harness_in(AgentKind::Custom, Some("agy"), &all).unwrap_err();
-        assert!(err.to_string().contains("no program"), "{err}");
+        assert!(err.to_string().contains("MY-VAR"), "{err}");
         // The usable entry resolves, disabled or not: a harness switched
         // off after its sessions were created keeps running them.
         let off = agy(HarnessOverride {
@@ -4608,7 +4483,8 @@ mod tests {
             enabled: true,
         };
         let all = harness_registry_in(&std::collections::BTreeMap::new(), &[account]);
-        let harness = resolve_harness_in(AgentKind::Custom, Some("claude-2"), &all).unwrap();
+        let harness = resolve_harness_in(AgentKind::Claude, Some("claude-2"), &all).unwrap();
+        assert_eq!(harness.id, "claude-2");
         assert_eq!(harness.program, "claude");
         assert_eq!(
             harness.launch_env(),
@@ -5278,6 +5154,7 @@ mod tests {
         );
         let mut wrapper = claude.clone();
         wrapper.id = "claude-b".into();
+        wrapper.kind = AgentKind::Custom;
         wrapper.program = "/home/me/bin/claude-b".into();
         let custom = agent(AgentKind::Custom, Some("claude-b"));
         assert_eq!(daemon.claude_projects_roots(&custom, &wrapper), None);
@@ -5287,6 +5164,18 @@ mod tests {
             .insert("CLAUDE_CONFIG_DIR".into(), "/home/me/.claude-b".into());
         assert_eq!(
             daemon.claude_projects_roots(&custom, &pinned),
+            Some(vec![PathBuf::from("/home/me/.claude-b/projects")])
+        );
+        // A Claude account: Claude with its id, in its own dir alone.
+        let account = orion_core::claude_account::ClaudeAccount {
+            id: "claude-b".into(),
+            config_dir: "/home/me/.claude-b".into(),
+            name: String::new(),
+            enabled: true,
+        }
+        .descriptor(&claude);
+        assert_eq!(
+            daemon.claude_projects_roots(&agent(AgentKind::Claude, Some("claude-b")), &account),
             Some(vec![PathBuf::from("/home/me/.claude-b/projects")])
         );
         let codex = orion_core::harness::builtin("codex").unwrap();

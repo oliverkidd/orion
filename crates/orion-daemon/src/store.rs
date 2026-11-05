@@ -263,8 +263,9 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE terminals ADD COLUMN run_command TEXT;
     ",
-    // 27: the custom harness registry id for `AgentKind::Custom` rows.
-    // Nullable: every built-in harness reads its kind column alone.
+    // 27: the custom harness registry id for `AgentKind::Custom` rows —
+    // and, since 32, the Claude account a `claude` row runs on. Nullable:
+    // every other built-in harness reads its kind column alone.
     "
     ALTER TABLE agents ADD COLUMN custom_harness TEXT;
     ",
@@ -366,6 +367,23 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE terminals ADD COLUMN setup INTEGER NOT NULL DEFAULT 0;
     ",
+    // 33: a Claude account is Claude with the account's id beside it, no
+    // longer a custom harness of that id. Each row on an account
+    // `claude_accounts` sets up (`temp.claude_account_ids`, seeded by
+    // `migrate()` from the config the caller read) is put on `claude`,
+    // its id kept in `custom_harness`, so it resumes in the same config
+    // dir and everything orion does for Claude covers it. A row on an id
+    // no account holds any more stays a custom row and refuses to boot
+    // with the reason, as it did. A `claude` row naming anything but an
+    // account (none was ever written) is made the default account's.
+    "
+    UPDATE agents SET kind = 'claude'
+      WHERE kind = 'custom'
+        AND custom_harness IN (SELECT id FROM temp.claude_account_ids);
+    UPDATE agents SET custom_harness = NULL
+      WHERE kind = 'claude' AND custom_harness IS NOT NULL
+        AND custom_harness NOT IN (SELECT id FROM temp.claude_account_ids);
+    ",
 ];
 
 pub struct Store {
@@ -383,7 +401,10 @@ pub type TreeRows = (Vec<Project>, Vec<Worktree>, Vec<Agent>, Vec<TerminalTab>);
 const PR_SEEN_KEEP_MS: i64 = 180 * 24 * 60 * 60 * 1000;
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self> {
+    /// Open (or create) the store at `path` and bring it up to date.
+    /// `claude_accounts` is every Claude account id `claude_accounts` in
+    /// config.json sets up: what migration 33 puts their rows on.
+    pub fn open(path: &Path, claude_accounts: &[String]) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -394,7 +415,7 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
         };
-        store.migrate()?;
+        store.migrate(claude_accounts)?;
         // Once per DAEMON start: the read marks nobody has moved in half a
         // year go. Best effort — a prune that failed is a few rows kept.
         if let Err(err) = store.prune_pr_seen(now_ms() - PR_SEEN_KEEP_MS) {
@@ -409,13 +430,22 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
         };
-        store.migrate()?;
+        store.migrate(&[])?;
         Ok(store)
     }
 
-    fn migrate(&self) -> Result<()> {
+    fn migrate(&self, claude_accounts: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // What migration 33 reads, which only the config knows: the ids
+        // of the Claude accounts set up. Gone again with the window.
+        conn.execute_batch("CREATE TEMP TABLE claude_account_ids (id TEXT PRIMARY KEY);")?;
+        for id in claude_accounts {
+            conn.execute(
+                "INSERT OR IGNORE INTO temp.claude_account_ids (id) VALUES (?1)",
+                params![id],
+            )?;
+        }
         // Rebuild-style migrations DROP a parent table (14 rebuilds
         // projects); with enforcement on, the DROP's implicit delete would
         // cascade into every child table. Standard SQLite rebuild procedure:
@@ -430,6 +460,7 @@ impl Store {
             ))
             .with_context(|| format!("migration {}", i + 1))?;
         }
+        conn.execute_batch("DROP TABLE temp.claude_account_ids;")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(())
     }
@@ -1520,7 +1551,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         // The project survived the walk; neither the original table name nor
         // the renamed one is left behind.
         assert_eq!(store.load_tree().unwrap().0.len(), 1);
@@ -1567,7 +1598,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         assert_eq!(store.agent_pr_url(&AgentId("a1".into())).unwrap(), None);
         // …and the later columns arrive NULL too (23: claude_title,
         // 24: recent_prompts — read as the empty history).
@@ -1618,7 +1649,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         let (projects, _, _, _) = store.load_tree().unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "p");
@@ -1654,7 +1685,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         let (projects, _, _, _) = store.load_tree().unwrap();
         assert_eq!(
             projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
@@ -1706,7 +1737,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         let (projects, worktrees, agents, _) = store.load_tree().unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(worktrees.len(), 1, "worktrees must survive the rebuild");
@@ -1809,7 +1840,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         let (projects, worktrees, agents, terminals) = store.load_tree().unwrap();
         // One `site`, the older row; the list reads workspace by workspace
         // (work's api then site, then video's film), renumbered from 0.
@@ -1892,11 +1923,109 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         let cloud = store.get_agent(&AgentId("cloud".into())).unwrap().unwrap();
         assert!(cloud.archived && cloud.archived_at > 0 && !cloud.unseen);
         let local = store.get_agent(&AgentId("local".into())).unwrap().unwrap();
         assert!(!local.archived && local.unseen);
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    /// A Claude account is Claude with its id beside: a store shaped like
+    /// one an account ran on — built at the release before (29), with
+    /// rows on the default account, on the account, archived and live, on
+    /// a `harnesses` map CLI and on an account since removed — comes back
+    /// with every row on a set-up account on `claude` under the same id,
+    /// archive state and session id kept, and nothing else changed. Opened
+    /// again, it stays as it is.
+    #[test]
+    fn migration_32_puts_account_rows_on_claude_with_their_id() {
+        let path = std::env::temp_dir().join(format!("orion-mig32-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            for (i, migration) in MIGRATIONS.iter().take(29).enumerate() {
+                conn.execute_batch(&format!(
+                    "BEGIN; {migration}; PRAGMA user_version = {}; COMMIT;",
+                    i + 1
+                ))
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, repo_path, sort_order, created_at)
+                   VALUES ('p1', 'p', '/tmp/p', 0, 0);
+                 INSERT INTO worktrees (id, project_id, path, branch, is_main, sort_order, created_at)
+                   VALUES ('w1', 'p1', '/tmp/p', 'main', 1, 0, 0);
+                 INSERT INTO agents (id, worktree_id, name, created_at, kind, custom_harness,
+                                     archived, archived_at, claude_session_id, model, effort)
+                   VALUES ('personal', 'w1', 'on the default', 0, 'claude', NULL, 0, 0, 's-1', 'opus', 'xhigh'),
+                          ('old', 'w1', 'archived default', 0, 'claude', NULL, 1, 7, 's-2', NULL, NULL),
+                          ('riplo', 'w1', 'on riplo', 0, 'custom', 'claude-engineering-riplo-ai', 0, 0, 's-3', 'opus', 'medium'),
+                          ('riplo-old', 'w1', 'archived riplo', 0, 'custom', 'claude-engineering-riplo-ai', 1, 9, 's-4', NULL, NULL),
+                          ('agy', 'w1', 'on agy', 0, 'custom', 'agy', 0, 0, NULL, NULL, NULL),
+                          ('gone', 'w1', 'on a removed account', 0, 'custom', 'claude-gone', 0, 0, 's-5', NULL, NULL),
+                          ('codex', 'w1', 'on codex', 0, 'codex', NULL, 0, 0, 's-6', NULL, NULL);",
+            )
+            .unwrap();
+        }
+
+        let accounts = ["claude-engineering-riplo-ai".to_string()];
+        let check = |store: &Store| {
+            let agent = |id: &str| store.get_agent(&AgentId(id.into())).unwrap().unwrap();
+            let on = |id: &str| {
+                let a = agent(id);
+                (a.kind, a.custom_harness, a.archived, a.session_id)
+            };
+            let riplo = Some("claude-engineering-riplo-ai".to_string());
+            assert_eq!(
+                on("riplo"),
+                (AgentKind::Claude, riplo.clone(), false, Some("s-3".into()))
+            );
+            assert_eq!(
+                (agent("riplo").model, agent("riplo").effort),
+                (Some("opus".into()), Some("medium".into()))
+            );
+            assert_eq!(
+                on("riplo-old"),
+                (AgentKind::Claude, riplo, true, Some("s-4".into()))
+            );
+            assert_eq!(agent("riplo-old").archived_at, 9);
+            assert_eq!(
+                on("personal"),
+                (AgentKind::Claude, None, false, Some("s-1".into()))
+            );
+            assert_eq!(
+                on("old"),
+                (AgentKind::Claude, None, true, Some("s-2".into()))
+            );
+            assert_eq!(
+                on("agy"),
+                (AgentKind::Custom, Some("agy".into()), false, None)
+            );
+            assert_eq!(
+                on("gone"),
+                (
+                    AgentKind::Custom,
+                    Some("claude-gone".into()),
+                    false,
+                    Some("s-5".into())
+                ),
+                "no account holds it now: it stays what it was"
+            );
+            assert_eq!(
+                on("codex"),
+                (AgentKind::Codex, None, false, Some("s-6".into()))
+            );
+        };
+        let store = Store::open(&path, &accounts).unwrap();
+        check(&store);
+        drop(store);
+        let store = Store::open(&path, &[]).unwrap();
+        check(&store);
         drop(store);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
@@ -1933,7 +2062,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = Store::open(&path).unwrap();
+        let store = Store::open(&path, &[]).unwrap();
         let agent = |id: &str| store.get_agent(&AgentId(id.into())).unwrap().unwrap();
         let pi = agent("pi");
         assert_eq!(pi.kind, AgentKind::Custom);
@@ -2345,16 +2474,16 @@ mod tests {
             })
             .unwrap();
         store
-            .set_agent_harness(&id, AgentKind::Custom, Some("claude-b"), Some("opus"), None)
+            .set_agent_harness(&id, AgentKind::Claude, Some("claude-b"), Some("opus"), None)
             .unwrap();
         let moved = store.get_agent(&id).unwrap().unwrap();
-        assert_eq!(moved.kind, AgentKind::Custom);
+        assert_eq!(moved.kind, AgentKind::Claude);
         assert_eq!(moved.custom_harness.as_deref(), Some("claude-b"));
         assert_eq!(moved.model.as_deref(), Some("opus"));
         assert_eq!(moved.effort, None);
         assert_eq!(moved.name, "Fix Login");
         assert_eq!(moved.session_id.as_deref(), Some("sid"));
-        // And back: a built-in carries no registry id.
+        // And back: the default account carries no id.
         store
             .set_agent_harness(&id, AgentKind::Claude, None, None, None)
             .unwrap();

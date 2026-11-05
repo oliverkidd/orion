@@ -62,9 +62,10 @@ pub enum AgentKind {
     /// its positional is the project path, and a session resumes by
     /// `--session <id>`.
     OpenCode,
-    /// A harness the `harnesses` map adds, or a Claude account: the
-    /// registry id travels beside the session (see `Agent::custom_harness`),
-    /// never in this variant. Launches as its registry entry describes.
+    /// A harness the `harnesses` map adds: the registry id travels beside
+    /// the session (see `Agent::custom_harness`), never in this variant.
+    /// Launches as its registry entry describes. A Claude account is no
+    /// custom harness: it is [`AgentKind::Claude`] with the account's id.
     Custom,
 }
 
@@ -186,9 +187,11 @@ pub struct Agent {
     pub status_changed_at: i64,
     #[serde(default)]
     pub kind: AgentKind,
-    /// Registry id of the custom harness, when `kind` is
-    /// [`AgentKind::Custom`]. Persisted beside the row so respawns find
-    /// the same entry; None for every built-in harness.
+    /// The registry id beside `kind`: the CLAUDE ACCOUNT a
+    /// [`AgentKind::Claude`] row runs on (None for the default account),
+    /// or the `harnesses` map entry of an [`AgentKind::Custom`] one.
+    /// Persisted beside the row so respawns find the same entry; None for
+    /// every other built-in harness. See [`crate::harness::registry_id`].
     #[serde(default)]
     pub custom_harness: Option<String>,
     /// Model the CLI is launched with (claude `--model` / codex `-m`);

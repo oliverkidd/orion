@@ -74,9 +74,6 @@ orion open <file>…       # show the files in this orion's FILE TABS — a moda
 ```sh
 orion config path              # where config.json, config.local.json, agent_presets.json and
                                 # ssh_hosts.json live
-orion config harnesses         # print the effective harness registry: every harness with
-                                # the program, flags, resume shape, hook dialect and defaults a
-                                # launch uses. Copy a row into config.json `harnesses` to override it
 ```
 
 See [Configuration](configuration.md#backup-restore-and-other-machines).

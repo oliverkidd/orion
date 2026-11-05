@@ -4329,7 +4329,7 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     let launch = if ticket != untouched {
         ticket.prefix.clear();
         ticket.postfix.clear();
-        QuickLaunch::of_preset(target, ticket, &cfg)
+        QuickLaunch::of_preset(target, ticket, None, &cfg)
     } else {
         QuickLaunch::from_config(target, &cfg)
     };

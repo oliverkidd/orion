@@ -18,12 +18,12 @@ switched off on the settings overlay's Accounts tab and drops out of the menu en
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
 ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). The menu
 lists only enabled harnesses whose CLI is found on PATH (the daemon still
-checks through the login shell at launch). Your own CLIs join the menu too: add them to config.json
-`harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
-own labels, each toggled in its own section on the Accounts tab, with the session card wearing the
-entry's label as its badge. An entry with only a `program` launches with it and a `--model` flag,
-boots fresh every time (no resume mapping), and — unless it names a built-in hook dialect — stays
-process-based: working while the PTY is live, done when it ends, never needing you. `→` on any row drills
+checks through the login shell at launch). Your own CLIs join the menu too: add one to config.json
+`harnesses` by the name of its program (see [Configuration](configuration.md#the-harness-registry))
+and it appears after the built-ins under its own label, toggled in its own section on the Accounts
+tab, with the session card wearing the entry's label as its badge. It launches with a `--model`
+flag, boots fresh every time (no resume), and stays process-based: working while the PTY is live,
+done when it ends, never needing you. `→` on any row drills
 into model and reasoning-effort submenus (Cursor's model is a family such as `claude-opus-5-thinking`, and
 its effort list follows the family, `-fast` variants included — `cursor-agent --list-models` bakes both
 into the id, so orion launches `--model claude-opus-5-thinking-high-fast`; the list is a built-in seed
@@ -45,8 +45,7 @@ is spawned with no permission flag at all and keeps its normal prompts — it st
 things it is configured to ask about. Codex is spawned with `--yolo` and Cursor with `--force`, so
 **neither of those two ever stops to ask**: they edit files and run commands on their own judgment for
 the life of the SESSION, and nothing in the picker or the settings overlay softens that. OpenCode keeps its own permission prompts: orion passes no `--auto`, so it
-stops and asks like Claude does, and a `permissions_flag` of `--auto` in its `harnesses` entry is how you
-opt out of that. Grok Build keeps its own prompts too — orion passes no `--always-approve` — but
+stops and asks like Claude does. Grok Build keeps its own prompts too — orion passes no `--always-approve` — but
 unlike those two it has no hook that says it is asking (below). Pick the
 harness with that in mind, especially in the ROOT WORKTREE.
 
@@ -100,9 +99,16 @@ and `Enter` launches it at once, no box at all; the list marks those rows `no ta
 picked with `Shift+Tab` in a quick prompt launches the same way when
 the box is still empty, while text you already typed stays yours to send. The row it creates is an
 ordinary session: it names itself on that first turn, resumes, and shows status like any other. Presets
-live in `agent_presets.json` beside `config.json`. The form's Harness row lists custom registry entries
-by id alongside the built-ins — a preset on one launches with the entry's program and defaults, and
-refuses with the reason when its entry is switched off or gone.
+live in `agent_presets.json` beside `config.json`.
+
+A preset FOLLOWS THE BOX unless it pins a harness: the form's Harness row starts on **the box's
+agent**, so picked in a quick prompt the preset runs on the account and harness that box is on —
+another Claude account stays on it — at the box's model and effort, taking only the model or
+effort the preset pins that the harness offers; launched with no box up, it starts where `⌘N`
+does. Pin a harness on the same row — the built-ins, each Claude account, custom registry entries
+by id — and the preset launches that, refusing with the reason when it is switched off or gone. A
+preset an older release saved on the default Claude account, which every preset started on, follows
+the box from now on; one saved on any other harness or account keeps it.
 
 Three presets are **system presets**, on every list and marked `system` — the agents orion starts
 itself:
@@ -113,14 +119,16 @@ itself:
   listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the
   e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push;
   watch the PR until it is green and go round again.
-- **Linear Ticket** is what a Linear launch sends — with its harness, model and effort once its text
-  is yours — unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
+- **Linear Ticket** is what a Linear launch sends — following the box like any preset, so the
+  launch starts on your `⌘N` account, at the model and effort it pins once its text is yours —
+  unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
   `{issues}` gets them between its prefix and postfix. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
 - **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
-  medium unless you change them. An account that is off falls back to your default agent's.
+  medium unless you change them. Following the box, it is written through your default agent's
+  account; an account it pins that is off falls back to that.
 
 A system preset always holds text: its editor opens on orion's text, and saving it unchanged, or
 cleared, keeps nothing of yours, so it says orion's text from then on — including a better one a
@@ -128,8 +136,8 @@ later release ships. Its text, harness, model and effort can be edited like any 
 be deleted or renamed. A list from before they existed keeps a preset you had already named `PR
 autofix`, `Linear Ticket` or `Week review`, text and all, as that system preset. The settings older
 releases kept for these agents in `config.json` — `autofix_model`, `autofix_effort`,
-`review_account`, `review_model`, `review_effort` — move onto them once, the review's account as it
-resolved then, and leave the file.
+`review_account`, `review_model`, `review_effort` — move onto them once, an account the old key
+named pinned as it resolved then, and leave the file.
 
 In the PULL REQUESTS MODAL (`v`), `Shift+Tab` on a pull request is a
 picker instead of the manager: the preset you pick launches a PR SESSION on that pull request. The
@@ -276,8 +284,10 @@ name you gave it and the email it is signed in as, `Work (you@example.com)` — 
 without moving its sessions or its dir. On a machine with more than one a card says which its
 session runs on by that name, else that email (`Work opus high`), where it would say `claude`. A
 removed account's dir stays, unless you send it to the Trash, for an account added by the same name
-to take back. See [Configuration](configuration.md#claude-accounts) for the
-`claude_accounts` entry behind it, signing in and out, renaming and removing one.
+to take back. A session on any account is a Claude session — the same hooks, model sync, title sync
+and resume — that keeps to its own account's config dir. See
+[Configuration](configuration.md#claude-accounts) for the `claude_accounts` entry behind it,
+signing in and out, renaming and removing one.
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the
 browser sign-in approves whichever account the browser is signed in to, so it is easy to end up
