@@ -2,12 +2,11 @@
 //! them readable across releases.
 //!
 //! Settings come in two layers, merged key by key: `config.json`, the
-//! portable file — what a backup or `orion ssh` carries to another machine,
-//! and what `ORION_CONFIG_FILE` can move into a dotfiles checkout — and
+//! portable file — what a backup copies to another machine, and what
+//! `ORION_CONFIG_FILE` can move into a dotfiles checkout — and
 //! `config.local.json` beside the database, for what only makes sense on
-//! this machine. The local layer wins, and is never exported, forwarded or
-//! overwritten by an import. The TUI's `Config` and the daemon's each
-//! deserialize their own fields out of the merged object.
+//! this machine. The local layer wins. The TUI's `Config` and the daemon's
+//! each deserialize their own fields out of the merged object.
 //!
 //! Two orion releases routinely share these files: a remote a few versions
 //! behind the machine that sshes into it, a backup restored into a newer
