@@ -4686,14 +4686,15 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 // ---- Linear HTTP (key never on argv) ----
 
 /// What each listed issue is read with: the row and its meta line, the
-/// reading pane, its team's workflow states for `⌘S`, and the pull
-/// requests attached to it for the work column — the same fields whoever's
-/// issues are asked for.
+/// reading pane, its team's id — whose workflow states for `⌘S` are read
+/// once, under `teams` ([`lists_query`]) — and the pull requests attached
+/// to it for the work column — the same fields whoever's issues are asked
+/// for.
 const ISSUE_FIELDS: &str =
     "id identifier title url description priority createdAt updatedAt completedAt \
     state { name type color position } labels { nodes { name color } } project { name color } \
     assignee { id displayName } creator { displayName } externalUserCreator { name } \
-    team { id states { nodes { id name type position color } } } \
+    team { id } \
     attachments(first: 25) { nodes { url metadata } pageInfo { hasNextPage } }";
 
 /// How many of the configured user's issues one ask lists.
@@ -4701,6 +4702,9 @@ const MINE_LIMIT: usize = 100;
 /// How many of the rest of their teams' — Linear's most a page holds, the
 /// most recently touched first.
 pub const OTHERS_LIMIT: usize = 250;
+
+/// A team's workflow states, as [`parse_states`] reads them.
+const TEAM_STATES: &str = "states { nodes { id name type position color } }";
 
 /// How many of the configured user's teams `⌘I` knows the members of,
 /// and how many of each: an issue in a team past that is still theirs or
@@ -4731,7 +4735,9 @@ fn done_states() -> String {
 /// someone — and `others`, open issues in that person's teams assigned to
 /// someone else or to nobody; then `mineDone` and `othersDone`, the same
 /// two cut to the issues done lately ([`done_states`]). With them `me`,
-/// who that person is, and their `teams`' members: who `⌘I` assigns to.
+/// who that person is, and their `teams`: each one's members, who `⌘I`
+/// assigns to, and its workflow states, where `⌘S` moves an issue — read
+/// once per team, not once per issue.
 async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let (query, variables) = lists_query(email);
@@ -4783,7 +4789,7 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
           }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
           {me_field}
           teams(first: {TEAMS_LIMIT}, filter: {{ members: {{ some: {{ {me} }} }} }}) {{
-            nodes {{ id members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} }}
+            nodes {{ id members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} {TEAM_STATES} }}
           }}
         }}"#
     );
@@ -4894,15 +4900,12 @@ fn issue_nodes(json: &serde_json::Value) -> Option<Vec<(&serde_json::Value, bool
     Some(nodes)
 }
 
-/// Each team's workflow states, from the issues' `team` fields, in
-/// Linear's `position` order.
+/// Each team's workflow states, from the answer's `teams`, in Linear's
+/// `position` order.
 fn parse_states(json: &serde_json::Value) -> HashMap<String, Vec<LinearState>> {
     let mut out: HashMap<String, Vec<LinearState>> = HashMap::new();
-    for team in issue_nodes(json)
-        .into_iter()
-        .flatten()
-        .filter_map(|(n, _)| n.get("team"))
-    {
+    let teams = json.pointer("/data/teams/nodes").and_then(|v| v.as_array());
+    for team in teams.into_iter().flatten() {
         let Some(id) = team.get("id").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -5557,19 +5560,22 @@ pub(crate) mod tests {
         }
     }
 
-    /// The teams' states ride the issue list, in Linear's order; `⌘S`
-    /// lists them on the issue's own state, Enter moves the issue there —
-    /// the row says so before Linear answers, and a refusal puts it back.
+    /// The teams' states ride the issue list once a team, in Linear's
+    /// order; `⌘S` lists them on the issue's own state, Enter moves the
+    /// issue there — the row says so before Linear answers, and a refusal
+    /// puts it back.
     #[test]
     fn ctrl_s_moves_an_issue_to_another_state() {
         let json = serde_json::json!({"data": {"mine": {"nodes": [
             {"id": "1", "identifier": "ENG-12", "title": "Login", "url": "https://linear.app/x/issue/ENG-12",
              "state": {"name": "In Progress", "type": "started"},
-             "team": {"id": "t1", "states": {"nodes": [
+             "team": {"id": "t1"}}
+        ]}, "teams": {"nodes": [
+            {"id": "t1", "members": {"nodes": []}, "states": {"nodes": [
                 {"id": "s3", "name": "Done", "type": "completed", "position": 3.0},
                 {"id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0},
                 {"id": "s2", "name": "In Progress", "type": "started", "position": 2.0}
-             ]}}}
+            ]}}
         ]}}});
         let issues = parse_issues(&json).unwrap();
         assert_eq!(issues[0].team_id, "t1");
@@ -6858,6 +6864,10 @@ pub(crate) mod tests {
             ),
             "{query}"
         );
+        // Each team's states once, under `teams` — never on every issue.
+        assert_eq!(query.matches(TEAM_STATES).count(), 1, "{query}");
+        assert!(ISSUE_FIELDS.contains("team { id }"), "{ISSUE_FIELDS}");
+        assert!(!ISSUE_FIELDS.contains("states"), "{ISSUE_FIELDS}");
         assert_eq!(vars, serde_json::json!({}));
         let (query, vars) = lists_query("sam@x.co");
         assert!(query.starts_with("query($email: String!)"), "{query}");
