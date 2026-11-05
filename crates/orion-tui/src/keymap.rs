@@ -182,9 +182,9 @@ pub enum Action {
     FindFile,
     Grep,
     TreeBrowser,
-    /// `⌘S`: the SKILLS BROWSER — every agent skill on the machine, read,
-    /// edited and moved to the Trash.
-    Skills,
+    /// **Open skills folder**: Claude Code's skills folder in the TREE
+    /// BROWSER. The COMMAND PALETTE's alone — no key.
+    OpenSkillsFolder,
     // terminal
     UnlockTerminal,
     /// `⌘U` in an agent's LOCKED PANE: the saved AGENT PRESETS as a picker,
@@ -845,13 +845,13 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["cmd+b", "ctrl+b"],
     },
     ActionSpec {
-        action: Action::Skills,
-        id: "skills",
-        label: "Skills",
-        hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^W moves it to the Trash",
+        action: Action::OpenSkillsFolder,
+        id: "skills_folder",
+        label: "Open skills folder",
+        hint: "Your Claude Code skills (~/.claude/skills) in the file tree browser",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["cmd+s", "ctrl+s"],
+        defaults: &[],
     },
     // ---- TERMINAL ----
     ActionSpec {

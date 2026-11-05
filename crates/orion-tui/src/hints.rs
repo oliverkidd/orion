@@ -589,8 +589,6 @@ mod tests {
         };
         let newline = crate::ui::task_keys::NEWLINE;
 
-        assert_hints_from(&crate::skills::hints("micro"), crate::skills::keys::ALL);
-
         let mut issues = crate::issues::IssuesView::new(project(), "p".into(), "/tmp/p".into());
         assert_hints_from(&crate::issues::hints(&issues), crate::issues::keys::ALL);
         issues.query.insert_str("x");

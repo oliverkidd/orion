@@ -35,7 +35,6 @@ const CTRL_N: &[u8] = &[0x0e];
 const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
 const CTRL_A: &[u8] = &[0x01];
-const CTRL_W: &[u8] = &[0x17];
 const CTRL_G: &[u8] = &[0x07];
 const CTRL_F: &[u8] = &[0x06];
 /// `⌘U` as Ghostty's kitty protocol spells it.
@@ -989,91 +988,6 @@ fn tui_branch_switcher_moves_the_root_checkout() {
         "{}",
         String::from_utf8_lossy(&stashes.stdout)
     );
-}
-
-/// A skill folder: `<root>/<name>/SKILL.md`, its frontmatter and a body.
-fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
-    let dir = root.join(name);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("SKILL.md"),
-        format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"),
-    )
-    .unwrap();
-}
-
-/// The SKILLS BROWSER over a home of the test's own: `^S` lists the user's
-/// skills and the checkout's — the user's folder reached through a
-/// symlink, as `~/.claude/skills` → `~/.cursor/skills` is on a Mac set up
-/// for both, and listed once — typing narrows them by description, the
-/// page reads the one under the cursor, `^w` moves one to that home's
-/// Trash behind a confirm, and Esc closes the browser.
-#[test]
-fn tui_skills_browser_lists_filters_reads_and_trashes() {
-    let home = tempfile::tempdir().unwrap();
-    let cursor_skills = home.path().join(".cursor/skills");
-    std::fs::create_dir_all(&cursor_skills).unwrap();
-    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
-    std::os::unix::fs::symlink(&cursor_skills, home.path().join(".claude/skills")).unwrap();
-    write_skill(
-        &cursor_skills,
-        "release-notes",
-        "Writes the changelog from merged pull requests",
-        "# Release notes\n\nGroup the merged pull requests by label.",
-    );
-    write_skill(&cursor_skills, "simplify", "Cleans up a diff", "# Simplify");
-    let mut tui = TuiHarness::spawn_with_env(&[
-        ("HOME", home.path().display().to_string()),
-        ("CLAUDE_CONFIG_DIR", String::new()),
-        ("CODEX_HOME", String::new()),
-        ("XDG_DATA_HOME", String::new()),
-    ]);
-    let repo = tui.make_repo("skills-proj");
-    write_skill(
-        &repo.join(".claude/skills"),
-        "deploy",
-        "Ships the app to staging",
-        "# Deploy",
-    );
-
-    tui.wait_for_text("to begin");
-    add_project(&mut tui, &repo, "skills-proj");
-
-    // Three, not five: `.claude/skills` and `.cursor/skills` are one folder.
-    tui.send(CTRL_S);
-    tui.wait_for_text("Skills — skills-proj (3)");
-    tui.wait_for_selected("release-notes");
-    tui.wait_for_text("simplify");
-
-    // ---- a description narrows the list; the page follows the cursor ----
-    tui.type_str("staging");
-    tui.wait_for_text("Skills — skills-proj (1/3)");
-    tui.wait_for_selected("deploy");
-    tui.wait_for_text("Ships the app to staging");
-    tui.wait_for_text("project · ");
-    tui.send(CTRL_U);
-    tui.type_str("changelog");
-    tui.wait_for_selected("release-notes");
-    tui.wait_for_text("Group the merged pull requests by label.");
-    tui.wait_for_gone("deploy");
-
-    // ---- ^w asks, naming the folder; yes moves it to the Trash ----
-    tui.send(CTRL_U);
-    tui.wait_for_text("Skills — skills-proj (3)");
-    tui.send(CTRL_W);
-    tui.wait_for_text("Move the skill 'release-notes' to the Trash?");
-    tui.send(ENTER);
-    tui.wait_for_text("Skills — skills-proj (2)");
-    let trashed = if cfg!(target_os = "macos") {
-        home.path().join(".Trash/release-notes")
-    } else {
-        home.path().join(".local/share/Trash/files/release-notes")
-    };
-    assert!(trashed.join("SKILL.md").is_file(), "in the Trash, whole");
-    assert!(!cursor_skills.join("release-notes").exists());
-
-    tui.send(ESC); // closes, filter and all
-    tui.wait_for_gone("Skills — skills-proj");
 }
 
 /// An SGR mouse report as the terminal would send it: `button` (0 = left,

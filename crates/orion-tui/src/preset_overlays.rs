@@ -1305,7 +1305,7 @@ pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const LAUNCH: Key = Key::new(&["enter"], "launch");
-    pub const NEW: Key = crate::skills::keys::NEW;
+    pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new");
     pub const EDIT: Key = crate::issues::keys::EDIT;
     /// Every modal's remove verb: it asks first.
     pub const DELETE: Key = Key::new(&["cmd+w", "ctrl+w"], "delete");

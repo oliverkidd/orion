@@ -3565,9 +3565,9 @@ fn handle_vim_event(app: &mut App, ev: VimEvent) {
 /// just-edited) file reloaded, whether the editor was embedded in it or
 /// floating over a page on it. The FILE TABS re-read the file whether the
 /// editor was theirs or floating over them, and land the cursor on the
-/// strip — the level Ctrl+Q steps back to. The SKILLS BROWSER reads its
-/// folders again, a `claude auth` run the CLAUDE ACCOUNTS, and an
-/// installer says how it went (`install::closed`).
+/// strip — the level Ctrl+Q steps back to. A `claude auth` run reads the
+/// CLAUDE ACCOUNTS again, and an installer says how it went
+/// (`install::closed`).
 fn close_vim(app: &mut App) {
     let account_auth = app.vim.as_ref().is_some_and(|v| v.account_auth);
     let install = app.vim.as_ref().and_then(|v| v.install.clone());
@@ -3584,7 +3584,6 @@ fn close_vim(app: &mut App) {
     match &mut app.overlay {
         Some(Overlay::Tree(view)) => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
-        Some(Overlay::Skills(_)) => crate::skills::editor_closed(app),
         Some(Overlay::Conflicts(view)) => view.reload(),
         _ => {}
     }
@@ -3903,9 +3902,6 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     // A list pasted into the TODOS MODAL is added to it (`todos::import`).
     if matches!(&app.overlay, Some(Overlay::Todos(_))) {
         return crate::todos::paste(app, text);
-    }
-    if matches!(&app.overlay, Some(Overlay::Skills(_))) {
-        return crate::skills::paste(app, text);
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
         crate::autofix::paste(app, text);
@@ -4277,7 +4273,6 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::FileTabs(_)
         | Overlay::Metrics(_)
         | Overlay::Usage(_)
-        | Overlay::Skills(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::ProjectPicker(_) => true,
         // A take-down waiting on its answer: Esc cancels that first.
@@ -4946,7 +4941,7 @@ fn dispatch_action(
         Action::FindFile => open_file_finder(app),
         Action::Grep => open_grep_view(app),
         Action::TreeBrowser => open_tree_browser(app),
-        Action::Skills => crate::skills::open(app),
+        Action::OpenSkillsFolder => crate::tree_browser::open_skills_folder(app),
         // New shell terminal, spawned in the worktree's directory.
         // (Cmd+T never reaches a TUI — the emulator opens its own tab.)
         Action::NewTerminal => create_terminal_for_context(app, out),
@@ -5355,11 +5350,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 .unwrap_or_default();
             ("Edit link".into(), "URL".into(), current)
         }
-        PromptKind::NewSkill { view } => (
-            "New skill".into(),
-            crate::skills::new_skill_label(view).into(),
-            String::new(),
-        ),
         PromptKind::ClaudeSignIn { id } => (
             format!(
                 "Sign in · {}",
@@ -5566,7 +5556,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Stacks
             | Action::Hosts
             | Action::AgentPresets
-            | Action::Skills
+            | Action::OpenSkillsFolder
     )
 }
 
@@ -5842,7 +5832,6 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
                 1,
             )
         }),
-        Some(Overlay::Skills(view)) => crate::skills::selected_file(view),
         // The DIFF VIEWER's file, at the line at the top of its diff — on
         // a checkout, and while the file is still there to open.
         Some(Overlay::Diff(view)) if view.prefetched.is_none() => view
@@ -6319,7 +6308,6 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             Some(Overlay::FileTabs(view)) => view.land_preview(ticket, *preview),
             _ => {}
         },
-        Answer::Skills { ticket, skills } => crate::skills::land(app, ticket, skills),
         Answer::Usage(answer) => crate::usage::land(app, answer),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
@@ -7187,8 +7175,8 @@ fn open_delete_worktree_confirm(app: &mut App) {
 /// one the modal guard in [`handle_key`] swallows. Only a ⌘ chord: one
 /// rebound onto a bare key keeps that key a modal's own.
 /// The modals whose remove verb is `⌘W` — the PULL REQUESTS MODAL's close,
-/// the SKILLS BROWSER's trash, the AGENT PRESETS list's delete, each behind
-/// its own confirm — up with nothing over them: `⌘W` is theirs.
+/// the AGENT PRESETS list's delete, each behind its own confirm — up with
+/// nothing over them: `⌘W` is theirs.
 fn modal_takes_cmd_w(app: &App) -> bool {
     app.vim.is_none()
         && app.page.is_none()
@@ -7196,7 +7184,6 @@ fn modal_takes_cmd_w(app: &App) -> bool {
             app.overlay,
             Some(
                 Overlay::PullRequests(_)
-                    | Overlay::Skills(_)
                     | Overlay::AgentPresets(_)
                     | Overlay::Stacks(_)
                     | Overlay::Conflicts(_)
@@ -8211,7 +8198,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
-        Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::Stacks(_) => crate::stacks::handle_key(app, key, out),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
@@ -8310,11 +8296,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     PromptKind::PrComment { back, .. } => back.clone(),
                     _ => None,
                 };
-                // A new skill's name stood in for the SKILLS BROWSER.
-                let back_to_skills = match &prompt.kind {
-                    PromptKind::NewSkill { view } => Some(view.clone()),
-                    _ => None,
-                };
                 // A QUICK PROMPT opened over either modal stood on it: Esc
                 // takes the box off and leaves the modal on its row.
                 let back_to_modal = match &prompt.kind {
@@ -8335,8 +8316,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     crate::issues::reopen(app, view);
                 } else if let Some(view) = back_to_prs {
                     crate::pr_modal::reopen(app, *view);
-                } else if let Some(view) = back_to_skills {
-                    crate::skills::reopen(app, *view);
                 } else if let Some(under) = back_to_modal {
                     under.reopen(app);
                 } else if let Some((worktree, name)) = back_to_presets {
@@ -8495,7 +8474,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             _ if ui::confirm_keys::CANCEL.matches(&key) => {
                 // Backing out lands where you were: a dialog the settings
                 // overlay opened reopens it, a preset delete the presets
-                // list, a skill's the SKILLS BROWSER — not the panels.
+                // list — not the panels.
                 let to_settings = confirm.action.from_settings();
                 let to_presets = match &confirm.action {
                     PendingAction::DeleteAgentPreset {
@@ -8505,15 +8484,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     } => Some((*index, worktree.clone(), quick.clone())),
                     _ => None,
                 };
-                let to_skills = match &confirm.action {
-                    PendingAction::TrashSkill { view, .. } => Some((**view).clone()),
-                    _ => None,
-                };
                 app.overlay = None;
                 if to_settings {
                     reopen_settings(app);
-                } else if let Some(view) = to_skills {
-                    crate::skills::reopen(app, view);
                 } else if let Some((index, worktree, quick)) = to_presets {
                     crate::preset_overlays::reopen_presets_list(
                         app,
@@ -9890,7 +9863,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     under.reopen(app);
                 }
             }
-            PromptKind::NewSkill { view } => crate::skills::reopen(app, (**view).clone()),
             _ => {}
         }
         return;
@@ -10059,7 +10031,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                 url: value,
             });
         }
-        PromptKind::NewSkill { view } => crate::skills::create(app, *view, &value),
         // The overlay goes back under the modal, so the account's row
         // says who it is signed in as once `claude auth login` exits.
         PromptKind::ClaudeSignIn { id } => {
@@ -10146,9 +10117,6 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                 quick.map(|back| *back),
                 index,
             );
-        }
-        PendingAction::TrashSkill { view, dir, name } => {
-            crate::skills::trash(app, *view, dir, name)
         }
         PendingAction::ResetSettings => reset_settings(app),
         PendingAction::AddClaudeAccount(new) => add_claude_account(app, new, true),
@@ -13011,10 +12979,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Todos(_))) {
         crate::todos::handle_mouse(app, mouse, mouse_pos, out);
-        return;
-    }
-    if matches!(&app.overlay, Some(Overlay::Skills(_))) {
-        crate::skills::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::BranchSwitch(_))) {
@@ -30406,12 +30370,12 @@ diff --git a/src/c.rs b/src/c.rs
             .unwrap();
             crate::claude_accounts::refresh_now();
             let bin = root.join(".Trash");
-            let skills = crate::skills::Places {
+            let places = crate::paths_util::Places {
                 home: Some(root.to_path_buf()),
-                trash: Some(crate::skills::Trash::Mac(bin.clone())),
+                trash: Some(crate::paths_util::Trash::Mac(bin.clone())),
                 ..Default::default()
             };
-            crate::skills::with_places(skills, || {
+            crate::paths_util::with_places(places, || {
                 let mut app = App::new();
                 let mut out = Vec::new();
                 // claude, claude-2, Add account, then the saved dir.
@@ -40294,14 +40258,6 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
-                "Skills",
-                |app| {
-                    seed_tree(app);
-                    run_action(app, crate::keymap::Action::Skills);
-                },
-                None,
-            ),
-            (
                 "Todos",
                 |app| {
                     seed_tree(app);
@@ -40552,7 +40508,6 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Issues(_) => "Issues",
             Overlay::PullRequests(_) => "PullRequests",
             Overlay::Linear(_) => "Linear",
-            Overlay::Skills(_) => "Skills",
             Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
@@ -40588,7 +40543,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 26, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
         });
     }
 

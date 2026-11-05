@@ -428,7 +428,7 @@ pub fn dir_of(entry: &HarnessDescriptor) -> Option<PathBuf> {
 
 /// `path` as a person writes it: `~/.claude-2` under the home dir.
 pub fn tilde(path: &Path) -> String {
-    crate::skills::tilde(path, Places::of_this_machine().home.as_deref())
+    crate::paths_util::tilde(path, Places::of_this_machine().home.as_deref())
 }
 
 // ---- the names an account goes by ----
@@ -1309,10 +1309,10 @@ pub fn trash_dir(dir: &Path) -> Result<String, String> {
     if !saved {
         return Err(format!("{shown} is no Claude config dir saved here"));
     }
-    let Some(bin) = crate::skills::Places::of_this_machine().trash else {
+    let Some(bin) = crate::paths_util::Places::of_this_machine().trash else {
         return Err(format!("no Trash here — {shown} stays on disk"));
     };
-    crate::skills::move_folder_to_trash(dir, &bin)
+    crate::paths_util::move_folder_to_trash(dir, &bin)
         .map_err(|e| format!("couldn't move {shown} to the Trash: {e}"))?;
     store::machine(|dirs| dirs.retain(|d| d != dir));
     Ok(format!("moved {shown} to the Trash"))
@@ -1383,8 +1383,8 @@ pub fn remove(id: &str, trash: bool) -> Result<String, String> {
             "removed {id} — {shown} stays: another account runs in it"
         ));
     }
-    Ok(match crate::skills::Places::of_this_machine().trash {
-        Some(bin) => match crate::skills::move_folder_to_trash(&dir, &bin) {
+    Ok(match crate::paths_util::Places::of_this_machine().trash {
+        Some(bin) => match crate::paths_util::move_folder_to_trash(&dir, &bin) {
             Ok(_) => format!("removed {id} and moved {shown} to the Trash"),
             Err(e) => format!("removed {id}, but couldn't move {shown} to the Trash: {e}"),
         },
@@ -2503,12 +2503,12 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
         m.sign(".claude-old/.claude.json", Some("old@b.co"));
         std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
         let bin = home.join(".Trash");
-        let skills = crate::skills::Places {
+        let places = crate::paths_util::Places {
             home: Some(home.clone()),
-            trash: Some(crate::skills::Trash::Mac(bin.clone())),
+            trash: Some(crate::paths_util::Trash::Mac(bin.clone())),
             ..Default::default()
         };
-        crate::skills::with_places(skills, || {
+        crate::paths_util::with_places(places, || {
             m.run(|| {
                 refresh_now();
                 assert!(trash_dir(&two)

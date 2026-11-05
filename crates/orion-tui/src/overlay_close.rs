@@ -44,7 +44,6 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Issues(v) => v.area,
         Overlay::PullRequests(v) => v.area,
         Overlay::Linear(v) => v.area,
-        Overlay::Skills(v) => v.area,
         Overlay::BranchSwitch(v) => v.area,
         Overlay::ProjectPicker(v) => v.area,
         Overlay::Onboard(v) => v.area,
@@ -113,7 +112,6 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             | Overlay::Stacks(_)
             | Overlay::CleanWorktrees(_)
             | Overlay::Hosts(_)
-            | Overlay::Skills(_)
             | Overlay::BranchSwitch(_),
         ) => app.overlay = None,
         // Confirm, Prompt, the AGENT PRESETS list and the PRESET EDITOR each

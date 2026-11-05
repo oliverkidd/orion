@@ -722,9 +722,148 @@ pub(crate) fn build_nodes(files: &[String]) -> (Vec<TreeNode>, Vec<usize>, usize
     (nodes, top, file_count)
 }
 
+/// How many files [`list_folder`] lists, and how deep it goes: a folder
+/// that vendors a `node_modules`, or links back into itself, is not
+/// walked to the bottom.
+const MAX_FOLDER_FILES: usize = 5_000;
+const MAX_FOLDER_DEPTH: usize = 8;
+
+/// Every file under `root`, a plain folder rather than a checkout, for a
+/// tree with no `git ls-files` to ask: relative to it, sorted, hidden ones
+/// (`.git`, `.DS_Store`) passed over, a symlinked folder walked as the
+/// folder it points at.
+pub(crate) fn list_folder(root: &std::path::Path) -> Result<Vec<String>, String> {
+    fn walk(entries: std::fs::ReadDir, rel: &str, depth: usize, files: &mut Vec<String>) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || files.len() >= MAX_FOLDER_FILES {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            // `metadata` follows a symlink: a linked folder is a folder.
+            match entry.path().metadata() {
+                Ok(meta) if meta.is_dir() && depth < MAX_FOLDER_DEPTH => {
+                    if let Ok(inner) = std::fs::read_dir(entry.path()) {
+                        walk(inner, &path, depth + 1, files);
+                    }
+                }
+                Ok(meta) if meta.is_file() => files.push(path),
+                _ => {}
+            }
+        }
+    }
+    let entries =
+        std::fs::read_dir(root).map_err(|e| format!("couldn't read {}: {e}", root.display()))?;
+    let mut files = Vec::new();
+    walk(entries, "", 0, &mut files);
+    files.sort();
+    Ok(files)
+}
+
+/// **Open skills folder** (COMMAND PALETTE): Claude Code's own skills
+/// folder (`~/.claude/skills`) in this browser, its files listed off the
+/// loop as a checkout's are — each read on the right, `Enter` editing it.
+pub(crate) fn open_skills_folder(app: &mut crate::app::App) {
+    use crate::app::Overlay;
+    let places = crate::paths_util::Places::of_this_machine();
+    let Some(root) = places.user_skills().filter(|dir| dir.is_dir()) else {
+        app.flash = Some(crate::flash::Flash::note(
+            "no skills folder yet — Claude Code keeps yours in ~/.claude/skills",
+        ));
+        return;
+    };
+    let label = crate::paths_util::tilde(&root, places.home.as_deref());
+    let editor = crate::config::Config::load().editor_command();
+    let Some(jobs) = app.view_jobs.clone() else {
+        // No loop to land an answer on (unit tests): read inline.
+        match list_folder(&root) {
+            Ok(files) => {
+                app.overlay = Some(Overlay::Tree(TreeBrowser::new(root, label, editor, files)))
+            }
+            Err(msg) => app.flash = Some(crate::flash::Flash::failed(msg)),
+        }
+        return;
+    };
+    let ticket = crate::view_jobs::ticket();
+    let dir = root.clone();
+    jobs.run(move || {
+        Some(crate::view_jobs::Answer::Files {
+            ticket,
+            result: list_folder(&dir),
+        })
+    });
+    app.overlay = Some(Overlay::Tree(TreeBrowser::opening(
+        root, label, editor, jobs, ticket,
+    )));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plain folder lists every file under it, relative and sorted —
+    /// a linked folder's as its own, hidden ones left out.
+    #[test]
+    fn a_plain_folder_lists_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        let elsewhere = dir.path().join("elsewhere/shared");
+        for path in [
+            root.join("notes/SKILL.md"),
+            root.join("notes/refs/a.md"),
+            root.join(".git/HEAD"),
+            root.join("notes/.DS_Store"),
+            elsewhere.join("SKILL.md"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x").unwrap();
+        }
+        std::os::unix::fs::symlink(&elsewhere, root.join("shared")).unwrap();
+        assert_eq!(
+            list_folder(&root).unwrap(),
+            ["notes/SKILL.md", "notes/refs/a.md", "shared/SKILL.md"]
+        );
+        assert!(list_folder(&dir.path().join("missing")).is_err());
+    }
+
+    /// **Open skills folder** opens this browser on Claude Code's skills
+    /// folder, named as a person writes it; with no folder, the footer
+    /// says where they go.
+    #[test]
+    fn open_skills_folder_browses_the_users_skills() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        let places = crate::paths_util::Places {
+            home: Some(home.path().to_path_buf()),
+            claude: Some(claude.clone()),
+            trash: None,
+        };
+        crate::config::with_config_path(home.path().join("config.json"), || {
+            crate::paths_util::with_places(places, || {
+                let mut app = crate::app::App::new();
+                open_skills_folder(&mut app);
+                assert!(app.overlay.is_none());
+                assert!(app
+                    .flash
+                    .as_deref()
+                    .is_some_and(|f| f.contains("~/.claude/skills")));
+
+                std::fs::create_dir_all(claude.join("skills/notes")).unwrap();
+                std::fs::write(claude.join("skills/notes/SKILL.md"), "# notes").unwrap();
+                open_skills_folder(&mut app);
+                let Some(crate::app::Overlay::Tree(view)) = &app.overlay else {
+                    panic!("the tree browser: {:?}", app.overlay.is_some());
+                };
+                assert_eq!(view.root, claude.join("skills"));
+                assert_eq!(view.branch, "~/.claude/skills");
+                assert_eq!(view.file_count, 1);
+            });
+        });
+    }
 
     fn browser(files: &[&str]) -> TreeBrowser {
         TreeBrowser::new(

@@ -108,11 +108,6 @@ pub enum Answer {
         ticket: u64,
         preview: Box<crate::tree_browser::Preview>,
     },
-    /// The SKILLS BROWSER's folders, read.
-    Skills {
-        ticket: u64,
-        skills: Vec<crate::skills::Skill>,
-    },
     /// One ACCOUNT USAGE ask, back from its provider.
     Usage(crate::usage::Answer),
     /// [`STALE_GRACE`] is up on `ticket`.

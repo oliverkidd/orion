@@ -355,7 +355,10 @@ fn orion_app(m: &Machine) -> Check {
         Some(bundle) => Check::new(
             NAME,
             Status::Ok,
-            format!("at {}", crate::skills::tilde(&bundle, m.home.as_deref())),
+            format!(
+                "at {}",
+                crate::paths_util::tilde(&bundle, m.home.as_deref())
+            ),
         ),
         None => Check::new(
             NAME,
@@ -390,7 +393,7 @@ fn agents(cfg: &Config, m: &Machine) -> Vec<Check> {
                 Some(path) => Check::new(
                     name,
                     Status::Ok,
-                    crate::skills::tilde(&path, m.home.as_deref()),
+                    crate::paths_util::tilde(&path, m.home.as_deref()),
                 ),
                 None => {
                     let check =

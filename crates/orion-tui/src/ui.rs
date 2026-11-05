@@ -1369,7 +1369,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         (Keys(&[crate::hints::COPY_PATH]), "copy a finder's path"),
                         (Act(&[Grep]), "find in files (git grep)"),
                         (Act(&[TreeBrowser]), "file tree browser"),
-                        (Act(&[Skills]), "skills: read, edit, trash"),
                     ],
                 ),
                 (
@@ -1604,7 +1603,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             let height = want.min(f.area().height.saturating_sub(2)).max(CHROME + 3);
             let area = centered_rect(f.area(), SETTINGS_W, height);
             f.render_widget(Clear, area);
-            let path = crate::skills::tilde(
+            let path = crate::paths_util::tilde(
                 &orion_core::paths::config_path(),
                 orion_core::env::home_dir().as_deref(),
             );
@@ -2634,7 +2633,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
-        Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::Stacks(view) => crate::stacks::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),

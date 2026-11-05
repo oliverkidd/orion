@@ -783,14 +783,6 @@ pub enum PendingAction {
         worktree: WorktreeId,
         quick: Option<Box<crate::quick_prompt::QuickReturn>>,
     },
-    /// `^d` in the SKILLS BROWSER: move the skill folder `dir` — its
-    /// symlinks resolved — to the Trash. Both answers put the browser back,
-    /// read afresh.
-    TrashSkill {
-        view: Box<crate::skills::SkillsView>,
-        dir: std::path::PathBuf,
-        name: String,
-    },
     /// `R` in the settings overlay: rewrite config.json from the defaults
     /// (every setting and every hotkey), then reopen the overlay on them.
     ResetSettings,
@@ -979,12 +971,6 @@ pub enum PromptKind {
     IssueComment {
         view: crate::issues::IssuesView,
         issue: crate::issues::IssueRef,
-    },
-    /// `^a` in the SKILLS BROWSER: a new skill's name. Enter makes the
-    /// folder and its SKILL.md and opens it in the editor; Esc, or an empty
-    /// name, puts the browser back.
-    NewSkill {
-        view: Box<crate::skills::SkillsView>,
     },
     /// Enter on a CLAUDE ACCOUNTS row (Settings → Agents): the email to
     /// sign account `id` in as, which fills Claude's login page — empty
@@ -2435,8 +2421,6 @@ pub enum Overlay {
     /// `⌘L`: the LINEAR VIEW — the open Linear issues assigned to the
     /// user, picked to fix together or to attach a pull request to.
     Linear(crate::linear::LinearView),
-    /// `⌘S`: the SKILLS BROWSER — every agent skill on the machine.
-    Skills(crate::skills::SkillsView),
     /// `c`: the BRANCH SWITCHER — the ROOT WORKTREE onto another branch.
     BranchSwitch(crate::branch_switch::BranchSwitchView),
     /// `^P` in the LAUNCHER VIEW's box: the PROJECT PICKER.
