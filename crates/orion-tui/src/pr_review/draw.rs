@@ -9,6 +9,8 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use super::bar::BarRow;
+use super::github;
 use super::github::{ReviewThread, ThreadComment};
 use super::layout::{self, Item, Stop};
 use super::write::{Composer, Target};
@@ -31,6 +33,13 @@ const MARGIN: usize = 1;
 const RULE: &str = "│ ";
 /// The fewest cells a comment's text wraps in, however deep the gutter.
 const MIN_TEXT_W: usize = 16;
+/// The rows the files and the diff keep over the bar, however long the
+/// summary.
+const MIN_PANES_H: u16 = 6;
+/// The most rows the summary shows before it scrolls.
+const SUMMARY_ROWS: usize = 3;
+/// What sits between two of the bar's verdicts.
+const VERDICT_GAP: &str = "   ";
 
 /// What the diff pane laid out at the last draw, for the keys and the
 /// mouse to read back.
@@ -48,6 +57,11 @@ struct Laid {
 pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ReviewScreen, th: Theme) {
     let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
     f.render_widget(Clear, area);
+    let [panes, bar_a] = Layout::vertical([
+        Constraint::Min(MIN_PANES_H),
+        Constraint::Length(bar_height(view, area.width)),
+    ])
+    .areas(area);
     let files_w = (area.width * FILES_PCT / 100)
         .max(MIN_FILES_W)
         .min(area.width.saturating_sub(SPLIT_PANE_LAYOUT_MIN));
@@ -55,11 +69,12 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ReviewScreen, th: Theme)
         Constraint::Length(files_w),
         Constraint::Min(SPLIT_PANE_LAYOUT_MIN),
     ])
-    .areas(area);
+    .areas(panes);
 
     let (files_inner, file_rects) = draw_files(f, view, files_a, th);
     let (diff_inner, laid) = draw_diff(f, view, diff_a, th);
-    crate::hints::draw_on_border(f, area, &super::hints(view), 0, th);
+    let bar = draw_bar(f, view, bar_a, th);
+    crate::hints::draw_on_border(f, area, &super::hints(view), bar.foot_w, th);
 
     if let Some(Overlay::Review(v)) = &mut app.overlay {
         v.area = area;
@@ -67,6 +82,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ReviewScreen, th: Theme)
         v.diff_area = diff_inner;
         v.file_rects = file_rects;
         v.diff_h = diff_inner.height;
+        v.bar_area = bar_a;
+        v.verdict_rects = bar.verdicts;
+        if let Some(at) = bar.summary {
+            v.summary.set_view(at);
+        }
         if let Some(laid) = laid {
             v.scroll = laid.scroll;
             v.stop_rows = laid.stops;
@@ -496,4 +516,137 @@ fn thread_lines(
         }
     }
     out
+}
+
+/// The bar's rows: its borders, the verdicts, and the summary as tall as
+/// what is typed, up to [`SUMMARY_ROWS`].
+fn bar_height(view: &ReviewScreen, width: u16) -> u16 {
+    let field_w = usize::from(width.saturating_sub(2)).saturating_sub(FIELD_LEAD + 1);
+    let rows = view
+        .summary
+        .rows(field_w.max(1))
+        .len()
+        .clamp(1, SUMMARY_ROWS);
+    3 + rows as u16
+}
+
+/// The cells a bar row's label takes: `form_label`'s, and a space.
+const FIELD_LEAD: usize = 9;
+
+/// What [`draw_bar`] left on screen, for the write-back.
+struct Bar {
+    /// The cells its foot — why the last submit didn't go, or what is on
+    /// its way — takes at the right of the bottom edge.
+    foot_w: u16,
+    verdicts: Vec<(Rect, github::Verdict)>,
+    summary: Option<TextView>,
+}
+
+/// The bar: the verdicts — only a comment on your own pull request — and
+/// how much is pending on its first row, the summary under them.
+fn draw_bar(f: &mut Frame, view: &ReviewScreen, area: Rect, th: Theme) -> Bar {
+    let focused = view.focus == Focus::Bar;
+    let (inner, foot_w) = crate::ui::form_frame(
+        f,
+        area,
+        "Your review",
+        view.notice.as_deref(),
+        view.saving.as_deref(),
+        focused,
+        th,
+    );
+    let mut out = Bar {
+        foot_w,
+        verdicts: Vec::new(),
+        summary: None,
+    };
+    let [verdict_a, summary_a] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    let on_verdict = focused && view.bar_row == BarRow::Verdict;
+    let mut spans = vec![
+        crate::ui::form_label("Verdict", on_verdict, th),
+        Span::raw(" "),
+    ];
+    let mut x = verdict_a.x + FIELD_LEAD as u16;
+    for (i, verdict) in github::Verdict::ALL.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(VERDICT_GAP));
+            x += VERDICT_GAP.width() as u16;
+        }
+        let allowed = verdict.allowed(view.own);
+        let chosen = verdict == view.verdict;
+        let text = format!("{} {}", if chosen { "●" } else { "○" }, verdict.label());
+        let style = match (chosen, allowed) {
+            (true, _) if on_verdict => Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+            (true, _) => Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+            (false, true) => Style::default().fg(th.muted),
+            (false, false) => Style::default().fg(th.faint),
+        };
+        let w = text.width() as u16;
+        if allowed {
+            out.verdicts
+                .push((Rect::new(x, verdict_a.y, w, 1), verdict));
+        }
+        x += w;
+        spans.push(Span::styled(text, style));
+    }
+    if view.own {
+        spans.push(Span::styled(
+            " · yours, so GitHub takes a comment",
+            Style::default().fg(th.dim),
+        ));
+    }
+    let right = vec![Span::styled(
+        super::bar::pending_words(view),
+        Style::default().fg(if view.pending_comments() > 0 {
+            th.accent
+        } else {
+            th.dim
+        }),
+    )];
+    // A cell clear of the border.
+    let width = usize::from(verdict_a.width).saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Line::from(pin_right(spans, right, width))),
+        verdict_a,
+    );
+
+    let on_summary = focused && view.bar_row == BarRow::Summary;
+    f.render_widget(
+        Paragraph::new(Line::from(crate::ui::form_label("Summary", on_summary, th))),
+        summary_a,
+    );
+    let field = crate::ui::field_after(summary_a, FIELD_LEAD);
+    let field = Rect {
+        height: summary_a.height,
+        ..field
+    };
+    if on_summary {
+        out.summary = Some(crate::ui::draw_multiline_input(f, &view.summary, field, th).0);
+    } else {
+        crate::ui::draw_multiline_idle(
+            f,
+            &view.summary,
+            field,
+            "optional — what the review says as a whole",
+            th,
+        );
+    }
+    out
+}
+
+/// `left`, then `right` ending on the row's last of `width` cells — or,
+/// with no room for both, `left` alone.
+fn pin_right(
+    mut left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let used = |spans: &[Span]| spans.iter().map(|s| s.content.width()).sum::<usize>();
+    let (l, r) = (used(&left), used(&right));
+    if l + 1 + r <= width {
+        left.push(Span::raw(" ".repeat(width - l - r)));
+        left.extend(right);
+    }
+    left
 }

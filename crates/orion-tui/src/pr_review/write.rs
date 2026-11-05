@@ -305,6 +305,8 @@ pub(super) fn composer_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => view.composer = None,
         _ if keys::ADD.matches(&key) && !composer.input.takes_newline(&key) => send_composer(app),
+        // Says to finish the comment first.
+        _ if keys::SUBMIT.matches(&key) => super::bar::submit(app),
         _ => {
             composer.input.handle_key(&key);
             view.follow = true;
@@ -373,16 +375,8 @@ fn send(app: &mut App, write: Write) {
     let Some(view) = screen(app) else {
         return;
     };
-    if view.saving.is_some() {
-        app.flash = Some(Flash::note(
-            "one moment — GitHub is still answering the last one",
-        ));
-        return;
-    }
-    let Some(pr_id) = view.pr_id.clone() else {
-        app.flash = Some(Flash::note(
-            "still reading the pull request from GitHub — try again in a moment",
-        ));
+    let Some(pr_id) = view.writable() else {
+        app.flash = Some(Flash::note(view.unwritable()));
         return;
     };
     #[cfg(test)]

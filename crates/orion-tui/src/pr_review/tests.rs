@@ -180,7 +180,7 @@ fn the_cursor_walks_lines_and_threads_and_brackets_go_file_to_file() {
     press(&mut app, KeyCode::Char('['));
     assert_eq!(view(&app).file, 1);
     // The files: ↑ picks the first, its diff from the top.
-    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::BackTab);
     assert_eq!(view(&app).focus, Focus::Files);
     press(&mut app, KeyCode::Up);
     assert_eq!(view(&app).file, 0);
@@ -192,7 +192,7 @@ fn the_cursor_walks_lines_and_threads_and_brackets_go_file_to_file() {
 #[test]
 fn a_resolved_thread_opens_while_the_cursor_rests_on_it() {
     let mut app = two_files();
-    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::BackTab);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Tab);
     let shot = screen(&mut app, 140, 30);
@@ -404,7 +404,8 @@ fn the_diff_is_read_from_git_from_where_the_branch_left_its_base() {
 #[test]
 fn the_hints_come_from_the_keys_table() {
     let mut app = two_files();
-    for _ in 0..2 {
+    // The diff, the bar, the files, and round to the diff.
+    for _ in 0..3 {
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
         press(&mut app, KeyCode::Tab);
     }
@@ -665,4 +666,178 @@ fn a_refused_write_keeps_what_was_typed_and_says_why() {
         },
     );
     assert!(format!("{:?}", app.flash).contains("#7: thread resolved"));
+}
+
+// ---- the verdict and the submit ----
+
+fn submit_key() -> KeyEvent {
+    KeyEvent::new(
+        KeyCode::Char('r'),
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    )
+}
+
+fn submitted() -> Vec<(github::Verdict, Option<String>, String)> {
+    bar::tests::take_submitted()
+}
+
+/// The review landing as GitHub answered it.
+fn sent_review(app: &mut App, verdict: github::Verdict, result: Result<(), String>) {
+    let ticket = view(app).ticket;
+    land(
+        app,
+        Answer::Submitted {
+            ticket,
+            number: 7,
+            url: URL.into(),
+            verdict,
+            result,
+        },
+    );
+}
+
+#[test]
+fn the_bar_picks_a_verdict_and_submit_sends_it_with_everything_pending() {
+    let mut app = two_files();
+    submitted();
+    if let Some(Overlay::Review(v)) = &mut app.overlay {
+        v.pending = Some("PRR_9".into());
+    }
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(view(&app).focus, Focus::Bar);
+    let shot = screen(&mut app, 140, 30);
+    assert!(shot.contains("Your review"), "{shot}");
+    assert!(
+        shot.contains("● Comment   ○ Approve   ○ Request changes"),
+        "{shot}"
+    );
+    assert!(shot.contains("1 pending comment"), "{shot}");
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(view(&app).verdict, github::Verdict::RequestChanges);
+    // A letter on the verdict starts the summary.
+    chars(&mut app, "Looks close");
+    assert_eq!(view(&app).bar_row, bar::BarRow::Summary);
+    let shot = screen(&mut app, 140, 30);
+    assert!(shot.contains("Looks close"), "{shot}");
+    assert!(shot.contains("Enter submit"), "{shot}");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        submitted(),
+        [(
+            github::Verdict::RequestChanges,
+            Some("PRR_9".into()),
+            "Looks close".into()
+        )]
+    );
+    // Refused: the bar says why, and nothing is lost.
+    sent_review(
+        &mut app,
+        github::Verdict::RequestChanges,
+        Err("GraphQL: Can not request changes on your own pull request".into()),
+    );
+    let v = view(&app);
+    assert!(v.saving.is_none());
+    assert_eq!(v.summary.as_str(), "Looks close");
+    let shot = screen(&mut app, 140, 30);
+    assert!(shot.contains("Can not request changes"), "{shot}");
+    // ⌘⇧R from anywhere sends it again; once GitHub takes it the screen
+    // gives way to the pull request's Reviews tab, its page read again.
+    press(&mut app, KeyCode::Tab);
+    handle_key(&mut app, submit_key());
+    assert_eq!(submitted().len(), 1);
+    sent_review(&mut app, github::Verdict::RequestChanges, Ok(()));
+    assert!(app.overlay.is_none());
+    assert!(format!("{:?}", app.flash).contains("requested changes on #7"));
+    assert!(app.pr_detail_stale.contains(URL));
+    assert_eq!(app.pr_tabs.tab, crate::pr_preview::PrTab::Reviews);
+}
+
+#[test]
+fn on_your_own_pull_request_only_a_comment_goes() {
+    let mut app = two_files();
+    let ticket = view(&app).ticket;
+    if let Some(Overlay::Review(v)) = &mut app.overlay {
+        v.verdict = github::Verdict::Approve;
+    }
+    land(
+        &mut app,
+        Answer::Threads {
+            ticket,
+            url: URL.into(),
+            result: Ok(github::Threads {
+                pr_id: "PR_1".into(),
+                mine: true,
+                pending: Some(github::PendingReview {
+                    id: "PRR_9".into(),
+                    body: "begun on github.com".into(),
+                }),
+                threads: threads(),
+            }),
+        },
+    );
+    assert_eq!(view(&app).verdict, github::Verdict::Comment);
+    // What was written into the pending review is carried on from.
+    assert_eq!(view(&app).summary.as_str(), "begun on github.com");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(view(&app).verdict, github::Verdict::Comment);
+    let shot = screen(&mut app, 140, 30);
+    assert!(shot.contains("yours, so GitHub takes a comment"), "{shot}");
+    assert_eq!(
+        view(&app).verdict_rects.len(),
+        1,
+        "only Comment is a target"
+    );
+}
+
+#[test]
+fn a_review_with_nothing_said_is_refused_before_github_is_asked() {
+    let mut app = app_on(vec![file("a.rs", A_DIFF)], Vec::new());
+    submitted();
+    handle_key(&mut app, submit_key());
+    assert!(submitted().is_empty());
+    let v = view(&app);
+    assert_eq!((v.focus, v.bar_row), (Focus::Bar, bar::BarRow::Summary));
+    assert!(v
+        .notice
+        .as_deref()
+        .is_some_and(|n| n.contains("Comment needs something said")));
+    // An approval needs no words.
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        submitted(),
+        [(github::Verdict::Approve, None, String::new())]
+    );
+}
+
+#[test]
+fn a_comment_still_being_written_is_finished_first() {
+    let mut app = two_files();
+    submitted();
+    press(&mut app, KeyCode::Char('c'));
+    handle_key(&mut app, submit_key());
+    assert!(submitted().is_empty());
+    assert!(format!("{:?}", app.flash).contains("finish the comment first"));
+    assert!(view(&app).composer.is_some());
+}
+
+#[test]
+fn a_review_sent_from_the_modal_lands_on_its_reviews_tab() {
+    let mut app = two_files();
+    if let Some(Overlay::Review(v)) = &mut app.overlay {
+        v.back = Some(Box::new(PullRequestsView::new(
+            orion_core::ProjectId("p1".into()),
+            "demo".into(),
+            "/nonexistent".into(),
+        )));
+    }
+    sent_review(&mut app, github::Verdict::Approve, Ok(()));
+    let Some(Overlay::PullRequests(modal)) = &app.overlay else {
+        panic!("not the modal: {:?}", app.overlay);
+    };
+    assert_eq!(modal.tabs.tab, crate::pr_preview::PrTab::Reviews);
+    assert!(format!("{:?}", app.flash).contains("approved #7"));
 }

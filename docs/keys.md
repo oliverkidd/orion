@@ -460,9 +460,19 @@ What you write goes into GitHub's own pending review: a comment or a reply shows
 pending review is GitHub's, there on the next visit here or on github.com. A comment GitHub refused
 stays in its box with what you typed, the footer saying why.
 
+The bar along the bottom, **Your review**, holds the verdict — **Comment**, **Approve** or
+**Request changes**; on a pull request you opened yourself GitHub takes only a comment, and the other
+two are greyed out — how many comments are pending, and an optional **Summary** (carried on from
+the pending review's own, when one was begun on github.com). `⌘⇧R` from anywhere — or `Enter` on the
+bar — sends the review with everything pending in it; with nothing pending it is sent at once as a
+review of its own. A comment or a change request with nothing pending needs a summary, and the bar
+says so rather than sending it. Once GitHub takes it the footer says `approved #42` (or
+`requested changes on #42`, `reviewed #42`) and the screen gives way to the pull request's Reviews
+tab, its page read again; refused, the bar says why and everything stays pending.
+
 | Key | Where | Action |
 |---|---|---|
-| `Tab` / `⇧Tab` | anywhere | the files, the diff |
+| `Tab` / `⇧Tab` | anywhere | the files, the diff, the bar, round |
 | `↑` / `↓`, `Home` / `End` | the files | pick a file; its diff beside them |
 | `Enter`, `→` | the files | the diff takes the keys |
 | `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` | the diff | the cursor, from line to line and thread to thread |
@@ -474,10 +484,13 @@ stays in its box with what you typed, the footer saying why.
 | `r` | a thread | a reply at its foot, held pending the same way (`c` on a thread replies too) |
 | `x` | a thread | resolve it, or open a resolved one again — at once, not held |
 | `⌫` | a thread | drop your last pending comment in it; the thread goes with it when it was all there was |
-| `]` / `[` | anywhere | the next thread / the one before, file to file, round either end |
+| `]` / `[` | the files, the diff | the next thread / the one before, file to file, round either end |
+| `←` / `→`, `Space` | the bar's verdict | the next verdict GitHub takes; `↓` (or typing) to the summary |
+| typing, `⇧Enter` | the bar's summary | the summary; a new line; `↑` off its top back to the verdict |
+| `⌘⇧R`; `Enter` on the bar | anywhere | submit the review |
 | `⌘R` | anywhere | ask GitHub for the threads again |
-| the wheel, a click | | the wheel scrolls the diff; a click picks a file, or puts the cursor on the line or thread under it |
-| `Esc` | | back to the pull request |
+| the wheel, a click | | the wheel scrolls the diff; a click picks a file, puts the cursor on the line or thread under it, or picks a verdict |
+| `Esc` | | from the bar, back to the diff; else back to the pull request |
 
 ## The quick prompt
 

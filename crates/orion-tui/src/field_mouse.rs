@@ -29,6 +29,8 @@ enum Field {
     DiffFilter,
     AutofixNote,
     ReviewNote,
+    /// The PR REVIEW's summary: the bar takes the keys.
+    PrReviewSummary,
 }
 
 /// Every text field the modal that is up holds, with which it is.
@@ -60,6 +62,7 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
             None => vec![(Field::PrQuery, &mut v.query)],
         },
         Overlay::Linear(v) => vec![(Field::LinearQuery, &mut v.query)],
+        Overlay::Review(v) => vec![(Field::PrReviewSummary, &mut v.summary)],
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
         Overlay::WeekReview(v) => match v.mode {
@@ -79,7 +82,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         | Overlay::FileTabs(_)
         | Overlay::Usage(_)
         | Overlay::Conflicts(_)
-        | Overlay::Review(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::AgentPresets(_) => Vec::new(),
     }
@@ -118,6 +120,10 @@ fn focus(app: &mut App, field: Field) {
         }
         (Some(Overlay::WeekReview(view)), Field::ReviewNote) => {
             view.row = crate::week_review::Row::Note;
+        }
+        (Some(Overlay::Review(view)), Field::PrReviewSummary) => {
+            view.focus = crate::pr_review::Focus::Bar;
+            view.bar_row = crate::pr_review::bar::BarRow::Summary;
         }
         _ => {}
     }

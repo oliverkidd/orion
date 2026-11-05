@@ -14,6 +14,8 @@
 //! file. `c` comments on the line under the cursor — `⇧↑`/`⇧↓` first make
 //! it a run of lines — in place under it, `r` replies to a thread, `x`
 //! resolves it and `⌫` drops a pending comment of yours ([`write`]).
+//! The bar along the bottom holds the verdict and a summary, and `⌘⇧R`
+//! sends the review with everything pending ([`bar`]).
 //!
 //! Nothing here blocks the loop: the diff is read on the blocking pool,
 //! and every GitHub call is a task of its own. Their answers land through
@@ -21,6 +23,7 @@
 //! a screen since closed is dropped, and a write the footer reports. What
 //! goes wrong is said in the footer.
 
+pub mod bar;
 mod draw;
 pub mod github;
 pub mod layout;
@@ -60,6 +63,17 @@ pub enum Focus {
     /// The diff: `↑`/`↓` walk its lines and threads.
     #[default]
     Diff,
+    /// The bar: the verdict and the summary.
+    Bar,
+}
+
+impl Focus {
+    /// `Tab`'s next, or `⇧Tab`'s: files, diff, bar, round.
+    fn step(self, forward: bool) -> Self {
+        const ORDER: [Focus; 3] = [Focus::Files, Focus::Diff, Focus::Bar];
+        let at = ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        ORDER[(at + if forward { 1 } else { 2 }) % 3]
+    }
 }
 
 /// One file of the pull request, its diff read.
@@ -117,6 +131,12 @@ pub struct ReviewScreen {
     pub composer: Option<write::Composer>,
     /// What GitHub is being asked to do, while it is.
     pub saving: Option<String>,
+    /// What the review says of the pull request, and in a summary.
+    pub verdict: github::Verdict,
+    pub summary: crate::text_input::TextInput,
+    pub bar_row: bar::BarRow,
+    /// Why the last submit didn't go, on the bar.
+    pub notice: Option<String>,
     /// The PULL REQUESTS MODAL it was opened from, to go back to.
     pub back: Option<Box<PullRequestsView>>,
     // As of the last draw, for the mouse and the page keys.
@@ -124,6 +144,8 @@ pub struct ReviewScreen {
     pub files_area: Rect,
     pub diff_area: Rect,
     pub file_rects: Vec<(Rect, usize)>,
+    pub bar_area: Rect,
+    pub verdict_rects: Vec<(Rect, github::Verdict)>,
     /// Each stop's first row in the diff and how many rows it takes.
     pub stop_rows: Vec<(Stop, usize, usize)>,
     pub diff_h: u16,
@@ -151,11 +173,17 @@ impl ReviewScreen {
             anchor: None,
             composer: None,
             saving: None,
+            verdict: github::Verdict::Comment,
+            summary: crate::text_input::TextInput::multiline(),
+            bar_row: bar::BarRow::Verdict,
+            notice: None,
             back: None,
             area: Rect::default(),
             files_area: Rect::default(),
             diff_area: Rect::default(),
             file_rects: Vec::new(),
+            bar_area: Rect::default(),
+            verdict_rects: Vec::new(),
             stop_rows: Vec::new(),
             diff_h: 0,
         }
@@ -189,6 +217,21 @@ impl ReviewScreen {
     /// The threads on `path`.
     pub fn threads_on<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a ReviewThread> + 'a {
         self.threads.iter().filter(move |t| t.path == path)
+    }
+
+    /// The pull request's node id, when a write may go now: GitHub has
+    /// said which pull request this is, and answered the last write.
+    fn writable(&self) -> Option<String> {
+        self.pr_id.clone().filter(|_| self.saving.is_none())
+    }
+
+    /// Why a write can't go now ([`ReviewScreen::writable`]).
+    fn unwritable(&self) -> &'static str {
+        if self.saving.is_some() {
+            "one moment — GitHub is still answering the last one"
+        } else {
+            "still reading the pull request from GitHub — try again in a moment"
+        }
     }
 
     /// The thread the cursor rests on.
@@ -346,6 +389,13 @@ impl ReviewScreen {
     fn take_threads(&mut self, read: Threads) {
         self.pr_id = Some(read.pr_id);
         self.own = read.mine;
+        self.hold_to_allowed();
+        if let Some(pending) = &read.pending {
+            // What was written into it on github.com, to carry on from.
+            if self.summary.trim().is_empty() && !pending.body.trim().is_empty() {
+                self.summary = crate::text_input::TextInput::multiline_with_text(&pending.body);
+            }
+        }
         self.pending = read.pending.map(|p| p.id);
         self.threads = read.threads;
         self.reading = false;
@@ -411,6 +461,14 @@ pub enum Answer {
         what: &'static str,
         result: Result<write::Wrote, String>,
     },
+    /// The review on pull request `number` sent with `verdict`, or why not.
+    Submitted {
+        ticket: u64,
+        number: u64,
+        url: String,
+        verdict: github::Verdict,
+        result: Result<(), String>,
+    },
 }
 
 /// The screen on display, when it is the one `ticket` was asked for.
@@ -464,6 +522,13 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
             what,
             result,
         } => write::land(app, ticket, number, what, result),
+        Answer::Submitted {
+            ticket,
+            number,
+            url,
+            verdict,
+            result,
+        } => bar::land_submitted(app, ticket, number, url, verdict, result),
     }
     app.dirty = true;
 }
@@ -637,6 +702,12 @@ pub(crate) mod keys {
     /// The comment being written, into the pending review.
     pub const ADD: Key = Key::new(&["enter"], "add to review");
     pub const NEWLINE: Key = crate::ui::task_keys::NEWLINE;
+    /// The bar: the verdict.
+    pub const VERDICT: Key = Key::new(&["left", "right"], "verdict").show(2);
+    /// The review sent, with everything pending: the modal's review chord,
+    /// from anywhere — and Enter on the bar.
+    pub const SUBMIT: Key = Key::new(&["cmd+shift+r", "ctrl+shift+r"], "submit");
+    pub const SEND: Key = Key::new(&["enter"], "submit");
     pub const REFRESH: Key = crate::hints::REFRESH;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
@@ -655,6 +726,9 @@ pub(crate) mod keys {
         DROP,
         ADD,
         NEWLINE,
+        VERDICT,
+        SUBMIT,
+        SEND,
         REFRESH,
     ];
 }
@@ -673,8 +747,20 @@ pub(crate) fn hints(view: &ReviewScreen) -> Vec<crate::hints::Hint> {
         Focus::Files => {
             hints.push(MOVE.hint_as("file").kept());
             hints.push(OPEN.hint());
+            hints.push(SUBMIT.hint());
             hints.push(THREADS.hint());
             hints.push(PANEL.hint_as("diff"));
+        }
+        Focus::Bar => {
+            hints.push(SEND.hint().kept());
+            if view.bar_row == bar::BarRow::Verdict {
+                hints.push(VERDICT.hint());
+            } else {
+                hints.push(NEWLINE.hint());
+            }
+            hints.push(PANEL.hint_as("files"));
+            hints.push(crate::hints::ESC_CLOSE.hint_as("diff"));
+            return hints;
         }
         Focus::Diff => {
             match view.thread_at_cursor() {
@@ -694,11 +780,12 @@ pub(crate) fn hints(view: &ReviewScreen) -> Vec<crate::hints::Hint> {
                     hints.push(RANGE.hint());
                 }
             }
+            hints.push(SUBMIT.hint());
             hints.push(MOVE.hint());
             hints.push(THREADS.hint());
             hints.push(PAGE.hint());
             hints.push(FILES.hint());
-            hints.push(PANEL.hint_as("files"));
+            hints.push(PANEL.hint_as("review"));
         }
     }
     hints.push(REFRESH.hint());
@@ -714,7 +801,7 @@ pub(crate) fn hints(view: &ReviewScreen) -> Vec<crate::hints::Hint> {
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     app.dirty = true;
     match &mut app.overlay {
-        Some(Overlay::Review(view)) => write::paste(view, text),
+        Some(Overlay::Review(view)) => write::paste(view, text) || bar::paste(view, text),
         _ => false,
     }
 }
@@ -729,20 +816,26 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     if REFRESH.matches(&key) {
         return refresh(app);
     }
+    if SUBMIT.matches(&key) {
+        return bar::submit(app);
+    }
     let Some(Overlay::Review(view)) = &mut app.overlay else {
         return;
     };
+    if PANEL.matches(&key) {
+        view.focus = view
+            .focus
+            .step(key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT));
+        return;
+    }
+    if view.focus == Focus::Bar {
+        return bar::bar_key(app, key);
+    }
     let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
     let on_diff = view.focus == Focus::Diff;
     match key.code {
         KeyCode::Esc if view.anchor.is_some() => view.anchor = None,
         KeyCode::Esc => back(app),
-        _ if PANEL.matches(&key) => {
-            view.focus = match view.focus {
-                Focus::Files => Focus::Diff,
-                Focus::Diff => Focus::Files,
-            };
-        }
         _ if NEXT_THREAD.matches(&key) => {
             view.jump_thread(true);
         }
@@ -800,7 +893,14 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             view.pick_file(view.file.saturating_sub(1));
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(&(_, i)) = view.file_rects.iter().find(|(r, _)| r.contains(pos)) {
+            if let Some(&(_, verdict)) = view.verdict_rects.iter().find(|(r, _)| r.contains(pos)) {
+                view.focus = Focus::Bar;
+                view.bar_row = bar::BarRow::Verdict;
+                view.verdict = verdict;
+                view.notice = None;
+            } else if view.bar_area.contains(pos) {
+                view.focus = Focus::Bar;
+            } else if let Some(&(_, i)) = view.file_rects.iter().find(|(r, _)| r.contains(pos)) {
                 view.focus = Focus::Files;
                 view.pick_file(i);
             } else if view.diff_area.contains(pos) {
