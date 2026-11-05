@@ -441,7 +441,9 @@ the merge form and AUTOFIX — draws from that store. The newest-asked answer wi
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
 last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's
-list and the git counts on the bands keep their answers by the same rules.
+list and the git counts on the bands keep their answers by the same rules. Linear's lists are kept on
+disk the same way (`linear-cache/issues.json`), and each project's is asked for as the project is
+selected, so `⌘L` opens on what was last read while the ask runs underneath.
 
 Settings and hotkeys live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

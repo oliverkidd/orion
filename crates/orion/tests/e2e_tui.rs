@@ -145,6 +145,9 @@ impl TuiHarness {
         // host-terminal cwd reports stop.
         cmd.env_remove("SSH_CONNECTION");
         cmd.env_remove("SSH_TTY");
+        // A project with a key has its Linear issues asked for as it is
+        // selected: a test must never reach Linear with the machine's.
+        cmd.env_remove("LINEAR_API_KEY");
         for (k, v) in extra_env {
             cmd.env(k, v);
         }

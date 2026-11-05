@@ -286,6 +286,9 @@ async fn main_loop(
     // the background (`pr_cache`).
     app.pr_cache = Some(crate::pr_cache::PrCache::default_location());
     crate::pr_cache::hydrate(&mut app);
+    // Every project's Linear issues the last run read, the same way.
+    app.linear_cache = Some(crate::linear_cache::LinearCache::default_location());
+    crate::linear_cache::hydrate(&mut app);
     // A screenshot dropped onto a prompt box is copied here the moment it
     // lands, before macOS deletes the file behind its thumbnail.
     app.attachments_dir = Some(crate::dropped_files::default_dir());
@@ -504,6 +507,11 @@ async fn main_loop(
                         crate::pr_cache::write_all(&cache, &store, &live)
                     });
                 }
+                if let Some((cache, store)) = crate::linear_cache::take_flush(&mut app) {
+                    tokio::task::spawn_blocking(move || crate::linear_cache::write(&cache, &store));
+                }
+                // The selected project's Linear issues, asked on arrival.
+                crate::linear::prefetch(&mut app);
                 next_git_poll = tokio::time::Instant::now() + GIT_POLL;
             }
             // `Shift+R` asked for the pull requests now: the same lookups
@@ -933,6 +941,9 @@ async fn main_loop(
             // handed to a thread here could be cut off with it.
             if let Some((cache, store, live)) = crate::pr_cache::take_flush(&mut app) {
                 crate::pr_cache::write_all(&cache, &store, &live);
+            }
+            if let Some((cache, store)) = crate::linear_cache::take_flush(&mut app) {
+                crate::linear_cache::write(&cache, &store);
             }
             // Persist selection so the next launch restores it.
             let _ = channels

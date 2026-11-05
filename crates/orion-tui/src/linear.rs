@@ -257,7 +257,7 @@ pub struct LinearState {
 }
 
 /// Someone an issue can be assigned to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearUser {
     pub id: String,
     /// Their display name.
@@ -1916,6 +1916,8 @@ fn list_len(app: &App, project: &ProjectId) -> usize {
 /// edit needs: while a list is out, it is owed and asked as soon as that
 /// one lands, never dropped.
 pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
+    // Asked for by name, a refusal is said, even of a prefetch's ask.
+    app.linear_prefetch.quiet.remove(&project);
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
@@ -1928,6 +1930,7 @@ pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fres
     let Some(ticket) = ticket else {
         return;
     };
+    app.linear_prefetch.asked.insert(project.clone(), now);
     app.linear_failed.remove(&project);
     app.dirty = true;
     let email = crate::config::Config::load()
@@ -1938,6 +1941,51 @@ pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fres
         let list = fetch_lists(&dir, &email).await;
         let _ = tx.send(LinearAnswer::List { ticket, dir, list });
     });
+}
+
+/// The LIST PREFETCH: each project's lists asked as it is selected, so
+/// `⌘L` — and the `⌘K` palette's issue rows — have them before they are
+/// asked for (`linear_cache` keeps them across launches meanwhile).
+#[derive(Debug, Default)]
+pub struct Prefetch {
+    /// The project selected at the last look: a prefetch asks on arrival.
+    seen: Option<ProjectId>,
+    /// When each project's lists were last asked, by any ask.
+    asked: HashMap<ProjectId, std::time::Instant>,
+    /// The projects whose list out now a prefetch asked for: a refusal of
+    /// one says nothing — the LINEAR VIEW says it when it opens.
+    quiet: std::collections::HashSet<ProjectId>,
+}
+
+/// How long a project's lists stand before arriving at it asks again.
+const PREFETCH_FRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// On the GIT POLL: arriving at a project asks for its lists, unless they
+/// were asked within [`PREFETCH_FRESH`] or it has no key to ask with —
+/// quietly either way.
+pub(crate) fn prefetch(app: &mut App) {
+    let Some((id, dir)) = app
+        .selected_project()
+        .map(|p| (p.id.clone(), p.repo_path.clone()))
+    else {
+        return;
+    };
+    let ahead = &mut app.linear_prefetch;
+    if ahead.seen.as_ref() == Some(&id) {
+        return;
+    }
+    ahead.seen = Some(id.clone());
+    let fresh = ahead
+        .asked
+        .get(&id)
+        .is_some_and(|at| at.elapsed() < PREFETCH_FRESH);
+    // One already out is someone else's, to say as it likes.
+    let out = app.linear_flights.in_flight(&id);
+    if fresh || out || app.linear_tx.is_none() || key_source(&dir).is_none() {
+        return;
+    }
+    request_list(app, id.clone(), dir, false);
+    app.linear_prefetch.quiet.insert(id);
 }
 
 /// The LINEAR VIEW over `overlay`, wherever it stands: up, under the PR
@@ -2113,6 +2161,7 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 .take_if(|(id, ..)| *id == ticket.key);
             if let Ok(comments) = result {
                 put_comments(app, &ticket.key, comments);
+                app.linear_cache_dirty = true;
             }
             app.dirty = true;
         }
@@ -2163,7 +2212,9 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                         me.as_deref(),
                     );
                     app.linear_failed.remove(&project);
+                    app.linear_prefetch.quiet.remove(&project);
                     app.linear.insert(project.clone(), fetched);
+                    app.linear_cache_dirty = true;
                     follow_cursor(app, &project, &old.list);
                     schedule_comments(app);
                     if let Some(wt) = waiting {
@@ -2172,7 +2223,9 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 }
                 Err(err) => {
                     app.linear_failed.insert(project.clone());
-                    app.flash = Some(crate::flash::Flash::failed(err));
+                    if !app.linear_prefetch.quiet.remove(&project) {
+                        app.flash = Some(crate::flash::Flash::failed(err));
+                    }
                 }
             }
             app.dirty = true;
@@ -8340,6 +8393,61 @@ pub(crate) mod tests {
         assert_eq!(input["priority"], 2);
         assert_eq!(input["title"], "run plan");
         assert!(sent[1]["input"].get("stateId").is_none(), "{sent:?}");
+    }
+
+    // ---- the prefetch ----
+
+    /// Arriving at a project asks for its lists, once: not again while it
+    /// stays selected. A prefetch Linear refuses says nothing — `⌘L`'s own
+    /// ask, the same refusal, does — and one that lands is written to the
+    /// disk cache on the next beat.
+    #[test]
+    fn arriving_at_a_project_prefetches_its_lists_quietly() {
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, _dir) = app_on(&[(".env", &line)]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        let project = ProjectId("p1".into());
+        with_graphql_stub(
+            |_, _| Err("Linear is down".into()),
+            || {
+                run_linear(&mut app, &mut rx, prefetch);
+                assert!(app.linear_failed.contains(&project), "asked");
+                assert_eq!(app.flash, None, "a prefetch says nothing");
+                prefetch(&mut app);
+                assert!(
+                    !app.linear_flights.in_flight(&project),
+                    "staying selected asks nothing"
+                );
+                run_linear(&mut app, &mut rx, open);
+                assert_eq!(app.flash.as_deref(), Some("Linear is down"));
+            },
+        );
+
+        let (mut app, _dir) = app_on(&[(".env", &line)]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        with_graphql_stub(
+            |_, _| {
+                Ok(serde_json::json!({"data": {"mine": {"nodes": []}, "others": {"nodes": []}}}))
+            },
+            || run_linear(&mut app, &mut rx, prefetch),
+        );
+        assert!(app.linear.contains_key(&project));
+        assert!(app.linear_cache_dirty, "to disk on the next beat");
+    }
+
+    /// A project with no key is never asked about.
+    #[test]
+    fn a_project_with_no_key_is_never_prefetched() {
+        let (mut app, dir) = app_on(&[]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        // orion's own environment can hold a key too.
+        if key_source(dir.path()).is_none() {
+            prefetch(&mut app);
+            assert!(!app.linear_flights.in_flight(&ProjectId("p1".into())));
+        }
     }
 
     // ---- comments ----
