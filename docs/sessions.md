@@ -46,7 +46,8 @@ things it is configured to ask about. Codex is spawned with `--yolo` and Cursor 
 **neither of those two ever stops to ask**: they edit files and run commands on their own judgment for
 the life of the SESSION, and nothing in the picker or the settings overlay softens that. OpenCode keeps its own permission prompts: orion passes no `--auto`, so it
 stops and asks like Claude does, and a `permissions_flag` of `--auto` in its `harnesses` entry is how you
-opt out of that. Pick the
+opt out of that. Grok Build keeps its own prompts too — orion passes no `--always-approve` — but
+unlike those two it has no hook that says it is asking (below). Pick the
 harness with that in mind, especially in the ROOT WORKTREE.
 
 The same choice reaches the STATUS DOT, because an AGENT can only report what its hook set can see.
@@ -70,7 +71,13 @@ inert outside orion) that posts OpenCode's `chat.message` as `UserPromptSubmit`,
 gated tool's `PostToolUse`, and its `question` tool's `question.asked` / `question.replied` as
 `PreToolUse` / `PostToolUse` — so an OpenCode row is working, red while a permission or a question
 waits on you (one raised from a subagent session included), and done when the turn ends, an aborted
-one included.
+one included. Grok Build reads hook files from its home, so orion keeps one there of its own
+(`~/.grok/hooks/orion.json`, inert outside orion) with `SessionStart`, `UserPromptSubmit`, `Stop`,
+`StopFailure`, `SubagentStart` and `SubagentStop` — a Grok row is working and done, and resumes its
+conversation after a restart — but Grok has no permission-request hook, so **a Grok SESSION that
+stops to ask you something stays working**. The picker says so on its row, dim at the right edge
+(`can't show it's waiting on you`), as it does for any CLI of yours with no hook dialect
+(`status from the process only`).
 
 ## AGENT PRESETS
 

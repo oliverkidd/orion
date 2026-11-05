@@ -297,7 +297,8 @@ resume, hooks and the Agents tab section all follow, with no rebuild.
 ```
 
 Nullable rows (`program`, `model_flag`, `permissions_flag`, `hooks`, `env`, …) clear with `null` —
-`"claude": {"hooks": null}` runs Claude with process-based status and no title sync. A row that
+`"claude": {"hooks": null}` runs Claude with process-based status and no title sync (`hooks` names
+one of `claude`, `codex`, `cursor`, `grok` or `opencode`). A row that
 stops making sense (an empty program, a resume flag plus a resume subcommand, an unknown dialect,
 an `env` name a shell can't export) refuses its launches with the reason while every other harness
 keeps working. The per-harness keys
@@ -423,10 +424,18 @@ here.
 Grok Build launches `grok` and starts off: a config with no `harnesses` map at all — `{}`, or a
 file from before the map — reads as `"grok": {"enabled": false}`, and its Enabled toggle is stored
 under `harnesses.grok.enabled`. A `harnesses` map that is there is read as written. Set `harnesses.grok.model_default` and `effort_default` in config.json
-to pass `--model` and `--reasoning-effort`; unset values use the CLI defaults. The picker offers
+to pass `--model` and `--effort`; unset values use the CLI defaults. The picker offers
 only `default` unless you configure `models` and `efforts` lists in that same block.
-`--rules` carries additional system guidance and `--resume` accepts a stored session ID, but
-automatic session-ID capture and managed hooks are not yet supported. Status is process-based.
+`--rules` carries orion's guidance (and, on a fresh launch, the AUTO-TITLE instruction), and
+orion installs its hooks as one file of its own, `~/.grok/hooks/orion.json` (`$GROK_HOME/hooks/`
+when that is set), which Grok reads with no trust prompt. They report `SessionStart`,
+`UserPromptSubmit`, `Stop`, `StopFailure` and the subagent events, so a Grok row shows working and
+done, and its `sessionId` is saved for `grok --resume` after a restart. Grok has no hook for a
+permission prompt, and orion passes no `--always-approve`, so a Grok row never shows that it is
+waiting on you — the picker row says so. A `permissions_flag` of `--always-approve` in its
+`harnesses` entry leaves it nothing to ask. Its first-turn `orion rename` asks for permission like
+any other command until you allow it (`Always allow` at the prompt, or `allow =
+["Bash(orion rename *)"]` under `[permission]` in `~/.grok/config.toml`).
 
 ### Linear
 

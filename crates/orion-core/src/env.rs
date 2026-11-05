@@ -69,6 +69,9 @@ pub const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 /// Codex's own override of its home (`~/.codex`), where orion installs
 /// its hooks.
 pub const CODEX_HOME: &str = "CODEX_HOME";
+/// Grok Build's own override of its home (`~/.grok`), under whose `hooks/`
+/// orion installs its hooks.
+pub const GROK_HOME: &str = "GROK_HOME";
 
 /// Env vars that identify an agent session to the daemon. They are set on
 /// every agent PTY and must never leak into plain terminals.

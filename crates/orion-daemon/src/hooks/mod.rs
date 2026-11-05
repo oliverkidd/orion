@@ -1,12 +1,14 @@
 //! Agent-CLI hook receiver: a loopback-only HTTP endpoint the shell hook
 //! one-liners POST to (`/api/hooks/claude`, `/api/hooks/codex`,
-//! `/api/hooks/cursor` and `/api/hooks/opencode`). Codex mirrors Claude's
-//! hook events and payload shape; cursor speaks its own dialect, but its
-//! installer translates event names into the `hookEvent` query param and
-//! the payload fields are aliased here (`conversation_id`, `subagent_id`,
-//! `workspace_roots`); OpenCode has no shell hooks at all — its managed
-//! plugin (`opencode_plugin.rs`) maps its events onto the same names and
-//! POSTs Claude-shaped payloads — so one handler serves all four. Fail-soft on
+//! `/api/hooks/cursor`, `/api/hooks/grok` and `/api/hooks/opencode`).
+//! Codex mirrors Claude's hook events and payload shape; Grok fires
+//! Claude's event names with a camelCase payload (`sessionId`, aliased
+//! here); cursor speaks its own dialect, but its installer translates
+//! event names into the `hookEvent` query param and the payload fields are
+//! aliased here (`conversation_id`, `subagent_id`, `workspace_roots`);
+//! OpenCode has no shell hooks at all — its managed plugin
+//! (`opencode_plugin.rs`) maps its events onto the same names and POSTs
+//! Claude-shaped payloads — so one handler serves all five. Fail-soft on
 //! both sides — a malformed payload still gets a 200 so a broken hook never
 //! faults the user's agent turn.
 //!
@@ -41,6 +43,13 @@ user's request, run this shell command exactly once:\n\n  orion rename \
 request, unquoted (example: orion rename Fix Login Redirect). If it reports \
 the session is already titled, accept that and move on. Then continue with \
 the request. Don't mention the rename to the user.";
+
+/// The instruction as system-prompt text, for a CLI whose hooks can't
+/// answer back (Grok's `--rules`, on a fresh launch): like Cursor's
+/// project rule, it names the first message it is for.
+pub fn auto_title_rule() -> String {
+    format!("On the first user message of this conversation:\n\n{AUTO_TITLE_INSTRUCTION}")
+}
 
 /// The instruction as a UserPromptSubmit hook's stdout. Codex only reads
 /// injected context out of this JSON envelope (its hook output schema is
@@ -85,7 +94,8 @@ enum HookDialect {
     /// appends it to the run's system prompt.
     Injectable,
     /// Cursor: every hook answers with its own gating JSON and drops the
-    /// body, so the `{"ok": …}` diagnostics can stay.
+    /// body, so the `{"ok": …}` diagnostics can stay. Grok's hooks print
+    /// nothing, and it reads no passive hook's stdout anyway.
     Plain,
 }
 
@@ -96,6 +106,7 @@ enum HookCli {
     Claude,
     Codex,
     Cursor,
+    Grok,
     OpenCode,
 }
 
@@ -103,7 +114,7 @@ impl HookCli {
     fn dialect(self) -> HookDialect {
         match self {
             HookCli::Claude | HookCli::Codex | HookCli::OpenCode => HookDialect::Injectable,
-            HookCli::Cursor => HookDialect::Plain,
+            HookCli::Cursor | HookCli::Grok => HookDialect::Plain,
         }
     }
 }
@@ -159,6 +170,12 @@ pub struct HookPayload {
     /// Cursor names the resumable chat id `conversation_id` (== its
     /// `session_id`, but only the alias is guaranteed on every event).
     pub conversation_id: Option<String>,
+    /// Grok's payload is camelCase: its session id — the one
+    /// `grok --resume` takes — is `sessionId`. A field of its own rather
+    /// than a serde alias, so a payload carrying both spellings still
+    /// parses.
+    #[serde(rename = "sessionId")]
+    pub session_id_camel: Option<String>,
     pub notification_type: Option<String>,
     pub tool_name: Option<String>,
     pub agent_id: Option<String>,
@@ -192,6 +209,7 @@ impl HookPayload {
         self.session_id
             .clone()
             .or_else(|| self.conversation_id.clone())
+            .or_else(|| self.session_id_camel.clone())
     }
 
     fn cwd(&self) -> Option<String> {
@@ -308,6 +326,7 @@ pub async fn start_hook_server(
         .route("/api/hooks/claude", post(receive_claude_hook))
         .route("/api/hooks/codex", post(receive_codex_hook))
         .route("/api/hooks/cursor", post(receive_cursor_hook))
+        .route("/api/hooks/grok", post(receive_grok_hook))
         .route("/api/hooks/opencode", post(receive_opencode_hook))
         .with_state(state);
 
@@ -359,6 +378,18 @@ async fn receive_cursor_hook(
     body: String,
 ) -> (StatusCode, String) {
     receive_hook(HookCli::Cursor, state, query, headers, body).await
+}
+
+/// Grok route: status and the session id, nothing back — Grok ignores a
+/// passive hook's stdout, so the AUTO-TITLE instruction rides its
+/// `--rules` instead (`registry::launch_system_prompt`).
+async fn receive_grok_hook(
+    State(state): State<Arc<HookServerState>>,
+    Query(query): Query<HookQuery>,
+    headers: HeaderMap,
+    body: String,
+) -> (StatusCode, String) {
+    receive_hook(HookCli::Grok, state, query, headers, body).await
 }
 
 /// `/api/hooks/opencode`: OpenCode's managed plugin POSTs Claude-shaped
@@ -421,7 +452,7 @@ async fn receive_hook(
             payload.transcript_path.as_deref(),
             payload.session_id.as_deref(),
         ),
-        HookCli::Codex | HookCli::Cursor | HookCli::OpenCode => None,
+        HookCli::Codex | HookCli::Cursor | HookCli::Grok | HookCli::OpenCode => None,
     };
     // The prompt rides only its own event, condensed here so the channel
     // never carries a pasted file whole.
@@ -468,7 +499,7 @@ async fn receive_hook(
                     // `TitleState::to_push`, which resolves the dialect).
                     s.to_push().map(str::to_string)
                 }),
-            HookCli::Codex | HookCli::Cursor | HookCli::OpenCode => None,
+            HookCli::Codex | HookCli::Cursor | HookCli::Grok | HookCli::OpenCode => None,
         };
         return (
             StatusCode::OK,
@@ -840,6 +871,58 @@ mod tests {
         // Absent cwd stays None (codex/cursor payloads may not send it).
         let payload: HookPayload = serde_json::from_str(r#"{"session_id":"s1"}"#).unwrap();
         assert!(payload.cwd.is_none());
+    }
+
+    /// Grok's documented payload (docs.x.ai/build/features/hooks):
+    /// camelCase `hookEventName`, `sessionId`, `cwd`, `workspaceRoot`.
+    /// The session id is what a resume takes; a payload with both
+    /// spellings keeps the snake_case one and still parses.
+    #[test]
+    fn grok_payload_reads_its_camel_case_session_id() {
+        let payload: HookPayload = serde_json::from_str(
+            r#"{"hookEventName":"UserPromptSubmit","sessionId":"g1","cwd":"/w/feat",
+                "workspaceRoot":"/w","prompt":"fix it"}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.session_id().as_deref(), Some("g1"));
+        assert_eq!(payload.cwd().as_deref(), Some("/w/feat"));
+        assert_eq!(payload.prompt.as_deref(), Some("fix it"));
+        let both: HookPayload =
+            serde_json::from_str(r#"{"session_id":"s1","sessionId":"g1"}"#).unwrap();
+        assert_eq!(both.session_id().as_deref(), Some("s1"));
+    }
+
+    /// The Grok route delivers status, the session id and the prompt, and
+    /// answers with diagnostics only — never the title instruction, which
+    /// reaches Grok through `--rules` — even for a row still untitled.
+    #[tokio::test]
+    async fn grok_route_delivers_the_session_and_injects_nothing() {
+        let store = seeded_store();
+        let (env, mut rx) = start_hook_server(store).await.unwrap();
+        for (event, want) in [
+            ("UserPromptSubmit", HookEvent::UserPromptSubmit),
+            ("Stop", HookEvent::Stop),
+            ("StopFailure", HookEvent::Stop),
+        ] {
+            let (status, body) = http_post(
+                env.port,
+                &format!("/api/hooks/grok?agentId=pending&hookEvent={event}"),
+                &env.token,
+                r#"{"hookEventName":"x","sessionId":"grok-1","cwd":"/w/feat","prompt":"fix it"}"#,
+            )
+            .await;
+            assert_eq!((status, body.as_str()), (200, HOOK_OK), "{event}");
+            let delivery = rx.recv().await.unwrap();
+            assert_eq!(delivery.event, want, "{event}");
+            assert_eq!(delivery.session_id.as_deref(), Some("grok-1"));
+            assert_eq!(delivery.cwd.as_deref(), Some("/w/feat"));
+            assert!(delivery.transcript.is_none(), "Claude's transcript only");
+            assert_eq!(
+                delivery.prompt.is_some(),
+                event == "UserPromptSubmit",
+                "{event}"
+            );
+        }
     }
 
     #[test]

@@ -164,8 +164,8 @@
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree.
   Restored agents resume with `claude --resume <session-id>` /
   `codex resume <session-id>` / `cursor-agent --resume <session-id>` (falling back to a fresh session
-  when the old one is gone) / `opencode --session <session-id>` / `grok --resume <session-id>` (orion
-  does not capture Grok's id yet, so there is rarely one to resume). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
+  when the old one is gone) / `opencode --session <session-id>` / `grok --resume <session-id>` (Grok's
+  hooks report it as `sessionId`). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
   resume reads on the first prompt — so a CLI booted and never used resumes as nothing. Claude
   ids are checked against the transcripts on disk before the spawn — in the config dir a harness's
   `env` pins, for a second Claude account — and one with none boots fresh;
@@ -185,7 +185,10 @@
   `~/.codex/hooks.json` (Codex — codex records hook approvals against the hook file's path, so a
   per-worktree file would re-prompt forever; from its home, you approve orion's hooks once at codex's
   "Hooks need review" prompt and every later worktree is silent). Groups are tagged `_orionManaged`,
-  user hooks preserved, rebuilt each spawn. Each hook is a fail-soft curl to the daemon's loopback HTTP
+  user hooks preserved, rebuilt each spawn. Grok Build reads every `*.json` in `~/.grok/hooks/`
+  (`$GROK_HOME/hooks/`) with no trust prompt — a project's own `.grok/hooks` would wait on
+  `/hooks-trust` — so orion writes one file of its own there, `orion.json`, whole, and only when it
+  differs. Each hook is a fail-soft curl to the daemon's loopback HTTP
   endpoint, authenticated with a per-boot bearer token injected into the agent's environment only.
   The checkout's own files (`.claude/settings.local.json`, `.cursor/hooks.json`,
   `.cursor/rules/orion-title.mdc`) are listed in the clone's `.git/info/exclude` as orion writes them —
@@ -261,7 +264,12 @@
   `question` tool's `question.asked` / `question.replied` → `PreToolUse` / `PostToolUse`. A subagent
   session's prompts post under the root session's id with the child as the origin, so its answer is its
   own next tool event. The file is env-guarded, so an `opencode` you run outside orion loads it and
-  does nothing.
+  does nothing. Grok Build fires Claude's event names with a camelCase payload (`sessionId`, `cwd`)
+  and gets six of them — `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `SubagentStart`,
+  `SubagentStop` — posting to `/api/hooks/grok`. It has no permission-request event and no question
+  tool, and orion runs it without `--always-approve`, so a Grok session waiting on a prompt stays
+  working: busy or idle and nothing else, like Cursor, but one that does stop to ask. Its tool
+  events are left out — with no dialog to close, they would only cost a POST per tool call.
 - **Sessions title themselves.** Create a session with the default name and the agent renames it after
   your first prompt — a 3-4 word title describing the ask (e.g. `Fix Login Redirect`), via a
   `orion rename <title>` command the CLI runs in its own turn (no extra API calls, no MCP server).
@@ -269,7 +277,8 @@
   `hookSpecificOutput.additionalContext`, the one envelope both read (the daemon sends it only while the
   session is untitled) — and OpenCode's plugin carries it into the turn's system prompt through OpenCode's
   system-transform hook; Cursor gets a managed `.cursor/rules/orion-title.mdc` project rule instead,
-  since its hooks can't inject context. Titling is one-shot and never clobbers a name you typed or set
+  since its hooks can't inject context, and Grok Build gets it in `--rules` on a fresh launch (it
+  reads no passive hook's output). Grok asks before running `orion rename` until you allow it. Titling is one-shot and never clobbers a name you typed or set
   with `r` — a late agent attempt is politely declined. `orion rename --force` overrides.
 - **A Claude session's own name and its row stay tied.** `/rename <name>` inside Claude Code retitles
   the row within a moment — the same name then shows on the session's card, Claude's prompt box, its
@@ -280,7 +289,8 @@
   creation, set with `r`, or chosen by AUTO-TITLE — reaches Claude on your next prompt through the
   same `UserPromptSubmit` hook reply, as `hookSpecificOutput.sessionTitle`. Whichever side changed
   last wins; a name you set in orion is never undone by re-reading Claude's older one. Claude only —
-  Codex and Cursor have no session name of their own.
+  Codex and Cursor have no session name of their own, and Grok's (`/rename`) has no hook or flag
+  that reaches it from outside.
 - **A Claude session's card names the model it is on.** Switch with `/model` inside Claude Code and
   the card follows within a second (`claude opus` → `claude fable`, `[1m]` kept for the 1M context
   window). Claude fires no hook for that either; it writes `Set model to …` into the transcript at

@@ -90,9 +90,9 @@ pub struct ModelSpec {
     pub catalog: Option<HarnessCatalog>,
 }
 
-/// How a harness takes its reasoning effort: a plain flag (`--effort`,
-/// `--reasoning-effort`), Codex's `-c model_reasoning_effort=` config pair, or
-/// nothing (composed into the model id, or unsupported).
+/// How a harness takes its reasoning effort: a plain flag (`--effort`),
+/// Codex's `-c model_reasoning_effort=` config pair, or nothing (composed
+/// into the model id, or unsupported).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffortSpec {
     /// Flag carrying the effort (`--effort`). Mutually exclusive with
@@ -270,10 +270,10 @@ pub struct HarnessDescriptor {
     #[serde(default)]
     pub system: SystemSpec,
     /// Hook dialect to install, naming the built-in CLI whose hooks this
-    /// harness speaks (`claude`, `codex`, `cursor`, `opencode`). Sessions report
-    /// status, prompts and permission waits like that harness; without one
-    /// they stay process-based. A Claude-compatible CLI gets title sync
-    /// with `claude`.
+    /// harness speaks (`claude`, `codex`, `cursor`, `grok`, `opencode`).
+    /// Sessions report status, prompts and permission waits like that
+    /// harness; without one they stay process-based. A Claude-compatible
+    /// CLI gets title sync with `claude`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<String>,
     /// Whether a relocated session resumes with the trailing "continue in
@@ -293,6 +293,38 @@ pub struct HarnessDescriptor {
 fn is_false(value: &bool) -> bool {
     !value
 }
+
+/// The hook dialects a `hooks` row can name, each the built-in CLI whose
+/// hooks it is.
+const HOOK_DIALECTS: [(&str, AgentKind); 5] = [
+    ("claude", AgentKind::Claude),
+    ("codex", AgentKind::Codex),
+    ("cursor", AgentKind::Cursor),
+    ("grok", AgentKind::Grok),
+    ("opencode", AgentKind::OpenCode),
+];
+
+fn dialect_named(name: &str) -> Option<AgentKind> {
+    HOOK_DIALECTS
+        .iter()
+        .find(|(dialect, _)| *dialect == name)
+        .map(|(_, kind)| *kind)
+}
+
+/// Whether a dialect's hooks say when the session waits on you: Claude's
+/// and Codex's `PermissionRequest`, OpenCode's `permission.asked` and
+/// question tool. Cursor and Grok have no such event.
+fn reports_waiting(dialect: AgentKind) -> bool {
+    match dialect {
+        AgentKind::Claude | AgentKind::Codex | AgentKind::OpenCode => true,
+        AgentKind::Cursor | AgentKind::Grok | AgentKind::Custom => false,
+    }
+}
+
+/// [`HarnessDescriptor::status_note`] for a CLI with no hook dialect.
+pub const PROCESS_STATUS_NOTE: &str = "status from the process only";
+/// [`HarnessDescriptor::status_note`] for a CLI that asks, unseen.
+pub const NO_WAITING_NOTE: &str = "can't show it's waiting on you";
 
 fn default_enabled() -> bool {
     true
@@ -363,12 +395,21 @@ impl HarnessDescriptor {
 
     /// The hook dialect this harness's sessions install, if any.
     pub fn hook_dialect(&self) -> Option<crate::AgentKind> {
-        match self.hooks.as_deref().map(str::trim) {
-            Some("claude") => Some(crate::AgentKind::Claude),
-            Some("codex") => Some(crate::AgentKind::Codex),
-            Some("cursor") => Some(crate::AgentKind::Cursor),
-            Some("opencode") => Some(crate::AgentKind::OpenCode),
-            _ => None,
+        dialect_named(self.hooks.as_deref()?.trim())
+    }
+
+    /// What the NEW AGENT PICKER says beside this harness when its
+    /// sessions show less than the whole range of status: a CLI with no
+    /// hook dialect is only ever working or exited, and one that stops to
+    /// ask (no skip-permissions flag) on a dialect with no waiting signal
+    /// never shows that it is waiting on you. None for the full range.
+    pub fn status_note(&self) -> Option<&'static str> {
+        match self.hook_dialect() {
+            None => Some(PROCESS_STATUS_NOTE),
+            Some(dialect) if !reports_waiting(dialect) && self.permissions_flag.is_none() => {
+                Some(NO_WAITING_NOTE)
+            }
+            Some(_) => None,
         }
     }
 
@@ -509,14 +550,13 @@ impl HarnessDescriptor {
             ));
         }
         if let Some(dialect) = self.hooks.as_deref().map(str::trim) {
-            match dialect {
-                "claude" | "codex" | "cursor" | "opencode" => {}
-                _ => {
-                    return Some(format!(
-                        "harness `{}` hooks `{dialect}`: name a built-in dialect (claude, codex, cursor, opencode)",
-                        self.id.trim()
-                    ));
-                }
+            if dialect_named(dialect).is_none() {
+                let names: Vec<&str> = HOOK_DIALECTS.iter().map(|(name, _)| *name).collect();
+                return Some(format!(
+                    "harness `{}` hooks `{dialect}`: name a built-in dialect ({})",
+                    self.id.trim(),
+                    names.join(", ")
+                ));
             }
         }
         for name in self.env.keys() {
@@ -699,6 +739,12 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
             },
             ..base
         },
+        // xAI's Grok Build, as docs.x.ai/build documents it (no `grok` was
+        // installed to ask): `-m/--model`, `--effort`, `-r/--resume <id>`,
+        // `--rules` appending to the system prompt (cli/reference), and
+        // personal hooks in `~/.grok/hooks/*.json` posting a camelCase
+        // payload with `sessionId` (features/hooks). No permission flag:
+        // it keeps its own prompts, which no hook announces.
         "grok" => HarnessDescriptor {
             label: "Grok Build".into(),
             program: "grok".into(),
@@ -707,7 +753,7 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
                 ..ModelSpec::default()
             },
             effort: EffortSpec {
-                flag: Some("--reasoning-effort".into()),
+                flag: Some("--effort".into()),
                 offered: true,
                 ..EffortSpec::default()
             },
@@ -719,6 +765,7 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
                 append_flag: Some("--rules".into()),
                 ..SystemSpec::default()
             },
+            hooks: Some("grok".into()),
             ..base
         },
         // OpenCode's model is a `provider/model` id (`opencode models`
@@ -1126,6 +1173,67 @@ mod tests {
         assert!(!opencode.effort.offered, "no effort flag, no Effort row");
         assert!(!opencode.relocation_prompt);
         assert!(!opencode.claude_like());
+        let grok = builtin("grok").unwrap();
+        assert_eq!(grok.effort.flag.as_deref(), Some("--effort"));
+        assert_eq!(grok.resume.flag.as_deref(), Some("--resume"));
+        assert_eq!(grok.system_append_flag(), Some("--rules"));
+        assert_eq!(grok.hook_dialect(), Some(AgentKind::Grok));
+        assert_eq!(grok.permissions_flag, None, "it keeps its own prompts");
+        assert!(!grok.claude_like());
+    }
+
+    /// The picker's note: none where every status can show; a hookless
+    /// CLI says it is the process alone; a CLI that asks on a dialect with
+    /// no waiting signal says red is out of reach — unless a
+    /// skip-permissions flag leaves it nothing to ask.
+    #[test]
+    fn status_notes_say_what_a_row_cannot_show() {
+        for id in ["claude", "codex", "cursor", "opencode"] {
+            assert_eq!(builtin(id).unwrap().status_note(), None, "{id}");
+        }
+        let grok = builtin("grok").unwrap();
+        assert_eq!(grok.status_note(), Some(NO_WAITING_NOTE));
+        let yolo = HarnessDescriptor {
+            permissions_flag: Some("--always-approve".into()),
+            ..grok.clone()
+        };
+        assert_eq!(yolo.status_note(), None);
+        let asking_cursor = HarnessDescriptor {
+            permissions_flag: None,
+            ..builtin("cursor").unwrap()
+        };
+        assert_eq!(asking_cursor.status_note(), Some(NO_WAITING_NOTE));
+        assert_eq!(placeholder("agy").status_note(), Some(PROCESS_STATUS_NOTE));
+        let hookless = HarnessDescriptor {
+            hooks: None,
+            ..grok
+        };
+        assert_eq!(hookless.status_note(), Some(PROCESS_STATUS_NOTE));
+    }
+
+    /// Every named dialect resolves, `grok` among them, and an unknown one
+    /// is refused with the list.
+    #[test]
+    fn hooks_rows_name_a_built_in_dialect() {
+        for (name, kind) in HOOK_DIALECTS {
+            let row = HarnessDescriptor {
+                hooks: Some(format!(" {name} ")),
+                ..placeholder("agy")
+            };
+            assert_eq!(row.hook_dialect(), Some(kind), "{name}");
+            assert_eq!(row.problem(), None, "{name}");
+        }
+        let row = HarnessDescriptor {
+            hooks: Some("pi".into()),
+            ..placeholder("agy")
+        };
+        assert_eq!(row.hook_dialect(), None);
+        assert_eq!(
+            row.problem().as_deref(),
+            Some(
+                "harness `agy` hooks `pi`: name a built-in dialect (claude, codex, cursor, grok, opencode)"
+            )
+        );
     }
 
     #[test]

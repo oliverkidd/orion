@@ -106,7 +106,9 @@ pub(crate) fn enabled_harnesses_or_flash(app: &mut App, cfg: &Config) -> Option<
 /// One `NewAgentOfKind` row per harness, labelled by `label`, every row
 /// carrying the same launch context (`→` on any of them drills into that
 /// kind's MODEL submenu with the context intact; customs offer no EFFORT
-/// submenu — see `effort_choices`).
+/// submenu — see `effort_choices`). A harness whose sessions can't show
+/// every status says so on its row, dim at the right edge
+/// ([`orion_core::harness::HarnessDescriptor::status_note`]).
 pub(crate) fn kind_rows(
     rows: &[HarnessRow],
     worktree: &WorktreeId,
@@ -114,9 +116,10 @@ pub(crate) fn kind_rows(
     quick: Option<&QuickReturn>,
     label: impl Fn(AgentKind, Option<&str>) -> String,
 ) -> Vec<MenuItem> {
+    let registry = Config::load().harness_registry();
     rows.iter()
         .map(|row| {
-            MenuItem::new(
+            let item = MenuItem::new(
                 label(row.kind, row.custom.as_deref()),
                 MenuAction::NewAgentOfKind {
                     worktree: worktree.clone(),
@@ -127,9 +130,29 @@ pub(crate) fn kind_rows(
                     pr: pr.cloned(),
                     quick: quick.map(|back| Box::new(back.clone())),
                 },
-            )
+            );
+            match entry_in(&registry, row.kind, row.custom.as_deref())
+                .and_then(|entry| entry.status_note())
+            {
+                Some(note) => item.with_note(note),
+                None => item,
+            }
         })
         .collect()
+}
+
+/// The entry of `registry` a row launches, while the registry names it.
+fn entry_in<'a>(
+    registry: &'a [orion_core::harness::HarnessDescriptor],
+    kind: AgentKind,
+    custom: Option<&str>,
+) -> Option<&'a orion_core::harness::HarnessDescriptor> {
+    let id = match (kind, custom) {
+        (AgentKind::Custom, Some(id)) => id,
+        (AgentKind::Custom, None) => return None,
+        _ => kind.as_str(),
+    };
+    registry.iter().find(|entry| entry.id == id)
 }
 
 /// The label a picker row shows: the registry entry's label for a known
@@ -137,17 +160,7 @@ pub(crate) fn kind_rows(
 /// `Claude (a@b.co)`, built-in Claude's included — and the kind name
 /// otherwise, including for a custom id the registry no longer names.
 pub(crate) fn harness_label(kind: AgentKind, custom: Option<&str>) -> String {
-    let cfg = Config::load();
-    let id = match (kind, custom) {
-        (AgentKind::Custom, Some(id)) => id,
-        (AgentKind::Custom, None) => return kind_label(kind).to_string(),
-        _ => kind.as_str(),
-    };
-    match cfg
-        .harness_registry()
-        .into_iter()
-        .find(|entry| entry.id == id)
-    {
+    match entry_in(&Config::load().harness_registry(), kind, custom) {
         Some(entry) => entry.display_label().to_string(),
         None => kind_label(kind).to_string(),
     }
@@ -332,6 +345,46 @@ mod tests {
                 } if id == "agy"
             ));
             assert_eq!(agy.action.submenu(), Some(SubmenuKind::Models));
+        });
+    }
+
+    /// A row says what its sessions can't show: Grok never shows that it
+    /// waits on you, a CLI with no hook dialect shows only its process —
+    /// and the rest say nothing. The note is the row's dim edge, never
+    /// part of its name.
+    #[test]
+    fn picker_rows_note_the_status_their_sessions_cannot_show() {
+        use orion_core::harness::{NO_WAITING_NOTE, PROCESS_STATUS_NOTE};
+        let json = r#"{"harnesses": {"agy": {"label": "Agy", "program": "agy"}}}"#;
+        pinned(json, || {
+            let mut app = App::new();
+            open_kind_picker(&mut app, KindPicker::new_session(WorktreeId("w1".into())));
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("{:?}", app.overlay);
+            };
+            let note = |label: &str| {
+                let item = menu.items.iter().find(|i| i.label == label).unwrap();
+                assert_eq!(item.note, item.hint.is_some(), "{label}");
+                item.hint.clone()
+            };
+            assert_eq!(note("Grok Build").as_deref(), Some(NO_WAITING_NOTE));
+            assert_eq!(note("Agy").as_deref(), Some(PROCESS_STATUS_NOTE));
+            for label in ["Codex", "Cursor", "OpenCode"] {
+                assert_eq!(note(label), None, "{label}");
+            }
+            assert_eq!(note(&harness_label(AgentKind::Claude, None)), None);
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            let shot: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(shot.contains(NO_WAITING_NOTE), "drawn on the row");
         });
     }
 
