@@ -394,6 +394,11 @@ drag or double-click, and `⌘C` copies the selection.
 the left, the selected file's diff on the right at the modal's full height. The panel with the keys
 wears the accent, and `Tab` walks them in reading order — commits, files, diff.
 
+- **The pull request heads it.** When the branch has a pull request, a row over the panels names
+  it and where it stands: `#1342 Fix PDF header · ✗ 44/45 checks` — the checks' tally once its page
+  has been read (`◐` while one runs, `✓` all passed), the one word GitHub's list gave before that,
+  and `merged` or `closed` once it is past taking work. A branch with no pull request has no row.
+
 - **The commits are what the branch added.** Its own commits since the base it was cut from, newest
   first — `git log --first-parent --no-merges <merge-base>..HEAD` — so a merge of `main` into it,
   and every commit that came in with that merge, never show. **Uncommitted changes** sits on top

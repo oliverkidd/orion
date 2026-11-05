@@ -1,7 +1,8 @@
 //! The DIFF VIEWER (`⌘E`) on screen.
 //!
 //! A left column and the diff beside it, the diff taking the modal's whole
-//! height. The column is [`crate::app::DEFAULT_DIFF_FILES_W`] wide until
+//! height — under one row naming the pull request it is about, when there
+//! is one (`diff_actions::top_line`). The column is [`crate::app::DEFAULT_DIFF_FILES_W`] wide until
 //! dragged, room for a commit's subject
 //! on one row and a file's path beside its counts; it keeps to half of a
 //! narrow modal. The column is the COMMIT LIST over the changed files, in
@@ -209,8 +210,18 @@ fn column_width(view: &DiffView, area: Rect) -> u16 {
 /// Draw the DIFF VIEWER over the screen and write back where everything
 /// went (`view` is a clone of `app.overlay`'s).
 pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
-    let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
-    f.render_widget(Clear, area);
+    let modal = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
+    f.render_widget(Clear, modal);
+    // The pull request it is about, on a row of its own over the panels.
+    let area = match crate::diff_actions::top_line(app, view, usize::from(modal.width), th) {
+        Some(line) => {
+            let [head, rest] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(modal);
+            f.render_widget(Paragraph::new(line), head);
+            rest
+        }
+        None => modal,
+    };
     let col_w = column_width(view, area);
     let [column, diff_a] = Layout::horizontal([
         Constraint::Length(col_w),
@@ -270,7 +281,7 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
         v.list_area = list_inner;
         v.files_scroll.top = files_top;
         v.diff_area = diff_a;
-        v.area = area;
+        v.area = modal;
         v.column_w = col_w;
         if let Some(list) = &mut v.commits {
             match commit_draw {
@@ -766,7 +777,10 @@ mod tests {
     }
 
     fn screen(view: DiffView, width: u16, height: u16) -> (String, App) {
-        let mut app = App::new();
+        screen_in(App::new(), view, width, height)
+    }
+
+    fn screen_in(mut app: App, view: DiffView, width: u16, height: u16) -> (String, App) {
         app.overlay = Some(Overlay::Diff(view));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| super::super::draw(f, &mut app)).unwrap();
@@ -950,6 +964,114 @@ mod tests {
             row("[ ] Uncommitted changes").ends_with("2 files         +124 −0 │"),
             "{text}"
         );
+    }
+
+    /// `app` with the test view's checkout on disk as worktree `w`, its
+    /// branch's pull request #1342 known, and that pull request's page read
+    /// with one of its 45 checks failed.
+    fn app_with_pull_request() -> (App, String) {
+        use crate::pull_request::{CheckState, PrCheck, PrDetail, PullRequest, STATE_OPEN};
+        let mut app = App::new();
+        let id = orion_core::WorktreeId("w".into());
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: id.clone(),
+            project_id: orion_core::ProjectId("p".into()),
+            path: "/nonexistent-orion-diff-test".into(),
+            branch: "feat".into(),
+            is_main: false,
+            sort_order: 0,
+        });
+        let url = "https://github.com/o/r/pull/1342".to_string();
+        app.pull_requests.insert(
+            id,
+            Some(PullRequest {
+                number: 1342,
+                url: url.clone(),
+                title: "Fix PDF header".into(),
+                answered_state: STATE_OPEN.into(),
+                answered_draft: false,
+                answered: Default::default(),
+                activity: Vec::new(),
+            }),
+        );
+        let check = |state| PrCheck {
+            name: "ci".into(),
+            workflow: String::new(),
+            state,
+            word: String::new(),
+            started: String::new(),
+            completed: String::new(),
+            url: String::new(),
+        };
+        let mut checks = vec![check(CheckState::Failed)];
+        checks.extend((0..44).map(|_| check(CheckState::Passed)));
+        let detail = PrDetail {
+            number: 1342,
+            url: url.clone(),
+            checks,
+            ..Default::default()
+        };
+        app.pr_detail.insert(url.clone(), detail);
+        (app, url)
+    }
+
+    /// The row a modal drawn at `area` starts on.
+    fn modal_row(text: &str, app: &App, below: usize) -> String {
+        let Some(Overlay::Diff(v)) = &app.overlay else {
+            panic!("the viewer is up");
+        };
+        let row = text
+            .lines()
+            .nth(usize::from(v.area.y) + below)
+            .unwrap_or("");
+        row.to_string()
+    }
+
+    /// The checkout's pull request heads the viewer, on a row of its own
+    /// over the panels — its number, its title and its checks' tally — and
+    /// a branch with none has no such row.
+    #[test]
+    fn the_top_line_names_the_checkouts_pull_request() {
+        let (text, app) = screen(view(), 150, 42);
+        let first = modal_row(&text, &app, 0);
+        assert!(
+            first.contains("╭ Commits"),
+            "no pull request, no line: {first}"
+        );
+
+        let (app, url) = app_with_pull_request();
+        let (text, app) = screen_in(app, view(), 150, 42);
+        let first = modal_row(&text, &app, 0);
+        assert!(
+            first.contains(" #1342 Fix PDF header · ✗ 44/45 checks"),
+            "{first}\n{text}"
+        );
+        assert!(modal_row(&text, &app, 1).contains("╭ Commits"), "{text}");
+
+        // Unread, the store's one word stands in for the tally; merged,
+        // the line says so and nothing about checks.
+        let (mut app, _) = app_with_pull_request();
+        app.pr_detail.clear();
+        let failing = crate::pr_store::PrObservation {
+            checks: Some(crate::pull_request::Checks::Failing),
+            ..Default::default()
+        };
+        app.prs.observe(&url, failing, crate::fetch::Asked::Cached);
+        let (text, app) = screen_in(app, view(), 150, 42);
+        assert!(
+            modal_row(&text, &app, 0).contains("#1342 Fix PDF header · ✗ checks failing"),
+            "{text}"
+        );
+        let (mut app, _) = app_with_pull_request();
+        let merged = crate::pr_store::PrObservation {
+            state: Some(crate::pull_request::STATE_MERGED.into()),
+            ..Default::default()
+        };
+        app.prs.observe(&url, merged, crate::fetch::Asked::Cached);
+        let (text, app) = screen_in(app, view(), 150, 42);
+        let first = modal_row(&text, &app, 0);
+        assert!(first.contains("#1342 Fix PDF header · merged"), "{first}");
+        assert!(!first.contains("checks"), "{first}");
     }
 
     /// The diff pane's border names what is read and the file's counts;
