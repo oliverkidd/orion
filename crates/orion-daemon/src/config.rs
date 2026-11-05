@@ -180,17 +180,24 @@ mod tests {
         assert_eq!(skipped.len(), 1);
     }
 
-    /// The daemon's half of the TUI's fixture test: every daemon key an
-    /// earlier release wrote still reads as written.
+    /// The daemon's half of the TUI's fixture test: every daemon key the
+    /// newest release wrote still reads as written.
     #[test]
-    fn config_files_from_earlier_releases_still_load_the_daemon_keys() {
-        let raw = include_str!("../../orion-core/fixtures/config-0.29.0.json");
+    fn the_newest_releases_config_still_loads_the_daemon_keys() {
+        let raw = include_str!("../../orion-core/fixtures/config-2.2.1.json");
         let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).unwrap();
         let (cfg, skipped) = orion_core::settings::parse_lenient::<Config>(&obj);
         assert!(skipped.is_empty(), "{skipped:?}");
         assert!(!cfg.prewarm_agents);
         assert_eq!(cfg.session_idle_timeout, "30m");
-        assert!(cfg.harnesses.contains_key("grok"), "the registry map reads");
+        assert_eq!(
+            cfg.harnesses.get("claude").and_then(|h| h.enabled),
+            Some(false),
+            "the registry map reads"
+        );
+        assert_eq!(cfg.claude_accounts.len(), 1);
+        assert_eq!(cfg.claude_accounts[0].id, "claude-work");
+        assert!(!cfg.claude_accounts[0].enabled, "the account switched off");
         assert_eq!(
             cfg.run_command(Path::new("/Users/me/src/app")),
             Some("npm run dev"),

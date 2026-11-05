@@ -1,8 +1,24 @@
 {
+  "account_tags": {
+    "claude-work": {
+      "tag": "W",
+      "tint": 2
+    }
+  },
   "animations": false,
+  "autofix_effort": "high",
+  "autofix_model": "opus",
+  "base_fetch": "15m",
   "black_background": false,
-  "card_issue_number": true,
+  "card_issue_number": false,
   "card_line_changes": true,
+  "claude_accounts": [
+    {
+      "config_dir": "~/.claude-work",
+      "enabled": false,
+      "id": "claude-work"
+    }
+  ],
   "claude_effort": "high",
   "claude_enabled": false,
   "claude_model": "opus",
@@ -30,10 +46,16 @@
     }
   ],
   "delete_empty_worktree": true,
+  "diff_start": "files",
+  "diff_ticked": "one at a time",
+  "diff_tree_view": false,
   "done_sound": "Ping",
   "editor": "nvim",
+  "expand_all_worktrees": true,
   "feedback_sound": "off",
   "focus_tint": false,
+  "follow_new_session": false,
+  "ghostty_keybinds": false,
   "git_init_on_create": false,
   "harnesses": {
     "claude": {
@@ -46,28 +68,38 @@
       "program": "/usr/local/bin/grok"
     }
   },
+  "hide_card_marks": true,
   "hide_card_prompt": true,
   "hide_draft_prs": true,
   "hide_projects": true,
   "hide_root_worktree": true,
   "hide_sessions": true,
-  "hide_terminal_glyphs": true,
   "hide_uninstalled_harnesses": true,
   "hide_worktrees": true,
+  "highlight_current_card": false,
   "keybindings": {
     "git_diff": "ctrl+g, g",
     "quit": ""
   },
+  "linear_auto_attach": false,
+  "linear_task_template": "Fix {identifier}: {title}",
+  "link_env_files": false,
   "muse_effort": "high",
   "muse_enabled": false,
   "muse_model": "muse-1",
   "opencode_enabled": false,
   "opencode_model": "anthropic/claude-sonnet-5",
+  "outside_editor": "vscode",
+  "outside_terminal": "terminal",
   "palette_enter_attaches": false,
   "pi_effort": "medium",
   "pi_enabled": false,
   "pi_model": "anthropic/claude-sonnet-5",
+  "pr_autofix": "off",
+  "pr_delete_branch": false,
+  "pr_draft": true,
   "pr_issue_counts": false,
+  "pr_merge_method": "rebase",
   "preset_text": "postfix",
   "prewarm_agents": false,
   "prewarm_sessions": false,
@@ -83,14 +115,21 @@
   "recent_prompts": true,
   "recent_prompts_count": 5,
   "remember_harness": true,
+  "review_account": "claude-work",
+  "review_effort": "low",
+  "review_model": "opus",
   "session_idle_timeout": "30m",
   "session_pane": "bottom",
-  "show_all_worktrees": true,
+  "show_all_worktrees": false,
   "show_key_combos": true,
   "show_workspaces": false,
   "skip_session_naming": true,
+  "spotify": false,
   "ssh_sync_config": false,
   "theme": "ocean",
+  "usage_claude": false,
+  "usage_cursor": false,
   "worktree_base_branch": "develop",
+  "worktree_containers": "remove",
   "worktree_layout": "list"
 }

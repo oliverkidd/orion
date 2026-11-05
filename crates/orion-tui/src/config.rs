@@ -881,16 +881,6 @@ pub struct AccountTagOverride {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
-    /// RETIRED with every project a git repository. Through 0.37 the
-    /// daemon-owned **git init new projects** SETTING (Settings → General,
-    /// on by default) could leave a directory the open-project prompt
-    /// created without a repository, which then failed to open. The
-    /// daemon now always runs `git init` in a folder the user confirmed —
-    /// a new one, or an existing one outside any repository — so no tab
-    /// shows the row and nothing reads it. Still loaded and written back
-    /// as stored, so an older build sharing the file keeps the choice its
-    /// user made.
-    pub git_init_on_create: bool,
     /// MOVED to each project's **Base branch** (`projects.<repo>.base_branch`):
     /// through 2.x one branch every project's new worktrees started from.
     /// Read, never written; [`Config::adopt_project_keys`] copies it into
@@ -966,13 +956,6 @@ pub struct Config {
     /// default, and nothing shows while Spotify is closed. Off, the poll
     /// stops too.
     pub spotify: bool,
-    /// RETIRED with every card carrying its last prompt. Through 0.40 the
-    /// **Card prompt** SETTING (Settings → Appearance, `shown` by default)
-    /// could leave the last prompt off every session card on the GRID.
-    /// Every card shows it now, whatever this says, so no tab shows the
-    /// row and nothing reads it. Still loaded and written back as stored,
-    /// so an older build sharing the file keeps the choice its user made.
-    pub hide_card_prompt: bool,
     /// Leave draft pull requests out of the PROJECT OPEN PRS GROUP and the
     /// `/` PALETTE's pull-request rows, so browsing what's open shows only
     /// the rows asking for a reviewer. A view filter, not a fetch filter:
@@ -1018,87 +1001,6 @@ pub struct Config {
     pub review_model: Option<String>,
     #[serde(skip_serializing)]
     pub review_effort: Option<String>,
-    /// RETIRED with the line counts always drawn. Through 0.37 the **Card
-    /// line counts** SETTING (Settings → Appearance, off by default)
-    /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
-    /// counts its lines now, whatever this says, so no tab shows the row
-    /// and nothing reads it. Still loaded and written back as stored, so
-    /// an older build sharing the file keeps the choice its user made.
-    pub card_line_changes: bool,
-    /// The key of the **Skip starting prompt** SETTING (Settings →
-    /// Sessions, through 0.30): on, `n` created the session straight from
-    /// the NEW AGENT PICKER instead of putting a task box up first.
-    /// Every `n` does that now — a launch that starts from a typed task is
-    /// the QUICK PROMPT's — so this build never reads it and no tab edits
-    /// it any more. Still loaded and written back as stored, so an older
-    /// build sharing the file keeps the behavior its user chose.
-    pub skip_session_naming: bool,
-    /// RETIRED with the archive confirm made unconditional. Through 0.34,
-    /// on, it put a CONFIRM DIALOG in front of archiving a session — the
-    /// `a` key and the row menu's Archive alike — and off (the default)
-    /// archived at once. Every archive asks now, so no tab shows the row
-    /// and nothing reads it. Still loaded and written back as stored, so
-    /// an older build sharing the file keeps the behavior its user chose.
-    pub confirm_on_archive: bool,
-    /// The key of the **Focused panel tint** SETTING (Settings →
-    /// Appearance, through 0.34): whether the faint accent wash behind
-    /// whatever keys land in — the card under the cursor, or the session
-    /// pane — was painted at all. It always is now: the wash is the one
-    /// cue that says which surface keys land in, so this build never
-    /// reads the key and no tab edits it. Still loaded and written back
-    /// as stored, so an older build sharing the file keeps the choice its
-    /// user made.
-    pub focus_tint: bool,
-    /// The key of the **Workspaces bar** SETTING (Settings → Appearance,
-    /// through 0.33): whether the bar of WORKSPACE tabs was drawn across
-    /// the top. Workspaces are gone — every project is in the one list the
-    /// PROJECT TABS open from — so this build never reads it and no tab
-    /// edits it. Still loaded and written back as stored, so an older
-    /// build sharing the file keeps the bar its user chose.
-    pub show_workspaces: bool,
-    /// RETIRED with the three-panel layout. Through 0.37 the **Projects panel**
-    /// SETTING (Settings → Appearance) collapsed that panel to a rail; the
-    /// GRID has no panels, so no tab shows the row and nothing reads it.
-    /// Still loaded and written back as stored, so an older build sharing
-    /// the file keeps the layout its user chose.
-    pub hide_projects: bool,
-    /// RETIRED with the three-panel layout, as `hide_projects` is: the
-    /// **Worktrees panel** SETTING through 0.37.
-    pub hide_worktrees: bool,
-    /// RETIRED with the three-panel layout, as `hide_projects` is: the
-    /// **Sessions panel** SETTING through 0.37.
-    pub hide_sessions: bool,
-    /// RETIRED with the root always listed. Through 0.27 one switch for
-    /// every project (Settings → Experimental), then through 0.35 the
-    /// fallback for a project whose `projects` entry had no **Hide root
-    /// worktree** row of its own: on, a project's ROOT WORKTREE was left
-    /// out of everything the grid launched into. Nothing hides the root
-    /// now — a launch that must not land in the shared checkout cuts a
-    /// fresh worktree instead — so no tab shows the row and nothing reads
-    /// this key, nor the one an entry may still carry (which rides through
-    /// [`ProjectSettings::other`]). Still loaded and written back as
-    /// stored, so an older build sharing the file keeps the choice its
-    /// user made.
-    pub hide_root_worktree: bool,
-    /// RETIRED with every card carrying its session's last prompt. Through
-    /// 0.37 the **Recent prompts** SETTING (Settings → Experimental) listed a
-    /// session's last prompts under its row; the card shows the newest one
-    /// whatever this says, so no tab shows the row and nothing reads it.
-    /// Still loaded and written back as stored, so an older build sharing
-    /// the file keeps the rows its user chose.
-    pub recent_prompts: bool,
-    /// RETIRED with `recent_prompts`: how many prompts that build listed
-    /// (`1` to `5` in its overlay). Loaded and written back as stored.
-    pub recent_prompts_count: usize,
-    /// RETIRED with the KEY COMBO DISPLAY always on. Through 0.37 the
-    /// **Key combo display** SETTING (Settings → Experimental) switched
-    /// the readout — each key pressed spelled at the bottom left of the
-    /// screen with what it did, `j - Move down` — on, off by default.
-    /// Every key shows now, whatever this says (`key_combo.rs`), so no
-    /// tab shows the row and nothing reads it. Still loaded and written
-    /// back as stored, so an older build sharing the file keeps the
-    /// choice its user made.
-    pub show_key_combos: bool,
     /// PROJECT SETTINGS: one [`ProjectSettings`] per project set up
     /// differently from the rest, keyed by the project's repo path as the
     /// DAEMON stores it — what the Settings → Projects tab edits for the
@@ -1109,15 +1011,6 @@ pub struct Config {
     /// rules: a value in here this build can't read costs the whole map,
     /// not one project.
     pub projects: BTreeMap<PathBuf, ProjectSettings>,
-    /// RETIRED with the counts always drawn. Through 0.37 the **PR & issue
-    /// counts** SETTING (Settings → Experimental, on by default) switched
-    /// the GRID header's `3 prs · 2 issues` off, and with it the issue
-    /// sweep over the other projects. The header always counts now — what
-    /// is waiting on a repo is the one thing the grid must say — so no tab
-    /// shows the row and nothing reads it. Still loaded and written back
-    /// as stored, so an older build sharing the file keeps the choice its
-    /// user made.
-    pub pr_issue_counts: bool,
     /// Default model/effort for new Claude / Codex / Cursor sessions.
     /// "default" means "don't pass the flag" (the CLI picks); any other
     /// value is passed through verbatim, so hand-edited configs can name
@@ -1338,7 +1231,6 @@ impl ProjectSettings {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            git_init_on_create: true,
             worktree_base_branch: None,
             worktree_containers: None,
             outside_editor: crate::outside_editor::AUTO.into(),
@@ -1352,7 +1244,6 @@ impl Default for Config {
             theme: "default".into(),
             animations: true,
             spotify: true,
-            hide_card_prompt: false,
             hide_draft_prs: false,
             diff_tree_view: true,
             pr_merge_method: None,
@@ -1362,20 +1253,7 @@ impl Default for Config {
             review_account: None,
             review_model: None,
             review_effort: None,
-            card_line_changes: false,
-            skip_session_naming: false,
-            confirm_on_archive: false,
-            focus_tint: true,
-            show_workspaces: true,
-            hide_projects: false,
-            hide_worktrees: false,
-            hide_sessions: false,
-            hide_root_worktree: false,
-            recent_prompts: false,
-            recent_prompts_count: 3,
             projects: BTreeMap::new(),
-            show_key_combos: false,
-            pr_issue_counts: true,
             claude_model: DEFAULT_CHOICE.into(),
             claude_models: Vec::new(),
             claude_effort: DEFAULT_CHOICE.into(),
@@ -3045,90 +2923,10 @@ mod tests {
         assert_eq!(read_json_file(&path)["pr_autofix"], "auto");
     }
 
-    /// Config files earlier releases wrote, every value off its default.
-    /// Add one per release; see [`config_files_from_earlier_releases_still_load_every_key`].
-    const CONFIG_FIXTURES: &[(&str, &str)] = &[
-        (
-            "0.26.0",
-            include_str!("../../orion-core/fixtures/config-0.26.0.json"),
-        ),
-        (
-            "0.27.0",
-            include_str!("../../orion-core/fixtures/config-0.27.0.json"),
-        ),
-        (
-            "0.28.0",
-            include_str!("../../orion-core/fixtures/config-0.28.0.json"),
-        ),
-        (
-            "0.29.0",
-            include_str!("../../orion-core/fixtures/config-0.29.0.json"),
-        ),
-        (
-            "0.30.0",
-            include_str!("../../orion-core/fixtures/config-0.30.0.json"),
-        ),
-        (
-            "0.31.0",
-            include_str!("../../orion-core/fixtures/config-0.31.0.json"),
-        ),
-        (
-            "0.32.0",
-            include_str!("../../orion-core/fixtures/config-0.32.0.json"),
-        ),
-        (
-            "0.33.0",
-            include_str!("../../orion-core/fixtures/config-0.33.0.json"),
-        ),
-        (
-            "0.34.0",
-            include_str!("../../orion-core/fixtures/config-0.34.0.json"),
-        ),
-        (
-            "0.35.0",
-            include_str!("../../orion-core/fixtures/config-0.35.0.json"),
-        ),
-        (
-            "0.36.0",
-            include_str!("../../orion-core/fixtures/config-0.36.0.json"),
-        ),
-        (
-            "0.37.0",
-            include_str!("../../orion-core/fixtures/config-0.37.0.json"),
-        ),
-        (
-            "0.38.0",
-            include_str!("../../orion-core/fixtures/config-0.38.0.json"),
-        ),
-        (
-            "0.39.0",
-            include_str!("../../orion-core/fixtures/config-0.39.0.json"),
-        ),
-        (
-            "0.40.0",
-            include_str!("../../orion-core/fixtures/config-0.40.0.json"),
-        ),
-        (
-            "0.40.1",
-            include_str!("../../orion-core/fixtures/config-0.40.1.json"),
-        ),
-        (
-            "0.40.2",
-            include_str!("../../orion-core/fixtures/config-0.40.2.json"),
-        ),
-        (
-            "0.41.0",
-            include_str!("../../orion-core/fixtures/config-0.41.0.json"),
-        ),
-        (
-            "0.42.0",
-            include_str!("../../orion-core/fixtures/config-0.42.0.json"),
-        ),
-        (
-            "1.0.0",
-            include_str!("../../orion-core/fixtures/config-1.0.0.json"),
-        ),
-    ];
+    /// The config file the newest release wrote, every key off its
+    /// default; see [`the_newest_releases_config_still_loads_every_key`].
+    /// Replace it when a release changes the keys it writes.
+    const NEWEST_RELEASE_CONFIG: &str = include_str!("../../orion-core/fixtures/config-2.2.1.json");
 
     fn read_json_file(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -3155,173 +2953,73 @@ mod tests {
             .map(|i| (tab, cfg.agent_rows_from() + i))
     }
 
-    /// The compatibility rule in docs/configuration.md: a key this build
-    /// still has keeps its name, its type and its meaning, so every key a
-    /// release wrote loads to exactly the value it wrote — a type change
-    /// leaves it unreadable, and reads back as something else here. A
-    /// retired key loads as nothing, and a save leaves it where it was.
+    /// The compatibility rule in docs/configuration.md, against the file
+    /// the newest release wrote: a key this build still has loads to
+    /// exactly the value that release wrote — a type change would leave it
+    /// unreadable, or read back as something else here — and a key this
+    /// build has retired loads as nothing. A save writes every one of them
+    /// back as it was, the retired ones untouched.
     #[test]
-    fn config_files_from_earlier_releases_still_load_every_key() {
-        for (release, raw) in CONFIG_FIXTURES {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("config.json");
-            std::fs::write(&path, raw).unwrap();
-            let loaded = load_from(&path);
-            assert!(
-                loaded.skipped.is_empty(),
-                "{release}: keys this build can't read: {:?}",
-                loaded.skipped
-            );
-            let known = serde_json::to_value(&loaded).unwrap();
-            let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
-            for (key, value) in fixture.as_object().unwrap() {
-                // A retired key loads as nothing; the save below, which
-                // leaves a key it doesn't know where it found it, keeps it.
-                let Some(loaded) = known.get(key) else {
-                    continue;
-                };
-                assert_eq!(
-                    loaded, value,
-                    "{release}: `{key}` no longer loads as that release wrote it"
-                );
+    fn the_newest_releases_config_still_loads_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, NEWEST_RELEASE_CONFIG).unwrap();
+        let loaded = load_from(&path);
+        assert!(
+            loaded.skipped.is_empty(),
+            "keys this build can't read: {:?}",
+            loaded.skipped
+        );
+        let known = serde_json::to_value(&loaded).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(NEWEST_RELEASE_CONFIG).unwrap();
+        let fixture = fixture.as_object().unwrap();
+        // A moved key is never written, so it is checked where it waits
+        // for its migration instead.
+        let moved = [
+            ("worktree_base_branch", &loaded.worktree_base_branch),
+            ("worktree_containers", &loaded.worktree_containers),
+            ("pr_merge_method", &loaded.pr_merge_method),
+            ("autofix_model", &loaded.autofix_model),
+            ("autofix_effort", &loaded.autofix_effort),
+            ("review_account", &loaded.review_account),
+            ("review_model", &loaded.review_model),
+            ("review_effort", &loaded.review_effort),
+        ];
+        assert_eq!(moved.len(), loaded.moved_keys().len(), "every moved key");
+        let mut retired = 0;
+        for (key, value) in fixture {
+            if let Some((_, held)) = moved.iter().find(|(name, _)| name == key) {
+                assert_eq!(held.as_deref(), value.as_str(), "`{key}` waits as written");
+                continue;
             }
-            // A save writes every one of them back unchanged.
-            loaded.save_to(&path).unwrap();
-            let saved = read_json_file(&path);
-            for (key, value) in fixture.as_object().unwrap() {
-                assert_eq!(
-                    saved.get(key),
-                    Some(value),
-                    "{release}: `{key}` after a save"
-                );
+            match known.get(key) {
+                Some(loaded) => assert_eq!(loaded, value, "`{key}` no longer loads as written"),
+                None => retired += 1,
             }
+        }
+        assert!(retired > 0, "the release wrote keys this build has retired");
+        loaded.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        for (key, value) in fixture {
+            assert_eq!(saved.get(key), Some(value), "`{key}` after a save");
         }
     }
 
-    /// `n` always launches straight from the picker now, so **Skip
-    /// starting prompt** has no row to be edited on — but the key an
-    /// earlier release wrote still loads, and is written back unchanged
-    /// for the older builds that read it.
+    /// A retired key — one an older orion wrote that this build no longer
+    /// has, at the top level or inside a project's entry — loads as
+    /// nothing and costs nothing, and a save writes it back where it was
+    /// for the older builds that still read it. An entry that only carries
+    /// such a key is kept for it, not dropped as all-default.
     #[test]
-    fn skip_session_naming_has_no_row_and_is_written_back_for_older_builds() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|row| row.label != "Skip starting prompt")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"skip_session_naming": true}"#).unwrap();
-        let mut cfg = load_from(&path);
-        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
-        assert!(cfg.skip_session_naming);
-
-        cfg.spotify = false;
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["skip_session_naming"], true);
-    }
-
-    /// Retired with the archive confirm made unconditional: no tab shows
-    /// the row, and a `true` an earlier release wrote still loads and is
-    /// written back unchanged for the older builds that read it.
-    #[test]
-    fn confirm_on_archive_has_no_row_and_is_written_back_for_older_builds() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|row| row.label != "Confirm on archive")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
-        assert!(!Config::default().confirm_on_archive);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.confirm_on_archive);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"confirm_on_archive": true}"#).unwrap();
-        let cfg = load_from(&path);
-        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
-        assert!(cfg.confirm_on_archive);
-
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["confirm_on_archive"], true);
-    }
-
-    /// Workspaces are gone, so **Workspaces bar** has no row to be edited
-    /// on — but the key an earlier release wrote still loads, and is
-    /// written back unchanged for the older builds that read it.
-    #[test]
-    fn show_workspaces_has_no_row_and_is_written_back_for_older_builds() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|row| row.label != "Workspaces bar")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"show_workspaces": false}"#).unwrap();
-        let mut cfg = load_from(&path);
-        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
-        assert!(!cfg.show_workspaces);
-
-        cfg.spotify = false;
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["show_workspaces"], false);
-    }
-
-    /// The tint is always on now, so **Focused panel tint** has no row to
-    /// be edited on — but the key an earlier release wrote still loads,
-    /// and is written back unchanged for the older builds that read it.
-    #[test]
-    fn focus_tint_has_no_row_and_is_written_back_for_older_builds() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|row| row.label != "Focused panel tint")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"focus_tint": false}"#).unwrap();
-        let mut cfg = load_from(&path);
-        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
-        assert!(!cfg.focus_tint);
-
-        cfg.spotify = false;
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["focus_tint"], false);
-    }
-
-    /// The root is always listed now, so **Hide root worktree** has no row
-    /// to be edited on — but the keys earlier releases wrote still load
-    /// and are written back unchanged for the older builds that read
-    /// them: the top-level `hide_root_worktree` (one switch for every
-    /// project, through 0.27) as a retired field of its own, and the one
-    /// in a project's entry (the Project tab's row, through 0.33) as a key
-    /// this build doesn't know — which also keeps that entry from being
-    /// dropped as all-default. Neither hides anything.
-    #[test]
-    fn hide_root_worktree_has_no_row_and_is_written_back_for_older_builds() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|row| row.label != "Hide root worktree")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
-
-        let demo = Path::new("/tmp/demo");
+    fn a_retired_key_loads_as_nothing_and_survives_a_save() {
         let other = Path::new("/tmp/other");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(
             &path,
             r#"{
-              "hide_root_worktree": true,
+              "confirm_on_archive": true,
+              "show_all_worktrees": false,
               "projects": {
                 "/tmp/other": { "hide_root_worktree": true, "future_row": "x" }
               }
@@ -3330,28 +3028,19 @@ mod tests {
         .unwrap();
         let mut cfg = load_from(&path);
         assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
-        assert!(cfg.hide_root_worktree);
-        assert_eq!(
-            cfg.project(demo),
-            ProjectSettings::default(),
-            "no entry: the defaults, whatever the old global key says"
-        );
         assert_eq!(
             cfg.project(other).other.get("hide_root_worktree"),
             Some(&serde_json::json!(true)),
             "an entry's key rides along unread"
         );
 
-        // A save writes both back; the entry that only carries the old
-        // key is kept for it, not dropped as all-default.
+        cfg.spotify = false;
         let kept = cfg.project(other);
         cfg.set_project(other, kept);
         cfg.save_to(&path).unwrap();
         let saved = read_json_file(&path);
-        assert_eq!(
-            saved["hide_root_worktree"], true,
-            "written back for older builds"
-        );
+        assert_eq!(saved["confirm_on_archive"], true);
+        assert_eq!(saved["show_all_worktrees"], false);
         assert_eq!(
             saved["projects"],
             serde_json::json!({
@@ -3479,26 +3168,6 @@ mod tests {
             assert!(loaded.animations);
             assert!(loaded.keybindings.is_empty());
         });
-    }
-
-    /// GIT INIT NEW PROJECTS: retired with every project a repository.
-    /// No tab shows the row; the key still loads and is written back as
-    /// stored for an older daemon sharing the file.
-    #[test]
-    fn git_init_on_create_is_retired_but_still_round_trips() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|r| r.label != "git init new projects")
-            }
-            _ => true,
-        }));
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"git_init_on_create": false}"#).unwrap();
-        let cfg = load_from(&path);
-        assert!(!cfg.git_init_on_create);
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["git_init_on_create"], false);
     }
 
     /// A project's **Base branch** is a typed row of its own on the
@@ -3996,33 +3665,6 @@ mod tests {
         assert_eq!(review.custom_harness.as_deref(), Some("claude-work"));
     }
 
-    /// CARD PROMPT: retired with every card carrying its last prompt. The
-    /// key an older build wrote (`hide_card_prompt`, off by default) still
-    /// loads to what it wrote and is written back as stored, but no tab
-    /// shows it any more.
-    #[test]
-    fn card_prompt_is_retired_but_still_round_trips() {
-        assert!(
-            !Config::default().hide_card_prompt,
-            "the default an older build reads"
-        );
-        let cfg: Config = serde_json::from_str(r#"{"hide_card_prompt": true}"#).unwrap();
-        assert!(cfg.hide_card_prompt, "loaded to what an older build wrote");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).hide_card_prompt, "written back as stored");
-
-        assert!(
-            SETTINGS_TABS.iter().all(|t| match t.body {
-                TabBody::Values(rows) => rows.iter().all(|r| r.label != "Card prompt"),
-                _ => true,
-            }),
-            "no tab shows the row"
-        );
-    }
-
     /// SPOTIFY IN FOOTER: on out of the box, toggled off from its
     /// General row, persisted under `spotify`; a config predating the
     /// key turns it on, and a saved `false` is honoured.
@@ -4267,37 +3909,6 @@ mod tests {
         }
     }
 
-    /// The KEY COMBO DISPLAY is always on now, so **Key combo display**
-    /// has no row to be edited on — but the key an earlier release wrote
-    /// still loads, and is written back unchanged for the older builds
-    /// that read it.
-    #[test]
-    fn show_key_combos_has_no_row_and_is_written_back_for_older_builds() {
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|row| row.label != "Key combo display")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"show_key_combos": true}"#).unwrap();
-        let mut cfg = load_from(&path);
-        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
-        assert!(cfg.show_key_combos);
-
-        cfg.follow_new_session = !cfg.follow_new_session;
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["show_key_combos"], true);
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(
-            !cfg.show_key_combos,
-            "unknown to a config written before it"
-        );
-    }
-
     /// A project's **On worktree delete** is a row of its own on the
     /// PROJECTS TAB: it starts `off`, cycles the four policies for that
     /// project alone and saves the word the daemon reads in its entry —
@@ -4351,30 +3962,6 @@ mod tests {
         assert_eq!(cfg.project(demo).containers(), WorktreeContainers::Off);
         cfg.cycle_project(demo, SettingKind::WorktreeContainers, 1);
         assert_eq!(cfg.project(demo).worktree_containers, "stop");
-    }
-
-    /// PR & ISSUE COUNTS: retired with the header always counting. The
-    /// key an older build wrote (`pr_issue_counts`, on by default) still
-    /// loads to what it wrote and is written back as stored, but no tab
-    /// shows it any more.
-    #[test]
-    fn pr_issue_counts_is_retired_but_still_round_trips() {
-        let cfg = Config::default();
-        assert!(cfg.pr_issue_counts, "the default an older build reads");
-        let cfg: Config = serde_json::from_str(r#"{"pr_issue_counts": false}"#).unwrap();
-        assert!(!cfg.pr_issue_counts, "loaded to what an older build wrote");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(!load_from(&path).pr_issue_counts, "written back as stored");
-
-        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
-            TabBody::Values(rows) | TabBody::Project(rows) => {
-                rows.iter().all(|r| r.label != "PR & issue counts")
-            }
-            TabBody::Keys | TabBody::Accounts => true,
-        }));
     }
 
     /// The QUICK PROMPT's harness: one name, cycled over every AGENT KIND,
@@ -4918,7 +4505,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-  "git_init_on_create": false,
+  "animations": false,
   "future_daemon_flag": true,
   "session_idle_timeout": "15m"
 }
@@ -4927,17 +4514,17 @@ mod tests {
         .unwrap();
 
         let mut cfg = load_from(&path);
-        assert!(!cfg.git_init_on_create);
+        assert!(!cfg.animations);
         assert_eq!(cfg.session_idle_timeout, "15m");
         cfg.spotify = false;
-        cfg.git_init_on_create = true;
+        cfg.animations = true;
         cfg.session_idle_timeout = "1h".into();
         cfg.save_to(&path).unwrap();
 
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["spotify"], false);
-        assert_eq!(saved["git_init_on_create"], true);
+        assert_eq!(saved["animations"], true);
         assert_eq!(saved["session_idle_timeout"], "1h");
         assert_eq!(saved["future_daemon_flag"], true);
     }

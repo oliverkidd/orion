@@ -35835,28 +35835,7 @@ mod tests {
         assert!(!app.term_locked);
     }
 
-    /// The retired `show_key_combos` key changes nothing: a config that
-    /// still says `false` — written by a build where the display was an
-    /// Experimental switch — leaves every press showing, and applying it
-    /// live takes nothing down.
-    #[test]
-    fn the_key_combo_display_shows_whatever_the_retired_key_says() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let cfg = crate::config::Config {
-            show_key_combos: false,
-            ..Default::default()
-        };
-        apply_config(&mut app, &cfg);
-        let mut out = Vec::new();
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("↓ - Move down"));
-        apply_config(&mut app, &cfg);
-        assert!(app.key_combo.is_some(), "a config apply leaves it standing");
-    }
-
-    /// CARD LINE COUNTS are always read: a config that still says
-    /// `card_line_changes: false` (an older build's) turns nothing off,
+    /// CARD LINE COUNTS are always read — no setting turns them off —
     /// and a read that finds nothing changed by the line drops its
     /// checkout's entry.
     #[test]
