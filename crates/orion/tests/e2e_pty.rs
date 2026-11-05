@@ -4516,6 +4516,251 @@ async fn continue_on_carries_the_session_onto_the_other_account() {
         "{events:#?}"
     );
 
+    // And back again: the default account takes it as cleanly — Claude
+    // with no account beside it, the conversation where it began, the CLI
+    // in the default dir.
+    write_frame(&mut c, &continue_on(15, &agent_id, "claude"))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, SPAWN_CHAIN_TIMEOUT, |evs| {
+        matches!(find_ack(evs, 15), Some(ServerEvent::Error { .. }))
+            || (find_ack(evs, 15).is_some()
+                && upserted_agent(evs, &agent_id).is_some_and(|a| a.custom_harness.is_none()))
+    })
+    .await;
+    assert!(
+        matches!(find_ack(&events, 15), Some(ServerEvent::Ack { .. })),
+        "{events:#?}"
+    );
+    let back = upserted_agent(&events, &agent_id).expect("the row's upsert");
+    assert_eq!(
+        (back.kind, back.custom_harness.as_deref()),
+        (AgentKind::Claude, None)
+    );
+    assert_eq!(back.session_id.as_deref(), Some("sid-1"));
+    assert_eq!(
+        std::fs::read_to_string(slug.join("sid-1.jsonl")).unwrap(),
+        "{\"type\":\"user\"}\n"
+    );
+    write_frame(&mut c, &attach).await.unwrap();
+    write_frame(
+        &mut c,
+        &ClientRequest::Input {
+            session: sref.clone(),
+            data: b"echo \"CFG=[$CLAUDE_CONFIG_DIR]\"\n".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    let want = format!("CFG=[{}]", account_a.display());
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        String::from_utf8_lossy(&collected_output(evs)).contains(&want)
+    })
+    .await;
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
+/// Two Claude accounts at once, through a daemon restart: a session on the
+/// default account and one on another run side by side, each `claude` in
+/// its own config dir; the daemon goes down mid-turn, and the next one
+/// brings both back with `--resume` of their own conversations, each still
+/// in its own dir — the rows stored as Claude, the second with its
+/// account beside.
+#[tokio::test]
+async fn both_accounts_run_at_once_and_resume_after_a_restart() {
+    use orion_core::AgentStatus;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let dir = env.tmp.path().to_path_buf();
+    let account_a = dir.join("claude-a");
+    let account_b = dir.join("claude-b");
+    env.write_config(
+        &serde_json::json!({
+            "claude_accounts": [{"id": "claude-b", "config_dir": account_b.to_str().unwrap()}]
+        })
+        .to_string(),
+    );
+    // The rc file's `claude`: each run records its config dir and argv,
+    // and the env its hooks would post with, then waits like a CLI.
+    let rc = dir.join("rc.sh");
+    std::fs::write(
+        &rc,
+        format!(
+            concat!(
+                "claude() {{\n",
+                "  args=$(printf '%s ' \"$@\" | tr '\\n' ' ')\n",
+                "  echo \"CFG=$CLAUDE_CONFIG_DIR ARGS=$args\" >> '{d}/runs-'\"$ORION_AGENT_ID\"\n",
+                "  env > '{d}/env-'\"$ORION_AGENT_ID\"\n",
+                "  exec sleep 600\n",
+                "}}\n",
+            ),
+            d = dir.display()
+        ),
+    )
+    .unwrap();
+    let shell = dir.join("accounts-shell.sh");
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/bash -c \". '{}'; $4\"\n",
+            rc.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&shell);
+    let daemon_env = [(env::CLAUDE_CONFIG_DIR, account_a.to_str().unwrap())];
+    let mut daemon = env.spawn_daemon_in(&shell, None, &daemon_env);
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let on_a = create_agent_get_id(&mut c, &worktree.id, "on-a", 2).await;
+    write_frame(
+        &mut c,
+        &ClientRequest::CreateAgent {
+            mode: Default::default(),
+            req_id: 3,
+            worktree: worktree.id.clone(),
+            name: "on-b".into(),
+            kind: AgentKind::Claude,
+            custom_harness: Some("claude-b".into()),
+            model: None,
+            effort: None,
+            auto_title: false,
+            starting_prompt: None,
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 3).is_some()).await;
+    let Some(ServerEvent::Ack {
+        created: Some(EntityId::Agent(on_b)),
+        ..
+    }) = find_ack(&events, 3)
+    else {
+        panic!("CreateAgent on claude-b failed: {events:#?}");
+    };
+    let on_b = on_b.clone();
+
+    // Both run at once, each in its own config dir.
+    let runs = |id: &orion_core::AgentId| dir.join(format!("runs-{}", id.as_str()));
+    let lines_of = |id: &orion_core::AgentId| -> Vec<String> {
+        std::fs::read_to_string(runs(id))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let wait_lines = |id: orion_core::AgentId, n: usize| {
+        let path = runs(&id);
+        async move {
+            let deadline = tokio::time::Instant::now() + SLOW_TIMEOUT;
+            loop {
+                let count = std::fs::read_to_string(&path)
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0);
+                if count >= n {
+                    return;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{path:?} never had {n} runs"
+                );
+                tokio::time::sleep(POLL_STEP).await;
+            }
+        }
+    };
+    wait_lines(on_a.clone(), 1).await;
+    wait_lines(on_b.clone(), 1).await;
+    let first_a = &lines_of(&on_a)[0];
+    let first_b = &lines_of(&on_b)[0];
+    assert!(
+        first_a.starts_with(&format!("CFG={} ", account_a.display())),
+        "{first_a}"
+    );
+    assert!(
+        first_b.starts_with(&format!("CFG={} ", account_b.display())),
+        "{first_b}"
+    );
+    assert!(!first_a.contains("--resume") && !first_b.contains("--resume"));
+
+    // A turn on each: its session id, and the transcript in its own dir.
+    let hooks = read_env_file(&dir.join(format!("env-{}", on_a.as_str()))).await;
+    let port: u16 = hooks[env::API_URL]
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .trim_end_matches('/')
+        .parse()
+        .unwrap();
+    let token = hooks[env::API_TOKEN].clone();
+    for (id, sid, account) in [(&on_a, "sid-a", &account_a), (&on_b, "sid-b", &account_b)] {
+        let slug = account.join("projects").join("-repo");
+        std::fs::create_dir_all(&slug).unwrap();
+        std::fs::write(slug.join(format!("{sid}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+        let (status, _) = hook_post_json(
+            port,
+            &format!(
+                "/api/hooks/claude?agentId={}&hookEvent=UserPromptSubmit",
+                id.as_str()
+            ),
+            &token,
+            &format!(r#"{{"session_id":"{sid}","prompt":"go"}}"#),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &on_a, AgentStatus::Running).is_some()
+            && status_change_at(evs, &on_b, AgentStatus::Running).is_some()
+    })
+    .await;
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+
+    // The next daemon brings both back mid-turn: each resumes its own
+    // conversation in its own dir.
+    let mut daemon = env.spawn_daemon_in(&shell, None, &daemon_env);
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    wait_lines(on_a.clone(), 2).await;
+    wait_lines(on_b.clone(), 2).await;
+    let again_a = &lines_of(&on_a)[1];
+    let again_b = &lines_of(&on_b)[1];
+    assert!(
+        again_a.starts_with(&format!("CFG={} ", account_a.display()))
+            && again_a.contains("--resume sid-a"),
+        "{again_a}"
+    );
+    assert!(
+        again_b.starts_with(&format!("CFG={} ", account_b.display()))
+            && again_b.contains("--resume sid-b"),
+        "{again_b}"
+    );
+    write_frame(&mut c, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+    let Some(ServerEvent::Snapshot { agents, .. }) = events
+        .iter()
+        .find(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    else {
+        unreachable!()
+    };
+    let row = |id: &orion_core::AgentId| agents.iter().find(|a| &a.id == id).unwrap();
+    assert_eq!(
+        (row(&on_a).kind, row(&on_a).custom_harness.as_deref()),
+        (AgentKind::Claude, None)
+    );
+    assert_eq!(
+        (row(&on_b).kind, row(&on_b).custom_harness.as_deref()),
+        (AgentKind::Claude, Some("claude-b"))
+    );
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);
 }

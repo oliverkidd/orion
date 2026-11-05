@@ -27006,6 +27006,61 @@ mod tests {
         })
     }
 
+    /// `Tab` in the `⌘N` box switches between two Claude accounts for the
+    /// one launch: the box opens on the account `⌘N` is set to, the picker
+    /// lists the default account right before it, and each pick launches
+    /// on that account — the default one bare, the other as Claude with
+    /// its id beside.
+    #[test]
+    fn tab_in_the_box_switches_between_two_claude_accounts() {
+        with_two_accounts(|_| {
+            crate::config::persist(|cfg| cfg.quick_prompt_kind = "claude-2".into());
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            let launched = |app: &mut App, out: &mut Vec<ClientRequest>, rows_up: usize| {
+                press(app, KeyCode::Char('n'), KeyModifiers::SUPER, out);
+                assert!(paste_into_overlay(app, "Fix auth"));
+                press(app, KeyCode::Tab, KeyModifiers::NONE, out);
+                let Some(Overlay::Menu(menu)) = &app.overlay else {
+                    panic!("Tab should open the harness picker, got {:?}", app.overlay);
+                };
+                assert_eq!(menu.hover, 1, "on the box's own account: {:?}", menu.items);
+                for _ in 0..rows_up {
+                    press(app, KeyCode::Up, KeyModifiers::NONE, out);
+                }
+                press(app, KeyCode::Enter, KeyModifiers::NONE, out);
+                assert!(
+                    matches!(&app.overlay, Some(Overlay::Prompt(_))),
+                    "the pick hands the box back: {:?}",
+                    app.overlay
+                );
+                press(app, KeyCode::Enter, KeyModifiers::NONE, out);
+                let picked = out.iter().find_map(|req| match req {
+                    ClientRequest::CreateAgent {
+                        kind,
+                        custom_harness,
+                        ..
+                    } => Some((*kind, custom_harness.clone())),
+                    _ => None,
+                });
+                out.clear();
+                picked.expect("a launch")
+            };
+            assert_eq!(
+                launched(&mut app, &mut out, 1),
+                (AgentKind::Claude, None),
+                "Up to the default account"
+            );
+            assert_eq!(
+                launched(&mut app, &mut out, 0),
+                (AgentKind::Claude, Some("claude-2".to_string())),
+                "the box's own account"
+            );
+        });
+    }
+
     /// The settings overlay on the CLAUDE ACCOUNTS row `at` (0 = the
     /// default account).
     fn open_account_row(app: &mut App, at: usize, out: &mut Vec<ClientRequest>) {

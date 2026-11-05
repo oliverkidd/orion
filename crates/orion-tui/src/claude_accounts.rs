@@ -1258,6 +1258,43 @@ mod tests {
         cfg.effective_harness_by_id(id).display_label().to_string()
     }
 
+    /// Two accounts stay signed in at once, each its own login read from
+    /// its own record — no warning, as two logins are two subscriptions —
+    /// and signing one out leaves the other signed in.
+    #[test]
+    fn both_accounts_stay_signed_in_at_once() {
+        let m = Machine::new("{}");
+        let two = m.home.path().join(".claude-2");
+        std::fs::write(
+            &m.config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        m.sign(".claude.json", Some("a@b.co"));
+        m.sign(".claude-2/.claude.json", Some("c@d.co"));
+        m.run(|| {
+            refresh_now();
+            let cfg = Config::load();
+            assert_eq!(label_of(&cfg, "claude"), "Claude (a@b.co)");
+            assert_eq!(label_of(&cfg, "claude-2"), "Claude (c@d.co)");
+            assert!(same_account_groups(&cfg.harness_registry()).is_empty());
+        });
+        m.sign(".claude.json", None);
+        m.run(|| {
+            refresh_now();
+            let cfg = Config::load();
+            assert_eq!(label_of(&cfg, "claude"), "Claude (not signed in)");
+            assert_eq!(
+                label_of(&cfg, "claude-2"),
+                "Claude (c@d.co)",
+                "the other stays signed in"
+            );
+        });
+    }
+
     /// Every account is named after the email its own record holds — the
     /// default one's in `~/.claude.json`, an extra one's inside its dir —
     /// and only once a read has landed.
