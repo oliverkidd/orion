@@ -669,7 +669,7 @@ there is said once.
 
 `⌘I` (`^Q` where the terminal sends no ⌘) opens the TODOS MODAL: every open PROJECT's own todo
 list, a tab each along the top in the order of the grid's project tabs, then any project whose
-tab is closed, opened on the selected project's tab (`←`/`→`, `Tab` or a click for another,
+tab is closed, opened on the selected project's tab (`⇧←`/`⇧→`, `Tab` or a click for another,
 `⌘1`–`⌘9` straight to one; each comes back as it was left while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
 an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
@@ -691,12 +691,17 @@ the bottom of the group it is in (or of the list). Ticked items and complete gro
 until the modal closes; the next time it opens they are gone from the list. Nothing unfinished goes
 anywhere — it is simply still there tomorrow, a day older.
 
-The project row's right end says what was ticked today and this week, across every project, with a
-bar for each day from Monday. A click on `✓N today` or `✓N this week` opens the **DONE** page: what
-was ticked in that span, a section per project in the tabs' order, each over the groups it was
-ticked in and nested groups under theirs, with the time (today) or day (this week) it was ticked.
-`←`/`→` turn between today and the week, `Space` puts an item ticked by mistake back on its list,
-`Esc` goes back. Days are local: a tick at 11pm is that day's, and the week starts on Monday.
+Down the right, beside the lists, is the **DONE** panel: your ticked todos and nothing else,
+across every project, over one span — **Today**, the **Week** (from Monday, the one it opens on),
+the **Month** (from the 1st) or the **Quarter** (from its first day). Under the span, how many were
+ticked in it and a bar chart of it: a bar a day for today and the week (Monday to Sunday, today's
+bright, the days to come dotted) and for the month (a bar a week when the panel is too narrow for
+its days), a bar a week for the quarter, labelled with its months. Then what was ticked, a section
+per project in the tabs' order, the latest first, each with when — the time today, the day this
+week, the date further back. `→` puts the keys on the panel and `←` (or `Esc`) hands them back;
+there `↑`/`↓` walk the items, `Tab` (`⇧Tab`) turns the span — a click on one does too — and
+`Space` puts an item ticked by mistake back on its list. A window too narrow for both columns shows
+the lists alone. Days are local: a tick at 11pm is that day's.
 
 The order is yours: `⌥↑`/`⌥↓` move an item a place up or down the list as it is drawn, whatever
 its priority — past the next item, into a nested group it meets and through it, out of the bottom

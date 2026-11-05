@@ -37371,9 +37371,10 @@ mod tests {
     }
 
     /// A tab per open project, in the projects' order, each with what is
-    /// open in it: `←`/`→` walk them round the ends — `⇧←`/`⇧→` and `Tab`
-    /// too, and `⌘2` goes straight to the second — each project's tab
-    /// coming back as it was left: its cursor, its filter, DONE open.
+    /// open in it: `⇧←`/`⇧→` walk them round the ends — `Tab` too, and
+    /// `⌘2` goes straight to the second — each project's tab coming back
+    /// as it was left: its cursor, its filter. Plain `→` is the DONE
+    /// panel's, which stays as it is from tab to tab.
     #[test]
     fn arrows_walk_a_tab_per_project() {
         use crate::todos::view::Entry;
@@ -37397,11 +37398,17 @@ mod tests {
             assert!(text.contains("nightshift"), "{text}");
             assert!(!text.contains("Log"), "no Today/Log tabs: {text}");
 
-            // Right, plain, the moment the modal is up.
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            // ⇧→ the moment the modal is up, and back.
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
             assert_eq!(todo_view(&app).project.0, "p2");
-            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
             assert_eq!(todo_view(&app).project.0, "p1");
+            // Plain → puts the keys on the DONE panel; ← hands them back.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_view(&app).project.0, "p1");
+            assert!(todo_view(&app).done.focused);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(!todo_view(&app).done.focused);
 
             // Left on an item with a filter typed: ←/→ are the filter's
             // caret then, ⇧→ still the tabs'.
@@ -37498,10 +37505,10 @@ mod tests {
     }
 
     /// A tick strikes the item through where it stands, the cursor
-    /// staying on it — nothing moves under it; the summary says so. Once
-    /// the modal goes, so does the item — and its DONE page,
-    /// opened by a click on the summary, has it under its group, where
-    /// `space` puts it back on the list.
+    /// staying on it — nothing moves under it — and the DONE panel beside
+    /// the list has it at once. Once the modal goes, so does the item from
+    /// the list; the panel still has it under its project, with when, and
+    /// `space` there puts it back on the list.
     #[test]
     fn a_ticked_todo_stays_put_then_leaves_the_list() {
         let mut out = Vec::new();
@@ -37513,7 +37520,7 @@ mod tests {
             let text = buffer_text(&terminal);
             assert!(text.contains("☑"), "{text}");
             assert!(text.contains("· 1 open · ✓1"), "{text}");
-            assert!(text.contains("✓1 today · ✓1 this week"), "{text}");
+            assert!(text.contains("✓1 this week"), "the panel has it: {text}");
             let (x, y) = find_cell(&terminal, "run plan");
             let cell = &terminal.backend().buffer()[(x, y)];
             assert!(cell
@@ -37541,32 +37548,28 @@ mod tests {
             run_action(&mut app, crate::keymap::Action::Todos);
             assert_eq!(order(&app), ["setup resend"]);
             let terminal = draw_todos(&mut app);
-            let text = buffer_text(&terminal);
-            assert!(!text.contains("run plan"), "{text}");
-            assert!(!text.contains("DONE BEFORE TODAY"), "{text}");
-
-            // A click on `✓1 today`: the DONE page, project over group
-            // over item.
-            let (x, y) = find_cell(&terminal, "✓1 today");
-            click(&mut app, x, y, &mut out);
-            let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("Today ✓1"), "{text}");
-            let (project, group, item) = (
-                text.find("DEMO").unwrap(),
-                text.find("Emails").unwrap(),
-                text.find("run plan").unwrap(),
+            let (list_x, _) = find_cell(&terminal, "setup resend");
+            let (done_x, _) = find_cell(&terminal, "run plan");
+            assert!(
+                done_x > list_x,
+                "only on the panel: {}",
+                buffer_text(&terminal)
             );
-            assert!(project < group && group < item, "{text}");
-            assert!(text.contains("10:00"), "when: {text}");
-            // `→` turns to the week; `space` puts it back; Esc to the list.
+            assert!(buffer_text(&terminal).contains("Tue"), "when it was ticked");
+
+            // `→` into the panel; `Tab` to today, the time it was ticked;
+            // `space` puts it back; `←` back to the list.
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert!(buffer_text(&draw_todos(&mut app)).contains("Tue 6 Oct"));
+            press(&mut app, KeyCode::Tab, KeyModifiers::SHIFT, &mut out);
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("✓1 today"), "{text}");
+            assert!(text.contains("10:00"), "when: {text}");
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("nothing ticked this week yet"), "{text}");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(todo_view(&app).page.is_none());
+            assert!(text.contains("nothing ticked today yet"), "{text}");
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(!todo_view(&app).done.focused);
             assert_eq!(order(&app), ["run plan", "setup resend"]);
         });
     }
