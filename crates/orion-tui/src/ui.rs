@@ -2264,6 +2264,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
         Overlay::Todos(view) => crate::todos::draw(f, app, &view, th, false),
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
+        Overlay::WhatsNew(view) => crate::whats_new::draw(f, app, &view, th),
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),

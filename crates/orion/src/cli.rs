@@ -213,11 +213,12 @@ pub(crate) enum Command {
         /// Remote directory to start in (default: remote $HOME).
         path: Option<String>,
     },
-    /// Open orion on its setup, every step.
+    /// Open orion on its setup.
     ///
-    /// Agents, Claude accounts, the Open in app editor, worktrees, Linear
-    /// and autofix, with `i` to install what's missing. The palette's Run
-    /// setup and Settings → Tools → Setup open the same thing.
+    /// Four pages: Welcome; Claude — its CLI (`i` installs it) and the
+    /// accounts to sign in; your first project, its base branch and run
+    /// command; and the keys that matter. The palette's Run setup opens
+    /// the same thing.
     Setup,
     /// Open orion as a Mac app of its own.
     ///

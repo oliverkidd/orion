@@ -206,7 +206,7 @@ pub enum Action {
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
     Restart,
-    /// Open ORION SETUP again, every step.
+    /// Open ORION SETUP again.
     RunSetup,
     /// `⌘⇧G`: install the newer published release the footer offers, then
     /// restart the daemon and this TUI on it.
@@ -930,7 +930,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::RunSetup,
         id: "run_setup",
         label: "Run setup",
-        hint: "Open Orion setup again, every step: agents and their CLIs, Claude accounts, the Open in app editor, worktrees, Linear and autofix, with i to install whatever is missing",
+        hint: "Open Orion setup again: Claude and its accounts (i installs its CLI), your first project's base branch and run command, and the keys that matter",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],

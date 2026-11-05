@@ -73,6 +73,7 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         },
         Overlay::Menu(_)
         | Overlay::Onboard(_)
+        | Overlay::WhatsNew(_)
         | Overlay::Confirm(_)
         | Overlay::Help(_)
         | Overlay::Settings(_)

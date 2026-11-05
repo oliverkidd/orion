@@ -159,7 +159,7 @@ fn init_tui_logging() -> Result<()> {
 }
 
 /// The TUI, and what its exit asks for next.
-/// Open the TUI — `setup` when `orion setup` asked for every step of it.
+/// Open the TUI — `setup` when `orion setup` asked for setup.
 fn run_tui(setup: bool) -> Result<()> {
     // On a Mac orion lives in its own app: a bare `orion` in a terminal
     // opens it there and leaves the terminal. An upgrade moves an orion
@@ -208,15 +208,6 @@ fn run_tui(setup: bool) -> Result<()> {
             } else {
                 orion_tui::restart()
             }
-        }
-        // Setup's App step: orion opens in its own app, the daemon and its
-        // sessions left up for it. Failing that, this terminal is left as
-        // it is, with the reason.
-        orion_tui::Exit::App => {
-            if let Err(why) = orion_tui::open_app() {
-                eprintln!("orion: {why:#} — run orion again to carry on here");
-            }
-            Ok(())
         }
         orion_tui::Exit::Quit => {
             orion_tui::app_bundle::refresh_on_quit(dev_build);

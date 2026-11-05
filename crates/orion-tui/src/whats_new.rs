@@ -1,16 +1,25 @@
-//! WHAT'S NEW: the releases since the one this machine last ran, shown as
-//! the first page of setup on the launch after an upgrade (`onboard`),
-//! however many releases the upgrade jumped — stacked newest first, and
-//! followed by any setup steps added since.
+//! WHAT'S NEW: the releases since the one this machine last ran, a sheet
+//! of its own over the grid on the launch after an upgrade, however many
+//! releases the upgrade jumped — stacked newest first. Shown once: closing
+//! it stamps them seen.
 //!
 //! The notes are baked in at build time from git (`build.rs`): each
 //! release's commits between its `v*` tag and the one before, so every
 //! release ever cut has notes without anyone writing them twice. Which
 //! releases are new is `seen_version` (config.local.json), stamped to this
-//! build's version whenever setup closes — never lowered, so running an
-//! older or a dev build in between does not show the same notes again.
+//! build's version whenever the sheet or setup closes — never lowered, so
+//! running an older or a dev build in between does not show the same
+//! notes again.
 
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::Frame;
+
+use crate::app::{App, Overlay};
 use crate::config::Config;
+use crate::theme::Theme;
 use crate::update_check::parse_version;
 
 /// One published release, as git has it.
@@ -63,24 +72,10 @@ pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// The SETUP VERSION each release first shipped, for a config written
-/// before `seen_version` existed: having seen a setup version means having
-/// run at least the release that brought it. Only ever needed for those
-/// configs — every launch from here on stamps `seen_version` — so it
-/// never grows.
-const SETUP_SHIPPED_IN: &[(u32, &str)] = &[(2, "1.0.17"), (3, "1.0.21")];
-
-/// The last version this machine is known to have run: `seen_version`, or
-/// for a config from before it, the release its setup version came with.
-/// None when nothing says (a setup from before setup versions).
+/// The last version this machine is known to have run: `seen_version`.
+/// None when nothing says (a config from before it).
 pub fn seen(cfg: &Config) -> Option<(u64, u64, u64)> {
-    parse_version(&cfg.seen_version).or_else(|| {
-        SETUP_SHIPPED_IN
-            .iter()
-            .rev()
-            .find(|(setup, _)| cfg.setup_version >= *setup)
-            .and_then(|(_, version)| parse_version(version))
-    })
+    parse_version(&cfg.seen_version)
 }
 
 /// How many releases a machine that says nothing of what it ran is shown
@@ -122,8 +117,7 @@ pub fn unseen(cfg: &Config) -> Vec<&'static Release> {
 
 /// `seen_version` moved up to this build, never down — measured against
 /// what [`seen`] knows, so a dev build behind the releases does not stamp
-/// over a setup version's better word: what closing setup stamps. Whether
-/// it moved.
+/// it down: what closing the sheet or setup stamps. Whether it moved.
 pub fn stamp_seen(cfg: &mut Config) -> bool {
     let newer = match (parse_version(current()), seen(cfg)) {
         (Some(this), Some(seen)) => this > seen,
@@ -134,6 +128,149 @@ pub fn stamp_seen(cfg: &mut Config) -> bool {
         cfg.seen_version = current().to_string();
     }
     newer
+}
+
+// ---- the sheet ----
+
+/// The WHAT'S NEW sheet's live state: the releases it shows and the last
+/// one seen before them, read as it opened — another orion stamping them
+/// meanwhile doesn't empty it — the release under the cursor, and where it
+/// was drawn, for a click outside.
+#[derive(Debug, Clone, Default)]
+pub struct WhatsNewView {
+    pub releases: Vec<&'static Release>,
+    pub seen: Option<(u64, u64, u64)>,
+    pub row: usize,
+    pub area: Rect,
+}
+
+/// Whether the sheet has anything to show this machine at startup:
+/// releases it has not seen the notes of.
+pub fn pending(cfg: &Config) -> bool {
+    !unseen(cfg).is_empty()
+}
+
+/// Put the sheet up over the grid, on the newest release.
+pub fn open(app: &mut App) {
+    let cfg = Config::load();
+    app.overlay = Some(Overlay::WhatsNew(WhatsNewView {
+        releases: unseen(&cfg),
+        seen: seen(&cfg),
+        ..WhatsNewView::default()
+    }));
+    app.dirty = true;
+}
+
+/// Close the sheet and stamp this build's notes seen, so it does not come
+/// back. A test without a config path does not persist.
+pub fn dismiss(app: &mut App) {
+    app.overlay = None;
+    app.dirty = true;
+    crate::onboard::persist(|cfg| {
+        stamp_seen(cfg);
+    });
+}
+
+/// The sheet's keys: one table [`handle_key`] matches and the border
+/// spells.
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const WALK: Key = Key::new(&["up", "down"], "release").show(2);
+    pub const DONE: Key = Key::new(&["enter", "esc"], "done").show(2);
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[WALK, DONE];
+}
+
+pub fn handle_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::WhatsNew(view)) = &mut app.overlay else {
+        return;
+    };
+    match key.code {
+        _ if keys::DONE.matches(&key) => return dismiss(app),
+        KeyCode::Down | KeyCode::Char('j') => {
+            view.row = (view.row + 1).min(view.releases.len().saturating_sub(1));
+        }
+        KeyCode::Up | KeyCode::Char('k') => view.row = view.row.saturating_sub(1),
+        _ => return,
+    }
+    app.dirty = true;
+}
+
+pub fn draw(f: &mut Frame, app: &mut App, view: &WhatsNewView, th: Theme) {
+    let width = crate::onboard::sheet_inner_width(f.area());
+    let body = notes(view, th, width);
+    let hints = [keys::DONE.hint().kept(), keys::WALK.hint()];
+    let area = crate::onboard::draw_sheet(
+        f,
+        " What's new in Orion ",
+        None,
+        body,
+        "",
+        &hints,
+        false,
+        th,
+    );
+    if let Some(Overlay::WhatsNew(live)) = &mut app.overlay {
+        live.area = area;
+    }
+}
+
+/// Each release since the one this machine last ran, newest first — its
+/// version and day, then every change in it with what its commit said.
+/// The cursor walks the releases; the one under it stays in sight, its
+/// last line kept on screen.
+fn notes(view: &WhatsNewView, th: Theme, width: u16) -> crate::onboard::Body {
+    let mut body = crate::onboard::Body::new(width);
+    let text = Style::default().fg(th.text);
+    let dim = Style::default().fg(th.dim);
+    let (releases, row) = (&view.releases, view.row);
+    let since = view
+        .seen
+        .map(|(a, b, c)| format!(" since v{a}.{b}.{c}"))
+        .unwrap_or_default();
+    let n = releases.len();
+    body.prose(
+        &format!(
+            "You're on v{} — {n} release{} {}{since}, newest first.",
+            current(),
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "is new" } else { "are new" },
+        ),
+        width,
+        dim,
+    );
+    for (i, release) in releases.iter().enumerate() {
+        body.blank();
+        let on = i == row;
+        body.lines.push(Line::from(vec![
+            Span::styled(
+                if on { " › " } else { "   " },
+                Style::default().fg(th.accent),
+            ),
+            Span::styled(
+                format!("v{}", release.version),
+                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", release.date), dim),
+        ]));
+        for change in release.changes {
+            body.item(
+                "• ",
+                change.title,
+                3,
+                width,
+                text.add_modifier(Modifier::BOLD),
+            );
+            for detail in change.details {
+                body.item("– ", detail, 5, width, dim);
+            }
+        }
+        if on {
+            body.selected = Some(body.lines.len() - 1);
+        }
+    }
+    body
 }
 
 #[cfg(test)]
@@ -212,17 +349,14 @@ mod tests {
     }
 
     #[test]
-    fn an_old_config_is_placed_by_its_setup_version() {
+    fn the_stamp_is_what_was_seen() {
         let mut cfg = Config {
             onboarded: true,
-            setup_version: 1,
             ..Config::default()
         };
         assert_eq!(seen(&cfg), None);
-        cfg.setup_version = 2;
-        assert_eq!(seen(&cfg), Some((1, 0, 17)));
         cfg.seen_version = "1.0.18".into();
-        assert_eq!(seen(&cfg), Some((1, 0, 18)), "the stamp wins");
+        assert_eq!(seen(&cfg), Some((1, 0, 18)));
     }
 
     #[test]
@@ -239,5 +373,56 @@ mod tests {
     fn a_first_run_has_no_news() {
         let cfg = Config::default();
         assert!(unseen(&cfg).is_empty());
+        assert!(!pending(&cfg));
+    }
+
+    fn sheet_text(app: &mut App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(96, 30)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    /// After an upgrade the sheet is up on its own: every release since
+    /// the one this machine last ran, newest first, no setup step with
+    /// them; ↑/↓ walk them, and closing it stamps this build seen, so it
+    /// is shown once.
+    #[test]
+    fn the_sheet_shows_the_unseen_releases_once() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            crate::onboard::persist(|cfg| {
+                cfg.onboarded = true;
+                cfg.seen_version = "1.0.0".into();
+            });
+            with_releases(ALL, || {
+                let cfg = Config::load();
+                assert!(pending(&cfg));
+                let mut app = App::new();
+                open(&mut app);
+                let shot = sheet_text(&mut app);
+                assert!(shot.contains("What's new in Orion"), "{shot}");
+                assert!(!shot.contains("Welcome"), "no setup page:\n{shot}");
+                let (a, b) = (shot.find("v1.0.3").unwrap(), shot.find("v1.0.1").unwrap());
+                assert!(a < b, "newest first:\n{shot}");
+                assert!(shot.contains("Three"), "{shot}");
+                handle_key(&mut app, KeyEvent::from(KeyCode::Down));
+                let Some(Overlay::WhatsNew(view)) = &app.overlay else {
+                    panic!("the sheet stays up");
+                };
+                assert_eq!(view.row, 1);
+                handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
+                assert!(app.overlay.is_none());
+                assert_eq!(Config::load().seen_version, current());
+            });
+        });
     }
 }

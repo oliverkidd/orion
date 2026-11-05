@@ -248,8 +248,8 @@ pub fn bundle_in(home: &Path) -> PathBuf {
 /// Whether orion can move into its app from where it is running: on a
 /// local Mac with the Ghostty the app is made from, when it is not in the
 /// app already, or in tmux (a choice the app would undo). A bare `orion`
-/// moves by itself where this holds ([`opens_in_app`]); setup's App step
-/// offers the move wherever it has not happened.
+/// moves by itself where this holds ([`opens_in_app`]); elsewhere `orion
+/// app` makes the move.
 #[cfg(not(test))]
 pub fn can_move() -> bool {
     !orion_core::host::is_remote_session()
@@ -258,24 +258,10 @@ pub fn can_move() -> bool {
         && crate::event_loop::ghostty_app().is_some()
 }
 
-/// [`can_move`] under test: what [`with_offered`] set on this thread.
+/// [`can_move`] under test: never — no test opens the app.
 #[cfg(test)]
 pub fn can_move() -> bool {
-    OFFERED.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-thread_local! {
-    static OFFERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Run `f` with [`can_move`] answering `on` on this test's thread.
-#[cfg(test)]
-pub fn with_offered<T>(on: bool, f: impl FnOnce() -> T) -> T {
-    let was = OFFERED.with(|o| o.replace(on));
-    let out = f();
-    OFFERED.with(|o| o.set(was));
-    out
+    false
 }
 
 /// Where `bundle` keeps its executables.

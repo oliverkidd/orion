@@ -20,7 +20,7 @@ orion spawn <task>         start another agent session beside it       (agents r
 orion open <file>…         show files in this orion's file tabs       (agents run this)
 orion config <cmd>         locate this machine's settings
 orion ssh <host>           open orion on a remote host over ssh
-orion setup                open orion on its setup, every step
+orion setup                open orion on its setup: Claude, your first project, the keys
 orion app                  open orion as a Mac app of its own (Orion.app)
 orion doctor               check what orion needs on this machine
 orion upgrade              install the latest published orion

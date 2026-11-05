@@ -250,9 +250,6 @@ pub enum Exit {
     /// **Upgrade orion**: install the newer release, then restart the
     /// daemon and this binary on it (`crate::restart`).
     Upgrade,
-    /// Setup's App step: open orion in its own app
-    /// (`crate::open_app`), the daemon and its sessions left up.
-    App,
 }
 
 pub async fn run_app() -> Result<Exit> {
@@ -303,8 +300,11 @@ async fn main_loop(
     if let Some(why) = crate::app_bundle::take_not_opened() {
         app.flash = Some(crate::flash::Flash::failed(why));
     }
-    if let Some(since) = crate::onboard::pending(&cfg) {
-        crate::onboard::open(&mut app, &cfg, since);
+    // A first run opens setup; an upgrade, the releases it brought, once.
+    if !cfg.onboarded {
+        crate::onboard::open(&mut app);
+    } else if crate::whats_new::pending(&cfg) {
+        crate::whats_new::open(&mut app);
     }
     let mut input = crossterm::event::EventStream::new();
     let mut out: Vec<ClientRequest> = Vec::new();
@@ -940,8 +940,6 @@ async fn main_loop(
                 Exit::Upgrade
             } else if app.restart {
                 Exit::Restart
-            } else if app.move_to_app {
-                Exit::App
             } else {
                 app.pending_ssh.take().map_or(Exit::Quit, Exit::Ssh)
             });
@@ -3678,6 +3676,7 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::CleanWorktrees(_)
         | Overlay::ProjectPicker(_) => true,
         Overlay::Onboard(view) => !view.asking(),
+        Overlay::WhatsNew(_) => true,
         _ => false,
     }
 }
@@ -4042,7 +4041,7 @@ fn dispatch_action(
     match action {
         Action::Quit => app.overlay = Some(Overlay::Confirm(confirm_quit())),
         Action::Restart => app.overlay = Some(Overlay::Confirm(confirm_restart())),
-        Action::RunSetup => crate::onboard::open(app, &crate::config::Config::load(), 0),
+        Action::RunSetup => crate::onboard::open(app),
         Action::Upgrade => open_upgrade(app),
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
@@ -4914,7 +4913,7 @@ fn open_launch_repo(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// of asking the daemon to register it twice; one that does not exist yet
 /// asks first whether to create it, and one in no git repository asks
 /// whether to `git init` it.
-fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequest>) {
+pub(crate) fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequest>) {
     if !path.exists() {
         app.overlay = Some(Overlay::Confirm(ConfirmDialog {
             title: "Create directory".into(),
@@ -7372,7 +7371,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
-        Overlay::Onboard(_) => crate::onboard::handle_key(app, key),
+        Overlay::Onboard(_) => crate::onboard::handle_key(app, key, out),
+        Overlay::WhatsNew(_) => crate::whats_new::handle_key(app, key),
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
@@ -8175,7 +8175,7 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         match spec.kind {
             SettingKind::RunSetup if delta == 0 => {
                 app.overlay = None;
-                crate::onboard::open(app, &crate::config::Config::load(), 0);
+                crate::onboard::open(app);
                 return;
             }
             SettingKind::Git | SettingKind::Gh if delta == 0 => {
@@ -9519,6 +9519,16 @@ pub(crate) fn select_worktree_by_id(
     // Land on the sessions panel so `n` immediately creates a session here.
     app.focus = Focus::Sessions;
     true
+}
+
+/// Land on project `id` as a pick of it from the PROJECT DROPDOWN does —
+/// setup's First project page stepping through the projects.
+pub(crate) fn select_project(
+    app: &mut App,
+    id: &orion_core::ProjectId,
+    out: &mut Vec<ClientRequest>,
+) {
+    launcher::open_project(app, id, out);
 }
 
 /// Land on a project we just added, the way a pick of it from the PROJECT
@@ -29367,7 +29377,7 @@ mod tests {
             let path = std::env::join_paths([bin.path()]).unwrap();
             crate::config::with_search_path(path, || {
                 let mut app = App::new();
-                crate::onboard::open(&mut app, &crate::config::Config::load(), 0);
+                crate::onboard::open(&mut app);
                 let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
                 let dir = tempfile::tempdir().unwrap();
                 let mut vim = crate::editor_term::EditorTerm::spawn_cmd(
@@ -35430,7 +35440,14 @@ mod tests {
             (
                 "Onboard",
                 |app| {
-                    crate::onboard::open(app, &crate::config::Config::load(), 0);
+                    crate::onboard::open(app);
+                },
+                None,
+            ),
+            (
+                "WhatsNew",
+                |app| {
+                    crate::whats_new::open(app);
                 },
                 None,
             ),
@@ -35600,6 +35617,7 @@ mod tests {
             Overlay::Linear(_) => "Linear",
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
+            Overlay::WhatsNew(_) => "WhatsNew",
             Overlay::Autofix(_) => "Autofix",
             Overlay::WeekReview(_) => "WeekReview",
             Overlay::Conflicts(_) => "Conflicts",
@@ -35632,7 +35650,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 22, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
         });
     }
 

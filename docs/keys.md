@@ -23,7 +23,7 @@ its key, and `Enter` runs it.
   border is too narrow for every key, whole keys drop off its right end, the modal's main verb and
   its way out (`Esc`) last; a key is never cut in half.
 - **A modal's explanation** of the row or setting under its cursor is a dim line inside the frame,
-  right above the keys — in the SETTINGS OVERLAY, the COMMAND PALETTE, the onboarding wizard.
+  right above the keys — in the SETTINGS OVERLAY, the COMMAND PALETTE, setup.
 - **One spelling and one colour for every key.** A letter under a modifier is its capital — `⌘K`,
   `^K`, `⌥P`, `⇧A` — and a bare letter is the letter you type (`t`). Every key label is drawn in the
   theme's accent — in the footer, on a modal's border, in the new-agent box's header, the COMMAND
@@ -536,12 +536,18 @@ CLIs](configuration.md#installing-editors-and-agent-clis)). The installer's own 
 modal: `^Q` stops it, and when it exits the title says whether the program is on PATH now and
 `Enter` closes it.
 
-FIRST-RUN SETUP (**Orion setup**, while `onboarded` is unset) is the same kind of modal, a step at
-a time — the STEP STRIP across its top lights the one it is on. `→`/`Tab` go to the next step,
-`←`/`⇧Tab` back, `↑`/`↓` move down a step's rows; `Space` flips the row (an agent on or off, an
-app chosen, a switch), `Enter` does its verb (an agent's default model, an account's sign-in, a
-typed row opened, the connection tested), `i` installs a missing agent CLI, and `Esc`
-skips the rest — or, while the step asks something, backs out of the question.
+FIRST-RUN SETUP (**Orion setup**, while `onboarded` is unset, and from **Run setup** or `orion
+setup`) is the same kind of modal, four pages — Welcome · Claude · First project · Ready — the STEP
+STRIP across its top lighting the one it is on. `→`/`Tab` go to the next page, `←`/`⇧Tab` back,
+`↑`/`↓` move down a page's rows. On **Claude**, `i` installs the Claude CLI while it is missing,
+`Enter` signs an account in (and switches it on) or adds one, and `Space` switches an account on or
+off. On **First project**, `Enter` on the Project row opens the repo orion was started in (or the
+open-project prompt), `Space` steps to the next project, and `Enter` on **Base branch** or **Run
+command** types it in place. **Ready** lists the keys that matter. `Esc` skips the rest — or, while
+a page asks something, backs out of the question.
+
+WHAT'S NEW is a sheet of its own, up once on the first launch after an upgrade: every release since
+the one this machine last ran, newest first. `↑`/`↓` walk the releases; `Enter` or `Esc` closes it.
 
 ## Typed fields
 

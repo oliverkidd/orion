@@ -774,8 +774,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             },
         ]),
     },
-    // Every Linear option in one place: the onboarding wizard's Linear
-    // page draws the same rows (`LINEAR_SETTINGS`).
+    // Every Linear option in one place (`LINEAR_SETTINGS`).
     SettingsTab {
         title: "Linear",
         body: TabBody::Values(LINEAR_SETTINGS),
@@ -794,10 +793,9 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     },
 ];
 
-/// The LINEAR TAB's rows, top to bottom — and the onboarding wizard's
-/// Linear page, which mirrors them. Linking pull requests leads: it is on
-/// by default and the one most people only ever check. Each project's key
-/// is on the PROJECTS TAB, under that project.
+/// The LINEAR TAB's rows, top to bottom. Linking pull requests leads: it
+/// is on by default and the one most people only ever check. Each
+/// project's key is on the PROJECTS TAB, under that project.
 pub const LINEAR_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::LinearAutoAttach,
@@ -1172,12 +1170,6 @@ pub struct Config {
     /// shared `config.json` does not skip the wizard on a new machine.
     #[serde(default)]
     pub onboarded: bool,
-    /// The SETUP VERSION this machine last went through
-    /// (`onboard::SETUP_VERSION`): a release that adds a step bumps it, and
-    /// the next launch opens setup on the new steps only. 0 on a config
-    /// from before it existed. Local-only, like `onboarded`.
-    #[serde(default)]
-    pub setup_version: u32,
     /// The orion version this machine last saw WHAT'S NEW for
     /// (`crate::whats_new`): the next launch of a newer build opens on the
     /// releases since. Empty on a config from before it existed. Local-only.
@@ -1671,7 +1663,6 @@ impl Default for Config {
             linear_assignee_email: String::new(),
             linear_auto_attach: true,
             onboarded: false,
-            setup_version: 0,
             seen_version: String::new(),
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             prewarm_agents: true,
@@ -1745,12 +1736,7 @@ impl Default for Config {
 /// is stays on this one. The local file is created for a key set away
 /// from its default, and an unreadable one is never rewritten — the key
 /// goes unsaved instead.
-const LOCAL_KEYS: &[&str] = &[
-    "linear_assignee_email",
-    "onboarded",
-    "setup_version",
-    "seen_version",
-];
+const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded", "seen_version"];
 
 /// Production starts with every harness off, including grok (whose
 /// built-in default is on, so the map has to say otherwise) — a fresh
@@ -2285,7 +2271,7 @@ impl Config {
     }
 
     /// The CLAUDE ACCOUNTS section's rows, below the Agents head — and the
-    /// onboarding wizard's page: every Claude account in registry order —
+    /// Claude page of setup: every Claude account in registry order —
     /// the default one, built-in Claude, first; on or off — then **Add
     /// account**.
     pub fn account_rows(&self) -> Vec<AccountRow> {

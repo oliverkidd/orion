@@ -43,6 +43,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Linear(v) => v.area,
         Overlay::ProjectPicker(v) => v.area,
         Overlay::Onboard(v) => v.area,
+        Overlay::WhatsNew(v) => v.area,
         Overlay::Autofix(v) => v.area,
         Overlay::Todos(v) => v.area,
         Overlay::WeekReview(v) => v.area,
@@ -83,7 +84,10 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             app.overlay = None;
             crate::quick_prompt::reopen(app, back.launch, &back.text);
         }
+        // Setup asking something backs out of the question, as its Esc does.
+        Some(Overlay::Onboard(view)) if view.asking() => crate::onboard::back_out(app),
         Some(Overlay::Onboard(_)) => crate::onboard::dismiss(app),
+        Some(Overlay::WhatsNew(_)) => crate::whats_new::dismiss(app),
         // A DIFF VIEWER opened from the PULL REQUESTS MODAL is a level
         // inside it: the modal comes back on the row and tab it was on.
         Some(Overlay::Diff(view)) if view.back.is_some() => {
@@ -148,6 +152,7 @@ pub(crate) fn force_close(app: &mut App) -> bool {
     match overlay {
         Overlay::Settings(_) => crate::event_loop::close_settings(app),
         Overlay::Onboard(_) => crate::onboard::dismiss(app),
+        Overlay::WhatsNew(_) => crate::whats_new::dismiss(app),
         _ => app.overlay = None,
     }
     if let Some(draft) = parked {

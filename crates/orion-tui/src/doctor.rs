@@ -5,7 +5,7 @@
 //! `LINEAR_API_KEY` (where it was found, never the key), and the docker
 //! compose projects whose checkout is gone — with the command that fixes
 //! whatever is missing. It never installs anything itself:
-//! `install.sh` and the onboarding wizard do, with the same commands
+//! `install.sh`, setup and Settings do, with the same commands
 //! (`install`).
 //!
 //! Only git, and the editor files open in, are required; the exit code

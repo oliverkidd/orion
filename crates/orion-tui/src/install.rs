@@ -4,7 +4,7 @@
 //! ghostty`), the vendor's documented command for an agent (`curl -fsSL
 //! https://claude.ai/install.sh | bash`).
 //!
-//! The onboarding wizard's Agents page and its App step, the SETTINGS
+//! Setup's Claude page (the Claude CLI), the SETTINGS
 //! OVERLAY's CLAUDE ACCOUNTS and harness rows, and the footer's word that
 //! fresh is missing share it: `i` on a program that isn't on PATH shows its [`Plan`] — the line it
 //! would run — and Enter runs that line in the editor modal's PTY, the

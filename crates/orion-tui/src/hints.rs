@@ -636,14 +636,21 @@ mod tests {
         );
 
         let cfg = crate::config::Config::default();
-        let mut onboard = crate::onboard::OnboardView::new(&cfg);
-        for page in 0..8 {
+        let mut onboard = crate::onboard::OnboardView::default();
+        for page in 0..4 {
             onboard.page = page;
             assert_hints_from(
                 &crate::onboard::hints(&cfg, &onboard),
                 crate::onboard::keys::ALL,
             );
         }
+        assert_hints_from(
+            &[
+                crate::whats_new::keys::DONE.hint(),
+                crate::whats_new::keys::WALK.hint(),
+            ],
+            crate::whats_new::keys::ALL,
+        );
 
         use crate::ui::prompt_keys::{ASCEND, CANCEL, COMPLETE, DIVE, OK, PICK};
         assert_hints_from(
