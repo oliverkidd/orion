@@ -218,6 +218,23 @@ impl DiffDoc {
         }
     }
 
+    /// The cells before a line's code in a pane `width` cells wide — its
+    /// numbers and its sign: where something said under a line (a PR
+    /// REVIEW thread) lines up.
+    pub fn gutter_width(&self, width: u16) -> usize {
+        self.columns(width).gutter
+    }
+
+    /// Line `i` drawn into its rows, for a pane that sets rows of its own
+    /// between the lines (the PR REVIEW's threads) rather than drawing a
+    /// window of them ([`DiffDoc::render`]).
+    pub fn render_line(&self, i: usize, width: u16, th: Theme) -> Vec<Line<'static>> {
+        self.lines
+            .get(i)
+            .map(|line| self.line_lines(line, self.columns(width), th))
+            .unwrap_or_default()
+    }
+
     /// The rows line `i` takes in a pane `width` cells wide.
     pub fn rows_of(&self, i: usize, width: u16) -> usize {
         self.row_counts(width)[i] as usize
@@ -225,7 +242,7 @@ impl DiffDoc {
 
     /// Every line's rows at `width`, from the cache when the width is the
     /// one it last counted at.
-    fn row_counts(&self, width: u16) -> std::sync::Arc<Vec<u32>> {
+    pub(crate) fn row_counts(&self, width: u16) -> std::sync::Arc<Vec<u32>> {
         let count = || {
             let cols = self.columns(width);
             std::sync::Arc::new(

@@ -2272,6 +2272,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
+        Overlay::Review(view) => crate::pr_review::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {

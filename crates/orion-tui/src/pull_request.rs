@@ -1329,6 +1329,11 @@ pub struct PrDetail {
     /// Its labels, in GitHub's colours, at the sentence's right end.
     #[serde(default)]
     pub labels: Vec<PrLabel>,
+    /// Its review threads — comments on its lines — read with the page
+    /// ([`detail`]): the Reviews tab lists them by file, and the PR REVIEW
+    /// opens on them while it asks again.
+    #[serde(default)]
+    pub threads: Vec<crate::pr_review::github::ReviewThread>,
 }
 
 impl PrDetail {
@@ -1564,14 +1569,23 @@ pub fn rfc3339_secs(stamp: &str) -> Option<i64> {
 /// `gh pr view` says nothing of how big each commit is, so the Commits
 /// tab's counts come from one GraphQL ask beside it ([`commit_stats`]),
 /// run at the same time and given less time ([`STATS_TIMEOUT`]): a page
-/// whose counts could not be read in time is the page without them.
+/// whose counts could not be read in time is the page without them. Its
+/// review threads are the same: a GraphQL ask of their own
+/// (`pr_review::github::read`), and a page without them when it misses.
 pub async fn detail(dir: &Path, number: u64) -> Option<PrDetail> {
     let arg = number.to_string();
     let args = ["pr", "view", arg.as_str(), "--json", DETAIL_FIELDS];
-    let (view, stats) = tokio::join!(gh(Some(dir), &args, TIMEOUT), commit_stats(dir, number));
+    let (view, stats, threads) = tokio::join!(
+        gh(Some(dir), &args, TIMEOUT),
+        commit_stats(dir, number),
+        crate::pr_review::github::read(dir, number, STATS_TIMEOUT)
+    );
     let mut detail = parse_detail(&view?)?;
     if let Some(stats) = stats {
         apply_commit_stats(&mut detail.commits, &stats);
+    }
+    if let Ok(threads) = threads {
+        detail.threads = threads.threads;
     }
     Some(detail)
 }
@@ -1689,6 +1703,7 @@ fn parse_detail(json: &str) -> Option<PrDetail> {
             })
             .filter(|l| !l.name.is_empty())
             .collect(),
+        threads: Vec::new(),
     })
 }
 

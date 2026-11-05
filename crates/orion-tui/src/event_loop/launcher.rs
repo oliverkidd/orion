@@ -4700,6 +4700,42 @@ mod tests {
         });
     }
 
+    /// Enter on the pane's Reviews tab reviews the pull request it reads:
+    /// the PR REVIEW, over the panels.
+    #[test]
+    fn enter_on_the_reviews_tab_reviews_the_pull_request() {
+        with_default_config(|| {
+            let mut app = with_a_listed_pull_request_on_the_empty_band();
+            let url = pull_request(9).url;
+            app.pr_detail.insert(
+                url.clone(),
+                crate::pull_request::PrDetail {
+                    number: 9,
+                    url,
+                    title: "Polish the nav".into(),
+                    base: "main".into(),
+                    head_sha: "abc123".into(),
+                    ..Default::default()
+                },
+            );
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+            key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+            assert_eq!(app.pr_tabs.tab, crate::pr_preview::PrTab::Reviews);
+            assert!(
+                footer_text(&app).contains("Enter review"),
+                "{}",
+                footer_text(&app)
+            );
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                matches!(&app.overlay, Some(crate::app::Overlay::Review(v)) if v.number == 9),
+                "{:?}",
+                app.overlay
+            );
+        });
+    }
+
     /// The footer carries hints only with nothing over the grid: a modal's
     /// keys are on its own border, and the footer under it says none.
     #[test]

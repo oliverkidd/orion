@@ -38,6 +38,7 @@ const CMD_U: &[u8] = b"\x1b[117;9u";
 const CMD_N: &[u8] = b"\x1b[110;9u";
 const CMD_E: &[u8] = b"\x1b[101;9u";
 const CMD_F: &[u8] = b"\x1b[102;9u";
+const CMD_SHIFT_R: &[u8] = b"\x1b[114;10u";
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 const SPACE: &[u8] = b" ";
 /// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
@@ -1101,6 +1102,165 @@ fn tui_conflict_resolver_runs_through_to_the_pull_request() {
     assert_eq!(on_origin, "1", "the merge reached the remote");
     let merged = git_stdout(&origin, &["show", "feat:a.txt"]);
     assert_eq!(merged, "one\nupstream\nthree", "the side taken");
+}
+
+/// The PR REVIEW, end to end against a stub `gh`: `⌘⇧R` in the PULL
+/// REQUESTS MODAL reads the pull request's diff from the repo and its
+/// threads from GitHub, ada's under the line she commented on; `c` on a
+/// line writes a comment that GitHub holds in a pending review the comment
+/// starts, and `⌘⇧R` sends the review with it. The stub writes down every
+/// request body it is handed, which is what GitHub would have been sent.
+#[test]
+fn tui_pr_review_comments_on_a_line_and_sends_the_review() {
+    let stub_bin = tempfile::tempdir().unwrap();
+    let sent = stub_bin.path().join("sent");
+    let mut tui = TuiHarness::spawn_with(
+        &[(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )],
+        r#", "pr_autofix": "off""#,
+    );
+    let repo = tui.make_repo("review-proj");
+    std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    repo_git(&repo, &["add", "."]);
+    repo_git(&repo, &["commit", "-q", "-m", "base"]);
+    repo_git(&repo, &["switch", "-q", "-c", "feat"]);
+    std::fs::write(repo.join("a.txt"), "one\ndeux\nthree\n").unwrap();
+    repo_git(&repo, &["commit", "-q", "-am", "feature"]);
+    let head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+    repo_git(&repo, &["switch", "-q", "main"]);
+
+    let list = format!(
+        concat!(
+            "{{\"data\":{{\"repository\":{{\"pullRequests\":{{\"nodes\":[",
+            "{{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
+            "\"isDraft\":false,\"headRefName\":\"feat\",\"isCrossRepository\":false,",
+            "\"headRepositoryOwner\":{{\"login\":\"o\"}},\"mergeable\":\"MERGEABLE\",",
+            "\"viewerDidAuthor\":false,\"headRefOid\":\"{head}\",",
+            "\"commits\":{{\"nodes\":[{{\"commit\":{{\"statusCheckRollup\":",
+            "{{\"state\":\"SUCCESS\"}}}}}}]}}}}]}}}}}}}}"
+        ),
+        head = head
+    );
+    let detail = format!(
+        concat!(
+            "{{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
+            "\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",",
+            "\"statusCheckRollup\":[],\"author\":{{\"login\":\"ada\"}},\"baseRefName\":\"main\",",
+            "\"headRefName\":\"feat\",\"headRefOid\":\"{head}\",\"comments\":[],\"reviews\":[],",
+            "\"files\":[{{\"path\":\"a.txt\",\"additions\":1,\"deletions\":1,",
+            "\"changeType\":\"MODIFIED\"}}]}}"
+        ),
+        head = head
+    );
+    let comment = |id: &str, who: &str, body: &str, mine: bool, state: &str| {
+        format!(
+            "{{\"id\":\"{id}\",\"author\":{{\"login\":\"{who}\"}},\"body\":\"{body}\",\
+             \"createdAt\":\"2026-11-05T10:00:00Z\",\"viewerDidAuthor\":{mine},\"state\":\"{state}\"}}"
+        )
+    };
+    let thread = |id: &str, line: u32, comment: String| {
+        format!(
+            "{{\"id\":\"{id}\",\"isResolved\":false,\"isOutdated\":false,\"path\":\"a.txt\",\
+             \"line\":{line},\"startLine\":null,\"originalLine\":{line},\"diffSide\":\"RIGHT\",\
+             \"comments\":{{\"nodes\":[{comment}]}}}}"
+        )
+    };
+    let threads = format!(
+        "{{\"data\":{{\"repository\":{{\"pullRequest\":{{\"id\":\"PR_7\",\"viewerDidAuthor\":false,\
+         \"reviews\":{{\"nodes\":[]}},\"reviewThreads\":{{\"nodes\":[{}]}}}}}}}}}}",
+        thread("T_ada", 2, comment("C_1", "ada", "Looks off", false, "SUBMITTED"))
+    );
+    let added = format!(
+        "{{\"data\":{{\"addPullRequestReviewThread\":{{\"thread\":{}}}}}}}",
+        thread("T_me", 1, comment("C_2", "me", "nit: one", true, "PENDING"))
+    );
+    let started =
+        "{\"data\":{\"addPullRequestReview\":{\"pullRequestReview\":{\"id\":\"PRR_1\"}}}}";
+    let submitted = "{\"data\":{\"submitPullRequestReview\":{\"pullRequestReview\":{\"id\":\"PRR_1\",\"state\":\"COMMENTED\"}}}}";
+    let gh = stub_bin.path().join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n\
+             \x20 *'--input -'*)\n\
+             \x20   body=$(cat)\n\
+             \x20   printf '%s\\n' \"$body\" >> '{sent}'\n\
+             \x20   case \"$body\" in\n\
+             \x20     *addPullRequestReviewThread*) printf '%s' '{added}' ;;\n\
+             \x20     *submitPullRequestReview*) printf '%s' '{submitted}' ;;\n\
+             \x20     *addPullRequestReview*) printf '%s' '{started}' ;;\n\
+             \x20     *) exit 1 ;;\n\
+             \x20   esac ;;\n\
+             \x20 *reviewThreads*) printf '%s' '{threads}' ;;\n\
+             \x20 'api graphql'*) printf '%s' '{list}' ;;\n\
+             \x20 'pr view 7'*) printf '%s' '{detail}' ;;\n\
+             \x20 *) exit 1 ;;\n\
+             esac\n",
+            sent = sent.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    tui.wait_for_text("to begin");
+    add_project(&mut tui, &repo, "review-proj");
+    tui.send(CMD_U);
+    tui.wait_for_text("Add things");
+    // The page is in — the Changes tab lists its file — so the review has
+    // a head and a base to read the diff between.
+    tui.send(SHIFT_RIGHT);
+    tui.wait_for_text("a.txt");
+    tui.send(CMD_SHIFT_R);
+    tui.wait_for_text("Review #7 Add things");
+    tui.wait_for_text("Looks off");
+    tui.wait_for("the diff, ada's thread under deux", |s| {
+        let text = screen_to_text(s);
+        let at = |needle: &str| text.find(needle);
+        matches!((at("deux"), at("Looks off")), (Some(a), Some(b)) if a < b)
+    });
+
+    // `c` on the first line, a comment, Enter: into a pending review.
+    tui.send(b"c");
+    tui.wait_for_text("Comment on line 1");
+    tui.type_str("nit: one");
+    tui.send(ENTER);
+    tui.wait_for_text("me · pending");
+    tui.wait_for_text("1 pending comment");
+
+    tui.send(CMD_SHIFT_R);
+    tui.wait_for_text("reviewed #7");
+    tui.wait_for_gone("Your review");
+
+    let bodies = std::fs::read_to_string(&sent).unwrap();
+    let bodies: Vec<&str> = bodies.lines().collect();
+    assert_eq!(bodies.len(), 3, "{bodies:?}");
+    assert!(
+        bodies[0].contains("addPullRequestReview(input: {pullRequestId: $pr})")
+            && bodies[0].contains("\"pr\":\"PR_7\""),
+        "the comment starts the pending review: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("addPullRequestReviewThread")
+            && bodies[1].contains("\"review\":\"PRR_1\"")
+            && bodies[1].contains("\"line\":1")
+            && bodies[1].contains("\"body\":\"nit: one\""),
+        "the comment, on line 1: {}",
+        bodies[1]
+    );
+    assert!(
+        bodies[2].contains("submitPullRequestReview")
+            && bodies[2].contains("\"review\":\"PRR_1\"")
+            && bodies[2].contains("\"event\":\"COMMENT\""),
+        "the review sent with it: {}",
+        bodies[2]
+    );
 }
 
 /// `⌘U` in an agent's locked pane, as Ghostty's kitty protocol spells it:
