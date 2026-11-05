@@ -640,15 +640,6 @@ pub enum PendingAction {
     /// answered (`event_loop::launcher::close_cursor_tab`, the `x`).
     CloseProjectTab(ProjectId),
     DeleteLink(LinkId),
-    /// `d` in the AGENT PRESETS list: drop the preset at `index` from the
-    /// store. Both answers reopen the list for `worktree` — as the QUICK
-    /// PROMPT picker for `quick`'s box when it was one — so the modal the
-    /// confirm evicted comes back where the user left it.
-    DeleteAgentPreset {
-        index: usize,
-        worktree: WorktreeId,
-        quick: Option<Box<crate::quick_prompt::QuickReturn>>,
-    },
     /// `^D` on one of the user's presets in Settings → Presets: drop the
     /// preset at `index` of the list, then the tab again.
     DeletePreset {
@@ -2349,9 +2340,10 @@ pub enum Overlay {
     /// **Clean unused worktrees** (`crate::clean_worktrees`).
     CleanWorktrees(crate::clean_worktrees::CleanView),
     Hosts(HostsView),
-    /// `e` in the SESSIONS PANEL: the AGENT PRESETS list.
+    /// The AGENT PRESETS PICKER: `⌘U` in the box or over a pane, the
+    /// palette's **Agent presets**, a pull request's.
     AgentPresets(crate::preset_overlays::AgentPresetsView),
-    /// The PRESET EDITOR form behind the list's `Ctrl+a` / `Ctrl+e`.
+    /// The PRESET EDITOR form, over Settings → Presets.
     AgentPresetEditor(crate::preset_overlays::AgentPresetEditor),
     /// `v`: the PULL REQUESTS MODAL — the project's open pull requests.
     PullRequests(crate::pr_modal::PullRequestsView),
@@ -2541,7 +2533,7 @@ pub enum PendingIntent {
         prompt: PromptKind,
         text: String,
         /// A launch fired into the stand-in while the DAEMON was still
-        /// cutting the checkout (`e` on the new row, an AGENT PRESET
+        /// cutting the checkout (**Agent presets** on the new row, an AGENT PRESET
         /// run): its session row is up under the stand-in, and the Ack
         /// sends the create into the real checkout
         /// (`placeholder::defer_launch` / `replay_launch`). An Error

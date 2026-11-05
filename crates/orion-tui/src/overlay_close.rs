@@ -64,10 +64,10 @@ pub(crate) fn click_is_outside(overlay: &Overlay, pos: Position) -> bool {
 
 /// Dismiss the open overlay after a click landed outside it — "exactly as
 /// Esc would", which for half of them means running Esc itself: a CONFIRM
-/// DIALOG cancels and lands back in the SETTINGS OVERLAY or AGENT PRESETS
-/// list it came from, a PROMPT DIALOG restores the warm slot's spec, the
+/// DIALOG cancels and lands back in the SETTINGS OVERLAY it came from, a
+/// PROMPT DIALOG restores the warm slot's spec, the
 /// AGENT PRESETS list in QUICK PROMPT picker mode hands the box back with
-/// its text, and the PRESET EDITOR backs out to its list.
+/// its text, and the PRESET EDITOR backs out to Settings → Presets.
 pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
     match &app.overlay {
         None => {}
@@ -134,7 +134,7 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 /// The HARDWIRED UNLOCK pressed with an overlay open: whatever is on screen
 /// goes, in one press, from any state — a typed filter, an open submenu, a
-/// live HOTKEY CAPTURE, the PRESET EDITOR nested over its list. Returns
+/// live HOTKEY CAPTURE, the PRESET EDITOR nested over Settings. Returns
 /// false when there was no overlay to close.
 ///
 /// This is the exit that never stages and never hands anything back: its

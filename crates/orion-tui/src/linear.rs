@@ -6820,12 +6820,11 @@ pub(crate) mod tests {
     }
 
     /// Typing in a Linear box never drops the issues: the text goes first
-    /// and the marked issues follow in full, under the preset made from
-    /// the box's own picker — which goes straight onto the box on save,
-    /// its prefix written in. The box cuts a fresh worktree, never the
-    /// project's root checkout (`dev` here).
+    /// and the marked issues follow in full, under the preset picked in
+    /// the box's own picker, its prefix written in. The box cuts a fresh
+    /// worktree, never the project's root checkout (`dev` here).
     #[test]
-    fn a_typed_task_keeps_the_issues_under_a_preset_made_on_the_spot() {
+    fn a_typed_task_keeps_the_issues_under_a_picked_preset() {
         let (mut app, dir, _rx) = paired();
         app.tree.worktrees.push(orion_core::Worktree {
             id: orion_core::WorktreeId("w1".into()),
@@ -6837,29 +6836,25 @@ pub(crate) mod tests {
         });
         let store = dir.path().join("agent_presets.json");
         crate::agent_presets::with_presets_path(store, || {
+            crate::agent_presets::save(&[crate::agent_presets::AgentPreset {
+                prefix: "Plan first.".into(),
+                name: "Planner".into(),
+                system: None,
+                ..crate::agent_presets::SystemPreset::LinearTicket.default_preset()
+            }])
+            .unwrap();
             browse_marked(&mut app);
             press(&mut app, plain(KeyCode::Enter));
             press(
                 &mut app,
                 KeyEvent::new(KeyCode::Char('u'), KeyModifiers::SUPER),
             );
-            press(
-                &mut app,
-                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::SUPER),
-            );
-            for c in "Linear Ticket".chars() {
-                press(&mut app, plain(KeyCode::Char(c)));
-            }
-            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
-                panic!("the preset editor, got {:?}", app.overlay);
-            };
-            editor.prefix.insert_str("Plan first.");
             press(&mut app, plain(KeyCode::Enter));
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the save hands the box back, got {:?}", app.overlay);
+                panic!("the pick hands the box back, got {:?}", app.overlay);
             };
             assert!(
-                prompt.title.contains("Linear ENG-1, ENG-3 · Linear Ticket"),
+                prompt.title.contains("Linear ENG-1, ENG-3 · Planner"),
                 "{}",
                 prompt.title
             );

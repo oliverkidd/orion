@@ -698,7 +698,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::AgentPresets,
         id: "agent_presets",
         label: "Agent presets",
-        hint: "Saved launch presets (CLI, model, effort, prefix/postfix) for the checkout under the cursor; Enter asks for an optional task, or skips it; from the pull requests list, a PR session in that branch's worktree",
+        hint: "Pick a saved preset to launch in the checkout under the cursor: Enter asks for an optional task, or skips it; on a pull request, a PR session in its branch's worktree. Presets are made in Settings → Presets",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &[],

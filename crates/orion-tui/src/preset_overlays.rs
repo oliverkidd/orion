@@ -1,23 +1,19 @@
-//! The AGENT PRESETS overlays: the list `e` opens in the SESSIONS PANEL
-//! and on a checkout's row of the WORKTREES PANEL
-//! (and, as a picker, on a PROJECT OPEN PRS GROUP row of the WORKTREES
-//! PANEL — a PR SESSION on that pull request, through the QUICK PROMPT)
-//! and the PRESET EDITOR form behind its `Ctrl+a` / `Ctrl+e` — their
-//! state, keys, mouse and drawing. The form's Text row picks which side of
-//! the task the preset's text goes (`agent_presets::PresetText`) — a prefix
-//! box, a postfix box or both — starting on **Preset text** (Settings →
-//! Sessions) for a new preset and on every side a stored one holds text
-//! for; a side the row leaves out saves blank. The presets themselves (and
-//! their file) are
+//! The AGENT PRESETS overlays: the PICKER — the list that only picks a
+//! preset, opened as a QUICK PROMPT's `⌘U` (the box's preset, written into
+//! its text), over an agent's LOCKED PANE (`⌘U`, pasted at its caret), on
+//! a pull request (a PR SESSION on it) and from the palette's **Agent
+//! presets** (a launch into the checkout under the cursor) — and the
+//! PRESET EDITOR, the form Settings → Presets (`presets_tab`) opens over
+//! itself to make or change one. Their state, keys, mouse and drawing.
+//! Presets are made, changed and deleted only in Settings: no picker
+//! offers it. The presets themselves (and their file) are
 //! `crate::agent_presets`; a launch goes through the QUICK PROMPT with the
 //! preset on it — sent on at once, empty, for a `skip_task` preset
 //! (`event_loop::submit_prompt_now`) — and the create it ends in goes
 //! through `event_loop::create_agent` like every other session.
 
 use crate::agent_presets::{AgentPreset, PresetText};
-use crate::app::{
-    clamp_selection, window_start, App, ConfirmDialog, Focus, Overlay, PendingAction, PromptKind,
-};
+use crate::app::{clamp_selection, window_start, App, Focus, Overlay, PromptKind};
 use crate::quick_prompt::QuickTarget;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -45,43 +41,39 @@ const PRESET_EDITOR_H: u16 = 21;
 const TASK_ASK: &str = "ask";
 const TASK_SKIP: &str = "skip";
 
-/// The AGENT PRESETS list (`e` in the SESSIONS PANEL): every saved preset,
-/// snapshot from the store when the modal opens. Letters type ahead over
-/// the names (`filter`), as in the MODEL / EFFORT submenus. Enter launches
-/// the selected one into `worktree` after asking for an optional task — at
-/// once for a `skip_task` preset; `Ctrl+a` / `Ctrl+e` / `Ctrl+d` create,
-/// edit and delete.
+/// The AGENT PRESETS PICKER: every saved preset, snapshot from the store
+/// when the modal opens. Letters type ahead over the names (`filter`), as
+/// in the MODEL / EFFORT submenus. Enter picks the selected one: launched
+/// into `worktree` through its task box — at once for a `skip_task`
+/// preset — or, as a QUICK PROMPT's picker, handed to that box. It only
+/// picks: making, changing and deleting presets is Settings → Presets'.
 #[derive(Debug, Clone)]
 pub struct AgentPresetsView {
     pub presets: Vec<AgentPreset>,
     /// Cursor into `presets` — the stored index, whatever the filter shows,
-    /// so the editor, the delete confirm and the launch read the right row.
+    /// so the launch reads the right row.
     pub selected: usize,
     /// The type-ahead typed so far: the rows narrow to the names it fuzzy
     /// matches, best match first (`visible`). Empty shows every preset in
     /// its stored order.
     pub filter: String,
-    /// The WORKTREE a launch lands in — the one selected when `e` was
-    /// pressed, carried so the editor and the delete confirm can reopen the
-    /// list for the same target.
+    /// The WORKTREE a launch lands in — the checkout under the cursor
+    /// when the list opened, or the picker's context checkout.
     pub worktree: WorktreeId,
     /// Whole modal rect, written back during draw so clicks outside close.
     pub area: Rect,
     /// Screen rect of the preset rows, written back during draw so clicks
     /// can hit-test rows.
     pub list_area: Rect,
-    /// Set when the list was opened as a QUICK PROMPT picker (`^X`
-    /// in the box, `e` on a PROJECT OPEN PRS GROUP row): the box to put
-    /// back, with the text typed so far. In that mode Enter applies the
-    /// row to that launch and Esc returns unchanged; `Ctrl+a` / `Ctrl+e` /
-    /// `Ctrl+d` manage the presets exactly as in the manager, and the
-    /// editor and the delete confirm carry this along so both come back to
-    /// the picker, not to a manager launching into `worktree`.
+    /// Set when the list was opened as a QUICK PROMPT picker (`⌘U` in the
+    /// box or over a pane, on a pull request): the box to put back, with
+    /// the text typed so far. In that mode Enter applies the row to that
+    /// launch and Esc returns unchanged.
     pub quick: Option<crate::quick_prompt::QuickReturn>,
     /// Where the launch lands once `Tab` (or a click on the list's
     /// `[ ] new worktree` row) has flipped it: a fresh worktree, or back
     /// to a checkout. None is where the list was opened for — `worktree`
-    /// in the manager, the launch's own target in a picker — so Esc on a
+    /// in the launcher, the launch's own target in a picker — so Esc on a
     /// picker still hands its box back unchanged.
     pub aim: Option<QuickTarget>,
     /// Screen rect of the NEW WORKTREE row, written back during draw so a
@@ -110,7 +102,7 @@ impl AgentPresetsView {
     }
 
     /// Where Enter launches: the flipped `aim`, else the picker's launch
-    /// target, else the manager's `worktree`.
+    /// target, else the launcher's `worktree`.
     pub fn target(&self) -> QuickTarget {
         self.aim
             .clone()
@@ -124,8 +116,7 @@ impl AgentPresetsView {
     }
 
     /// The picker's box with the flipped `aim` applied — what Enter hands
-    /// over, and what the editor and the delete confirm carry so the flip
-    /// survives the trip.
+    /// over.
     pub fn aimed_quick(&self) -> Option<crate::quick_prompt::QuickReturn> {
         let mut back = self.quick.clone()?;
         if let Some(aim) = &self.aim {
@@ -134,7 +125,8 @@ impl AgentPresetsView {
         Some(back)
     }
 
-    /// Is this list a QUICK PROMPT picker rather than the manager?
+    /// Is this list a QUICK PROMPT picker rather than the launcher — the
+    /// palette's **Agent presets**, launching into `worktree`?
     pub fn is_picker(&self) -> bool {
         self.quick.is_some()
     }
@@ -329,22 +321,15 @@ pub struct FormError {
 }
 
 /// The PRESET EDITOR: one form for creating (`editing == None`) or editing
-/// (`editing == Some(index)`) an AGENT PRESET. Model and effort hold a
-/// choice label from `config::model_choices` / `effort_choices`, so
-/// `DEFAULT_CHOICE` means "follow Settings → Accounts" and becomes None on save.
+/// (`editing == Some(index)`) an AGENT PRESET, over Settings → Presets.
+/// Model and effort hold a choice label from `config::model_choices` /
+/// `effort_choices`, so `DEFAULT_CHOICE` means "follow Settings →
+/// Accounts" and becomes None on save.
 #[derive(Debug, Clone)]
 pub struct AgentPresetEditor {
-    /// Where the list this form came from launches into; Esc and save
-    /// reopen it for the same target.
-    pub worktree: WorktreeId,
-    /// The QUICK PROMPT box behind the list, when the form was opened from
-    /// a picker (`AgentPresetsView::quick`): Esc and save reopen the list
-    /// as that picker, so the box, its text and its pull request survive.
-    pub quick: Option<crate::quick_prompt::QuickReturn>,
-    /// The Settings → Presets row the form was opened from
-    /// (`presets_tab`): Esc lands back on it and a save on the saved
-    /// preset's row, not on a list. None when a list opened the form.
-    pub settings_row: Option<usize>,
+    /// The Settings → Presets row the form was opened from (`presets_tab`):
+    /// Esc lands back on it, and a save on the saved preset's row.
+    pub settings_row: usize,
     /// Index into the stored list when editing; None when creating.
     pub editing: Option<usize>,
     pub name: TextInput,
@@ -387,11 +372,9 @@ pub struct AgentPresetEditor {
 impl AgentPresetEditor {
     /// A blank form: Claude at the configured defaults, the box(es) the
     /// **Preset text** setting names (`text`), caret on the name.
-    pub fn new(worktree: WorktreeId, text: PresetText) -> Self {
+    pub fn new(text: PresetText) -> Self {
         Self {
-            worktree,
-            quick: None,
-            settings_row: None,
+            settings_row: 0,
             editing: None,
             name: TextInput::new(),
             follow: true,
@@ -414,21 +397,14 @@ impl AgentPresetEditor {
     /// holds text on as well as the side(s) the **Preset text** setting
     /// (`default`) names — nothing saved is hidden. A SYSTEM PRESET on
     /// orion's text opens on that text, to edit from.
-    pub fn from_preset(
-        worktree: WorktreeId,
-        index: usize,
-        preset: &AgentPreset,
-        default: PresetText,
-    ) -> Self {
+    pub fn from_preset(index: usize, preset: &AgentPreset, default: PresetText) -> Self {
         let preset = &preset.clone().with_builtin_text();
         let choice = |v: &Option<String>| {
             v.clone()
                 .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into())
         };
         Self {
-            worktree,
-            quick: None,
-            settings_row: None,
+            settings_row: 0,
             editing: Some(index),
             name: TextInput::with_text(preset.name.clone()),
             follow: preset.follows_box(),
@@ -750,20 +726,12 @@ impl AgentPresetEditor {
     }
 }
 
-/// `e` in the SESSIONS PANEL, or on a checkout's row of the WORKTREES
-/// PANEL: the AGENT PRESETS list for the selected WORKTREE — the one a
-/// launch lands in. The two panels answer alike because both cursors name
-/// that checkout: the Worktrees one is on it, the Sessions one is inside
-/// it. (`p` in the WORKTREES PANEL cuts a fresh worktree first; a preset
-/// runs in the checkout it was reached from.) With the Worktrees cursor on
-/// a PROJECT OPEN PRS GROUP row it is the same list as a picker for a PR
-/// SESSION on that pull request (`quick_prompt::open_preset_picker_for_pr`)
-/// — from whichever panel has FOCUS, as `p` is: a pull request row has no
-/// worktree and no sessions to manage presets against, so the pull
-/// request is the only thing the key can be for, and the pane reading it
-/// is where a review preset is most often reached for. Anywhere else the
-/// key just says where it works, since without a worktree or a pull
-/// request there is nothing to launch into.
+/// The palette's **Agent presets**: the PICKER for the checkout under the
+/// cursor — Enter launches the preset there — or, with the cursor on a
+/// pull request, the picker for a PR SESSION on it
+/// (`quick_prompt::open_preset_picker_for_pr`), since a pull request has
+/// no checkout of its own to launch into until one is cut. Anywhere else
+/// there is nothing to launch into, and it does nothing.
 pub(crate) fn open_agent_presets(app: &mut App) {
     if app.selected_worktree_pr().is_some() {
         crate::quick_prompt::open_preset_picker_for_pr(app);
@@ -773,56 +741,13 @@ pub(crate) fn open_agent_presets(app: &mut App) {
         (Focus::Sessions | Focus::Worktrees, Some(w)) => w.id.clone(),
         _ => return,
     };
-    reopen_agent_presets(app, worktree, 0);
+    open_launcher(app, worktree);
 }
 
-/// (Re)open the AGENT PRESETS list from the store, cursor on `selected`
-/// (clamped) — what the editor, the task editor's Esc and the delete
-/// confirm come back to.
-pub(crate) fn reopen_agent_presets(app: &mut App, worktree: WorktreeId, selected: usize) {
-    reopen_presets_list(app, worktree, None, selected);
-}
-
-/// (Re)open the list the editor or the delete confirm was reached from:
-/// the manager, or — with `quick` — the QUICK PROMPT picker for that box,
-/// so a preset added, edited or deleted from a picker lands back in the
-/// picker with the box, its text and its pull request intact.
-pub(crate) fn reopen_presets_list(
-    app: &mut App,
-    worktree: WorktreeId,
-    quick: Option<crate::quick_prompt::QuickReturn>,
-    selected: usize,
-) {
-    let mut view = AgentPresetsView::new(worktree, crate::agent_presets::load());
-    view.selected = clamp_selection(selected as i64, view.presets.len());
-    view.quick = quick;
+/// The PICKER as the launcher for `worktree`, read from the store.
+pub(crate) fn open_launcher(app: &mut App, worktree: WorktreeId) {
+    let view = AgentPresetsView::new(worktree, crate::agent_presets::load());
     app.overlay = Some(Overlay::AgentPresets(view));
-}
-
-/// The PRESET EDITOR: blank for `Ctrl+a`, pre-filled from the list's row
-/// for `Ctrl+e` — from the manager or a picker alike; `quick` is the
-/// picker's box, to come back to (`AgentPresetEditor::quick`). Its boxes
-/// are the side(s) `preset_text` (a hand-edited key) names, plus any a
-/// stored preset already holds text on.
-pub(crate) fn open_agent_preset_editor(
-    app: &mut App,
-    worktree: WorktreeId,
-    quick: Option<crate::quick_prompt::QuickReturn>,
-    editing: Option<usize>,
-) {
-    let text = crate::config::Config::load().preset_text();
-    let mut editor = match editing {
-        Some(index) => match crate::agent_presets::load().get(index) {
-            Some(preset) => AgentPresetEditor::from_preset(worktree, index, preset, text),
-            None => {
-                reopen_presets_list(app, worktree, quick, 0);
-                return;
-            }
-        },
-        None => AgentPresetEditor::new(worktree, text),
-    };
-    editor.quick = quick;
-    app.overlay = Some(Overlay::AgentPresetEditor(editor));
 }
 
 /// The PRESET EDITOR over Settings → Presets, opened on row `from`:
@@ -835,31 +760,22 @@ pub(crate) fn open_editor_from_settings(
     editing: Option<(usize, &AgentPreset)>,
 ) {
     let text = crate::config::Config::load().preset_text();
-    let nowhere = WorktreeId(String::new());
     let mut editor = match editing {
-        Some((index, preset)) => AgentPresetEditor::from_preset(nowhere, index, preset, text),
-        None => AgentPresetEditor::new(nowhere, text),
+        Some((index, preset)) => AgentPresetEditor::from_preset(index, preset, text),
+        None => AgentPresetEditor::new(text),
     };
-    editor.settings_row = Some(from);
+    editor.settings_row = from;
     app.overlay = Some(Overlay::AgentPresetEditor(editor));
 }
 
 /// Enter in the PRESET EDITOR: validate against the stored list, write the
 /// row (in place when editing, appended when new), and land back on it in
-/// the list — or, for a new preset made from a QUICK PROMPT's picker, on
-/// that box with the preset on it, and from an agent's pane, in its prompt.
-/// A rejected form stays open, the reason on a banner at the top
-/// of it and the caret on the field to fix (`AgentPresetEditor::reject`) —
-/// not in the FOOTER, which is nowhere near the form.
-pub(crate) fn save_agent_preset_editor(
-    app: &mut App,
-    mut editor: AgentPresetEditor,
-    out: &mut Vec<ClientRequest>,
-) {
-    let mut presets = match editor.settings_row {
-        Some(_) => crate::agent_presets::load_seeded(),
-        None => crate::agent_presets::load(),
-    };
+/// Settings → Presets. A rejected form stays open, the reason on a banner
+/// at the top of it and the caret on the field to fix
+/// (`AgentPresetEditor::reject`) — not in the FOOTER, which is nowhere
+/// near the form.
+pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEditor) {
+    let mut presets = crate::agent_presets::load_seeded();
     let preset = match editor.validate(&presets) {
         Ok(preset) => preset,
         Err(error) => {
@@ -868,7 +784,6 @@ pub(crate) fn save_agent_preset_editor(
             return;
         }
     };
-    let created = editor.editing.is_none().then(|| preset.clone());
     let index = match editor.editing {
         Some(index) if index < presets.len() => {
             // A SYSTEM PRESET stays one, under its own name: orion finds
@@ -889,66 +804,8 @@ pub(crate) fn save_agent_preset_editor(
         }
     };
     crate::presets_tab::save(app, &presets);
-    if editor.settings_row.is_some() {
-        let at = crate::presets_tab::Screen::of(presets).row_of(index);
-        crate::presets_tab::reopen(app, at.unwrap_or(0));
-        return;
-    }
-    // A preset made from a QUICK PROMPT's picker was made to be used: it
-    // goes straight onto that box, as Enter on its row would put it —
-    // landing back on the list with the new row only highlighted read as
-    // picked, and the box went out without it. Never launched from here,
-    // even a skip-task one: the box comes back for its Enter. A harness
-    // switched off stays on the list, whose Enter says so.
-    match (created, editor.quick) {
-        // Over an agent's pane it goes straight in, where it was wanted;
-        // one with no text to paste stays on the list like any other row.
-        (
-            Some(preset),
-            Some(crate::quick_prompt::QuickReturn {
-                into_pane: Some(session),
-                ..
-            }),
-        ) if preset.has_wrapping() => insert_preset_into_pane(app, &preset, &session, out),
-        (Some(preset), Some(back)) if back.into_pane.is_none() => {
-            let cfg = crate::config::Config::load();
-            if cfg.preset_harness_usable(&preset) {
-                reopen_box_with_preset(app, back, preset, &cfg);
-            } else {
-                reopen_presets_list(app, editor.worktree, Some(back), index);
-            }
-        }
-        (_, quick) => reopen_presets_list(app, editor.worktree, quick, index),
-    }
-}
-
-/// `Ctrl+d` in the AGENT PRESETS list: the confirm that guards the delete.
-/// The list comes back either way (see `PendingAction::DeleteAgentPreset`).
-pub(crate) fn open_delete_preset_confirm(app: &mut App, view: &AgentPresetsView) {
-    let Some(preset) = view.presets.get(view.selected) else {
-        return;
-    };
-    if preset.system.is_some() {
-        app.flash = Some(crate::flash::Flash::note(format!(
-            "'{}' is a system preset: it can't be deleted. Clear its text to go back to orion's own.",
-            preset.name
-        )));
-        app.dirty = true;
-        return;
-    }
-    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
-        title: "Delete preset".into(),
-        message: format!(
-            "Delete preset '{}'?\nIts saved prefix and postfix text go with it.",
-            preset.name
-        ),
-        action: PendingAction::DeleteAgentPreset {
-            index: view.selected,
-            worktree: view.worktree.clone(),
-            quick: view.aimed_quick().map(Box::new),
-        },
-        area: ratatui::layout::Rect::default(),
-    }));
+    let at = crate::presets_tab::Screen::of(presets).row_of(index);
+    crate::presets_tab::reopen(app, at.unwrap_or(0));
 }
 
 /// The list's Enter: ask for the optional task that the preset's prefix and
@@ -1072,9 +929,9 @@ fn preset_on_box(
     .with_under(back.launch.under)
 }
 
-/// Keys in the AGENT PRESETS list. Letters type ahead over the names — so
-/// the verbs are `Ctrl` chords and ↑/↓ (or `Ctrl+n` / `Ctrl+p`) move, as
-/// in every filtered overlay.
+/// Keys in the AGENT PRESETS PICKER. Letters type ahead over the names,
+/// ↑/↓ move and Enter picks, as in every filtered overlay; nothing else
+/// — the presets are managed in Settings → Presets.
 pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let Some(Overlay::AgentPresets(view)) = &mut app.overlay else {
         return;
@@ -1085,8 +942,8 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         KeyCode::Esc if !view.filter.is_empty() => view.filter.clear(),
         // Backing out of the box's own picker is a return trip, not a
         // close: the box comes back exactly as it left, text and all. A
-        // picker reached with no box up (`e` on a pull request) closes as
-        // the manager does — it used to put up an empty box nobody asked
+        // picker reached with no box up (one on a pull request) closes as
+        // the launcher does — it used to put up an empty box nobody asked
         // for — unless it stands on a modal the box would have, which it
         // leaves on its row.
         KeyCode::Esc => match view.box_behind().cloned() {
@@ -1102,28 +959,6 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         KeyCode::Down => view.step(1),
         KeyCode::Up => view.step(-1),
         KeyCode::Char('u') if ctrl => view.filter.clear(),
-        // The manage verbs answer in a picker exactly as in the manager:
-        // wherever the list shows, its presets can be added, edited and
-        // deleted. The editor and the delete confirm carry the picker's
-        // box (`view.quick`) and reopen the list as that picker — left to
-        // reopen the manager, they dropped the box, its text and the pull
-        // request, and the next Enter launched a plain session into the
-        // picker's context checkout (for a PR SESSION, the ROOT WORKTREE).
-        _ if keys::NEW.matches(&key) => {
-            let (worktree, quick) = (view.worktree.clone(), view.aimed_quick());
-            open_agent_preset_editor(app, worktree, quick, None);
-        }
-        _ if keys::EDIT.matches(&key) => {
-            if !view.presets.is_empty() {
-                let (worktree, quick) = (view.worktree.clone(), view.aimed_quick());
-                let index = view.selected;
-                open_agent_preset_editor(app, worktree, quick, Some(index));
-            }
-        }
-        _ if keys::DELETE.matches(&key) => {
-            let view = view.clone();
-            open_delete_preset_confirm(app, &view);
-        }
         _ if keys::LAUNCH.matches(&key) => activate_selected(app, out),
         // Type-ahead: Backspace widens; a letter narrows the rows to the
         // names it fuzzy matches, the cursor on the best. A letter no name
@@ -1141,10 +976,10 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
 /// The selected row is chosen — Enter, or a click on it. In a QUICK PROMPT
 /// picker the row is handed to the box waiting behind the list
 /// (`view.quick`), which keeps that box's target, its text and its pull
-/// request; in the manager it launches into the list's worktree,
+/// request; in the launcher it launches into the list's worktree,
 /// through the preset's task box or past it; over an agent's pane it is
 /// pasted at that agent's caret. The one function both input
-/// handlers call: when the click ran a copy of the manager half whatever
+/// handlers call: when the click ran a copy of the launcher half whatever
 /// the mode, a click in the PR SESSION picker — whose worktree is the ROOT
 /// WORKTREE, there only to name the project — started a plain session in
 /// the main checkout.
@@ -1193,7 +1028,7 @@ fn insert_preset_into_pane(
 
 /// `Tab` on the AGENT PRESETS list, and a click on its `[ ] new worktree`
 /// row: flip where the launch lands between a fresh worktree and a
-/// checkout — the manager's between the worktree `e` was pressed on and a
+/// checkout — the launcher's between the worktree it was opened on and a
 /// fresh one of its project, a picker's through `launcher::flipped_target`,
 /// so the box it hands over is already aimed. A picker opened from the box
 /// has no row to flip ([`AgentPresetsView::has_worktree_row`]). A PR
@@ -1235,7 +1070,7 @@ pub(crate) fn toggle_new_worktree(app: &mut App) {
 
 /// Keys in the PRESET EDITOR: Tab order between fields, choice cycling,
 /// text editing, save and back.
-pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
     let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
         return;
     };
@@ -1244,16 +1079,9 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<Clie
         // Esc first clears a choice row's type-ahead, then backs out.
         KeyCode::Esc if !editor.filter.is_empty() => editor.filter.clear(),
         // Back to the Settings → Presets row it came from, unsaved.
-        KeyCode::Esc if editor.settings_row.is_some() => {
-            let at = editor.settings_row.unwrap_or(0);
-            crate::presets_tab::reopen(app, at);
-        }
-        // Back to the list it came from — the manager or the picker —
-        // unsaved.
         KeyCode::Esc => {
-            let (worktree, quick) = (editor.worktree.clone(), editor.quick.clone());
-            let index = editor.editing.unwrap_or(0);
-            reopen_presets_list(app, worktree, quick, index);
+            let at = editor.settings_row;
+            crate::presets_tab::reopen(app, at);
         }
         // ↓/↑ inside the prefix or postfix walk its lines first, as in
         // Claude Code's prompt; past the last (or first) line — and on
@@ -1288,7 +1116,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<Clie
                 .is_some_and(|input| input.takes_newline(&key)) =>
         {
             let editor = editor.clone();
-            save_agent_preset_editor(app, editor, out);
+            save_agent_preset_editor(app, editor);
         }
         KeyCode::Left if !editor.field.is_typed() => editor.cycle(-1),
         KeyCode::Right | KeyCode::Char(' ') if !editor.field.is_typed() => editor.cycle(1),
@@ -1303,9 +1131,9 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<Clie
     }
 }
 
-/// Mouse in the AGENT PRESETS list: the wheel moves the selection, a click
-/// on a row launches it (rows are actions, as in the hosts picker — editing
-/// is `Ctrl+e`), a click outside the modal closes; everything else is swallowed.
+/// Mouse in the AGENT PRESETS PICKER: the wheel moves the selection, a
+/// click on a row picks it (rows are actions, as in the hosts picker), a
+/// click outside the modal closes; everything else is swallowed.
 /// A click is Enter on that row, in both modes: in a QUICK PROMPT picker it
 /// hands the row to the box waiting behind the list (`view.quick`), which
 /// keeps that box's target, text and pull request. It used to launch
@@ -1351,20 +1179,13 @@ pub(crate) fn handle_list_mouse(
     }
 }
 
-/// The AGENT PRESETS list's and the PRESET EDITOR's own keys: one table
+/// The AGENT PRESETS PICKER's and the PRESET EDITOR's own keys: one table
 /// their key handlers ([`handle_list_key`], [`handle_editor_key`]) match
-/// and their bottom borders spell. Letters type ahead, so the list's
-/// verbs are chords.
+/// and their bottom borders spell.
 pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const LAUNCH: Key = Key::new(&["enter"], "launch");
-    pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new");
-    /// `⌘I`, since `⌘E` is the changes chord everywhere; `^E` is the twin
-    /// for a terminal with no ⌘ (`^I` is Tab there).
-    pub const EDIT: Key = Key::new(&["cmd+i", "ctrl+e"], "edit");
-    /// Every modal's remove verb: it asks first.
-    pub const DELETE: Key = Key::new(&["cmd+w", "ctrl+w"], "delete");
     /// The NEW WORKTREE toggle under the rows.
     pub const WORKTREE: Key = Key::new(&["tab"], "new worktree");
     /// The editor: the next field, a choice row's value, save.
@@ -1372,13 +1193,13 @@ pub(crate) mod keys {
     pub const CHOOSE: Key = Key::new(&["left", "right"], "choose").show(2);
     pub const SAVE: Key = Key::new(&["enter"], "save");
     #[cfg(test)]
-    pub const ALL: &[Key] = &[LAUNCH, NEW, EDIT, DELETE, WORKTREE, FIELD, CHOOSE, SAVE];
+    pub const ALL: &[Key] = &[LAUNCH, WORKTREE, FIELD, CHOOSE, SAVE];
 }
 
-/// The keys on the list's frame, by mode: Enter's verb, the manage
-/// chords, and where Esc goes — the one thing that differs between the
-/// box's picker and one opened on a pull request, until
-/// letters are typed, when Esc clears them.
+/// The keys on the list's frame, by mode: Enter's verb, the NEW WORKTREE
+/// toggle where the list has it, and where Esc goes — the one thing that
+/// differs between the box's picker and one opened on a pull request,
+/// until letters are typed, when Esc clears them.
 pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     let enter = if view.pane_target().is_some() {
         "insert"
@@ -1394,12 +1215,7 @@ pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     } else {
         "close"
     };
-    let mut hints = vec![
-        keys::LAUNCH.hint_as(enter).kept(),
-        keys::NEW.hint(),
-        keys::EDIT.hint(),
-        keys::DELETE.hint(),
-    ];
+    let mut hints = vec![keys::LAUNCH.hint_as(enter).kept()];
     if view.has_worktree_row() {
         hints.push(keys::WORKTREE.hint());
     }
@@ -1414,7 +1230,7 @@ pub(crate) fn editor_hints() -> Vec<crate::hints::Hint> {
         keys::CHOOSE.hint(),
         crate::ui::task_keys::NEWLINE.hint(),
         keys::SAVE.hint().kept(),
-        crate::hints::Hint::new("Esc", "back to the list"),
+        crate::hints::Hint::new("Esc", "back to Settings"),
     ]
 }
 
@@ -1435,8 +1251,7 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
     f.render_widget(Clear, area);
     // In QUICK PROMPT picker mode Enter applies the row to the launch
     // behind it — the box, which Esc gives back, or the pull request the
-    // list was opened on, where Esc just closes; the manage
-    // verbs are the manager's.
+    // list was opened on, where Esc just closes.
     // The type-ahead shows in the title, as a submenu's does: `Agent
     // presets ⌕ rev`, the bare ⌕ while nothing is typed yet.
     let title = if view.pane_target().is_some() {
@@ -1480,7 +1295,7 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
         empty_list_row(
             f,
             inner,
-            &format!("no presets yet — {} creates one", keys::NEW.label()),
+            "no presets yet — make one in Settings → Presets",
             th,
         );
     }
@@ -1503,9 +1318,9 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
         if preset.skip_task {
             marks.push("no task");
         }
-        // One orion reads its text from: it can't be deleted or renamed.
+        // One of orion's own (Settings → Presets' Used by orion).
         if preset.system.is_some() {
-            marks.push("system");
+            marks.push(crate::presets_tab::ORION_TAG);
         }
         let marks = marks.join(" ");
         let marks_w = marks.chars().count();
@@ -1845,10 +1660,12 @@ mod tests {
     use super::*;
     use orion_core::WorktreeId;
 
-    /// A SYSTEM PRESET can't be deleted: its delete says why and opens no
-    /// confirm; a preset the user made opens the confirm as ever.
+    /// The PICKER only picks: in every mode, ⌘N / ⌘I / ⌘W and their
+    /// `^` twins — the manage chords it used to answer to — do nothing,
+    /// and its frame names none of them; orion's presets carry the
+    /// `orion` tag Settings → Presets gives them.
     #[test]
-    fn a_system_preset_refuses_the_delete() {
+    fn the_picker_only_picks() {
         let presets = vec![
             crate::agent_presets::SystemPreset::PrAutofix.default_preset(),
             AgentPreset {
@@ -1857,17 +1674,78 @@ mod tests {
                 ..crate::agent_presets::SystemPreset::PrAutofix.default_preset()
             },
         ];
-        let mut app = App::new();
-        let mut view = AgentPresetsView::new(orion_core::WorktreeId("w".into()), presets);
-        open_delete_preset_confirm(&mut app, &view);
-        assert!(app.overlay.is_none(), "no confirm");
-        assert!(app
-            .flash
-            .as_deref()
-            .is_some_and(|f| f.contains("can't be deleted")));
-        view.selected = 1;
-        open_delete_preset_confirm(&mut app, &view);
-        assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("presets.json"), || {
+            pinned("{}", || {
+                let mut app = App::new();
+                let w = WorktreeId("w".into());
+                let launch = crate::quick_prompt::QuickLaunch::from_config(
+                    QuickTarget::Worktree(w.clone()),
+                    &crate::config::Config::load(),
+                );
+                let fresh = crate::quick_prompt::QuickReturn::fresh(launch.clone());
+                let in_box = crate::quick_prompt::QuickReturn {
+                    from_box: true,
+                    ..fresh.clone()
+                };
+                let on_pr = crate::quick_prompt::QuickReturn::fresh(launch.with_pr(Some(
+                    crate::pull_request::PrLaunch {
+                        url: "https://github.com/o/r/pull/7".into(),
+                        head: "feat".into(),
+                        number: 7,
+                    },
+                )));
+                let over_pane = crate::quick_prompt::QuickReturn {
+                    into_pane: Some(orion_core::SessionRef::Agent(orion_core::AgentId(
+                        "a1".into(),
+                    ))),
+                    ..fresh
+                };
+                // The launcher, the box's picker, a pull request's, a pane's.
+                for quick in [None, Some(in_box), Some(on_pr), Some(over_pane)] {
+                    let mut view = AgentPresetsView::new(w.clone(), presets.clone());
+                    view.quick = quick;
+                    crate::hints::assert_hints_from(&list_hints(&view), keys::ALL);
+                    for (selected, chord) in [0, 1].into_iter().flat_map(|row| {
+                        [
+                            "cmd+n", "ctrl+n", "cmd+i", "ctrl+e", "cmd+w", "ctrl+w", "ctrl+a",
+                            "ctrl+d",
+                        ]
+                        .map(|chord| (row, chord))
+                    }) {
+                        let key = crate::keymap::KeyChord::parse(chord).unwrap();
+                        view.selected = selected;
+                        app.overlay = Some(Overlay::AgentPresets(view.clone()));
+                        let mut out = Vec::new();
+                        handle_list_key(&mut app, KeyEvent::new(key.code, key.mods), &mut out);
+                        assert!(
+                            matches!(&app.overlay, Some(Overlay::AgentPresets(v)) if v.presets.len() == 2),
+                            "{chord} on row {selected}: {:?}",
+                            app.overlay.as_ref().map(|_| ())
+                        );
+                        assert!(out.is_empty(), "{chord}");
+                    }
+                }
+                app.overlay = Some(Overlay::AgentPresets(AgentPresetsView::new(w, presets)));
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+                terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let text: String = (0..buffer.area.height)
+                    .map(|y| {
+                        (0..buffer.area.width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                            + "\n"
+                    })
+                    .collect();
+                let autofix = text.lines().find(|l| l.contains("PR autofix")).unwrap();
+                assert!(autofix.contains(crate::presets_tab::ORION_TAG), "{text}");
+                for verb in ["new", "edit", "delete"] {
+                    assert!(!text.contains(&format!(" {verb} ·")), "{verb}:\n{text}");
+                }
+            })
+        });
     }
 
     /// A system preset on orion's text opens on that text, to edit from;
@@ -1886,13 +1764,12 @@ mod tests {
                     .iter()
                     .position(|p| p.system == Some(SystemPreset::LinearTicket))
                     .unwrap();
-                let w = WorktreeId("w".into());
                 let mut editor =
-                    AgentPresetEditor::from_preset(w.clone(), at, &presets[at], PresetText::Prefix);
+                    AgentPresetEditor::from_preset(at, &presets[at], PresetText::Prefix);
                 assert_eq!(editor.prefix.as_str(), crate::linear::TICKET_TEXT);
                 editor.name = TextInput::with_text("Renamed".to_string());
                 let mut app = App::new();
-                save_agent_preset_editor(&mut app, editor, &mut Vec::new());
+                save_agent_preset_editor(&mut app, editor);
                 let saved = &crate::agent_presets::load()[at];
                 assert_eq!(saved.name, "Linear Ticket", "not renamed");
                 assert!(!saved.has_wrapping(), "orion's text kept as none");
@@ -1914,7 +1791,7 @@ mod tests {
     }
 
     fn editor(text: PresetText) -> AgentPresetEditor {
-        AgentPresetEditor::new(WorktreeId("w1".into()), text)
+        AgentPresetEditor::new(text)
     }
 
     fn stored(prefix: &str, postfix: &str) -> AgentPreset {
@@ -2005,9 +1882,8 @@ mod tests {
     /// like a new one.
     #[test]
     fn editing_shows_a_stored_side_whatever_the_setting_says() {
-        let w = || WorktreeId("w1".into());
         let post = stored("", "Run the tests.");
-        let e = AgentPresetEditor::from_preset(w(), 0, &post, PresetText::Prefix);
+        let e = AgentPresetEditor::from_preset(0, &post, PresetText::Prefix);
         assert_eq!(
             e.text,
             PresetText::Both,
@@ -2018,16 +1894,15 @@ mod tests {
             "Run the tests.",
             "opening the form drops nothing saved"
         );
-        let e = AgentPresetEditor::from_preset(w(), 0, &post, PresetText::Postfix);
+        let e = AgentPresetEditor::from_preset(0, &post, PresetText::Postfix);
         assert_eq!(e.text, PresetText::Postfix);
         let e = AgentPresetEditor::from_preset(
-            w(),
             0,
             &stored("Be strict.", "Run the tests."),
             PresetText::Prefix,
         );
         assert_eq!(e.text, PresetText::Both);
-        let e = AgentPresetEditor::from_preset(w(), 0, &stored("", ""), PresetText::Postfix);
+        let e = AgentPresetEditor::from_preset(0, &stored("", ""), PresetText::Postfix);
         assert_eq!(
             e.text,
             PresetText::Postfix,
@@ -2067,7 +1942,7 @@ mod tests {
     /// flattened in the name, nowhere on a choice row.
     #[test]
     fn reject_points_at_the_field_and_its_first_edit_clears() {
-        let mut editor = AgentPresetEditor::new(WorktreeId("w1".into()), PresetText::Prefix);
+        let mut editor = AgentPresetEditor::new(PresetText::Prefix);
         let error = editor.validate(&[]).unwrap_err();
         assert_eq!(
             error,

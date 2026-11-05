@@ -138,7 +138,7 @@ in the COMMAND PALETTE and, where they apply to a card, its right-click menu. Bi
 | `Esc` | leave the pane, back to the card it reads |
 | `⇧Esc` | the agent's Esc: a bare Esc down the PTY |
 | `^Q`, `^]`, `^⇧H` | also leave the pane; `^Q` is the HARDWIRED UNLOCK, which no rebind can take away |
-| `⌘U` | over an agent: pick one of your saved AGENT PRESETS and its text is pasted at the caret, unsent, the pane still locked. A prefix ends on a blank line for the task, a postfix starts on one so it follows a task already typed, and a preset with both lands whole with the caret after it. Only the text travels, not the preset's harness or model. A long preset shows as the harness shows any long paste — Claude Code's `[Pasted text #1 +4 lines]` — and is sent in full. `⌘N` makes a new one from the list. Over a shell, `⌘U` is the pull requests modal as anywhere else |
+| `⌘U` | over an agent: pick one of your saved AGENT PRESETS and its text is pasted at the caret, unsent, the pane still locked. A prefix ends on a blank line for the task, a postfix starts on one so it follows a task already typed, and a preset with both lands whole with the caret after it. Only the text travels, not the preset's harness or model. A long preset shows as the harness shows any long paste — Claude Code's `[Pasted text #1 +4 lines]` — and is sent in full. The list only picks: presets are made in Settings → Presets. Over a shell, `⌘U` is the pull requests modal as anywhere else |
 | any ⌘ chord orion binds | leave the pane and run it — `⌘K`, `⌘P`, `⌘E`, `⌘J`, `⌘⇧P` … |
 | `⌘F` | full-screen the session, or bring it back down; never forwarded to the agent. `Esc` and `^Q` also bring a full-screen session back down |
 | mouse wheel | a child that asked for the mouse (Claude Code's alt-screen UI, `vim` with `mouse=a`, `htop`) gets the notch as a real wheel report; an alternate-screen app that wants no mouse (`less`, plain `vim`) gets `↑`/`↓`; anything else scrolls orion's own scrollback, and the header counts how far back you are as `scroll N` |
@@ -285,15 +285,14 @@ also answers to the same letter's `^` chord; the border shows the ⌘ one. `↑`
 
 | Key | Verb | Where |
 |---|---|---|
-| `⌘N` | new | pull requests (a new pull request), agent presets, todos (an item; `⌘⇧N` a group) |
+| `⌘N` | new | pull requests (a new pull request), todos (an item; `⌘⇧N` a group) |
 | `⌘E` | changes | pull requests (its diff) — the grid's Changes |
-| `⌘I` | edit (`^E` with no ⌘ — `^I` is Tab there) | agent presets |
 | `⌘R` | ask again; the query as a regex | pull requests, Linear; find in files |
 | `⌘O` | open outside orion | pull requests (the browser), Linear and the finders (**Open files in**) |
 | `⌘⇧B` | the file in the **File tree** | the editor, the diff viewer |
 | `⌘⇧I` | `path:line` into the checkout's agent's prompt | the editor |
 | `⌘Y` | comment | pull requests — the grid's `y` |
-| `⌘W` | close / remove, behind a confirm | pull requests (close without merging — the edit form, at its State row), agent presets (delete) |
+| `⌘W` | close / remove, behind a confirm | pull requests (close without merging — the edit form, at its State row) |
 | `⌘;` | edit, every field in one form | pull requests (title, base, draft, labels, reviewers, assignees, close or reopen) |
 | `⌘X` | merge (a selection in the filter cuts first); cut | pull requests; todos (the item or selection) |
 | `⌘D` | ready for review ⇄ draft | pull requests |

@@ -38,8 +38,7 @@ use super::{
     remove_worktree_rows, restore_context, select_worktree_by_id, selection_snapshot,
 };
 use crate::app::{
-    now_ms, AgentLaunchDraft, App, AttachedTerm, ConfirmDialog, Overlay, PendingAction,
-    PendingIntent, PlaceholderRows,
+    now_ms, AgentLaunchDraft, App, AttachedTerm, Overlay, PendingIntent, PlaceholderRows,
 };
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, ClientRequest, ProjectId, SessionRef, Worktree,
@@ -290,7 +289,7 @@ pub(super) fn resolve_worktree(app: &mut App, placeholder: &WorktreeId, real: &W
             *wid = real.clone();
         }
     }
-    // A modal opened on the stand-in — the AGENT PRESETS list `e` put up
+    // A modal opened on the stand-in — the AGENT PRESETS picker put up
     // on the new row, the task box behind it — is addressed to the real
     // checkout from here, so its Enter names a checkout the DAEMON has
     // rather than an id it never had. The prewarm armed on the row too.
@@ -460,7 +459,7 @@ pub(super) fn discard_agent(app: &mut App, placeholder: &AgentId, out: &mut Vec<
 
 /// A launch fired into a stand-in checkout. Nothing goes to the DAEMON
 /// under an id it has never seen — but a launch into the NEW WORKTREE
-/// modal's row (`e` on the new row, an AGENT PRESET picked, its task
+/// modal's row (**Agent presets** on the new row, an AGENT PRESET picked, its task
 /// typed, all before the DAEMON's `git worktree add` has finished) is
 /// not lost either: its session row goes up under the stand-in as a
 /// QUICK PROMPT's would, the draft rides the checkout's own PENDING
@@ -530,17 +529,12 @@ pub(super) fn replay_launch(
 }
 
 /// The checkout a modal is addressed to — the one its Enter launches
-/// into, or the AGENT PRESETS list it reopens for. None for a modal that
-/// names no checkout, and for a QUICK PROMPT about to cut one.
+/// into. None for a modal that names no checkout, and for a QUICK PROMPT
+/// about to cut one.
 fn modal_worktree_mut(overlay: &mut Overlay) -> Option<&mut WorktreeId> {
     match overlay {
         Overlay::Prompt(dialog) => dialog.kind.worktree_mut(),
         Overlay::AgentPresets(view) => Some(&mut view.worktree),
-        Overlay::AgentPresetEditor(editor) => Some(&mut editor.worktree),
-        Overlay::Confirm(ConfirmDialog {
-            action: PendingAction::DeleteAgentPreset { worktree, .. },
-            ..
-        }) => Some(worktree),
         _ => None,
     }
 }

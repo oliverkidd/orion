@@ -229,7 +229,6 @@ mod tests {
     use crate::app::FileFinder;
     use crate::preset_overlays::{AgentPresetEditor, PresetField};
     use crossterm::event::KeyModifiers;
-    use orion_core::WorktreeId;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -271,14 +270,14 @@ mod tests {
         }
     }
 
-    /// In the preset form (`⌘U`'s new preset) a click on a box the caret
+    /// In the PRESET EDITOR (Settings → Presets) a click on a box the caret
     /// is not in hands it the caret where it points, and a drag there
     /// selects; a click on the name takes the caret back up — the boxes
     /// type, click and select as the QUICK PROMPT's does.
     #[test]
     fn a_click_in_an_idle_box_takes_the_caret_there_and_a_drag_selects() {
         let mut app = App::new();
-        let mut form = AgentPresetEditor::new(WorktreeId("w1".into()), PresetText::Both);
+        let mut form = AgentPresetEditor::new(PresetText::Both);
         form.postfix.set_text("hello world");
         app.overlay = Some(Overlay::AgentPresetEditor(form));
         let terminal = frame(&mut app);

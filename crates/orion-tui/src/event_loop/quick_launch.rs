@@ -11,7 +11,7 @@
 //! BACKGROUND LAUNCH's are, so the cursor and the pane stay on that
 //! card. Both rows are on screen from the moment Enter is pressed —
 //! stand-ins (`placeholder`) that the Acks turn into the real rows. A
-//! launch for a pull request (`QuickLaunch::pr` — `e` on an OPEN PRS
+//! launch for a pull request (`QuickLaunch::pr` — **Agent presets** on an OPEN PRS
 //! row, through the preset picker) is a `CreatePrAgent` instead: the
 //! draft carries the PR and `create_agent` addresses it to the PROJECT,
 //! whose checkout of the PR's head branch the DAEMON finds or cuts.

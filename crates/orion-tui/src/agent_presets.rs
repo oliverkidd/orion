@@ -1,6 +1,6 @@
 //! AGENT PRESETS: saved launch definitions — an AGENT KIND, a MODEL / EFFORT
 //! choice, optional prefix / postfix text, and whether to ask for a task at
-//! all — that `e` lists for the checkout under the cursor. Launching one asks for an
+//! all — made in Settings → Presets and picked wherever a launch is. Launching one asks for an
 //! optional task (or, with `skip_task`, nothing) and hands the CLI
 //! `prefix + task + postfix` as its positional starting prompt.
 //!

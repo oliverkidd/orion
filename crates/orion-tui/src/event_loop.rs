@@ -4572,7 +4572,7 @@ fn cycle_box_effort(app: &mut App, back: crate::quick_prompt::QuickReturn) {
     if back.from_box {
         crate::quick_prompt::reopen(app, stepped, &back.text);
     } else {
-        // A picker reached with no box up (`n`, `e` on a pull request):
+        // A picker reached with no box up (`n`, **Agent presets** on a pull request):
         // the step opens the box, on the spec just stepped.
         crate::quick_prompt::open_picked_box(app, stepped);
     }
@@ -7643,7 +7643,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
         }
         Overlay::AgentPresets(_) => crate::preset_overlays::handle_list_key(app, key, out),
-        Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key, out),
+        Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
@@ -7883,27 +7883,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
             _ if ui::confirm_keys::CANCEL.matches(&key) => {
                 // Backing out lands where you were: a dialog the settings
-                // overlay opened reopens it, a preset delete the presets
-                // list — not the panels.
+                // overlay opened reopens it — not the panels.
                 let to_settings = confirm.action.from_settings();
-                let to_presets = match &confirm.action {
-                    PendingAction::DeleteAgentPreset {
-                        index,
-                        worktree,
-                        quick,
-                    } => Some((*index, worktree.clone(), quick.clone())),
-                    _ => None,
-                };
                 app.overlay = None;
                 if to_settings {
                     reopen_settings(app);
-                } else if let Some((index, worktree, quick)) = to_presets {
-                    crate::preset_overlays::reopen_presets_list(
-                        app,
-                        worktree,
-                        quick.map(|back| *back),
-                        index,
-                    );
                 }
             }
             _ if ui::confirm_keys::YES.matches(&key) => {
@@ -9159,27 +9143,6 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             });
         }
         PendingAction::CloseProjectTab(id) => launcher::close_cursor_tab(app, &id, out),
-        PendingAction::DeleteAgentPreset {
-            index,
-            worktree,
-            quick,
-        } => {
-            let mut presets = crate::agent_presets::load();
-            if presets.get(index).is_some_and(|p| p.system.is_none()) {
-                presets.remove(index);
-                if let Err(err) = crate::agent_presets::save(&presets) {
-                    app.flash = Some(crate::flash::Flash::failed(format!(
-                        "could not save agent presets: {err}"
-                    )));
-                }
-            }
-            crate::preset_overlays::reopen_presets_list(
-                app,
-                worktree,
-                quick.map(|back| *back),
-                index,
-            );
-        }
         PendingAction::DeletePreset { index } => crate::presets_tab::delete(app, index),
         PendingAction::RestorePresetText { index } => crate::presets_tab::restore(app, index),
         PendingAction::ResetSettings => reset_settings(app),
@@ -9425,7 +9388,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             // under the generated name and AUTO-TITLE, its first prompt
             // typed in the CLI. No box stands between the picker and the
             // pane — a launch that starts from a typed task is the QUICK
-            // PROMPT's (`p`; `e` on an OPEN PRS row for a PR SESSION). The
+            // PROMPT's (`p`; **Agent presets** on an OPEN PRS row for a PR SESSION). The
             // standing default-spec warm slot gets adopted where it
             // matches (never for a PR SESSION: an unscoped warm CLI cannot
             // be adopted for one), and the refill behind the create
@@ -27637,7 +27600,7 @@ mod tests {
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(matches!(
                 &app.overlay,
-                Some(Overlay::AgentPresetEditor(e)) if e.editing.is_none() && e.settings_row == Some(last)
+                Some(Overlay::AgentPresetEditor(e)) if e.editing.is_none() && e.settings_row == last
             ));
         });
     }
@@ -31550,6 +31513,16 @@ mod tests {
         Some((launch.preset.as_ref()?.name.as_str(), &launch.target))
     }
 
+    /// The PRESET EDITOR as Settings → Presets opens it: on the stored
+    /// preset at `index`, or blank on + New preset.
+    pub(super) fn open_preset_editor(app: &mut App, index: Option<usize>) {
+        let screen = crate::presets_tab::Screen::load();
+        let at = index.map_or(screen.rows.len() - 1, |i| {
+            screen.row_of(i).expect("a stored preset")
+        });
+        crate::presets_tab::run(app, crate::presets_tab::Cmd::Open(at));
+    }
+
     fn open_presets(app: &mut App, out: &mut Vec<ClientRequest>) {
         seed_tree(app);
         app.focus = Focus::Sessions;
@@ -31735,142 +31708,10 @@ mod tests {
                         app.overlay, app.flash
                     );
                 };
-                let back = view.quick.as_ref().expect("a picker, not the manager");
+                let back = view.quick.as_ref().expect("a picker, not the launcher");
                 assert_eq!(back.launch.pr.as_ref().map(|pr| pr.number), Some(7));
                 assert!(out.is_empty(), "{out:?}");
             }
-        });
-    }
-
-    /// The presets list `e` opens on a PROJECT OPEN PRS GROUP row manages
-    /// presets as the one on a checkout's row does: `a` adds, `e` edits,
-    /// `d` deletes. A new preset's save puts it straight on the PR's box;
-    /// every other way back — an edit's save, the editor's Esc, the
-    /// delete confirm's either answer — lands in the PR picker. The pull
-    /// request rides all of them, so the next Enter is still a PR SESSION.
-    #[test]
-    fn the_pr_preset_picker_adds_edits_and_deletes_presets() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            seed_open_prs(&mut app, &[(7, "Attach links")]);
-            app.focus = Focus::Worktrees;
-            app.set_sel_worktree(1);
-            let mut out = Vec::new();
-            out.extend(crate::event_loop::run_action(
-                &mut app,
-                crate::keymap::Action::AgentPresets,
-            ));
-            // The row names, and the cursor, of the PR picker on screen.
-            fn pr_picker(app: &App) -> (Vec<String>, usize) {
-                let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                    panic!("back in the PR picker, got {:?}", app.overlay);
-                };
-                let back = view.quick.as_ref().expect("the picker, not the manager");
-                assert_eq!(back.launch.pr.as_ref().map(|pr| pr.number), Some(7));
-                let names = view.presets.iter().map(|p| p.name.clone()).collect();
-                (names, view.selected)
-            }
-            let (seeded, _) = pr_picker(&app);
-            assert_eq!(seeded, ["reviewer", "scratch"]);
-
-            // a: a new preset, saved onto the PR's box; the box's own
-            // picker has the cursor on it.
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(
-                matches!(&app.overlay, Some(Overlay::AgentPresetEditor(_))),
-                "a opens the editor: {:?}",
-                app.overlay
-            );
-            type_text(&mut app, "triage", &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the new preset goes on the box, got {:?}", app.overlay);
-            };
-            assert!(
-                prompt.title.starts_with("Quick prompt · PR #7 · triage"),
-                "{}",
-                prompt.title
-            );
-            press(
-                &mut app,
-                KeyCode::Char('x'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            let (names, cursor) = pr_picker(&app);
-            assert_eq!(names, ["reviewer", "scratch", "triage"]);
-            assert_eq!(cursor, 2, "the cursor lands on the new row");
-
-            // e: edited in place.
-            press(
-                &mut app,
-                KeyCode::Char('e'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(
-                matches!(&app.overlay, Some(Overlay::AgentPresetEditor(e)) if e.editing == Some(2)),
-                "e edits the row under the cursor: {:?}",
-                app.overlay
-            );
-            type_text(&mut app, " pr", &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(pr_picker(&app).0[2], "triage pr");
-
-            // Esc backs out of the editor unsaved, to the picker too.
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            type_text(&mut app, "abandoned", &mut out);
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert_eq!(pr_picker(&app).0.len(), 3);
-
-            // d: `n` keeps the preset, `y` drops it — the picker either way.
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(
-                matches!(&app.overlay, Some(Overlay::Confirm(_))),
-                "d asks first: {:?}",
-                app.overlay
-            );
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
-            assert_eq!(pr_picker(&app).0.len(), 3);
-            press(
-                &mut app,
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
-            assert_eq!(pr_picker(&app).0, seeded);
-            assert_eq!(crate::agent_presets::load().len(), 2, "the store agrees");
-
-            // And a pick from it is still for the pull request.
-            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick hands the box back, got {:?}", app.overlay);
-            };
-            assert_eq!(
-                prompt.title,
-                "Quick prompt · PR #7 · reviewer (claude · opus · high)"
-            );
-            assert!(out.is_empty(), "managing presets sends nothing: {out:?}");
         });
     }
 
@@ -31904,7 +31745,7 @@ mod tests {
                     app.overlay
                 );
             };
-            assert!(view.is_picker(), "a picker for the PR, not the manager");
+            assert!(view.is_picker(), "a picker for the PR, not the launcher");
             let back = view.quick.as_ref().expect("is_picker");
             assert_eq!(back.launch.pr.as_ref().map(|pr| pr.number), Some(7));
             assert_eq!(
@@ -32150,26 +31991,19 @@ mod tests {
     }
 
     #[test]
-    fn presets_a_fills_the_editor_and_enter_persists() {
+    fn the_preset_editor_fills_and_enter_persists() {
         use crate::preset_overlays::PresetField;
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            open_preset_editor(&mut app, None);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
-                panic!("a should open the editor, got {:?}", app.overlay);
+                panic!("the editor, got {:?}", app.overlay);
             };
             assert_eq!(editor.editing, None);
             assert_eq!(editor.field, PresetField::Name);
 
-            // List verbs are just characters while a text field has the
-            // caret — `e`, `d`, `a` type rather than act.
+            // Letters type while a text field has the caret.
             type_text(&mut app, "tested", &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             // The box's agent, then Claude, then Codex.
@@ -32251,12 +32085,18 @@ mod tests {
             );
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("save should land back in the list, got {:?}", app.overlay);
+            let Some(Overlay::Settings(view)) = &app.overlay else {
+                panic!("save should land back in Settings, got {:?}", app.overlay);
             };
-            assert_eq!(view.presets.len(), 3);
-            assert_eq!(view.selected, 2, "cursor on the saved row");
-            let saved = &crate::agent_presets::load()[2];
+            assert_eq!(view.tab, crate::config::presets_tab());
+            let screen = crate::presets_tab::Screen::load();
+            assert_eq!(
+                screen.preset(view.selected).map(|(_, p)| p.name.as_str()),
+                Some("tested"),
+                "cursor on the saved row"
+            );
+            let presets = crate::agent_presets::load();
+            let saved = presets.last().unwrap();
             assert_eq!(saved.name, "tested");
             assert_eq!(saved.kind, AgentKind::Codex);
             assert_eq!(saved.model.as_deref(), Some("gpt-6-astra"));
@@ -32284,17 +32124,11 @@ mod tests {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            open_preset_editor(&mut app, None);
             // Enter from the far end of the form.
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
-                panic!("a should open the editor, got {:?}", app.overlay);
+                panic!("the editor, got {:?}", app.overlay);
             };
             assert_eq!(editor.field, PresetField::Task);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -32396,11 +32230,12 @@ mod tests {
             assert_eq!(editor.name.as_str(), "Reviewe");
 
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("Esc goes back to the list, got {:?}", app.overlay);
-            };
-            assert_eq!(view.presets.len(), 2, "nothing saved");
-            assert_eq!(crate::agent_presets::load().len(), 2);
+            assert!(
+                matches!(app.overlay, Some(Overlay::Settings(_))),
+                "Esc goes back to Settings, got {:?}",
+                app.overlay
+            );
+            assert_eq!(crate::agent_presets::load().len(), 2, "nothing saved");
         });
     }
 
@@ -32410,8 +32245,7 @@ mod tests {
     /// letters type too — `e` and `q` are no edit and no close — and a
     /// letter nothing matches is refused, so the list never empties. Esc
     /// clears the letters before it closes, leaving the found row
-    /// selected; Enter, a click and the Ctrl verbs all act on the row the
-    /// filter left.
+    /// selected; Enter and a click act on the row the filter left.
     #[test]
     fn presets_list_types_ahead_to_find_a_preset_by_name() {
         with_seeded_presets(|| {
@@ -32469,23 +32303,8 @@ mod tests {
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none());
 
-            // Ctrl+e edits the row the filter left, not the stored first.
-            open_presets(&mut app, &mut out);
-            type_text(&mut app, "scr", &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('e'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(
-                matches!(&app.overlay, Some(Overlay::AgentPresetEditor(e)) if e.editing == Some(1)),
-                "{:?}",
-                app.overlay
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-
             // Enter launches the filtered row: "scratch" on the box.
+            open_presets(&mut app, &mut out);
             type_text(&mut app, "scr", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert_eq!(
@@ -32512,20 +32331,14 @@ mod tests {
     }
 
     #[test]
-    fn presets_e_edits_in_place() {
+    fn the_preset_editor_edits_in_place() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('e'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            let before = crate::agent_presets::load_seeded().len();
+            open_preset_editor(&mut app, Some(1));
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
-                panic!("e should open the editor on the row, got {:?}", app.overlay);
+                panic!("the editor on the row, got {:?}", app.overlay);
             };
             assert_eq!(editor.editing, Some(1));
             assert_eq!(editor.name.as_str(), "scratch");
@@ -32544,66 +32357,16 @@ mod tests {
             assert!(text.contains("◂ default ▸"), "focused choice:\n{text}");
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("save should land back in the list, got {:?}", app.overlay);
+            let Some(Overlay::Settings(view)) = &app.overlay else {
+                panic!("save should land back in Settings, got {:?}", app.overlay);
             };
-            assert_eq!(view.presets.len(), 2, "edited in place, not appended");
-            assert_eq!(view.selected, 1);
+            let screen = crate::presets_tab::Screen::load();
+            assert_eq!(screen.row_of(1), Some(view.selected), "on its row");
             let saved = crate::agent_presets::load();
+            assert_eq!(saved.len(), before, "edited in place, not appended");
             assert_eq!(saved[1].name, "scratch");
             assert_eq!(saved[1].model, None, "default folds to None");
             assert_eq!(saved[0].name, "reviewer", "order kept");
-        });
-    }
-
-    #[test]
-    fn presets_d_confirms_deletes_and_reopens_and_cancel_keeps() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            match &app.overlay {
-                Some(Overlay::Confirm(c)) => {
-                    assert!(c.message.contains("'reviewer'"), "{}", c.message);
-                    assert!(matches!(
-                        c.action,
-                        PendingAction::DeleteAgentPreset { index: 0, .. }
-                    ));
-                }
-                other => panic!("d should ask first, got {other:?}"),
-            }
-            // Backing out puts the list back, untouched.
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            match &app.overlay {
-                Some(Overlay::AgentPresets(view)) => assert_eq!(view.presets.len(), 2),
-                other => panic!("cancel should reopen the list, got {other:?}"),
-            }
-            press(
-                &mut app,
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
-            match &app.overlay {
-                Some(Overlay::AgentPresets(view)) => {
-                    assert_eq!(view.presets.len(), 1, "row dropped");
-                    assert_eq!(view.presets[0].name, "scratch");
-                    assert_eq!(view.selected, 0, "cursor clamped");
-                }
-                other => panic!("delete should reopen the list, got {other:?}"),
-            }
-            assert_eq!(app.flash, None, "the list without it says it");
-            let left = crate::agent_presets::load();
-            assert_eq!(left.len(), 1, "removal reached the store");
-            assert_eq!(left[0].name, "scratch");
-            assert!(out.is_empty(), "{out:?}");
         });
     }
 
@@ -32726,7 +32489,7 @@ mod tests {
             // The wrapping preset, sent empty: prefix + postfix alone, as
             // the box shows them round the caret.
             out.clear();
-            crate::preset_overlays::reopen_agent_presets(&mut app, worktree, 0);
+            crate::preset_overlays::open_launcher(&mut app, worktree);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
@@ -32745,28 +32508,25 @@ mod tests {
     }
 
     /// A `skip_task` preset asks for nothing: the editor's Task row turns
-    /// it on, the list marks the row, and Enter on it launches straight
-    /// away on prefix + postfix — no task box in between.
+    /// it on, Settings → Presets and the picker mark the row, and Enter on
+    /// it in the picker launches straight away on prefix + postfix — no
+    /// task box in between.
     #[test]
-    fn a_skip_task_preset_launches_from_the_list_without_asking() {
+    fn a_skip_task_preset_launches_from_the_picker_without_asking() {
         use crate::preset_overlays::PresetField;
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            // `e` on "reviewer"; Task is the last field, so ⇧Tab from Name
-            // wraps onto it.
-            press(
-                &mut app,
-                KeyCode::Char('e'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            // "reviewer" in the editor; Task is the last field, so ⇧Tab
+            // from Name wraps onto it.
+            open_preset_editor(&mut app, Some(0));
             press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
-                panic!("e should open the editor, got {:?}", app.overlay);
+                panic!("the editor, got {:?}", app.overlay);
             };
             assert_eq!(editor.field, PresetField::Task);
             assert!(!editor.skip_task, "presets ask by default");
@@ -32788,9 +32548,14 @@ mod tests {
             assert!(crate::agent_presets::load()[0].skip_task, "saved");
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
-            assert!(text.contains("no task"), "list mark:\n{text}");
+            assert!(text.contains("no task"), "Settings marks it:\n{text}");
             assert!(out.is_empty(), "editing sends nothing: {out:?}");
 
+            app.overlay = None;
+            out.extend(run_action(&mut app, crate::keymap::Action::AgentPresets));
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("no task"), "the picker marks it:\n{text}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "no task box: {:?}", app.overlay);
             assert!(
@@ -33748,52 +33513,6 @@ mod tests {
         });
     }
 
-    /// The manage verbs keep the pane: a preset made from this list goes
-    /// straight in, and one abandoned comes back to this list, not a box.
-    #[test]
-    fn a_preset_made_from_the_pane_list_goes_straight_in() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            let mut out = Vec::new();
-            let sref = agent_pane(&mut app, true);
-
-            press_cmd_u(&mut app, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("Esc goes back to the list, got {:?}", app.overlay);
-            };
-            assert_eq!(view.pane_target(), Some(&sref));
-
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
-                panic!("the editor, got {:?}", app.overlay);
-            };
-            editor.name = crate::text_input::TextInput::with_text("fresh");
-            editor.prefix = crate::text_input::TextInput::with_text("Look closely.");
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert!(app.term_locked);
-            match out.as_slice() {
-                [ClientRequest::Input { data, .. }] => {
-                    assert_eq!(data, b"\x1b[200~Look closely.\n\n\x1b[201~");
-                }
-                other => panic!("expected one Input request, got {other:?}"),
-            }
-        });
-    }
-
     /// The box's launch chords have no launch to aim from this list.
     #[test]
     fn the_pane_preset_list_is_not_a_launch_box() {
@@ -33870,25 +33589,18 @@ mod tests {
             assert!(view.is_picker(), "opened to pick, not to manage");
             assert_eq!(view.presets[0].name, "reviewer");
 
-            // The manage verbs answer here as in the Sessions panel's list,
-            // and come back to the picker: `a` then Esc leaves the box and
-            // its text waiting behind it.
+            // The picker only picks: the chord that used to make a preset
+            // here leaves it, and the box's text behind it, as they were.
             press(
                 &mut app,
                 KeyCode::Char('n'),
                 KeyModifiers::CONTROL,
                 &mut out,
             );
-            assert!(
-                matches!(&app.overlay, Some(Overlay::AgentPresetEditor(e)) if e.quick.is_some()),
-                "a opens the editor from the picker: {:?}",
-                app.overlay
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!("Esc goes back to the picker, got {:?}", app.overlay);
+                panic!("^N makes nothing in the picker, got {:?}", app.overlay);
             };
-            assert!(view.is_picker(), "still the picker, not the manager");
+            assert!(view.is_picker(), "still the picker, not the launcher");
             assert_eq!(
                 view.quick.as_ref().map(|back| back.text.as_str()),
                 Some("Fix auth")
@@ -34031,12 +33743,11 @@ mod tests {
         });
     }
 
-    /// With no presets saved the picker still opens — empty, on the
-    /// manager's `a` hint — so the first one is made right there: saving it
-    /// hands the box back, text intact, under that preset — no second
-    /// Enter on its row, whose highlight read as picked.
+    /// With no presets saved the picker still opens, empty, saying where
+    /// one is made — Settings → Presets — and the chord that used to make
+    /// one there makes nothing; Esc hands the box back, text intact.
     #[test]
-    fn the_preset_key_without_presets_opens_a_picker_that_adds_one() {
+    fn the_preset_key_without_presets_opens_a_picker_that_says_where_to_make_one() {
         with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
             crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
@@ -34059,7 +33770,10 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
                 terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                 let text = buffer_text(&terminal);
-                assert!(text.contains("no presets yet — ⌘N creates one"), "{text}");
+                assert!(
+                    text.contains("no presets yet — make one in Settings → Presets"),
+                    "{text}"
+                );
 
                 press(
                     &mut app,
@@ -34067,14 +33781,13 @@ mod tests {
                     KeyModifiers::CONTROL,
                     &mut out,
                 );
-                type_text(&mut app, "tidy", &mut out);
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
                 let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                    panic!("the save hands the box back, got {:?}", app.overlay);
+                    panic!("Esc hands the box back, got {:?}", app.overlay);
                 };
-                assert_eq!(crate::agent_presets::load().len(), 1, "and saved it");
+                assert!(crate::agent_presets::load().is_empty(), "nothing made");
                 assert_eq!(prompt.input.as_str(), "Fix auth");
-                assert!(prompt.title.contains("tidy"), "{}", prompt.title);
                 assert!(out.is_empty(), "{out:?}");
             });
         });
@@ -34529,13 +34242,7 @@ mod tests {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            open_preset_editor(&mut app, None);
             type_text(&mut app, "cur", &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -34601,15 +34308,17 @@ mod tests {
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let saved = crate::agent_presets::load();
-            assert_eq!(saved[2].kind, AgentKind::Cursor);
-            assert_eq!(saved[2].model.as_deref(), Some("claude-opus-5"));
-            assert_eq!(saved[2].effort.as_deref(), Some("high"));
+            let presets = crate::agent_presets::load();
+            let saved = presets.last().unwrap();
+            assert_eq!(saved.kind, AgentKind::Cursor);
+            assert_eq!(saved.model.as_deref(), Some("claude-opus-5"));
+            assert_eq!(saved.effort.as_deref(), Some("high"));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
+            let row = text.lines().find(|l| l.contains(" cur ")).unwrap_or("");
             assert!(
-                text.contains("cur  cursor · claude-opus-5 · high"),
-                "spec label names family and effort:\n{text}"
+                row.contains("cursor · claude-opus-5 · high"),
+                "Settings → Presets' row names family and effort:\n{text}"
             );
         });
     }
@@ -34721,13 +34430,7 @@ mod tests {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_presets(&mut app, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            open_preset_editor(&mut app, None);
             type_text(&mut app, "typed", &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             // Harness: "cu" jumps to cursor; h/l no longer cycle.
@@ -34800,7 +34503,7 @@ mod tests {
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(
-                matches!(app.overlay, Some(Overlay::AgentPresets(_))),
+                matches!(app.overlay, Some(Overlay::Settings(_))),
                 "second Esc backs out: {:?}",
                 app.overlay
             );
@@ -34877,9 +34580,8 @@ mod tests {
     /// click used to launch the row straight into it: a `skip`-task preset
     /// clicked on an OPEN PRS row started a plain session in the main
     /// checkout, no pull request, no checkout cut, nothing nested. The
-    /// delete keys reach the delete confirm, as in the manager — whose
-    /// exits once reopened the list in manage mode against the root, and
-    /// now come back to the picker, the pull request still on it.
+    /// picker only picks: its old delete key leaves it as it was, the pull
+    /// request still on it.
     #[test]
     fn a_click_in_the_pr_preset_picker_launches_the_pr_session_not_a_root_session() {
         with_seeded_presets(|| {
@@ -34910,8 +34612,8 @@ mod tests {
                 crate::keymap::Action::AgentPresets,
             ));
 
-            // The delete key asks first, and backing out of the confirm
-            // lands in the PR picker again.
+            // The picker only picks: the delete chord leaves the PR
+            // picker as it was.
             press(
                 &mut app,
                 KeyCode::Char('w'),
@@ -34921,20 +34623,10 @@ mod tests {
             assert!(
                 matches!(
                     &app.overlay,
-                    Some(Overlay::Confirm(c))
-                        if matches!(&c.action, PendingAction::DeleteAgentPreset { quick: Some(_), .. })
-                ),
-                "^W asks before deleting: {:?}",
-                app.overlay
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
                     Some(Overlay::AgentPresets(view))
                         if view.quick.as_ref().is_some_and(|back| back.launch.pr.is_some())
                 ),
-                "^W's confirm backs out to the PR picker: {:?}",
+                "^W deletes nothing from the PR picker: {:?}",
                 app.overlay
             );
 
@@ -35050,9 +34742,12 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
                 terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
                 let text = buffer_text(&terminal);
-                assert!(text.contains("no presets yet — ⌘N creates one"), "{text}");
-                // Enter and Ctrl+e on nothing do nothing: the hint names
-                // Ctrl+n.
+                assert!(
+                    text.contains("no presets yet — make one in Settings → Presets"),
+                    "{text}"
+                );
+                // Enter and Ctrl+e on nothing do nothing: the hint says
+                // where presets are made.
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
                 assert_eq!(app.flash, None);
@@ -36544,27 +36239,16 @@ mod tests {
             (
                 "AgentPresets",
                 |app| {
-                    crate::preset_overlays::reopen_agent_presets(
-                        app,
-                        orion_core::WorktreeId("w1".into()),
-                        0,
-                    );
+                    crate::preset_overlays::open_launcher(app, orion_core::WorktreeId("w1".into()));
                 },
                 None,
             ),
             (
-                // The only staged landing: the editor backs out to the list
-                // it was opened from, unsaved, exactly as its own Esc does.
+                // A staged landing: the editor backs out to Settings →
+                // Presets, unsaved, exactly as its own Esc does.
                 "AgentPresetEditor",
-                |app| {
-                    crate::preset_overlays::open_agent_preset_editor(
-                        app,
-                        orion_core::WorktreeId("w1".into()),
-                        None,
-                        None,
-                    );
-                },
-                Some("AgentPresets"),
+                |app| open_preset_editor(app, None),
+                Some("Settings"),
             ),
             (
                 "Onboard",
@@ -36938,28 +36622,15 @@ mod tests {
             assert!(peel_with(submenu, KeyCode::Esc).is_none());
             assert!(peel_with(submenu, KeyCode::Char('q')).is_none());
 
-            // The PRESET EDITOR over its list: Esc goes back to the list.
+            // The PRESET EDITOR over Settings → Presets: Esc goes back to
+            // the tab.
             let editor = |app: &mut App| {
-                let mut out = Vec::new();
                 seed_tree(app);
-                app.focus = Focus::Sessions;
-                out.extend(crate::event_loop::run_action(
-                    app,
-                    crate::keymap::Action::AgentPresets,
-                ));
-                press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, &mut out);
-                assert!(
-                    matches!(app.overlay, Some(Overlay::AgentPresetEditor(_))),
-                    "{:?}",
-                    app.overlay
-                );
+                open_preset_editor(app, None);
             };
             assert!(
-                matches!(
-                    peel_with(editor, KeyCode::Esc),
-                    Some(Overlay::AgentPresets(_))
-                ),
-                "Esc should back out to the list"
+                matches!(peel_with(editor, KeyCode::Esc), Some(Overlay::Settings(_))),
+                "Esc should back out to Settings"
             );
             assert!(peel_with(editor, KeyCode::Char('q')).is_none());
         });

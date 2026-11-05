@@ -82,7 +82,7 @@ pub struct QuickLaunch {
     /// Boxed, so every prompt kind is not as large as a preset.
     pub preset: Option<Box<AgentPreset>>,
     /// The pull request this launch is for, when the box was opened from
-    /// a PROJECT OPEN PRS GROUP row (`e` on it): named in the title and
+    /// a pull request (`Enter` on it, or a preset picked for it): named in the title and
     /// the header's worktree field, and sent to the DAEMON as a PR SESSION
     /// (`CreatePrAgent`) — it runs in the PROJECT's checkout of the PR's
     /// head branch, reused when one is there and cut by the DAEMON
@@ -205,9 +205,9 @@ pub struct QuickReturn {
     pub text: String,
     /// Was the box up when the picker opened (`Tab` / `^X` in it)?
     /// Esc puts the box back only then. A picker reached with no box up —
-    /// `e` on a pull request — closes on Esc instead, as the
-    /// manager does: it used to put up an empty box nobody asked for. A
-    /// pick opens the box either way.
+    /// the palette's **Agent presets** on a pull request — closes on Esc
+    /// instead, as the launcher does: it used to put up an empty box
+    /// nobody asked for. A pick opens the box either way.
     pub from_box: bool,
     /// The agent's pane the picker was opened from (`⌘U` in a LOCKED PANE),
     /// when the pick is pasted at that agent's caret rather than put on a
@@ -926,12 +926,10 @@ pub(crate) fn open_launch_picker(app: &mut App, back: QuickReturn) {
     );
 }
 
-/// `⌘U` / `^X` in the box: the saved AGENT PRESETS as a picker. The list is
-/// the one `e` opens in the SESSIONS PANEL, in picker mode — Enter adopts
-/// the row's harness, MODEL / EFFORT and prefix/postfix for this launch and
-/// Esc comes back unchanged, while `Ctrl+a` / `Ctrl+e` / `Ctrl+d` manage
-/// the presets as they do there and come back to this picker. With none
-/// saved yet it opens empty, on the same `Ctrl+a` hint the manager shows.
+/// `⌘U` / `^X` in the box: the saved AGENT PRESETS as a picker — Enter
+/// adopts the row's harness, MODEL / EFFORT and text for this launch and
+/// Esc comes back unchanged. It only picks: presets are made and changed
+/// in Settings → Presets.
 pub(crate) fn open_preset_picker(app: &mut App, back: QuickReturn) {
     let presets = crate::agent_presets::load();
     let selected = back
@@ -974,7 +972,7 @@ pub(crate) fn open_preset_picker_for_pane(app: &mut App) -> bool {
     true
 }
 
-/// `e` on a PROJECT OPEN PRS GROUP row: the saved AGENT PRESETS as a
+/// The palette's **Agent presets** on a pull request: the saved AGENT PRESETS as a
 /// picker for a PR SESSION on that pull request. The pick hands the
 /// QUICK PROMPT box back with the preset applied and the PR carried
 /// (`QuickLaunch::pr`) — or, for a `skip`-task preset, launches at once

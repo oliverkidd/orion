@@ -80,13 +80,16 @@ stops to ask you something stays working**. The picker says so on its row, dim a
 
 ## AGENT PRESETS
 
-If you keep starting the same kind of session with the same framing, save it as an **agent preset**:
-**Agent presets** (the command palette, or `⇧Tab` in the quick prompt) lists them, and the launch lands in that card's checkout — its last row says which, and `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
+If you keep starting the same kind of session with the same framing, save it as an **agent preset**,
+in **Settings → Presets** (below). Wherever a launch is, a picker lists them — **Agent presets**
+(the command palette), `⌘U` in the quick prompt, `⌘U` over an agent's pane, `⇧Tab` on a pull
+request — and it only picks: making, changing and deleting presets is Settings' alone, so no picker
+offers it. From the palette the launch lands in that card's checkout — its last row says which, and
+`Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
-model and effort submenus. `Ctrl+a` opens a small form — name, harness, model, effort, **Text**
+model and effort submenus. The editor is a small form — name, harness, model, effort, **Text**
 (which side of the task the preset's text goes: `prefix`, `postfix` or `prefix & postfix`, with a
-box for each side it names) and **Task** (`ask` or `skip`) — and `Ctrl+e` / `Ctrl+d` edit or
-delete; they are chords because plain letters type. A new preset starts on the side
+box for each side it names) and **Task** (`ask` or `skip`). A new preset starts on the side
 `preset_text` in CONFIG.JSON names, by hand — `prefix` unless you change it: one
 box, sent before your task — and cycling the row shows the other box or both; a side the row leaves
 out saves blank. Editing a preset also shows any side that already holds text, so one saved with
@@ -96,7 +99,7 @@ launches the CLI with `prefix + task + postfix` as its very first prompt. The ta
 send the box with nothing typed and the prefix and postfix go on their own (a preset with neither starts the CLI
 with no first prompt). Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
 and `Enter` launches it at once, no box at all; the list marks those rows `no task`. A `skip` preset
-picked with `Shift+Tab` in a quick prompt launches the same way when
+picked in a quick prompt (`⌘U`) launches the same way when
 the box is still empty, while text you already typed stays yours to send. The row it creates is an
 ordinary session: it names itself on that first turn, resumes, and shows status like any other. Presets
 live in `agent_presets.json` beside `config.json`.
@@ -110,14 +113,14 @@ by id — and the preset launches that, refusing with the reason when it is swit
 preset an older release saved on the default Claude account, which every preset started on, follows
 the box from now on; one saved on any other harness or account keeps it.
 
-**Settings → Presets** is where they are managed. orion's own come first, under **Used by orion**,
+**Settings → Presets** is where they are made, changed and deleted. orion's own come first, under **Used by orion**,
 each tagged `orion` with a few words on what it is for, and marked `your text` while it holds text
 of yours; yours follow under **Yours**, each with where it runs, then **+ New preset**. The keys
 follow the row, and the frame names only those that work on it: `Enter` edits any preset; on one of
 orion's, `^R` puts back orion's text (once you confirm); on one of yours, `^N` makes a new one and
 `^D` deletes it (once you confirm). The editor comes back to the row it was opened on.
 
-Three presets are **system presets**, on every list and marked `system` — the agents orion starts
+Three presets are **system presets**, on every list and tagged `orion` — the agents orion starts
 itself:
 
 - **PR autofix** wraps what broke for the agent **Auto-fix my PRs** sends to a broken pull request.
@@ -147,7 +150,7 @@ releases kept for these agents in `config.json` — `autofix_model`, `autofix_ef
 named pinned as it resolved then, and leave the file.
 
 In the PULL REQUESTS MODAL (`v`), `Shift+Tab` on a pull request is a
-picker instead of the manager: the preset you pick launches a PR SESSION on that pull request. The
+picker for it: the preset you pick launches a PR SESSION on that pull request. The
 box comes back with the preset applied and the PR in its title, and `Enter` starts the agent in the
 project's worktree on the PR's head branch — reused when one is already checked out on it, cut by
 the daemon otherwise — with the PR link and its work rule in the system prompt and the preset's
