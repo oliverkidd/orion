@@ -9341,21 +9341,33 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             if let Some(back) = quick {
                 // A model or an effort picked for the harness the box is
                 // already on tunes the launch it is, AGENT PRESET and all;
-                // a harness picked is a new launch spec, which drops it.
+                // a harness picked is a new launch spec, which drops a
+                // preset that pins its own — one that FOLLOWS THE BOX goes
+                // along, its pinned model and effort where none was picked.
                 let tuned = (model.is_some() || effort.is_some())
                     && kind == back.launch.kind
                     && custom == back.launch.custom;
+                let follows = back.launch.preset.as_ref().filter(|p| p.follows_box());
+                let (model_picked, effort_picked) = (model.is_some(), effort.is_some());
                 // The picker's `worktree` is only what its menu was built
                 // against; where the launch lands is the box's own target.
+                let cfg = crate::config::Config::load();
                 let mut launch = crate::quick_prompt::QuickLaunch::of_kind(
                     back.launch.target.clone(),
                     kind,
                     custom.clone(),
                     model.filter(|m| m != crate::config::DEFAULT_CHOICE),
                     effort.filter(|e| e != crate::config::DEFAULT_CHOICE),
-                    &crate::config::Config::load(),
+                    &cfg,
                 );
-                if tuned {
+                if let Some(preset) = follows.filter(|_| !tuned) {
+                    launch = launch.pinned_to(
+                        preset.model.as_deref().filter(|_| !model_picked),
+                        preset.effort.as_deref().filter(|_| !effort_picked),
+                        &cfg,
+                    );
+                }
+                if tuned || follows.is_some() {
                     launch.preset = back.launch.preset.clone();
                 }
                 let launch = launch
@@ -31203,6 +31215,7 @@ mod tests {
                         name: "reviewer".into(),
                         kind: AgentKind::Claude,
                         custom_harness: None,
+                        follow_box: None,
                         model: Some("opus".into()),
                         effort: Some("high".into()),
                         prefix: "Be strict.".into(),
@@ -31214,6 +31227,7 @@ mod tests {
                         name: "scratch".into(),
                         kind: AgentKind::Codex,
                         custom_harness: None,
+                        follow_box: None,
                         model: Some("gpt-6-luna".into()),
                         effort: None,
                         prefix: String::new(),
@@ -31275,6 +31289,7 @@ mod tests {
                 name: "review and merge".into(),
                 kind: AgentKind::Claude,
                 custom_harness: None,
+                follow_box: None,
                 model: None,
                 effort: None,
                 prefix: "Investigate whether this pull request should be merged.".into(),
@@ -31733,6 +31748,7 @@ mod tests {
                 name: "ship".into(),
                 kind: AgentKind::Claude,
                 custom_harness: None,
+                follow_box: None,
                 model: None,
                 effort: None,
                 prefix: "Commit and push.".into(),
@@ -31862,6 +31878,8 @@ mod tests {
             // caret — `e`, `d`, `a` type rather than act.
             type_text(&mut app, "tested", &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            // The box's agent, then Claude, then Codex.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -34228,6 +34246,7 @@ mod tests {
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("editor should stay open, got {:?}", app.overlay);
@@ -34575,6 +34594,7 @@ mod tests {
                 name: "review and merge".into(),
                 kind: AgentKind::Claude,
                 custom_harness: None,
+                follow_box: None,
                 model: None,
                 effort: None,
                 prefix: "Review this pull request.".into(),

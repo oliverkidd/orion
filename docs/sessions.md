@@ -99,9 +99,16 @@ and `Enter` launches it at once, no box at all; the list marks those rows `no ta
 picked with `Shift+Tab` in a quick prompt launches the same way when
 the box is still empty, while text you already typed stays yours to send. The row it creates is an
 ordinary session: it names itself on that first turn, resumes, and shows status like any other. Presets
-live in `agent_presets.json` beside `config.json`. The form's Harness row lists custom registry entries
-by id alongside the built-ins — a preset on one launches with the entry's program and defaults, and
-refuses with the reason when its entry is switched off or gone.
+live in `agent_presets.json` beside `config.json`.
+
+A preset FOLLOWS THE BOX unless it pins a harness: the form's Harness row starts on **the box's
+agent**, so picked in a quick prompt the preset runs on the account and harness that box is on —
+another Claude account stays on it — at the box's model and effort, taking only the model or
+effort the preset pins that the harness offers; launched with no box up, it starts where `⌘N`
+does. Pin a harness on the same row — the built-ins, each Claude account, custom registry entries
+by id — and the preset launches that, refusing with the reason when it is switched off or gone. A
+preset an older release saved on the default Claude account, which every preset started on, follows
+the box from now on; one saved on any other harness or account keeps it.
 
 Three presets are **system presets**, on every list and marked `system` — the agents orion starts
 itself:
@@ -112,14 +119,16 @@ itself:
   listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the
   e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push;
   watch the PR until it is green and go round again.
-- **Linear Ticket** is what a Linear launch sends — with its harness, model and effort once its text
-  is yours — unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
+- **Linear Ticket** is what a Linear launch sends — following the box like any preset, so the
+  launch starts on your `⌘N` account, at the model and effort it pins once its text is yours —
+  unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
   `{issues}` gets them between its prefix and postfix. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
 - **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
-  medium unless you change them. An account that is off falls back to your default agent's.
+  medium unless you change them. Following the box, it is written through your default agent's
+  account; an account it pins that is off falls back to that.
 
 A system preset always holds text: its editor opens on orion's text, and saving it unchanged, or
 cleared, keeps nothing of yours, so it says orion's text from then on — including a better one a
@@ -127,8 +136,8 @@ later release ships. Its text, harness, model and effort can be edited like any 
 be deleted or renamed. A list from before they existed keeps a preset you had already named `PR
 autofix`, `Linear Ticket` or `Week review`, text and all, as that system preset. The settings older
 releases kept for these agents in `config.json` — `autofix_model`, `autofix_effort`,
-`review_account`, `review_model`, `review_effort` — move onto them once, the review's account as it
-resolved then, and leave the file.
+`review_account`, `review_model`, `review_effort` — move onto them once, an account the old key
+named pinned as it resolved then, and leave the file.
 
 In the PULL REQUESTS MODAL (`v`), `Shift+Tab` on a pull request is a
 picker instead of the manager: the preset you pick launches a PR SESSION on that pull request. The

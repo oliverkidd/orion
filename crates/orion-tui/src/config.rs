@@ -1654,8 +1654,12 @@ impl Config {
     }
 
     /// Whether a preset may launch: its harness's Accounts tab switch,
-    /// enabled and valid.
+    /// enabled and valid — always, for one that follows the box, which
+    /// runs on a harness the box already launches.
     pub fn preset_harness_usable(&self, preset: &crate::agent_presets::AgentPreset) -> bool {
+        if preset.follows_box() {
+            return true;
+        }
         let id = orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref());
         self.harness_registry()
             .iter()
@@ -2201,13 +2205,13 @@ impl Config {
     /// starts itself onto their SYSTEM PRESETS in `presets`, which
     /// [`crate::agent_presets::ensure_system`] has seeded: the autofix
     /// agent's fallback model and effort onto **PR autofix**; the week
-    /// review's account, model and effort onto **Week review** — the
-    /// account as it resolves now, so the review goes on being written
-    /// where it was. A Week review preset `new_review` — just added — is
-    /// put on that account too, with no old key to say otherwise. The old
-    /// keys are spent, and the next save drops them. Whether any were
-    /// there to move.
-    pub fn move_into_presets(&mut self, presets: &mut [AgentPreset], new_review: bool) -> bool {
+    /// review's account, model and effort onto **Week review** — an
+    /// account the old key named pinned as it resolves now, so the review
+    /// goes on being written where it was; an empty one meant the default
+    /// agent's, which is what the preset following the box already does.
+    /// The old keys are spent, and the next save drops them. Whether any
+    /// were there to move.
+    pub fn move_into_presets(&mut self, presets: &mut [AgentPreset]) -> bool {
         use crate::agent_presets::SystemPreset;
         let (model, effort) = (self.autofix_model.take(), self.autofix_effort.take());
         let autofix = model.is_some() || effort.is_some();
@@ -2230,15 +2234,20 @@ impl Config {
             self.review_effort.take(),
         );
         let review = account.is_some() || model.is_some() || effort.is_some();
-        let through = (review || new_review)
-            .then(|| self.review_account(account.as_deref().unwrap_or_default()))
-            .flatten();
+        // Only the account it named, while it is still one: a fallback
+        // would pin whatever stood in for it today.
+        let through = account
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.review_account(id).filter(|entry| entry.id == id));
         if let Some(preset) = presets
             .iter_mut()
-            .find(|p| (review || new_review) && p.system == Some(SystemPreset::WeekReview))
+            .find(|p| review && p.system == Some(SystemPreset::WeekReview))
         {
             if let Some(entry) = through {
                 (preset.kind, preset.custom_harness) = entry.session_kind();
+                preset.follow_box = Some(false);
             }
             if let Some(model) = model.as_deref().and_then(non_default) {
                 preset.model = Some(model);
@@ -3615,10 +3624,11 @@ mod tests {
     }
 
     /// The autofix and week review settings an older release kept in the
-    /// file move onto their system presets once — the review's account as
-    /// it resolved then, the default agent's — and the save after drops
+    /// file move onto their system presets once, and the save after drops
     /// the old keys. Empty values mean what they meant: the default
-    /// agent's own model, sonnet · medium for the review.
+    /// agent's own model, sonnet · medium for the review, and for its
+    /// account the default agent's — which the preset, following the box,
+    /// goes on reading; an account the key named is pinned.
     #[test]
     fn the_old_autofix_and_review_keys_move_onto_the_system_presets() {
         use crate::agent_presets::{ensure_system, SystemPreset};
@@ -3643,20 +3653,21 @@ mod tests {
             ..SystemPreset::PrAutofix.default_preset()
         }];
         ensure_system(&mut presets);
-        assert!(cfg.move_into_presets(&mut presets, true));
+        assert!(cfg.move_into_presets(&mut presets));
         let of = |which| presets.iter().find(|p| p.system == Some(which)).unwrap();
         let autofix = of(SystemPreset::PrAutofix);
         assert_eq!(autofix.model, None, "empty was the default agent's own");
         assert_eq!(autofix.effort.as_deref(), Some("high"));
         let review = of(SystemPreset::WeekReview);
+        assert!(review.follows_box(), "empty: the default agent's");
         assert_eq!(
-            (review.kind, review.custom_harness.as_deref()),
-            (AgentKind::Claude, Some("claude-work")),
+            cfg.review_account("").map(|entry| entry.id).as_deref(),
+            Some("claude-work"),
             "written where it was: the default agent's account"
         );
         assert_eq!(review.model.as_deref(), Some("sonnet"));
         assert_eq!(review.effort.as_deref(), Some("low"));
-        assert!(!cfg.move_into_presets(&mut presets, false), "once");
+        assert!(!cfg.move_into_presets(&mut presets), "once");
 
         cfg.save_to(&path).unwrap();
         let saved = read_json_file(&path);
@@ -3671,23 +3682,25 @@ mod tests {
         }
         assert_eq!(saved["quick_prompt_kind"], "claude-work");
 
-        // A file from before the review had keys of its own: a new Week
-        // review preset still goes on the account it was written through,
-        // the default agent's, and nothing in the file moved.
+        // An account the old key named stays where it was written.
         let mut cfg: Config = serde_json::from_str(&format!(
-            r#"{{"quick_prompt_kind": "claude-work",
+            r#"{{"review_account": "claude-work",
                 "claude_accounts": [{{"id": "claude-work", "config_dir": "{}"}}]}}"#,
             work.display()
         ))
         .unwrap();
         let mut presets = Vec::new();
         ensure_system(&mut presets);
-        assert!(!cfg.move_into_presets(&mut presets, true));
+        assert!(cfg.move_into_presets(&mut presets));
         let review = presets
             .iter()
             .find(|p| p.system == Some(SystemPreset::WeekReview))
             .unwrap();
-        assert_eq!(review.custom_harness.as_deref(), Some("claude-work"));
+        assert!(!review.follows_box());
+        assert_eq!(
+            (review.kind, review.custom_harness.as_deref()),
+            (AgentKind::Claude, Some("claude-work"))
+        );
     }
 
     /// SPOTIFY IN FOOTER: on out of the box, toggled off from its

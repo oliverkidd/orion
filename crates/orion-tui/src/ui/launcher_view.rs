@@ -3221,6 +3221,7 @@ mod tests {
             name: name.into(),
             kind: orion_core::AgentKind::Claude,
             custom_harness: None,
+            follow_box: None,
             model: None,
             effort: None,
             prefix: String::new(),

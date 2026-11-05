@@ -859,7 +859,12 @@ fn account_through(
     cfg: &crate::config::Config,
     preset: &crate::agent_presets::AgentPreset,
 ) -> Option<Account> {
-    let pinned = orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref());
+    // A preset that follows the box names no account: the default
+    // agent's, as `review_account` reads an empty one.
+    let pinned = match preset.follows_box() {
+        true => "",
+        false => orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref()),
+    };
     let entry = cfg.review_account(pinned)?;
     Some(Account {
         program: entry.program.trim().to_string(),
@@ -3297,6 +3302,7 @@ AL Ada L · GR Grace
         let on = |kind: orion_core::AgentKind, custom: Option<&str>| AgentPreset {
             kind,
             custom_harness: custom.map(String::from),
+            follow_box: Some(false),
             ..SystemPreset::WeekReview.default_preset()
         };
         let gone = on(orion_core::AgentKind::Custom, Some("gone"));
@@ -3330,6 +3336,15 @@ AL Ada L · GR Grace
             assert_eq!(pinned(&through), None, "built-in Claude, its own sign-in");
             let work_on = on(orion_core::AgentKind::Claude, Some("claude-work"));
             assert!(pinned(&account_through(&cfg, &work_on).unwrap()).is_some());
+            // Following the box, it is written through the default agent's.
+            let follows = AgentPreset {
+                follow_box: Some(true),
+                ..claude.clone()
+            };
+            assert_eq!(
+                pinned(&account_through(&cfg, &follows).unwrap()),
+                Some(work.display().to_string())
+            );
 
             cfg.quick_prompt_kind = "codex".into();
             assert_eq!(
