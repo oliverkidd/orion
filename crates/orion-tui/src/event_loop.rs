@@ -4273,13 +4273,18 @@ fn dispatch_action(
         // The config read is per-open so edits apply without restarting.
         Action::Palette => {
             if app.focus != Focus::Terminal {
-                app.overlay = Some(Overlay::Palette(Palette::new(
+                // Every project's todos, for their rows.
+                crate::todos::view::load_every_list(app);
+                let mut extra = crate::palette::linear_rows(&app.tree, &app.linear);
+                extra.extend(crate::palette::todo_rows(&app.tree, &app.todos));
+                let palette = Palette::new(
                     &app.tree,
                     crate::config::Config::load().palette_enter_attaches,
                     &app.open_prs,
                     &app.prs,
                     app.hide_draft_prs,
-                )));
+                );
+                app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
             }
         }
         // `.` / `,`: the palette's attention order as a ring, no modal —
@@ -9620,6 +9625,8 @@ fn jump_to_target_inner(
         // session in it the empty grid and no pane.
         PaletteTarget::Project(id) => launcher::open_tab(app, &id, out),
         PaletteTarget::AddProject => open_prompt(app, PromptKind::AddProject),
+        PaletteTarget::LinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
+        PaletteTarget::Todo { project, item } => crate::todos::view::open_at(app, &project, item),
         PaletteTarget::Worktree(id) => {
             if app.selected_worktree().is_some_and(|w| w.id == id) {
                 app.focus = Focus::Sessions;

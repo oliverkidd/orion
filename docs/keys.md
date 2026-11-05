@@ -73,7 +73,7 @@ Ghostty config.
 | Select model | `⌘/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Agents tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
 | Select worktree | `⌘.` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree**, or any branch with no checkout yet — a teammate's included |
-| Jump to… | `⌘K` | fuzzy jump across every project, worktree, session and open pull request (below); its last row opens a folder as a project |
+| Jump to… | `⌘K` | fuzzy jump across every project, worktree, session, open pull request, open Linear issue and open todo (below); its last row opens a folder as a project |
 | Go to file | `⌘P` | the FILE FINDER for the selected worktree |
 | Find in files | `⌘⇧F`, `⇧F` | `git grep` into the same modal |
 | File tree browser | `⌘B` | the TREE BROWSER |
@@ -233,7 +233,9 @@ to what needs you. `Enter` on a session that NEEDS FEEDBACK attaches and focuses
 over each row's full `project/branch/session` path. Every open pull request orion has listed is a
 row too, `↗ project/#42 title`, badged `draft`, `ready for review`, or `merge conflicts` /
 `checks failing` in red; `Enter` on one reads it in the pane, and `^O` opens it in the browser.
-Archived sessions are never rows here — their PTY is released, so there is nothing to jump to. The
+So is each project's open Linear issues, `◇ project/ENG-12 title` — the last list read, or the one
+kept from the last run — where `Enter` opens the Linear issues modal on it, and its open todos,
+`☐ project/text`, where `Enter` opens the todos modal on it. Archived sessions are never rows here — their PTY is released, so there is nothing to jump to. The
 last row opens a folder as a project.
 
 With the pane reading a pull request — its [page](#the-pull-request-page) — `⌘E` shows its diff,

@@ -10,7 +10,9 @@
 //! `project/branch/session` paths. Before a query it is the RECENT
 //! SESSIONS list: only the sessions, the ones that want you first; typing
 //! reaches the projects, worktrees and pull requests too, on lines of
-//! their own in that same order.
+//! their own in that same order — and under them each project's open
+//! Linear issues, as the last list read (or the cache) has them, and its
+//! open todos ([`linear_rows`], [`todo_rows`]).
 
 use crate::app::{
     clamp_selection, last_interaction_ms, project_recency, project_rollup, project_unseen,
@@ -41,6 +43,18 @@ pub enum PaletteTarget {
     /// The last row, always there: open a folder as a new project — the
     /// prompt the PROJECT DROPDOWN's last row opens.
     AddProject,
+    /// An open Linear issue in `project`'s list, by its id: picking it
+    /// opens the LINEAR VIEW on it.
+    LinearIssue {
+        project: ProjectId,
+        id: String,
+    },
+    /// An open todo on `project`'s list, by its id: picking it opens the
+    /// TODOS MODAL on it.
+    Todo {
+        project: ProjectId,
+        item: u64,
+    },
 }
 
 /// What the [`PaletteTarget::AddProject`] row reads, and matches on.
@@ -152,6 +166,9 @@ pub struct Palette {
     /// Screen rect of the result rows (query row excluded), written back
     /// during draw so clicks can hit-test rows.
     pub list_area: Rect,
+    /// The rows that are not the tree's — Linear issues, todos — read
+    /// when the palette opened and kept under the tree's on a rebuild.
+    pub extra: Vec<PaletteItem>,
 }
 
 impl Palette {
@@ -170,9 +187,19 @@ impl Palette {
             enter_attaches,
             area: Rect::default(),
             list_area: Rect::default(),
+            extra: Vec::new(),
         };
         palette.apply_filter();
         palette
+    }
+
+    /// The palette with `extra` rows under the tree's ([`linear_rows`],
+    /// [`todo_rows`]).
+    pub fn with_extra(mut self, extra: Vec<PaletteItem>) -> Self {
+        self.items.extend(extra.iter().cloned());
+        self.extra = extra;
+        self.apply_filter();
+        self
     }
 
     /// Re-derive `items` after the tree changed under an open palette,
@@ -189,6 +216,7 @@ impl Palette {
     ) {
         let keep = self.selected_target().cloned();
         self.items = build_palette_items(tree, open_prs, prs, hide_draft_prs);
+        self.items.extend(self.extra.iter().cloned());
         self.apply_filter();
         if let Some(target) = keep {
             if let Some(row) = self
@@ -442,6 +470,76 @@ fn build_palette_items(
         trouble: None,
     });
     items
+}
+
+/// A row under project `p` that is neither the tree's nor a pull
+/// request: no status, no stamp, in the attention order's last tier.
+fn row_in(p: &Project, target: PaletteTarget, label: &str) -> PaletteItem {
+    let under = format!("{}/", p.name);
+    PaletteItem {
+        target,
+        text: format!("{under}{label}"),
+        label_at: under.chars().count(),
+        crumb: Some((0, p.name.chars().count())),
+        stamped: 0,
+        status: None,
+        unseen: false,
+        tier: PaletteTier::Rest,
+        interacted: 0,
+        standing: None,
+        trouble: None,
+    }
+}
+
+/// Each project's open Linear issues, as `linear` has them — the last
+/// list read, or the one the cache kept (`linear_cache`) — `ENG-12 title`
+/// under the project. Projects that share a Linear workspace list an
+/// issue once, under the first of them in tree order.
+pub fn linear_rows(
+    tree: &Tree,
+    linear: &HashMap<ProjectId, crate::linear::LinearList>,
+) -> Vec<PaletteItem> {
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for p in &tree.projects {
+        let Some(list) = linear.get(&p.id) else {
+            continue;
+        };
+        for issue in &list.list {
+            if matches!(issue.status_type.as_str(), "completed" | "canceled")
+                || !seen.insert(issue.id.as_str())
+            {
+                continue;
+            }
+            let target = PaletteTarget::LinearIssue {
+                project: p.id.clone(),
+                id: issue.id.clone(),
+            };
+            rows.push(row_in(p, target, &issue.label()));
+        }
+    }
+    rows
+}
+
+/// Each project's open todos, as `todos` has its list (by checkout).
+pub fn todo_rows(
+    tree: &Tree,
+    todos: &HashMap<std::path::PathBuf, crate::todos::TodoFile>,
+) -> Vec<PaletteItem> {
+    let mut rows = Vec::new();
+    for p in &tree.projects {
+        let Some(file) = todos.get(&p.repo_path) else {
+            continue;
+        };
+        for item in file.items.iter().filter(|i| i.done.is_none()) {
+            let target = PaletteTarget::Todo {
+                project: p.id.clone(),
+                item: item.id,
+            };
+            rows.push(row_in(p, target, item.text.trim()));
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -841,6 +939,85 @@ mod tests {
                 .filter(|i| !matches!(i.target, PaletteTarget::PullRequest { .. }))
                 .all(|i| i.standing.is_none()),
             "only a pull request has a standing"
+        );
+    }
+
+    /// Each project's open Linear issues and open todos are rows under it,
+    /// for a query only: a done or canceled issue and a ticked todo are
+    /// not, an issue two projects share is one row, and a rebuild as the
+    /// tree changes keeps them.
+    #[test]
+    fn open_issues_and_todos_are_rows_a_query_reaches() {
+        use crate::linear::{tests::issue, LinearIssue, LinearList};
+        let tree = tree();
+        let done = LinearIssue {
+            status_type: "completed".into(),
+            ..issue("i3", "ENG-3", "Shipped")
+        };
+        let list = |issues: Vec<LinearIssue>| LinearList {
+            list: issues,
+            ..Default::default()
+        };
+        let linear = HashMap::from([
+            (
+                ProjectId("p1".into()),
+                list(vec![issue("i1", "ENG-1", "Login"), done]),
+            ),
+            (
+                ProjectId("p2".into()),
+                list(vec![
+                    issue("i1", "ENG-1", "Login"),
+                    issue("i2", "ENG-2", "Logout"),
+                ]),
+            ),
+        ]);
+        let mut file = crate::todos::TodoFile::new(std::path::Path::new("/tmp/demo"));
+        let inbox = file.inbox();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+        file.add_item(inbox, "write the release notes", today);
+        let ticked = file.add_item(inbox, "old news", today);
+        file.toggle(ticked, chrono::Local::now());
+        let todos = HashMap::from([(std::path::PathBuf::from("/tmp/demo"), file)]);
+
+        let mut extra = linear_rows(&tree, &linear);
+        extra.extend(todo_rows(&tree, &todos));
+        let texts: Vec<&str> = extra.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "demo/ENG-1 Login",
+                "quiet/ENG-2 Logout",
+                "demo/write the release notes"
+            ]
+        );
+        let mut palette = Palette::new(&tree, false, &HashMap::new(), &PrStore::default(), false)
+            .with_extra(extra);
+        assert!(
+            palette
+                .matches
+                .iter()
+                .all(|m| palette.items[m.item].in_overview()),
+            "a query's rows only"
+        );
+        palette.query = TextInput::from("release");
+        palette.apply_filter();
+        assert!(matches!(
+            palette.selected_target(),
+            Some(PaletteTarget::Todo { project, .. }) if project.0 == "p1"
+        ));
+        palette.rebuild(&tree, &HashMap::new(), &PrStore::default(), false);
+        assert!(
+            matches!(palette.selected_target(), Some(PaletteTarget::Todo { .. })),
+            "kept on a rebuild"
+        );
+        palette.query = TextInput::from("eng-2");
+        palette.apply_filter();
+        assert_eq!(
+            palette.selected_target(),
+            Some(&PaletteTarget::LinearIssue {
+                project: ProjectId("p2".into()),
+                id: "i2".into()
+            })
         );
     }
 

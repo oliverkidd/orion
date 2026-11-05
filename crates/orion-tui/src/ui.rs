@@ -1845,6 +1845,8 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     // since that row is where picking it lands.
                     PaletteTarget::PullRequest { .. } => ("↗ ", "↗ "),
                     PaletteTarget::AddProject => ("+ ", "+ "),
+                    PaletteTarget::LinearIssue { .. } => ("◇ ", "◇ "),
+                    PaletteTarget::Todo { .. } => ("☐ ", "☐ "),
                 };
                 let status = item.status;
                 // A pull request carries no status; its colors are its

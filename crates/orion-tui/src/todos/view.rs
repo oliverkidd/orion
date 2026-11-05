@@ -493,18 +493,51 @@ pub(crate) fn open(app: &mut App) {
 
 fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
     // Every tab's list, for the counts on the strip.
+    load_every_list(app);
+    load_list(app, dir.clone());
+    app.overlay = Some(Overlay::Todos(TodoView::new(project, name, dir)));
+    app.dirty = true;
+}
+
+/// A `⌘K` row's todo: the modal on `project`'s tab with the cursor on
+/// item `item`, the groups it is in unfolded.
+pub(crate) fn open_at(app: &mut App, project: &ProjectId, item: u64) {
+    let Some(p) = app.tree.projects.iter().find(|p| &p.id == project).cloned() else {
+        return;
+    };
+    open_on(app, p.id, p.name, p.repo_path);
+    let group = list(app).and_then(|f| f.item(item)).map(|i| i.group);
+    let folded = group.is_some_and(|group| {
+        list(app).is_some_and(|f| {
+            f.ancestors(group)
+                .iter()
+                .any(|g| f.group(*g).is_some_and(|g| g.collapsed))
+        })
+    });
+    if let (true, Some(group)) = (folded, group) {
+        edit(app, |f| f.reveal(group));
+    }
+    let Some((entries, _)) = rows_now(app) else {
+        return;
+    };
+    let on = |e: &Entry| matches!(e, Entry::Item { id, .. } if *id == item);
+    if let Some(at) = entries.iter().position(on) {
+        put_cursor(app, at, Some(entries[at]));
+    }
+}
+
+/// Every project's list read in — the modal's tabs, the `⌘K` palette's
+/// todo rows — those read already left as they are.
+pub(crate) fn load_every_list(app: &mut App) {
     let dirs: Vec<PathBuf> = app
         .tree
         .projects
         .iter()
         .map(|p| p.repo_path.clone())
-        .chain(std::iter::once(dir.clone()))
         .collect();
     for dir in dirs {
         load_list(app, dir);
     }
-    app.overlay = Some(Overlay::Todos(TodoView::new(project, name, dir)));
-    app.dirty = true;
 }
 
 /// `dir`'s list read in, unless it already is.
@@ -3078,6 +3111,47 @@ mod tests {
                 Entry::AddRow,
             ]
         );
+    }
+
+    /// `⌘K` finds an open todo, and `Enter` on it opens the modal on its
+    /// project's tab with the cursor on it, its group unfolded.
+    #[test]
+    fn the_palette_opens_the_modal_on_a_todo() {
+        let mut app = App::new();
+        app.tree.projects.push(orion_core::Project {
+            id: ProjectId("p1".into()),
+            name: "demo".into(),
+            repo_path: "/r".into(),
+            sort_order: 0,
+        });
+        let mut file = TodoFile::new(Path::new("/r"));
+        let emails = file.add_group(None, "Emails");
+        file.add_item(emails, "run plan", day(6));
+        let resend = file.add_item(emails, "setup resend", day(6));
+        file.group_mut(emails).unwrap().collapsed = true;
+        app.todos.insert(PathBuf::from("/r"), file);
+
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::Palette);
+        let mut out = Vec::new();
+        for c in "resend".chars() {
+            let key = KeyEvent::from(crossterm::event::KeyCode::Char(c));
+            crate::event_loop::handle_overlay_key(&mut app, key, &mut out);
+        }
+        let enter = KeyEvent::from(crossterm::event::KeyCode::Enter);
+        crate::event_loop::handle_overlay_key(&mut app, enter, &mut out);
+        assert!(
+            matches!(app.overlay, Some(Overlay::Todos(_))),
+            "{:?}",
+            app.overlay
+        );
+        assert_eq!(
+            current(&app),
+            Some(Entry::Item {
+                id: resend,
+                depth: 1
+            })
+        );
+        assert!(!list(&app).unwrap().group(emails).unwrap().collapsed);
     }
 
     /// The field stands where what it makes will: a new item after its

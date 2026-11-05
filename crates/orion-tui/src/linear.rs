@@ -1891,6 +1891,23 @@ pub(crate) fn open_attach(app: &mut App) {
     );
 }
 
+/// A `⌘K` row's issue: the view on `project`, on the issue's tab with
+/// the cursor on it.
+pub(crate) fn open_at(app: &mut App, project: &ProjectId, id: &str) {
+    let Some(p) = app.tree.projects.iter().find(|p| &p.id == project).cloned() else {
+        return;
+    };
+    let at = rows(app, project).iter().position(|i| i.id == id);
+    let tab = at.map(|i| LinearTab::of(&rows(app, project)[i]));
+    open_on(app, p.id, p.name, p.repo_path, LinearMode::Browse);
+    if let (Some(Overlay::Linear(view)), Some(at), Some(tab)) = (&mut app.overlay, at, tab) {
+        view.selected = at;
+        view.tab = tab;
+        view.focus = LinearFocus::List;
+    }
+    schedule_comments(app);
+}
+
 fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: LinearMode) {
     let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
     view.selected = clamp_selection(0, list_len(app, &project));
@@ -8393,6 +8410,36 @@ pub(crate) mod tests {
         assert_eq!(input["priority"], 2);
         assert_eq!(input["title"], "run plan");
         assert!(sent[1]["input"].get("stateId").is_none(), "{sent:?}");
+    }
+
+    // ---- ⌘K ----
+
+    /// `⌘K` finds an open issue by its title, under its project, and
+    /// `Enter` on it opens the LINEAR VIEW on it — on its own tab.
+    #[test]
+    fn the_palette_opens_the_view_on_an_issue() {
+        let (mut app, _dir, _rx) = paired();
+        let project = ProjectId("p1".into());
+        if let Some(list) = app.linear.get_mut(&project) {
+            list.list[2].mine = false;
+        }
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::Palette);
+        for c in "signup".chars() {
+            press(&mut app, plain(KeyCode::Char(c)));
+        }
+        let Some(Overlay::Palette(palette)) = &app.overlay else {
+            panic!("the palette, got {:?}", app.overlay);
+        };
+        assert_eq!(
+            palette.selected_target(),
+            Some(&crate::palette::PaletteTarget::LinearIssue {
+                project,
+                id: "3".into()
+            })
+        );
+        press(&mut app, plain(KeyCode::Enter));
+        assert_eq!(the_view(&app).tab, LinearTab::Others);
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-3"));
     }
 
     // ---- the prefetch ----
