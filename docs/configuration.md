@@ -804,7 +804,7 @@ screen, so a year of use reads and writes what a week does:
 | Open pull requests | the 100 newest per project |
 | Merged pull requests | every one merged in the last 7 days, read a page of 100 at a time until the week is covered |
 | Linear issues | open ones — 100 of yours, 250 of your teams' — and the ones done in the last 7 days, 50 of each |
-| Pull request pages and diffs (`pr-cache/details/`, `pr-cache/diffs/`) | one file each, while the pull request is on a row; written only when read again |
+| Pull request pages (`pr-cache/details/`) | one file each, while the pull request is on a row; written only when read again |
 | Linear branch links (`linear-links.json`) | until 90 days after they were last linked, once no checkout is on the branch and no open pull request is from it |
 | Week in review (`reviews/`) | the last 12 per project, each with what it was written from; a second one for the same week and scope takes the first's place |
 | Pull request read marks (the DAEMON's `pr_seen`) | 180 days after you last read the pull request; pruned when the DAEMON starts |

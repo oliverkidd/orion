@@ -1431,12 +1431,6 @@ pub fn drafts_last(list: &mut [OpenPr], prs: &crate::pr_store::PrStore) {
     });
 }
 
-/// How long a `gh pr diff` may run. Diffs are bigger than metadata and
-/// GitHub can be slow to assemble one for a large pull request, so this is
-/// looser than [`TIMEOUT`] — but still bounded, because the user is sitting
-/// in front of a "loading" flash while it runs.
-const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
-
 /// The readable contents of one pull request: what it says it does, what
 /// people said back, and what the PULL REQUEST PAGE's other tabs list —
 /// the files it changes, its commits, its checks and its reviews. Fetched
@@ -1981,41 +1975,6 @@ fn conversation(v: &serde_json::Value) -> Vec<PrComment> {
     out
 }
 
-/// The whole unified diff of a pull request, in one call. `None` when `gh`
-/// couldn't answer.
-pub async fn diff(dir: &Path, number: u64) -> Option<String> {
-    gh(
-        Some(dir),
-        &["pr", "diff", &number.to_string()],
-        DIFF_TIMEOUT,
-    )
-    .await
-}
-
-/// The unified diff of one commit of a pull request, from GitHub — the
-/// commit need not be fetched into any checkout here — in the shape `gh
-/// pr diff` gives a whole pull request. `gh` fills `{owner}` and `{repo}`
-/// from the checkout. `None` when `gh` couldn't answer, or for a sha that
-/// is not one.
-pub async fn commit_diff(dir: &Path, sha: &str) -> Option<String> {
-    if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let path = format!("repos/{{owner}}/{{repo}}/commits/{sha}");
-    gh(
-        Some(dir),
-        &["api", &path, "-H", "Accept: application/vnd.github.diff"],
-        DIFF_TIMEOUT,
-    )
-    .await
-}
-
-/// A commit's page inside its pull request — `…/pull/42/commits/<sha>` —
-/// the URL its diff is fetched, cached and opened under.
-pub fn commit_url(pr_url: &str, sha: &str) -> String {
-    format!("{}/commits/{sha}", pr_url.trim_end_matches('/'))
-}
-
 /// How long a `gh pr comment` may run. The body is small and the call
 /// is one request, so the metadata budget serves — but the person who
 /// pressed Enter is watching the footer, so it is bounded all the same.
@@ -2102,63 +2061,6 @@ fn first_line(stderr: &str) -> Option<String> {
 /// nothing at all.
 pub fn comment_error(stderr: &str) -> String {
     first_line(stderr).unwrap_or_else(|| GH_NOT_RUN.to_string())
-}
-
-/// Cut a unified diff into one chunk per file, in the order git emitted
-/// them: `(path, that file's diff text)`.
-///
-/// The path comes from the `+++ b/…` line when there is one and falls back
-/// to the `diff --git` header, so a deleted file (whose `+++` is
-/// `/dev/null`) still reports the path it had. Anything before the first
-/// `diff --git` — `gh` prints nothing there today, but a future banner
-/// would land there — is dropped rather than shown as a nameless file.
-pub fn split_unified_diff(text: &str) -> Vec<(String, String)> {
-    let mut files: Vec<(String, String)> = Vec::new();
-    let mut path = String::new();
-    let mut lines: Vec<&str> = Vec::new();
-    let flush = |files: &mut Vec<(String, String)>, path: &mut String, lines: &mut Vec<&str>| {
-        if !path.is_empty() {
-            files.push((std::mem::take(path), lines.join("\n")));
-        }
-        lines.clear();
-    };
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            flush(&mut files, &mut path, &mut lines);
-            path = header_path(rest);
-        }
-        if path.is_empty() {
-            continue; // preamble before the first file
-        }
-        // `+++ b/x` is authoritative: it survives the quoting and the
-        // spaces-in-names ambiguity that makes `diff --git` hard to split.
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            if rest != "/dev/null" {
-                path = rest.strip_prefix("b/").unwrap_or(rest).to_string();
-            }
-        }
-        lines.push(line);
-    }
-    flush(&mut files, &mut path, &mut lines);
-    files
-}
-
-/// Best-effort path out of a `diff --git a/x b/x` header. The two halves
-/// are the same path for everything but a rename, so the second half is
-/// taken and the `b/` prefix stripped; a name containing spaces makes this
-/// ambiguous, which is why the `+++` line overrides it when one follows.
-fn header_path(rest: &str) -> String {
-    let rest = rest.trim();
-    match rest.split_once(" b/") {
-        Some((_, b)) => b.to_string(),
-        None => rest
-            .rsplit(' ')
-            .next()
-            .unwrap_or(rest)
-            .strip_prefix("b/")
-            .unwrap_or(rest)
-            .to_string(),
-    }
 }
 
 /// Test-only accessors: nothing in the app reads these — screens read
@@ -3267,10 +3169,6 @@ mod tests {
         assert_eq!(duration_label(45), "45s");
         assert_eq!(duration_label(192), "3m 12s");
         assert_eq!(duration_label(3840), "1h 4m");
-        assert_eq!(
-            commit_url("https://github.com/o/r/pull/42", "abc"),
-            "https://github.com/o/r/pull/42/commits/abc"
-        );
     }
 
     /// Missing optional fields are zeros and empty strings, not a failed
@@ -3282,74 +3180,6 @@ mod tests {
         assert_eq!(d.answered_state, "OPEN");
         assert!(d.comments.is_empty());
         assert!(parse_detail("{}").is_none());
-    }
-
-    /// The diff is cut per file, in git's order, with the `+++ b/…` line
-    /// naming each chunk.
-    #[test]
-    fn a_unified_diff_splits_per_file() {
-        let text = "\
-diff --git a/src/a.rs b/src/a.rs
-index 111..222 100644
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1,2 +1,2 @@
--old
-+new
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+y
-";
-        let files = split_unified_diff(text);
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].0, "src/a.rs");
-        assert!(files[0].1.starts_with("diff --git a/src/a.rs"));
-        assert!(files[0].1.contains("+new"));
-        assert!(
-            !files[0].1.contains("src/b.rs"),
-            "the chunk stops at the next file: {}",
-            files[0].1
-        );
-        assert_eq!(files[1].0, "src/b.rs");
-        // Nothing is lost and nothing is duplicated: every input line lands
-        // in exactly one chunk. Checked against real `gh pr diff` output
-        // too, which is what this invariant is really guarding.
-        let total: usize = files.iter().map(|(_, d)| d.lines().count()).sum();
-        assert_eq!(total, text.lines().count());
-    }
-
-    /// A deleted file's `+++` is `/dev/null`, so the name has to come from
-    /// the `diff --git` header — and a rename reports the new path.
-    #[test]
-    fn deleted_and_renamed_files_still_get_a_name() {
-        let files = split_unified_diff(
-            "\
-diff --git a/gone.rs b/gone.rs
-deleted file mode 100644
---- a/gone.rs
-+++ /dev/null
-@@ -1 +0,0 @@
--x
-diff --git a/old.rs b/new.rs
-similarity index 90%
-rename from old.rs
-rename to new.rs
---- a/old.rs
-+++ b/new.rs
-",
-        );
-        assert_eq!(files[0].0, "gone.rs");
-        assert_eq!(files[1].0, "new.rs");
-    }
-
-    /// Nothing to split is an empty list, not a nameless file.
-    #[test]
-    fn an_empty_diff_yields_no_files() {
-        assert!(split_unified_diff("").is_empty());
-        assert!(split_unified_diff("some banner\nwith no diff\n").is_empty());
     }
 
     /// `gh pr view` exits 1 both for a branch with no pull request and for

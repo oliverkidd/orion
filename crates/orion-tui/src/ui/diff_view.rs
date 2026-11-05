@@ -148,9 +148,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             } else {
                 "tree"
             }));
-            if view.prefetched.is_none() {
-                hints.push(crate::hints::in_app_hint());
-            }
+            hints.push(crate::hints::in_app_hint());
         }
         DiffFocus::Diff => {
             hints.push(LINES.hint().kept());
@@ -160,9 +158,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             hints.push(BACK.hint());
             hints.push(next);
             hints.push(REVIEWED.hint());
-            if view.prefetched.is_none() {
-                hints.push(crate::hints::in_app_hint());
-            }
+            hints.push(crate::hints::in_app_hint());
         }
     }
     hints.push(match view.back {
@@ -177,9 +173,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
 /// the viewer reads as a level inside the modal.
 fn crumb(view: &DiffView) -> Option<String> {
     view.back.as_ref()?;
-    let url = view.pr_url.as_deref()?;
-    let (_, rest) = url.split_once("/pull/")?;
-    let number = rest.split('/').next()?;
+    let number = view.pr_review.as_ref()?.number;
     Some(format!("#{number} › "))
 }
 
@@ -188,15 +182,7 @@ fn crumb(view: &DiffView) -> Option<String> {
 pub(crate) fn diff_explanation(view: &DiffView) -> String {
     use diff_keys::*;
     let Some(list) = &view.commits else {
-        return if view.prefetched.is_some() {
-            format!(
-                "The pull request's whole diff. {} reads the file under the cursor; {} walks the panels.",
-                OPEN.label(),
-                PANEL.label()
-            )
-        } else {
-            String::new()
-        };
+        return String::new();
     };
     if !list.loaded {
         return "Reading the branch's commits…".to_string();

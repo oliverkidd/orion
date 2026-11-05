@@ -187,7 +187,7 @@ at the top.
 | Tab | What it lists | Enter (`⌘E` / `⌘O` in the modal), a click |
 |---|---|---|
 | **Description** | the body as markdown, then the conversation — comments and reviews, oldest first | the pull request in the browser |
-| **Changes** `11` | every file: its status (`M`, `A`, `D`, `R`) and its `+`/`−`. GitHub hands back the first hundred; past that the tab says so and `⌘E` reads the whole diff | the DIFF VIEWER on the pull request, at that file |
+| **Changes** `11` | every file: its status (`M`, `A`, `D`, `R`) and its `+`/`−`. GitHub hands back the first hundred; past that the tab says so and `⌘E` reads every file | the DIFF VIEWER on the pull request, at that file |
 | **Commits** `4` | newest first: short sha, subject, author and age, and how big it is — `+12 −3 · 4 files` | the DIFF VIEWER on that commit's own diff |
 | **Checks** | failed first, then running, passed and skipped: `✗` / `●` / `✓` / `–`, the name, its workflow and how long it ran. The tab reads `✗ Checks 44/45` with one failed (44 of 45 fine), `● Checks 3/5` while some still run, `✓ Checks` when every one passed | the check's page — its log — in the browser |
 | **Reviews** | GitHub's review decision (`✓ Approved`, `✗ Changes requested`, `● Review required`), each reviewer's latest word, who has been asked and not answered, then the reviews themselves. The tab wears the decision's mark | the pull request in the browser |
@@ -456,11 +456,10 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | `Esc` | | close — or, opened from the PULL REQUESTS MODAL, back to the pull request |
 
 With the pane reading a pull request, `⌘E` — and the PULL REQUESTS MODAL's `⌘E` and its Changes and
-Commits rows — open the same viewer on that pull request. When the repo has its head commit (your
-branch, or one fetched since) it is read from git: its commits over the files, every one ticked —
-the whole pull request — to read one at a time or a few together like a checkout's, opened on the
-file or the commit you picked. Otherwise its diff is fetched whole with `gh pr diff`: its files in
-the column, its title heading each, no commit list.
+Commits rows — open the same viewer on that pull request, read from git: its commits over the
+files, every one ticked — the whole pull request — to read one at a time or a few together like a
+checkout's, opened on the file or the commit you picked. A head the repo lacks (someone else's
+branch, a fork's) is fetched by its pull ref first.
 
 ## The quick prompt
 

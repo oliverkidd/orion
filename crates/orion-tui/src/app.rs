@@ -1308,18 +1308,6 @@ pub struct DiffView {
     pub files_drag: Option<i32>,
     /// Whether the repo has a commit; picks the diff command.
     pub head_ok: bool,
-    /// Per-file diff text when this view is showing something git can't be
-    /// asked for file by file — a pull request, whose whole diff arrives in
-    /// one `gh pr diff`. `None` is the ordinary worktree view, which shells
-    /// out per file. Its presence also turns OFF reviewed-mark persistence:
-    /// marks are stored under the worktree path and pruned when that path
-    /// isn't a directory, and a pull request has no path of its own.
-    pub prefetched: Option<HashMap<String, String>>,
-    /// The pull request a prefetched view is showing, by URL — what a
-    /// fresh `gh pr diff` landing later checks before replacing the
-    /// contents of a modal opened on the cached copy. `None` for the
-    /// worktree view.
-    pub pr_url: Option<String>,
     /// Reviewed ✓ marks: file path → fingerprint of the approved diff text.
     /// Orion-side bookkeeping only (persisted via `review::store_marks`);
     /// never stages or otherwise touches git state.
@@ -1329,7 +1317,7 @@ pub struct DiffView {
     pub head_key: String,
     /// BACKGROUND READS: with it, the file list and every file's diff are
     /// read off the loop (`git_diff::load_selected_diff`); without (a view
-    /// built by a test, a pull request's prefetched view), inline.
+    /// built by a test), inline.
     pub jobs: Option<crate::view_jobs::Jobs>,
     /// This view's own ticket, carried by every diff it asks for, so text
     /// read for an earlier modal never lands in this one's cache.
@@ -1387,8 +1375,8 @@ pub struct DiffView {
     /// pull request's file, asked for before its commits were read.
     pub want_path: Option<String>,
     /// A pull request read from this repo's git (`event_loop::
-    /// open_pr_review`): what to read from GitHub instead should its
-    /// commits turn out not to be here.
+    /// open_pr_review`): where it was asked to open, and which pull request
+    /// the title names (`#42 ›`).
     pub pr_review: Option<crate::event_loop::PrReview>,
 }
 
@@ -1495,8 +1483,6 @@ impl DiffView {
             column_w: 0,
             files_drag: None,
             head_ok,
-            prefetched: None,
-            pr_url: None,
             reviewed: HashMap::new(),
             head_key: String::new(),
             jobs: None,
@@ -3680,20 +3666,6 @@ pub struct PendingPrDetail {
     pub dir: PathBuf,
 }
 
-/// A finished `gh pr diff`, back on the loop: which pull request, what to
-/// title the modal, and the diff — `None` when `gh` couldn't answer. The
-/// URL is what the cache files it under and what says whether a modal
-/// already open on a cached copy is this one's.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrDiffAnswer {
-    pub number: u64,
-    pub url: String,
-    pub title: String,
-    pub diff: Option<String>,
-    /// The file the viewer was asked to open at (`PrReviewAt::File`).
-    pub file: Option<String>,
-}
-
 /// A finished `gh pr comment`, back on the loop: which pull request (and
 /// the row text that titled its box), the text that was sent — handed
 /// back to the box when the post failed — and what `gh` said: the new
@@ -4672,19 +4644,6 @@ pub struct App {
     /// Changes tab's row acted on — by the pull request's URL. Taken by
     /// the next pull-request diff to open, whichever it is.
     pub pr_diff_at: Option<(String, String)>,
-    /// The pull request whose full diff is being fetched, if any — one at a
-    /// time, so mashing the key can't spawn a `gh pr diff` per press.
-    pub pr_diff_inflight: Option<u64>,
-    /// Pull requests whose *cached* diff the modal opened on while a fresh
-    /// `gh pr diff` runs underneath. When that lands it replaces the modal's
-    /// contents in place if the modal is still on the same pull request,
-    /// and is only cached otherwise — never a second modal popping up over
-    /// whatever the user moved on to.
-    pub pr_diff_refreshing: std::collections::HashSet<String>,
-    /// Where a finished `gh pr diff` is sent back to the loop; the main loop
-    /// installs it at startup (the `vim_tx` precedent). Key handlers can
-    /// therefore start a network fetch without the loop's channels in hand.
-    pub pr_diff_tx: Option<tokio::sync::mpsc::UnboundedSender<PrDiffAnswer>>,
     /// Pull requests (by URL) with a `gh pr comment` still running. A
     /// second box sent on the same pull request waits for the first to
     /// land rather than racing it.
@@ -4694,7 +4653,8 @@ pub struct App {
     /// starts from it, so the refusal cost nothing typed.
     pub pr_comment_drafts: HashMap<String, String>,
     /// Where a finished `gh pr comment` lands (`PrCommentAnswer`);
-    /// installed by the loop at startup like `pr_diff_tx`.
+    /// installed by the loop at startup (the `vim_tx` precedent), so key
+    /// handlers can start the post without the loop's channels in hand.
     pub pr_comment_tx: Option<tokio::sync::mpsc::UnboundedSender<PrCommentAnswer>>,
     /// Where the PULL REQUESTS MODAL's forms' git and `gh` land — a new
     /// pull request, a merge (`pr_actions::Answer`); None in unit tests,
@@ -5021,9 +4981,6 @@ impl App {
             pr_preview_lines: 0,
             pr_tabs: Default::default(),
             pr_diff_at: None,
-            pr_diff_inflight: None,
-            pr_diff_refreshing: std::collections::HashSet::new(),
-            pr_diff_tx: None,
             pr_comment_inflight: std::collections::HashSet::new(),
             pr_comment_drafts: HashMap::new(),
             pr_comment_tx: None,

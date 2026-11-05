@@ -107,8 +107,8 @@
   in the same background job as the viewer's `git status`, and a branch past 50 commits is read 50
   at a time, the next page when the cursor reaches `… N older commits` — `git log` diffs each
   commit it lists to count its lines, so three hundred commits are never diffed to show six. A pull
-  request's diff has no commit list: `gh pr diff` hands it over whole. One of its commits opens on
-  its own (`event_loop::open_pr_review`) when the project's repo has it.
+  request is read the same way (`event_loop::open_pr_review`), its head fetched by its pull ref
+  (`refs/pull/N/head`) when the project's repo lacks it.
 - **The diff pane is read, not paged — `diff_doc`.** A file's `git diff` is read once, as it lands,
   into lines that say what they are: its headers into the facts on the pane's edge (added, renamed
   from, `+20 −3`), each `@@` into the line it starts on, each line of code into its old and new
@@ -401,7 +401,7 @@ attachment is gone; links an earlier version saved stay in the database, so no d
 though the grid draws none of them.
 
 This is the one part of orion the TUI asks for itself rather than the DAEMON: every `gh pr view`,
-open-list query (`gh api graphql`) and `gh pr diff` — is spawned by the client, which is why the lookups stop the moment you
+open-list query (`gh api graphql`) — is spawned by the client, which is why the lookups stop the moment you
 quit, and why a machine with no `gh` — or one that is unauthenticated, or pointed at a checkout with no
 remote — just shows no rows instead of an error. The selected project is asked about most: its
 selected worktree's pull request and its open list on every tick, one process each, and its other

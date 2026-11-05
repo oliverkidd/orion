@@ -1704,8 +1704,8 @@ pub(crate) fn run_act(
             app.pr_diff_at = Some((url.to_string(), path));
             crate::event_loop::request_pr_diff_for(app, number, url.to_string(), label.to_string());
         }
-        // The commit from the project's own repo when it has it — under its
-        // message — else fetched alone from GitHub (`open_pr_review`).
+        // The commit alone, out of the pull request's commits — fetched by
+        // its pull ref first when the repo lacks it (`open_pr_review`).
         RowAct::Commit { sha, .. } => crate::event_loop::open_pr_review(
             app,
             number,

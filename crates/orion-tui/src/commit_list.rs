@@ -236,7 +236,7 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
 /// commits, newest first, and no uncommitted row, since nothing checked
 /// out is being read. None when the repo has no such commit, no such
 /// base — never another branch standing in for it — or nothing in common
-/// with it: the pull request is read from GitHub instead.
+/// with it: the head and base are then fetched and it is read again.
 pub fn read_tip(root: &Path, base: &str, tip: &str) -> Option<CommitListing> {
     if !has_commit(root, tip) {
         return None;
