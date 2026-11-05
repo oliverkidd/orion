@@ -68,6 +68,10 @@ pub(crate) mod diff_keys {
     /// The grid's file tree chord (`Action::TreeBrowser`).
     pub const TREE: Key = Key::new(&["cmd+b", "ctrl+b"], "tree");
     pub const FOLD: Key = Key::new(&["left", "right"], "fold").show(2);
+    /// The pull-requests key everywhere (`Action::PullRequests`): here, the
+    /// modal on this branch's pull request, Esc coming back
+    /// (`diff_actions`).
+    pub const PULLS: Key = Key::new(&["cmd+u"], "pull request");
 
     /// Every key of the table, for the tests that hold the hints to it.
     #[cfg(test)]
@@ -84,6 +88,7 @@ pub(crate) mod diff_keys {
         REVIEWED,
         TREE,
         FOLD,
+        PULLS,
         crate::hints::IN_CURSOR,
     ];
 }
@@ -132,6 +137,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             } else {
                 "tree"
             }));
+            hints.push(PULLS.hint());
             hints.push(crate::hints::in_app_hint());
         }
         DiffFocus::Diff => {
@@ -141,6 +147,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             hints.push(BACK.hint());
             hints.push(next);
             hints.push(REVIEWED.hint());
+            hints.push(PULLS.hint());
             hints.push(crate::hints::in_app_hint());
         }
     }

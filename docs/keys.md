@@ -445,6 +445,7 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | `⌘R` | the files, the diff | mark the file reviewed ✓, which sinks it to the bottom — orion-side bookkeeping only: on the uncommitted changes it is stored until HEAD moves or the file changes again, on anything else it lasts while the modal is open |
 | `⌘B` | the files | fold the file list into a directory tree and back (`←`/`→` fold) — this viewer's alone; **Files as a tree** says how the next opens |
 | `⌘O` (`^O`) | the files, the diff | the file in the **Open in app** editor, at the line at the top of the diff |
+| `⌘U` | anywhere | the PULL REQUESTS MODAL on this branch's pull request page (as the hotkey opens it, when there is none); its last `Esc` comes back here. On a pull request's viewer the modal opened, back up to the modal |
 | the wheel | over any panel | scrolls that panel; no cursor moves |
 | a click | | a commit's row aims the cursor there and its box ticks it, a file is selected, the diff takes the keys; a second click on the cursor's row is `Enter` |
 | `Esc` | | close — or, opened from the PULL REQUESTS MODAL, back to the pull request |

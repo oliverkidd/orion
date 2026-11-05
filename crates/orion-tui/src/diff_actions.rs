@@ -252,10 +252,16 @@ pub(crate) fn reopen(app: &mut App, view: DiffView) {
 
 // ---- the keys ----
 
-/// The DIFF VIEWER's keys that reach past the diff: `Enter` on a
-/// conflicted file. True when `key` was one of them, and is spent.
+/// The DIFF VIEWER's keys that reach past the diff: `⌘U`, and `Enter` on
+/// a conflicted file. True when `key` was one of them, and is spent.
 pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequest>) -> bool {
     use crate::ui::diff_keys::OPEN;
+    let chord = crate::keymap::KeyChord::from_event(key);
+    let action = app.keymap.lookup(crate::keymap::Scope::Global, &chord);
+    if action == Some(crate::keymap::Action::PullRequests) {
+        open_pull_requests(app);
+        return true;
+    }
     let Some(Overlay::Diff(view)) = &app.overlay else {
         return false;
     };
@@ -267,6 +273,22 @@ pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequ
     };
     resolve(app, &path, out);
     true
+}
+
+/// `⌘U`, the pull-requests key everywhere: the PULL REQUESTS MODAL over the
+/// viewer, on the page of the pull request it is about, and Esc there
+/// comes back (`pr_modal::open_from_diff`). A pull request's viewer that
+/// the modal opened is a level inside it already: `⌘U` goes back up, as
+/// Esc does.
+fn open_pull_requests(app: &mut App) {
+    let Some(Overlay::Diff(mut view)) = app.overlay.take() else {
+        return;
+    };
+    if let Some(back) = view.back.take() {
+        return crate::pr_modal::reopen(app, *back);
+    }
+    let url = pull_request(app, &view).map(|pr| pr.url);
+    crate::pr_modal::open_from_diff(app, view, url);
 }
 
 /// `Enter` on conflicted `path`: the CONFLICT RESOLVER over the viewer, on
@@ -550,5 +572,62 @@ mod tests {
             app.flash
         );
         git(&clone, &["merge", "--abort"]);
+    }
+
+    /// `⌘U` in the viewer opens the PULL REQUESTS MODAL on this branch's
+    /// pull request — another listed first — and its Esc puts the viewer
+    /// back as it was; with no pull request it opens as the hotkey does,
+    /// and still comes back.
+    #[test]
+    fn cmd_u_opens_the_branchs_pull_request_and_esc_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_on(dir.path());
+        let row = |number: u64, url: &str| crate::pull_request::OpenPr {
+            number,
+            title: "t".into(),
+            url: url.into(),
+            answered_draft: false,
+            answered: Default::default(),
+            head: "other".into(),
+            mine: false,
+            head_sha: String::new(),
+            meta: Default::default(),
+        };
+        let now = std::time::Instant::now();
+        app.open_prs.insert(
+            ProjectId("p".into()),
+            crate::app::OpenPrs {
+                merged: Vec::new(),
+                list: vec![row(3, "https://github.com/o/r/pull/3"), row(7, URL)],
+                at: now,
+                due: now + std::time::Duration::from_secs(60),
+                step: std::time::Duration::from_secs(60),
+            },
+        );
+        let cmd_u = || KeyEvent::new(KeyCode::Char('u'), crossterm::event::KeyModifiers::SUPER);
+        let viewer = DiffView::new(dir.path().to_path_buf(), "feature".into(), Vec::new(), true);
+        let id = viewer.id;
+
+        app.overlay = Some(Overlay::Diff(viewer));
+        crate::event_loop::handle_overlay_key(&mut app, cmd_u(), &mut Vec::new());
+        let Some(Overlay::PullRequests(modal)) = &app.overlay else {
+            panic!("no modal: {:?}", app.overlay);
+        };
+        assert!(modal.from_diff.is_some());
+        let first = modal.selected_url.clone();
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(the_view(&app).id, id, "the same viewer, back");
+
+        with_pull_request(&mut app);
+        crate::event_loop::handle_overlay_key(&mut app, cmd_u(), &mut Vec::new());
+        let Some(Overlay::PullRequests(modal)) = &app.overlay else {
+            panic!("no modal: {:?}", app.overlay);
+        };
+        assert_eq!(modal.selected_url.as_deref(), Some(URL), "on #7's page");
+        assert_ne!(first.as_deref(), Some(URL), "not where the hotkey lands");
+        let hints = crate::hints::text(&crate::pr_modal::hints(modal), 400);
+        assert!(hints.ends_with("Esc back"), "{hints}");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(the_view(&app).id, id);
     }
 }

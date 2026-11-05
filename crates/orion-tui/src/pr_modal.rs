@@ -260,7 +260,24 @@ pub struct PullRequestsView {
     pub pick: Option<PrPick>,
     /// The pages read ahead of the cursor.
     pub prefetch: Prefetch,
+    /// The DIFF VIEWER this modal was opened over with `⌘U`: its last Esc
+    /// puts it back ([`open_from_diff`]).
+    pub from_diff: Option<FromDiff>,
 }
+
+/// A DIFF VIEWER the modal stands over, as it was. The modal compares as a
+/// value and a viewer doesn't, so two are the same when they are the same
+/// viewer (`DiffView::id`).
+#[derive(Debug, Clone)]
+pub struct FromDiff(pub Box<crate::app::DiffView>);
+
+impl PartialEq for FromDiff {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+
+impl Eq for FromDiff {}
 
 impl PullRequestsView {
     pub fn new(project: ProjectId, project_name: String, dir: PathBuf) -> Self {
@@ -288,6 +305,7 @@ impl PullRequestsView {
             form: None,
             pick: None,
             prefetch: Prefetch::default(),
+            from_diff: None,
         }
     }
 
@@ -445,6 +463,36 @@ pub(crate) fn take_prefetch(app: &mut App) -> Vec<PendingPrDetail> {
         view.prefetch = queue;
     }
     due
+}
+
+/// `⌘U` in the DIFF VIEWER (`diff_actions`): the modal for the selected
+/// project over `diff`, on `url`'s page — the viewer's pull request — or
+/// where the hotkey opens it when there is none. Its last Esc puts the
+/// viewer back as it was.
+pub(crate) fn open_from_diff(app: &mut App, diff: crate::app::DiffView, url: Option<String>) {
+    let Some(project) = app.selected_project().cloned() else {
+        app.overlay = Some(Overlay::Diff(diff));
+        return;
+    };
+    let mut view = PullRequestsView::new(project.id, project.name, project.repo_path);
+    view.from_diff = Some(FromDiff(Box::new(diff)));
+    show(app, view);
+    if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
+        view.selected_url = url.or(view.selected_url.take());
+    }
+    list_changed(app);
+}
+
+/// The last Esc of a modal `⌘U` opened over a DIFF VIEWER: the viewer back
+/// as it was, and the pane's own page read again.
+fn back_to_diff(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = app.overlay.take() else {
+        return;
+    };
+    rearm_pane_detail(app);
+    if let Some(FromDiff(diff)) = view.from_diff {
+        app.overlay = Some(Overlay::Diff(*diff));
+    }
 }
 
 /// Esc out of the PR PICK: the LINEAR VIEW back as it was, marks and
@@ -1142,6 +1190,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::Esc if !view.query.is_empty() => clear_query(app),
         // The PR PICK's last Esc is the LINEAR VIEW's, not the panels'.
         KeyCode::Esc if view.pick.is_some() => back_to_linear(app),
+        // Opened over the DIFF VIEWER (`⌘U` there), it goes back to it.
+        KeyCode::Esc if view.from_diff.is_some() => back_to_diff(app),
         KeyCode::Esc => close(app),
         // Tab / ⇧Tab (a shifted Tab under the kitty protocol too): the
         // keys to the other panel.
@@ -1543,7 +1593,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     }
     let esc = if !view.query.is_empty() {
         "clear"
-    } else if picking {
+    } else if picking || view.from_diff.is_some() {
         "back"
     } else {
         "close"
