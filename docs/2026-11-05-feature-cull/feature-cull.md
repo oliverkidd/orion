@@ -22,7 +22,7 @@ The work lives on the branch `feature-cull` (worktree `orion-worktrees/feature-c
   cargo test -p orion --no-fail-fast --test e2e_tui --test help_cli --test config_cli --test install_sh
   ```
   Add `cargo test -p orion --test e2e_pty` when the step touches the daemon or the protocol. It spawns real daemons and is slow. Without `--no-fail-fast`, an e2e_tui failure stops the other suites from running at all. Run the suites once before you change anything, so a failure you didn't cause is known up front.
-- A retired config key needs no list: the fixture test (`config_files_from_earlier_releases_still_load_every_key`) lets any key the build no longer reads load as nothing, as long as a save leaves it in the file.
+- A retired config key needs no list: the config tests (`a_retired_key_loads_as_nothing_and_survives_a_save`, `the_newest_releases_config_still_loads_every_key`) let any key the build no longer reads load as nothing, as long as a save leaves it in the file.
 - Keep scratch scripts in a folder named after your step, not loose in a shared scratch folder.
 - Before committing code (not docs or tests), run the `simplify` skill over the diff.
 - Commit message style: one plain sentence saying what the user gets, the way `git log` already reads (`The run line says when it's stopping`), then a short body.

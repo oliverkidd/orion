@@ -4,7 +4,7 @@
 //!
 //! **What the branch is measured against** is where orion cuts its
 //! worktrees from (`git::add_worktree_off_default` in the DAEMON): the
-//! `worktree_base_branch` SETTING when it names a branch this repo has —
+//! project's **Base branch** when it names a branch this repo has —
 //! origin's copy first, then a local one — else `origin/HEAD`, else the
 //! branch the ROOT WORKTREE is on, which is what a worktree is cut from in
 //! a repo with no origin. The DAEMON fetches before it cuts; this reads
@@ -348,7 +348,7 @@ pub(crate) fn forget_base(root: &Path) {
     }
 }
 
-/// The branch a `worktree_base_branch` SETTING means, read the way the
+/// The branch a project's **Base branch** means, read the way the
 /// DAEMON reads it: trimmed, a leading `origin/` meaning the same as the
 /// bare name. Empty for no name.
 pub(crate) fn base_name(setting: &str) -> &str {

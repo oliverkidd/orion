@@ -3,7 +3,7 @@
 //! `com.docker.compose.project.working_dir`, the directory `up` ran from.
 //! A worktree that runs `docker compose up` leaves a project behind when
 //! orion deletes it; this is how the DAEMON knows which one to stop or
-//! tear down (`worktree_containers`), how `orion doctor` spots the
+//! tear down (each project's **On worktree delete**), how `orion doctor` spots the
 //! ones whose checkout is already gone, and how STACK STATUS — the band's
 //! `⬡` — knows which stacks run where.
 //!
@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// What happens to a deleted worktree's compose projects: the
-/// `worktree_containers` SETTING.
+/// project's **On worktree delete** (`projects.<repo>.worktree_containers`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorktreeContainers {
     /// Left as they are. The default: orion touches nothing it didn't make.
@@ -32,7 +32,7 @@ pub enum WorktreeContainers {
     RemoveVolumes,
 }
 
-/// The **Worktree containers** choices, in the order the row cycles them,
+/// The **On worktree delete** choices, in the order the row cycles them,
 /// the default first.
 pub const WORKTREE_CONTAINERS: &[&str] = &[
     WorktreeContainers::Off.as_str(),

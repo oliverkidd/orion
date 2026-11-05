@@ -20,7 +20,7 @@ orion spawn <task>         start another agent session beside it       (agents r
 orion open <file[:line]>…  show files in this orion's file tabs       (agents run this)
 orion config <cmd>         locate this machine's settings
 orion ssh <host>           open orion on a remote host over ssh
-orion setup                open orion on its setup, every step
+orion setup                open orion on its setup: Claude, your first project, the keys
 orion app                  open orion as a Mac app of its own (Orion.app)
 orion doctor               check what orion needs on this machine
 orion upgrade              install the latest published orion
@@ -56,7 +56,7 @@ orion worktree [name] [--base <ref>]  # move the current session into a worktree
                           # creating the branch if it's new (agents run this when you ask for a
                           # worktree; no name invents one; --base picks a new branch's start point,
                           # a branch name meaning origin's fetched copy — main is origin/main;
-                          # without it the worktree_base_branch setting, else origin's default)
+                          # without it the project's Base branch, else origin's default)
 orion spawn <task> [--kind <claude|codex|cursor|grok|opencode>]  # start a new agent session beside the current
                           # one, in the same worktree, opening on <task> (agents run this when you
                           # ask for a new orion session; --kind defaults to this session's harness;
@@ -86,7 +86,7 @@ See [Configuration](configuration.md#backup-restore-and-other-machines).
 ```sh
 orion doctor             # one line for each thing orion leans on, with the fix for a missing one:
                           # git, gh (installed and signed in: `gh auth status`), fresh (or the
-                          # editor ORION_EDITOR names), the Open in app editor,
+                          # editor ORION_EDITOR names), the editor app files open in,
                           # Orion.app and the Ghostty it is made from, the CLI of every
                           # agent turned on, and the LINEAR_API_KEY of the project you are
                           # standing in — where it was found, never the key — and the docker
@@ -104,7 +104,7 @@ orion doctor --json      # the same report as {"ok": …, "checks": [{name, stat
   ✓ gh                signed in to GitHub
   ✗ File editor       fresh isn't installed — no file can open
                       fix: brew install fresh-editor
-  ✓ Open in app       auto → Cursor
+  ✓ Open files in     auto → Cursor
   ✗ Orion.app         not made yet — orion's ⌘ shortcuts work in it
                       fix: orion app
   ✓ Agent claude      ~/.local/bin/claude

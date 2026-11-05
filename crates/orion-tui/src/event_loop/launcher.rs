@@ -74,9 +74,8 @@ pub(super) fn open_new_session(app: &mut App) {
 }
 
 /// The launch a box opened from the grid starts from: the Settings →
-/// Agents harness, aimed as [`open_box`] says — or at a fresh worktree
-/// with the QUICK PROMPT NEW WORKTREE SETTING on. None when there is no
-/// project to aim at.
+/// Accounts harness, aimed as [`open_box`] says — the checkout under the
+/// cursor. None when there is no project to aim at.
 fn box_launch(app: &mut App) -> Option<QuickLaunch> {
     let project = app.selected_project().map(|p| p.id.clone()).or_else(|| {
         app.project_rows()
@@ -86,7 +85,7 @@ fn box_launch(app: &mut App) -> Option<QuickLaunch> {
     });
     let project = project?;
     let cfg = crate::config::Config::load();
-    let target = view::target_for(app, &project, cfg.quick_prompt_new_worktree);
+    let target = view::target_for(app, &project, false);
     Some(QuickLaunch::from_config(target, &cfg))
 }
 
@@ -330,7 +329,7 @@ pub(super) fn land_on_grid(app: &mut App) {
 }
 
 /// The checkout of the EMPTY BAND under the grid's cursor — a band with
-/// no card on it, which only **Show all worktrees** draws. What `d` and
+/// no card on it. What `d` and
 /// a right-click act on there: the worktree itself, as nothing else is.
 /// None with the grid down, or the cursor on a card or a band of them.
 ///
@@ -575,7 +574,7 @@ pub(super) fn handle_action(
         Action::PaneTabs => walk_terminals(app, out),
         // `t`: a terminal in the cursor's checkout, as its chip.
         Action::NewTerminal => new_terminal(app, out),
-        // `p`: the box on the Settings → Agents harness. `n`: the harness
+        // `p`: the box on the Settings → Accounts harness. `n`: the harness
         // first, then the same box set to it.
         Action::QuickPrompt => open_box(app),
         Action::New => open_new_session(app),
@@ -702,7 +701,7 @@ pub(super) fn click_pull_request(
 /// box's own send (`quick_launch::submit`): the settings read off the
 /// card go out on the `CreateAgent` exactly as a spec picked through the
 /// box's `Tab` / `⌘/` would, and the box's pickers still work on it. `p`
-/// opens the box on the Agents tab defaults and a fresh worktree; the
+/// opens the box on the Accounts tab defaults and a fresh worktree; the
 /// shifted key opens it on the card. Nothing of the card's conversation
 /// is copied: the new session is a fresh CLI on the same footing.
 ///
@@ -801,7 +800,7 @@ pub(super) fn continue_on(app: &mut App) {
     let targets = cfg.continue_targets(&agent);
     if targets.is_empty() {
         app.flash = Some(crate::flash::Flash::setup(
-            "no other Claude account to continue on — add one in Settings → Agents → \
+            "no other Claude account to continue on — add one in Settings → Accounts → \
              Claude accounts",
         ));
         return;
@@ -814,7 +813,7 @@ pub(super) fn continue_on(app: &mut App) {
     {
         app.flash = Some(crate::flash::Flash::setup(
             "an account marked \"same account\" is signed in as this session's email — \
-             one limit; sign it in as the other in Settings → Agents → Claude accounts",
+             one limit; sign it in as the other in Settings → Accounts → Claude accounts",
         ));
     }
     app.overlay = Some(Overlay::Menu(ContextMenu {
@@ -1034,7 +1033,7 @@ pub(super) fn step_grid(app: &mut App, dx: i64, dy: i64, out: &mut Vec<ClientReq
     if let Some((band, layout)) = app.walked_band(&bands) {
         let at = view::card_cursor(app, &bands[band]);
         col = at.and_then(|i| layout.row_of(i)).map_or(0, |(_, c)| c);
-        // An EMPTY BAND (**Show all worktrees**) has no card to step to:
+        // An EMPTY BAND has no card to step to:
         // `j`/`k` go straight on to the band above or below it.
         let next = layout.stepped(at, dx, dy);
         if let Some(next) = next.filter(|&next| Some(next) != at) {
@@ -4093,7 +4092,7 @@ mod tests {
         });
     }
 
-    /// [`two_sessions`] with **Show all worktrees** on and a third
+    /// [`two_sessions`] with a third
     /// checkout of `demo` — `idle`, with nothing running in it — its
     /// EMPTY BAND the grid's last, under `feat`'s.
     /// `⌘W` is `Backspace` on the agent or terminal the pane shows: the
@@ -4285,7 +4284,6 @@ mod tests {
 
     fn with_empty_band() -> App {
         let mut app = two_sessions();
-        app.show_all_worktrees = true;
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -4330,18 +4328,12 @@ mod tests {
             .unwrap_or_else(|| panic!("band {index} was not drawn"))
     }
 
-    /// With **Show all worktrees** on a checkout with nothing running is
-    /// on the grid as an EMPTY BAND — its branch on the rule, and under
-    /// it what can be done there — which `j` walks onto like any band.
-    /// Off, the same tree has no such band.
+    /// A checkout with nothing running is on the grid as an EMPTY BAND —
+    /// its branch on the rule, and under it what can be done there —
+    /// which `j` walks onto like any band.
     #[test]
     fn an_empty_worktree_is_a_band_the_cursor_walks_onto() {
         with_default_config(|| {
-            let mut off = with_empty_band();
-            off.show_all_worktrees = false;
-            let screen = screen_text(&draw_tall(&mut off));
-            assert!(!screen.contains("idle"), "{screen}");
-
             let mut app = with_empty_band();
             let screen = screen_text(&draw_tall(&mut app));
             assert!(screen.contains("idle"), "{screen}");
@@ -5053,13 +5045,12 @@ mod tests {
         });
     }
 
-    /// With **Show all worktrees** on (and **Delete emptied worktree**
-    /// off), deleting a worktree's last card never asks about the
-    /// worktree: the card's ordinary confirm, a delete of the card alone,
-    /// and its band stays on the grid — empty, the cursor on it — for `d`
-    /// to delete when that is wanted.
+    /// Deleting a worktree's last card never asks about the worktree: the
+    /// card's ordinary confirm, a delete of the card alone, and its band
+    /// stays on the grid — empty, the cursor on it — for `d` to delete
+    /// when that is wanted.
     #[test]
-    fn deleting_the_last_card_keeps_the_worktree_with_show_all_worktrees() {
+    fn deleting_the_last_card_keeps_the_worktree() {
         with_default_config(|| {
             let mut app = with_empty_band();
             draw_tall(&mut app);
@@ -5098,50 +5089,6 @@ mod tests {
                 app.selected_worktree().map(|w| w.id.clone()),
                 Some(WorktreeId("w2".into())),
                 "the cursor stays on the emptied band"
-            );
-            draw_tall(&mut app);
-        });
-    }
-
-    /// **Delete emptied worktree** on, with **Show all worktrees** on too:
-    /// `d` on a worktree's last card takes the worktree with it — no
-    /// empty band is left on the grid for a second `d`.
-    #[test]
-    fn deleting_the_last_card_takes_the_worktree_when_the_setting_says_so() {
-        with_config_json(r#"{"delete_empty_worktree": true}"#, || {
-            let mut app = with_empty_band();
-            draw_tall(&mut app);
-            to_feat(&mut app);
-            key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
-            match &app.overlay {
-                Some(Overlay::Confirm(c)) => assert!(
-                    matches!(
-                        c.action,
-                        PendingAction::ThenDeleteWorktree { offered: false, .. }
-                    ) && c.message.contains("goes with it"),
-                    "{:?}: {}",
-                    c.action,
-                    c.message
-                ),
-                other => panic!("expected the card's confirm, got {other:?}"),
-            }
-            let sent = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            assert!(
-                sent.iter()
-                    .any(|r| matches!(r, ClientRequest::DeleteAgent { .. })),
-                "{sent:?}"
-            );
-            assert!(
-                sent.iter()
-                    .any(|r| matches!(r, ClientRequest::DeleteWorktree { id, .. }
-                    if id == &WorktreeId("w2".into()))),
-                "{sent:?}"
-            );
-            assert!(
-                !crate::launcher::bands(&app)
-                    .iter()
-                    .any(|b| b.worktree == WorktreeId("w2".into())),
-                "feat's band is gone with its last card"
             );
             draw_tall(&mut app);
         });
@@ -6234,7 +6181,7 @@ mod tests {
     /// Switching projects is asking to LOOK at one, never to start
     /// something in it: a pick from the PROJECT DROPDOWN that lands on a
     /// project with nothing in it yet leaves the box shut, and the grid
-    /// says what starts one instead. The same for its tab and a digit —
+    /// is its root's empty band instead. The same for its tab and a digit —
     /// all take the one [`open_project`].
     #[test]
     fn switching_to_an_empty_project_opens_no_box() {
@@ -6273,8 +6220,8 @@ mod tests {
             let text = buffer_text(&draw(&mut app));
             assert_eq!(tabs_drawn(&app), ["demo", "docs"], "{text}");
             assert!(
-                text.contains("press  ⌘N  to start an agent"),
-                "the grid says what starts one: {text}"
+                text.contains("nothing running"),
+                "its root's empty band is the grid: {text}"
             );
         });
     }
@@ -6328,7 +6275,7 @@ mod tests {
                     "ack_first={ack_first}: the pane folded away: {text}"
                 );
                 assert!(app.flash.is_none());
-                assert!(text.contains("Welcome to orion"), "{text}");
+                assert!(text.contains("nothing running"), "{text}");
                 assert!(!text.contains("shell-1"), "no terminal of demo's: {text}");
             }
         });
@@ -6363,9 +6310,9 @@ mod tests {
         });
     }
 
-    /// **Show all worktrees** keeps a band on the grid for a checkout with
-    /// nothing running, so a project with no session still has one — its
-    /// root's. Switching to it folds the PANE away all the same: an EMPTY
+    /// Every checkout has a band on the grid, one with nothing running
+    /// too, so a project with no session still has one — its root's.
+    /// Switching to it folds the PANE away all the same: an EMPTY
     /// BAND is no card, and the pane never goes on reading the session of
     /// the project that was left. INPUT PARITY: the `+` dropdown's pick,
     /// the `/` PALETTE's and [`open_project`] itself end in the same state.
@@ -6396,7 +6343,6 @@ mod tests {
         with_default_config(|| {
             for (way, open) in ways {
                 let mut app = two_sessions();
-                app.show_all_worktrees = true;
                 seed_empty_project(&mut app);
                 draw(&mut app);
                 let mut out = Vec::new();
@@ -6438,13 +6384,12 @@ mod tests {
     /// its chip, the pane reading it rather than the session of the
     /// project that was left — in the root, where the cursor already
     /// rests on a first visit, and in another checkout under an EMPTY
-    /// BAND (**Show all worktrees**), which the cursor steps past.
+    /// BAND, which the cursor steps past.
     #[test]
     fn a_project_with_only_a_terminal_opens_on_it() {
         with_default_config(|| {
-            for (show_all, checkout) in [(false, "w3root"), (true, "w3root"), (true, "w3feat")] {
+            for checkout in ["w3root", "w3feat"] {
                 let mut app = two_sessions();
-                app.show_all_worktrees = show_all;
                 seed_empty_project(&mut app);
                 hse(
                     &mut app,
@@ -6470,7 +6415,7 @@ mod tests {
 
                 super::open_project(&mut app, &ProjectId("p3".into()), &mut out);
                 let text = buffer_text(&draw(&mut app));
-                let case = format!("show_all={show_all} in {checkout}");
+                let case = format!("in {checkout}");
 
                 assert_eq!(
                     reading(&app),
@@ -6619,11 +6564,13 @@ mod tests {
         });
     }
 
-    /// [`two_sessions`] plus `docs` from [`seed_empty_project`], opened:
-    /// a project with no sessions in front of you, so an empty grid.
+    /// [`two_sessions`] plus `docs` from [`seed_empty_project`], opened
+    /// before its root checkout has arrived: a project with no band at
+    /// all in front of you, so an empty grid.
     fn on_an_empty_project() -> App {
         let mut app = two_sessions();
         seed_empty_project(&mut app);
+        app.tree.worktrees.retain(|w| w.project_id.0 != "p3");
         super::open_project(&mut app, &ProjectId("p3".into()), &mut Vec::new());
         app
     }
@@ -6652,9 +6599,17 @@ mod tests {
             let mut by_key = on_an_empty_project();
             draw(&mut by_key);
             key(&mut by_key, KeyCode::Char('n'), KeyModifiers::SUPER);
+            // With no checkout yet, each box cuts a fresh worktree under a
+            // name of its own picking.
             let launch = |app: &App| match &app.overlay {
                 Some(Overlay::Prompt(p)) => match &p.kind {
-                    PromptKind::QuickPrompt(launch) => launch.clone(),
+                    PromptKind::QuickPrompt(launch) => {
+                        let mut launch = launch.clone();
+                        if let QuickTarget::NewWorktree { branch, .. } = &mut launch.target {
+                            branch.clear();
+                        }
+                        launch
+                    }
                     other => panic!("not the box: {other:?}"),
                 },
                 other => panic!("no box: {other:?}"),
@@ -8104,46 +8059,16 @@ mod tests {
         });
     }
 
-    /// `a`, answered, archives the session under the cursor. The cursor
-    /// takes the card after it — the one that slides up into its place —
-    /// and on the first card that is the whole of the grid's landing.
+    /// The only entry of a band leaving leaves the band, empty, under the
+    /// cursor — no card under it, so nothing in the pane. The archive
+    /// runs on the confirm's Enter, a second input event, and that is the
+    /// one the landing is kept across.
     #[test]
-    fn archiving_the_first_card_takes_the_card_that_slides_up() {
-        with_default_config(|| {
-            let mut app = two_sessions();
-            draw(&mut app);
-            to_feat(&mut app);
-            assert_eq!(selected(&app).as_deref(), Some("a2"));
-            key(
-                &mut app,
-                KeyCode::Char('A'),
-                KeyModifiers::SUPER | KeyModifiers::SHIFT,
-            );
-            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            assert!(
-                app.tree.agents.iter().any(|a| a.id.0 == "a2" && a.archived),
-                "archived on the confirm's Enter"
-            );
-            assert_eq!(
-                selected(&app).as_deref(),
-                Some("a1"),
-                "its band went with it: the root band's card, at the band level"
-            );
-            assert_eq!(app.focus, Focus::Sessions);
-        });
-    }
-
-    /// The only entry of a band leaving takes the band with it: the cursor
-    /// lands on the band that slid up into its slot, and the pane on that
-    /// band's entry. The archive runs on the confirm's Enter, a second
-    /// input event, and that is the one the landing is kept across.
-    #[test]
-    fn archiving_a_bands_only_card_lands_on_the_band_that_slides_up() {
+    fn archiving_a_bands_only_card_leaves_the_cursor_on_its_empty_band() {
         with_default_config(|| {
             let mut app = three_sessions();
             draw(&mut app);
             assert_eq!(cards(&app), ["a9", "a2", "a1"], "newest first");
-            let root_card = selected(&app);
             draw_at(&mut app, 130, 50);
             let (x, y) = row_cell(&app, 1);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
@@ -8155,31 +8080,29 @@ mod tests {
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                app.tree.agents.iter().any(|a| a.id.0 == "a2" && a.archived),
+                "archived on the confirm's Enter"
+            );
             assert_eq!(cards(&app), ["a9", "a1"]);
             assert_eq!(
                 app.selected_worktree().map(|w| w.id.0.clone()).as_deref(),
-                Some("w1"),
-                "on the band that slid up"
+                Some("w2"),
+                "on feat's band, empty now"
             );
-            assert_eq!(selected(&app), root_card, "on the card it was left on");
-            assert_eq!(
-                pane(&app).map(|s| matches!(s, SessionRef::Agent(_))),
-                Some(true),
-                "and the pane reads it"
-            );
+            assert_eq!(selected(&app), None, "no card to be on");
             assert_eq!(app.focus, Focus::Sessions);
         });
     }
 
     /// `d`, answered, lands where `a` lands: INPUT PARITY across the two
-    /// verbs that take a card off the grid — the band that slides up when
-    /// the deleted card was its band's last, and the card before it when
-    /// it was the last of a band with more.
+    /// verbs that take a card off the grid — the emptied band when the
+    /// deleted card was its band's last, and the card before it when it
+    /// was the last of a band with more.
     #[test]
     fn deleting_a_card_lands_where_archiving_it_lands() {
         with_default_config(|| {
-            // feat's only card: its band goes, and the root band takes
-            // the cursor.
+            // feat's only card: its band stays, empty, under the cursor.
             let mut app = three_sessions();
             draw(&mut app);
             assert_eq!(cards(&app), ["a9", "a2", "a1"], "newest first");
@@ -8189,9 +8112,10 @@ mod tests {
             assert_eq!(cards(&app), ["a9", "a1"], "the delete went through");
             assert_eq!(
                 app.selected_worktree().map(|w| w.id.0.clone()).as_deref(),
-                Some("w1"),
-                "on the band that slid up"
+                Some("w2"),
+                "on feat's band, empty now"
             );
+            assert_eq!(selected(&app), None);
 
             // The last card of a band: nothing after it, so the one before.
             let mut app = three_sessions();
@@ -8252,15 +8176,23 @@ mod tests {
         with_default_config(|| {
             let mut app = three_sessions();
             draw(&mut app);
-            super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
-            assert_eq!(selected(&app).as_deref(), Some("a2"), "the middle card");
+            super::select(&mut app, AgentId("a9".into()), &mut Vec::new());
+            assert_eq!(
+                selected(&app).as_deref(),
+                Some("a9"),
+                "the root band's first card"
+            );
             key(
                 &mut app,
                 KeyCode::Char('A'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            assert_eq!(selected(&app).as_deref(), Some("a1"), "the card after it");
+            assert_eq!(
+                selected(&app).as_deref(),
+                Some("a1"),
+                "the card after it in its band"
+            );
 
             // What the DAEMON answers with: the Ack for the request, then
             // the row as it now has it — archived, its process killed, its
@@ -8283,7 +8215,7 @@ mod tests {
                 .tree
                 .agents
                 .iter()
-                .find(|a| a.id.0 == "a2")
+                .find(|a| a.id.0 == "a9")
                 .cloned()
                 .unwrap();
             archived.archived = true;
@@ -8315,10 +8247,10 @@ mod tests {
             let mut app = three_sessions();
             draw(&mut app);
             assert_eq!(cards(&app), ["a9", "a2", "a1"], "newest first");
-            super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
+            super::select(&mut app, AgentId("a9".into()), &mut Vec::new());
 
-            // What the input event opens with: the cursor on the middle
-            // card.
+            // What the input event opens with: the cursor on the root band's
+            // first card.
             let before = super::cursor_entry(&app).expect("a card under the cursor");
             // ...and in the same breath a newer session leads the grid, so
             // every index below it has moved by one.
@@ -8326,9 +8258,9 @@ mod tests {
             assert_eq!(cards(&app), ["az", "a9", "a2", "a1"], "the newcomer leads");
 
             let mut out = Vec::new();
-            super::super::archive_agent_now(&mut app, AgentId("a2".into()), &mut out);
+            super::super::archive_agent_now(&mut app, AgentId("a9".into()), &mut out);
             super::keep_cursor(&mut app, before, &mut out);
-            assert_eq!(cards(&app), ["az", "a9", "a1"]);
+            assert_eq!(cards(&app), ["az", "a2", "a1"]);
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a1"),
@@ -8362,12 +8294,11 @@ mod tests {
     }
 
     /// The ONLY card leaving — archived with `^A` or deleted with ⌫, each
-    /// behind its confirm — leaves nothing for the PANE to read, so it
-    /// folds away and the empty grid takes the body, the way a project
-    /// opened with no sessions lands. INPUT PARITY: both verbs end in the
-    /// same state.
+    /// behind its confirm — leaves its band, empty, under the cursor and
+    /// nothing for the PANE to read, as `j` onto an empty band does.
+    /// INPUT PARITY: both verbs end in the same state.
     #[test]
-    fn the_last_card_leaving_folds_the_pane_away() {
+    fn the_last_card_leaving_leaves_its_empty_band_aimed_at() {
         with_default_config(|| {
             for keys in [
                 &[
@@ -8392,13 +8323,18 @@ mod tests {
                     key(&mut app, *code, *mods);
                 }
                 assert!(cards(&app).is_empty(), "{keys:?}: the card left");
-                assert!(app.launcher_unaimed, "{keys:?}: nothing left to aim at");
-                assert!(!super::has_pane(&app), "{keys:?}: and the pane folded");
+                assert_eq!(
+                    app.selected_worktree().map(|w| w.id.0.clone()).as_deref(),
+                    Some("w2root"),
+                    "{keys:?}: on web's root band, empty now"
+                );
+                assert!(!app.launcher_unaimed, "{keys:?}: the band is aimed at");
+                assert_eq!(reading(&app), None, "{keys:?}: the pane reads nothing");
                 assert!(app.flash.is_none());
                 let text = buffer_text(&draw(&mut app));
                 assert!(
-                    text.contains("press  ⌘N  to start an agent"),
-                    "{keys:?}: the empty grid says what starts one: {text}"
+                    text.contains("nothing running"),
+                    "{keys:?}: the root's empty band is the grid: {text}"
                 );
             }
         });
@@ -9047,41 +8983,6 @@ mod tests {
                 assert!(text.contains(&format!("effort {want} ⌘Y")), "{text}");
                 assert!(!text.contains("effort: "), "no footer message: {text}");
             }
-        });
-    }
-
-    /// The QUICK PROMPT NEW WORKTREE SETTING starts every box on a fresh
-    /// worktree of the selected project; a checkout picked in the WORKTREE
-    /// PICKER is that box's alone, and the next box starts fresh again.
-    #[test]
-    fn the_new_worktree_setting_starts_every_box_on_a_fresh_worktree() {
-        with_config_json(r#"{"quick_prompt_new_worktree": true}"#, || {
-            let mut app = two_sessions();
-            draw(&mut app);
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER);
-            let (launch, _) = launch(&app);
-            let QuickTarget::NewWorktree { project, .. } = &launch.target else {
-                panic!("expected a fresh worktree, got {:?}", launch.target);
-            };
-            assert_eq!(Some(project), app.selected_project().map(|p| &p.id));
-
-            open_worktree_picker(&mut app);
-            let (rows, hover) = picker_rows(&app);
-            assert!(rows[0].ends_with(" ✓"), "the box is on it: {rows:?}");
-            assert_eq!(hover, 0);
-            click_picker_row(&mut app, "feat");
-            assert_eq!(
-                self::launch(&app).0.target,
-                QuickTarget::Worktree(WorktreeId("w2".into())),
-                "this box's pick"
-            );
-            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            app.quick_draft.clear();
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER);
-            assert!(
-                self::launch(&app).0.is_new_worktree(),
-                "the next box starts fresh"
-            );
         });
     }
 
@@ -9929,7 +9830,7 @@ mod tests {
             assert!(
                 app.flash
                     .as_deref()
-                    .is_some_and(|f| f.contains("Settings → Agents → Claude accounts")),
+                    .is_some_and(|f| f.contains("Settings → Accounts → Claude accounts")),
                 "{:?}",
                 app.flash
             );
@@ -11148,10 +11049,10 @@ mod tests {
         });
     }
 
-    /// A band whose last card is archived with its drawer unfolded stays
-    /// on the grid, holding the session just filed; folded, it goes.
+    /// A band whose last card is archived stays on the grid: its drawer
+    /// unfolded holds the session just filed; folded, the band is empty.
     #[test]
-    fn an_unfolded_drawer_keeps_its_band_on_the_grid() {
+    fn a_band_whose_last_card_is_archived_stays_on_the_grid() {
         with_default_config(|| {
             let mut app = one_archived();
             app.archived_open.insert(WorktreeId("w2".into()));
@@ -11173,7 +11074,11 @@ mod tests {
 
             app.archived_open.remove(&WorktreeId("w2".into()));
             let bands = crate::launcher::bands(&app);
-            assert!(bands.iter().all(|b| b.worktree.0 != "w2"));
+            let feat = bands
+                .iter()
+                .find(|b| b.worktree.0 == "w2")
+                .expect("feat's band, folded");
+            assert!(feat.cards.is_empty() && !feat.drawer_open);
         });
     }
 

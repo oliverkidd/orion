@@ -3,7 +3,7 @@
 //! Every key the grid reacts to is an [`Action`] here, with a default
 //! chord list. A hand-edited `keybindings` object in the config JSON
 //! (`keybindings: { "<action id>": "j, down" }`) overrides them, the
-//! Hotkeys tab of the settings overlay lists them, and the event loop
+//! Keys tab of the settings overlay lists them, and the event loop
 //! dispatches through [`Keymap::lookup`] instead of matching raw
 //! `KeyCode`s.
 //!
@@ -149,7 +149,7 @@ pub enum Action {
     FollowUp,
     /// `Shift+P`: the QUICK PROMPT on the card under the cursor's settings
     /// — the same harness, model, effort and worktree — so the task is all
-    /// there is to type. `p` opens the box on the Agents tab defaults; the
+    /// there is to type. `p` opens the box on the Accounts tab defaults; the
     /// shifted key opens it on the card.
     DuplicateSession,
     /// `Shift+C`: **Continue on** another Claude account — the Claude
@@ -191,7 +191,7 @@ pub enum Action {
     Home,
     Hosts,
     Settings,
-    /// The settings overlay on the Agents tab's CLAUDE ACCOUNTS: who each
+    /// The settings overlay on the Accounts tab's CLAUDE ACCOUNTS: who each
     /// Claude Code login is, signing one in or out, adding another.
     ClaudeAccounts,
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
@@ -211,7 +211,7 @@ pub enum Action {
     /// `⌘⇧R`, HOME's key: stop the DAEMON and every session in it, then
     /// start orion again from the binary on disk, behind a confirm.
     Restart,
-    /// Open ORION SETUP again, every step.
+    /// Open ORION SETUP again.
     RunSetup,
     /// `⌘⇧G`: install the newer published release the footer offers, then
     /// restart the daemon and this TUI on it.
@@ -242,7 +242,7 @@ pub struct ActionSpec {
     pub id: &'static str,
     pub label: &'static str,
     pub hint: &'static str,
-    /// Section header in the Hotkeys tab.
+    /// Section header in the Keys tab.
     pub group: &'static str,
     pub scope: Scope,
     pub defaults: &'static [&'static str],
@@ -725,7 +725,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::CycleEffort,
         id: "cycle_effort",
         label: "Cycle effort",
-        hint: "Step the new-agent box's effort / reasoning variant (default, low, high, …), shown in its header; with no box up, the Agents default",
+        hint: "Step the new-agent box's effort / reasoning variant (default, low, high, …), shown in its header; with no box up, the Accounts tab default",
         group: "SESSIONS",
         scope: Scope::Global,
         // `⌘Y` first: macOS keeps ⌘⇧/ for every app's Help menu, so in
@@ -766,7 +766,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ContinueOn,
         id: "continue_on",
         label: "Continue on another account",
-        hint: "Carry the Claude session under the cursor onto another Claude account (Settings → Agents → Claude accounts), conversation and all, and resume it there; for a session stopped at a usage limit",
+        hint: "Carry the Claude session under the cursor onto another Claude account (Settings → Accounts → Claude accounts), conversation and all, and resume it there; for a session stopped at a usage limit",
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["shift+c"],
@@ -890,7 +890,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ClaudeAccounts,
         id: "claude_accounts",
         label: "Claude accounts",
-        hint: "Settings → Agents → Claude accounts: who each Claude Code login is signed in as, sign one in or out, add another",
+        hint: "Settings → Accounts → Claude accounts: who each Claude Code login is signed in as, sign one in or out, add another",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],
@@ -953,7 +953,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::RunSetup,
         id: "run_setup",
         label: "Run setup",
-        hint: "Open Orion setup again, every step: agents and their CLIs, Claude accounts, the Open in app editor, worktrees, Linear and autofix, with i to install whatever is missing",
+        hint: "Open Orion setup again: Claude and its accounts (i installs its CLI), your first project's base branch and run command, and the keys that matter",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],
@@ -1002,7 +1002,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenInCursor,
         id: "open_in_cursor",
         label: "Open checkout in app",
-        hint: "Open the checkout under the cursor in the Open in app editor — Cursor, VS Code, … ({open_outside} on a file opens the file)",
+        hint: "Open the checkout under the cursor in your editor app — Cursor, VS Code, … ({open_outside} on a file opens the file)",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],
@@ -1455,7 +1455,7 @@ impl Keymap {
     /// The chords Help and the footer print for an action: its ⌘ ones,
     /// or every chord when it has none ([`shown`]). A bare-letter
     /// fallback beside a ⌘ chord (`s` for `⌘,`) stays bound, and only
-    /// Settings → Hotkeys lists it.
+    /// Settings → Keys lists it.
     pub fn shown_chords(&self, action: Action) -> Vec<KeyChord> {
         shown(self.chords(action))
     }

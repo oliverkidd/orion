@@ -203,10 +203,7 @@ pub(crate) fn ask(app: &mut App) {
         }
         (true, _) => return,
         (false, Some(page)) if !page.base.is_empty() => (page.base.clone(), "HEAD".to_string()),
-        (false, _) => (
-            crate::config::Config::load().worktree_base_branch,
-            "HEAD".to_string(),
-        ),
+        (false, _) => (app.tree.base_branch_at(&view.root), "HEAD".to_string()),
     };
     let (root, jobs) = (view.root.clone(), view.jobs.clone());
     let ticket = crate::view_jobs::ticket();

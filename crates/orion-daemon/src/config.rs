@@ -16,11 +16,6 @@ pub struct Config {
     /// Pre-spawn agent CLIs while the user is still naming the session so
     /// creation feels instant. Costs one idle CLI process per warm slot.
     pub prewarm_agents: bool,
-    /// Pre-spawn a worktree's dead sessions when the user's selection rests
-    /// on it, so attaching shows an already-booted screen instead of a
-    /// booting shell. Costs idle shell/CLI processes for sessions the user
-    /// may never open.
-    pub prewarm_sessions: bool,
     /// Kill idle session PTYs in worktrees no client is looking at once
     /// they've gone unwatched this long: "1m" | "5m" | "15m" | "30m" | "1h"
     /// ("off" disables reaping entirely; any `<n>s`/`<n>m`/`<n>h` works).
@@ -30,26 +25,6 @@ pub struct Config {
     /// reaped session revives on the next attach or prewarm (agents resume
     /// their conversation). Malformed values fall back to the 5m default.
     pub session_idle_timeout: String,
-    /// The branch every new WORKTREE nobody named a base for starts from
-    /// — a project's **New worktree**, a bare `orion worktree`, the QUICK
-    /// PROMPT's auto-created one. Empty (the default) means origin's own
-    /// default branch, `origin/HEAD` as freshly fetched; a name (`master`,
-    /// `develop`) means origin's fetched copy of that branch when origin
-    /// has one, else the checkout's local ref of that name, else — a repo
-    /// with no such branch at all — the default again, with a warning in
-    /// the daemon log. Read through [`Config::worktree_base_branch`].
-    pub worktree_base_branch: String,
-    /// ENV LINKS: symlink the main checkout's git-ignored `.env*` files
-    /// into every other WORKTREE of the project — one orion creates, one an
-    /// agent moves into, and one made outside orion that the sync adopts —
-    /// so each checkout runs against the clone's secrets. On by default; a
-    /// file already in the worktree is never replaced (see `env_links`).
-    pub link_env_files: bool,
-    /// WORKTREE CONTAINERS: what a deleted worktree's docker compose
-    /// projects get — `off` (the default), `stop`, `remove`, or
-    /// `remove+volumes`. Read through [`Config::worktree_containers`];
-    /// anything unknown is `off` (see `containers`).
-    pub worktree_containers: String,
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): repoint a program, rename a flag, switch a harness
     /// off, or define a whole new CLI. Merged by
@@ -58,38 +33,49 @@ pub struct Config {
     pub harnesses: BTreeMap<String, orion_core::harness::HarnessOverride>,
     /// CLAUDE ACCOUNTS beyond the default one (`claude_accounts`): each
     /// a config dir under a stable id, launched as Claude's own row with
-    /// `CLAUDE_CONFIG_DIR` pointing there. The TUI's Agents tab and
+    /// `CLAUDE_CONFIG_DIR` pointing there. The TUI's Accounts tab and
     /// first-run onboarding edit the list; the daemon spawns, resumes and
     /// continues sessions on it through the registry.
     pub claude_accounts: Vec<orion_core::claude_account::ClaudeAccount>,
     /// PROJECT SETTINGS: one entry per project set up differently from the
     /// rest, keyed by the project's repo path as the store holds it. The
-    /// TUI's Project tab owns the map; the daemon reads the one key in it
-    /// that is its to act on, through [`Config::run_command`].
+    /// TUI's Projects tab owns the map; the daemon reads the keys in it
+    /// that are its to act on ([`Config::base_branch`],
+    /// [`Config::run_command`], [`Config::worktree_containers`]).
     pub projects: BTreeMap<PathBuf, ProjectConfig>,
 }
 
-/// One project's entry under `projects` — the rows of the TUI's Project
-/// tab, of which the daemon reads one. The rest (`open_command`) are the
+/// One project's entry under `projects` — the rows of the TUI's Projects
+/// tab, of which the daemon reads three. The rest (`open_command`) are the
 /// TUI's and pass through unread.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ProjectConfig {
+    /// The branch the project's new WORKTREES start from when nobody
+    /// named a base — a bare `orion worktree`, the QUICK PROMPT's **+ new
+    /// worktree**. Empty (the default) means origin's own default branch,
+    /// `origin/HEAD` as freshly fetched; a name (`dev`, `master`) means
+    /// origin's fetched copy of that branch when origin has one, else the
+    /// checkout's local ref of that name, else — a repo with no such
+    /// branch at all — the default again, with a warning in the daemon
+    /// log. Read through [`Config::base_branch`].
+    pub base_branch: String,
     /// The RUN COMMAND a menu's **Run** starts in this project's
     /// worktrees, typed into Settings → Projects. Empty means there is
     /// none.
     pub run_command: String,
+    /// ON WORKTREE DELETE: what a deleted worktree's docker compose
+    /// projects get — empty or `off` (the default), `stop`, `remove`, or
+    /// `remove+volumes`. Read through [`Config::worktree_containers`];
+    /// anything unknown is `off` (see `containers`).
+    pub worktree_containers: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             prewarm_agents: true,
-            prewarm_sessions: true,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
-            worktree_base_branch: String::new(),
-            link_env_files: true,
-            worktree_containers: WorktreeContainers::Off.as_str().into(),
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
             projects: BTreeMap::new(),
@@ -120,22 +106,26 @@ impl Config {
             .unwrap_or_else(|| parse_timeout(DEFAULT_SESSION_IDLE_TIMEOUT).expect("default parses"))
     }
 
-    /// The configured WORKTREE BASE BRANCH, or None for the default
-    /// (origin's own default branch). Whitespace is trimmed and a leading
-    /// `origin/` dropped: `origin/master` means the same as `master` —
-    /// origin's fetched copy when it has one — and spelling it out must
-    /// not turn into a branch that tracks `origin/master` and aims its
-    /// first push there.
-    pub fn worktree_base_branch(&self) -> Option<&str> {
-        let name = self.worktree_base_branch.trim();
+    /// The BASE BRANCH set for the project checked out at `repo_path`, or
+    /// None for the default (origin's own default branch). Whitespace is
+    /// trimmed and a leading `origin/` dropped: `origin/master` means the
+    /// same as `master` — origin's fetched copy when it has one — and
+    /// spelling it out must not turn into a branch that tracks
+    /// `origin/master` and aims its first push there.
+    pub fn base_branch(&self, repo_path: &Path) -> Option<&str> {
+        let name = self.projects.get(repo_path)?.base_branch.trim();
         let name = name.strip_prefix("origin/").unwrap_or(name).trim();
         (!name.is_empty()).then_some(name)
     }
 
-    /// The `worktree_containers` policy; a value this build doesn't know
-    /// is `off`.
-    pub fn worktree_containers(&self) -> WorktreeContainers {
-        WorktreeContainers::parse(&self.worktree_containers)
+    /// The ON WORKTREE DELETE policy of the project checked out at
+    /// `repo_path`; no entry, or a word this build doesn't know, is `off`.
+    pub fn worktree_containers(&self, repo_path: &Path) -> WorktreeContainers {
+        self.projects
+            .get(repo_path)
+            .map_or(WorktreeContainers::Off, |p| {
+                WorktreeContainers::parse(&p.worktree_containers)
+            })
     }
 
     /// The RUN COMMAND set for the project checked out at `repo_path` in
@@ -182,28 +172,32 @@ mod tests {
         let obj = serde_json::json!({
             "prewarm_agents": "nope",
             "session_idle_timeout": "1h",
-            "prewarm_sessions": false,
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
         assert!(cfg.prewarm_agents, "the unreadable key takes its default");
         assert_eq!(cfg.session_idle_timeout, "1h");
-        assert!(!cfg.prewarm_sessions);
         assert_eq!(skipped.len(), 1);
     }
 
-    /// The daemon's half of the TUI's fixture test: every daemon key an
-    /// earlier release wrote still reads as written.
+    /// The daemon's half of the TUI's fixture test: every daemon key the
+    /// newest release wrote still reads as written.
     #[test]
-    fn config_files_from_earlier_releases_still_load_the_daemon_keys() {
-        let raw = include_str!("../../orion-core/fixtures/config-0.29.0.json");
+    fn the_newest_releases_config_still_loads_the_daemon_keys() {
+        let raw = include_str!("../../orion-core/fixtures/config-2.2.1.json");
         let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).unwrap();
         let (cfg, skipped) = orion_core::settings::parse_lenient::<Config>(&obj);
         assert!(skipped.is_empty(), "{skipped:?}");
-        assert!(!cfg.prewarm_agents && !cfg.prewarm_sessions);
+        assert!(!cfg.prewarm_agents);
         assert_eq!(cfg.session_idle_timeout, "30m");
-        assert_eq!(cfg.worktree_base_branch, "develop");
-        assert!(cfg.harnesses.contains_key("grok"), "the registry map reads");
+        assert_eq!(
+            cfg.harnesses.get("claude").and_then(|h| h.enabled),
+            Some(false),
+            "the registry map reads"
+        );
+        assert_eq!(cfg.claude_accounts.len(), 1);
+        assert_eq!(cfg.claude_accounts[0].id, "claude-work");
+        assert!(!cfg.claude_accounts[0].enabled, "the account switched off");
         assert_eq!(
             cfg.run_command(Path::new("/Users/me/src/app")),
             Some("npm run dev"),
@@ -265,13 +259,19 @@ mod tests {
         );
     }
 
+    /// A project's base branch is its own: read under its repo path,
+    /// trimmed and with `origin/` dropped; another project, or one with no
+    /// entry, starts from origin's default.
     #[test]
-    fn worktree_base_branch_defaults_to_none_and_normalizes() {
-        assert_eq!(Config::default().worktree_base_branch(), None);
+    fn base_branch_is_read_per_project_and_normalizes() {
+        let demo = Path::new("/tmp/demo");
+        assert_eq!(Config::default().base_branch(demo), None);
         let base = |v: &str| {
-            let cfg: Config =
-                serde_json::from_str(&format!(r#"{{"worktree_base_branch": "{v}"}}"#)).unwrap();
-            cfg.worktree_base_branch().map(str::to_string)
+            let cfg: Config = serde_json::from_str(&format!(
+                r#"{{"projects": {{"/tmp/demo": {{"base_branch": "{v}"}}}}}}"#
+            ))
+            .unwrap();
+            cfg.base_branch(demo).map(str::to_string)
         };
         assert_eq!(base(""), None);
         assert_eq!(base("   "), None, "blank is unset, not a branch called ' '");
@@ -283,11 +283,18 @@ mod tests {
             "origin/x is x: origin's copy is what the name already means"
         );
         assert_eq!(base("origin/"), None);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.worktree_base_branch(), None);
+        let cfg: Config =
+            serde_json::from_str(r#"{"projects": {"/tmp/demo": {"base_branch": "dev"}}}"#).unwrap();
+        assert_eq!(cfg.base_branch(Path::new("/tmp/other")), None);
+        let old: Config = serde_json::from_str(r#"{"worktree_base_branch": "dev"}"#).unwrap();
+        assert_eq!(
+            old.base_branch(demo),
+            None,
+            "the old global key is the TUI's to move, never read here"
+        );
     }
 
-    /// The Project tab's `run_command`, under the project's repo path:
+    /// The Projects tab's `run_command`, under the project's repo path:
     /// trimmed, blank is unset, and the entry's other rows — the TUI's —
     /// don't stop the daemon reading it.
     #[test]
@@ -308,34 +315,28 @@ mod tests {
         // A `projects` this build can't read costs the map, not the rest.
         let obj = serde_json::json!({
             "projects": { "/tmp/demo": { "run_command": ["npm", "run", "dev"] } },
-            "worktree_base_branch": "develop",
+            "session_idle_timeout": "1h",
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
         assert_eq!(cfg.run_command(Path::new("/tmp/demo")), None);
-        assert_eq!(cfg.worktree_base_branch, "develop");
+        assert_eq!(cfg.session_idle_timeout, "1h");
         assert_eq!(skipped.into_iter().collect::<Vec<_>>(), ["projects"]);
     }
 
     #[test]
-    fn env_links_default_on_and_allow_opt_out() {
-        assert!(Config::default().link_env_files);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.link_env_files);
-        let cfg: Config = serde_json::from_str(r#"{"link_env_files": false}"#).unwrap();
-        assert!(!cfg.link_env_files);
-    }
-
-    #[test]
-    fn worktree_containers_default_off_and_read_the_policy() {
+    fn worktree_containers_default_off_and_read_the_policy_per_project() {
+        let demo = Path::new("/tmp/demo");
         assert_eq!(
-            Config::default().worktree_containers(),
+            Config::default().worktree_containers(demo),
             WorktreeContainers::Off
         );
         let read = |v: &str| {
-            serde_json::from_str::<Config>(&format!(r#"{{"worktree_containers": "{v}"}}"#))
-                .unwrap()
-                .worktree_containers()
+            serde_json::from_str::<Config>(&format!(
+                r#"{{"projects": {{"/tmp/demo": {{"worktree_containers": "{v}"}}}}}}"#
+            ))
+            .unwrap()
+            .worktree_containers(demo)
         };
         assert_eq!(read("remove+volumes"), WorktreeContainers::RemoveVolumes);
         assert_eq!(read("stop"), WorktreeContainers::Stop);
@@ -344,14 +345,11 @@ mod tests {
             WorktreeContainers::Off,
             "unknown deletes nothing"
         );
-    }
-
-    #[test]
-    fn defaults_enable_session_prewarm_and_allow_opt_out() {
-        assert!(Config::default().prewarm_sessions);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.prewarm_sessions);
-        let cfg: Config = serde_json::from_str(r#"{"prewarm_sessions": false}"#).unwrap();
-        assert!(!cfg.prewarm_sessions);
+        let cfg: Config = serde_json::from_str(r#"{"worktree_containers": "stop"}"#).unwrap();
+        assert_eq!(
+            cfg.worktree_containers(demo),
+            WorktreeContainers::Off,
+            "the old global key is the TUI's to move, never read here"
+        );
     }
 }

@@ -28,7 +28,7 @@ That is the whole install. It needs git. It also gets Ghostty if you don't have 
 - Open **Orion** from the Dock or Spotlight. Typing `orion` in a terminal opens the same app.
 - **Over ssh or in tmux:** `orion` runs in the terminal it was typed in.
 
-The first launch walks you through setup, including installing an agent if you have none. `orion upgrade` gets the latest release.
+The first launch walks you through setup: Claude Code (installed for you if it is missing) and its accounts, then your first project. `orion upgrade` gets the latest release.
 
 ## Core features
 

@@ -7,7 +7,7 @@
 //! list, each account a copy of Claude's row in its own config dir) into
 //! the effective
 //! [`HarnessDescriptor`]s every surface reads: the `n` picker, the `e`
-//! presets, spawn and resume, hooks, and the Agents tab. Adding a CLI is a config edit; the verification is
+//! presets, spawn and resume, hooks, and the Accounts tab. Adding a CLI is a config edit; the verification is
 //! that every behavior below is data, with the three genuinely bespoke arg
 //! shapings (Cursor's composed model id, Codex's `-c` config pair and its
 //! positional resume, OpenCode's `--prompt` flag) carried as descriptor
@@ -71,7 +71,7 @@ impl HarnessCatalog {
 pub const DEFAULT_CHOICE: &str = "default";
 
 /// How a harness takes its model: the flag carrying it, the default the
-/// Agents tab edits, and the static list the pickers offer (before the
+/// Accounts tab edits, and the static list the pickers offer (before the
 /// `default` sentinel, which always means "don't pass the flag").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSpec {
@@ -227,7 +227,7 @@ impl ModeSpec {
 }
 
 /// The effective behavior of one harness: what the picker offers, what
-/// spawn builds, which hooks install, and what the Agents tab edits.
+/// spawn builds, which hooks install, and what the Accounts tab edits.
 /// Built-ins come from [`builtin`]; user entries merge over them (or over
 /// a [`placeholder`] for new ids) through [`HarnessOverride`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,7 +634,7 @@ pub fn placeholder(id: &str) -> HarnessDescriptor {
 }
 
 /// The compiled-in behavior of a known harness: what a fresh install
-/// runs before any config exists. The Agents tab, the picker, spawn and
+/// runs before any config exists. The Accounts tab, the picker, spawn and
 /// hooks all read through here, so a new built-in is a new row plus its
 /// exhaustive-match arms — and a new third-party CLI needs no row at all.
 pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
@@ -1003,7 +1003,7 @@ impl HarnessDescriptor {
 /// ([`ClaudeAccount::descriptor`]), and the map's entry for its id is
 /// deltas over that, as for a built-in. An account whose entry is broken,
 /// or whose id an earlier account already holds, is left out (the TUI's
-/// Agents tab names it and why).
+/// Accounts tab names it and why).
 pub fn registry(
     overrides: &BTreeMap<String, HarnessOverride>,
     accounts: &[ClaudeAccount],
@@ -1077,7 +1077,7 @@ fn registered_accounts(accounts: &[ClaudeAccount]) -> Vec<&ClaudeAccount> {
 
 /// Every entry the picker and presets offer: enabled and valid, in
 /// registry order. Invalid entries are left out (create paths refuse them
-/// with their reason); the Agents tab still lists them so they can be
+/// with their reason); the Accounts tab still lists them so they can be
 /// fixed.
 pub fn usable(all: &[HarnessDescriptor]) -> Vec<&HarnessDescriptor> {
     all.iter()

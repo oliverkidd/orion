@@ -515,7 +515,7 @@ fn count_lines(bytes: &[u8]) -> u64 {
 /// Every file in the checkout (tracked + untracked, gitignore respected) in
 /// git listing order, for the fuzzy file finder — plus the ignored `.env*`
 /// files after them: `.env.local` and its kind are gitignored by design,
-/// yet they are files you open (and the ones `link_env_files` symlinks into
+/// yet they are files you open (and the ones the daemon symlinks into
 /// every worktree). `Err` is a user-facing flash message.
 pub fn list_files(root: &Path) -> Result<Vec<String>, String> {
     let output = run_git(
@@ -741,7 +741,7 @@ pub fn read_listing(root: &Path) -> Result<crate::view_jobs::DiffListing, String
 
 /// What opening the DIFF VIEWER on a checkout reads: [`read_listing`], and
 /// the COMMIT LIST beside it (`commit_list::read`), measured against the
-/// `worktree_base_branch` SETTING's `base_setting`. One job rather than
+/// project's **Base branch**, `base_setting`. One job rather than
 /// two, so the view never has to decide what an empty `git status` means
 /// before it knows whether the branch has commits to show instead.
 pub fn read_opening(

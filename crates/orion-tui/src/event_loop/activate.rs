@@ -42,9 +42,8 @@ pub(super) fn menu_row(app: &mut App, index: usize, out: &mut Vec<ClientRequest>
 
 /// The PALETTE's selected row — Enter, a click, `Ctrl+O`, `Ctrl+F`: the
 /// palette goes and the panels land on the row's target. `landing` is how:
-/// None is Enter's own rule (the `palette_enter_attaches` SETTING, the
-/// browser for a pull request, an attach for a session waiting on you),
-/// which a click follows too; the two chords name theirs.
+/// None is Enter's own rule (it lands on the row, and attaches a session
+/// waiting on you), which a click follows too; the two chords name theirs.
 pub(super) fn palette_row(app: &mut App, landing: Option<Landing>, out: &mut Vec<ClientRequest>) {
     let Some(Overlay::Palette(palette)) = &app.overlay else {
         return;
@@ -52,8 +51,7 @@ pub(super) fn palette_row(app: &mut App, landing: Option<Landing>, out: &mut Vec
     let Some(target) = palette.selected_target().cloned() else {
         return;
     };
-    let attaches = palette.enter_attaches;
-    let landing = landing.unwrap_or_else(|| Landing::for_enter_on(app, &target, attaches));
+    let landing = landing.unwrap_or_else(|| Landing::for_enter_on(app, &target));
     app.overlay = None;
     jump_to_target(app, target, landing, out);
 }

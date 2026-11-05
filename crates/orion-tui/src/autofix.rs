@@ -19,7 +19,7 @@
 //!   session at work in a checkout of the PR's branch — any, not only an
 //!   `autofix-<n>` — holds the ask back until it is done, and a PR already
 //!   being asked about is not asked about twice.
-//! * **Sending, unasked.** **Auto-fix PRs** (`Config::pr_autofix`, on by
+//! * **Sending, unasked.** **Auto-fix my PRs** (`Config::pr_autofix`, on by
 //!   default) sends the agent the moment a breakage has settled — no modal,
 //!   nothing to confirm — until [`AUTO_ATTEMPTS`] tries in a row have not
 //!   turned the PR green, when it stops and says so (a flash, and a desktop
@@ -29,11 +29,11 @@
 //! * **As the worktree's agent.** [`dispatch`] launches a PR SESSION
 //!   (`CreatePrAgent`, so the DAEMON finds or cuts the PR's worktree) named
 //!   `autofix-<n>` on the harness, account, model and effort of the session
-//!   that did the work on the branch ([`source_agent`]) — the **Autofix
-//!   fallback model** / **effort** only when there is none — its first
-//!   prompt [`prompt`]: the pull request and what failed, wrapped in the
-//!   **PR autofix** SYSTEM PRESET's text, or orion's own instructions while
-//!   that holds none.
+//!   that did the work on the branch ([`source_agent`]) — with none, the
+//!   default agent at the **PR autofix** SYSTEM PRESET's model and effort
+//!   — its first prompt [`prompt`]: the pull request and what failed,
+//!   wrapped in that preset's text, which is orion's own rules
+//!   ([`PRESET_TEXT`]) while it holds none of the user's.
 //! * **Standing down.** Another session live on the branch — mid-turn, or
 //!   waiting on the user — does not hold the agent back. It is told where
 //!   that session's conversation is ([`stand_down_preamble`]) and reads it
@@ -76,7 +76,7 @@ pub const SETTLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// asks.
 pub const AUTO_ATTEMPTS: u8 = 3;
 
-/// **Auto-fix PRs** (Settings → Review): on or off.
+/// **Auto-fix my PRs** (Settings → General): on or off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
@@ -813,17 +813,33 @@ impl PrRefs {
     }
 }
 
+/// orion's own text for the PR autofix SYSTEM PRESET, as `(prefix,
+/// postfix)`: the rules, then — after what broke — how to finish. What the
+/// agent is told while the preset holds none of the user's
+/// ([`crate::agent_presets::SystemPreset::builtin_text`]).
+pub const PRESET_TEXT: (&str, &str) = (
+    "You are orion's PR autofixer. Fix the pull request below so it can merge, and push the fix to its branch. Do not open a new pull request, force-push, merge it, or change unrelated code.
+
+Rules:
+- Fix only what is listed under \"Fix\" below.
+- Merge conflicts: fetch the base branch from origin and merge it. Resolve each conflict by understanding both sides' intent; never drop one side's work silently. Regenerate lockfiles and generated files rather than hand-merging them, and commit the merge.
+- Failing unit tests: read the failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`), reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
+- Failing e2e tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
+- Any other failing check (lint, typecheck, build): reproduce it locally and fix it.",
+    "Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.",
+);
+
 /// The agent's first prompt: the pull request and the ticked issues —
-/// with the failed checks behind each — and the user's note, under
-/// orion's own instructions, or between `preset`'s prefix and postfix in
-/// their place.
+/// with the failed checks behind each — and the user's note, between the
+/// PR autofix preset's prefix and postfix — orion's own
+/// ([`PRESET_TEXT`]) while it holds none of the user's.
 pub fn prompt(
     pr: &OpenPr,
     refs: &PrRefs,
     diagnosis: &Diagnosis,
     picks: &Picks,
     note: &str,
-    preset: Option<&AgentPreset>,
+    preset: &AgentPreset,
 ) -> String {
     let base = match refs.base.as_str() {
         "" => "the base branch".to_string(),
@@ -833,33 +849,10 @@ pub fn prompt(
         .into_iter()
         .filter(|i| picks[i.index()])
         .collect();
-    let context = context(pr, refs, diagnosis, &ticked, &base, note);
-    let parts: Vec<String> = match preset {
-        Some(preset) => vec![preset.prefix.clone(), context, preset.postfix.clone()],
-        None => {
-            let mut parts = vec![format!(
-                "You are orion's PR autofixer. Fix the issues below on this pull request, then commit and push to its branch. Do not open a new pull request, force-push, merge the PR, or change unrelated code.\n\n{context}"
-            )];
-            parts.extend(ticked.iter().map(|issue| {
-                format!(
-                    "## {}\n{}",
-                    issue.heading(),
-                    instructions(*issue, &base, pr.number)
-                )
-            }));
-            parts.push(format!(
-                "When everything above passes locally, run the relevant suites once more, commit with a message that says what you fixed, and `git push`. Then `gh pr checks {n} --watch`; if a check you were asked to fix fails again, go round once more (at most twice). Finish with a short summary: what you changed, and anything you could not fix and why.",
-                n = pr.number
-            ));
-            parts
-        }
-    };
-    parts
-        .into_iter()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    preset
+        .clone()
+        .with_builtin_text()
+        .compose(&context(pr, refs, diagnosis, &ticked, &base, note))
 }
 
 /// What the agent is pointed at: the pull request, its branches, each
@@ -919,20 +912,6 @@ fn check_line(check: &PrCheck) -> String {
         line.push_str(&format!(" {}", check.url));
     }
     line
-}
-
-/// orion's own instructions for one ticked issue, under its heading.
-fn instructions(issue: Issue, base: &str, number: u64) -> String {
-    match issue {
-        Issue::Conflicts => format!(
-            "Fetch and merge {base} from origin. Resolve each conflict by understanding both sides' intent; never drop one side's work silently. Regenerate lockfiles and generated files rather than hand-merging them. Build, run the tests that cover the conflicted files, and commit the merge."
-        ),
-        Issue::Unit => format!(
-            "Read the failure logs (`gh pr checks {number}`, then `gh run view <run-id> --log-failed`). Reproduce each failure locally with this repo's test command, fix the code (change a test only when this PR intentionally changed the behaviour it checks), and re-run until they pass."
-        ),
-        Issue::E2e => "Pull the failing test names out of the CI logs, run exactly those tests locally with this repo's e2e command, fix, and re-run until they pass. Run a test that now passes 3 times to rule out flakiness. If a test fails only in CI and passes reliably locally, say so rather than guessing at a fix.".to_string(),
-        Issue::Other => "Reproduce each locally (lint, typecheck, build — whatever the check runs), fix, and re-run until it passes.".to_string(),
-    }
 }
 
 // ---- the form ----
@@ -1083,7 +1062,7 @@ fn close(app: &mut App) -> Option<AutofixForm> {
 
 /// Send the agent: a PR SESSION named `autofix-<n>`, on the harness,
 /// account, model and effort of the session that did the work on the
-/// branch ([`source_agent`]) — the Autofix fallbacks without one — told
+/// branch ([`source_agent`]) — the PR autofix preset's without one — told
 /// [`prompt`], under [`stand_down_preamble`] while other sessions are live
 /// there. The ledger counts it and the PR stops being watched.
 pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) {
@@ -1093,6 +1072,9 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         ));
         return;
     };
+    // The PR autofix SYSTEM PRESET: its text, and the model and effort
+    // the agent runs at when there is no session to copy.
+    let preset = crate::agent_presets::system(crate::agent_presets::SystemPreset::PrAutofix);
     let (kind, custom, model, effort) = match source_agent(app, &form.project, &form.pr) {
         Some(a) => (
             a.kind,
@@ -1100,20 +1082,15 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
             a.model.clone(),
             a.effort.clone(),
         ),
-        None => crate::config::Config::load().autofix_launch(),
+        None => crate::config::Config::load().autofix_launch(&preset),
     };
-    // The PR autofix SYSTEM PRESET's text, or orion's own while it has none.
-    let preset = Some(crate::agent_presets::system(
-        crate::agent_presets::SystemPreset::PrAutofix,
-    ))
-    .filter(AgentPreset::has_wrapping);
     let task = prompt(
         &form.pr,
         &form.refs,
         &form.diagnosis,
         &form.picks,
         form.note.as_str(),
-        preset.as_ref(),
+        &preset,
     );
     let text = [stand_down_preamble(&form.peers, &form.pr), task]
         .into_iter()
@@ -1544,8 +1521,17 @@ mod tests {
         assert_ne!(a.fingerprint("x"), a.fingerprint("y"));
     }
 
+    /// The PR autofix preset as a list that never touched it holds it:
+    /// orion's own text.
+    fn orions() -> AgentPreset {
+        crate::agent_presets::SystemPreset::PrAutofix.default_preset()
+    }
+
+    /// The prompt names only what is ticked, between orion's rules and how
+    /// to finish: fix only what is listed, re-run only the failed e2e specs,
+    /// push, and watch the PR until it is green.
     #[test]
-    fn the_prompt_says_only_what_is_ticked() {
+    fn the_prompt_says_only_what_is_ticked_under_orions_rules() {
         let detail = detail(true, vec![check("e2e", "", CheckState::Failed)]);
         let text = prompt(
             &pr(),
@@ -1553,30 +1539,40 @@ mod tests {
             &diag(&detail),
             &[false, false, true, false],
             "flaky on CI",
-            None,
+            &orions(),
         );
+        assert!(text.starts_with("You are orion's PR autofixer."), "{text}");
         assert!(text.contains("https://github.com/o/r/pull/7"));
         assert!(text.contains("`feat` into `main`"));
-        assert!(text.contains("## Failing e2e tests"));
         assert!(text.contains("https://ci/e2e"));
         assert!(text.contains("Note from the user: flaky on CI"));
-        assert!(!text.contains("## Merge conflicts"));
-        assert!(!text.contains("## Failing unit tests"));
+        let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Note from the user").unwrap()];
+        assert!(fix.contains("- Failing e2e tests:"), "{fix}");
+        assert!(!fix.contains("- Merge conflicts"), "{fix}");
+        assert!(!fix.contains("- Failing unit tests"), "{fix}");
+        for rule in [
+            "Fix only what is listed",
+            "re-run only those specs locally, never the full suite — unless earlier attempts failed the same way",
+            "reproduce each failing test locally",
+            "`gh pr checks --watch` until it is green",
+        ] {
+            assert!(text.contains(rule), "{rule}:\n{text}");
+        }
+        let at = |needle: &str| text.find(needle).unwrap();
+        assert!(at("Rules:") < at("Pull request:"), "the rules lead");
+        assert!(
+            at("Note from the user") < at("git push"),
+            "finishing ends it"
+        );
     }
 
     #[test]
-    fn a_preset_replaces_the_instructions_but_keeps_the_context() {
+    fn a_preset_replaces_orions_text_but_keeps_the_context() {
         let detail = detail(true, Vec::new());
         let preset = AgentPreset {
-            name: "mine".into(),
-            kind: orion_core::AgentKind::Claude,
-            custom_harness: None,
-            model: None,
-            effort: None,
             prefix: "Do it my way.".into(),
             postfix: "Then push.".into(),
-            skip_task: true,
-            system: None,
+            ..orions()
         };
         let text = prompt(
             &pr(),
@@ -1584,7 +1580,7 @@ mod tests {
             &diag(&detail),
             &[true, false, false, false],
             "",
-            Some(&preset),
+            &preset,
         );
         assert!(text.starts_with("Do it my way."));
         assert!(text.ends_with("Then push."));

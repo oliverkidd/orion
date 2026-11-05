@@ -27,10 +27,10 @@ pub struct AgentPreset {
     /// Registry id when `kind` is [`AgentKind::Custom`].
     #[serde(default)]
     pub custom_harness: Option<String>,
-    /// Launch model; None = follow the Settings → Agents default.
+    /// Launch model; None = follow the Settings → Accounts default.
     #[serde(default)]
     pub model: Option<String>,
-    /// Launch effort; None = follow the Settings → Agents default.
+    /// Launch effort; None = follow the Settings → Accounts default.
     #[serde(default)]
     pub effort: Option<String>,
     /// Text sent before the task (may be empty).
@@ -45,27 +45,38 @@ pub struct AgentPreset {
     #[serde(default)]
     pub skip_task: bool,
     /// A SYSTEM PRESET: one orion itself reads its text from — the PR
-    /// autofix agent's, a Linear ticket launch's. Every list has one of
-    /// each ([`ensure_system`]); its text can be edited, but it cannot be
-    /// deleted or renamed. None on a preset the user made.
+    /// autofix agent's, a Linear ticket launch's, the week review's. Every
+    /// list has one of each ([`ensure_system`]); its text can be edited,
+    /// but it cannot be deleted or renamed, and it is never blank: the
+    /// list holds nothing while it says what orion says
+    /// ([`AgentPreset::with_builtin_text`]). None on a preset the user made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemPreset>,
 }
 
-/// The SYSTEM PRESETS: what orion reads each one's text for.
+/// The SYSTEM PRESETS: the agents orion starts itself, and what it reads
+/// each one's text, harness, model and effort for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemPreset {
     /// The text around what broke, for the agent AUTOFIX sends to a pull
-    /// request (`crate::autofix::prompt`). Empty: orion's built-in
-    /// instructions.
+    /// request (`crate::autofix::prompt`); its model and effort are what
+    /// that agent runs at when no session on the branch has run here to
+    /// copy. It runs on the pull request's own agent.
     PrAutofix,
     /// The text around a Linear ticket launch's issues (`crate::linear`).
     LinearTicket,
+    /// The rules a WEEK REVIEW is written by (`crate::week_review`), and
+    /// the Claude account, model and effort that write it.
+    WeekReview,
 }
 
 impl SystemPreset {
-    pub const ALL: [SystemPreset; 2] = [SystemPreset::PrAutofix, SystemPreset::LinearTicket];
+    pub const ALL: [SystemPreset; 3] = [
+        SystemPreset::PrAutofix,
+        SystemPreset::LinearTicket,
+        SystemPreset::WeekReview,
+    ];
 
     /// The name the preset is listed under, and the name an older list's
     /// own preset is adopted by.
@@ -73,18 +84,36 @@ impl SystemPreset {
         match self {
             SystemPreset::PrAutofix => "PR autofix",
             SystemPreset::LinearTicket => "Linear Ticket",
+            SystemPreset::WeekReview => "Week review",
         }
     }
 
-    /// The preset as a list that never had one gets it: no text, so the
-    /// launch it is for says what orion always said.
+    /// orion's own text for the preset, as `(prefix, postfix)`: what it
+    /// says while the list holds none of the user's.
+    pub fn builtin_text(self) -> (&'static str, &'static str) {
+        match self {
+            SystemPreset::PrAutofix => crate::autofix::PRESET_TEXT,
+            SystemPreset::LinearTicket => (crate::linear::TICKET_TEXT, ""),
+            SystemPreset::WeekReview => (crate::week_review::brief_rules(), ""),
+        }
+    }
+
+    /// The preset as a list that never had one gets it: orion's text, and
+    /// — the week review's — Claude at sonnet · medium.
     pub fn default_preset(self) -> AgentPreset {
+        let (model, effort) = match self {
+            SystemPreset::WeekReview => (
+                Some(crate::week_review::DEFAULT_MODEL.into()),
+                Some(crate::week_review::DEFAULT_EFFORT.into()),
+            ),
+            _ => (None, None),
+        };
         AgentPreset {
             name: self.name().into(),
             kind: AgentKind::default(),
             custom_harness: None,
-            model: None,
-            effort: None,
+            model,
+            effort,
             prefix: String::new(),
             postfix: String::new(),
             skip_task: false,
@@ -115,20 +144,38 @@ pub fn ensure_system(presets: &mut Vec<AgentPreset>) -> bool {
     changed
 }
 
-/// The list as stored, with its SYSTEM PRESETS made sure of and saved
-/// when that changed it: run once as orion starts, so the presets list
-/// shows them from then on.
+/// The list as stored, with its SYSTEM PRESETS made sure of — and the
+/// settings an older release kept in `config.json` for the agents they
+/// carry moved onto them ([`crate::config::Config::move_into_presets`]) —
+/// saved when that changed it: run once as orion starts, so the presets
+/// list shows them from then on. The moved keys leave `config.json` only
+/// once the presets holding them are saved.
 pub fn seed_system() {
     let mut presets = load();
-    if ensure_system(&mut presets) {
-        if let Err(err) = save(&presets) {
-            tracing::warn!(%err, "couldn't save the system presets");
+    let mut cfg = crate::config::Config::load();
+    let review = SystemPreset::WeekReview;
+    let new_review = !presets
+        .iter()
+        .any(|p| p.system == Some(review) || p.name.trim().eq_ignore_ascii_case(review.name()));
+    let added = ensure_system(&mut presets);
+    let moved = cfg.move_into_presets(&mut presets, new_review);
+    if !added && !moved {
+        return;
+    }
+    if let Err(err) = save(&presets) {
+        tracing::warn!(%err, "couldn't save the system presets");
+        return;
+    }
+    if moved {
+        if let Err(err) = cfg.try_save() {
+            tracing::warn!(%err, "couldn't drop the settings the system presets took");
         }
     }
 }
 
 /// SYSTEM PRESET `which` as the list holds it — or as it would once
-/// [`ensure_system`] ran, for a list that has not been seeded yet.
+/// [`ensure_system`] ran, for a list that has not been seeded yet. Its
+/// text as stored: blank while it is orion's ([`AgentPreset::with_builtin_text`]).
 pub fn system(which: SystemPreset) -> AgentPreset {
     let mut presets = load();
     ensure_system(&mut presets);
@@ -139,6 +186,32 @@ pub fn system(which: SystemPreset) -> AgentPreset {
 }
 
 impl AgentPreset {
+    /// The preset with the text it sends: a SYSTEM PRESET whose list holds
+    /// no text of the user's says orion's ([`SystemPreset::builtin_text`]),
+    /// so it is never blank. Any other preset as it is.
+    pub fn with_builtin_text(mut self) -> Self {
+        if let Some(which) = self.system.filter(|_| !self.has_wrapping()) {
+            let (prefix, postfix) = which.builtin_text();
+            self.prefix = prefix.into();
+            self.postfix = postfix.into();
+        }
+        self
+    }
+
+    /// The preset as the list should hold it: a SYSTEM PRESET whose text
+    /// is orion's word for word holds none — so it follows orion's text
+    /// when that changes — and clearing it is the way back to orion's.
+    pub fn without_builtin_text(mut self) -> Self {
+        if let Some(which) = self.system {
+            let (prefix, postfix) = which.builtin_text();
+            if self.prefix.trim() == prefix.trim() && self.postfix.trim() == postfix.trim() {
+                self.prefix.clear();
+                self.postfix.clear();
+            }
+        }
+        self
+    }
+
     /// `claude · opus · high` / `codex · gpt-5.5` / `cursor` — the kind plus
     /// whichever of model and effort the preset pins; a CLAUDE ACCOUNT's
     /// email in place of the kind on a machine with more than one.
@@ -185,7 +258,7 @@ impl AgentPreset {
 
 /// Which side of the task a preset's text goes: a PREFIX before it, a
 /// POSTFIX after it, or both. The PRESET EDITOR shows one box per side —
-/// its Text row picks — and **Preset text** (Settings → Sessions,
+/// its Text row picks — and `preset_text` (a hand-edited key,
 /// [`crate::config::Config::preset_text`]) is what a new preset starts on:
 /// prefix alone by default, the framing most people reach for and one box
 /// to fill. Never stored on the preset — a side is what it holds, so the
@@ -373,8 +446,9 @@ mod tests {
     }
 
     /// A list with its own "PR autofix" keeps it, text and all, as the
-    /// system preset; the Linear one it lacks is added empty; a second
-    /// pass changes nothing; and the tag survives the file.
+    /// system preset; the Linear and Week review ones it lacks are added
+    /// on orion's text — the review's on sonnet · medium; a second pass
+    /// changes nothing; and the tag survives the file.
     #[test]
     fn system_presets_adopt_a_preset_by_name_and_fill_in_the_rest() {
         let (_dir, path) = store();
@@ -387,11 +461,20 @@ mod tests {
         ];
         assert!(ensure_system(&mut presets));
         let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["pr AUTOFIX", "reviewer", "Linear Ticket"]);
+        assert_eq!(
+            names,
+            ["pr AUTOFIX", "reviewer", "Linear Ticket", "Week review"]
+        );
         assert_eq!(presets[0].system, Some(SystemPreset::PrAutofix));
         assert_eq!(presets[0].prefix, "Fix it my way.", "the user's text kept");
         assert_eq!(presets[2].system, Some(SystemPreset::LinearTicket));
-        assert!(!presets[2].has_wrapping());
+        assert!(!presets[2].has_wrapping(), "orion's text is kept as none");
+        let review = &presets[3];
+        assert_eq!(review.system, Some(SystemPreset::WeekReview));
+        assert_eq!(
+            (review.model.as_deref(), review.effort.as_deref()),
+            (Some("sonnet"), Some("medium"))
+        );
         assert!(!ensure_system(&mut presets), "once is enough");
 
         save_to(&path, &presets).unwrap();
@@ -401,6 +484,51 @@ mod tests {
         assert!(
             !raw.contains(r#""system": null"#),
             "a user's preset has none"
+        );
+    }
+
+    /// A system preset is never blank: one holding no text says orion's,
+    /// one holding the user's says theirs; and its text saved as orion's
+    /// word for word, or cleared, is kept as nothing — so it follows
+    /// orion's text when that changes. A user's preset is left alone.
+    #[test]
+    fn a_system_preset_always_holds_text_and_clearing_it_restores_orions() {
+        for which in SystemPreset::ALL {
+            let blank = which.default_preset();
+            let (prefix, postfix) = which.builtin_text();
+            assert!(!prefix.trim().is_empty(), "{which:?} has text of orion's");
+            let shown = blank.clone().with_builtin_text();
+            assert_eq!(
+                (shown.prefix.as_str(), shown.postfix.as_str()),
+                (prefix, postfix)
+            );
+            assert!(shown.has_wrapping());
+            assert_eq!(shown.clone().without_builtin_text(), blank, "kept as none");
+            let cleared = AgentPreset {
+                prefix: "  ".into(),
+                postfix: String::new(),
+                ..shown
+            };
+            assert_eq!(
+                cleared.with_builtin_text().prefix,
+                prefix,
+                "clearing it puts orion's back"
+            );
+            let own = AgentPreset {
+                prefix: "Mine.".into(),
+                ..blank
+            };
+            assert_eq!(own.clone().with_builtin_text(), own);
+            assert_eq!(own.clone().without_builtin_text(), own);
+        }
+        let users = AgentPreset {
+            prefix: crate::linear::TICKET_TEXT.into(),
+            ..preset("mine", AgentKind::Claude)
+        };
+        assert_eq!(users.clone().without_builtin_text(), users);
+        assert_eq!(
+            preset("mine", AgentKind::Claude).with_builtin_text().prefix,
+            ""
         );
     }
 

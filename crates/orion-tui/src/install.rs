@@ -4,7 +4,7 @@
 //! ghostty`), the vendor's documented command for an agent (`curl -fsSL
 //! https://claude.ai/install.sh | bash`).
 //!
-//! The onboarding wizard's Agents page and its App step, the SETTINGS
+//! Setup's Claude page (the Claude CLI), the SETTINGS
 //! OVERLAY's CLAUDE ACCOUNTS and harness rows, and the footer's word that
 //! fresh is missing share it: `i` on a program that isn't on PATH shows its [`Plan`] — the line it
 //! would run — and Enter runs that line in the editor modal's PTY, the
@@ -148,7 +148,7 @@ fn brew_plan(
     }
 }
 
-/// The command-line tools the Tools tab lists besides the editors: git,
+/// The command-line tools `orion doctor` checks besides the editors: git,
 /// which orion can't work without, and gh, for pull requests —
 /// each one's Homebrew formula and install page.
 pub const CLIS: &[(&str, &str, &str)] = &[
@@ -162,7 +162,7 @@ pub fn cli_plan(program: &str, brew: Option<&Path>) -> Option<Plan> {
     Some(brew_plan(program, formula, false, link, brew))
 }
 
-/// The **Open in app** editors orion can install on a Mac: the word the
+/// The **Open files in** editors orion can install on a Mac: the word the
 /// setting stores, Homebrew's cask for it, and its download page.
 const APPS: &[(&str, &str, &str)] = &[
     ("cursor", "cursor", "https://cursor.com/download"),
@@ -178,7 +178,7 @@ const APPS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// The **Open in app** app `program` names, when it names one of [`APPS`].
+/// The **Open files in** app `program` names, when it names one of [`APPS`].
 fn outside_app(program: &str) -> Option<crate::outside_editor::App> {
     APPS.iter().find(|(word, _, _)| *word == program)?;
     match crate::outside_editor::Choice::parse(program) {
@@ -187,7 +187,7 @@ fn outside_app(program: &str) -> Option<crate::outside_editor::App> {
     }
 }
 
-/// How the **Open in app** choice `word` gets onto a Mac: its cask. None
+/// How the **Open files in** choice `word` gets onto a Mac: its cask. None
 /// for `auto`.
 pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
     let (word, cask, link) = APPS.iter().find(|(name, _, _)| *name == word)?;
@@ -370,7 +370,7 @@ pub fn settings_row_plan(
     tools: &Tools,
 ) -> Option<Plan> {
     use crate::config::{AccountRow, HarnessField, SettingKind};
-    if tab == crate::config::agents_tab() {
+    if tab == crate::config::accounts_tab() {
         let id = match (cfg.account_row(index), cfg.agent_row(index)) {
             (Some(AccountRow::Account(id)), _) => id,
             (None, Some((id, HarnessField::Enabled))) => id,
@@ -387,8 +387,6 @@ pub fn settings_row_plan(
             let word = cfg.outside_editor.trim();
             (!installed(word)).then(|| tools.app_plan(word)).flatten()
         }
-        SettingKind::Git => (!installed("git")).then(|| tools.cli_plan("git")).flatten(),
-        SettingKind::Gh => (!installed("gh")).then(|| tools.cli_plan("gh")).flatten(),
         _ => None,
     }
 }
@@ -562,7 +560,7 @@ mod tests {
         assert_eq!(page.link, "https://ghostty.org/download");
     }
 
-    /// The Tools tab's command-line rows and Open in app apps install by
+    /// The command-line tools and the editor apps install by
     /// Homebrew, or name their page without it.
     #[test]
     fn tools_rows_install_by_homebrew() {

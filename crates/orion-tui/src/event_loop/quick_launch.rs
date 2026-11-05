@@ -57,17 +57,15 @@ pub(super) fn submit(
     } else {
         reveal_pane(app);
     }
-    // The box is the one launch that stays out of the way by default:
-    // `p`, type, Enter, keep working — on the card you were on, or, with
-    // FOLLOW NEW SESSION on, with the new session in the pane, the keys
-    // still on the cards — unless the `quick_prompt_focus` SETTING says to take
-    // the pane, as a picker-walked launch (`n`) does.
-    let focus_pane = !stay && cfg.quick_prompt_focus;
+    // The box is the one launch that stays out of the way: `p`, type,
+    // Enter, keep working — on the card you were on, or, with FOLLOW NEW
+    // SESSION on, with the new session in the pane, the keys still on the
+    // cards.
     match launch.target.clone() {
         QuickTarget::Worktree(worktree) => {
             let draft = AgentLaunchDraft {
                 follow: !stay,
-                ..draft(launch, worktree, text, focus_pane, None)
+                ..draft(launch, worktree, text, None)
             };
             create_agent(app, draft, out)
         }
@@ -97,7 +95,7 @@ pub(super) fn submit(
                 out,
             );
 
-            // `base: None` is the DAEMON's `worktree_base_branch` SETTING,
+            // `base: None` is the project's **Base branch** (the DAEMON reads it),
             // else its fetched `origin/HEAD` (`git::add_worktree_off_default`)
             // — never this checkout's HEAD. An `existing` branch (a WORKTREE
             // PICKER branch row) is checked out as it is instead.
@@ -108,7 +106,6 @@ pub(super) fn submit(
                     launch,
                     text,
                     placeholder,
-                    focus: focus_pane,
                 },
                 !stay,
                 |req_id| ClientRequest::CreateWorktree {
@@ -126,8 +123,7 @@ pub(super) fn submit(
 /// What every launch the screen follows does at once: the new session is
 /// put where it can be seen without the keys going with it. The PANE
 /// beside the grid unfolds if `^~` had folded it away; the Ack lands the
-/// cursor on the new card, inside its worktree. Where FOCUS goes is
-/// `focus_pane`'s alone (`quick_prompt_focus`).
+/// cursor on the new card, inside its worktree, FOCUS staying where it is.
 fn reveal_pane(app: &mut App) {
     app.launcher_pane_hidden = false;
     app.dirty = true;
@@ -138,12 +134,9 @@ fn reveal_pane(app: &mut App) {
 /// is a session in front of the user to keep there: a launch fired from
 /// a session card — one under the grid's cursor, read in the pane. With
 /// no card aimed at, or on an empty band, there is nothing to lose and
-/// the cursor lands on the new session as it always has. A box that
-/// enters the new session's pane (`quick_prompt_focus`) has to go there,
-/// so that SETTING on outranks this.
+/// the cursor lands on the new session as it always has.
 fn stays_put(app: &App, cfg: &crate::config::Config) -> bool {
     !cfg.follow_new_session
-        && !cfg.quick_prompt_focus
         && !app.launcher_unaimed
         && app
             .selected_session_row()
@@ -181,9 +174,7 @@ fn announce_background(app: &mut App, target: &QuickTarget) {
 /// The Ack for that `CreateWorktree`: `worktree` exists now, launch there.
 /// Without `follow` — the user navigated away while the checkout was cut
 /// (`App::left_behind`) — the launch still goes out, but no cursor moves
-/// back onto the row, now or at the session's own Ack. `focus` is the
-/// pane the box's Enter settled on (`submit`).
-#[allow(clippy::too_many_arguments)]
+/// back onto the row, now or at the session's own Ack.
 pub(super) fn launch_in_created_worktree(
     app: &mut App,
     mut launch: QuickLaunch,
@@ -191,7 +182,6 @@ pub(super) fn launch_in_created_worktree(
     placeholder: PlaceholderRows,
     worktree: WorktreeId,
     follow: bool,
-    focus: bool,
     out: &mut Vec<ClientRequest>,
 ) {
     // The stand-in checkout becomes the real one — its session row moves
@@ -200,9 +190,7 @@ pub(super) fn launch_in_created_worktree(
     if follow {
         // The new row is the context every later `p` / `n` runs in, so the
         // cursor moves onto it — but FOCUS stays on the panel `p` was
-        // pressed in, as every QUICK PROMPT launch leaves it
-        // (`quick_prompt_focus` decides the pane, in `create_agent`'s
-        // intent, not here).
+        // pressed in, as every QUICK PROMPT launch leaves it.
         let focus = app.focus;
         if !select_worktree_by_id(app, &worktree, out) {
             app.select_worktree_when_seen = Some(worktree.clone());
@@ -220,7 +208,7 @@ pub(super) fn launch_in_created_worktree(
         app,
         AgentLaunchDraft {
             follow,
-            ..draft(launch, worktree, text, focus, Some(placeholder.agent))
+            ..draft(launch, worktree, text, Some(placeholder.agent))
         },
         out,
     );
@@ -229,12 +217,12 @@ pub(super) fn launch_in_created_worktree(
 /// The create itself, the same on both routes. An empty name opts the
 /// row into AUTO-TITLE, so the session names itself from the very prompt
 /// that started it, and the box comes back with the text should the
-/// DAEMON refuse. `focus_pane` is whether the Ack takes the pane.
+/// DAEMON refuse. Its Ack never takes the pane: FOCUS stays where the box
+/// was opened from.
 pub(super) fn draft(
     launch: QuickLaunch,
     worktree: WorktreeId,
     text: String,
-    focus_pane: bool,
     placeholder: Option<AgentId>,
 ) -> AgentLaunchDraft {
     let base = AgentLaunchDraft::new(
@@ -256,7 +244,7 @@ pub(super) fn draft(
         pr: launch.pr.clone(),
         mode: launch.mode,
         reopen_on_error: Some((PromptKind::QuickPrompt(launch), text)),
-        focus_pane,
+        focus_pane: false,
         placeholder,
         ..base
     }

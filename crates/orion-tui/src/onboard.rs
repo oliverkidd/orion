@@ -1,10 +1,11 @@
-//! First-run ONBOARDING: a short setup over the empty grid — the agents to
-//! turn on (and install), their Claude accounts, the editors, worktree
-//! defaults, Linear and autofix — ending on what was chosen and the keys
-//! to press next. On a Mac, anywhere but in its own app, it starts on the APP
-//! STEP, which reopens orion in Orion.app (`app_bundle`). Opened once from
-//! `main_loop` while `config.onboarded` is still false; Esc / a click
-//! outside skips and stamps the flag so it does not come back.
+//! First-run SETUP: four pages over the empty grid — Welcome; Claude, its
+//! CLI and the accounts to sign in; the first project, with the branch
+//! its worktrees start from and its run command; and Ready, the keys that
+//! matter. Opened once from `main_loop` while `config.onboarded` is still
+//! false, and again from the palette's **Run setup** and `orion setup`;
+//! Esc / a click outside skips and stamps the flag so it does not come
+//! back. WHAT'S NEW, after an upgrade, is a sheet of its own
+//! (`crate::whats_new`), drawn in the same frame ([`draw_sheet`]).
 //!
 //! Every page is one modal laid out the way every modal is (docs/keys.md,
 //! "How the screen is laid out"): the STEP STRIP across its top names each
@@ -14,9 +15,9 @@
 //! bottom border; and on that border the keys, from the [`keys`] table the
 //! handler matches. The modal is as tall as its page, within the screen.
 //!
-//! A program a row names that isn't on PATH — an agent's CLI, an editor —
-//! says `install…`, and `i` there shows the command that installs it and
-//! runs it on Enter, in the editor modal (`install`).
+//! The Claude CLI, while it isn't on PATH, says `install…`, and `i` shows
+//! the command that installs it and runs it on Enter, in the editor modal
+//! (`install`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -27,234 +28,82 @@ use ratatui::Frame;
 
 use crate::app::{App, Overlay};
 use crate::claude_accounts::NewAccount;
-use crate::config::{
-    program_installed, AccountRow, Config, SettingKind, SettingSpec, LINEAR_SETTINGS,
-};
+use crate::config::{persist, program_installed, AccountRow, Config, SettingKind};
 use crate::install::{Plan, Tools};
 use crate::keymap::{Action, Keymap};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::centered_rect;
+use orion_core::protocol::ClientRequest;
 
 /// One page of the wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
-    /// WHAT'S NEW: the releases since the last one this machine ran, ahead
-    /// of the setup steps they added — after an upgrade only.
-    WhatsNew,
     Welcome,
-    Agents,
-    /// CLAUDE ACCOUNTS: sign the default account in, add another.
-    Accounts,
-    /// The BUILT-IN EDITOR files open in, and the app `⌘O` hands them to.
-    Editor,
-    Worktrees,
-    Linear,
-    /// AUTOFIX: what happens when one of your pull requests breaks.
-    Autofix,
-    /// The APP STEP, first while orion runs anywhere but its own app on a
-    /// Mac that has the Ghostty the app is made from: Enter reopens orion
-    /// in Orion.app (`app_bundle`).
-    App,
+    /// CLAUDE: the CLI, then every account — sign each in, add one.
+    Claude,
+    /// FIRST PROJECT: the repo, its base branch and run command.
+    Project,
     Ready,
 }
 
-/// The SETUP VERSION: bumped by a release that adds a step, so a machine
-/// that went through an older setup is shown the new steps on its next
-/// launch ([`pending`]). Each page says which version brought it.
-pub const SETUP_VERSION: u32 = 5;
+/// The wizard's pages, in order.
+const PAGES: [Page; 4] = [Page::Welcome, Page::Claude, Page::Project, Page::Ready];
 
 impl Page {
-    /// The SETUP VERSION this page's offer arrived in. The App step is
-    /// 5's. It was 4's, where it stood behind WHAT'S NEW and one Esc on
-    /// the notes dismissed it unseen; a machine that went through 4 is
-    /// shown it again, in front. The installed orion never reaches it on a
-    /// Mac with Ghostty — a bare `orion` opens the app before setup runs
-    /// (`app_bundle::opens_in_app`) — so it is what is left for an orion
-    /// that stayed in a terminal: the app would not open, or it was told
-    /// to stay.
-    fn added(self) -> u32 {
-        match self {
-            Page::App => 5,
-            Page::Autofix => 3,
-            _ => 1,
-        }
-    }
-
-    /// Whether a page has anything to offer this machine: the App step
-    /// only on a Mac, to an orion not already in its app.
-    fn offered(self) -> bool {
-        match self {
-            Page::App => crate::app_bundle::can_move(),
-            _ => true,
-        }
-    }
-
     /// Its name on the STEP STRIP.
     fn label(self) -> &'static str {
         match self {
-            Page::WhatsNew => "What's new",
             Page::Welcome => "Welcome",
-            Page::Agents => "Agents",
-            Page::Accounts => "Accounts",
-            Page::Editor => "Editor",
-            Page::Worktrees => "Worktrees",
-            Page::Linear => "Linear",
-            Page::Autofix => "Autofix",
-            Page::App => "App",
+            Page::Claude => "Claude",
+            Page::Project => "First project",
             Page::Ready => "Ready",
         }
     }
 }
 
-/// The wizard's pages, in order: the APP STEP first while it is
-/// offered, so nothing is set up twice; the CLAUDE ACCOUNTS step right
-/// after Agents while a Claude account is on there — with Claude off there
-/// is nothing to sign in. Accounts are switched on and off on the Agents
-/// page only, so the list never changes under the page the wizard is on.
-fn pages(cfg: &Config) -> Vec<Page> {
-    let claude = cfg
-        .raw_harness_registry()
-        .iter()
-        .any(|entry| entry.is_claude_account() && entry.enabled);
-    [
-        Page::App,
-        Page::Welcome,
-        Page::Agents,
-        Page::Accounts,
-        Page::Editor,
-        Page::Worktrees,
-        Page::Linear,
-        Page::Autofix,
-        Page::Ready,
-    ]
-    .into_iter()
-    .filter(|page| *page != Page::Accounts || claude)
-    .filter(|page| page.offered())
-    .collect()
+/// The CLI every Claude account runs.
+const CLAUDE_CLI: &str = "claude";
+
+/// A row of the Claude page: the CLI, then the CLAUDE ACCOUNTS rows of
+/// Settings → Accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeRow {
+    Cli,
+    Account(AccountRow),
 }
 
-/// The pages a run of setup walks: all of them from `since` 0, else
-/// WHAT'S NEW while there are releases this machine has not seen, then
-/// the steps a later SETUP VERSION added that have something to offer
-/// here, and Ready to finish on after those. The App step, when it is one
-/// of them, leads even the notes: it reopens orion somewhere else, where
-/// setup carries on and the notes are read, and a step behind the notes
-/// is one Esc from never being seen.
-fn view_pages(cfg: &Config, since: u32) -> Vec<Page> {
-    let all = pages(cfg);
-    let news = !crate::whats_new::unseen(cfg).is_empty();
-    let mut out = Vec::new();
-    if news {
-        out.push(Page::WhatsNew);
-    }
-    // The whole wizard (Run setup) still shows notes not yet seen, rather
-    // than stamping them seen unread.
-    if since == 0 {
-        out.extend(all);
-    } else {
-        let steps: Vec<Page> = all
-            .into_iter()
-            .filter(|page| *page != Page::Ready && page.added() > since)
-            .collect();
-        if !steps.is_empty() || !news {
-            out.extend(steps);
-            out.push(Page::Ready);
-        }
-    }
-    if let Some(at) = out.iter().position(|page| *page == Page::App) {
-        out[..=at].rotate_right(1);
-    }
-    out
-}
-
-/// Whether setup should open at startup, and from which version: `Some(0)`
-/// for the whole wizard on a first run, `Some(v)` for the steps added since
-/// version `v`, `None` when there is nothing new. A newer setup with
-/// nothing to offer this machine is stamped seen here, quietly.
-pub fn pending(cfg: &Config) -> Option<u32> {
-    if !cfg.onboarded {
-        return Some(0);
-    }
-    // A config from before the version existed went through version 1.
-    let seen = cfg.setup_version.max(1);
-    if view_pages(cfg, seen) != [Page::Ready] {
-        return Some(seen);
-    }
-    // Nothing new to show: stamp it seen, quietly — and only when that
-    // changes something, so a launch with no news writes nothing.
-    if mark_seen(&mut cfg.clone()) {
-        persist(|cfg| {
-            mark_seen(cfg);
-        });
-    }
-    None
-}
-
-/// This build's setup steps and release notes, stamped seen. Whether
-/// anything moved.
-fn mark_seen(cfg: &mut Config) -> bool {
-    let steps = cfg.setup_version < SETUP_VERSION;
-    cfg.setup_version = cfg.setup_version.max(SETUP_VERSION);
-    crate::whats_new::stamp_seen(cfg) | steps
-}
-
-/// The Worktrees page's rows: Settings → General's, by kind.
-const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::WorktreeBaseBranch, SettingKind::LinkEnvFiles];
-
-/// The Autofix page's rows: Settings → Review's Autofix group.
-const AUTOFIX_ROWS: &[SettingKind] = &[
-    SettingKind::PrAutofix,
-    SettingKind::AutofixModel,
-    SettingKind::AutofixEffort,
-];
-
-/// The settings rows a page mirrors, in order — the overlay's own specs,
-/// so each row's label and explanation are its tab's word for word. The
-/// Linear page is the LINEAR TAB entire ([`LINEAR_SETTINGS`]).
-fn setting_rows(page: Page) -> Vec<&'static SettingSpec> {
-    let kinds = match page {
-        Page::Worktrees => WORKTREE_ROWS,
-        Page::Autofix => AUTOFIX_ROWS,
-        Page::Linear => return LINEAR_SETTINGS.iter().collect(),
-        _ => return Vec::new(),
-    };
-    kinds
-        .iter()
-        .filter_map(|kind| crate::config::spec_for(*kind))
+fn claude_rows(cfg: &Config) -> Vec<ClaudeRow> {
+    std::iter::once(ClaudeRow::Cli)
+        .chain(cfg.account_rows().into_iter().map(ClaudeRow::Account))
         .collect()
 }
 
-/// The Editor page's rows: the **Open in app** choices, by the word the
-/// setting stores. Files open in fresh, which has no choice to make.
-fn editor_rows() -> &'static [&'static str] {
-    crate::outside_editor::CHOICES
-}
+/// The First project page's rows under the project: its rows of
+/// Settings → Projects, by kind.
+const PROJECT_ROWS: &[SettingKind] = &[SettingKind::BaseBranch, SettingKind::RunCommand];
 
 /// The first-run wizard's live state. `area` is written back on draw so a
 /// click outside can dismiss it the same way Esc does.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OnboardView {
     pub page: usize,
     pub row: usize,
     pub area: Rect,
-    /// A typed row being edited in place — the worktree base branch, the
-    /// Linear page's account or task template — and its text so far.
+    /// A typed row being edited in place — the project's base branch or
+    /// run command — and its text so far.
     pub field: Option<(SettingKind, TextInput)>,
-    /// What the CLAUDE ACCOUNTS page is asking, when it is asking.
+    /// What the Claude page is asking, when it is asking.
     pub account: AccountStep,
     /// The install `i` asked about: its command, which Enter runs.
     pub install: Option<Plan>,
-    /// The SETUP VERSION this run shows the steps after: 0 for the whole
-    /// wizard ([`view_pages`]).
-    pub since: u32,
     /// The page's last word: an account added, a name refused, how an
     /// install went.
     pub note: Option<String>,
 }
 
-/// The CLAUDE ACCOUNTS page's questions, one at a time — the same flow
-/// as Settings → Agents: an email to sign in as, or a new account's name
+/// The Claude page's questions, one at a time — the same flow as
+/// Settings → Accounts: an email to sign in as, or a new account's name
 /// and then whether it shares the default account's setup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AccountStep {
@@ -271,19 +120,6 @@ pub enum AccountStep {
 }
 
 impl OnboardView {
-    pub fn new(_cfg: &Config) -> Self {
-        Self {
-            page: 0,
-            row: 0,
-            area: Rect::default(),
-            field: None,
-            account: AccountStep::Rows,
-            install: None,
-            note: None,
-            since: 0,
-        }
-    }
-
     /// Whether a field or a question has the keys, so Esc answers it
     /// rather than skipping the wizard.
     pub fn asking(&self) -> bool {
@@ -291,47 +127,46 @@ impl OnboardView {
     }
 
     /// The page the wizard stands on.
-    fn current(&self, cfg: &Config) -> Page {
-        let all = view_pages(cfg, self.since);
-        all[self.page.min(all.len() - 1)]
+    fn current(&self) -> Page {
+        PAGES[self.page.min(PAGES.len() - 1)]
     }
 }
 
-/// Open the wizard over whatever is up, showing the steps after SETUP
-/// VERSION `since` — 0 for all of them: at startup ([`pending`]), from
-/// the palette's **Run setup**, Settings' **Setup** row and `orion setup`.
-pub fn open(app: &mut App, cfg: &Config, since: u32) {
-    let mut view = OnboardView::new(cfg);
-    view.since = since;
-    app.overlay = Some(Overlay::Onboard(view));
+/// Open the wizard over whatever is up, on its first page: at startup
+/// while `onboarded` is false, from the palette's **Run setup** and from
+/// `orion setup`.
+pub fn open(app: &mut App) {
+    app.overlay = Some(Overlay::Onboard(OnboardView::default()));
     app.dirty = true;
 }
 
-/// Leave the wizard and remember it was seen, so the next launch goes
-/// straight to the grid. A test without a config path does not persist.
+/// Leave the wizard and remember it was seen — this build's release notes
+/// with it, so the next launch goes straight to the grid. A test without
+/// a config path does not persist.
 pub fn dismiss(app: &mut App) {
     app.overlay = None;
     app.dirty = true;
     persist(|cfg| {
         cfg.onboarded = true;
-        mark_seen(cfg);
+        crate::whats_new::stamp_seen(cfg);
     });
 }
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let Some(Overlay::Onboard(view)) = &mut app.overlay else {
         return;
     };
     if let Some((kind, input)) = &mut view.field {
         match key.code {
             KeyCode::Esc => view.field = None,
-            // Enter saves; a multi-row field's ⇧Enter breaks a line.
-            KeyCode::Enter if !input.takes_newline(&key) => {
+            KeyCode::Enter => {
                 let (kind, value) = (*kind, input.as_str().to_string());
                 view.field = None;
-                persist(|cfg| {
-                    cfg.set_text(kind, &value);
-                });
+                if let Some(repo) = app.selected_project().map(|p| p.repo_path.clone()) {
+                    persist(|cfg| {
+                        cfg.set_project_text(&repo, kind, &value);
+                    });
+                }
             }
             _ => {
                 input.handle_key(&key);
@@ -367,15 +202,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         _ if keys::SKIP.matches(&key) => dismiss(app),
-        _ if keys::NEXT_PAGE.matches(&key) => next(app),
-        _ if keys::PREV_PAGE.matches(&key) => prev(app),
+        _ if keys::NEXT_PAGE.matches(&key) => turn(app, 1),
+        _ if keys::PREV_PAGE.matches(&key) => turn(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_row(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_row(app, -1),
-        _ if keys::ENTER.matches(&key) => activate(app),
-        _ if keys::TOGGLE.matches(&key) => toggle(app),
-        _ if keys::INSTALL.matches(&key) => ask_install(app),
+        _ if keys::ENTER.matches(&key) => activate(app, out),
+        _ if keys::TOGGLE.matches(&key) => toggle(app, out),
+        _ if keys::INSTALL.matches(&key) && view.current() == Page::Claude => ask_install(app),
         _ => {}
     }
+}
+
+/// A click outside while a page asks something: the question goes, as Esc
+/// takes it back, and the wizard stays — what was typed is not worth
+/// skipping setup over.
+pub fn back_out(app: &mut App) {
+    set_view(app, |view| {
+        view.field = None;
+        view.account = AccountStep::Rows;
+        view.install = None;
+    });
 }
 
 /// The wizard's own keys: one table [`handle_key`] matches and [`hints`]
@@ -387,7 +233,7 @@ pub(crate) mod keys {
     pub const PREV_PAGE: Key = Key::new(&["left", "shift+tab", "h"], "back");
     pub const ENTER: Key = Key::new(&["enter"], "continue");
     pub const TOGGLE: Key = Key::new(&["space"], "toggle");
-    /// A program a row names that isn't on PATH: its installer.
+    /// The Claude CLI while it isn't on PATH: its installer.
     pub const INSTALL: Key = Key::new(&["i"], "install");
     pub const SKIP: Key = Key::new(&["esc"], "skip");
     /// The account question's answers.
@@ -409,18 +255,12 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
         ];
     }
     if let Some(plan) = &view.install {
-        let mut hints = Vec::new();
-        hints.push(
-            keys::ENTER
-                .hint_as(if plan.runnable() {
-                    "run it here"
-                } else {
-                    "open the page"
-                })
-                .kept(),
-        );
-        hints.push(back);
-        return hints;
+        let run = if plan.runnable() {
+            "run it here"
+        } else {
+            "open the page"
+        };
+        return vec![keys::ENTER.hint_as(run).kept(), back];
     }
     match &view.account {
         AccountStep::Rows => {}
@@ -433,43 +273,33 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
         AccountStep::Name(_) => return vec![keys::ENTER.hint_as("next").kept(), back],
         AccountStep::Share(_) => return vec![keys::YES.hint().kept(), keys::NO.hint(), back],
     }
-    let page = view.current(cfg);
+    let page = view.current();
     let mut hints = match page {
-        Page::WhatsNew => vec![keys::ENTER
-            .hint_as(if view_pages(cfg, view.since).len() == 1 {
-                "done"
-            } else {
-                "set up what's new"
-            })
-            .kept()],
         Page::Welcome => vec![keys::ENTER.hint_as("start").kept()],
-        Page::Agents => vec![
-            keys::TOGGLE.hint_as("on/off").kept(),
-            keys::ENTER.hint_as("model"),
-        ],
-        Page::Accounts => match cfg.account_rows().get(view.row) {
-            Some(AccountRow::Add) => vec![keys::ENTER.hint_as("add an account").kept()],
-            _ => vec![keys::ENTER.hint_as("sign in").kept()],
-        },
-        Page::Editor => vec![keys::ENTER.hint_as("choose").kept()],
-        Page::App => vec![keys::ENTER.hint_as("open as an app").kept()],
-        Page::Worktrees | Page::Linear | Page::Autofix => {
-            match setting_rows(page).get(view.row).map(|spec| spec.kind) {
-                Some(kind) if kind.is_status() => vec![keys::ENTER.hint_as("test").kept()],
-                Some(kind) if kind.is_text() => vec![keys::ENTER.hint_as("type it").kept()],
-                Some(kind) if is_switch(kind) => vec![keys::TOGGLE.hint().kept()],
-                _ => vec![keys::ENTER.hint_as("change").kept()],
+        Page::Claude => match claude_rows(cfg).get(view.row) {
+            Some(ClaudeRow::Cli) => vec![keys::ENTER.hint_as("check").kept()],
+            Some(ClaudeRow::Account(AccountRow::Add)) => {
+                vec![keys::ENTER.hint_as("add an account").kept()]
             }
-        }
+            _ => vec![
+                keys::ENTER.hint_as("sign in").kept(),
+                keys::TOGGLE.hint_as("on/off"),
+            ],
+        },
+        Page::Project => match view.row {
+            0 => vec![
+                keys::ENTER.hint_as("open a project").kept(),
+                keys::TOGGLE.hint_as("next project"),
+            ],
+            _ => vec![keys::ENTER.hint_as("type it").kept()],
+        },
         Page::Ready => vec![keys::ENTER.hint_as("start using Orion").kept()],
     };
-    if row_install(cfg, page, view.row).is_some() {
+    if page == Page::Claude && cli_plan().is_some() {
         hints.push(keys::INSTALL.hint());
     }
-    match page {
-        Page::Ready => {}
-        Page::App => hints.push(keys::NEXT_PAGE.hint_as("stay here")),
-        _ => hints.push(keys::NEXT_PAGE.hint()),
+    if page != Page::Ready {
+        hints.push(keys::NEXT_PAGE.hint());
     }
     if view.page > 0 {
         hints.push(keys::PREV_PAGE.hint());
@@ -478,163 +308,153 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
     hints
 }
 
-/// A row that is a plain on/off switch, which Space flips.
-fn is_switch(kind: SettingKind) -> bool {
-    matches!(
-        kind,
-        SettingKind::LinkEnvFiles | SettingKind::LinearAutoAttach
-    )
-}
-
-/// The program the row under the cursor names that isn't on PATH, and how
-/// it gets there — an agent's CLI. None on any
-/// other row, or when the program is there.
-fn row_install(cfg: &Config, page: Page, row: usize) -> Option<Plan> {
-    let tools = Tools::here();
-    match page {
-        Page::Agents => {
-            let program = cfg.harness_registry().get(row)?.program.clone();
-            (!program_installed(&program))
-                .then(|| tools.agent_plan(&program))
-                .flatten()
-        }
-        _ => None,
-    }
+/// How the Claude CLI gets onto PATH, while it isn't there.
+fn cli_plan() -> Option<Plan> {
+    (!program_installed(CLAUDE_CLI))
+        .then(|| Tools::here().agent_plan(CLAUDE_CLI))
+        .flatten()
 }
 
 /// What the row under the cursor does, for the EXPLANATION line above the
-/// keys: an agent's CLI and where it comes from, an editor's keys, the
-/// settings rows' own explanations (the overlay's word for word).
-fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
+/// keys.
+fn explanation(app: &App, cfg: &Config, view: &OnboardView) -> String {
     // The install question says it all, over the rows.
     if view.install.is_some() {
         return String::new();
     }
-    let page = view.current(cfg);
-    match page {
-        Page::Welcome | Page::App | Page::Ready => String::new(),
-        Page::WhatsNew if view_pages(cfg, view.since).len() > 1 => {
-            "↑/↓ walk the releases. Enter goes on to the setup steps they added.".into()
-        }
-        Page::WhatsNew => "↑/↓ walk the releases.".into(),
-        Page::Agents => agent_explanation(cfg, view.row),
-        Page::Accounts => cfg
-            .account_rows()
-            .get(view.row)
-            .map(|row| cfg.account_hint(row))
-            .unwrap_or_default(),
-        Page::Editor => editor_explanation(view.row, keymap),
-        Page::Worktrees | Page::Linear | Page::Autofix => setting_rows(page)
-            .get(view.row)
-            .map(|spec| crate::hints::expand(spec.hint, keymap))
-            .unwrap_or_default(),
+    match view.current() {
+        Page::Welcome | Page::Ready => String::new(),
+        Page::Claude => match claude_rows(cfg).get(view.row) {
+            Some(ClaudeRow::Cli) => cli_explanation(),
+            Some(ClaudeRow::Account(row)) => cfg.account_hint(row),
+            None => String::new(),
+        },
+        Page::Project => match view.row {
+            0 => project_explanation(app),
+            row => PROJECT_ROWS
+                .get(row - 1)
+                .and_then(|kind| crate::config::spec_for(*kind))
+                .map(|spec| crate::hints::expand(spec.hint, &app.keymap))
+                .unwrap_or_default(),
+        },
     }
 }
 
-fn agent_explanation(cfg: &Config, row: usize) -> String {
-    let Some(entry) = cfg.harness_registry().into_iter().nth(row) else {
-        return String::new();
-    };
-    let (label, program) = (entry.display_label(), entry.program.trim());
-    if program_installed(program) {
-        return format!(
-            "{label} runs `{program}`. On, it is offered whenever you start an agent; {} steps its \
-             default model",
-            keys::ENTER.label()
-        );
+fn cli_explanation() -> String {
+    if program_installed(CLAUDE_CLI) {
+        return "Claude Code is installed: every Claude account below runs it, each signed in \
+                with a login of its own"
+            .into();
     }
-    match Tools::here().agent_plan(program) {
+    match Tools::here().agent_plan(CLAUDE_CLI) {
         Some(plan) if plan.runnable() => format!(
-            "`{program}` isn't on PATH — {} runs its installer: {}",
+            "`{CLAUDE_CLI}` isn't on PATH — {} runs its installer: {}",
             keys::INSTALL.label(),
             plan.line
         ),
-        Some(plan) => format!("`{program}` isn't on PATH — install it: {}", plan.link),
-        None => format!("`{program}` isn't on PATH — install it, then turn {label} on"),
+        Some(plan) => format!("`{CLAUDE_CLI}` isn't on PATH — install it: {}", plan.link),
+        None => format!("`{CLAUDE_CLI}` isn't on PATH — install Claude Code, then come back"),
     }
 }
 
-fn editor_explanation(row: usize, keymap: &Keymap) -> String {
-    let Some(word) = editor_rows().get(row) else {
-        return String::new();
-    };
-    let places = crate::outside_editor::Places::here();
-    let choice = crate::outside_editor::Choice::parse(word);
-    let opens = crate::hints::key_or(keymap, Action::OpenOutside, "Open outside");
-    match (choice, crate::outside_editor::resolve(choice, &places)) {
-        (crate::outside_editor::Choice::Auto, Ok(target)) => format!(
-            "The first installed of Cursor, VS Code and Sublime Text — {opens} opens \
-             files and checkouts in {} here",
-            target.name
+fn project_explanation(app: &App) -> String {
+    let enter = keys::ENTER.label();
+    let space = keys::TOGGLE.label();
+    let mut text = match app.launch_repo_name() {
+        Some(name) => format!("{enter} opens {name}, the repo orion was started in, as a project"),
+        None => format!(
+            "{enter} opens a folder as a project — in setup's place; Run setup comes back here"
         ),
-        (_, Ok(target)) => format!("{opens} opens files and checkouts in {}", target.name),
-        (_, Err(why)) => why,
+    };
+    if app.tree.projects.len() > 1 {
+        text.push_str(&format!("; {space} steps to the next project"));
     }
+    text
 }
 
 /// The modal's width: room for the STEP STRIP and a row's columns, never
 /// wider than the screen.
 const MODAL_W: u16 = 92;
 
+/// The width a sheet's lines are laid out at inside its border, on a
+/// screen `frame` wide.
+pub(crate) fn sheet_inner_width(frame: Rect) -> u16 {
+    MODAL_W
+        .min(frame.width.saturating_sub(2))
+        .max(frame.width.min(24))
+        .saturating_sub(2)
+}
+
 pub fn draw(f: &mut Frame, app: &mut App, view: &OnboardView, th: Theme) {
     let cfg = Config::load();
-    let frame = f.area();
-    let width = MODAL_W
-        .min(frame.width.saturating_sub(2))
-        .max(frame.width.min(24));
-    let inner_w = width.saturating_sub(2);
+    let inner_w = sheet_inner_width(f.area());
     let body = page_body(app, &cfg, view, th, inner_w);
-    let explain = explanation(&cfg, view, &app.keymap);
+    let explain = explanation(app, &cfg, view);
+    let strip = step_strip(view.page.min(PAGES.len() - 1), inner_w, th);
+    let area = draw_sheet(
+        f,
+        " Orion setup ",
+        Some(strip),
+        body,
+        &explain,
+        &hints(&cfg, view),
+        view.asking(),
+        th,
+    );
+    if let Some(Overlay::Onboard(live)) = &mut app.overlay {
+        live.area = area;
+    }
+}
+
+/// One sheet over the grid — setup's pages and WHAT'S NEW alike: `strip`
+/// across its top when it has one, then `body`, scrolled to keep the row
+/// under the cursor — or, `asking`, the question at its end — in sight,
+/// then `explain` over the keys on the bottom border. As tall as its
+/// body, within the screen. Its area, for a click outside.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_sheet(
+    f: &mut Frame,
+    title: &str,
+    strip: Option<Line<'static>>,
+    body: Body,
+    explain: &str,
+    hints: &[crate::hints::Hint],
+    asking: bool,
+    th: Theme,
+) -> Rect {
+    let frame = f.area();
+    let inner_w = sheet_inner_width(frame);
     let explain_rows = match explain.trim() {
         "" => 0,
         text => crate::hints::explain_lines(text, inner_w, 3).len() as u16 + 1,
     };
     // The strip and the blank under it, the body, and a blank over the
     // explanation; the borders.
-    let want = 2 + body.lines.len() as u16 + explain_rows + 2;
+    let strip_rows = if strip.is_some() { 2 } else { 0 };
+    let want = strip_rows + body.lines.len() as u16 + explain_rows + 2;
     let height = want
         .min(frame.height.saturating_sub(2))
         .max(frame.height.min(8));
-    let area = centered_rect(frame, width, height);
+    let area = centered_rect(frame, inner_w + 2, height);
     f.render_widget(ratatui::widgets::Clear, area);
-    let block = crate::hints::modal_block(
-        crate::ui::modal_block(
-            if view.since == 0 {
-                " Orion setup "
-            } else if view_pages(&cfg, view.since).contains(&Page::WhatsNew) {
-                " What's new in Orion "
-            } else {
-                " New in Orion setup "
-            },
-            th,
-        ),
-        &hints(&cfg, view),
-        area.width,
-        th,
-    );
+    let block = crate::hints::modal_block(crate::ui::modal_block(title, th), hints, area.width, th);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let all = view_pages(&cfg, view.since);
-    let at = view.page.min(all.len() - 1);
-    if inner.height > 0 {
-        f.render_widget(
-            Paragraph::new(step_strip(&all, at, inner.width, th)),
-            Rect { height: 1, ..inner },
-        );
+    let mut rest = inner;
+    if let Some(strip) = strip.filter(|_| inner.height > 0) {
+        f.render_widget(Paragraph::new(strip), Rect { height: 1, ..inner });
+        rest = Rect {
+            y: inner.y + 2.min(inner.height),
+            height: inner.height.saturating_sub(2),
+            ..inner
+        };
     }
-    let rest = Rect {
-        y: inner.y + 2.min(inner.height),
-        height: inner.height.saturating_sub(2),
-        ..inner
-    };
-    let (body_area, explain_row) = crate::hints::explain_area(&explain, rest, 3);
-    crate::hints::draw_explain(f, explain_row, &explain, th);
+    let (body_area, explain_row) = crate::hints::explain_area(explain, rest, 3);
+    crate::hints::draw_explain(f, explain_row, explain, th);
     // A blank row between the body and the explanation when there is room.
     let room = usize::from(body_area.height)
         .saturating_sub(usize::from(explain_row.height > 0 && body_area.height > 4));
-    // The row under the cursor — or a question being asked, at the end —
-    // stays in sight on a screen too short for the whole page.
-    let anchor = if view.asking() {
+    let anchor = if asking {
         body.lines.len().saturating_sub(1)
     } else {
         body.selected.unwrap_or(0)
@@ -642,33 +462,31 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &OnboardView, th: Theme) {
     let first = (anchor + 1).saturating_sub(room);
     let lines: Vec<Line> = body.lines.into_iter().skip(first).take(room).collect();
     f.render_widget(Paragraph::new(lines), body_area);
-    if let Some(Overlay::Onboard(live)) = &mut app.overlay {
-        live.area = area;
-    }
+    area
 }
 
 /// The STEP STRIP: every step by name, the one the wizard is on lit, the
 /// ones behind it a shade brighter than the ones ahead. Too narrow for the
-/// names, it is `Step 3 of 8 · Accounts`.
-fn step_strip(all: &[Page], at: usize, width: u16, th: Theme) -> Line<'static> {
-    let full: usize = all
+/// names, it is `Step 3 of 4 · First project`.
+fn step_strip(at: usize, width: u16, th: Theme) -> Line<'static> {
+    let full: usize = PAGES
         .iter()
         .map(|page| page.label().chars().count() + 3)
         .sum();
     if full > usize::from(width) {
         return Line::from(vec![
             Span::styled(
-                format!(" Step {} of {} · ", at + 1, all.len()),
+                format!(" Step {} of {} · ", at + 1, PAGES.len()),
                 Style::default().fg(th.dim),
             ),
             Span::styled(
-                all[at].label(),
+                PAGES[at].label(),
                 Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
             ),
         ]);
     }
     let mut spans = Vec::new();
-    for (i, page) in all.iter().enumerate() {
+    for (i, page) in PAGES.iter().enumerate() {
         spans.push(Span::raw(" "));
         let style = match i.cmp(&at) {
             std::cmp::Ordering::Less => Style::default().fg(th.muted),
@@ -683,17 +501,17 @@ fn step_strip(all: &[Page], at: usize, width: u16, th: Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A page's body as drawn: its lines at the modal's inner width, and which
-/// of them is the row under the cursor.
-struct Body {
-    lines: Vec<Line<'static>>,
-    selected: Option<usize>,
+/// A sheet's body as drawn: its lines at the modal's inner width, and
+/// which of them is the row under the cursor.
+pub(crate) struct Body {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) selected: Option<usize>,
     /// The modal's inner width, which every line keeps a column short of.
     width: usize,
 }
 
 impl Body {
-    fn new(width: u16) -> Self {
+    pub(crate) fn new(width: u16) -> Self {
         Self {
             lines: Vec::new(),
             selected: None,
@@ -701,12 +519,12 @@ impl Body {
         }
     }
 
-    fn blank(&mut self) {
+    pub(crate) fn blank(&mut self) {
         self.lines.push(Line::from(""));
     }
 
     /// `text` wrapped to `width` with a column of margin each side.
-    fn prose(&mut self, text: &str, width: u16, style: Style) {
+    pub(crate) fn prose(&mut self, text: &str, width: u16, style: Style) {
         self.indented(text, 1, width, style);
     }
 
@@ -718,7 +536,7 @@ impl Body {
 
     /// `text` wrapped `indent` columns in behind `mark` (`• `), its wrapped
     /// rows hanging under the text rather than the mark — a list item.
-    fn item(&mut self, mark: &str, text: &str, indent: usize, width: u16, style: Style) {
+    pub(crate) fn item(&mut self, mark: &str, text: &str, indent: usize, width: u16, style: Style) {
         let hang = indent + mark.chars().count();
         let room = usize::from(width).saturating_sub(hang + 1).max(1);
         for (i, line) in crate::pr_preview::wrap(text, room).into_iter().enumerate() {
@@ -797,17 +615,10 @@ fn column_widths(rows: &[Vec<String>], width: u16) -> Vec<usize> {
 
 fn page_body(app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16) -> Body {
     let mut body = Body::new(width);
-    let page = view.current(cfg);
-    match page {
-        Page::WhatsNew => whats_new(&mut body, cfg, view, th, width),
+    match view.current() {
         Page::Welcome => welcome(&mut body, app, th, width),
-        Page::Agents => agents(&mut body, cfg, view, th, width),
-        Page::Accounts => accounts(&mut body, cfg, view, th, width),
-        Page::Editor => editors(&mut body, cfg, view, th, width, &app.keymap),
-        Page::App => app_page(&mut body, th, width),
-        Page::Worktrees | Page::Linear | Page::Autofix => {
-            settings_page(&mut body, app, cfg, view, page, th, width)
-        }
+        Page::Claude => claude(&mut body, cfg, view, th, width),
+        Page::Project => project(&mut body, app, cfg, view, th, width),
         Page::Ready => ready(&mut body, app, cfg, th, width),
     }
     if let Some(plan) = &view.install {
@@ -819,60 +630,6 @@ fn page_body(app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16)
         body.prose(note, width, Style::default().fg(th.muted));
     }
     body
-}
-
-/// WHAT'S NEW: each release since the one this machine last ran, newest
-/// first — its version and day, then every change in it with what its
-/// commit said. The cursor walks the releases; the one under it stays in
-/// sight, its last line kept on screen.
-fn whats_new(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
-    let text = Style::default().fg(th.text);
-    let dim = Style::default().fg(th.dim);
-    let releases = crate::whats_new::unseen(cfg);
-    let since = crate::whats_new::seen(cfg)
-        .map(|(a, b, c)| format!(" since v{a}.{b}.{c}"))
-        .unwrap_or_default();
-    let n = releases.len();
-    body.prose(
-        &format!(
-            "You're on v{} — {n} release{} {}{since}, newest first.",
-            crate::whats_new::current(),
-            if n == 1 { "" } else { "s" },
-            if n == 1 { "is new" } else { "are new" },
-        ),
-        width,
-        dim,
-    );
-    for (i, release) in releases.iter().enumerate() {
-        body.blank();
-        let on = i == view.row;
-        body.lines.push(Line::from(vec![
-            Span::styled(
-                if on { " › " } else { "   " },
-                Style::default().fg(th.accent),
-            ),
-            Span::styled(
-                format!("v{}", release.version),
-                Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {}", release.date), dim),
-        ]));
-        for change in release.changes {
-            body.item(
-                "• ",
-                change.title,
-                3,
-                width,
-                text.add_modifier(Modifier::BOLD),
-            );
-            for detail in change.details {
-                body.item("– ", detail, 5, width, dim);
-            }
-        }
-        if on {
-            body.selected = Some(body.lines.len() - 1);
-        }
-    }
 }
 
 fn welcome(body: &mut Body, app: &App, th: Theme, width: u16) {
@@ -891,8 +648,7 @@ fn welcome(body: &mut Body, app: &App, th: Theme, width: u16) {
     );
     body.blank();
     body.prose(
-        "A minute of setup: the agents to turn on (and install), the editor files open in, \
-         worktree defaults, Linear and autofix.",
+        "A minute of setup: Claude and its accounts, your first project, and the keys to know.",
         width,
         text,
     );
@@ -907,133 +663,52 @@ fn welcome(body: &mut Body, app: &App, th: Theme, width: u16) {
     );
 }
 
-/// The terminal orion runs in, by name when it is the usual one.
-fn this_terminal() -> Option<&'static str> {
-    (std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal")).then_some("Terminal.app")
-}
-
-/// The APP STEP: orion's ⌘ shortcuts work in Orion.app and nowhere else
-/// on a Mac, and Enter reopens orion there.
-fn app_page(body: &mut Body, th: Theme, width: u16) {
-    let text = Style::default().fg(th.text);
-    let terminal = this_terminal();
-    let enter = keys::ENTER.label();
-    body.lines.push(Line::from(Span::styled(
-        " Orion's ⌘ shortcuts need its own app",
-        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-    )));
-    body.blank();
-    body.prose(
-        &format!(
-            "⌘N starts an agent, ⌘K jumps anywhere, ⌘P finds a file — in Orion.app. {} keeps ⌘ \
-             for itself or never passes it on, so here they don't reach orion.",
-            terminal.unwrap_or("A terminal")
-        ),
-        width,
-        text,
-    );
-    body.blank();
-    body.prose(
-        &format!(
-            "{enter} makes Orion.app in ~/Applications — the Ghostty on this Mac under Orion's \
-             name, in the Dock from then on — and carries on with setup there. It is a window \
-             onto this same Orion: sessions keep running, and projects, settings and history \
-             stay where they are. Close this window once it's open."
-        ),
-        width,
-        text,
-    );
-    body.blank();
-    body.prose(
-        &format!(
-            "{} stays in {}, without them. `orion app` makes the move any time.",
-            keys::NEXT_PAGE.label(),
-            terminal.unwrap_or("this terminal")
-        ),
-        width,
-        Style::default().fg(th.dim),
-    );
-}
-
-fn agents(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
-    body.prose(
-        "Turn on the agents you use; one left off stays out of every picker.",
-        width,
-        Style::default().fg(th.dim),
-    );
-    body.blank();
-    let tools = Tools::here();
-    let entries = cfg.harness_registry();
-    let mut cells: Vec<Vec<String>> = vec![vec![
-        "Agent".into(),
-        "On".into(),
-        "Default model".into(),
-        "CLI".into(),
-    ]];
-    let mut styles = Vec::new();
-    for entry in &entries {
-        let installed = program_installed(&entry.program);
-        let cli = match (installed, tools.agent_plan(&entry.program)) {
-            (true, _) => ("installed", Style::default().fg(th.ok)),
-            (false, Some(_)) => ("install…", Style::default().fg(th.accent)),
-            (false, None) => ("not on PATH", Style::default().fg(th.warn)),
-        };
-        let on = if entry.enabled {
-            ("on", Style::default().fg(th.ok))
-        } else {
-            ("off", Style::default().fg(th.dim))
-        };
-        cells.push(vec![
-            entry.display_label().to_string(),
-            on.0.into(),
-            crate::config::model_row_label(&entry.model.default, entry.model.catalog),
-            cli.0.into(),
-        ]);
-        styles.push((on.1, cli.1));
-    }
-    let widths = column_widths(&cells, width);
-    let head = Style::default().fg(th.dim);
-    let header = cells[0].iter().map(|c| (c.clone(), head)).collect();
-    body.row(false, header, &widths, th);
-    for (i, (row, (on, cli))) in cells.iter().skip(1).zip(styles).enumerate() {
-        let text = Style::default().fg(th.text);
-        let cells = vec![
-            (row[0].clone(), text),
-            (row[1].clone(), on),
-            (row[2].clone(), text),
-            (row[3].clone(), cli),
-        ];
-        body.row(i == view.row, cells, &widths, th);
-    }
-}
-
-/// The CLAUDE ACCOUNTS page: every account, the default one first, with
-/// its dir and who it is signed in as; **Add account**; the same-account
-/// warning when two share an email; and the question being asked, if one
-/// is.
-fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
+/// The Claude page: the CLI `installed` or `install…`, then every account
+/// — on or off, its dir and who it is signed in as — **Add account**, the
+/// same-account warning when two share an email, and the question being
+/// asked, if one is.
+fn claude(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
     let dim = Style::default().fg(th.dim);
     let text = Style::default().fg(th.text);
     body.prose(
-        "Each Claude account is a Claude Code config dir with a login of its own. Sign the \
-         default one in, or add another to run sessions on a second subscription.",
+        "Orion's agents run on Claude Code. Each Claude account is a config dir with a login of \
+         its own: sign the default one in, or add another to run sessions on a second \
+         subscription.",
         width,
         dim,
     );
     body.blank();
-    let rows = cfg.account_rows();
+    let rows = claude_rows(cfg);
+    let installed = program_installed(CLAUDE_CLI);
     let mut cells: Vec<Vec<String>> = vec![vec![
-        "Account".into(),
+        String::new(),
+        "On".into(),
         "Config dir".into(),
         "Signed in".into(),
     ]];
     for row in &rows {
-        let label = match row {
-            AccountRow::Account(id) => cfg.effective_harness_by_id(id).display_label().to_string(),
-            AccountRow::Add => "Add account".into(),
-        };
-        let (dir, state) = cfg.account_parts(row);
-        cells.push(vec![label, dir, state]);
+        cells.push(match row {
+            ClaudeRow::Cli => vec![
+                "Claude Code".into(),
+                String::new(),
+                CLAUDE_CLI.into(),
+                if installed {
+                    "installed".into()
+                } else {
+                    "install…".into()
+                },
+            ],
+            ClaudeRow::Account(AccountRow::Add) => {
+                let (dir, _) = cfg.account_parts(&AccountRow::Add);
+                vec!["Add account".into(), String::new(), dir, String::new()]
+            }
+            ClaudeRow::Account(row @ AccountRow::Account(id)) => {
+                let entry = cfg.effective_harness_by_id(id);
+                let (dir, state) = cfg.account_parts(row);
+                let on = if entry.enabled { "on" } else { "off" };
+                vec![entry.display_label().to_string(), on.into(), dir, state]
+            }
+        });
     }
     let widths = column_widths(&cells, width);
     body.row(
@@ -1042,25 +717,28 @@ fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width:
         &widths,
         th,
     );
-    for (i, row) in cells.iter().skip(1).enumerate() {
-        let state = if row[2] == "signed in" {
-            Style::default().fg(th.ok)
-        } else if row[2].starts_with("same as") {
-            Style::default().fg(th.warn)
-        } else {
-            dim
+    for (i, (row, cell)) in rows.iter().zip(cells.iter().skip(1)).enumerate() {
+        let state = match cell[3].as_str() {
+            "signed in" | "installed" => Style::default().fg(th.ok),
+            "install…" => Style::default().fg(th.accent),
+            s if s.starts_with("same as") => Style::default().fg(th.warn),
+            _ => dim,
         };
-        let label = if matches!(rows.get(i), Some(AccountRow::Add)) {
-            Style::default().fg(th.accent)
-        } else {
-            text
+        let on = match cell[1].as_str() {
+            "on" => Style::default().fg(th.ok),
+            _ => dim,
+        };
+        let label = match row {
+            ClaudeRow::Account(AccountRow::Add) => Style::default().fg(th.accent),
+            _ => text,
         };
         body.row(
             i == view.row,
             vec![
-                (row[0].clone(), label),
-                (row[1].clone(), text),
-                (row[2].clone(), state),
+                (cell[0].clone(), label),
+                (cell[1].clone(), on),
+                (cell[2].clone(), text),
+                (cell[3].clone(), state),
             ],
             &widths,
             th,
@@ -1134,183 +812,146 @@ fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width:
     }
 }
 
-/// The Editor page: **Open in app**'s choices, each saying what it opens
-/// on this machine. The chosen one wears the dot.
-fn editors(
-    body: &mut Body,
-    cfg: &Config,
-    view: &OnboardView,
-    th: Theme,
-    width: u16,
-    keymap: &Keymap,
-) {
+/// The First project page: the project the grid is on — or the repo
+/// orion was started in, to open — then its **Base branch** and **Run
+/// command**, the rows Settings → Projects has for it, typed in place.
+fn project(body: &mut Body, app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
     let dim = Style::default().fg(th.dim);
-    let text = Style::default().fg(th.text);
-    let rows = editor_rows();
-    let chosen_app = crate::outside_editor::Choice::parse(&cfg.outside_editor);
-    let places = crate::outside_editor::Places::here();
-    let mut cells: Vec<Vec<String>> = Vec::new();
-    let mut styles = Vec::new();
-    for word in rows {
-        let choice = crate::outside_editor::Choice::parse(word);
-        let name = match choice {
-            crate::outside_editor::Choice::App(_) => {
-                crate::outside_editor::value_label(word, &crate::outside_editor::Places::default())
-                    .split(" — ")
-                    .next()
-                    .unwrap_or(word)
-                    .to_string()
-            }
-            _ => word.to_string(),
+    body.prose(
+        "A project is a git repository. Its agents run in worktrees — a checkout of their own \
+         branch each — cut from its base branch, so they work side by side without touching each \
+         other's files.",
+        width,
+        dim,
+    );
+    body.blank();
+    let selected = app.selected_project();
+    let project = match (selected, app.launch_repo_name()) {
+        (Some(p), _) => format!("{} · {}", p.name, p.repo_path.display()),
+        (None, Some(name)) => format!("none yet — Enter opens {name}"),
+        (None, None) => "none yet — Enter opens one".into(),
+    };
+    let settings = selected.map(|p| cfg.project(&p.repo_path));
+    let editing = view.field.as_ref();
+    let mut cells = vec![vec!["Project".to_string(), project]];
+    for kind in PROJECT_ROWS {
+        let label = crate::config::spec_for(*kind).map_or("", |s| s.label);
+        let value = match (editing, &settings) {
+            (Some((at, input)), _) if at == kind => format!("{}▌", input.as_str()),
+            (_, Some(settings)) => settings.value_label(*kind),
+            (_, None) => "open a project first".into(),
         };
-        let (state, style) = match (choice, crate::outside_editor::resolve(choice, &places)) {
-            (crate::outside_editor::Choice::Auto, Ok(target)) => {
-                (format!("opens {}", target.name), text)
-            }
-            (_, Ok(_)) => ("installed".to_string(), Style::default().fg(th.ok)),
-            (_, Err(_)) => ("not installed".to_string(), dim),
-        };
-        let chosen = choice == chosen_app;
-        cells.push(vec![
-            format!("{} {name}", if chosen { "●" } else { "○" }),
-            state,
-        ]);
-        styles.push(style);
+        cells.push(vec![label.to_string(), value]);
     }
     let widths = column_widths(&cells, width);
-    let apps_head = crate::hints::expand(
-        "Open in app — {open_outside} hands a file or a checkout to it",
-        keymap,
-    );
-    body.heading(&apps_head, th);
     for (i, cell) in cells.into_iter().enumerate() {
-        let name_style = if cell[0].starts_with('●') {
+        let value = if i == 0 && selected.is_none() {
             Style::default().fg(th.accent)
         } else {
-            text
-        };
-        body.row(
-            i == view.row,
-            vec![(cell[0].clone(), name_style), (cell[1].clone(), styles[i])],
-            &widths,
-            th,
-        );
-    }
-}
-
-/// The Worktrees, Linear and Autofix pages: settings rows mirroring the
-/// overlay's — their values read as the overlay reads them — and, while a
-/// typed row is being edited, its text in place (a multi-row field's under
-/// the rows, the caret's row in sight).
-fn settings_page(
-    body: &mut Body,
-    app: &App,
-    cfg: &Config,
-    view: &OnboardView,
-    page: Page,
-    th: Theme,
-    width: u16,
-) {
-    let dim = Style::default().fg(th.dim);
-    let keymap = &app.keymap;
-    match page {
-        Page::Worktrees => {
-            body.prose(
-                "A worktree is a checkout of its own branch, so agents work side by side \
-                 without touching each other's files.",
-                width,
-                dim,
-            );
-            body.blank();
-        }
-        Page::Linear => {
-            body.prose(
-                &format!(
-                    "{} lists the Linear issues assigned to you; Settings → Linear has these rows \
-                     too.",
-                    crate::hints::key_or(keymap, Action::Linear, "The Linear view")
-                ),
-                width,
-                dim,
-            );
-            body.blank();
-        }
-        Page::Autofix => {
-            body.prose(
-                "When one of your pull requests hits merge conflicts or failing checks, Orion can \
-                 send an agent to fix it: resolve the conflicts, reproduce the failing unit and \
-                 e2e tests locally, fix them and push to the PR. Ask shows you what broke and \
-                 lets you pick; auto just goes. ^G in the pull requests modal sends it any time.",
-                width,
-                dim,
-            );
-            body.blank();
-        }
-        _ => {}
-    }
-    let specs = setting_rows(page);
-    let editing = view.field.as_ref();
-    let values: Vec<String> = specs
-        .iter()
-        .map(|spec| match editing {
-            Some((kind, input)) if *kind == spec.kind => format!("{}▌", input.as_str()),
-            _ => setting_value(app, cfg, spec.kind),
-        })
-        .collect();
-    let cells: Vec<Vec<String>> = specs
-        .iter()
-        .zip(&values)
-        .map(|(spec, value)| vec![spec.label.to_string(), value.clone()])
-        .collect();
-    let widths = column_widths(&cells, width);
-    let mut group = "";
-    for (i, (spec, value)) in specs.iter().zip(values).enumerate() {
-        if spec.group != group {
-            body.blank();
-            body.heading(spec.group, th);
-            group = spec.group;
-        }
-        let value_style = match value.as_str() {
-            "on" => Style::default().fg(th.ok),
-            "off" => dim,
-            _ => Style::default().fg(th.accent),
+            Style::default().fg(th.text)
         };
         body.row(
             i == view.row,
             vec![
-                (spec.label.to_string(), Style::default().fg(th.text)),
-                (value, value_style),
+                (cell[0].clone(), Style::default().fg(th.muted)),
+                (cell[1].clone(), value),
             ],
             &widths,
             th,
         );
     }
-    if page == Page::Worktrees {
-        body.blank();
-        body.prose(
-            &format!(
-                "A new agent runs in the checkout under the cursor. For a fresh worktree, {} \
-                 in its box and pick + new worktree.",
-                crate::hints::key_or(keymap, Action::SelectLaunchWorktree, "Select worktree")
-            ),
-            width,
-            dim,
-        );
-    }
 }
 
-/// A settings row's value in words: the LINEAR TAB's status rows as the
-/// app tells them, the rest as the overlay reads them.
-fn setting_value(app: &App, cfg: &Config, kind: SettingKind) -> String {
-    if let Some(status) = crate::linear::status_value(app, kind) {
-        return status;
+/// What setup leaves set, a line a step: the Claude accounts that are on
+/// (warned while none is, or the CLI is missing) and the project.
+fn summary(app: &App, cfg: &Config) -> Vec<(&'static str, String, bool)> {
+    let on: Vec<String> = cfg
+        .harness_registry()
+        .into_iter()
+        .filter(|entry| entry.enabled && entry.is_claude_account())
+        .map(|entry| entry.display_label().to_string())
+        .collect();
+    let claude = match (on.is_empty(), program_installed(CLAUDE_CLI)) {
+        (true, _) => (
+            "none on — turn one on in Settings → Accounts to start an agent".to_string(),
+            true,
+        ),
+        (false, true) => (on.join(", "), false),
+        (false, false) => (format!("{} (CLI not installed)", on.join(", ")), true),
+    };
+    let project = match app.selected_project() {
+        Some(p) => {
+            let base = match cfg.project(&p.repo_path).base_branch.trim() {
+                "" => "origin's default branch".to_string(),
+                name => name.to_string(),
+            };
+            (format!("{} · worktrees from {base}", p.name), false)
+        }
+        None => ("none yet — open one any time from the palette".into(), true),
+    };
+    vec![
+        ("Claude", claude.0, claude.1),
+        ("Project", project.0, project.1),
+    ]
+}
+
+/// The keys that matter, from the live keymap — an unbound one left out.
+fn next_keys(keymap: &Keymap) -> Vec<(String, &'static str)> {
+    [
+        (Action::QuickPrompt, "start an agent: type the task, Enter"),
+        (Action::Palette, "jump to any project, worktree or session"),
+        (Action::GitDiff, "the checkout's changes, commit by commit"),
+        (Action::Linear, "your Linear issues"),
+        (Action::Todos, "your todos, a list per project"),
+        (Action::Settings, "Settings: change any of this"),
+    ]
+    .into_iter()
+    .filter_map(|(action, does)| crate::hints::key(keymap, action).map(|key| (key, does)))
+    .collect()
+}
+
+fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
+    body.lines.push(Line::from(Span::styled(
+        " You're set.",
+        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+    )));
+    body.blank();
+    let chosen = summary(app, cfg);
+    let cells: Vec<Vec<String>> = chosen
+        .iter()
+        .map(|(what, value, _)| vec![what.to_string(), value.clone()])
+        .collect();
+    let widths = column_widths(&cells, width);
+    for (what, value, warn) in &chosen {
+        let style = Style::default().fg(if *warn { th.warn } else { th.text });
+        body.row(
+            false,
+            vec![
+                (what.to_string(), Style::default().fg(th.muted)),
+                (value.clone(), style),
+            ],
+            &widths,
+            th,
+        );
     }
-    match kind {
-        SettingKind::WorktreeBaseBranch => match cfg.worktree_base_branch.trim() {
-            "" => "auto — origin's default branch".into(),
-            name => name.to_string(),
-        },
-        _ => cfg.value_label(kind),
+    body.blank();
+    body.heading("The keys that matter", th);
+    let keys = next_keys(&app.keymap);
+    let cells: Vec<Vec<String>> = keys
+        .iter()
+        .map(|(key, does)| vec![key.clone(), does.to_string()])
+        .collect();
+    let widths = column_widths(&cells, width);
+    for (key, does) in keys {
+        body.row(
+            false,
+            vec![
+                (key, crate::hints::key_style(th)),
+                (does.to_string(), Style::default().fg(th.text)),
+            ],
+            &widths,
+            th,
+        );
     }
 }
 
@@ -1350,340 +991,145 @@ fn install_question(body: &mut Body, plan: &Plan, th: Theme, width: u16) {
     }
 }
 
-/// One line of the Ready page's summary: what it is about, what was
-/// chosen, and whether it wants another look.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Chosen {
-    what: &'static str,
-    value: String,
-    warn: bool,
-}
-
-/// What the wizard leaves set, a line a step: the agents on (and any whose
-/// CLI is missing), the editors, worktrees, Linear, the terminal.
-fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
-    let on: Vec<_> = cfg
-        .harness_registry()
-        .into_iter()
-        .filter(|entry| entry.enabled)
-        .collect();
-    let agents = if on.is_empty() {
-        Chosen {
-            what: "Agents",
-            value: "none on — turn one on in Settings → Agents to start an agent".into(),
-            warn: true,
-        }
-    } else {
-        let missing = on.iter().any(|e| !program_installed(&e.program));
-        Chosen {
-            what: "Agents",
-            value: on
-                .iter()
-                .map(|entry| {
-                    let label = entry.display_label().to_string();
-                    if program_installed(&entry.program) {
-                        label
-                    } else {
-                        format!("{label} (not installed)")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-            warn: missing,
-        }
+/// Step a page on (`delta` 1) or back (-1); off the last page is done.
+fn turn(app: &mut App, delta: i32) {
+    let Some(Overlay::Onboard(view)) = &mut app.overlay else {
+        return;
     };
-    let base = match cfg.worktree_base_branch.trim() {
-        "" => "origin's default branch".to_string(),
-        name => name.to_string(),
-    };
-    let key = crate::linear::status_value(app, SettingKind::LinearKey)
-        .filter(|status| status.starts_with("found"))
-        .map(|status| format!(" · LINEAR_API_KEY {status}"))
-        .unwrap_or_default();
-    vec![
-        agents,
-        Chosen {
-            what: "Open in app",
-            value: cfg.value_label(SettingKind::OutsideEditor),
-            warn: false,
-        },
-        Chosen {
-            what: "Worktrees",
-            value: format!(
-                "{} · new ones branch from {base}",
-                if cfg.link_env_files {
-                    ".env files linked"
-                } else {
-                    ".env files not linked"
-                }
-            ),
-            warn: false,
-        },
-        Chosen {
-            what: "Linear",
-            value: format!(
-                "{}{key}",
-                if cfg.linear_auto_attach {
-                    "pull requests linked to their issues"
-                } else {
-                    "pull requests not linked"
-                }
-            ),
-            warn: false,
-        },
-    ]
-}
-
-/// The keys to press first, from the live keymap — an unbound one left
-/// out.
-fn next_keys(keymap: &Keymap) -> Vec<(String, &'static str)> {
-    [
-        (Action::QuickPrompt, "start an agent: type the task, Enter"),
-        (
-            Action::NewTerminal,
-            "open a terminal: a plain shell, no agent",
-        ),
-        (Action::Palette, "jump to any project, worktree or session"),
-        (Action::Linear, "your Linear issues"),
-        (Action::CommandPalette, "every action by name"),
-        (Action::Settings, "Settings: change any of this"),
-    ]
-    .into_iter()
-    .filter_map(|(action, does)| crate::hints::key(keymap, action).map(|key| (key, does)))
-    .collect()
-}
-
-fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
-    body.lines.push(Line::from(Span::styled(
-        " You're set. This is what Orion will use:",
-        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-    )));
-    body.blank();
-    let chosen = summary(app, cfg);
-    let cells: Vec<Vec<String>> = chosen
-        .iter()
-        .map(|c| vec![c.what.to_string(), c.value.clone()])
-        .collect();
-    let widths = column_widths(&cells, width);
-    let room = usize::from(width)
-        .saturating_sub(3 + widths[0] + 2 + 1)
-        .max(8);
-    for c in &chosen {
-        let style = Style::default().fg(if c.warn { th.warn } else { th.text });
-        // A long value — many agents — wraps under its own column.
-        let mut wrapped = crate::pr_preview::wrap(&c.value, room).into_iter();
-        let first = wrapped.next().unwrap_or_default();
-        body.row(
-            false,
-            vec![
-                (c.what.to_string(), Style::default().fg(th.muted)),
-                (first, style),
-            ],
-            &widths,
-            th,
-        );
-        for more in wrapped {
-            body.lines.push(Line::from(Span::styled(
-                format!("{}{more}", " ".repeat(3 + widths[0] + 2)),
-                style,
-            )));
-        }
+    let next = view.page as i32 + delta;
+    if next >= PAGES.len() as i32 {
+        dismiss(app);
+        return;
     }
-    body.blank();
-    body.heading("Next", th);
-    let keys = next_keys(&app.keymap);
-    let cells: Vec<Vec<String>> = keys
-        .iter()
-        .map(|(key, does)| vec![key.clone(), does.to_string()])
-        .collect();
-    let widths = column_widths(&cells, width);
-    for (key, does) in keys {
-        body.row(
-            false,
-            vec![
-                (key, crate::hints::key_style(th)),
-                (does.to_string(), Style::default().fg(th.text)),
-            ],
-            &widths,
-            th,
-        );
+    if next < 0 {
+        return;
     }
-}
-
-fn next(app: &mut App) {
-    let cfg = Config::load();
-    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-        let all = view_pages(&cfg, view.since);
-        if view.page + 1 >= all.len() {
-            dismiss(app);
-            return;
-        }
-        view.page += 1;
-        view.row = landing_row(all[view.page], &cfg);
-        view.note = None;
-        app.dirty = true;
-    }
-}
-
-fn prev(app: &mut App) {
-    let cfg = Config::load();
-    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-        let all = view_pages(&cfg, view.since);
-        if view.page == 0 {
-            return;
-        }
-        view.page = (view.page - 1).min(all.len() - 1);
-        view.row = landing_row(all[view.page], &cfg);
-        view.note = None;
-        app.dirty = true;
-    }
-}
-
-/// Where the cursor lands on arriving at `page`: on the Editor page the
-/// app chosen now; the first row elsewhere.
-fn landing_row(page: Page, cfg: &Config) -> usize {
-    if page != Page::Editor {
-        return 0;
-    }
-    let chosen = crate::outside_editor::Choice::parse(&cfg.outside_editor);
-    editor_rows()
-        .iter()
-        .position(|word| crate::outside_editor::Choice::parse(word) == chosen)
-        .unwrap_or(0)
+    view.page = next as usize;
+    view.row = 0;
+    view.note = None;
+    app.dirty = true;
 }
 
 fn page_rows(page: Page, cfg: &Config) -> usize {
     match page {
-        Page::Agents => cfg.harness_registry().len(),
-        Page::Accounts => cfg.account_rows().len(),
-        Page::Editor => editor_rows().len(),
-        Page::Worktrees | Page::Linear | Page::Autofix => setting_rows(page).len(),
-        Page::WhatsNew => crate::whats_new::unseen(cfg).len(),
-        Page::Welcome | Page::App | Page::Ready => 0,
+        Page::Claude => claude_rows(cfg).len(),
+        Page::Project => 1 + PROJECT_ROWS.len(),
+        Page::Welcome | Page::Ready => 0,
     }
 }
 
 fn move_row(app: &mut App, delta: i32) {
     let cfg = Config::load();
     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-        let n = page_rows(view.current(&cfg), &cfg);
+        let n = page_rows(view.current(), &cfg);
         if n == 0 {
             return;
         }
-        let next = (view.row as i32 + delta).rem_euclid(n as i32) as usize;
-        view.row = next;
+        view.row = (view.row as i32 + delta).rem_euclid(n as i32) as usize;
         view.note = None;
         app.dirty = true;
     }
 }
 
 /// The page and row the wizard's cursor is on.
-fn cursor(app: &App, cfg: &Config) -> Option<(Page, usize)> {
+fn cursor(app: &App) -> Option<(Page, usize)> {
     match &app.overlay {
-        Some(Overlay::Onboard(view)) => Some((view.current(cfg), view.row)),
+        Some(Overlay::Onboard(view)) => Some((view.current(), view.row)),
         _ => None,
     }
 }
 
-fn activate(app: &mut App) {
-    let cfg = Config::load();
-    let Some((page, row)) = cursor(app, &cfg) else {
+fn set_view(app: &mut App, edit: impl FnOnce(&mut OnboardView)) {
+    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
+        edit(view);
+    }
+    app.dirty = true;
+}
+
+fn activate(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let Some((page, row)) = cursor(app) else {
         return;
     };
     match page {
-        Page::WhatsNew | Page::Welcome | Page::Ready => next(app),
-        Page::Agents => cycle_selected_model(app),
-        Page::Accounts => {
-            let step = match cfg.account_rows().into_iter().nth(row) {
-                Some(AccountRow::Account(id)) => AccountStep::Email {
+        Page::Welcome | Page::Ready => turn(app, 1),
+        Page::Claude => {
+            let cfg = Config::load();
+            let step = match claude_rows(&cfg).into_iter().nth(row) {
+                Some(ClaudeRow::Cli) => return ask_install(app),
+                Some(ClaudeRow::Account(AccountRow::Account(id))) => AccountStep::Email {
                     id,
                     input: TextInput::new(),
                 },
-                Some(AccountRow::Add) => AccountStep::Name(TextInput::new()),
+                Some(ClaudeRow::Account(AccountRow::Add)) => AccountStep::Name(TextInput::new()),
                 None => return,
             };
-            if let Some(Overlay::Onboard(view)) = &mut app.overlay {
+            set_view(app, |view| {
                 view.account = step;
                 view.note = None;
-                app.dirty = true;
-            }
+            });
         }
-        Page::Editor => choose_editor_row(app, row),
-        Page::App => app_step(app),
-        // The overlay's rows, doing what Enter does there: a typed row
-        // opens for typing, a status row tests the connection, the rest
-        // flip or step.
-        Page::Worktrees | Page::Linear | Page::Autofix => {
-            match setting_rows(page).get(row).map(|spec| spec.kind) {
-                Some(kind) if kind.is_status() => crate::linear::test_connection(app),
-                Some(kind) if kind.is_text() => {
-                    let input = TextInput::with_text(cfg.text_value(kind));
-                    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-                        view.field = Some((kind, input));
-                    }
-                    app.dirty = true;
-                }
-                Some(kind) => cycle_setting(app, kind),
-                None => {}
-            }
+        Page::Project if row == 0 => open_project(app, out),
+        Page::Project => {
+            let Some(kind) = PROJECT_ROWS.get(row - 1).copied() else {
+                return;
+            };
+            let Some(repo) = app.selected_project().map(|p| p.repo_path.clone()) else {
+                return set_view(app, |view| {
+                    view.note = Some("Open a project first: Enter on the Project row".into());
+                });
+            };
+            let input = TextInput::with_text(Config::load().project_text_value(&repo, kind));
+            set_view(app, |view| view.field = Some((kind, input)));
         }
     }
 }
 
-/// Step a settings row on, as the overlay does.
-fn cycle_setting(app: &mut App, kind: SettingKind) {
-    persist(|cfg| cfg.cycle_kind(kind, 1));
-    if kind == SettingKind::PrAutofix {
-        app.autofix_mode = Config::load().autofix_mode();
+/// Enter on the Project row: the repo orion was started in, opened as a
+/// project — the project the page is on once it lands — or, with none to
+/// open, the open-project prompt in setup's place.
+fn open_project(app: &mut App, out: &mut Vec<ClientRequest>) {
+    match app
+        .launch_repo
+        .clone()
+        .filter(|_| app.launch_repo_name().is_some())
+    {
+        Some(repo) => crate::event_loop::open_folder(app, repo, out),
+        None => crate::event_loop::open_prompt(app, crate::app::PromptKind::AddProject),
     }
+}
+
+/// Space on the Project row: the next project the tree has, which the
+/// grid moves to as well.
+fn next_project(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let projects = &app.tree.projects;
+    if projects.len() < 2 {
+        return;
+    }
+    let at = app
+        .selected_project()
+        .and_then(|p| projects.iter().position(|q| q.id == p.id))
+        .map_or(0, |i| (i + 1) % projects.len());
+    let id = projects[at].id.clone();
+    crate::event_loop::select_project(app, &id, out);
     app.dirty = true;
 }
 
-/// Enter on the APP STEP: quit into Orion.app ([`crate::Exit::App`]),
-/// setup not stamped seen so it carries on there.
-fn app_step(app: &mut App) {
-    app.move_to_app = true;
-    app.should_quit = true;
-}
-
-/// Enter or Space on an Editor page row: that app is the one.
-fn choose_editor_row(app: &mut App, row: usize) {
-    if let Some(word) = editor_rows().get(row) {
-        persist(|cfg| cfg.outside_editor = word.to_string());
-        crate::outside_editor::forget_hint_name();
-    }
-    app.dirty = true;
-}
-
-/// `i`: the install for the row's program, asked before it runs — or, when
-/// there is nothing to install, why not.
+/// `i`: the Claude CLI's install, asked before it runs — or, when there
+/// is nothing to install, why not.
 fn ask_install(app: &mut App) {
-    let cfg = Config::load();
-    let Some((page, row)) = cursor(app, &cfg) else {
-        return;
-    };
-    let program = match page {
-        Page::Agents => cfg.harness_registry().get(row).map(|e| e.program.clone()),
-        _ => None,
-    };
-    let Some(program) = program else {
-        return;
-    };
-    let plan = row_install(&cfg, page, row);
-    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-        match plan {
-            Some(plan) => view.install = Some(plan),
-            None if crate::install::installed(&program) => {
-                view.note = Some(format!("{program} is already installed"));
-            }
-            None => view.note = Some(format!("Orion knows no installer for `{program}`")),
+    let plan = cli_plan();
+    set_view(app, |view| match plan {
+        Some(plan) => view.install = Some(plan),
+        None if program_installed(CLAUDE_CLI) => {
+            view.note = Some(format!("{CLAUDE_CLI} is already installed"));
         }
-    }
-    app.dirty = true;
+        None => view.note = Some(format!("Orion knows no installer for `{CLAUDE_CLI}`")),
+    });
 }
 
-/// A key while the CLAUDE ACCOUNTS page asks something: the field takes
-/// the typing, Enter answers, Esc goes back to the rows.
+/// A key while the Claude page asks something: the field takes the
+/// typing, Enter answers, Esc goes back to the rows. Signing an account
+/// in switches it on: an account is signed in to be used.
 fn account_step_key(app: &mut App, key: KeyEvent) {
     let Some(Overlay::Onboard(view)) = &mut app.overlay else {
         return;
@@ -1701,6 +1147,11 @@ fn account_step_key(app: &mut App, key: KeyEvent) {
             }
             let (id, email) = (id.clone(), input.as_str().trim().to_string());
             view.account = AccountStep::Rows;
+            persist(|cfg| {
+                if !cfg.effective_harness_by_id(&id).enabled {
+                    cfg.cycle_agent_row(&id, crate::config::HarnessField::Enabled, 0);
+                }
+            });
             crate::claude_accounts::sign_in(app, &id, Some(&email));
         }
         AccountStep::Name(input) => {
@@ -1732,64 +1183,37 @@ fn account_step_key(app: &mut App, key: KeyEvent) {
 /// Add `new` from the wizard and land on its row, ready to sign in.
 fn add_account(app: &mut App, new: NewAccount, share: bool) {
     let result = crate::claude_accounts::add(&new, share);
-    let row = Config::load()
-        .account_rows()
-        .iter()
-        .position(|row| matches!(row, AccountRow::Account(id) if *id == new.id));
-    if let Some(Overlay::Onboard(view)) = &mut app.overlay {
+    let row = claude_rows(&Config::load()).iter().position(
+        |row| matches!(row, ClaudeRow::Account(AccountRow::Account(id)) if *id == new.id),
+    );
+    set_view(app, |view| {
         view.account = AccountStep::Rows;
         view.row = row.unwrap_or(view.row);
         view.note = Some(match result {
             Ok(note) => note,
             Err(why) => why,
         });
-    }
+    });
     crate::claude_accounts::request_refresh(app, true);
 }
 
-fn cycle_selected_model(app: &mut App) {
-    let row = match &app.overlay {
-        Some(Overlay::Onboard(view)) => view.row,
-        _ => return,
-    };
-    persist(|cfg| {
-        if let Some(entry) = cfg.harness_registry().get(row) {
-            let id = entry.id.clone();
-            cfg.cycle_agent_row(&id, crate::config::HarnessField::Model, 1);
-        }
-    });
-    app.dirty = true;
-}
-
-/// Space: an agent on or off, an editor chosen, a switch flipped.
-fn toggle(app: &mut App) {
-    let cfg = Config::load();
-    let Some((page, row)) = cursor(app, &cfg) else {
+/// Space: an account on or off; the next project.
+fn toggle(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let Some((page, row)) = cursor(app) else {
         return;
     };
     match page {
-        Page::Agents => persist(|cfg| {
-            if let Some(entry) = cfg.harness_registry().get(row) {
-                let id = entry.id.clone();
-                cfg.cycle_agent_row(&id, crate::config::HarnessField::Enabled, 0);
-            }
-        }),
-        Page::Editor => choose_editor_row(app, row),
-        Page::Worktrees | Page::Linear | Page::Autofix => {
-            match setting_rows(page).get(row).map(|spec| spec.kind) {
-                Some(kind) if !kind.is_text() && !kind.is_status() => cycle_setting(app, kind),
-                _ => {}
+        Page::Claude => {
+            if let Some(ClaudeRow::Account(AccountRow::Account(id))) =
+                claude_rows(&Config::load()).into_iter().nth(row)
+            {
+                persist(|cfg| cfg.cycle_agent_row(&id, crate::config::HarnessField::Enabled, 0));
             }
         }
-        Page::WhatsNew | Page::Welcome | Page::Accounts | Page::App | Page::Ready => {}
+        Page::Project if row == 0 => next_project(app, out),
+        Page::Welcome | Page::Project | Page::Ready => {}
     }
     app.dirty = true;
-}
-
-fn persist(edit: impl FnOnce(&mut Config)) {
-    let mut cfg = Config::load();
-    edit(&mut cfg);
-    let _ = cfg.try_save();
 }
 
 #[cfg(test)]
@@ -1813,202 +1237,6 @@ mod tests {
         crate::config::with_search_path(path, f)
     }
 
-    /// A first run gets every step; a machine on this SETUP VERSION none;
-    /// one through an older setup only the steps added since — Autofix
-    /// from 2, and on a Mac where orion is not yet in its own app the App
-    /// step from 3 — and Ready to finish on.
-    #[test]
-    fn an_older_setup_opens_on_whats_new() {
-        with_temp_config(|| {
-            with_programs(&[], || {
-                assert_eq!(pending(&Config::load()), Some(0));
-                // This build's release notes seen: the setup steps alone.
-                persist(|cfg| {
-                    cfg.onboarded = true;
-                    cfg.seen_version = crate::whats_new::current().into();
-                });
-                let cfg = Config::load();
-                assert_eq!(pending(&cfg), Some(1));
-                assert_eq!(view_pages(&cfg, 1), vec![Page::Autofix, Page::Ready]);
-                crate::app_bundle::with_offered(true, || {
-                    assert_eq!(
-                        view_pages(&cfg, 1),
-                        vec![Page::App, Page::Autofix, Page::Ready]
-                    );
-                    assert_eq!(view_pages(&cfg, 3), vec![Page::App, Page::Ready]);
-                    assert_eq!(view_pages(&cfg, SETUP_VERSION), vec![Page::Ready]);
-                });
-                persist(|cfg| cfg.setup_version = 2);
-                assert_eq!(pending(&Config::load()), Some(2));
-                assert_eq!(
-                    view_pages(&Config::load(), 2),
-                    vec![Page::Autofix, Page::Ready]
-                );
-                persist(|cfg| cfg.setup_version = SETUP_VERSION);
-                assert_eq!(pending(&Config::load()), None);
-            });
-        });
-    }
-
-    /// The move to Orion.app after an upgrade: a machine set up before the
-    /// app existed opens on the App step alone, once — Enter quits into
-    /// the app with setup unstamped, so the orion opened there, where the
-    /// step is no longer offered, stamps it and goes straight to the grid.
-    #[test]
-    fn an_upgrade_offers_the_move_to_the_app_once() {
-        with_temp_config(|| {
-            with_programs(&[crate::install::GHOSTTY], || {
-                persist(|cfg| {
-                    cfg.onboarded = true;
-                    cfg.setup_version = 3;
-                    cfg.seen_version = crate::whats_new::current().into();
-                });
-                crate::app_bundle::with_offered(true, || {
-                    let cfg = Config::load();
-                    assert_eq!(pending(&cfg), Some(3));
-                    let mut app = App::new();
-                    open(&mut app, &cfg, 3);
-                    assert_eq!(view(&app).current(&cfg), Page::App);
-                    press(&mut app, KeyCode::Enter);
-                    assert!(app.should_quit && app.move_to_app);
-                    assert_eq!(Config::load().setup_version, 3, "carries on there");
-                });
-                // Inside the app the step has nothing to offer.
-                assert_eq!(pending(&Config::load()), None);
-                assert_eq!(Config::load().setup_version, SETUP_VERSION);
-            });
-        });
-    }
-
-    /// The move comes before the notes. In 2.0 it stood behind WHAT'S NEW,
-    /// where one Esc on the notes stamped it seen unshown; a machine that
-    /// went through that setup is asked again, with the step in front.
-    #[test]
-    fn the_app_step_leads_the_release_notes() {
-        with_temp_config(|| {
-            crate::whats_new::with_releases(NEWS, || {
-                with_programs(&[crate::install::GHOSTTY], || {
-                    persist(|cfg| {
-                        cfg.onboarded = true;
-                        cfg.setup_version = 4;
-                        cfg.seen_version = "0.9.8".into();
-                    });
-                    crate::app_bundle::with_offered(true, || {
-                        let cfg = Config::load();
-                        assert_eq!(pending(&cfg), Some(4));
-                        assert_eq!(
-                            view_pages(&cfg, 4),
-                            vec![Page::App, Page::WhatsNew, Page::Ready]
-                        );
-                        assert_eq!(
-                            view_pages(&cfg, 0)[..3],
-                            [Page::App, Page::WhatsNew, Page::Welcome]
-                        );
-                        let mut app = App::new();
-                        open(&mut app, &cfg, 4);
-                        assert_eq!(view(&app).current(&cfg), Page::App);
-                    });
-                    // In the app there is no step to lead: the notes alone.
-                    assert_eq!(view_pages(&Config::load(), 4), vec![Page::WhatsNew]);
-                });
-            });
-        });
-    }
-
-    /// Staying put is remembered too: → past the App step and Enter on
-    /// Ready stamp this setup seen, and the step is not offered again.
-    #[test]
-    fn staying_in_the_terminal_is_asked_once() {
-        with_temp_config(|| {
-            with_programs(&[crate::install::GHOSTTY], || {
-                persist(|cfg| {
-                    cfg.onboarded = true;
-                    cfg.setup_version = 3;
-                    cfg.seen_version = crate::whats_new::current().into();
-                });
-                crate::app_bundle::with_offered(true, || {
-                    let mut app = App::new();
-                    open(&mut app, &Config::load(), 3);
-                    press(&mut app, KeyCode::Right);
-                    assert_eq!(view(&app).current(&Config::load()), Page::Ready);
-                    press(&mut app, KeyCode::Enter);
-                    assert!(app.overlay.is_none() && !app.should_quit);
-                    assert_eq!(pending(&Config::load()), None);
-                });
-            });
-        });
-    }
-
-    #[test]
-    fn dismiss_stamps_onboarded_and_closes() {
-        with_temp_config(|| {
-            let mut app = App::new();
-            let cfg = Config::load();
-            open(&mut app, &cfg, 0);
-            assert!(matches!(app.overlay, Some(Overlay::Onboard(_))));
-            dismiss(&mut app);
-            assert!(app.overlay.is_none());
-            assert!(Config::load().onboarded);
-        });
-    }
-
-    #[test]
-    fn enter_on_welcome_advances() {
-        with_temp_config(|| {
-            let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
-            match &app.overlay {
-                Some(Overlay::Onboard(view)) => assert_eq!(view.page, 1),
-                other => panic!("expected onboard, got {other:?}"),
-            }
-        });
-    }
-
-    /// The steps in order: the App step first, only where it is offered;
-    /// the CLAUDE ACCOUNTS step follows Agents while Claude is
-    /// on there, and is skipped with it off; the Editor step comes before
-    /// Worktrees, Ready is last.
-    #[test]
-    fn the_steps_run_in_order_and_accounts_only_with_claude_on() {
-        with_temp_config(|| {
-            let cfg = Config::load();
-            assert_eq!(
-                pages(&cfg),
-                [
-                    Page::Welcome,
-                    Page::Agents,
-                    Page::Accounts,
-                    Page::Editor,
-                    Page::Worktrees,
-                    Page::Linear,
-                    Page::Autofix,
-                    Page::Ready,
-                ]
-            );
-            crate::app_bundle::with_offered(true, || {
-                let all = pages(&cfg);
-                assert_eq!(all[..2], [Page::App, Page::Welcome]);
-                assert_eq!(all.len(), 9);
-            });
-            let off: Config = serde_json::from_str(r#"{"claude_enabled": false}"#).unwrap();
-            assert_eq!(
-                pages(&off),
-                [
-                    Page::Welcome,
-                    Page::Agents,
-                    Page::Editor,
-                    Page::Worktrees,
-                    Page::Linear,
-                    Page::Autofix,
-                    Page::Ready,
-                ]
-            );
-        });
-    }
-
-    /// A temp home with the default account's dir (holding a CLAUDE.md
-    /// to share) and the config pinned beside it.
     fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
         let home = tempfile::tempdir().unwrap();
         let root = home.path();
@@ -2021,7 +1249,7 @@ mod tests {
     }
 
     fn press(app: &mut App, code: KeyCode) {
-        handle_key(app, KeyEvent::from(code));
+        handle_key(app, KeyEvent::from(code), &mut Vec::new());
     }
 
     fn view(app: &App) -> &OnboardView {
@@ -2033,12 +1261,9 @@ mod tests {
 
     /// Walk the wizard onto `page`.
     fn to_page(app: &mut App, page: Page) {
-        let all = pages(&Config::load());
-        let at = all.iter().position(|p| *p == page).unwrap();
-        while view(app).page < at {
+        while view(app).current() != page {
             press(app, KeyCode::Right);
         }
-        assert_eq!(view(app).current(&Config::load()), page);
     }
 
     fn draw_at(app: &mut App, width: u16, height: u16) -> String {
@@ -2084,91 +1309,110 @@ mod tests {
             .join(" ")
     }
 
-    /// The step strip names every step once — no page title repeated
-    /// over the page — and narrows to `Step n of m` when the names don't
-    /// fit.
+    /// Setup is four pages, in order, named once each on the step strip
+    /// — which narrows to `Step n of m` when the names don't fit — and
+    /// stepping off the last closes it.
     #[test]
-    fn the_step_strip_names_every_step_once() {
+    fn setup_is_four_pages_named_on_the_strip() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            to_page(&mut app, Page::Agents);
+            open(&mut app);
             let shot = draw_text(&mut app);
-            assert!(
-                shot.contains(
-                    " Welcome   Agents   Accounts   Editor   Worktrees   Linear   Autofix   Ready "
-                ),
-                "{shot}"
-            );
-            assert_eq!(shot.matches("Agents").count(), 1, "{shot}");
-            assert!(shot.contains("Orion setup"), "{shot}");
-            let narrow = draw_at(&mut app, 60, 28);
-            assert!(narrow.contains("Step 2 of 8 · Agents"), "{narrow}");
+            let strip = shot.lines().find(|l| l.contains("Welcome")).unwrap();
+            for name in ["Welcome", "Claude", "First project", "Ready"] {
+                assert_eq!(strip.matches(name).count(), 1, "{name}: {strip}");
+            }
+            for old in ["Agents", "Editor", "Worktrees", "Linear", "Autofix", "App"] {
+                assert!(!strip.contains(old), "{old} is gone: {strip}");
+            }
+            let narrow = draw_at(&mut app, 40, 20);
+            assert!(narrow.contains("Step 1 of 4"), "{narrow}");
+            let mut seen = Vec::new();
+            for _ in 0..PAGES.len() {
+                seen.push(view(&app).current());
+                press(&mut app, KeyCode::Right);
+            }
+            assert_eq!(seen, PAGES);
+            assert!(app.overlay.is_none(), "off the last page is done");
+            assert!(Config::load().onboarded);
         });
     }
 
-    /// The Worktrees page mirrors Settings → General's rows — the base
-    /// branch and linking `.env` files — and says where a fresh worktree
-    /// comes from: the box's own toggle is gone, and
-    /// `quick_prompt_new_worktree` is the Agents tab's, neither shown nor
-    /// flipped here.
     #[test]
-    fn the_worktrees_page_offers_its_settings_and_points_at_the_picker() {
+    fn dismiss_stamps_onboarded_and_this_builds_notes_and_closes() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            to_page(&mut app, Page::Worktrees);
+            open(&mut app);
+            press(&mut app, KeyCode::Esc);
+            assert!(app.overlay.is_none());
             let cfg = Config::load();
-            assert_eq!(page_rows(Page::Worktrees, &cfg), 2);
-            let keymap = crate::keymap::Keymap::default();
-            let shot = draw_text(&mut app);
-            let text = words(&shot);
-            assert!(
-                text.contains("› Worktree base branch auto — origin's default branch"),
-                "{text}"
-            );
-            assert!(text.contains("Link .env files on"), "{text}");
-            let key = crate::hints::key(&keymap, crate::keymap::Action::SelectLaunchWorktree)
-                .expect("bound by default");
-            assert!(
-                text.contains(&format!("{key} in its box and pick + new worktree")),
-                "{text}"
-            );
-            assert!(
-                text.contains("Branch new worktrees start from"),
-                "the row's own explanation: {text}"
-            );
-            assert!(shot.contains("Enter type it"), "{shot}");
+            assert!(cfg.onboarded);
+            assert_eq!(cfg.seen_version, crate::whats_new::current());
+        });
+    }
 
-            press(&mut app, KeyCode::Down);
-            press(&mut app, KeyCode::Char(' '));
-            let cfg = Config::load();
-            assert!(!cfg.link_env_files, "row 1 is the .env link");
-            assert!(
-                !cfg.quick_prompt_new_worktree,
-                "the Agents tab's key is left alone"
-            );
-            press(&mut app, KeyCode::Up);
+    #[test]
+    fn enter_on_welcome_advances() {
+        with_temp_config(|| {
+            let mut app = App::new();
+            open(&mut app);
             press(&mut app, KeyCode::Enter);
-            for c in "develop".chars() {
-                press(&mut app, KeyCode::Char(c));
-            }
-            press(&mut app, KeyCode::Enter);
-            assert_eq!(Config::load().worktree_base_branch, "develop");
+            assert_eq!(view(&app).current(), Page::Claude);
+        });
+    }
+
+    /// The Claude page: the CLI first, `installed` or `install…` — `i`
+    /// shows its installer, Esc backs out of the question, never the
+    /// wizard — then every account and Add.
+    #[test]
+    fn the_claude_page_offers_the_cli_and_every_account() {
+        with_temp_home(|_| {
+            with_programs(&["brew"], || {
+                let mut app = App::new();
+                open(&mut app);
+                to_page(&mut app, Page::Claude);
+                let shot = draw_text(&mut app);
+                let inner = words(&shot);
+                for needle in [
+                    "On Config dir Signed in",
+                    "› Claude Code claude install…",
+                    "Add account ~/.claude-2",
+                ] {
+                    assert!(inner.contains(needle), "{needle}:\n{shot}");
+                }
+                assert!(shot.contains("i install"), "{shot}");
+                press(&mut app, KeyCode::Char('i'));
+                let plan = view(&app)
+                    .install
+                    .clone()
+                    .expect("the installer is asked about");
+                assert_eq!(plan.program, "claude");
+                assert!(view(&app).asking());
+                press(&mut app, KeyCode::Esc);
+                assert!(view(&app).install.is_none(), "the question, not the wizard");
+                assert!(app.overlay.is_some());
+            });
+            with_programs(&["claude"], || {
+                let mut app = App::new();
+                open(&mut app);
+                to_page(&mut app, Page::Claude);
+                let inner = words(&draw_text(&mut app));
+                assert!(inner.contains("Claude Code claude installed"), "{inner}");
+            });
         });
     }
 
     /// Enter on an account asks for the email, then runs `claude auth
-    /// login` over the wizard; Esc on the question answers it, never
-    /// skipping the wizard.
+    /// login` over the wizard and switches the account on; Space flips it.
     #[test]
-    fn enter_on_an_account_signs_it_in() {
+    fn enter_on_an_account_signs_it_in_and_switches_it_on() {
         with_temp_home(|_| {
             let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            press(&mut app, KeyCode::Enter);
-            press(&mut app, KeyCode::Right);
-            assert_eq!(view(&app).current(&Config::load()), Page::Accounts);
+            open(&mut app);
+            to_page(&mut app, Page::Claude);
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Char(' '));
+            assert!(!Config::load().effective_harness_by_id("claude").enabled);
             press(&mut app, KeyCode::Enter);
             assert!(matches!(view(&app).account, AccountStep::Email { .. }));
             press(&mut app, KeyCode::Esc);
@@ -2186,6 +1430,10 @@ mod tests {
             assert_eq!(ran.len(), 1);
             assert_eq!(ran[0].args, ["auth", "login", "--email", "a@b.co"]);
             assert_eq!(view(&app).account, AccountStep::Rows);
+            assert!(
+                Config::load().effective_harness_by_id("claude").enabled,
+                "on"
+            );
         });
     }
 
@@ -2195,9 +1443,9 @@ mod tests {
     fn add_account_on_the_wizard_names_and_shares() {
         with_temp_home(|root| {
             let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            press(&mut app, KeyCode::Enter);
-            press(&mut app, KeyCode::Right);
+            open(&mut app);
+            to_page(&mut app, Page::Claude);
+            press(&mut app, KeyCode::Down);
             press(&mut app, KeyCode::Down);
             press(&mut app, KeyCode::Enter);
             assert!(matches!(view(&app).account, AccountStep::Name(_)));
@@ -2208,7 +1456,7 @@ mod tests {
             );
             press(&mut app, KeyCode::Char('y'));
             assert_eq!(view(&app).account, AccountStep::Rows);
-            assert_eq!(view(&app).row, 1, "on the new account");
+            assert_eq!(view(&app).row, 2, "on the new account");
             assert!(view(&app)
                 .note
                 .as_deref()
@@ -2218,34 +1466,13 @@ mod tests {
                 root.join(".claude/CLAUDE.md")
             );
             assert_eq!(Config::load().claude_accounts[0].id, "claude-2");
-            assert_eq!(Config::load().claude_accounts[0].name, "", "nothing typed");
-            // A typed name is the one it goes by, as typed.
-            press(&mut app, KeyCode::Down);
-            press(&mut app, KeyCode::Enter);
-            for c in "Work Laptop".chars() {
-                press(&mut app, KeyCode::Char(c));
-            }
-            press(&mut app, KeyCode::Enter);
-            press(&mut app, KeyCode::Char('n'));
-            let cfg = Config::load();
-            let work = &cfg.claude_accounts[1];
-            assert_eq!(
-                (work.id.as_str(), work.name.as_str()),
-                ("claude-work-laptop", "Work Laptop")
-            );
-            assert_eq!(
-                cfg.effective_harness_by_id("claude-work-laptop")
-                    .display_label(),
-                "Work Laptop (not signed in)"
-            );
         });
     }
 
-    /// The page as drawn: every account by its email, its dir and who it
-    /// is signed in as in columns, Add, and the same-account warning when
-    /// two share one.
+    /// Two accounts signed in as one email are drawn as such, with the
+    /// same-account warning under them.
     #[test]
-    fn the_accounts_page_draws_who_each_account_is() {
+    fn the_claude_page_draws_who_each_account_is() {
         with_temp_home(|root| {
             std::fs::create_dir_all(root.join(".claude-2")).unwrap();
             std::fs::write(
@@ -2265,15 +1492,14 @@ mod tests {
             }
             crate::claude_accounts::refresh_now();
             let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            press(&mut app, KeyCode::Enter);
-            press(&mut app, KeyCode::Right);
+            open(&mut app);
+            to_page(&mut app, Page::Claude);
+            press(&mut app, KeyCode::Down);
             let text = draw_text(&mut app);
             let inner = words(&text);
             for needle in [
-                "Account Config dir Signed in",
-                "› Claude (a@b.co) ~/.claude same as ~/.claude-2",
-                "Claude (a@b.co) ~/.claude-2 same as ~/.claude",
+                "› Claude (a@b.co) on ~/.claude same as ~/.claude-2",
+                "Claude (a@b.co) on ~/.claude-2 same as ~/.claude",
                 "Add account ~/.claude-3",
                 "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
             ] {
@@ -2284,273 +1510,93 @@ mod tests {
         });
     }
 
-    /// The Linear page mirrors Settings → Linear: the same rows, in the
-    /// same order, with the same values and the tab's own explanation of
-    /// the row under the cursor. Space flips **Link PRs to Linear**, and
-    /// Enter types the account in place.
+    fn with_project<T>(app: &mut App, f: impl FnOnce(&mut App) -> T) -> T {
+        app.tree.projects.push(orion_core::Project {
+            id: orion_core::ProjectId("p1".into()),
+            name: "demo".into(),
+            repo_path: "/tmp/demo".into(),
+            sort_order: 0,
+        });
+        app.set_sel_project(0);
+        f(app)
+    }
+
+    /// The First project page: the project the grid is on, then its base
+    /// branch and run command, typed in place into that project's entry —
+    /// the rows Settings → Projects has for it.
     #[test]
-    fn the_linear_page_mirrors_the_linear_tab() {
+    fn the_first_project_page_sets_its_base_branch_and_run_command() {
         with_temp_config(|| {
             let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            to_page(&mut app, Page::Linear);
-            let shot = draw_text(&mut app);
-            let mut at = 0;
-            for spec in LINEAR_SETTINGS {
-                let found = shot[at..]
-                    .find(spec.label)
-                    .unwrap_or_else(|| panic!("{} in order:\n{shot}", spec.label));
-                at += found;
-            }
-            let inner = words(&shot);
-            for needle in [
-                "Link PRs to Linear on",
-                "Linear account the key's owner",
-                "Connection",
-                "API key no project selected",
-            ] {
-                assert!(inner.contains(needle), "{needle}:\n{shot}");
-            }
-            assert!(
-                shot.contains("Attach the PR a"),
-                "the tab's explanation:\n{shot}"
-            );
-            assert!(shot.contains("Space toggle"), "{shot}");
-
-            press(&mut app, KeyCode::Char(' '));
-            assert!(!Config::load().linear_auto_attach);
-            press(&mut app, KeyCode::Char(' '));
-            assert!(Config::load().linear_auto_attach);
-
+            open(&mut app);
+            to_page(&mut app, Page::Project);
+            let inner = words(&draw_text(&mut app));
+            assert!(inner.contains("Project none yet — Enter opens"), "{inner}");
             press(&mut app, KeyCode::Down);
             press(&mut app, KeyCode::Enter);
-            assert!(view(&app).asking());
-            for c in "a@b.co".chars() {
-                press(&mut app, KeyCode::Char(c));
-            }
-            press(&mut app, KeyCode::Enter);
-            assert_eq!(Config::load().linear_assignee_email, "a@b.co");
-        });
-    }
+            assert!(!view(&app).asking(), "nothing to type into yet");
+            assert!(view(&app).note.is_some());
 
-    #[test]
-    fn enter_on_an_agent_cycles_its_model() {
-        with_temp_config(|| {
-            let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
-            let before = Config::load().claude_model.clone();
-            handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
-            let after = Config::load().claude_model.clone();
-            assert_ne!(after, before, "Enter on the first agent steps its model");
-            match &app.overlay {
-                Some(Overlay::Onboard(view)) => assert_eq!(view.page, 1),
-                other => panic!("expected onboard, got {other:?}"),
-            }
-        });
-    }
-
-    /// The Agents page reads as a table — on or off, the model, and the
-    /// CLI `installed` or `install…` — with every label whole. `i` on a
-    /// missing CLI shows its installer and Enter runs it in the modal;
-    /// Esc backs out of the question, never the wizard.
-    #[test]
-    fn a_missing_agent_cli_installs_from_the_agents_page() {
-        with_temp_config(|| {
-            with_programs(&["claude", "brew"], || {
-                let mut app = App::new();
-                open(&mut app, &Config::load(), 0);
-                to_page(&mut app, Page::Agents);
-                let shot = draw_text(&mut app);
-                let inner = words(&shot);
+            with_project(&mut app, |app| {
+                let inner = words(&draw_text(app));
                 for needle in [
-                    "Agent On Default model CLI",
-                    "› Claude on default installed",
-                    "Codex on default install…",
-                    "Grok Build on default install…",
+                    "Project demo · /tmp/demo",
+                    "› Base branch auto",
+                    "Run command not set",
                 ] {
-                    assert!(inner.contains(needle), "{needle}:\n{shot}");
+                    assert!(inner.contains(needle), "{needle}:\n{inner}");
                 }
-                assert!(!shot.contains('['), "no bracketed values:\n{shot}");
-                assert!(!shot.contains(" i install"), "claude is there:\n{shot}");
-
-                press(&mut app, KeyCode::Char('i'));
-                assert!(view(&app).install.is_none());
-                assert_eq!(
-                    view(&app).note.as_deref(),
-                    Some("claude is already installed")
-                );
-
-                let codex = Config::load()
-                    .harness_registry()
-                    .iter()
-                    .position(|entry| entry.id == "codex")
-                    .unwrap();
-                for _ in 0..codex {
-                    press(&mut app, KeyCode::Down);
+                press(app, KeyCode::Enter);
+                assert!(view(app).asking());
+                for c in "dev".chars() {
+                    press(app, KeyCode::Char(c));
                 }
-                let shot = draw_text(&mut app);
-                assert!(shot.contains("i install"), "{shot}");
-                assert!(
-                    words(&shot).contains(
-                        "`codex` isn't on PATH — i runs its installer: brew install --cask codex"
-                    ),
-                    "{shot}"
-                );
-                press(&mut app, KeyCode::Char('i'));
-                assert!(view(&app).asking());
-                let shot = draw_text(&mut app);
-                assert!(
-                    words(&shot).contains("Install codex? Enter runs this here"),
-                    "{shot}"
-                );
-                assert!(shot.contains("Enter run it here · Esc back"), "{shot}");
-                press(&mut app, KeyCode::Esc);
-                assert!(!view(&app).asking());
-                assert!(matches!(app.overlay, Some(Overlay::Onboard(_))));
-                assert!(crate::install::take_ran().is_empty());
-
-                press(&mut app, KeyCode::Char('i'));
-                press(&mut app, KeyCode::Enter);
-                let ran = crate::install::take_ran();
-                assert_eq!(ran.len(), 1);
-                assert_eq!(ran[0].args, ["install", "--cask", "codex"]);
-                assert!(!view(&app).asking());
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Down);
+                press(app, KeyCode::Enter);
+                for c in "just start".chars() {
+                    press(app, KeyCode::Char(c));
+                }
+                press(app, KeyCode::Enter);
+                let project = Config::load().project(std::path::Path::new("/tmp/demo"));
+                assert_eq!(project.base_branch, "dev");
+                assert_eq!(project.run_command, "just start");
+                let inner = words(&draw_text(app));
+                assert!(inner.contains("Base branch dev"), "{inner}");
             });
         });
     }
 
-    /// The Editor page: **Open in app**'s choices, the chosen one dotted,
-    /// and no **File editor** rows — files open in fresh. Enter chooses,
-    /// and the page opens on the choice.
+    /// Ready: what was set, and the keys that matter from the live keymap.
     #[test]
-    fn the_editor_page_chooses_the_app() {
+    fn the_ready_page_names_the_keys_that_matter() {
         with_temp_config(|| {
-            let mut app = App::new();
-            open(&mut app, &Config::load(), 0);
-            to_page(&mut app, Page::Editor);
-            let shot = draw_at(&mut app, 150, 40);
-            let inner = words(&shot);
-            assert!(inner.contains("Open in app — "), "{shot}");
-            assert!(inner.contains("● auto"), "{shot}");
-            assert!(!inner.contains("File editor"), "{shot}");
-            let sublime = editor_rows().iter().position(|w| *w == "sublime").unwrap();
-            for _ in view(&app).row..sublime {
-                press(&mut app, KeyCode::Down);
-            }
-            press(&mut app, KeyCode::Char(' '));
-            assert_eq!(Config::load().outside_editor, "sublime");
-            to_page(&mut app, Page::Editor);
-            assert_eq!(editor_rows()[view(&app).row], "sublime", "on the choice");
-        });
-    }
-
-    /// Where it is offered setup opens on the App step; with Ghostty here
-    /// Enter quits into Orion.app, setup left unstamped so it carries on
-    /// there, and → stays in this terminal instead.
-    #[test]
-    fn the_app_step_reopens_orion_in_its_app() {
-        with_temp_config(|| {
-            crate::app_bundle::with_offered(true, || {
-                with_programs(&[crate::install::GHOSTTY], || {
-                    let mut app = App::new();
-                    open(&mut app, &Config::load(), 0);
-                    assert_eq!(view(&app).current(&Config::load()), Page::App);
-                    let shot = draw_text(&mut app);
-                    let said = words(&shot);
-                    assert!(
-                        said.contains("Orion's ⌘ shortcuts need its own app"),
-                        "{shot}"
-                    );
-                    assert!(said.contains("here they don't reach orion"), "{shot}");
-                    assert!(
-                        said.contains("`orion app` makes the move any time"),
-                        "{shot}"
-                    );
-                    assert!(said.contains("makes Orion.app in ~/Applications"), "{shot}");
-                    assert!(
-                        said.contains("projects, settings and history stay where they are"),
-                        "{shot}"
-                    );
-                    assert!(shot.contains("Enter open as an app"), "{shot}");
-                    assert!(shot.contains("stay here"), "{shot}");
-
-                    press(&mut app, KeyCode::Right);
-                    assert_eq!(view(&app).current(&Config::load()), Page::Welcome);
-                    assert!(!app.should_quit);
-
-                    press(&mut app, KeyCode::Left);
-                    press(&mut app, KeyCode::Enter);
-                    assert!(app.should_quit && app.move_to_app);
-                    assert!(!Config::load().onboarded, "setup carries on in the app");
-                });
-            });
-        });
-    }
-
-    /// The Ready page sums up what was chosen and names the next keys from
-    /// the keymap; with no agent on it says so instead of naming none.
-    #[test]
-    fn the_ready_page_sums_up_what_was_chosen() {
-        with_temp_config(|| {
-            with_programs(&["claude", "fresh"], || {
-                // Claude on, every other agent off.
-                persist(|cfg| {
-                    for entry in cfg.harness_registry() {
-                        if entry.enabled != (entry.id == "claude") {
-                            cfg.cycle_agent_row(&entry.id, crate::config::HarnessField::Enabled, 0);
-                        }
-                    }
-                });
-                let app = App::new();
-                let cfg = Config::load();
-                let chosen = summary(&app, &cfg);
-                assert_eq!(chosen[0].what, "Agents");
-                assert_eq!(chosen[0].value, "Claude");
-                assert!(!chosen[0].warn);
-                assert_eq!(chosen[1].what, "Open in app");
-                assert!(chosen[2].value.starts_with(".env files linked"));
-
-                let mut app = App::new();
-                open(&mut app, &cfg, 0);
-                to_page(&mut app, Page::Ready);
-                let shot = draw_text(&mut app);
-                let inner = words(&shot);
-                for (key, does) in next_keys(&app.keymap) {
-                    assert!(
-                        inner.contains(&format!("{key} {does}")),
-                        "{key} {does}:\n{shot}"
-                    );
-                }
-                let new_agent = crate::hints::key(&app.keymap, Action::QuickPrompt).unwrap();
-                assert!(
-                    inner.contains(&format!("{new_agent} start an agent")),
-                    "{shot}"
-                );
-                assert!(inner.contains("Agents Claude Open in app"), "{shot}");
-                assert!(!shot.contains("Turn on an agent"), "{shot}");
-                assert!(shot.contains("Enter start using Orion"), "{shot}");
-
+            with_programs(&["claude"], || {
                 persist(|cfg| cfg.claude_enabled = false);
-                let chosen = summary(&app, &Config::load());
-                assert!(chosen[0].value.starts_with("none on"), "{:?}", chosen[0]);
-                assert!(chosen[0].warn);
+                let mut app = App::new();
+                open(&mut app);
+                to_page(&mut app, Page::Ready);
+                let inner = words(&draw_text(&mut app));
+                assert!(inner.contains("Claude none on"), "{inner}");
+                for key in ["⌘N", "⌘K", "⌘E", "⌘L", "⌘I", "⌘,"] {
+                    assert!(inner.contains(key), "{key}: {inner}");
+                }
+                press(&mut app, KeyCode::Enter);
+                assert!(app.overlay.is_none(), "Enter starts using Orion");
             });
         });
     }
 
-    /// Every page fits the screen — 150×40 and 90×28 — with its keys on
-    /// the bottom border and nothing cut at the frame: the modal is as tall
-    /// as the page, and every line of prose wraps.
+    /// Every page fits the screen, its prose wrapped a column short of
+    /// the frame and its keys on the bottom border.
     #[test]
     fn every_page_fits_and_wraps() {
         with_temp_config(|| {
-            with_programs(&["claude", "fresh", "brew"], || {
+            with_programs(&["claude", "brew"], || {
                 for (w, h) in [(150, 40), (90, 28)] {
                     let mut app = App::new();
-                    open(&mut app, &Config::load(), 0);
-                    let count = pages(&Config::load()).len();
-                    for page in 0..count {
+                    open(&mut app);
+                    for page in 0..PAGES.len() {
                         let shot = draw_at(&mut app, w, h);
                         let rows: Vec<Vec<char>> =
                             shot.lines().map(|row| row.chars().collect()).collect();
@@ -2561,9 +1607,6 @@ mod tests {
                             .unwrap_or_else(|| panic!("a frame:\n{shot}"));
                         let border: String = rows[bottom].iter().collect();
                         assert!(border.contains("Esc"), "keys on the border:\n{shot}");
-                        // Nothing runs into the right border: prose wraps
-                        // a column short of it, and a row's value is cut
-                        // to fit.
                         let right = rows[top].iter().position(|c| *c == '╮').unwrap();
                         for row in &rows[top + 1..bottom] {
                             assert_eq!(row[right], '│', "the frame:\n{shot}");
@@ -2573,99 +1616,11 @@ mod tests {
                             bottom - top < usize::from(h) - 1,
                             "page {page} at {w}x{h} fits:\n{shot}"
                         );
-                        if page + 1 < count {
+                        if page + 1 < PAGES.len() {
                             press(&mut app, KeyCode::Right);
                         }
                     }
                 }
-            });
-        });
-    }
-
-    /// Releases this test build "shipped": one past what the machine saw.
-    static NEWS: &[crate::whats_new::Release] = &[
-        crate::whats_new::Release {
-            version: "1.0.0",
-            date: "2026-10-06",
-            changes: &[crate::whats_new::Change {
-                title: "PR autofix",
-                details: &["An agent sent at your PR's conflicts and failing checks"],
-            }],
-        },
-        crate::whats_new::Release {
-            version: "0.9.9",
-            date: "2026-10-05",
-            changes: &[crate::whats_new::Change {
-                title: "File links open partial paths",
-                details: &[],
-            }],
-        },
-        crate::whats_new::Release {
-            version: "0.9.8",
-            date: "2026-10-04",
-            changes: &[],
-        },
-    ];
-
-    /// After an upgrade, setup opens on WHAT'S NEW — every release since
-    /// the one this machine last ran, stacked newest first — ahead of the
-    /// setup steps added since; with no steps missed, the notes alone, and
-    /// closing them stamps this build seen.
-    #[test]
-    fn an_upgrade_opens_on_whats_new_ahead_of_the_missed_steps() {
-        with_temp_config(|| {
-            crate::whats_new::with_releases(NEWS, || {
-                persist(|cfg| {
-                    cfg.onboarded = true;
-                    cfg.setup_version = 2;
-                    cfg.seen_version = "0.9.8".into();
-                });
-                let cfg = Config::load();
-                assert_eq!(pending(&cfg), Some(2));
-                assert_eq!(
-                    view_pages(&cfg, 2),
-                    vec![Page::WhatsNew, Page::Autofix, Page::Ready]
-                );
-
-                persist(|cfg| cfg.setup_version = SETUP_VERSION);
-                let cfg = Config::load();
-                let since = pending(&cfg).expect("news to show");
-                assert_eq!(view_pages(&cfg, since), vec![Page::WhatsNew]);
-                let mut app = App::new();
-                open(&mut app, &cfg, since);
-                let shot = draw_text(&mut app);
-                for text in [
-                    "What's new in Orion",
-                    "since v0.9.8",
-                    "v1.0.0",
-                    "PR autofix",
-                    "v0.9.9",
-                    "File links open partial paths",
-                    "done",
-                ] {
-                    assert!(shot.contains(text), "{text} missing:\n{shot}");
-                }
-                assert!(!shot.contains("v0.9.8  "), "the one seen is not news");
-                handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
-                assert!(app.overlay.is_none());
-                assert_eq!(Config::load().seen_version, crate::whats_new::current());
-                assert_eq!(pending(&Config::load()), None, "seen now");
-            });
-        });
-    }
-
-    /// A launch with nothing new writes nothing.
-    #[test]
-    fn no_news_is_no_write() {
-        with_temp_config(|| {
-            crate::whats_new::with_releases(NEWS, || {
-                persist(|cfg| {
-                    cfg.onboarded = true;
-                    cfg.setup_version = SETUP_VERSION;
-                    cfg.seen_version = "999.0.0".into();
-                });
-                assert_eq!(pending(&Config::load()), None);
-                assert_eq!(Config::load().seen_version, "999.0.0", "never lowered");
             });
         });
     }

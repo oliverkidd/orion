@@ -144,7 +144,7 @@ const CONFIRM_MIN_W: u16 = 52;
 const HELP_W: u16 = 92;
 /// The help overlay's key column: chords past it are dropped whole.
 const HELP_KEY_W: usize = 14;
-/// Wide enough for the whole tab strip, Linear and Hotkeys included.
+/// Wide enough for the tab strip and the longest row with its value and hint.
 const SETTINGS_W: u16 = 90;
 const HOSTS_W: u16 = 64;
 /// Layout floor for a split modal's right pane. Deliberately below
@@ -172,10 +172,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let area = f.area();
         confetti.draw(f.buffer_mut(), area, std::time::Instant::now(), app.theme);
     }
-    if app.black_background {
-        let area = f.area();
-        draw_black_background(f.buffer_mut(), area);
-    }
+    let area = f.area();
+    draw_black_background(f.buffer_mut(), area);
 }
 
 fn draw_screen(f: &mut Frame, app: &mut App) {
@@ -614,11 +612,6 @@ pub(crate) fn confirm_hints(action: &crate::app::PendingAction) -> Vec<crate::hi
     use crate::app::PendingAction;
     use confirm_keys::{CANCEL, NO, TRASH, YES};
     match action {
-        PendingAction::ThenDeleteWorktree { offered: true, .. } => vec![
-            YES.hint_as("yes, both"),
-            NO.hint_as("no, the card only"),
-            CANCEL.hint(),
-        ],
         PendingAction::AddClaudeAccount(_) => vec![
             YES.hint_as("share it"),
             NO.hint_as("start empty"),
@@ -644,7 +637,7 @@ pub(crate) mod menu_keys {
     pub const INTO: Key = Key::new(&["right", "l"], "more");
     /// Back out of a submenu.
     pub const BACK: Key = Key::new(&["left", "h"], "back");
-    /// The hovered harness's section of Settings → Agents. `s` only
+    /// The hovered harness's section of Settings → Accounts. `s` only
     /// where no filter eats letters.
     pub const SETTINGS: Key = Key::new(&["?", "s"], "settings");
     /// Widen a type-ahead filter.
@@ -1476,7 +1469,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         (Act(&[Home]), "home: orion's animation"),
                         (Act(&[ToggleLauncherPane]), "fold / unfold the pane"),
                         (Act(&[ToggleFullScreen]), "full-screen / normal size"),
-                        (Act(&[Settings]), "settings; Hotkeys tab lists keys"),
+                        (Act(&[Settings]), "settings; Keys tab lists keys"),
                         (Act(&[Quit]), "quit"),
                     ],
                 ),
@@ -1600,7 +1593,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Settings(view) => {
             // A tab strip over a scrolling list. Splitting the settings by
             // tab is what keeps the modal short enough for a stock 24-row
-            // terminal now that the Hotkeys tab alone is forty rows.
+            // terminal now that the Keys tab alone is forty rows.
             let cfg = crate::config::Config::load();
             let tab = view.tab;
             let rows = app.settings_rows(tab);
@@ -1699,12 +1692,12 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         ]));
                     }
                     crate::config::SettingsRow::Setting(i) => {
-                        // The Agents tab resolves its harness rows through
+                        // The Accounts tab resolves its harness rows through
                         // the registry; every other values tab reads its
                         // static spec, and a PROJECT TAB row reads the
                         // entry of the project whose block it is in.
-                        let (label, value, prefix) = if tab == crate::config::agents_tab() {
-                            match (crate::config::AGENTS_HEAD.get(*i), cfg.account_row(*i)) {
+                        let (label, value, prefix) = if tab == crate::config::accounts_tab() {
+                            match (crate::config::ACCOUNTS_HEAD.get(*i), cfg.account_row(*i)) {
                                 (Some(spec), _) => {
                                     (spec.label.to_string(), cfg.value_label(spec.kind), "")
                                 }
@@ -1723,7 +1716,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                 }
                                 (None, None) => {
                                     let (id, field) = cfg.agent_row(*i).expect(
-                                        "settings_rows indexes the Agents tab's harness rows",
+                                        "settings_rows indexes the Accounts tab's harness rows",
                                     );
                                     (field.label().to_string(), cfg.agent_value(&id, field), "")
                                 }
@@ -1731,17 +1724,16 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         } else {
                             let spec = crate::config::setting_at(tab, *i)
                                 .expect("settings_rows indexes this tab's settings");
-                            let value = if spec.kind.is_project() {
-                                app.settings_project(tab, *i)
-                                    .map(|p| cfg.project(&p.repo_path).value_label(spec.kind))
-                                    .unwrap_or_else(|| "n/a".into())
-                            } else if let Some(status) = crate::linear::status_value(app, spec.kind)
-                            {
-                                // The LINEAR TAB's status rows: the app's
-                                // to say, never the file's.
-                                status
-                            } else {
-                                cfg.value_label(spec.kind)
+                            // A PROJECTS TAB row is its project's; the
+                            // Linear key's status is the app's to say,
+                            // never the file's.
+                            let value = match app.settings_project(tab, *i) {
+                                Some(p) if spec.kind.is_status() => {
+                                    crate::linear::key_status(app, &p.repo_path)
+                                }
+                                Some(p) => cfg.project(&p.repo_path).value_label(spec.kind),
+                                None if spec.kind.is_project() => "n/a".into(),
+                                None => cfg.value_label(spec.kind),
                             };
                             (spec.label.to_string(), value, "")
                         };
@@ -2225,6 +2217,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
         Overlay::Todos(view) => crate::todos::draw(f, app, &view, th, false),
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
+        Overlay::WhatsNew(view) => crate::whats_new::draw(f, app, &view, th),
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
@@ -2818,6 +2811,7 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
         return hints;
     }
     let tail = [RESET_ALL.hint(), CLOSE.hint()];
+    let kind = crate::config::setting_at(view.tab, view.selected).map(|s| s.kind);
     let mut hints = if view.on_tabs {
         let digits = crate::keymap::KeyChord::parse("1")
             .zip(crate::keymap::KeyChord::parse("9"))
@@ -2826,26 +2820,14 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
         vec![CYCLE.hint_as("tab"), Hint::new(digits, "jump")]
     } else if view.is_hotkeys() {
         Vec::new()
-    } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
+    } else if kind.is_some_and(|k| k.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
-    } else if let Some(
-        kind @ (crate::config::SettingKind::RunSetup
-        | crate::config::SettingKind::Git
-        | crate::config::SettingKind::Gh),
-    ) = crate::config::setting_at(view.tab, view.selected).map(|s| s.kind)
-    {
-        // The Tools tab's verbs: setup opens; a program row only installs,
-        // which the `i` hint below offers while it's missing.
-        if kind == crate::config::SettingKind::RunSetup {
-            vec![CHOOSE.hint_as("open setup").kept()]
-        } else {
-            Vec::new()
-        }
-    } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_status())
-    {
+    } else if kind == Some(crate::config::SettingKind::AgentPresets) {
+        vec![CHOOSE.hint_as("open the presets").kept()]
+    } else if kind.is_some_and(|k| k.is_status()) {
         vec![CHOOSE.hint_as("test the connection").kept()]
     } else {
-        let cfg = (view.tab == crate::config::agents_tab()).then(crate::config::Config::load);
+        let cfg = (view.tab == crate::config::accounts_tab()).then(crate::config::Config::load);
         match cfg
             .as_ref()
             .and_then(|cfg| cfg.account_row(view.selected).map(|row| (cfg, row)))
@@ -5124,9 +5106,7 @@ mod tests {
             buf.content.iter().filter(|c| c.bg == Color::Reset).count()
         };
         let mut app = App::new();
-        assert!(resets(&mut app) > 0, "off: the terminal's background shows");
-        app.black_background = true;
-        assert_eq!(resets(&mut app), 0, "on: every default cell goes black");
+        assert_eq!(resets(&mut app), 0, "every default cell goes black");
 
         let area = Rect::new(0, 0, 2, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);

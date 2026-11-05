@@ -44,7 +44,7 @@ pub struct ClaudeAccount {
     /// entry stays the two keys above.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    /// Whether the pickers offer it — the Agents tab's switch. Written
+    /// Whether the pickers offer it — the Accounts tab's switch. Written
     /// only while off, so an entry stays the two keys above.
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_on")]
     pub enabled: bool,
@@ -65,7 +65,7 @@ impl ClaudeAccount {
     }
 
     /// Why this entry cannot be an account, or None when it can. The
-    /// registry leaves a broken entry out; the Agents tab names the reason.
+    /// registry leaves a broken entry out; the Accounts tab names the reason.
     pub fn problem(&self) -> Option<String> {
         let id = self.id.trim();
         if id.is_empty() {

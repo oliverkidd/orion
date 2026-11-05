@@ -707,9 +707,8 @@ pub(crate) fn open_quick_prompt(app: &mut App) {
         open_for_pr(app);
         return;
     }
-    // The WORKTREES PANEL, and anywhere with the QUICK PROMPT NEW
-    // WORKTREE SETTING on: a fresh worktree of the selected project.
-    if app.focus == Focus::Worktrees || Config::load().quick_prompt_new_worktree {
+    // The WORKTREES PANEL: a fresh worktree of the selected project.
+    if app.focus == Focus::Worktrees {
         let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
             return;
         };

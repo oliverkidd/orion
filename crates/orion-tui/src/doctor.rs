@@ -1,11 +1,11 @@
 //! `orion doctor`: what this machine has of what orion leans on, a line
 //! each — git, gh and its sign-in, fresh (or the editor `ORION_EDITOR`
-//! names), the **Open in app** editor, Orion.app and the Ghostty it is made
-//! from, the CLI of every agent turned on, and the project's
+//! names), the editor app files open in (**Open files in**), Orion.app
+//! and the Ghostty it is made from, the CLI of every agent turned on, and the project's
 //! `LINEAR_API_KEY` (where it was found, never the key), and the docker
 //! compose projects whose checkout is gone — with the command that fixes
 //! whatever is missing. It never installs anything itself:
-//! `install.sh` and the onboarding wizard do, with the same commands
+//! `install.sh`, setup and Settings do, with the same commands
 //! (`install`).
 //!
 //! Only git, and the editor files open in, are required; the exit code
@@ -178,8 +178,8 @@ pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
     out
 }
 
-/// What a check's `fix:` says for an install: the line Settings → Tools
-/// and setup run on `i`, else the page to get it from.
+/// What a check's `fix:` says for an install: the line setup and the
+/// settings rows run on `i`, else the page to get it from.
 fn plan_fix(plan: crate::install::Plan) -> String {
     if plan.line.is_empty() {
         plan.link.into()
@@ -251,7 +251,7 @@ fn editor(m: &Machine) -> Check {
     }
 }
 
-/// **Open in app**: the app `⌘O` hands a file to, as this machine
+/// **Open files in**: the app `⌘O` hands a file to, as this machine
 /// resolves the setting.
 fn open_in_app(cfg: &Config, m: &Machine) -> Check {
     use crate::outside_editor::{resolve, Choice, Places};
@@ -262,18 +262,18 @@ fn open_in_app(cfg: &Config, m: &Machine) -> Check {
     let choice = Choice::parse(&cfg.outside_editor);
     match resolve(choice, &places) {
         Ok(target) => Check::new(
-            "Open in app",
+            "Open files in",
             Status::Ok,
             match choice {
                 Choice::Auto => format!("auto → {}", target.name),
                 _ => target.name.to_string(),
             },
         ),
-        Err(why) => Check::new("Open in app", Status::Missing, why).fix(
+        Err(why) => Check::new("Open files in", Status::Missing, why).fix(
             m.tools()
                 .app_plan(choice.as_str())
                 .map(plan_fix)
-                .unwrap_or_else(|| "set Open in app to auto in Settings → Tools".into()),
+                .unwrap_or_else(|| "set Open files in to auto in Settings → General".into()),
         ),
     }
 }
@@ -325,7 +325,7 @@ fn agents(cfg: &Config, m: &Machine) -> Vec<Check> {
         return vec![Check::new(
             "Agents",
             Status::Skipped,
-            "none turned on — Settings → Agents",
+            "none turned on — Settings → Accounts",
         )];
     }
     let tools = m.tools();
@@ -383,14 +383,30 @@ fn linear(m: &Machine) -> Check {
 }
 
 /// docker compose projects whose every container was started in a
-/// directory that is gone — a worktree deleted while **Worktree
-/// containers** was off, or outside orion — with the commands that tear
-/// them down. Never required: only checkouts that run compose have any.
+/// directory that is gone — a worktree deleted while its project's **On
+/// worktree delete** was off, or outside orion — with the commands that
+/// tear them down. Never required: only checkouts that run compose have
+/// any.
 fn containers(cfg: &Config, m: &Machine) -> Check {
     use orion_core::compose;
     const NAME: &str = "Containers";
-    let policy = compose::WorktreeContainers::parse(&cfg.worktree_containers);
-    let setting = format!("Worktree containers: {}", policy.as_str());
+    let cleaning: Vec<String> = cfg
+        .projects
+        .iter()
+        .map(|(repo, project)| (repo, project.containers()))
+        .filter(|(_, policy)| *policy != compose::WorktreeContainers::Off)
+        .map(|(repo, policy)| {
+            format!(
+                "{} {}",
+                orion_core::Project::folder_name(repo),
+                policy.as_str()
+            )
+        })
+        .collect();
+    let setting = match cleaning.as_slice() {
+        [] => "On worktree delete: off".to_string(),
+        some => format!("On worktree delete: {}", some.join(", ")),
+    };
     let Some(docker) = m.find("docker") else {
         return Check::new(NAME, Status::Skipped, "no docker CLI on PATH");
     };
@@ -418,8 +434,8 @@ fn containers(cfg: &Config, m: &Machine) -> Check {
         .map(|p| format!("docker compose -p {p} down --volumes"))
         .collect::<Vec<_>>()
         .join("; ");
-    let hint = if policy == compose::WorktreeContainers::Off {
-        " — Settings → General → Worktree containers cleans up on delete"
+    let hint = if cleaning.is_empty() {
+        " — Settings → Projects → On worktree delete cleans up on delete"
     } else {
         ""
     };
@@ -575,11 +591,14 @@ mod tests {
 
         let stubs = Stubs::new();
         stubs.program("docker", "printf 'live\\t/\\n'");
-        let cfg: Config = serde_json::from_str(r#"{"worktree_containers": "remove"}"#).unwrap();
+        let cfg: Config = serde_json::from_str(
+            r#"{"projects": {"/src/app": {"worktree_containers": "remove"}}}"#,
+        )
+        .unwrap();
         let check = containers(&cfg, &stubs.machine());
         assert_eq!(check.status, Status::Ok);
         assert!(
-            check.detail.ends_with("(Worktree containers: remove)"),
+            check.detail.ends_with("(On worktree delete: app remove)"),
             "{}",
             check.detail
         );

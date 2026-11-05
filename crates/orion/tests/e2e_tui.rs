@@ -50,18 +50,16 @@ const PROJECT_MENU_ROW: &str = "Remove from list";
 /// way back out to the grid's cards.
 const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";
 
-/// A data dir as a user who finished first-run setup leaves it: the
-/// ONBOARDING wizard already seen, its new setup steps and this build's
-/// release notes included (any of them would cover the grid every test
-/// drives) and the agents it offers
-/// switched on, which a fresh install leaves off.
+/// A data dir as a user who finished first-run setup leaves it: setup
+/// already seen and this build's release notes with it (either would
+/// cover the grid every test drives) and the agents it offers switched
+/// on, which a fresh install leaves off.
 fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
     std::fs::write(
         data_dir.join("config.local.json"),
         format!(
-            r#"{{"onboarded": true, "setup_version": {}, "seen_version": "{}"}}"#,
-            orion_tui::onboard::SETUP_VERSION,
+            r#"{{"onboarded": true, "seen_version": "{}"}}"#,
             orion_tui::whats_new::current()
         ),
     )
@@ -613,12 +611,11 @@ fn tui_manual_link_add_is_unavailable() {
     tui.wait_for_gone("attach a link");
 }
 
-/// The DIFF VIEWER's flat file list: opened with the keys on the files
-/// and the list flat (Settings → Review), the way this walk reads it.
+/// The DIFF VIEWER's flat file list, the way this walk reads it: the
+/// list flat, and the keys handed from the commits to the files.
 #[test]
 fn tui_git_diff_modal() {
-    let mut tui =
-        TuiHarness::spawn_with_settings(r#", "diff_start": "files", "diff_tree_view": false"#);
+    let mut tui = TuiHarness::spawn_with_settings(r#", "diff_tree_view": false"#);
     let repo = tui.make_repo("diff-proj");
 
     tui.wait_for_text("to begin");
@@ -635,7 +632,9 @@ fn tui_git_diff_modal() {
     // ---- open the modal; the selected file's diff renders ----
     tui.send(CMD_E);
     tui.wait_for_text("Files (2)");
-    // Status is path-ordered, so .keep (modified) is selected first.
+    // It opens on the commits; Tab hands the keys to the files. Status
+    // is path-ordered, so .keep (modified) is selected first.
+    tui.send(TAB);
     tui.wait_for_selected(".keep");
     tui.wait_for_text("+ tracked change");
 
@@ -696,7 +695,7 @@ fn tui_git_diff_modal() {
     );
 }
 
-/// The DIFF VIEWER's COMMIT LIST end to end, on the Review tab's defaults
+/// The DIFF VIEWER's COMMIT LIST end to end, on the defaults
 /// — the keys on the commits as it opens: a clean checkout with commits
 /// of its own opens on the whole branch, every commit ticked, instead of
 /// saying "no changes"; `^A` unticks them and the cursor's commit shows
@@ -921,7 +920,7 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     }
 }
 
-/// AUTOFIX, end to end: with **Auto-fix PRs** on — an older orion's
+/// AUTOFIX, end to end: with **Auto-fix my PRs** on — an older orion's
 /// `ask` reads as on — a pull request of the user's that `gh` says
 /// conflicts sends an `autofix-<n>` agent at it on its own, with no modal
 /// to answer. A stub `gh` on PATH answers the open list (GraphQL) and the

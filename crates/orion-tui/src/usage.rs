@@ -319,43 +319,39 @@ impl Usage {
 pub fn accounts(cfg: &Config) -> Vec<Account> {
     let registry = cfg.harness_registry();
     let mut out: Vec<Account> = Vec::new();
-    if cfg.usage_claude {
-        for entry in registry
-            .iter()
-            .filter(|e| e.enabled && e.is_claude_account())
-        {
-            let email = crate::claude_accounts::email_of(entry);
-            if let Some(email) = &email {
-                let same = out.iter_mut().find(|a| {
-                    a.email
-                        .as_deref()
-                        .is_some_and(|seen| seen.eq_ignore_ascii_case(email))
-                });
-                if let Some(first) = same {
-                    first.also.push(entry.id.clone());
-                    continue;
-                }
-            }
-            out.push(claude_account(entry, email));
-        }
-    }
-    if cfg.usage_cursor {
-        if let Some(entry) = registry.iter().find(|e| {
-            e.id == orion_core::AgentKind::Cursor.as_str()
-                && e.enabled
-                && crate::config::program_installed(&e.program)
-        }) {
-            out.push(Account {
-                id: entry.id.clone(),
-                provider: Provider::Cursor,
-                label: "Cursor".into(),
-                email: None,
-                signed_out: false,
-                keychain_dir: None,
-                dir: None,
-                also: Vec::new(),
+    for entry in registry
+        .iter()
+        .filter(|e| e.enabled && e.is_claude_account())
+    {
+        let email = crate::claude_accounts::email_of(entry);
+        if let Some(email) = &email {
+            let same = out.iter_mut().find(|a| {
+                a.email
+                    .as_deref()
+                    .is_some_and(|seen| seen.eq_ignore_ascii_case(email))
             });
+            if let Some(first) = same {
+                first.also.push(entry.id.clone());
+                continue;
+            }
         }
+        out.push(claude_account(entry, email));
+    }
+    if let Some(entry) = registry.iter().find(|e| {
+        e.id == orion_core::AgentKind::Cursor.as_str()
+            && e.enabled
+            && crate::config::program_installed(&e.program)
+    }) {
+        out.push(Account {
+            id: entry.id.clone(),
+            provider: Provider::Cursor,
+            label: "Cursor".into(),
+            email: None,
+            signed_out: false,
+            keychain_dir: None,
+            dir: None,
+            also: Vec::new(),
+        });
     }
     out
 }
@@ -1135,7 +1131,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             dim,
         )));
         lines.push(Line::from(Span::styled(
-            " add one in Settings → Agents",
+            " add one in Settings → Accounts",
             dim,
         )));
     }

@@ -131,8 +131,8 @@ pub(crate) enum Command {
         /// Branch name; several words are joined with hyphens, none at all
         /// gets a random `<adj>-<noun>-<verb>` one.
         name: Vec<String>,
-        /// Start point for a new branch (default: the `worktree_base_branch`
-        /// setting, else origin's default branch, fetched).
+        /// Start point for a new branch (default: the project's Base branch,
+        /// else origin's default branch, fetched).
         ///
         /// A branch name origin has means origin's copy of it, fetched first:
         /// `main` is `origin/main`, never this checkout's local branch. A tag,
@@ -164,7 +164,7 @@ pub(crate) enum Command {
         #[arg(long, value_name = "NAME")]
         worktree: Option<String>,
         /// Start point for a new --worktree branch (default: the
-        /// `worktree_base_branch` setting, else origin's default branch).
+        /// project's Base branch, else origin's default branch).
         #[arg(long, value_name = "REF", requires = "worktree")]
         base: Option<String>,
     },
@@ -215,11 +215,12 @@ pub(crate) enum Command {
         /// Remote directory to start in (default: remote $HOME).
         path: Option<String>,
     },
-    /// Open orion on its setup, every step.
+    /// Open orion on its setup.
     ///
-    /// Agents, Claude accounts, the Open in app editor, worktrees, Linear
-    /// and autofix, with `i` to install what's missing. The palette's Run
-    /// setup and Settings → Tools → Setup open the same thing.
+    /// Four pages: Welcome; Claude — its CLI (`i` installs it) and the
+    /// accounts to sign in; your first project, its base branch and run
+    /// command; and the keys that matter. The palette's Run setup opens
+    /// the same thing.
     Setup,
     /// Open orion as a Mac app of its own.
     ///
@@ -234,7 +235,7 @@ pub(crate) enum Command {
     /// Check what orion needs on this machine.
     ///
     /// One line each for git, gh and its sign-in, fresh (or the editor
-    /// `ORION_EDITOR` names), the Open in app editor, Orion.app and the
+    /// `ORION_EDITOR` names), the editor app files open in, Orion.app and the
     /// Ghostty it is made from, the CLI of every agent turned on, and this
     /// project's LINEAR_API_KEY (where it was found, never the key) — with
     /// the command that fixes whatever is missing. It never installs

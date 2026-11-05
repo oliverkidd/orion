@@ -221,7 +221,8 @@ pub struct CreateForm {
 }
 
 impl CreateForm {
-    fn new(project: ProjectId, dir: PathBuf, from: String, draft: bool) -> Self {
+    /// A new pull request from `from`, its Draft box off.
+    fn new(project: ProjectId, dir: PathBuf, from: String) -> Self {
         Self {
             project,
             dir,
@@ -229,7 +230,7 @@ impl CreateForm {
             into: TextInput::new(),
             title: TextInput::new(),
             body: TextInput::multiline(),
-            draft,
+            draft: false,
             field: CreateField::Title,
             heads: None,
             bases: None,
@@ -390,7 +391,7 @@ pub(crate) fn open_create(app: &mut App) {
     }
     let from = default_head(app, &project);
     let config = crate::config::Config::load();
-    let mut form = CreateForm::new(project, dir.clone(), from, config.pr_draft);
+    let mut form = CreateForm::new(project, dir.clone(), from);
     if form.from.is_empty() {
         form.field = CreateField::From;
     }
@@ -399,7 +400,7 @@ pub(crate) fn open_create(app: &mut App) {
     form.fetching = tx.is_some();
     put_form(app, PrForm::Create(form));
     if let Some(tx) = tx {
-        let base_setting = config.worktree_base_branch.clone();
+        let base_setting = config.project(&dir).base_branch;
         let quit = app.git_sync.quit.clone();
         // What the repo knows now, at once; then again once origin is
         // fetched, so a branch moved on there — a `dev` merged from
@@ -874,10 +875,6 @@ pub struct MergeForm {
     /// The methods the repo allows; every one until `gh repo view` says.
     pub allowed: Vec<MergeMethod>,
     pub delete_branch: bool,
-    /// The **Delete merged branch** SETTING as the form opened: what
-    /// [`MergeForm::apply_detail`] ticks the box to once it knows the
-    /// branch is ours.
-    pub delete_default: bool,
     /// The repo deletes merged branches itself.
     pub auto_delete: bool,
     /// Why the branch can't go with it, once GitHub has said
@@ -909,7 +906,8 @@ impl MergeForm {
         self.branch = deletable_branch(pr, detail);
         self.base = detail.map(|d| d.base.clone()).unwrap_or_default();
         self.warnings = merge_warnings(status, detail);
-        self.delete_branch = self.delete_default && self.branch.is_some();
+        // The box starts ticked wherever the branch is ours to delete.
+        self.delete_branch = self.branch.is_some();
     }
 }
 
@@ -941,7 +939,8 @@ fn merge_warnings(status: &PrStatus, detail: Option<&PrDetail>) -> Vec<String> {
 }
 
 /// `⌘X`: the merge form for the pull request under the cursor, on
-/// the **Review** tab's defaults, the repo asked which methods it allows.
+/// the method this project last merged by, the branch to be deleted, and
+/// the repo asked which methods it allows.
 pub(crate) fn open_merge(app: &mut App) {
     let Some(view) = modal(app) else {
         return;
@@ -961,10 +960,9 @@ pub(crate) fn open_merge(app: &mut App) {
         branch: None,
         head: pr.head.clone(),
         pending: true,
-        method: MergeMethod::parse(&config.pr_merge_method),
+        method: config.merge_method(&dir),
         allowed: MergeMethod::ALL.to_vec(),
         delete_branch: false,
-        delete_default: config.pr_delete_branch,
         auto_delete: false,
         stays: None,
         auto: false,
@@ -1123,6 +1121,7 @@ fn submit_merge(app: &mut App) {
             ticket,
             result,
             landed,
+            method: (dir, method),
         });
     });
 }
@@ -1152,7 +1151,7 @@ async fn merge(
     let Some(branch) = branch.filter(|_| !auto) else {
         return Ok(BranchFate::Kept);
     };
-    let setting = crate::config::Config::load().worktree_base_branch;
+    let setting = crate::config::Config::load().project(dir).base_branch;
     Ok(retire_merged_branch(dir, branch, base, &setting).await)
 }
 
@@ -1214,8 +1213,8 @@ async fn guard(dir: &Path, branch: &str, setting: &str) -> Option<BranchFate> {
 /// Why `branch` outlives any pull request merged from it: it is what other
 /// work is based on, so "stacked on it" means every open pull request of
 /// the repo's and deleting it is never what merging it meant. `dev` merged
-/// into `main` is the shape. `setting` is the `worktree_base_branch`
-/// SETTING, which names such a branch on a repo that doesn't protect it.
+/// into `main` is the shape. `setting` is the project's **Base branch**,
+/// which names such a branch on a repo that doesn't protect it.
 /// `Err` when GitHub could not say.
 async fn long_lived(dir: &Path, branch: &str, setting: &str) -> Result<Option<String>, String> {
     if branch == crate::commit_list::base_name(setting) {
@@ -1260,7 +1259,7 @@ fn ask_long_lived(app: &mut App) {
         return;
     };
     tokio::spawn(async move {
-        let setting = crate::config::Config::load().worktree_base_branch;
+        let setting = crate::config::Config::load().project(&dir).base_branch;
         if let Ok(Some(why)) = long_lived(&dir, &branch, &setting).await {
             let _ = tx.send(Answer::BranchStays { ticket, why });
         }
@@ -1544,7 +1543,7 @@ async fn close(
     let Some(branch) = branch else {
         return Ok(BranchFate::Kept);
     };
-    let setting = crate::config::Config::load().worktree_base_branch;
+    let setting = crate::config::Config::load().project(dir).base_branch;
     Ok(retire_closed_branch(dir, branch, &setting).await)
 }
 
@@ -1674,12 +1673,14 @@ pub enum Answer {
     BranchStays { ticket: u64, why: String },
     /// `gh pr merge`: what to flash, or why it refused. `landed` is the
     /// pull request's number and base when it merged now — not auto-merge,
-    /// which lands later — for the MERGE CONFETTI.
+    /// which lands later — for the MERGE CONFETTI. `method` is the repo
+    /// and the method it took, for its next merge form to open on.
     Merged {
         project: ProjectId,
         ticket: u64,
         result: Result<String, String>,
         landed: Option<(u64, String)>,
+        method: (PathBuf, MergeMethod),
     },
     /// `gh pr close`: what to flash, or why it refused.
     Closed {
@@ -1810,9 +1811,13 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             ticket,
             result,
             landed,
+            method: (dir, method),
         } => {
             // Origin's base just moved: bring the project's root after it.
+            // And the project's next merge form opens on the method this
+            // one took — one gh refused teaches it nothing.
             if result.is_ok() {
+                crate::config::persist(|cfg| cfg.remember_merge_method(&dir, method));
                 crate::base_sync::request_now(app, &project);
                 if let Some((number, base)) = &landed {
                     crate::confetti::fire(app, *number, base);
@@ -3297,7 +3302,6 @@ esac
             method: MergeMethod::Squash,
             allowed: MergeMethod::ALL.to_vec(),
             delete_branch: false,
-            delete_default: false,
             auto_delete: false,
             stays: None,
             auto: false,
@@ -3338,12 +3342,7 @@ esac
 
     #[test]
     fn the_hints_come_from_the_table() {
-        let form = CreateForm::new(
-            ProjectId("p".into()),
-            PathBuf::from("/x"),
-            "feature".into(),
-            false,
-        );
+        let form = CreateForm::new(ProjectId("p".into()), PathBuf::from("/x"), "feature".into());
         for field in CreateField::ORDER {
             let mut form = form.clone();
             form.field = field;
@@ -3360,12 +3359,8 @@ esac
         let mut app = App::new();
         let mut view =
             PullRequestsView::new(ProjectId("p".into()), "demo".into(), PathBuf::from("/x"));
-        let mut form = CreateForm::new(
-            ProjectId("p".into()),
-            PathBuf::from("/x"),
-            "feature".into(),
-            false,
-        );
+        let mut form =
+            CreateForm::new(ProjectId("p".into()), PathBuf::from("/x"), "feature".into());
         form.title.set_text("Fix");
         form.focus(CreateField::From);
         view.form = Some(Box::new(PrForm::Create(form)));
@@ -3402,12 +3397,8 @@ esac
     /// best match.
     #[test]
     fn a_branch_field_picks_from_the_branches() {
-        let mut form = CreateForm::new(
-            ProjectId("p".into()),
-            PathBuf::from("/x"),
-            "feature".into(),
-            false,
-        );
+        let mut form =
+            CreateForm::new(ProjectId("p".into()), PathBuf::from("/x"), "feature".into());
         form.heads = Some(["main", "feature", "fix/login"].map(String::from).into());
         form.focus(CreateField::From);
         assert_eq!(form.choices().len(), 3);
@@ -3433,6 +3424,7 @@ esac
                     ticket: 1,
                     result,
                     landed,
+                    method: (PathBuf::from("/x"), MergeMethod::Squash),
                 },
             );
             app.confetti.is_some()

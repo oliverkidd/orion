@@ -151,7 +151,7 @@ pub fn run_doctor(json: bool) -> bool {
 }
 
 /// `orion setup`: forget that setup was seen, so the TUI about to start
-/// opens every step of it again.
+/// opens it again.
 pub fn reset_setup() {
     let mut cfg = config::Config::load();
     cfg.onboarded = false;
@@ -170,7 +170,7 @@ pub fn run_tui() -> Result<Exit> {
 
 /// Open orion in its own app, in this folder, and say so — whenever a bare
 /// `orion` is started in a terminal on a Mac ([`app_bundle::opens_in_app`]),
-/// after setup's App step has quit the TUI, from `install.sh` on a first
+/// from `install.sh` on a first
 /// install (`orion _open-in-ghostty`) and from `orion app`. The daemon and
 /// its sessions stay up; the new window attaches to them. See
 /// [`app_bundle`].
