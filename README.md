@@ -4,7 +4,7 @@
 
 **Mission control for your coding agents.**
 
-Run Claude Code, Codex, Cursor, Pi, Muse, Grok and OpenCode across every project and worktree, from one grid. They keep working when you close it.
+Run Claude Code, Codex, Cursor, Grok and OpenCode across every project and worktree, from one grid. They keep working when you close it.
 
 macOS · Linux
 

@@ -168,13 +168,12 @@
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
   the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#the-project-file-orionjson).
-- **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
+- **Agents boot `claude`, `codex`, `cursor-agent`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree.
   Restored agents resume with `claude --resume <session-id>` /
   `codex resume <session-id>` / `cursor-agent --resume <session-id>` (falling back to a fresh session
-  when the old one is gone) / `pi --session-id <session-id>` (which creates a missing id instead of
-  dying) / `opencode --session <session-id>` / `grok --resume <session-id>` (orion does not capture
-  Grok's id yet, so there is rarely one to resume); `muse` always boots fresh (no resume flag mapped yet). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
+  when the old one is gone) / `opencode --session <session-id>` / `grok --resume <session-id>` (orion
+  does not capture Grok's id yet, so there is rarely one to resume). A session's id is saved only once a turn has run in it — the CLI writes the transcript a
   resume reads on the first prompt — so a CLI booted and never used resumes as nothing. Claude
   ids are checked against the transcripts on disk before the spawn — in the config dir a harness's
   `env` pins, for a second Claude account — and one with none boots fresh;
@@ -187,7 +186,7 @@
   before the spawn, and an id listed as a `background` session opens as `claude attach <id>`
   instead — the live conversation, which detaching (Ctrl+Z) or archiving the row leaves running. A
   refused resume the job-dir look missed is asked about the same way and re-opened attached. An AGENT created from the PULL REQUESTS MODAL also receives the PR URL and a PR-only
-  work rule — Claude and Pi through `--append-system-prompt` and Grok Build through `--rules` on every spawn, Codex, Cursor, Muse and OpenCode as the first prompt of
+  work rule — Claude through `--append-system-prompt` and Grok Build through `--rules` on every spawn, Codex, Cursor and OpenCode as the first prompt of
   their cold spawn (their transcripts carry it through a resume); orion persists that URL. An AGENT
   launched from the ISSUES MODAL (`i`) carries the GitHub issue's URL the same way — persisted with
   the row, rebuilt into an issue-context rule on every spawn and resume — so the harness knows which
@@ -262,15 +261,8 @@
   permission prompt stays red until the turn ends. Cursor gets five camelCase events —
   `sessionStart`, `beforeSubmitPrompt`, `stop`, `subagentStart`, `subagentStop` — and no permission
   event at all; orion runs `cursor-agent --force`, so waiting-on-you is simply not detectable there
-  and a Cursor session never reaches NEEDS FEEDBACK, only busy or idle. Pi runs TypeScript extensions
-  instead of shell hooks, so orion writes one managed extension into its global agent dir
-  (`~/.pi/agent/extensions/orion.ts`, or `$PI_CODING_AGENT_DIR/extensions/` — global because pi loads
-  those without the trust prompt a per-project `.pi/extensions/` raises) that maps pi's events onto the
-  same names: `session_start` → `SessionStart`, `before_agent_start` → `UserPromptSubmit`,
-  `agent_end` → `Stop` (it fires on an abort too, so a cancelled pi turn finishes on its own), the
-  `ask_question` tool's start and end → `PreToolUse` / `PostToolUse`, and a blocking extension prompt
-  mid-run → `PermissionRequest`. The file is env-guarded, so a `pi` you run outside orion loads it and
-  does nothing. OpenCode runs TypeScript plugins the same way, so orion writes one managed plugin into
+  and a Cursor session never reaches NEEDS FEEDBACK, only busy or idle. OpenCode runs TypeScript
+  plugins instead of shell hooks, so orion writes one managed plugin into
   its global config dir (`~/.config/opencode/plugins/orion.ts`, or `$XDG_CONFIG_HOME/opencode/plugins/`
   — globbed at startup with no trust prompt, and always on the list whatever `OPENCODE_CONFIG_DIR` adds)
   that maps its server events onto the same names: `chat.message` → `UserPromptSubmit` (the typed text
@@ -279,14 +271,14 @@
   `permission.replied` → the gated tool's `PostToolUse` (the one hook an approval fires), and the
   `question` tool's `question.asked` / `question.replied` → `PreToolUse` / `PostToolUse`. A subagent
   session's prompts post under the root session's id with the child as the origin, so its answer is its
-  own next tool event. The file is env-guarded like pi's.
+  own next tool event. The file is env-guarded, so an `opencode` you run outside orion loads it and
+  does nothing.
 - **Sessions title themselves.** Create a session with the default name and the agent renames it after
   your first prompt — a 3-4 word title describing the ask (e.g. `Fix Login Redirect`), via a
   `orion rename <title>` command the CLI runs in its own turn (no extra API calls, no MCP server).
   Claude Code and Codex get the instruction injected through the `UserPromptSubmit` hook response — as
   `hookSpecificOutput.additionalContext`, the one envelope both read (the daemon sends it only while the
-  session is untitled) — Pi's extension reads the same envelope and appends it to that run's system
-  prompt, and OpenCode's plugin carries it into the turn's system prompt through OpenCode's
+  session is untitled) — and OpenCode's plugin carries it into the turn's system prompt through OpenCode's
   system-transform hook; Cursor gets a managed `.cursor/rules/orion-title.mdc` project rule instead,
   since its hooks can't inject context. Titling is one-shot and never clobbers a name you typed or set
   with `r` — a late agent attempt is politely declined. `orion rename --force` overrides.
@@ -329,17 +321,17 @@
   session's row under it at once, and the moment that turn ends restarts the CLI resumed inside the
   worktree, opening with a note saying where it now runs, so the conversation carries on there without
   you typing anything. Claude learns the rule from a short `--append-system-prompt` orion passes at
-  spawn, plus a `Bash(orion worktree:*)` permission so the command never prompts; Pi gets the same
-  appended prompt and reopens on the same note, and Grok Build gets it through `--rules`. Codex, Cursor, Muse and OpenCode have no system-prompt flag to learn
+  spawn, plus a `Bash(orion worktree:*)` permission so the command never prompts, and Grok Build gets
+  it through `--rules`. Codex, Cursor and OpenCode have no system-prompt flag to learn
   the rule from, but run the same command when you ask. Codex then reopens on the same note —
   `codex resume <id> --cd <worktree> "<note>"`, the `--cd` because Codex otherwise reopens a resumed
   session in the directory its transcript recorded, the old checkout. Cursor and OpenCode resume silent
   and wait for your next prompt (`opencode --session <id> --prompt "<note>"` loads the session but never
-  submits the note); Muse reboots fresh with no note (no resume flag mapped). The restart is the only way there: an agent CLI can't `cd` out of the
+  submits the note). The restart is the only way there: an agent CLI can't `cd` out of the
   directory it was started in.
 - **Ask the agent for another session and it starts one.** Tell a Claude session "start a new orion
   session that fixes the login redirect" and it runs `orion spawn "<task>"`: the daemon starts a second
-  agent beside it — same worktree, same harness, model and effort unless `--kind claude|codex|cursor|pi|muse|grok|opencode`
+  agent beside it — same worktree, same harness, model and effort unless `--kind claude|codex|cursor|grok|opencode`
   names another — opening on that task as its first prompt, so it is working before you look. The new
   card appears on the grid on its own (default name, so it titles itself), and the session you
   asked from is untouched: no restart, no focus change. Claude learns this from the same appended system

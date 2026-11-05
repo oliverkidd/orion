@@ -1129,11 +1129,8 @@ pub fn rename(id: &str, name: &str) -> Result<String, String> {
         .iter()
         .any(|entry| entry.id == id && entry.is_claude_account())
     {
-        // A legacy `custom_harnesses` entry keeps a label of its own, which
-        // only an empty one in the map clears.
-        let legacy = cfg.custom_harnesses.iter().any(|c| c.id.trim() == id);
         let over = cfg.harnesses.entry(id.to_string()).or_default();
-        over.label = (!name.is_empty() || legacy).then(|| name.to_string());
+        over.label = (!name.is_empty()).then(|| name.to_string());
     } else {
         return Err(format!("`{id}` is no Claude account to rename"));
     }

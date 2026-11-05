@@ -261,16 +261,6 @@ const AGENTS: &[(&str, &str, &str)] = &[
         "https://cursor.com/docs/cli/installation",
     ),
     (
-        "pi",
-        "curl -fsSL https://pi.dev/install.sh | sh",
-        "https://pi.dev",
-    ),
-    (
-        "muse",
-        "curl -fsSL https://dev.meta.ai/install.sh | bash",
-        "https://dev.meta.ai",
-    ),
-    (
         "grok",
         "curl -fsSL https://x.ai/cli/install.sh | bash",
         "https://docs.x.ai/build/overview",
@@ -702,8 +692,6 @@ mod tests {
                 "cursor-agent",
                 "curl https://cursor.com/install -fsS | bash",
             ),
-            ("pi", "curl -fsSL https://pi.dev/install.sh | sh"),
-            ("muse", "curl -fsSL https://dev.meta.ai/install.sh | bash"),
             ("grok", "curl -fsSL https://x.ai/cli/install.sh | bash"),
             ("opencode", "curl -fsSL https://opencode.ai/install | bash"),
         ] {

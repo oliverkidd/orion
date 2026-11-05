@@ -3284,7 +3284,7 @@ mod tests {
         for kind in [
             orion_core::AgentKind::Claude,
             orion_core::AgentKind::Codex,
-            orion_core::AgentKind::Pi,
+            orion_core::AgentKind::Grok,
         ] {
             let launch = QuickLaunch::of_kind(target.clone(), kind, None, None, None, &cfg);
             let effort = cells_of(&header(&app, &launch, 200), BoxField::Effort);

@@ -13,7 +13,7 @@
 
 use crate::agent_presets::PresetText;
 use orion_core::compose::{WorktreeContainers, WORKTREE_CONTAINERS};
-use orion_core::harness::{CustomHarness, HarnessDescriptor};
+use orion_core::harness::HarnessDescriptor;
 use orion_core::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -173,9 +173,7 @@ pub fn agent_kind_names() -> Vec<String> {
 /// The model rows for a harness: [`DEFAULT_CHOICE`] first ("don't pass the
 /// flag — let the CLI pick", what the daemon sees as None), then the
 /// runtime catalogue (Claude/Cursor, already headed) or the descriptor's
-/// static list. Pi's `--model` takes a fuzzy pattern across providers, so
-/// its list is families, not ids; a hand-edited `provider/id` passes
-/// through verbatim.
+/// static list.
 pub fn model_choices(kind: AgentKind, custom: Option<&str>) -> Vec<String> {
     model_choices_in(&describe(kind, custom))
 }
@@ -379,9 +377,8 @@ fn static_fallback_effort(efforts: &[String]) -> Option<&str> {
 }
 
 /// The effective descriptor `(kind, custom)` reads as: the registry row
-/// with the `harnesses` map, the legacy list entry, and the legacy
-/// per-harness keys folded in. Loads the config fresh, like every other
-/// reader here. A broken entry still resolves (the picker, not the read,
+/// with the `harnesses` map and the legacy per-harness keys folded in.
+/// Loads the config fresh, like every other reader here. A broken entry still resolves (the picker, not the read,
 /// hides it); launches refuse it with its reason. An id the registry no
 /// longer names degrades to a placeholder under its own name, so rows
 /// outliving their entry still render.
@@ -398,16 +395,7 @@ fn describe(kind: AgentKind, custom: Option<&str>) -> orion_core::harness::Harne
     {
         return descriptor;
     }
-    orion_core::harness::CustomHarness {
-        id: id.to_string(),
-        label: String::new(),
-        program: id.to_string(),
-        enabled: true,
-        model: DEFAULT_CHOICE.into(),
-        model_flag: "--model".into(),
-        hooks: None,
-    }
-    .as_descriptor()
+    orion_core::harness::placeholder(id)
 }
 
 /// One setting row in the overlay; rows live inside a [`SettingsTab`].
@@ -549,7 +537,7 @@ pub enum SettingKind {
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
-/// per registry entry — built-ins, legacy customs and `harnesses` map ids
+/// per registry entry — built-ins, Claude accounts and `harnesses` map ids
 /// alike — with an Enabled row, a Model row, and an Effort row while the
 /// harness offers effort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1634,13 +1622,6 @@ pub struct Config {
     pub codex_effort: String,
     pub cursor_model: String,
     pub cursor_effort: String,
-    /// Pi's pair: a `--model` pattern and a `--thinking` level.
-    pub pi_model: String,
-    pub pi_effort: String,
-    /// Muse's `--model` id. `muse_effort` is reserved until the CLI
-    /// documents a reasoning flag; it stores but sends nothing.
-    pub muse_model: String,
-    pub muse_effort: String,
     /// OpenCode's `--model` id (`provider/model`, passed verbatim). No
     /// effort key: OpenCode has no effort flag — reasoning is a per-model
     /// variant picked inside its own TUI — so its Agents section has no
@@ -1655,16 +1636,7 @@ pub struct Config {
     pub claude_enabled: bool,
     pub codex_enabled: bool,
     pub cursor_enabled: bool,
-    pub pi_enabled: bool,
-    pub muse_enabled: bool,
     pub opencode_enabled: bool,
-    /// User-defined harnesses (`custom_harnesses` in config.json): offered
-    /// in the NEW AGENT PICKER after the built-ins when enabled, launched
-    /// with the entry's program and model flag, with process-based status
-    /// unless the entry names a hook dialect. Empty by default. Legacy:
-    /// new harnesses belong in `harnesses` as full descriptors, where
-    /// they also gain resume, effort, system-prompt and hook-dialect rows.
-    pub custom_harnesses: Vec<CustomHarness>,
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): disable a built-in, repoint a program, rename a
     /// flag, or define a whole new CLI. Merged by
@@ -1893,18 +1865,11 @@ impl Default for Config {
             codex_effort: DEFAULT_CHOICE.into(),
             cursor_model: DEFAULT_CHOICE.into(),
             cursor_effort: DEFAULT_CHOICE.into(),
-            pi_model: DEFAULT_CHOICE.into(),
-            pi_effort: DEFAULT_CHOICE.into(),
-            muse_model: DEFAULT_CHOICE.into(),
-            muse_effort: DEFAULT_CHOICE.into(),
             opencode_model: DEFAULT_CHOICE.into(),
             claude_enabled: cfg!(test),
             codex_enabled: cfg!(test),
             cursor_enabled: cfg!(test),
-            pi_enabled: cfg!(test),
-            muse_enabled: cfg!(test),
             opencode_enabled: cfg!(test),
-            custom_harnesses: Vec::new(),
             harnesses: default_harnesses(),
             claude_accounts: Vec::new(),
             account_tags: BTreeMap::new(),
@@ -2171,8 +2136,8 @@ impl Config {
 
     /// The effective registry as launches read it: the compiled-in known
     /// harnesses with the `harnesses` map applied — Claude's extra
-    /// accounts (`claude_accounts`) right after it — then the legacy
-    /// `custom_harnesses` list, then map-only new ids — plus, for
+    /// accounts (`claude_accounts`) right after it — then map-only new
+    /// ids — plus, for
     /// built-ins, the legacy per-harness keys (`claude_model`,
     /// `codex_enabled`, …) wherever the map stays silent on that field.
     /// The map wins where both speak; the Agents tab writes the legacy
@@ -2181,11 +2146,7 @@ impl Config {
     /// included, until its own map entry names one. What `orion config
     /// harnesses` prints: labels as written, no email.
     pub fn raw_harness_registry(&self) -> Vec<HarnessDescriptor> {
-        let mut all = orion_core::harness::registry(
-            &self.harnesses,
-            &self.custom_harnesses,
-            &self.claude_accounts,
-        );
+        let mut all = orion_core::harness::registry(&self.harnesses, &self.claude_accounts);
         for entry in &mut all {
             if orion_core::harness::builtin(&entry.id).is_none() {
                 continue;
@@ -2253,8 +2214,6 @@ impl Config {
                 &self.cursor_model,
                 &self.cursor_effort,
             ),
-            "pi" => (&self.pi_enabled, &self.pi_model, &self.pi_effort),
-            "muse" => (&self.muse_enabled, &self.muse_model, &self.muse_effort),
             // OpenCode has no effort key: nothing to fall back to there.
             "opencode" => {
                 return (
@@ -2299,16 +2258,7 @@ impl Config {
         {
             return descriptor;
         }
-        CustomHarness {
-            id: id.to_string(),
-            label: String::new(),
-            program: id.to_string(),
-            enabled: true,
-            model: DEFAULT_CHOICE.into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        }
-        .as_descriptor()
+        orion_core::harness::placeholder(id)
     }
 
     /// The configured default model for new sessions of `kind`, as the
@@ -2326,9 +2276,9 @@ impl Config {
 
     /// The configured default effort for new sessions of `kind`;
     /// None = "default" = don't pass the flag. A composing harness fits
-    /// the effort against its configured family ([`fit_effort`]). A
-    /// reserved effort (stored, like Muse's, but with no flag mapped yet)
-    /// is None whatever the file holds — spawn would drop it anyway.
+    /// the effort against its configured family ([`fit_effort`]). An
+    /// effort with no flag mapped is None whatever the file holds — spawn
+    /// would drop it anyway.
     pub fn default_effort(&self, kind: AgentKind) -> Option<String> {
         if kind == AgentKind::Custom {
             return None;
@@ -2431,16 +2381,7 @@ impl Config {
         {
             return descriptor;
         }
-        CustomHarness {
-            id: id.to_string(),
-            label: String::new(),
-            program: id.to_string(),
-            enabled: true,
-            model: DEFAULT_CHOICE.into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        }
-        .as_descriptor()
+        orion_core::harness::placeholder(id)
     }
 
     /// Where `agent`'s Claude session can be carried on — **Continue on**
@@ -2802,7 +2743,7 @@ impl Config {
     }
 
     /// Write an Enabled toggle: the `harnesses` map where it speaks, else
-    /// the legacy layer (the built-in switch, the list entry).
+    /// the legacy layer (the built-in switch, the account's own).
     fn set_harness_enabled(&mut self, id: &str, enabled: bool) {
         if self.harnesses.get(id).and_then(|o| o.enabled).is_some() {
             self.harness_override_mut(id).enabled = Some(enabled);
@@ -2810,14 +2751,6 @@ impl Config {
         }
         if orion_core::harness::builtin(id).is_some() {
             self.set_legacy_enabled(id, enabled);
-            return;
-        }
-        if let Some(entry) = self
-            .custom_harnesses
-            .iter_mut()
-            .find(|entry| entry.id == id)
-        {
-            entry.enabled = enabled;
             return;
         }
         if let Some(account) = self
@@ -2832,7 +2765,7 @@ impl Config {
     }
 
     /// Write a Model default: the map where it speaks, else the legacy
-    /// layer (the built-in model key, the list entry's model).
+    /// built-in model key.
     fn set_harness_model(&mut self, id: &str, model: String) {
         if self
             .harnesses
@@ -2847,20 +2780,11 @@ impl Config {
             self.set_legacy_model(id, model);
             return;
         }
-        if let Some(entry) = self
-            .custom_harnesses
-            .iter_mut()
-            .find(|entry| entry.id == id)
-        {
-            entry.model = model;
-            return;
-        }
         self.harness_override_mut(id).model_default = Some(model);
     }
 
     /// Write an Effort default: the map where it speaks, else the legacy
-    /// built-in effort key (legacy list entries hold no effort; the map
-    /// owns theirs).
+    /// built-in effort key.
     fn set_harness_effort(&mut self, id: &str, effort: String) {
         if orion_core::harness::builtin(id).is_some()
             && self
@@ -2885,8 +2809,6 @@ impl Config {
             "claude" => self.claude_enabled = enabled,
             "codex" => self.codex_enabled = enabled,
             "cursor" => self.cursor_enabled = enabled,
-            "pi" => self.pi_enabled = enabled,
-            "muse" => self.muse_enabled = enabled,
             "opencode" => self.opencode_enabled = enabled,
             _ => self.harness_override_mut(id).enabled = Some(enabled),
         }
@@ -2897,8 +2819,6 @@ impl Config {
             "claude" => self.claude_model = model,
             "codex" => self.codex_model = model,
             "cursor" => self.cursor_model = model,
-            "pi" => self.pi_model = model,
-            "muse" => self.muse_model = model,
             "opencode" => self.opencode_model = model,
             _ => self.harness_override_mut(id).model_default = Some(model),
         }
@@ -2909,8 +2829,6 @@ impl Config {
             "claude" => self.claude_effort = effort,
             "codex" => self.codex_effort = effort,
             "cursor" => self.cursor_effort = effort,
-            "pi" => self.pi_effort = effort,
-            "muse" => self.muse_effort = effort,
             _ => self.harness_override_mut(id).effort_default = Some(effort),
         }
     }
@@ -5541,7 +5459,7 @@ mod tests {
     fn harness_toggles_default_on_and_persist() {
         let mut cfg = Config::default();
         assert!(cfg.claude_enabled && cfg.codex_enabled && cfg.cursor_enabled);
-        assert!(cfg.pi_enabled && cfg.muse_enabled && cfg.opencode_enabled);
+        assert!(cfg.opencode_enabled);
         let builtin: Vec<AgentKind> = AgentKind::ALL
             .into_iter()
             .filter(|kind| *kind != AgentKind::Custom)
@@ -5561,8 +5479,6 @@ mod tests {
             vec![
                 AgentKind::Claude,
                 AgentKind::Cursor,
-                AgentKind::Pi,
-                AgentKind::Muse,
                 AgentKind::Grok,
                 AgentKind::OpenCode
             ],
@@ -5592,7 +5508,7 @@ mod tests {
 
         // Every kind off is representable (a hand edit), and reads as empty.
         let cfg: Config = serde_json::from_str(
-            r#"{"claude_enabled":false,"codex_enabled":false,"cursor_enabled":false,"pi_enabled":false,"muse_enabled":false,"opencode_enabled":false,"harnesses":{"grok":{"enabled":false}}}"#,
+            r#"{"claude_enabled":false,"codex_enabled":false,"cursor_enabled":false,"opencode_enabled":false,"harnesses":{"grok":{"enabled":false}}}"#,
         )
         .unwrap();
         assert!(cfg.enabled_kinds().is_empty());
@@ -5696,8 +5612,6 @@ mod tests {
                 (AgentKind::Claude, None),
                 (AgentKind::Codex, None),
                 (AgentKind::Cursor, None),
-                (AgentKind::Pi, None),
-                (AgentKind::Muse, None),
                 (AgentKind::Grok, None),
                 (AgentKind::OpenCode, None),
             ]
@@ -5706,16 +5620,16 @@ mod tests {
         // Disabled and broken entries are out; the tab still lists them
         // (with their reason) so they can be fixed.
         let cfg: Config = serde_json::from_str(
-            r#"{"custom_harnesses": [
-                {"id": "agy", "program": "agy"},
-                {"id": "off", "program": "off", "enabled": false},
-                {"id": "broken", "program": ""}
-            ]}"#,
+            r#"{"harnesses": {
+                "agy": {"program": "agy"},
+                "off": {"program": "off", "enabled": false},
+                "broken": {"program": ""}
+            }}"#,
         )
         .unwrap();
         let offered = cfg.offered_harnesses();
-        assert_eq!(offered.len(), 8);
-        assert_eq!(offered[7], (AgentKind::Custom, Some("agy".into())));
+        assert_eq!(offered.len(), 6);
+        assert_eq!(offered[5], (AgentKind::Custom, Some("agy".into())));
         let rows = cfg.agent_rows();
         assert!(rows.contains(&("off".to_string(), HarnessField::Enabled)));
         assert!(rows.contains(&("broken".to_string(), HarnessField::Enabled)));
@@ -5730,10 +5644,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("agy"), "").unwrap();
         let hiding = serde_json::from_str::<Config>(
-            r#"{"custom_harnesses": [
-                {"id": "agy", "program": "agy"},
-                {"id": "missing", "program": "definitely-not-on-path"}
-            ]}"#,
+            r#"{"harnesses": {
+                "agy": {"program": "agy"},
+                "missing": {"program": "definitely-not-on-path"}
+            }}"#,
         )
         .unwrap();
         let offered =
@@ -5818,23 +5732,8 @@ mod tests {
             cfg.default_effort(AgentKind::Codex).as_deref(),
             Some("high")
         );
-        // Pi passes both through like Claude: a pattern and a thinking level.
-        assert_eq!(cfg.default_model(AgentKind::Pi), None);
-        assert_eq!(cfg.default_effort(AgentKind::Pi), None);
-        cfg.pi_model = "sonnet".into();
-        cfg.pi_effort = "xhigh".into();
-        assert_eq!(cfg.default_model(AgentKind::Pi).as_deref(), Some("sonnet"));
-        assert_eq!(cfg.default_effort(AgentKind::Pi).as_deref(), Some("xhigh"));
-        // Muse passes --model through verbatim; effort is reserved and
-        // never sent, whatever the file holds.
-        assert_eq!(cfg.default_model(AgentKind::Muse), None);
-        assert_eq!(cfg.default_effort(AgentKind::Muse), None);
-        cfg.muse_model = "spark".into();
-        cfg.muse_effort = "high".into();
-        assert_eq!(cfg.default_model(AgentKind::Muse).as_deref(), Some("spark"));
-        assert_eq!(cfg.default_effort(AgentKind::Muse), None);
-        assert_eq!(AgentKind::parse("muse"), Some(AgentKind::Muse));
-        assert_eq!(AgentKind::Muse.cli_program(), "muse");
+        assert_eq!(AgentKind::parse("pi"), None, "Pi is gone");
+        assert_eq!(AgentKind::parse("muse"), None, "and so is Muse");
         // OpenCode passes a `provider/model` id through verbatim and has
         // no effort key at all: no Effort row to locate.
         assert_eq!(cfg.default_model(AgentKind::OpenCode), None);
@@ -5852,15 +5751,17 @@ mod tests {
             locate_in(&cfg, "opencode", HarnessField::Effort).is_none(),
             "no Effort row"
         );
-        let (tab, row) = locate_in(&cfg, "pi", HarnessField::Effort).unwrap();
+        cfg.claude_effort = "xhigh".into();
+        let (tab, row) = locate_in(&cfg, "claude", HarnessField::Effort).unwrap();
         cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.agent_value("pi", HarnessField::Effort), "max");
+        assert_eq!(cfg.agent_value("claude", HarnessField::Effort), "max");
         cfg.cycle(tab, row, 1);
         assert_eq!(
-            cfg.agent_value("pi", HarnessField::Effort),
+            cfg.agent_value("claude", HarnessField::Effort),
             DEFAULT_CHOICE,
             "wraps"
         );
+        cfg.claude_effort = DEFAULT_CHOICE.into();
         // Cursor: the family is the model; the effort only counts when
         // that family ships it.
         assert_eq!(cfg.default_model(AgentKind::Cursor), None);
@@ -6196,22 +6097,6 @@ mod tests {
                         ]
                     ),
                     (
-                        "Pi".to_string(),
-                        vec![
-                            "Enabled".to_string(),
-                            "Model".to_string(),
-                            "Effort".to_string()
-                        ]
-                    ),
-                    (
-                        "Muse".to_string(),
-                        vec![
-                            "Enabled".to_string(),
-                            "Model".to_string(),
-                            "Effort".to_string()
-                        ]
-                    ),
-                    (
                         "Grok Build".to_string(),
                         vec![
                             "Enabled".to_string(),
@@ -6275,8 +6160,6 @@ mod tests {
                         "Claude",
                         "Codex",
                         "Cursor",
-                        "Pi",
-                        "Muse",
                         "Grok Build",
                         "OpenCode",
                         "agy"

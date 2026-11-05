@@ -1715,7 +1715,7 @@ impl Daemon {
     /// The turn an agent ran `orion worktree` in has ended: make the
     /// process match its row. Kill it and respawn it resumed in the target,
     /// with a prompt naming the checkout it now runs in so the conversation
-    /// carries straight on (Claude, codex and pi take that prompt as an
+    /// carries straight on (Claude and codex take that prompt as an
     /// argument; cursor resumes silent and waits for the user — see
     /// `relocation_prompt`). Gated on the turn-end signals — Stop, the idle
     /// notification a Stop-less end still fires, and the progress clear
@@ -2691,16 +2691,9 @@ impl Daemon {
             // hook dialect has no context-injection channel.
             Some(AgentKind::Cursor) => hooks::installer::install_cursor_hooks(&worktree.path)
                 .and_then(|()| hooks::installer::install_cursor_title_rule(&worktree.path)),
-            // Pi runs TypeScript extensions, not shell hooks: one managed
-            // extension in its global agent dir (loaded without the trust
-            // prompt a worktree-local `.pi/extensions/` would raise) serves
-            // every worktree.
-            Some(AgentKind::Pi) => {
-                hooks::pi_extension::install(&hooks::pi_extension::pi_agent_dir())
-            }
-            // OpenCode runs TypeScript plugins, likewise: one managed
-            // plugin in its global config dir (globbed at startup, no
-            // trust prompt) serves every worktree.
+            // OpenCode runs TypeScript plugins, not shell hooks: one
+            // managed plugin in its global config dir (globbed at startup,
+            // no trust prompt) serves every worktree.
             Some(AgentKind::OpenCode) => {
                 hooks::opencode_plugin::install(&hooks::opencode_plugin::opencode_config_dir())
             }
@@ -2873,8 +2866,7 @@ impl Daemon {
     /// could not find its session: clear the id and boot fresh instead of
     /// leaving a dead pane. Reached from `watch_for_exit` on a natural death
     /// only, so a restart or relocation that killed the PTY on purpose (and
-    /// has respawned it already) never gets a second CLI. (`pi --session-id`
-    /// creates a missing id instead of dying, so pi never lands here.)
+    /// has respawned it already) never gets a second CLI.
     fn respawn_failed_resume(self: &Arc<Self>, id: &AgentId, cols: u16, rows: u16) {
         // `ensure_session`'s gate: an Attach reaching for the dead session
         // right now must not fork a CLI beside this one.
@@ -3252,26 +3244,21 @@ fn claude_transcript_exists(roots: &[PathBuf], session_id: &str) -> Option<bool>
 /// `codex resume <sid> --cd <cwd>` (subcommand, so resume args must lead;
 /// the `--cd` because codex reopens a resumed session in the directory its
 /// transcript recorded — or asks which to use — unless told one, and a
-/// relocated session must land in its new worktree, not the old checkout);
-/// pi takes `pi --session-id <sid>`, which resumes the id where it exists
-/// and creates it where it doesn't (a relocated session's new cwd). `cwd`
-/// is the checkout every local spawn boots in. Codex and cursor always get their
-/// skip-permissions flag (`--yolo` / `--force`), appended after the resume
-/// args — same convention as Mission Control; pi has no permission gate to
-/// skip.
+/// relocated session must land in its new worktree, not the old checkout).
+/// `cwd` is the checkout every local spawn boots in. Codex and cursor
+/// always get their skip-permissions flag (`--yolo` / `--force`), appended
+/// after the resume args — same convention as Mission Control.
 /// Model/effort choices follow: `claude --model m --effort e`,
-/// `codex -m m -c model_reasoning_effort=e`, `pi --model m --thinking e`,
-/// and for cursor one flat id
+/// `codex -m m -c model_reasoning_effort=e`, and for cursor one flat id
 /// joined from the two — `cursor-agent --model m-e` (`--model m` when
 /// effort is None; the CLI's catalogue bakes the effort into the id and
 /// rejects the `m[effort=e]` form its `--help` advertises).
-/// Claude and pi then get orion's worktree guidance appended to the system
+/// Claude then gets orion's worktree guidance appended to the system
 /// prompt, any persisted PR scope is composed into that same system-prompt
 /// argument, and an `initial_prompt` — the relocation notice a `orion
 /// worktree` respawn opens with, or the starting prompt an AGENT PRESET
 /// launch composes — goes last, as the CLI's trailing positional prompt
-/// (`claude [prompt]`, `codex [PROMPT]`, `cursor-agent [prompt...]`,
-/// `pi [messages...]`).
+/// (`claude [prompt]`, `codex [PROMPT]`, `cursor-agent [prompt...]`).
 ///
 /// The plain shape, as every restart/resume spawns it: booted in
 /// `TEST_CWD`, no initial prompt, guidance on. Tests assert against this;
@@ -3300,11 +3287,11 @@ fn agent_spawn_command(
     )
 }
 
-/// A pinned registry for spawn tests: the compiled-in rows, no overrides,
-/// no legacy entries — what a fresh install launches.
+/// A pinned registry for spawn tests: the compiled-in rows, no overrides
+/// — what a fresh install launches.
 #[cfg(test)]
 fn test_registry() -> Vec<orion_core::harness::HarnessDescriptor> {
-    harness_registry_in(&std::collections::BTreeMap::new(), &[], &[])
+    harness_registry_in(&std::collections::BTreeMap::new(), &[])
 }
 
 /// The pinned descriptor `kind` launches as in spawn tests.
@@ -3316,7 +3303,7 @@ fn test_harness(
     resolve_harness_in(kind, None, all).expect("built-ins resolve from a pinned registry")
 }
 
-/// The pinned descriptor for a legacy custom entry in spawn tests.
+/// The pinned descriptor for a `harnesses` map entry in spawn tests.
 #[cfg(test)]
 fn test_custom_harness(
     all: &[orion_core::harness::HarnessDescriptor],
@@ -3330,9 +3317,8 @@ fn test_custom_harness(
 /// of Claude's own EnterWorktree tool, whose checkout lands under
 /// `<repo>/.claude/worktrees/` on a `worktree-*` branch — a layout the
 /// worktree list only adopts after the fact, and not where a orion user
-/// keeps their worktrees. Claude and pi (both take `--append-system-prompt`;
-/// pi has no EnterWorktree, but does run `git worktree add` on its own
-/// unless told otherwise): codex and cursor have no system-prompt flag.
+/// keeps their worktrees. Claude takes it through `--append-system-prompt`;
+/// codex and cursor have no system-prompt flag.
 pub const CLAUDE_WORKTREE_GUIDANCE: &str = "[orion] This session runs inside orion, which \
 manages this project's git worktrees. When the user asks you to work in a worktree (\"do this in a \
 worktree\", \"in a new worktree\", \"branch this off in its own checkout\"), do not use the \
@@ -3355,8 +3341,8 @@ const RESUME_INTERRUPTED_PROMPT: &str =
 /// the user never has to type "continue". Only for the CLIs verified to
 /// open a resumed session on a trailing prompt — `claude --resume <sid>
 /// "<prompt>"`, `codex resume <sid> [PROMPT]` (the positional its `--help`
-/// documents; submitted as the next turn, verified live on codex 0.153.4)
-/// and `pi --session-id <sid> "<prompt>"`. Whether `cursor-agent --resume
+/// documents; submitted as the next turn, verified live on codex 0.153.4).
+/// Whether `cursor-agent --resume
 /// <id> [prompt...]` submits one is not, so a relocated cursor session
 /// resumes silent and waits for the user.
 fn relocation_prompt(relocate: bool, worktree: &Worktree) -> Option<String> {
@@ -3640,27 +3626,22 @@ fn cli_missing_message(program: &str) -> String {
 
 /// The effective harness registry from the current config: the
 /// compiled-in known harnesses with the `harnesses` map applied — Claude's
-/// extra accounts (`claude_accounts`) beside it — then the legacy
-/// `custom_harnesses` list, then map-only new ids. Every launch, resume and
+/// extra accounts (`claude_accounts`) beside it — then map-only new ids.
+/// Every launch, resume and
 /// hook install resolves through here, so a config edit (not a rebuild) is
 /// what adds a CLI.
 pub(crate) fn harness_registry() -> Vec<orion_core::harness::HarnessDescriptor> {
     let config = crate::config::Config::load();
-    harness_registry_in(
-        &config.harnesses,
-        &config.custom_harnesses,
-        &config.claude_accounts,
-    )
+    harness_registry_in(&config.harnesses, &config.claude_accounts)
 }
 
 /// [`harness_registry`] against an explicit config, so tests can pin the
 /// registry without touching the user's files.
 fn harness_registry_in(
     overrides: &std::collections::BTreeMap<String, orion_core::harness::HarnessOverride>,
-    customs: &[orion_core::harness::CustomHarness],
     accounts: &[orion_core::claude_account::ClaudeAccount],
 ) -> Vec<orion_core::harness::HarnessDescriptor> {
-    orion_core::harness::registry(overrides, customs, accounts)
+    orion_core::harness::registry(overrides, accounts)
 }
 
 /// The descriptor a launch or row runs as: built-ins by kind, customs by
@@ -3865,32 +3846,6 @@ mod tests {
             agent_spawn_command(AgentKind::Cursor, None, None, None, None),
             ("cursor-agent".into(), vec!["--force".to_string()], false)
         );
-        // Pi has no permission gate to skip and takes the same guidance as
-        // Claude (it has the system-prompt flag).
-        assert_eq!(
-            agent_spawn_command(AgentKind::Pi, None, None, None, None),
-            ("pi".into(), guided("--append-system-prompt", &[]), false)
-        );
-        // Pi resumes by exact id — one that is missing is created, so a
-        // relocated session's new cwd never dies on a stale id.
-        assert_eq!(
-            agent_spawn_command(AgentKind::Pi, Some("sid-4"), None, None, None),
-            (
-                "pi".into(),
-                guided("--append-system-prompt", &["--session-id", "sid-4"]),
-                true
-            )
-        );
-        // Muse boots bare and fresh: no resume flag is mapped yet, so a
-        // stored session id is ignored rather than sent.
-        assert_eq!(
-            agent_spawn_command(AgentKind::Muse, None, None, None, None),
-            ("muse".into(), vec![], false)
-        );
-        assert_eq!(
-            agent_spawn_command(AgentKind::Muse, Some("sid-9"), None, None, None),
-            ("muse".into(), vec![], false)
-        );
         // OpenCode boots bare like Codex (no system-prompt flag) and with
         // no permission flag (its prompts drive NEEDS FEEDBACK through the
         // managed plugin); a stored id resumes by `--session`.
@@ -3999,37 +3954,6 @@ mod tests {
                 false
             )
         );
-        // Pi: `--model <pattern>` plus `--thinking <level>`, ahead of the
-        // guidance like Claude's.
-        assert_eq!(
-            agent_spawn_command(AgentKind::Pi, None, Some("sonnet"), Some("high"), None),
-            (
-                "pi".into(),
-                guided(
-                    "--append-system-prompt",
-                    &["--model", "sonnet", "--thinking", "high"]
-                ),
-                false
-            )
-        );
-        assert_eq!(
-            agent_spawn_command(AgentKind::Pi, None, None, Some("off"), None),
-            (
-                "pi".into(),
-                guided("--append-system-prompt", &["--thinking", "off"]),
-                false
-            )
-        );
-        // Muse takes `--model` verbatim and no effort flag yet: effort is
-        // dropped, never sent.
-        assert_eq!(
-            agent_spawn_command(AgentKind::Muse, None, Some("spark"), Some("high"), None),
-            (
-                "muse".into(),
-                vec!["--model".to_string(), "spark".to_string()],
-                false
-            )
-        );
         // OpenCode takes a `provider/model` id verbatim and has no effort
         // flag: effort is dropped, never sent.
         assert_eq!(
@@ -4108,24 +4032,25 @@ mod tests {
         );
     }
 
+    /// A `harnesses` map entry for an id no built-in holds: `over` with
+    /// `agy` as its program.
+    fn agy(
+        over: orion_core::harness::HarnessOverride,
+    ) -> std::collections::BTreeMap<String, orion_core::harness::HarnessOverride> {
+        std::collections::BTreeMap::from([(
+            "agy".to_string(),
+            orion_core::harness::HarnessOverride {
+                program: orion_core::harness::Clearable::Set("agy".into()),
+                ..over
+            },
+        )])
+    }
+
     #[test]
     fn custom_spawn_uses_entry_program_and_model_flag() {
-        // Custom entries launch with their own program and model flag; a
+        // A map-only entry launches with its own program and model flag; a
         // stored session id is ignored (fresh boot) and effort is dropped.
-        let agy = orion_core::harness::CustomHarness {
-            id: "agy".into(),
-            label: "Agy".into(),
-            program: "agy".into(),
-            enabled: true,
-            model: "default".into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        };
-        let all = harness_registry_in(
-            &std::collections::BTreeMap::new(),
-            std::slice::from_ref(&agy),
-            &[],
-        );
+        let all = harness_registry_in(&agy(Default::default()), &[]);
         let harness = test_custom_harness(&all, "agy");
         let (program, args, resumed) = agent_spawn_command_with(
             &harness,
@@ -4142,11 +4067,11 @@ mod tests {
         assert_eq!(args, vec!["--model", "big-1", "do it"]);
         assert!(!resumed);
         // A custom model flag spelling is honored verbatim.
-        let gemini = orion_core::harness::CustomHarness {
-            model_flag: "-m".into(),
-            ..agy.clone()
+        let gemini = orion_core::harness::HarnessOverride {
+            model_flag: orion_core::harness::Clearable::Set("-m".into()),
+            ..Default::default()
         };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[gemini], &[]);
+        let all = harness_registry_in(&agy(gemini), &[]);
         let harness = test_custom_harness(&all, "agy");
         let (_, args, _) = agent_spawn_command_with(
             &harness,
@@ -4164,30 +4089,17 @@ mod tests {
 
     #[test]
     fn custom_spawn_honors_map_deltas_for_resume_and_hooks() {
-        // A legacy entry gains a resume flag and an effort flag purely
-        // through the `harnesses` map — no code change, no new shape.
+        // A map entry gains a resume flag and an effort flag purely
+        // through config — no code change, no new shape.
         use orion_core::harness::{Clearable, HarnessOverride};
-        let agy = orion_core::harness::CustomHarness {
-            id: "agy".into(),
-            label: "Agy".into(),
-            program: "agy".into(),
-            enabled: true,
-            model: "default".into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        };
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(
-            "agy".into(),
-            HarnessOverride {
-                resume_flag: Clearable::Set("--resume".into()),
-                effort_flag: Clearable::Set("--effort".into()),
-                effort_offered: Some(true),
-                hooks: Clearable::Set("claude".into()),
-                ..HarnessOverride::default()
-            },
-        );
-        let all = harness_registry_in(&overrides, &[agy], &[]);
+        let overrides = agy(HarnessOverride {
+            resume_flag: Clearable::Set("--resume".into()),
+            effort_flag: Clearable::Set("--effort".into()),
+            effort_offered: Some(true),
+            hooks: Clearable::Set("claude".into()),
+            ..HarnessOverride::default()
+        });
+        let all = harness_registry_in(&overrides, &[]);
         let harness = test_custom_harness(&all, "agy");
         assert_eq!(
             harness.hook_dialect(),
@@ -4233,7 +4145,7 @@ mod tests {
                 ..HarnessOverride::default()
             },
         );
-        let all = harness_registry_in(&overrides, &[], &[]);
+        let all = harness_registry_in(&overrides, &[]);
         let grok = test_custom_harness(&all, "grok");
         assert_eq!(grok.problem(), None);
 
@@ -4280,21 +4192,8 @@ mod tests {
 
     #[test]
     fn harness_resolve_names_missing_unknown_and_broken_entries() {
-        use orion_core::harness::CustomHarness;
-        let agy = CustomHarness {
-            id: "agy".into(),
-            label: String::new(),
-            program: "agy".into(),
-            enabled: true,
-            model: "default".into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        };
-        let all = harness_registry_in(
-            &std::collections::BTreeMap::new(),
-            std::slice::from_ref(&agy),
-            &[],
-        );
+        use orion_core::harness::{Clearable, HarnessOverride};
+        let all = harness_registry_in(&agy(Default::default()), &[]);
         // Built-ins resolve by kind, whatever the id says.
         assert_eq!(
             resolve_harness_in(AgentKind::Claude, None, &all)
@@ -4308,20 +4207,18 @@ mod tests {
         let err = resolve_harness_in(AgentKind::Custom, Some("gone"), &all).unwrap_err();
         assert!(err.to_string().contains("no longer defined"), "{err}");
         // A broken entry refuses with its reason, never launches.
-        let broken = CustomHarness {
-            program: String::new(),
-            ..agy.clone()
-        };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[broken], &[]);
+        let mut broken = agy(Default::default());
+        broken.get_mut("agy").unwrap().program = Clearable::Clear;
+        let all = harness_registry_in(&broken, &[]);
         let err = resolve_harness_in(AgentKind::Custom, Some("agy"), &all).unwrap_err();
         assert!(err.to_string().contains("no program"), "{err}");
         // The usable entry resolves, disabled or not: a harness switched
         // off after its sessions were created keeps running them.
-        let off = CustomHarness {
-            enabled: false,
-            ..agy.clone()
-        };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[off], &[]);
+        let off = agy(HarnessOverride {
+            enabled: Some(false),
+            ..HarnessOverride::default()
+        });
+        let all = harness_registry_in(&off, &[]);
         assert_eq!(
             resolve_harness_in(AgentKind::Custom, Some("agy"), &all)
                 .unwrap()
@@ -4341,7 +4238,7 @@ mod tests {
             name: String::new(),
             enabled: true,
         };
-        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[], &[account]);
+        let all = harness_registry_in(&std::collections::BTreeMap::new(), &[account]);
         let harness = resolve_harness_in(AgentKind::Custom, Some("claude-2"), &all).unwrap();
         assert_eq!(harness.program, "claude");
         assert_eq!(
@@ -4414,7 +4311,6 @@ mod tests {
         let claude = test_harness(&all, AgentKind::Claude);
         let codex = test_harness(&all, AgentKind::Codex);
         let cursor = test_harness(&all, AgentKind::Cursor);
-        let pi = test_harness(&all, AgentKind::Pi);
         // The relocation notice trails everything, guidance included.
         let (_, args, resumed) = agent_spawn_command_with(
             &claude,
@@ -4524,25 +4420,6 @@ mod tests {
             .1,
             vec!["--force", "fix auth"]
         );
-        // Pi: the prompt trails the resume id and the guidance, as pi's
-        // `[messages...]` positional.
-        let mut expected = guided("--append-system-prompt", &["--session-id", "sid"]);
-        expected.push("carry on".into());
-        assert_eq!(
-            agent_spawn_command_with(
-                &pi,
-                Some("sid"),
-                Some(Path::new(TEST_CWD)),
-                None,
-                None,
-                None,
-                Some("carry on"),
-                None,
-                true,
-            )
-            .1,
-            expected
-        );
         // An override is verbatim: no guidance, no prompt.
         assert_eq!(
             agent_spawn_command_with(
@@ -4604,7 +4481,7 @@ mod tests {
     }
 
     /// The relocation notice reaches the CLIs whose resume submits a
-    /// trailing prompt — Claude, codex and pi — and names the checkout;
+    /// trailing prompt — Claude and codex — and names the checkout;
     /// cursor's is unverified and OpenCode's `--session <id> --prompt` is
     /// not submitted (verified on opencode 1.18.32), so their relocated
     /// sessions reopen silent. (Codex was gated out until #39: `codex
@@ -4621,7 +4498,7 @@ mod tests {
             sort_order: 0,
         };
         let all = test_registry();
-        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Pi] {
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
             let harness = test_harness(&all, kind);
             assert!(harness.relocation_prompt, "{kind:?} maps the notice");
             let prompt = relocation_prompt(harness.relocation_prompt, &feat)
@@ -5619,10 +5496,10 @@ mod tests {
     }
 
     /// Which launches boot straight into a turn — the question the
-    /// optimistic `running` hangs on. Claude and Pi take a launch rule on
+    /// optimistic `running` hangs on. Claude and Grok take a launch rule on
     /// their system-prompt flag, so only a task makes them work at once;
-    /// Codex, Cursor and Muse have no such flag, so the rule itself opens
-    /// their first prompt.
+    /// Codex, Cursor and OpenCode have no such flag, so the rule itself
+    /// opens their first prompt.
     #[test]
     fn a_launch_submits_a_first_prompt_when_it_carries_a_task_or_an_unflagged_rule() {
         for kind in AgentKind::ALL {
@@ -7004,7 +6881,6 @@ mod tests {
         assert!(
             cli_missing_message(AgentKind::Codex.cli_program()).starts_with("codex was not found")
         );
-        assert!(cli_missing_message(AgentKind::Pi.cli_program()).starts_with("pi was not found"));
         assert!(cli_missing_message("agy").starts_with("agy was not found"));
         // No "restart orion": agent CLIs are spawned through the user's
         // login shell, so a fresh install is picked up on the next try.

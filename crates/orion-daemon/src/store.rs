@@ -345,6 +345,20 @@ const MIGRATIONS: &[&str] = &[
         unseen = 0
       WHERE cloud_session_id IS NOT NULL AND archived = 0;
     ",
+    // 31: the Pi and Muse harnesses are gone. Their rows would otherwise
+    // read back as the default kind — a bare `claude` booted in a Pi
+    // session's name — so each is archived once, stamped now unless it
+    // already was, and moved onto `custom` under its old name as the
+    // registry id: a `harnesses` map entry of that name brings the CLI
+    // back, and without one the row refuses to boot with the reason.
+    "
+    UPDATE agents SET custom_harness = kind, kind = 'custom',
+        archived_at = CASE WHEN archived = 1 THEN archived_at
+          ELSE CAST(strftime('%s', 'now') AS INTEGER) * 1000 END,
+        archived = 1,
+        unseen = 0
+      WHERE kind IN ('pi', 'muse');
+    ",
 ];
 
 pub struct Store {
@@ -1881,6 +1895,56 @@ mod tests {
         assert!(cloud.archived && cloud.archived_at > 0 && !cloud.unseen);
         let local = store.get_agent(&AgentId("local".into())).unwrap().unwrap();
         assert!(!local.archived && local.unseen);
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    /// Pi and Muse are gone: their stored rows come back archived, as
+    /// custom rows naming the old harness — never re-read as Claude — and
+    /// a row archived before keeps its stamp.
+    #[test]
+    fn migration_31_archives_pi_and_muse_rows_as_customs() {
+        let path = std::env::temp_dir().join(format!("orion-mig31-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            for (i, migration) in MIGRATIONS.iter().take(30).enumerate() {
+                conn.execute_batch(&format!(
+                    "BEGIN; {migration}; PRAGMA user_version = {}; COMMIT;",
+                    i + 1
+                ))
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, repo_path, sort_order, created_at)
+                   VALUES ('p1', 'p', '/tmp/p', 0, 0);
+                 INSERT INTO worktrees (id, project_id, path, branch, is_main, sort_order, created_at)
+                   VALUES ('w1', 'p1', '/tmp/p', 'main', 1, 0, 0);
+                 INSERT INTO agents (id, worktree_id, name, created_at, kind, archived, archived_at)
+                   VALUES ('pi', 'w1', 'on pi', 0, 'pi', 0, 0),
+                          ('muse', 'w1', 'on muse', 0, 'muse', 1, 42),
+                          ('codex', 'w1', 'on codex', 0, 'codex', 0, 0);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let agent = |id: &str| store.get_agent(&AgentId(id.into())).unwrap().unwrap();
+        let pi = agent("pi");
+        assert_eq!(pi.kind, AgentKind::Custom);
+        assert_eq!(pi.custom_harness.as_deref(), Some("pi"));
+        assert!(pi.archived && pi.archived_at > 42);
+        let muse = agent("muse");
+        assert_eq!(
+            (muse.kind, muse.custom_harness.as_deref()),
+            (AgentKind::Custom, Some("muse"))
+        );
+        assert_eq!(muse.archived_at, 42, "archived before: the stamp stands");
+        let codex = agent("codex");
+        assert_eq!((codex.kind, codex.archived), (AgentKind::Codex, false));
         drop(store);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));

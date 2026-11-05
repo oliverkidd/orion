@@ -144,14 +144,10 @@ pub enum HookEvent {
 }
 
 /// The tools whose call means the turn is waiting on you: Claude's
-/// `AskUserQuestion`, pi's `ask_question` (its managed extension posts
-/// the tool's own name) and OpenCode's `question` (its managed plugin
-/// posts it on the `question.asked` event).
+/// `AskUserQuestion` and OpenCode's `question` (its managed plugin posts
+/// it on the `question.asked` event).
 fn asks_user(tool_name: Option<&str>) -> bool {
-    matches!(
-        tool_name,
-        Some("AskUserQuestion" | "ask_question" | "question")
-    )
+    matches!(tool_name, Some("AskUserQuestion" | "question"))
 }
 
 impl HookEvent {
@@ -951,43 +947,6 @@ mod tests {
         assert_eq!(status_of(&fx), Some(AgentStatus::Running));
         let fx = m.handle(HookEvent::Stop, Some("ses_1"), now);
         assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
-    }
-
-    /// pi's question tool goes through the same red-then-back flow as
-    /// Claude's AskUserQuestion; any other tool name is not a wait.
-    #[test]
-    fn pi_ask_question_reads_as_waiting_on_you() {
-        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
-        let now = t0();
-        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
-        let fx = m.handle(
-            HookEvent::PreToolUse {
-                tool_name: Some("ask_question".into()),
-                subagent_id: None,
-            },
-            Some("s1"),
-            now,
-        );
-        assert_eq!(status_of(&fx), Some(AgentStatus::NeedsFeedback));
-        let fx = m.handle(
-            HookEvent::PostToolUse {
-                tool_name: Some("ask_question".into()),
-                subagent_id: None,
-            },
-            Some("s1"),
-            now,
-        );
-        assert_eq!(status_of(&fx), Some(AgentStatus::Running));
-        let fx = m.handle(
-            HookEvent::PreToolUse {
-                tool_name: Some("bash".into()),
-                subagent_id: None,
-            },
-            Some("s1"),
-            now,
-        );
-        assert_eq!(status_of(&fx), None, "an ordinary tool changes nothing");
-        assert!(!asks_user(None));
     }
 
     fn tool(name: &str, subagent: Option<&str>, post: bool) -> HookEvent {

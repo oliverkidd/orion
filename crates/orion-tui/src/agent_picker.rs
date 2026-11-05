@@ -211,8 +211,6 @@ pub(crate) fn kind_label(kind: AgentKind) -> &'static str {
         AgentKind::Claude => "Claude",
         AgentKind::Codex => "Codex",
         AgentKind::Cursor => "Cursor",
-        AgentKind::Pi => "Pi",
-        AgentKind::Muse => "Muse",
         AgentKind::Grok => "Grok Build",
         AgentKind::OpenCode => "OpenCode",
         // Custom rows label through `harness_label` (the entry's own
@@ -303,16 +301,16 @@ mod tests {
         }
     }
 
-    /// Custom entries ride after the built-ins under their own labels;
+    /// `harnesses` map entries ride after the built-ins under their own labels;
     /// disabled, invalid and (under the hide switch) missing ones stay
     /// out, and their rows carry the registry id into the launch.
     #[test]
     fn picker_lists_usable_custom_entries_after_the_builtins() {
-        let json = r#"{"custom_harnesses": [
-            {"id": "agy", "label": "Agy", "program": "agy"},
-            {"id": "off", "label": "Off", "program": "off", "enabled": false},
-            {"id": "broken", "label": "Broken", "program": ""}
-        ]}"#;
+        let json = r#"{"harnesses": {
+            "agy": {"label": "Agy", "program": "agy"},
+            "off": {"label": "Off", "program": "off", "enabled": false},
+            "broken": {"label": "Broken", "program": ""}
+        }}"#;
         pinned(json, || {
             let worktree = WorktreeId("w1".into());
             let mut app = App::new();
@@ -342,9 +340,9 @@ mod tests {
     #[test]
     fn agents_tab_toggles_custom_entries_off_the_picker() {
         use crate::config::{locate_agent, HarnessField};
-        let json = r#"{"custom_harnesses": [
-            {"id": "agy", "label": "Agy", "program": "agy"}
-        ]}"#;
+        let json = r#"{"harnesses": {
+            "agy": {"label": "Agy", "program": "agy"}
+        }}"#;
         pinned(json, || {
             let worktree = WorktreeId("w1".into());
             let mut app = App::new();
@@ -512,7 +510,7 @@ mod tests {
     #[test]
     fn no_harness_flashes_the_picker() {
         pinned(
-            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false, "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false, "harnesses":{"grok":{"enabled":false}}}"#,
+            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false, "opencode_enabled": false, "harnesses":{"grok":{"enabled":false}}}"#,
             || {
                 let worktree = WorktreeId("w1".into());
                 let mut app = App::new();

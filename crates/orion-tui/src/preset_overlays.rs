@@ -1938,28 +1938,25 @@ mod tests {
     /// never a bare `custom` — and picking one stores the registry id.
     #[test]
     fn kind_choices_list_custom_entries_by_id() {
-        pinned(
-            r#"{"custom_harnesses": [{"id": "agy", "program": "agy"}]}"#,
-            || {
-                let mut editor = editor(PresetText::Prefix);
-                editor.field = PresetField::Kind;
-                let choices = editor.row_choices();
-                assert!(choices.contains(&"claude".to_string()), "{choices:?}");
-                assert!(choices.contains(&"agy".to_string()), "{choices:?}");
-                assert!(!choices.contains(&"custom".to_string()), "{choices:?}");
+        pinned(r#"{"harnesses": {"agy": {"program": "agy"}}}"#, || {
+            let mut editor = editor(PresetText::Prefix);
+            editor.field = PresetField::Kind;
+            let choices = editor.row_choices();
+            assert!(choices.contains(&"claude".to_string()), "{choices:?}");
+            assert!(choices.contains(&"agy".to_string()), "{choices:?}");
+            assert!(!choices.contains(&"custom".to_string()), "{choices:?}");
 
-                editor.set_row_value("agy");
-                assert_eq!(editor.kind, AgentKind::Custom);
-                assert_eq!(editor.custom.as_deref(), Some("agy"));
-                assert_eq!(editor.row_value(), "agy");
-                let preset = editor.to_preset();
-                assert_eq!(preset.custom_harness.as_deref(), Some("agy"));
+            editor.set_row_value("agy");
+            assert_eq!(editor.kind, AgentKind::Custom);
+            assert_eq!(editor.custom.as_deref(), Some("agy"));
+            assert_eq!(editor.row_value(), "agy");
+            let preset = editor.to_preset();
+            assert_eq!(preset.custom_harness.as_deref(), Some("agy"));
 
-                editor.set_row_value("codex");
-                assert_eq!(editor.kind, AgentKind::Codex);
-                assert_eq!(editor.custom, None);
-            },
-        );
+            editor.set_row_value("codex");
+            assert_eq!(editor.kind, AgentKind::Codex);
+            assert_eq!(editor.custom, None);
+        });
     }
 
     /// A refused save moves the caret onto the field the error names,

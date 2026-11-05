@@ -2373,7 +2373,7 @@ async fn create_agent_refuses_when_the_cli_is_not_installed() {
         // Cursor's binary is `cursor-agent`; the message must name that, not
         // the kind, or the user goes looking for the wrong thing to install.
         (12, AgentKind::Cursor, "cursor-agent"),
-        (13, AgentKind::Pi, "pi"),
+        (13, AgentKind::OpenCode, "opencode"),
     ] {
         write_frame(
             &mut c,

@@ -10,9 +10,9 @@
 //!
 //! The rule is regenerated from the persisted URL and the row's current
 //! worktree for every fresh process, so a RESUME cannot silently lose the
-//! scope the user chose at creation time. Claude, pi and Grok take it
-//! through their system-prompt flag on every spawn. Codex, Cursor, Muse
-//! and OpenCode have none, so on their cold spawn it becomes the
+//! scope the user chose at creation time. Claude and Grok take it
+//! through their system-prompt flag on every spawn. Codex, Cursor and
+//! OpenCode have none, so on their cold spawn it becomes the
 //! positional first prompt — their transcripts keep it, so a resume needs
 //! nothing added.
 //!

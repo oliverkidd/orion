@@ -13,23 +13,21 @@ walk (`.` / `,`), archiving and deleting.
 ## The NEW AGENT PICKER
 
 Run **New agent — choose harness** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
-run — **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
+run — **Claude**, **Codex**, **Cursor**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
 switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
 ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). The menu
 lists only enabled harnesses whose CLI is found on PATH (the daemon still
 checks through the login shell at launch). Your own CLIs join the menu too: add them to config.json
-`custom_harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
+`harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
 own labels, each toggled in its own section on the Agents tab, with the session card wearing the
-entry's label as its badge. A custom entry launches with its program and model flag, boots fresh every
-time (no resume mapping), and — unless it names a built-in hook dialect — stays process-based: working
-while the PTY is live, done when it ends, never needing you. `→` on any row drills
+entry's label as its badge. An entry with only a `program` launches with it and a `--model` flag,
+boots fresh every time (no resume mapping), and — unless it names a built-in hook dialect — stays
+process-based: working while the PTY is live, done when it ends, never needing you. `→` on any row drills
 into model and reasoning-effort submenus (Cursor's model is a family such as `claude-opus-5-thinking`, and
 its effort list follows the family, `-fast` variants included — `cursor-agent --list-models` bakes both
 into the id, so orion launches `--model claude-opus-5-thinking-high-fast`; the list is a built-in seed
-merged with `--list-models`, cached in `cursor_models.json` beside `config.json` and refreshed daily;
-Pi's model is a fuzzy `--model` pattern — `opus`, `sonnet`, or a `provider/id` you set in `config.json` —
-and its effort is the `--thinking` level, `off` through `max`).
+merged with `--list-models`, cached in `cursor_models.json` beside `config.json` and refreshed daily).
 In those submenus you type to filter — `opus` narrows the rows to the Opus families, `↑`/`↓` move, `Backspace` widens, `Esc` clears — and the preset editor's Harness / Model / Effort rows take the same type-ahead.
 `Enter` anywhere takes your configured defaults. `Enter` on a row opens the QUICK PROMPT set to
 that harness, model and effort, aimed at the checkout under the cursor: type the task and `Enter`
@@ -46,9 +44,7 @@ The rows do not run under the same permissions, and the picker is where you deci
 is spawned with no permission flag at all and keeps its normal prompts — it stops and asks before the
 things it is configured to ask about. Codex is spawned with `--yolo` and Cursor with `--force`, so
 **neither of those two ever stops to ask**: they edit files and run commands on their own judgment for
-the life of the SESSION, and nothing in the picker or the settings overlay softens that. Pi has no
-permission gate to begin with — orion passes no flag, and it runs its tools as it sees fit. Muse is
-the same: no flag mapped yet. OpenCode keeps its own permission prompts: orion passes no `--auto`, so it
+the life of the SESSION, and nothing in the picker or the settings overlay softens that. OpenCode keeps its own permission prompts: orion passes no `--auto`, so it
 stops and asks like Claude does, and a `permissions_flag` of `--auto` in its `harnesses` entry is how you
 opt out of that. Pick the
 harness with that in mind, especially in the ROOT WORKTREE.
@@ -67,13 +63,7 @@ a Codex row stays red until the turn ends). Cursor has no `PermissionRequest` ho
 and since orion runs it with `--force` there is nothing left to wait on anyway: its hooks are
 `sessionStart`, `beforeSubmitPrompt`, `stop`, `subagentStart` and `subagentStop`, which is busy versus
 idle and nothing else. **A Cursor SESSION can never show the red NEEDS FEEDBACK dot** — if you are
-watching one and waiting for it to ask you something, it is not going to. Pi has no shell hooks at all:
-orion installs one managed extension (`~/.pi/agent/extensions/orion.ts`, inert outside orion) that
-posts pi's `session_start`, `before_agent_start`, `agent_end` and `ask_question` tool events as
-`SessionStart`, `UserPromptSubmit`, `Stop` and `PreToolUse` / `PostToolUse`, and any blocking prompt an
-extension raises mid-run as `PermissionRequest` — so a Pi row is working, red while its `ask_question`
-tool waits on you, and done when the run ends, a cancelled run included. Muse has no hooks at all yet:
-its row is working while the PTY is live and done when the process ends, and it never goes red. OpenCode
+watching one and waiting for it to ask you something, it is not going to. OpenCode
 runs TypeScript plugins, so orion installs one managed plugin (`~/.config/opencode/plugins/orion.ts`,
 inert outside orion) that posts OpenCode's `chat.message` as `UserPromptSubmit`, its `session.status`
 / `session.idle` as `Stop`, `permission.asked` / `permission.replied` as `PermissionRequest` and the
@@ -214,8 +204,8 @@ clipped to the card, with a dim `30m ago` pinned to the right. The DAEMON keeps 
 per session behind it.
 
 The text is the prompt as you typed it, not a paraphrase. The DAEMON reads it off the
-`UserPromptSubmit` hook payload every harness sends (Claude, Codex and Cursor name it `prompt`; Pi's
-managed extension and OpenCode's managed plugin post the same field), collapses its whitespace and keeps the first 200 characters,
+`UserPromptSubmit` hook payload every harness sends (Claude, Codex and Cursor name it `prompt`;
+OpenCode's managed plugin posts the same field), collapses its whitespace and keeps the first 200 characters,
 so a pasted file shows as its opening line. It costs the agent nothing — no extra turn, no tool call,
 nothing added to its context — which is why it is the prompt and not a summary the model wrote.
 Prompts orion composes itself, such as a PR SESSION's scope or the note a `orion worktree`
@@ -631,7 +621,7 @@ Either way the launch is an ISSUE SESSION. The create carries the issue's URL
 (`CreateAgent::issue_url`); the DAEMON validates it, keeps it with the AGENT row beside a PR
 SESSION's URL, refuses to hand the launch to a PREWARM POOL spare (which booted without it), and on
 every cold spawn and RESUME composes an issue-context rule naming the URL, the checkout and its
-branch — Claude and Pi receive it through `--append-system-prompt`, Grok Build through `--rules`, and Codex, Cursor, Muse and OpenCode as the opening
+branch — Claude receives it through `--append-system-prompt`, Grok Build through `--rules`, and Codex, Cursor and OpenCode as the opening
 of their first prompt, exactly as the PR rule travels. The harness therefore knows which issue the
 session exists for before it reads your task, is told to read the issue with `gh issue view` first,
 and to reference it in commits and close it from the pull request. The row it creates is an

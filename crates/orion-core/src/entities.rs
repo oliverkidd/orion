@@ -52,14 +52,6 @@ pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
-    /// pi.dev's coding agent: the `pi` CLI (npm
-    /// `@earendil-works/pi-coding-agent`). Status comes from a managed
-    /// TypeScript extension rather than shell hooks.
-    Pi,
-    /// Meta's Muse Spark coding agent: the `muse` CLI. No managed
-    /// hooks yet, so status is process-based (running while the PTY
-    /// is live) until a hook dialect is mapped.
-    Muse,
     /// xAI's Grok Build CLI. Status is process-based until managed hooks
     /// are supported.
     Grok,
@@ -69,10 +61,9 @@ pub enum AgentKind {
     /// its positional is the project path, and a session resumes by
     /// `--session <id>`.
     OpenCode,
-    /// A user-defined harness from the `custom_harnesses` registry: the
-    /// entry id travels beside the session (see `Agent::custom_harness`),
-    /// never in this variant. Launches with the entry's program and model
-    /// flag, with process-based status and no resume — like [`AgentKind::Muse`].
+    /// A harness the `harnesses` map adds, or a Claude account: the
+    /// registry id travels beside the session (see `Agent::custom_harness`),
+    /// never in this variant. Launches as its registry entry describes.
     Custom,
 }
 
@@ -81,12 +72,10 @@ impl AgentKind {
     /// boot-time CLI probe warm) and should fail to compile if one is added.
     /// `Custom` rides along: it never launches without its registry entry,
     /// so loops over ALL skip it explicitly where a bare kind is meaningless.
-    pub const ALL: [AgentKind; 8] = [
+    pub const ALL: [AgentKind; 6] = [
         AgentKind::Claude,
         AgentKind::Codex,
         AgentKind::Cursor,
-        AgentKind::Pi,
-        AgentKind::Muse,
         AgentKind::Grok,
         AgentKind::OpenCode,
         AgentKind::Custom,
@@ -97,8 +86,6 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor",
-            AgentKind::Pi => "pi",
-            AgentKind::Muse => "muse",
             AgentKind::Grok => "grok",
             AgentKind::OpenCode => "opencode",
             AgentKind::Custom => "custom",
@@ -113,8 +100,6 @@ impl AgentKind {
             "claude" => AgentKind::Claude,
             "codex" => AgentKind::Codex,
             "cursor" => AgentKind::Cursor,
-            "pi" => AgentKind::Pi,
-            "muse" => AgentKind::Muse,
             "grok" => AgentKind::Grok,
             "opencode" => AgentKind::OpenCode,
             _ => return None,
@@ -132,8 +117,6 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor-agent",
-            AgentKind::Pi => "pi",
-            AgentKind::Muse => "muse",
             AgentKind::Grok => "grok",
             AgentKind::OpenCode => "opencode",
             AgentKind::Custom => "custom",

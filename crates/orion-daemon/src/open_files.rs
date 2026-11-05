@@ -18,8 +18,8 @@ use crate::registry::Daemon;
 /// What orion appends to Claude's system prompt so "show me the file"
 /// becomes one `orion open` call instead of the file's contents pasted
 /// into the reply — and nothing else does: an agent wanting the user to
-/// look at what it wrote names the path and waits to be asked. Claude and
-/// pi, like the worktree and spawn guidance (all three take
+/// look at what it wrote names the path and waits to be asked. Claude,
+/// like the worktree and spawn guidance (all three ride
 /// `--append-system-prompt`): codex and cursor have no such flag.
 pub const CLAUDE_OPEN_GUIDANCE: &str = "[orion] Only when the user explicitly asks you to open or \
 show a file in orion (\"open it\", \"show me the file\", \"open these in orion\") — and never on \

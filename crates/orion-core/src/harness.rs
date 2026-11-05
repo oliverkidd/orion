@@ -1,11 +1,11 @@
 //! The harness registry: one behavior descriptor per agent CLI.
 //!
-//! The seven known harnesses ship as a compiled-in table ([`builtin`]);
+//! The five known harnesses ship as a compiled-in table ([`builtin`]);
 //! the user's config adds a `harnesses` map of [`HarnessOverride`]s over
 //! it — disable one, repoint a program, rename a flag, or define a whole
-//! new CLI — and [`registry`] merges the two (plus the legacy
-//! [`CustomHarness`] list and the `claude_accounts` list, each account a
-//! copy of Claude's row in its own config dir) into the effective
+//! new CLI — and [`registry`] merges the two (plus the `claude_accounts`
+//! list, each account a copy of Claude's row in its own config dir) into
+//! the effective
 //! [`HarnessDescriptor`]s every surface reads: the `n` picker, the `e`
 //! presets, spawn and resume, hooks, and the Agents tab. Adding a CLI is a config edit; the verification is
 //! that every behavior below is data, with the three genuinely bespoke arg
@@ -91,7 +91,7 @@ pub struct ModelSpec {
 }
 
 /// How a harness takes its reasoning effort: a plain flag (`--effort`,
-/// `--thinking`), Codex's `-c model_reasoning_effort=` config pair, or
+/// `--reasoning-effort`), Codex's `-c model_reasoning_effort=` config pair, or
 /// nothing (composed into the model id, or unsupported).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffortSpec {
@@ -113,14 +113,13 @@ pub struct EffortSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub efforts: Vec<String>,
     /// Whether effort is a concept for this harness at all: the Agents
-    /// tab's Effort row and the effort submenus show only while set. Muse
-    /// keeps a reserved row (stored, never sent); legacy customs have none.
+    /// tab's Effort row and the effort submenus show only while set.
     #[serde(default)]
     pub offered: bool,
 }
 
 /// How a harness resumes a stored CLI session id: a flag (`--resume`,
-/// `--session-id`), Codex's positional subcommand (`resume <id>`, with
+/// `--session`), Codex's positional subcommand (`resume <id>`, with
 /// `--cd`), or nothing (the CLI boots fresh and the id is ignored).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeSpec {
@@ -230,7 +229,7 @@ impl ModeSpec {
 /// The effective behavior of one harness: what the picker offers, what
 /// spawn builds, which hooks install, and what the Agents tab edits.
 /// Built-ins come from [`builtin`]; user entries merge over them (or over
-/// the legacy-custom shape for new ids) through [`HarnessOverride`].
+/// a [`placeholder`] for new ids) through [`HarnessOverride`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessDescriptor {
     /// Stable id: the builtin name or the custom entry id.
@@ -271,7 +270,7 @@ pub struct HarnessDescriptor {
     #[serde(default)]
     pub system: SystemSpec,
     /// Hook dialect to install, naming the built-in CLI whose hooks this
-    /// harness speaks (`claude`, `codex`, `cursor`, `pi`, `opencode`). Sessions report
+    /// harness speaks (`claude`, `codex`, `cursor`, `opencode`). Sessions report
     /// status, prompts and permission waits like that harness; without one
     /// they stay process-based. A Claude-compatible CLI gets title sync
     /// with `claude`.
@@ -368,7 +367,6 @@ impl HarnessDescriptor {
             Some("claude") => Some(crate::AgentKind::Claude),
             Some("codex") => Some(crate::AgentKind::Codex),
             Some("cursor") => Some(crate::AgentKind::Cursor),
-            Some("pi") => Some(crate::AgentKind::Pi),
             Some("opencode") => Some(crate::AgentKind::OpenCode),
             _ => None,
         }
@@ -512,10 +510,10 @@ impl HarnessDescriptor {
         }
         if let Some(dialect) = self.hooks.as_deref().map(str::trim) {
             match dialect {
-                "claude" | "codex" | "cursor" | "pi" | "opencode" => {}
+                "claude" | "codex" | "cursor" | "opencode" => {}
                 _ => {
                     return Some(format!(
-                        "harness `{}` hooks `{dialect}`: name a built-in dialect (claude, codex, cursor, pi, opencode)",
+                        "harness `{}` hooks `{dialect}`: name a built-in dialect (claude, codex, cursor, opencode)",
                         self.id.trim()
                     ));
                 }
@@ -571,15 +569,15 @@ fn models(ids: &[&str]) -> Vec<ModelEntry> {
         .collect()
 }
 
-/// The compiled-in behavior of a known harness: what a fresh install
-/// runs before any config exists. The Agents tab, the picker, spawn and
-/// hooks all read through here, so a new built-in is a new row plus its
-/// exhaustive-match arms — and a new third-party CLI needs no row at all.
-pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
-    let base = HarnessDescriptor {
+/// The row an id the registry does not name reads as: under its own name,
+/// `id` as its program, a `--model` flag and nothing else — no effort, no
+/// resume, no hooks. What a session outliving its entry renders with, and
+/// what a map-only entry's deltas apply over.
+pub fn placeholder(id: &str) -> HarnessDescriptor {
+    HarnessDescriptor {
         id: id.trim().to_string(),
         label: String::new(),
-        program: String::new(),
+        program: id.trim().to_string(),
         env: BTreeMap::new(),
         enabled: true,
         model: ModelSpec::default(),
@@ -592,6 +590,17 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
         relocation_prompt: false,
         compose_model_effort: false,
         mode: ModeSpec::default(),
+    }
+}
+
+/// The compiled-in behavior of a known harness: what a fresh install
+/// runs before any config exists. The Agents tab, the picker, spawn and
+/// hooks all read through here, so a new built-in is a new row plus its
+/// exhaustive-match arms — and a new third-party CLI needs no row at all.
+pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
+    let base = HarnessDescriptor {
+        program: String::new(),
+        ..placeholder(id)
     };
     Some(match id.trim() {
         "claude" => HarnessDescriptor {
@@ -687,53 +696,6 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
                 flag: Some("--mode".into()),
                 plan: Some("plan".into()),
                 ask: Some("ask".into()),
-            },
-            ..base
-        },
-        "pi" => HarnessDescriptor {
-            label: "Pi".into(),
-            program: "pi".into(),
-            model: ModelSpec {
-                flag: Some("--model".into()),
-                default: default_model_choice(),
-                models: models(&["opus", "sonnet", "haiku", "gpt-5.5"]),
-                catalog: None,
-            },
-            effort: EffortSpec {
-                flag: Some("--thinking".into()),
-                default: default_model_choice(),
-                efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-                offered: true,
-                ..EffortSpec::default()
-            },
-            resume: ResumeSpec {
-                flag: Some("--session-id".into()),
-                ..ResumeSpec::default()
-            },
-            system: SystemSpec {
-                append_flag: Some("--append-system-prompt".into()),
-                ..SystemSpec::default()
-            },
-            hooks: Some("pi".into()),
-            relocation_prompt: true,
-            ..base
-        },
-        "muse" => HarnessDescriptor {
-            label: "Muse".into(),
-            program: "muse".into(),
-            model: ModelSpec {
-                flag: Some("--model".into()),
-                default: default_model_choice(),
-                models: Vec::new(),
-                catalog: None,
-            },
-            effort: EffortSpec {
-                default: default_model_choice(),
-                offered: true,
-                ..EffortSpec::default()
             },
             ..base
         },
@@ -978,137 +940,19 @@ impl HarnessDescriptor {
     }
 }
 
-/// One user-defined harness, as the legacy `custom_harnesses` key holds
-/// it. New harnesses belong in the `harnesses` map as full descriptors;
-/// this list keeps reading, converting each entry to the descriptor shape
-/// it always had (model flag, no effort row, no resume, optional hook
-/// dialect). An id the map also names merges the map's deltas over the
-/// entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CustomHarness {
-    /// Stable id: what the picker shows the session under when the label
-    /// is empty, and what persisted sessions point back at. Lowercase
-    /// letters, digits and hyphens; must be unique within the list and
-    /// must not collide with a built-in id (`claude`, `codex`, `cursor`,
-    /// `pi`, `muse`, `opencode`).
-    pub id: String,
-    /// Display label for the picker and session rows. Empty falls back
-    /// to the id.
-    #[serde(default)]
-    pub label: String,
-    /// The CLI orion launches, resolved on PATH through the login shell
-    /// like every other harness.
-    pub program: String,
-    /// Whether the NEW AGENT PICKER offers this entry.
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    /// Default model id. `"default"` (the default) means don't pass the
-    /// flag — let the CLI pick; any other value is passed verbatim.
-    #[serde(default = "default_model_choice")]
-    pub model: String,
-    /// The flag that carries the model id. `"--model"` unless the CLI
-    /// spells it otherwise.
-    #[serde(default = "default_model_flag")]
-    pub model_flag: String,
-    /// Hook dialect to install for this entry's sessions, naming the
-    /// built-in CLI whose hooks the entry's program speaks: `"claude"`,
-    /// `"codex"`, `"cursor"` or `"pi"`. With one set the sessions report
-    /// status, prompts and permission waits exactly like that harness;
-    /// without one they stay process-based (running while the PTY is
-    /// live, never waiting-on-you). A Claude-compatible CLI gets title
-    /// sync and auto-title with `"claude"`.
-    #[serde(default)]
-    pub hooks: Option<String>,
-}
-
-fn default_model_flag() -> String {
-    "--model".into()
-}
-
-impl CustomHarness {
-    /// The label the picker and session rows show.
-    pub fn display_label(&self) -> &str {
-        if self.label.trim().is_empty() {
-            &self.id
-        } else {
-            &self.label
-        }
-    }
-
-    /// The descriptor shape this entry always had, before the map's
-    /// deltas (if any) apply over it.
-    pub fn as_descriptor(&self) -> HarnessDescriptor {
-        HarnessDescriptor {
-            id: self.id.clone(),
-            label: self.label.clone(),
-            program: self.program.clone(),
-            env: BTreeMap::new(),
-            enabled: self.enabled,
-            model: ModelSpec {
-                flag: Some(self.model_flag.clone()),
-                default: self.model.clone(),
-                models: Vec::new(),
-                catalog: None,
-            },
-            effort: EffortSpec::default(),
-            permissions_flag: None,
-            prompt_flag: None,
-            resume: ResumeSpec::default(),
-            system: SystemSpec::default(),
-            hooks: self.hooks.clone(),
-            relocation_prompt: false,
-            compose_model_effort: false,
-            mode: ModeSpec::default(),
-        }
-    }
-
-    /// Why this entry is unusable, or None when it launches. The picker
-    /// hides invalid entries; create paths refuse them with this message.
-    pub fn problem(&self) -> Option<String> {
-        if self.id.trim().is_empty() {
-            return Some("custom harness with an empty id".into());
-        }
-        if !self
-            .id
-            .trim()
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
-            return Some(format!(
-                "custom harness id `{}`: use lowercase letters, digits and hyphens",
-                self.id.trim()
-            ));
-        }
-        if crate::AgentKind::parse(self.id.trim()).is_some() {
-            return Some(format!(
-                "custom harness id `{}` collides with a built-in harness",
-                self.id.trim()
-            ));
-        }
-        self.as_descriptor().problem()
-    }
-
-    /// The hook dialect this entry's sessions install, if any.
-    pub fn hook_dialect(&self) -> Option<crate::AgentKind> {
-        self.as_descriptor().hook_dialect()
-    }
-}
-
 /// The effective registry both halves of orion read: the built-ins in
 /// [`AgentKind::ALL`] order with the `harnesses` map applied — Claude's
-/// extra accounts right after it — then the legacy list in order (each with
-/// its map deltas), then map-only new ids in key order. Callers hide
+/// extra accounts right after it — then map-only new ids in key order. Callers hide
 /// entries that are disabled or [`problem`][HarnessDescriptor::problem]-broken;
 /// see [`usable`].
 ///
 /// An account is Claude's effective row in its own config dir
 /// ([`ClaudeAccount::descriptor`]), and the map's entry for its id is
 /// deltas over that, as for a built-in. An account whose entry is broken,
-/// or whose id a built-in, a legacy entry or an earlier account already
-/// holds, is left out (the TUI's Agents tab names it and why).
+/// or whose id an earlier account already holds, is left out (the TUI's
+/// Agents tab names it and why).
 pub fn registry(
     overrides: &BTreeMap<String, HarnessOverride>,
-    customs: &[CustomHarness],
     accounts: &[ClaudeAccount],
 ) -> Vec<HarnessDescriptor> {
     let mut out: Vec<HarnessDescriptor> = builtins()
@@ -1120,7 +964,7 @@ pub fn registry(
             descriptor
         })
         .collect();
-    let accounts = registered_accounts(accounts, customs);
+    let accounts = registered_accounts(accounts);
     if let Some(at) = out.iter().position(|entry| entry.id == "claude") {
         let claude = out[at].clone();
         let rows = accounts.iter().map(|account| {
@@ -1132,18 +976,10 @@ pub fn registry(
         });
         out.splice(at + 1..at + 1, rows.collect::<Vec<_>>());
     }
-    for entry in customs {
-        let mut descriptor = entry.as_descriptor();
-        if let Some(over) = overrides.get(&descriptor.id) {
-            descriptor.apply(over);
-        }
-        out.push(descriptor);
-    }
     let mut extra: Vec<&String> = overrides
         .keys()
         .filter(|id| {
             builtin(id).is_none()
-                && !customs.iter().any(|entry| &entry.id == *id)
                 && !accounts
                     .iter()
                     .any(|account| account.id.trim() == id.as_str())
@@ -1153,23 +989,11 @@ pub fn registry(
     for id in extra {
         let mut descriptor = HarnessDescriptor {
             id: id.clone(),
-            label: String::new(),
             program: String::new(),
-            env: BTreeMap::new(),
-            enabled: true,
-            model: ModelSpec::default(),
-            effort: EffortSpec::default(),
-            permissions_flag: None,
-            prompt_flag: None,
-            resume: ResumeSpec::default(),
-            system: SystemSpec::default(),
-            hooks: None,
-            relocation_prompt: false,
-            compose_model_effort: false,
-            mode: ModeSpec::default(),
+            ..placeholder(id)
         };
         // A map-only entry that maps effort shows its Effort row like a
-        // built-in; a bare program stays Model-only like a legacy custom.
+        // built-in; a bare program stays Model-only.
         if let Some(over) = overrides.get(id) {
             descriptor.apply(over);
             if over.effort_offered.is_none()
@@ -1186,18 +1010,12 @@ pub fn registry(
 }
 
 /// The `claude_accounts` entries the registry carries: valid ones, each id
-/// once, none a legacy entry already holds.
-fn registered_accounts<'a>(
-    accounts: &'a [ClaudeAccount],
-    customs: &[CustomHarness],
-) -> Vec<&'a ClaudeAccount> {
+/// once.
+fn registered_accounts(accounts: &[ClaudeAccount]) -> Vec<&ClaudeAccount> {
     let mut kept: Vec<&ClaudeAccount> = Vec::new();
     for account in accounts {
         let id = account.id.trim();
-        if account.problem().is_none()
-            && !customs.iter().any(|entry| entry.id.trim() == id)
-            && !kept.iter().any(|other| other.id.trim() == id)
-        {
+        if account.problem().is_none() && !kept.iter().any(|other| other.id.trim() == id) {
             kept.push(account);
         }
     }
@@ -1257,22 +1075,18 @@ pub fn resolve<'a>(
 mod tests {
     use super::*;
 
-    fn custom(id: &str) -> CustomHarness {
-        CustomHarness {
-            id: id.into(),
-            label: String::new(),
-            program: "agy".into(),
-            enabled: true,
-            model: default_model_choice(),
-            model_flag: default_model_flag(),
-            hooks: None,
+    /// A map-only entry running `program`.
+    fn program(program: &str) -> HarnessOverride {
+        HarnessOverride {
+            program: Clearable::Set(program.into()),
+            ..HarnessOverride::default()
         }
     }
 
     #[test]
     fn builtins_cover_every_builtin_kind() {
         let all = builtins();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 5);
         for kind in AgentKind::ALL {
             if kind == AgentKind::Custom {
                 continue;
@@ -1301,13 +1115,8 @@ mod tests {
         assert_eq!(cursor.program, "cursor-agent");
         assert!(cursor.compose_model_effort);
         assert!(!cursor.relocation_prompt);
-        let pi = builtin("pi").unwrap();
-        assert_eq!(pi.resume.flag.as_deref(), Some("--session-id"));
-        assert_eq!(pi.effort.flag.as_deref(), Some("--thinking"));
-        let muse = builtin("muse").unwrap();
-        assert!(!muse.resumes());
-        assert_eq!(muse.hooks, None);
-        assert!(muse.effort.offered, "muse keeps its reserved Effort row");
+        assert_eq!(builtin("pi"), None, "Pi is no built-in any more");
+        assert_eq!(builtin("muse"), None, "nor is Muse");
         let opencode = builtin("opencode").unwrap();
         assert_eq!(opencode.program, "opencode");
         assert_eq!(opencode.prompt_flag.as_deref(), Some("--prompt"));
@@ -1355,15 +1164,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_orders_builtins_then_legacy_then_new_ids() {
+    fn registry_orders_builtins_then_new_ids() {
         let mut overrides = BTreeMap::new();
-        overrides.insert(
-            "agy".into(),
-            HarnessOverride {
-                program: Clearable::Set("agy".into()),
-                ..HarnessOverride::default()
-            },
-        );
+        overrides.insert("zed".into(), program("zed"));
+        overrides.insert("agy".into(), program("agy"));
         overrides.insert(
             "claude".into(),
             HarnessOverride {
@@ -1371,20 +1175,15 @@ mod tests {
                 ..HarnessOverride::default()
             },
         );
-        let customs = vec![custom("zed")];
-        let all = registry(&overrides, &customs, &[]);
+        let all = registry(&overrides, &[]);
         let ids: Vec<&str> = all.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["claude", "codex", "cursor", "pi", "muse", "grok", "opencode", "zed", "agy"]
+            vec!["claude", "codex", "cursor", "grok", "opencode", "agy", "zed"]
         );
         assert!(!all[0].enabled, "the claude override applied");
-        assert_eq!(all[7].program, "agy", "legacy entry converts");
-        assert_eq!(all[8].program, "agy", "map-only entry resolves");
-        assert!(
-            !all[8].effort.offered,
-            "a bare program stays Model-only like a legacy custom"
-        );
+        assert_eq!(all[5].program, "agy", "map-only entry resolves");
+        assert!(!all[5].effort.offered, "a bare program stays Model-only");
     }
 
     #[test]
@@ -1399,7 +1198,7 @@ mod tests {
                 ..HarnessOverride::default()
             },
         );
-        let all = registry(&overrides, &[], &[]);
+        let all = registry(&overrides, &[]);
         let agy = all.iter().find(|entry| entry.id == "agy").unwrap();
         assert!(agy.effort.offered);
         assert_eq!(agy.problem(), None);
@@ -1431,7 +1230,7 @@ mod tests {
 
     #[test]
     fn resolve_names_missing_and_broken_entries() {
-        let all = registry(&BTreeMap::new(), &[custom("agy")], &[]);
+        let all = registry(&BTreeMap::from([("agy".into(), program("agy"))]), &[]);
         assert_eq!(resolve(&all, AgentKind::Claude, None).unwrap().id, "claude");
         assert_eq!(
             resolve(&all, AgentKind::Custom, Some("agy"))
@@ -1441,27 +1240,9 @@ mod tests {
         );
         assert!(resolve(&all, AgentKind::Custom, Some("gone")).is_err());
         assert!(resolve(&all, AgentKind::Custom, None).is_err());
-        let mut broken = custom("broken");
-        broken.program = "  ".into();
-        let all = registry(&BTreeMap::new(), &[broken], &[]);
+        let all = registry(&BTreeMap::from([("broken".into(), program("  "))]), &[]);
         assert!(resolve(&all, AgentKind::Custom, Some("broken")).is_err());
-        assert_eq!(usable(&all).len(), 7, "the broken entry is hidden");
-    }
-
-    #[test]
-    fn legacy_validation_still_names_its_problems() {
-        assert!(custom("").problem().is_some());
-        assert!(custom("Agy").problem().is_some());
-        assert!(custom("claude").problem().is_some());
-        assert!(custom("muse").problem().is_some());
-        assert!(custom("grok").problem().is_some());
-        assert!(custom("opencode").problem().is_some());
-        let claude_hooks = CustomHarness {
-            hooks: Some("claude".into()),
-            ..custom("agy")
-        };
-        assert_eq!(claude_hooks.problem(), None);
-        assert_eq!(claude_hooks.hook_dialect(), Some(crate::AgentKind::Claude));
+        assert_eq!(usable(&all).len(), 5, "the broken entry is hidden");
     }
 
     /// The second Claude account as config.json writes it: `env` merges
@@ -1482,7 +1263,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        let all = registry(&overrides, &[], &[]);
+        let all = registry(&overrides, &[]);
         let b = all.iter().find(|entry| entry.id == "claude-b").unwrap();
         assert_eq!(b.problem(), None);
         assert_eq!(b.env["CLAUDE_CONFIG_DIR"], "~/.claude-b");
@@ -1586,7 +1367,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let all = registry(&overrides, &[], &[]);
+        let all = registry(&overrides, &[]);
         let ids = |from: &str| -> Vec<String> {
             continue_targets(&all, from)
                 .into_iter()
@@ -1601,7 +1382,8 @@ mod tests {
     /// `claude_accounts` entries are Claude's effective row in their own
     /// dirs, listed right after it; the map's entry for an account's id is
     /// deltas over that row, never a second harness; and an entry that
-    /// can't be an account — broken, or an id already taken — stays out.
+    /// can't be an account — broken, a built-in's id, or an id already
+    /// taken — stays out.
     #[test]
     fn claude_accounts_are_claude_in_their_own_dirs() {
         let account = |id: &str, dir: &str| ClaudeAccount {
@@ -1624,24 +1406,22 @@ mod tests {
                 "claude-2".to_string(),
                 serde_json::from_value(serde_json::json!({"model_default": "opus"})).unwrap(),
             ),
+            ("agy".to_string(), program("agy")),
         ]
         .into_iter()
         .collect();
         let accounts = [
             account("claude-2", "~/.claude-2"),
             account("claude-2", "~/.claude-again"),
-            account("agy", "~/.claude-agy"),
+            account("codex", "~/.claude-codex"),
             account("Bad Id", "~/.claude-bad"),
             account("claude-3", "/srv/claude-3"),
         ];
-        let all = registry(&overrides, &[custom("agy")], &accounts);
+        let all = registry(&overrides, &accounts);
         let ids: Vec<&str> = all.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(
             ids,
-            [
-                "claude", "claude-2", "claude-3", "codex", "cursor", "pi", "muse", "grok",
-                "opencode", "agy"
-            ]
+            ["claude", "claude-2", "claude-3", "codex", "cursor", "grok", "opencode", "agy"]
         );
         let two = &all[1];
         assert_eq!(
@@ -1659,7 +1439,7 @@ mod tests {
         assert_eq!(
             all.last().unwrap().program,
             "agy",
-            "the legacy entry kept its id"
+            "the map-only entry kept its id"
         );
         assert!(all.iter().all(|entry| entry.problem().is_none()));
         assert!(two.is_claude_account() && two.takes_claude_sessions());
@@ -1699,16 +1479,15 @@ mod tests {
         assert!(!listed.offers_model("claude-opus-5[1m]"));
         listed.model.flag = None;
         assert!(!listed.offers_model("sonnet"), "no flag, no model");
-        let legacy = CustomHarness {
+        let bare = HarnessDescriptor {
             hooks: Some("claude".into()),
-            ..custom("agy")
-        }
-        .as_descriptor();
+            ..placeholder("agy")
+        };
         assert!(
-            legacy.offers_model("opus"),
+            bare.offers_model("opus"),
             "an empty list passes ids verbatim"
         );
-        assert!(!legacy.offers_effort("high"), "no Effort row, no effort");
+        assert!(!bare.offers_effort("high"), "no Effort row, no effort");
     }
 
     /// Claude starts in plan through its permission mode and has no ask;
@@ -1729,7 +1508,7 @@ mod tests {
         assert_eq!(cursor.offered(), AgentMode::ALL);
         assert_eq!(cursor.args(AgentMode::Ask), Some(["--mode", "ask"]));
 
-        for id in ["codex", "pi", "muse", "grok", "opencode"] {
+        for id in ["codex", "grok", "opencode"] {
             assert_eq!(
                 builtin(id).unwrap().mode.offered(),
                 [AgentMode::Edit],

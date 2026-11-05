@@ -71,7 +71,7 @@ fn seed_onboarded_config(data_dir: &std::path::Path, settings: &str) {
         data_dir.join("config.json"),
         format!(
             r#"{{"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
-            "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true{settings}}}"#
+            "opencode_enabled": true{settings}}}"#
         ),
     )
     .unwrap();

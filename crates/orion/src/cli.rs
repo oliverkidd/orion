@@ -152,8 +152,8 @@ pub(crate) enum Command {
         /// The task the new session starts on; multiple words need no quotes.
         #[arg(required = true, num_args = 1..)]
         task: Vec<String>,
-        /// Harness for the new session: claude, codex, cursor, pi, muse,
-        /// grok or opencode.
+        /// Harness for the new session: claude, codex, cursor, grok or
+        /// opencode.
         ///
         /// Defaults to the harness this session is running.
         #[arg(long, value_name = "KIND", value_parser = parse_agent_kind)]
@@ -494,7 +494,7 @@ pub(crate) enum ConfigCommand {
         source: String,
     },
     /// Print the effective harness registry: every harness orion knows —
-    /// the built-ins, `custom_harnesses` entries and `harnesses` map ids —
+    /// the built-ins, Claude accounts and `harnesses` map ids —
     /// with the program, flags, resume shape, hook dialect and defaults a
     /// launch actually uses. Copy a row into config.json `harnesses` to
     /// override it.
