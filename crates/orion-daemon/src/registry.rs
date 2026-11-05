@@ -209,6 +209,10 @@ pub struct Daemon {
     /// RUN TERMINALS sent a `^C` by a stop or a restart and not yet gone:
     /// a second press kills them outright.
     stopping_runs: Mutex<HashMap<TerminalId, Stop>>,
+    /// SETUP TERMINALS still running that a **Start stack** is waiting
+    /// on: the config to start the worktree's run under once each exits
+    /// cleanly (`RunState::run_queued`).
+    queued_runs: Mutex<HashMap<TerminalId, crate::config::Config>>,
     /// STACK STATUS: the last docker compose listing, and the poke that
     /// asks for a fresh one now.
     pub stacks: crate::stacks::StackWatch,
@@ -239,6 +243,7 @@ impl Daemon {
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),
             stopping_runs: Mutex::new(HashMap::new()),
+            queued_runs: Mutex::new(HashMap::new()),
             stacks: crate::stacks::StackWatch::default(),
         })
     }
@@ -680,6 +685,7 @@ impl Daemon {
             exit_code: self
                 .finished_run_exit(&SessionRef::Terminal(id.clone()))
                 .flatten(),
+            run_queued: self.queued_runs.lock().unwrap().contains_key(id),
         }
     }
 
@@ -1555,7 +1561,7 @@ impl Daemon {
             .filter(|t| worktree_ids.contains(&t.worktree_id))
         {
             self.kill_session(&SessionRef::Terminal(t.id.clone()));
-            self.finished_runs.lock().unwrap().remove(&t.id);
+            self.forget_command(&t.id);
         }
         self.kill_prewarmed_in(worktree_ids);
     }
@@ -2133,13 +2139,21 @@ impl Daemon {
 
     pub fn close_terminal(self: &Arc<Self>, id: &TerminalId) -> Result<()> {
         self.kill_session(&SessionRef::Terminal(id.clone()));
-        self.finished_runs.lock().unwrap().remove(id);
-        self.stopping_runs.lock().unwrap().remove(id);
+        self.forget_command(id);
         self.store.delete_terminal(id)?;
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Terminal(id.clone()),
         });
         Ok(())
+    }
+
+    /// Drop what the DAEMON holds about terminal `id`'s last command — an
+    /// ended run's PTY, a stop under way, a start waiting on it — as its
+    /// row goes, or its command starts again.
+    fn forget_command(&self, id: &TerminalId) {
+        self.finished_runs.lock().unwrap().remove(id);
+        self.stopping_runs.lock().unwrap().remove(id);
+        self.queued_runs.lock().unwrap().remove(id);
     }
 
     // ---- setup terminals ----
@@ -2200,22 +2214,97 @@ impl Daemon {
         Ok(Some(id))
     }
 
-    /// SETUP TERMINAL `id`'s PTY, `session`, exited with `exit_code`. A
-    /// clean exit takes the row with it; any other keeps it, as `setup
-    /// failed (1)`, its PTY kept for the attach that wants to read why.
+    /// SETUP TERMINAL `setup`'s PTY, `session`, exited with `exit_code`. A
+    /// clean exit takes the row with it and starts the run a **Start
+    /// stack** left waiting on it; any other keeps the row, as `setup
+    /// failed (1)`, its PTY kept for the attach that wants to read why, and
+    /// starts nothing — the warning says so, and a press now starts it.
     fn setup_ended(
         self: &Arc<Self>,
-        id: &TerminalId,
+        setup: &TerminalTab,
         session: &Arc<PtySession>,
         exit_code: Option<i32>,
     ) {
+        let id = &setup.id;
+        let queued = self.queued_runs.lock().unwrap().remove(id);
         if exit_code != Some(0) {
             self.keep_finished(id, session, exit_code);
+            if queued.is_some() {
+                let branch = self.branch_of(&setup.worktree_id);
+                self.warn_clients(format!(
+                    "setup failed on {branch}, so its stack didn't start — Start stack there starts it anyway"
+                ));
+            }
             return;
         }
         if let Err(e) = self.close_terminal(id) {
             tracing::warn!(terminal = %id.0, error = %e, "finished setup's row not removed");
         }
+        if let Some(config) = queued {
+            tracing::info!(worktree = %setup.worktree_id, "setup finished; starting its run");
+            if let Err(e) = self.start_run_with(&setup.worktree_id, &config) {
+                let branch = self.branch_of(&setup.worktree_id);
+                self.warn_clients(format!(
+                    "setup finished on {branch}, but its stack didn't start: {e:#}"
+                ));
+            }
+        }
+    }
+
+    /// Worktree `id`'s branch, for a warning that names it.
+    fn branch_of(&self, id: &WorktreeId) -> String {
+        self.store
+            .get_worktree(id)
+            .ok()
+            .flatten()
+            .map_or_else(|| "its worktree".into(), |w| w.branch)
+    }
+
+    /// A **Start stack** on a worktree still setting up: queued on its
+    /// running SETUP TERMINAL under `config` — the config of the press, as
+    /// a restart keeps its own — to start once that exits cleanly
+    /// ([`Daemon::setup_ended`]). The first press sends the row again, so
+    /// every client's footer says it is waiting. The setup's id, or None
+    /// when the worktree has no setup running.
+    fn queue_run_behind_setup(
+        &self,
+        worktree_id: &WorktreeId,
+        config: &crate::config::Config,
+    ) -> Result<Option<TerminalId>> {
+        let setups = self.store.setup_terminals_in(worktree_id)?;
+        let (id, first) = {
+            // Checked under the queue's lock: a setup's exit leaves
+            // `sessions` before it takes its queue, so one already ending
+            // reads as gone here and nothing waits on it.
+            let mut queue = self.queued_runs.lock().unwrap();
+            let Some(setup) = setups
+                .into_iter()
+                .find(|s| self.is_alive(&SessionRef::Terminal(s.id.clone())))
+            else {
+                return Ok(None);
+            };
+            let first = queue.insert(setup.id.clone(), config.clone()).is_none();
+            (setup.id, first)
+        };
+        if first {
+            // A row gone meanwhile took its queue with it; nothing to say.
+            let _ = self.broadcast_terminal(&id);
+        }
+        Ok(Some(id))
+    }
+
+    /// A stop on `worktree_id` while a start waits on its setup: the
+    /// start is called off, and the setup's row sent again to say so.
+    /// Whether there was one to call off.
+    fn cancel_queued_run(&self, worktree_id: &WorktreeId) -> Result<bool> {
+        let mut cancelled = false;
+        for setup in self.store.setup_terminals_in(worktree_id)? {
+            if self.queued_runs.lock().unwrap().remove(&setup.id).is_some() {
+                cancelled = true;
+                let _ = self.broadcast_terminal(&setup.id);
+            }
+        }
+        Ok(cancelled)
     }
 
     /// Spawn command terminal `term`'s PTY — a run's or a setup's — in
@@ -2253,7 +2342,9 @@ impl Daemon {
     /// `run_command` setting (Settings → Projects), read fresh — in the
     /// worktree's RUN TERMINAL; with none, the refusal says so. A run that already
     /// exited lends its row; one still going is the answer as it stands,
-    /// so a second client's press never starts a second server.
+    /// so a second client's press never starts a second server. A worktree
+    /// still running its setup starts nothing yet: the start waits for the
+    /// setup ([`Daemon::queue_run_behind_setup`]), and the answer is its row.
     pub fn start_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<EntityId> {
         self.start_run_with(worktree_id, &crate::config::Config::load())
     }
@@ -2279,6 +2370,9 @@ impl Daemon {
             }
         }
         let command = self.run_command_in(&worktree, config)?;
+        if let Some(setup) = self.queue_run_behind_setup(worktree_id, config)? {
+            return Ok(EntityId::Terminal(setup));
+        }
         let term = match existing {
             Some(mut term) => {
                 self.store.set_terminal_run_command(&term.id, &command)?;
@@ -2300,8 +2394,7 @@ impl Daemon {
                 term
             }
         };
-        self.finished_runs.lock().unwrap().remove(&term.id);
-        self.stopping_runs.lock().unwrap().remove(&term.id);
+        self.forget_command(&term.id);
         let id = term.id.clone();
         let spawned = self.spawn_command(term, &worktree);
         tracing::info!(worktree = %worktree_id, %command, ok = spawned.is_ok(), "run started");
@@ -2359,10 +2452,14 @@ impl Daemon {
     /// down to the kill ([`RunState::stopping_until`]): one that ignores
     /// the `^C` is killed after [`RUN_STOP_GRACE`]; a second stop kills it
     /// at once. A run that already ended is dropped, row and all. Nothing
-    /// to stop is not an error — two clients may both have pressed it.
+    /// to stop is not an error — two clients may both have pressed it. A
+    /// start still waiting on the worktree's setup is called off instead.
     ///
     /// [`RunState::stopping_until`]: orion_core::RunState::stopping_until
     pub fn stop_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<()> {
+        if self.cancel_queued_run(worktree_id)? {
+            return Ok(());
+        }
         self.stop_run_then(worktree_id, None)
     }
 
@@ -3389,7 +3486,7 @@ impl Daemon {
                         tracing::info!(session = ?sref, exit_code, "session exited");
                         if let SessionRef::Terminal(id) = &sref {
                             match daemon.command_terminal(id) {
-                                Some(t) if t.setup => daemon.setup_ended(id, &session, exit_code),
+                                Some(t) if t.setup => daemon.setup_ended(&t, &session, exit_code),
                                 Some(_) => daemon.run_ended(id, &session, exit_code),
                                 None => {}
                             }
@@ -5881,6 +5978,135 @@ mod tests {
             assert_eq!(started, None);
         }
         assert_eq!(daemon.store.count_terminals(&worktree.id).unwrap(), 0);
+    }
+
+    /// A config whose project at `repo` has both a SETUP COMMAND and a
+    /// RUN COMMAND.
+    fn setup_and_run_config(repo: &Path, setup: &str, run: &str) -> crate::config::Config {
+        project_config(
+            repo,
+            serde_json::json!({ "setup_command": setup, "run_command": run }),
+        )
+    }
+
+    /// The next row any client is sent for a live RUN TERMINAL.
+    async fn next_live_run(events: &mut broadcast::Receiver<ServerEvent>) -> TerminalTab {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let ServerEvent::EntityUpserted {
+                    entity: Entity::Terminal(t),
+                } = events.recv().await.unwrap()
+                {
+                    if t.is_run() && t.alive {
+                        return t;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("no run started")
+    }
+
+    /// **Start stack** on a worktree still setting up starts nothing yet:
+    /// it waits on the setup's row, which says so to every client, and the
+    /// run starts once the setup exits cleanly and its row has gone. A
+    /// second press meanwhile waits too, and never starts a second run.
+    #[tokio::test]
+    async fn a_start_during_setup_waits_for_it_then_runs() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let cfg = setup_and_run_config(dir.path(), "sleep 0.5", "sleep 30");
+        let mut events = daemon.events.subscribe();
+        let setup = daemon
+            .start_setup(dir.path(), &worktree, &cfg)
+            .unwrap()
+            .unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(
+                daemon.start_run_with(&worktree.id, &cfg).unwrap(),
+                EntityId::Terminal(setup.clone()),
+                "the answer is the setup it waits on"
+            );
+        }
+        assert!(daemon
+            .store
+            .run_terminals_in(&worktree.id)
+            .unwrap()
+            .is_empty());
+        let waiting = terminal_row_until(&mut events, &setup, |row| row.run.run_queued).await;
+        assert!(waiting.alive, "setting up, with a start waiting");
+
+        let run = next_live_run(&mut events).await;
+        assert_eq!(run.run_command.as_deref(), Some("sleep 30"));
+        assert!(
+            daemon.store.get_terminal(&setup).unwrap().is_none(),
+            "the setup's row went first"
+        );
+        assert_eq!(
+            daemon.store.run_terminals_in(&worktree.id).unwrap().len(),
+            1
+        );
+        daemon.kill_all();
+    }
+
+    /// A stop while a start waits on the setup calls the start off — the
+    /// row says so — and leaves the setup running.
+    #[tokio::test]
+    async fn a_stop_calls_off_a_start_waiting_on_setup() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let cfg = setup_and_run_config(dir.path(), "sleep 30", "sleep 30");
+        let mut events = daemon.events.subscribe();
+        let setup = daemon
+            .start_setup(dir.path(), &worktree, &cfg)
+            .unwrap()
+            .unwrap();
+        daemon.start_run_with(&worktree.id, &cfg).unwrap();
+        terminal_row_until(&mut events, &setup, |row| row.run.run_queued).await;
+
+        daemon.stop_run(&worktree.id).unwrap();
+        let called_off = terminal_row_until(&mut events, &setup, |row| !row.run.run_queued).await;
+        assert!(called_off.alive, "the setup carries on");
+        assert!(daemon.queued_runs.lock().unwrap().is_empty());
+        daemon.kill_all();
+    }
+
+    /// A setup that fails starts no run that was waiting on it, and a
+    /// warning says so; a press after that starts the run at once.
+    #[tokio::test]
+    async fn a_failed_setup_starts_no_waiting_run() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let cfg = setup_and_run_config(dir.path(), "sleep 0.3; exit 2", "sleep 30");
+        let mut events = daemon.events.subscribe();
+        let mut warnings = daemon.events.subscribe();
+        let setup = daemon
+            .start_setup(dir.path(), &worktree, &cfg)
+            .unwrap()
+            .unwrap();
+        daemon.start_run_with(&worktree.id, &cfg).unwrap();
+
+        let failed = terminal_row_until(&mut events, &setup, |row| !row.alive).await;
+        assert_eq!(failed.run.exit_code, Some(2));
+        assert!(!failed.run.run_queued, "nothing waits on it now");
+        assert!(daemon
+            .store
+            .run_terminals_in(&worktree.id)
+            .unwrap()
+            .is_empty());
+        let said = drain_warnings(&mut warnings);
+        assert!(
+            said.iter().any(|w| w.contains("stack didn't start")),
+            "{said:?}"
+        );
+
+        let EntityId::Terminal(run) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
+            panic!("a run lives in a terminal");
+        };
+        assert_ne!(run, setup);
+        assert!(daemon.is_alive(&SessionRef::Terminal(run)));
+        daemon.kill_all();
     }
 
     #[tokio::test]

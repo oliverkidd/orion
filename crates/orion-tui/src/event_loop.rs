@@ -5248,8 +5248,10 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// Starting runs its RUN COMMAND in its RUN TERMINAL in the background:
 /// the run line comes up in its band, and the cursor and the pane stay
 /// where they were ([`PendingIntent::RunStarted`]); with none set, the
-/// DAEMON's refusal says so in the footer. Stopping sends that run a `^C`,
-/// so its own trap winds the stack down — a second press kills it.
+/// DAEMON's refusal says so in the footer; a checkout still setting up
+/// starts it once its setup has finished, and a press meanwhile calls that
+/// off. Stopping sends that run a `^C`, so its own trap winds the stack
+/// down — a second press kills it.
 pub(crate) fn toggle_stack_in(
     app: &mut App,
     worktree: &orion_core::WorktreeId,
@@ -5261,6 +5263,16 @@ pub(crate) fn toggle_stack_in(
         return;
     }
     let id = worktree.clone();
+    if crate::stacks::run_queued(app, &id) {
+        app.flash = Some(crate::flash::Flash::note(
+            "the stack won't start when setup finishes",
+        ));
+        send(app, out, |req_id| ClientRequest::StopRun {
+            req_id,
+            worktree: id,
+        });
+        return;
+    }
     if app.worktree_running(&id) {
         // The first stop is said by the run line and the footer for as
         // long as it lasts (`ui::footer::stopping_line`); the second kills.
@@ -27783,23 +27795,29 @@ mod tests {
         );
     }
 
-    /// A SETUP LINE is never the checkout's run: while it sets up, `⌘⇧S`
-    /// still starts the stack, and its menu has no stack verbs.
-    #[test]
-    fn a_setup_line_is_not_the_checkouts_run() {
-        use orion_core::{Entity, TerminalId, TerminalTab};
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let setup = TerminalTab {
-            id: TerminalId("setup1".into()),
+    /// The `w1` checkout's SETUP LINE, setting up, with `run` for what the
+    /// DAEMON says of it.
+    fn a_setup(run: orion_core::RunState) -> orion_core::TerminalTab {
+        orion_core::TerminalTab {
+            id: orion_core::TerminalId("setup1".into()),
             worktree_id: orion_core::WorktreeId("w1".into()),
             name: "setup".into(),
             sort_order: 0,
             alive: true,
             run_command: Some("just setup-worktree".into()),
             setup: true,
-            run: Default::default(),
-        };
+            run,
+        }
+    }
+
+    /// A SETUP LINE is never the checkout's run: while it sets up, `⌘⇧S`
+    /// still starts the stack, and its menu has no stack verbs.
+    #[test]
+    fn a_setup_line_is_not_the_checkouts_run() {
+        use orion_core::Entity;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let setup = a_setup(Default::default());
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -27819,6 +27837,73 @@ mod tests {
             .map(|i| i.label)
             .collect();
         assert!(!labels.iter().any(|l| l.contains("stack")), "{labels:?}");
+    }
+
+    /// A **Start stack** waiting on the checkout's setup — the DAEMON's
+    /// word, on the setup's row — holds the footer through any key, and
+    /// lets go once the setup row has gone. `⌘⇧S` meanwhile calls the
+    /// start off, and the menu offers that too.
+    #[test]
+    fn a_start_waiting_on_setup_holds_the_footer_and_a_press_cancels_it() {
+        use orion_core::{Entity, EntityId, TerminalId};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let queued = |run_queued| {
+            a_setup(orion_core::RunState {
+                run_queued,
+                ..Default::default()
+            })
+        };
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(queued(false)),
+            },
+        );
+        assert_eq!(crate::ui::footer::setup_wait_line(&app), None);
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(queued(true)),
+            },
+        );
+        let held = crate::ui::footer::setup_wait_line(&app).expect("held while it waits");
+        assert_eq!(
+            &*held,
+            "setting up · the stack starts once setup finishes · ⌘⇧S again cancels"
+        );
+        let w1 = orion_core::WorktreeId("w1".into());
+        assert_eq!(crate::stacks::menu_label(&app, &w1), "Cancel start");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("the stack starts once setup finishes"),
+            "{text}"
+        );
+        assert!(
+            text.contains("setting up…"),
+            "the setup line says so:\n{text}"
+        );
+
+        let out = run_action(&mut app, crate::keymap::Action::ToggleStack);
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StopRun { worktree, .. }] if worktree == &w1),
+            "a second press calls the start off: {out:?}"
+        );
+        assert!(app
+            .flash
+            .as_deref()
+            .unwrap_or_default()
+            .contains("won't start"));
+
+        hse(
+            &mut app,
+            ServerEvent::EntityRemoved {
+                id: EntityId::Terminal(TerminalId("setup1".into())),
+            },
+        );
+        assert_eq!(crate::ui::footer::setup_wait_line(&app), None);
     }
 
     /// **Stop all stacks** stops every checkout's run, and nothing when

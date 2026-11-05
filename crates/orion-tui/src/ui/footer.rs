@@ -13,7 +13,8 @@
 //! wherever that is not the grid, the first of them is the way back to it.
 //! A FLASH takes the hints' place until the next key, in its kind's mark
 //! and color ([`flash_spans`]); a stop of the cursor's run holds that
-//! place while it lasts ([`stopping_line`]).
+//! place while it lasts ([`stopping_line`]), and so does a start waiting
+//! on the checkout's setup ([`setup_wait_line`]).
 
 use super::{truncate, App, ConnState, Focus, HitTarget};
 use crate::app::{CrumbPart, SessionRow};
@@ -532,6 +533,20 @@ pub(crate) fn stopping_line(app: &App) -> Option<Flash> {
     )))
 }
 
+/// While a **Start stack** on the cursor's checkout waits for its setup
+/// to finish (`RunState::run_queued`), the line the footer holds in the
+/// hints' place, as [`stopping_line`] is held.
+pub(crate) fn setup_wait_line(app: &App) -> Option<Flash> {
+    let worktree = crate::git_sync::target(app)?;
+    if !crate::stacks::run_queued(app, &worktree) {
+        return None;
+    }
+    let key = crate::hints::key_or(&app.keymap, Action::ToggleStack, "Cancel start");
+    Some(Flash::working(format!(
+        "setting up · the stack starts once setup finishes · {key} again cancels"
+    )))
+}
+
 /// Draw the bar.
 fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // `area` includes the blank padding row; the bar itself is its last row.
@@ -604,7 +619,11 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             .map(|s| s.width())
             .sum::<usize>();
     // The flash, behind the four cells the crumb leaves before it.
-    let flash = app.flash.clone().or_else(|| stopping_line(app));
+    let flash = app
+        .flash
+        .clone()
+        .or_else(|| stopping_line(app))
+        .or_else(|| setup_wait_line(app));
     let flash_w = flash.as_ref().map_or(0, |f| {
         flash_spans(app, f).iter().map(|s| s.width()).sum::<usize>() + 4
     });

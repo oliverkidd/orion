@@ -388,6 +388,10 @@ pub struct RunState {
     /// what ⌘O's **Open app** opens. Empty once the run has ended, and
     /// again from a start.
     pub ports: Vec<u16>,
+    /// On a SETUP TERMINAL: a **Start stack** pressed while it runs is
+    /// waiting for it. The run starts once the setup exits cleanly, and
+    /// the footer says so meanwhile.
+    pub run_queued: bool,
 }
 
 /// A URL pinned to a worktree — the pull request, the ticket, the design

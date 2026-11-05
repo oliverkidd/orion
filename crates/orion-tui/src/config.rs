@@ -604,7 +604,7 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::SetupCommand,
         label: "Setup command",
-        hint: "Shell line run once in each new worktree of this project, on a setup line in its band, e.g. just setup-worktree",
+        hint: "Shell line run once in each new worktree of this project, on a setup line in its band, e.g. just setup-worktree; {toggle_stack} (Start stack) waits for it",
         group: "",
     },
     SettingSpec {
