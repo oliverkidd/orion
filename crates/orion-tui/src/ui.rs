@@ -16,7 +16,7 @@ mod diff_view;
 pub(crate) mod footer;
 mod grep_view;
 mod launcher_view;
-pub(crate) use launcher_view::session_line;
+pub(crate) use launcher_view::{session_chip, session_line};
 
 pub(crate) use diff_view::diff_keys;
 use footer::draw_footer;
@@ -3695,6 +3695,9 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         .unwrap_or(&pr.label)
         .trim()
         .to_string();
+    let work = app
+        .selected_project()
+        .map(|p| crate::pr_work::of(app, &p.id, &pr.url, pr.number));
     let input = crate::pr_preview::PageInput {
         number: pr.number,
         title: &title,
@@ -3706,6 +3709,7 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         browser_key: key_hint(app, Action::Activate),
         diff_key: key_hint(app, Action::GitDiff),
         conflicts: conflicts.as_deref(),
+        work: work.as_ref(),
         now: orion_core::clock::now_secs() as i64,
     };
 
@@ -3754,6 +3758,9 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     }
     for (rect, key) in &tabs.fold_hits {
         app.hits.push((*rect, HitTarget::PrPageFold(*key)));
+    }
+    for (rect, hit) in &tabs.work_hits {
+        app.hits.push((*rect, HitTarget::PrPageWork(hit.clone())));
     }
     app.pr_tabs = tabs;
     app.hits.push((inner, HitTarget::TerminalPane));

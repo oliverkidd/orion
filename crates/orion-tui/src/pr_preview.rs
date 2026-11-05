@@ -302,6 +302,9 @@ pub struct PrTabs {
     /// and every listed row's visible rect by row.
     pub tab_hits: Vec<(Rect, PrTab)>,
     pub row_hits: Vec<(Rect, usize)>,
+    /// As of the last draw, for the mouse: each part of the WORK BLOCK a
+    /// click acts on (`pr_work`).
+    pub work_hits: Vec<(Rect, crate::pr_work::WorkHit)>,
     /// The `<details>` turned in the description and the comments, and
     /// as of the last draw each summary's visible rect, for the mouse.
     pub folds: Folds,
@@ -452,6 +455,9 @@ pub struct PageInput<'a> {
     /// The files it conflicts in, as the repo merged them
     /// (`conflicts::of_page`): the Changes tab marks them.
     pub conflicts: Option<&'a [String]>,
+    /// What is at work on it, between the sentence and the tabs
+    /// (`pr_work`).
+    pub work: Option<&'a crate::pr_work::Work>,
     /// Unix seconds, for ages and durations.
     pub now: i64,
 }
@@ -470,6 +476,8 @@ const BODY: &str = "  ";
 pub struct Page {
     pub head: Vec<Line<'static>>,
     tabs: Vec<TabSpot>,
+    /// Where the WORK BLOCK's clickable parts landed, by row in the head.
+    work: Vec<crate::pr_work::WorkSpot>,
     pub body: Vec<Line<'static>>,
     /// Each listed row's first line in the body and its line count.
     spans: Vec<(usize, usize)>,
@@ -485,13 +493,25 @@ type FoldSpot = (std::ops::Range<usize>, FoldKey);
 /// wear the accent then, and a quieter mark otherwise, as a list's do.
 ///
 /// The head is what the frame's own border ([`border`]) leaves to say: the
-/// sentence — who, from where into where, how much, how long ago — and
-/// the tabs, underlined.
+/// sentence — who, from where into where, how much, how long ago — the
+/// WORK BLOCK under it, and the tabs, underlined.
 pub fn page(input: &PageInput, tabs: &PrTabs, focused: bool, width: usize, th: Theme) -> Page {
     let width = width.max(1);
     let mut head = vec![Line::from("")];
     if let Some(detail) = input.detail {
         head.push(sentence(detail, input.now, width, th));
+    }
+    let (work_lines, work) = input
+        .work
+        .map(|work| crate::pr_work::lines(work, width, th))
+        .unwrap_or_default();
+    let work_at = head.len() as u16;
+    head.extend(work_lines);
+    let work = work
+        .into_iter()
+        .map(|(row, from, to, hit)| (work_at + row, from, to, hit))
+        .collect();
+    if head.len() > 1 {
         head.push(Line::from(""));
     }
     let (rows, hits) = tab_row(input, tabs.tab, width, th);
@@ -507,6 +527,7 @@ pub fn page(input: &PageInput, tabs: &PrTabs, focused: bool, width: usize, th: T
     Page {
         head,
         tabs: tabs_at,
+        work,
         body,
         spans,
         folds,
@@ -1707,22 +1728,25 @@ pub fn draw(f: &mut Frame, area: Rect, page: &Page, tabs: &mut PrTabs, scroll: u
     let shown: Vec<Line> = page.body.iter().skip(top).take(view_h).cloned().collect();
     f.render_widget(Paragraph::new(shown), body);
 
+    // Columns `[from, to)` of head row `row` on screen, if it is.
+    let in_head = |row: u16, from: u16, to: u16| {
+        let from = from.min(area.width);
+        (row < head_h).then(|| Rect {
+            x: area.x + from,
+            y: area.y + row,
+            width: to.min(area.width).saturating_sub(from),
+            height: 1,
+        })
+    };
     tabs.tab_hits = page
         .tabs
         .iter()
-        .filter(|(row, ..)| *row < head_h)
-        .map(|&(row, from, to, tab)| {
-            let from = from.min(area.width);
-            (
-                Rect {
-                    x: area.x + from,
-                    y: area.y + row,
-                    width: to.min(area.width).saturating_sub(from),
-                    height: 1,
-                },
-                tab,
-            )
-        })
+        .filter_map(|&(row, from, to, tab)| in_head(row, from, to).map(|rect| (rect, tab)))
+        .collect();
+    tabs.work_hits = page
+        .work
+        .iter()
+        .filter_map(|(row, from, to, hit)| in_head(*row, *from, *to).map(|r| (r, hit.clone())))
         .collect();
     // The part of body lines `first..end` on screen, if any.
     let on_screen = |first: usize, end: usize| {
@@ -2067,6 +2091,7 @@ mod tests {
             browser_key: "Enter".into(),
             diff_key: "^E".into(),
             conflicts: None,
+            work: None,
             now: NOW,
         }
     }

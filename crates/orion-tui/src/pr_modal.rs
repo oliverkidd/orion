@@ -1369,6 +1369,12 @@ pub(crate) fn handle_mouse(
         .iter()
         .find(|(rect, _)| rect.contains(mouse_pos))
         .map(|(_, key)| *key);
+    let on_work = view
+        .tabs
+        .work_hits
+        .iter()
+        .find(|(rect, _)| rect.contains(mouse_pos))
+        .map(|(_, hit)| hit.clone());
     match mouse.kind {
         MouseEventKind::ScrollUp if over_body => view.scroll_by(-WHEEL_LINES),
         MouseEventKind::ScrollDown if over_body => view.scroll_by(WHEEL_LINES),
@@ -1389,6 +1395,12 @@ pub(crate) fn handle_mouse(
                 view.tabs.select(row);
             }
             act_on_row(app, out, true);
+        }
+        // A session or an issue the WORK BLOCK names: landed on, opened.
+        MouseEventKind::Down(MouseButton::Left) if on_work.is_some() => {
+            if let Some(hit) = on_work {
+                crate::pr_work::click(app, hit, out);
+            }
         }
         // A `<details>` summary opens or shuts, as on github.com.
         MouseEventKind::Down(MouseButton::Left) if on_fold.is_some() => {
@@ -1984,6 +1996,7 @@ pub(crate) fn draw(
             v.tabs.tab_hits.clear();
             v.tabs.row_hits.clear();
             v.tabs.fold_hits.clear();
+            v.tabs.work_hits.clear();
             v.filter_pick = Some(pick);
         }
         return;
@@ -2007,6 +2020,7 @@ pub(crate) fn draw(
 
     // ---- right: the reading side, the PULL REQUEST PAGE ----
     let current = cursor.and_then(|i| rows.get(i));
+    let work = current.map(|pr| crate::pr_work::of(app, &view.project, &pr.url, pr.number));
     let input = current.map(|pr| crate::pr_preview::PageInput {
         number: pr.number,
         title: &pr.title,
@@ -2018,6 +2032,7 @@ pub(crate) fn draw(
         browser_key: keys::BROWSER.label(),
         diff_key: keys::DIFF.label(),
         conflicts: crate::conflicts::of_page(app, &pr.url),
+        work: work.as_ref(),
         now,
     });
     // The frame says where it stands, the number and the title — the page

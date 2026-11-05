@@ -407,7 +407,11 @@ sweeps, and a merged checkout left lying around costs an idle orion no repaints.
 conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
 as the PULL REQUESTS MODAL does (whose list moves a pull request to its **Merged** section on merge — the last 7 days'
 merges, under the open rows — and which `hide_draft_prs` never thins — the
-modal lists drafts too); `⌘E` shows its diff. The page's review threads — comments on lines — come
+modal lists drafts too); `⌘E` shows its diff. The page's WORK BLOCK (`pr_work`), under its first
+line, is drawn from what orion already holds and asks for nothing: the `autofix-<n>` on the head
+branch from the tree (or, with none, the page's failing checks and the conflict check's files), the
+issues on the branch's link in `linear-links.json` and those the project's Linear list has the pull
+request attached to, and the sessions in the project's checkouts of its head branch. The page's review threads — comments on lines — come
 from one GraphQL query asked beside `gh pr view`, and the Reviews tab lists them by file; `Enter` there
 (or `⌘⇧R` in the modal) opens the [PR review](keys.md#the-pr-review), where you comment on lines, reply,
 resolve and submit a verdict. What you write is GitHub's own pending review, written through

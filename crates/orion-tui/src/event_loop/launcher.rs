@@ -4728,6 +4728,47 @@ mod tests {
         });
     }
 
+    /// The pane's PULL REQUEST PAGE carries its WORK BLOCK under the
+    /// sentence — here the Linear issue its branch was linked to — and a
+    /// click on the issue opens it in the LINEAR VIEW.
+    #[test]
+    fn the_panes_pull_request_page_names_its_issue_and_a_click_opens_it() {
+        with_default_config(|| {
+            let mut app = with_a_listed_pull_request_on_the_empty_band();
+            let project = ProjectId("p1".into());
+            let issue = crate::linear::tests::issue("1", "ENG-1", "Polish");
+            app.linear_links
+                .remember(&project, "idle", std::slice::from_ref(&issue));
+            app.linear.insert(
+                project,
+                crate::linear::LinearList {
+                    list: vec![issue],
+                    ..Default::default()
+                },
+            );
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
+            let screen = screen_text(&draw_tall(&mut app));
+            assert!(screen.contains("LINEAR    ◑ ENG-1 In Progress"), "{screen}");
+            let at = app
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches!(hit, HitTarget::PrPageWork(_)).then_some(*rect))
+                .expect("the issue, for the mouse");
+            mouse(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                at.x + 2,
+                at.y,
+            );
+            assert!(
+                matches!(&app.overlay, Some(crate::app::Overlay::Linear(v)) if v.selected == 0),
+                "{:?}",
+                app.overlay
+            );
+        });
+    }
+
     /// The footer carries hints only with nothing over the grid: a modal's
     /// keys are on its own border, and the footer under it says none.
     #[test]

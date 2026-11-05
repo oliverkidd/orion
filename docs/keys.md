@@ -171,6 +171,23 @@ TABS, the active one lit, each with its count, the checks and the reviews marked
  Description   Changes 11   Commits 4   ✗ Checks 44/45   ✓ Reviews
 ```
 
+Between that first line and the tabs, the **work block** says what is at work on the pull request, a
+line each, and only the lines that have something to say:
+
+```
+ AUTOFIX   ✗ 1 failing check, 3 files conflict · ⌘G send autofix
+ LINEAR    ◑ ENG-12 In Progress   ○ ENG-15 Todo
+ SESSIONS  ● Ri billing   ◐ Pe docs
+```
+
+- **AUTOFIX** is the `autofix-<n>` at work on it and what it is doing (`working · 4m`, `waiting on
+  you`) — or, while it is open and broken with none on it, what broke and the key that sends one.
+- **LINEAR** is the issues linked to it — the ones its branch was linked to (`⌘.`, a `⌘L` launch) and
+  the ones Linear has it attached to — each with its state.
+- **SESSIONS** is the agents on its head branch, each with its account's tag as its grid row wears it.
+
+A click on a session lands on it in the grid; a click on an issue opens it in `⌘L`.
+
 The head stays put and the tab under it scrolls. All of it is one `gh pr view`, read when the cursor
 rests on the pull request and remembered across launches; until it lands the tabs are up with `…`
 for their counts, and the keys work already. The tab stays as you walk from one pull request to the

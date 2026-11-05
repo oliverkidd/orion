@@ -1444,6 +1444,22 @@ impl LinkStore {
         stale
     }
 
+    /// Every issue on `project`'s link on `branch`, waiting or attached,
+    /// as `(id, identifier)`: what the PULL REQUEST PAGE's LINEAR line
+    /// names (`pr_work`).
+    pub(crate) fn issues_on(&self, project: &ProjectId, branch: &str) -> Vec<(String, String)> {
+        self.key_of(project, branch)
+            .and_then(|key| self.links.get(&key))
+            .map(|link| {
+                link.issue_ids
+                    .iter()
+                    .cloned()
+                    .zip(link.identifiers.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether `issue_id` is on `project`'s link on `branch`.
     fn holds(&self, project: &ProjectId, branch: &str, issue_id: &str) -> bool {
         self.key_of(project, branch)

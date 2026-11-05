@@ -539,7 +539,7 @@ pub fn land_detail(
     };
     let status = app.prs.status_or_open(url);
     let diagnosis = diagnose(detail, status.health.conflicts);
-    let pr = open_pr(app, &watch.project, url);
+    let pr = open_pr(app, &watch.project, url).cloned();
     if diagnosis.is_empty() && status.is_open() && pr.is_some() && !status.conflicts_known {
         app.autofix.recheck_later(url);
         return;
@@ -647,13 +647,12 @@ fn open_pending(app: &mut App, url: &str, detail: Option<&PrDetail>) {
 }
 
 /// The PR's row in its project's open list.
-fn open_pr(app: &App, project: &ProjectId, url: &str) -> Option<OpenPr> {
+pub(crate) fn open_pr<'a>(app: &'a App, project: &ProjectId, url: &str) -> Option<&'a OpenPr> {
     app.open_prs
         .get(project)?
         .list
         .iter()
         .find(|pr| pr.url == url)
-        .cloned()
 }
 
 /// The session name an autofix agent on PR `number` goes by.
@@ -662,7 +661,12 @@ pub fn agent_name(number: u64) -> String {
 }
 
 /// Whether `agent` works in one of `project`'s checkouts of `branch`.
-fn on_branch(app: &App, agent: &orion_core::Agent, project: &ProjectId, branch: &str) -> bool {
+pub(crate) fn on_branch(
+    app: &App,
+    agent: &orion_core::Agent,
+    project: &ProjectId,
+    branch: &str,
+) -> bool {
     app.tree
         .worktrees
         .iter()
@@ -679,10 +683,21 @@ fn fixer_on_it(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
 /// user in one of `project`'s checkouts of `branch` — what the DIFF
 /// VIEWER's Enter on a conflicted file leaves the conflict to.
 pub(crate) fn fixing(app: &App, project: &ProjectId, branch: &str, number: u64) -> bool {
-    let fixer = agent_name(number);
-    app.tree.agents.iter().any(|agent| {
+    fixer(app, project, branch, number).is_some()
+}
+
+/// The `autofix-<number>` [`fixing`] finds: what the PULL REQUEST PAGE's
+/// AUTOFIX line shows at work (`pr_work`).
+pub(crate) fn fixer<'a>(
+    app: &'a App,
+    project: &ProjectId,
+    branch: &str,
+    number: u64,
+) -> Option<&'a orion_core::Agent> {
+    let name = agent_name(number);
+    app.tree.agents.iter().find(|agent| {
         !agent.archived
-            && agent.name == fixer
+            && agent.name == name
             && matches!(
                 agent.status,
                 AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
