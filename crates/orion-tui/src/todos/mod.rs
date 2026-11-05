@@ -11,15 +11,13 @@
 //! where it stands while the modal is up; once it goes, so does the item
 //! — kept in the file for the DONE page (`history`), what was ticked today or this
 //! week. A group with everything in it ticked is complete, and goes the
-//! same way. A list pasted in as indented Markdown becomes groups and
-//! items (`import`). The modal itself is `view`.
+//! same way. The modal itself is `view`.
 //!
 //! Days are local, never UTC: a tick at 11pm is that day's. "Today" is
 //! read off the clock at every draw ([`today`]), so the list rolls over
 //! by itself after midnight with no day stored anywhere.
 
 pub mod history;
-pub mod import;
 pub mod store;
 pub mod view;
 
@@ -133,6 +131,9 @@ enum At {
 
 /// What a group `⌥→` makes is called until it is named.
 pub const NEW_GROUP: &str = "New group";
+
+/// The top-level group an item with no group to go in goes into.
+pub const INBOX: &str = "Inbox";
 
 /// How many priorities there are: Linear's four and none.
 pub const PRIORITIES: usize = crate::linear::PRIORITY_ORDER.len();
@@ -1014,76 +1015,14 @@ impl TodoFile {
         self.groups.retain(|g| !gone.contains(&g.id));
     }
 
-    /// The top-level group named [`import::INBOX`], made when missing:
-    /// where an item goes with no group to go in.
+    /// The top-level group named [`INBOX`], made when missing: where an
+    /// item goes with no group to go in.
     pub fn inbox(&mut self) -> u64 {
-        let inbox = self
-            .subgroups(None)
-            .find(|g| g.name == import::INBOX)
-            .map(|g| g.id);
+        let inbox = self.subgroups(None).find(|g| g.name == INBOX).map(|g| g.id);
         match inbox {
             Some(id) => id,
-            None => self.add_group(None, import::INBOX),
+            None => self.add_group(None, INBOX),
         }
-    }
-
-    /// A pasted list's groups and items added in, open and with no
-    /// priority — merged into a group of the same name at the same level
-    /// rather than beside it, an item its group already has left out, so
-    /// the same list pasted twice adds nothing. How many items came in.
-    pub fn import(&mut self, nodes: &[import::Node], today: NaiveDate) -> usize {
-        self.import_under(None, nodes, today, 0)
-    }
-
-    fn import_under(
-        &mut self,
-        parent: Option<u64>,
-        nodes: &[import::Node],
-        today: NaiveDate,
-        depth: usize,
-    ) -> usize {
-        let mut added = 0;
-        // Groups made here with no item after them yet: the next one
-        // added here is the one each stands before, as the list had it.
-        let mut waiting: Vec<u64> = Vec::new();
-        for node in nodes {
-            match node {
-                import::Node::Item(text) => {
-                    let group = match parent {
-                        Some(group) => group,
-                        None => self.inbox(),
-                    };
-                    if self
-                        .items
-                        .iter()
-                        .any(|i| i.group == group && i.text == *text)
-                    {
-                        continue;
-                    }
-                    let id = self.add_item(group, text, today);
-                    for sub in waiting.drain(..) {
-                        if let Some(sub) = self.group_mut(sub) {
-                            sub.before = Some(id);
-                        }
-                    }
-                    added += 1;
-                }
-                import::Node::Group { name, children } if depth < MAX_DEPTH => {
-                    let existing = self
-                        .subgroups(parent)
-                        .find(|g| g.name == *name)
-                        .map(|g| g.id);
-                    let group = existing.unwrap_or_else(|| {
-                        let made = self.add_group(parent, name);
-                        waiting.extend(parent.map(|_| made));
-                        made
-                    });
-                    added += self.import_under(Some(group), children, today, depth + 1);
-                }
-                import::Node::Group { .. } => {}
-            }
-        }
-        added
     }
 }
 
@@ -1248,35 +1187,6 @@ mod tests {
         assert_eq!(monday(day(7)), day(5));
     }
 
-    /// Importing twice merges into the groups already there.
-    #[test]
-    fn an_import_merges_into_groups_of_the_same_name() {
-        let mut file = TodoFile::new(Path::new("/r"));
-        let nodes = import::parse(import::tests::FIXTURE);
-        assert_eq!(file.import(&nodes, day(6)), 29);
-        let tops: Vec<&str> = file.subgroups(None).map(|g| g.name.as_str()).collect();
-        assert_eq!(
-            tops,
-            ["Emails", "link sharing", "UI", "MCP fixes", "Side quests"]
-        );
-        let groups = file.groups.len();
-        assert_eq!(
-            file.import(&import::parse("- Emails\n    - one more\n- solo\n"), day(6)),
-            2
-        );
-        assert_eq!(file.groups.len(), groups + 1, "Emails merged, Inbox made");
-        let emails = file
-            .subgroups(None)
-            .find(|g| g.name == "Emails")
-            .unwrap()
-            .id;
-        assert_eq!(file.shown_items(emails, &[]).len(), 6);
-        assert!(file
-            .items
-            .iter()
-            .all(|i| i.priority == 0 && i.done.is_none()));
-    }
-
     /// A deleted item's id is never handed out again — not even across a
     /// save — and a file from before the counter starts past its ids.
     #[test]
@@ -1300,26 +1210,6 @@ mod tests {
             priority: 0,
         });
         assert_eq!(old.take_id(), 10);
-    }
-
-    /// The same list pasted again adds nothing.
-    #[test]
-    fn a_list_pasted_twice_adds_nothing_the_second_time() {
-        let mut file = TodoFile::new(Path::new("/r"));
-        let nodes = import::parse(import::tests::FIXTURE);
-        assert_eq!(file.import(&nodes, day(6)), 29);
-        assert_eq!(file.import(&nodes, day(6)), 0);
-        assert_eq!(file.items.len(), 29);
-    }
-
-    /// A nested group pasted between items stands between them.
-    #[test]
-    fn a_pasted_nested_group_keeps_its_place() {
-        let mut file = TodoFile::new(Path::new("/r"));
-        let list = "- UI\n    - a\n    - Later\n        - x\n    - b\n";
-        file.import(&import::parse(list), day(6));
-        let ui = file.subgroups(None).next().unwrap().id;
-        assert_eq!(drawn(&file, ui, &[]), ["a", "[Later]", "b"]);
     }
 
     /// A new item after another is drawn right under it, with no

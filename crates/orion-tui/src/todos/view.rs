@@ -48,8 +48,9 @@
 //! item right under the cursor's, `⌘⇧N` a new group — in a section, one
 //! nested there right under the cursor's row — the field for its first
 //! item open in it once it is named. `⌘F` opens the filter, which keeps the
-//! headers over the items that match; a paste of more than one line, with
-//! no field open, is read as an indented list and added in (`import`).
+//! headers over the items that match. Lines pasted in are an item each
+//! ([`pasted_lines`]): into a new item's field, or — with no field open —
+//! right after the cursor's item.
 //!
 //! `Enter` sends an agent at an item — the QUICK PROMPT over the modal,
 //! the item's text and group in the box — and the session it starts is
@@ -914,65 +915,112 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(view) = view_mut(app) else {
         return false;
     };
+    let lines = pasted_lines(text);
     if let Some((kind, input)) = &mut view.input {
-        let kind = *kind;
-        let lines = super::import::lines(text);
         // Lines into a new item's field are an item each: the first goes
         // on what was typed, the field opens again under the last.
         if matches!(kind, InputKind::Item { .. }) && lines.len() > 1 {
-            input.insert_str(&lines[0]);
-            save_field(app, kind);
-            for line in &lines[1..] {
-                let Some(kind) = view_mut(app)
-                    .and_then(|v| v.input.as_ref())
-                    .map(|(k, _)| *k)
-                else {
-                    break;
-                };
-                commit(app, kind, line);
-            }
-            app.flash = Some(crate::flash::Flash::done(format!(
-                "added {}",
-                crate::bundle::plural(lines.len(), "item")
-            )));
+            add_lines(app, &lines);
         } else {
             input.insert_str(&text.replace(['\r', '\n'], " "));
         }
         return true;
     }
-    // What `⌘X`/`⌘C` took, pasted back: the items themselves.
-    if !view.filtering && paste_clip(app, text) {
-        return true;
-    }
-    if text.trim().contains('\n') {
-        let nodes = super::import::parse(text);
-        if !nodes.is_empty() {
-            let count = edit(app, |file| file.import(&nodes, super::today())).unwrap_or(0);
-            app.flash = Some(crate::flash::Flash::done(format!(
-                "added {} from the pasted list",
-                crate::bundle::plural(count, "item")
-            )));
-            return true;
-        }
-    }
-    let line = text.replace(['\r', '\n'], " ");
-    let Some(view) = view_mut(app) else {
-        return false;
-    };
     if view.filtering {
+        let line = text.replace(['\r', '\n'], " ");
         view.query.insert_str(&line);
         query_changed(app);
-    } else {
-        // As typing would: onto the end of the row — or, with no row to
-        // go on, into the filter.
-        start_edit(app, Some(&line));
-        if let Some(view) = view_mut(app).filter(|v| v.input.is_none()) {
-            view.filtering = true;
-            view.query.insert_str(&line);
-            query_changed(app);
+        return true;
+    }
+    // What `⌘X`/`⌘C` took, pasted back: the items themselves.
+    if paste_clip(app, text) {
+        return true;
+    }
+    // Lines with no field open are an item each too, from right after the
+    // cursor's item, the field left shut.
+    if lines.len() > 1 {
+        start_item(app);
+        add_lines(app, &lines);
+        if let Some(view) = view_mut(app) {
+            view.input = None;
         }
+        return true;
+    }
+    let line = text.replace(['\r', '\n'], " ");
+    // As typing would: onto the end of the row — or, with no row to go
+    // on, into the filter.
+    start_edit(app, Some(&line));
+    if let Some(view) = view_mut(app).filter(|v| v.input.is_none()) {
+        view.filtering = true;
+        view.query.insert_str(&line);
+        query_changed(app);
     }
     true
+}
+
+/// `lines` into the new item's field that is open: the first onto what
+/// was typed in it, each after that an item of its own under the one
+/// before, the field open again under the last.
+fn add_lines(app: &mut App, lines: &[String]) {
+    let Some((kind, input)) = view_mut(app).and_then(|v| v.input.as_mut()) else {
+        return;
+    };
+    let kind = *kind;
+    input.insert_str(&lines[0]);
+    save_field(app, kind);
+    for line in &lines[1..] {
+        let Some(kind) = view_mut(app)
+            .and_then(|v| v.input.as_ref())
+            .map(|(k, _)| *k)
+        else {
+            break;
+        };
+        commit(app, kind, line);
+    }
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "added {}",
+        crate::bundle::plural(lines.len(), "item")
+    )));
+}
+
+/// The bullets a pasted line can start with: Markdown's, and the dots a
+/// notes app or a word processor copies out.
+const BULLETS: [&str; 6] = ["- ", "* ", "+ ", "• ", "◦ ", "▪ "];
+
+/// Each line of `text` that has anything on it, as one item: its bullet,
+/// if it has one, a task box, a surrounding `**…**` and a `;` closing it
+/// taken off.
+pub fn pasted_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| {
+            let line = line.trim();
+            let line = BULLETS
+                .iter()
+                .find_map(|b| line.strip_prefix(b))
+                .unwrap_or(line);
+            tidy(line.trim_end_matches(';')).to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// `text` with a task box and a surrounding `**…**` taken off.
+fn tidy(text: &str) -> &str {
+    let mut text = text.trim();
+    if let Some(after) = ["[ ] ", "[x] ", "[X] "]
+        .iter()
+        .find_map(|b| text.strip_prefix(b))
+    {
+        text = after.trim();
+    }
+    if let Some(inner) = text
+        .strip_prefix("**")
+        .and_then(|t| t.strip_suffix("**"))
+        .filter(|t| !t.is_empty())
+    {
+        text = inner.trim();
+    }
+    text
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
@@ -2831,6 +2879,23 @@ mod tests {
 
     fn view() -> TodoView {
         TodoView::new(ProjectId("p1".into()), "demo".into(), PathBuf::from("/r"))
+    }
+
+    /// Lines pasted in are an item each, with or without a bullet, and
+    /// the `;` that listed them taken off.
+    #[test]
+    fn pasted_lines_are_an_item_each() {
+        let text = "deck folders;\n  ◦ speaker notes;\n\n  ◦ smart model routing;\n  • [ ] the hint-unmet note.\n- **bold**\n";
+        assert_eq!(
+            pasted_lines(text),
+            [
+                "deck folders",
+                "speaker notes",
+                "smart model routing",
+                "the hint-unmet note.",
+                "bold",
+            ]
+        );
     }
 
     /// The tabs stand as the grid's do, a drag there moving them here too,

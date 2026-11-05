@@ -865,12 +865,10 @@ group at the end, either way with its first item's field open in it — `⌘P` p
 `⌘↑`/`⌘↓` jump from group to group. `⌘F` opens the filter, which keeps the matching items under
 their headers.
 
-**Pasting a list in.** Paste an indented Markdown list into the modal — a list copied out of a notes
-app — and it is added: `- `, `* ` or `+ ` bullets, a tab or four spaces a level (two when that is
-the list's smallest indent), `**bold**` taken off, other lines (a `Todo` heading) passed over. A
-bullet with bullets under it becomes a group, merged into one of the same name at the same level
-rather than beside it; one without becomes an item, open and with no priority; items at the top
-with no group go into **Inbox**.
+**Pasting lines in.** Paste several lines into the modal — a list copied out of a notes app — and
+each one is an item, open and with no priority, right after the cursor's item; pasted into a new
+item's field, they start where the field stands. A bullet (`- `, `* `, `+ `, `•`), a task box,
+`**bold**` and a closing `;` come off each line, and blank lines are passed over.
 
 **An agent on an item.** `Enter` opens the QUICK PROMPT over the modal, aimed at a fresh worktree,
 the item's text in the box with `Context: todo in <group › subgroup>` under it. Edit it

@@ -3899,7 +3899,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
     if matches!(&app.overlay, Some(Overlay::Linear(_))) {
         return crate::linear::paste(app, text);
     }
-    // A list pasted into the TODOS MODAL is added to it (`todos::import`).
+    // Lines pasted into the TODOS MODAL are an item each.
     if matches!(&app.overlay, Some(Overlay::Todos(_))) {
         return crate::todos::paste(app, text);
     }
@@ -41701,17 +41701,53 @@ diff --git a/src/c.rs b/src/c.rs
         terminal
     }
 
-    /// The modal up on the seeded project, `list` pasted into it.
+    /// The modal up on the seeded project, its list `list`: a `- group`
+    /// a line at the top, its items four spaces in, and a group nested in
+    /// it with its own items eight — standing among the items where its
+    /// line does.
     fn todos_with(list: &str) -> App {
+        let mut file = crate::todos::TodoFile::new(std::path::Path::new("/tmp/demo"));
+        let today = crate::todos::today();
+        let rows: Vec<(usize, &str)> = list
+            .lines()
+            .filter_map(|line| {
+                let text = line.trim_start();
+                Some(((line.len() - text.len()) / 4, text.strip_prefix("- ")?))
+            })
+            .collect();
+        let (mut top, mut nested, mut waiting) = (None, None, Vec::new());
+        for (i, (depth, text)) in rows.iter().enumerate() {
+            let has_items = rows.get(i + 1).is_some_and(|(next, _)| next > depth);
+            match depth {
+                0 => {
+                    top = Some(file.add_group(None, text));
+                    waiting.clear();
+                }
+                1 if has_items => {
+                    let group = file.add_group(top, text);
+                    waiting.push(group);
+                    nested = Some(group);
+                }
+                1 => {
+                    let id = file.add_item(top.unwrap(), text, today);
+                    for group in waiting.drain(..) {
+                        file.group_mut(group).unwrap().before = Some(id);
+                    }
+                }
+                _ => {
+                    file.add_item(nested.unwrap(), text, today);
+                }
+            }
+        }
         let mut app = App::new();
         seed_tree(&mut app);
+        app.todos.insert("/tmp/demo".into(), file);
         press(
             &mut app,
             KeyCode::Char('i'),
             KeyModifiers::SUPER,
             &mut Vec::new(),
         );
-        assert!(paste_into_overlay(&mut app, list));
         app
     }
 
@@ -41809,30 +41845,6 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(todo_view(&app).project.0, "p2");
             press(&mut app, KeyCode::Char('1'), KeyModifiers::SUPER, &mut out);
             assert_eq!(todo_view(&app).project.0, "p1");
-        });
-    }
-
-    /// The pasted list is groups and items: the fixture's five groups and
-    /// 29 items, drawn under their headers.
-    #[test]
-    fn pasting_a_list_into_todos_adds_its_groups() {
-        crate::todos::with_now(todo_clock(6), || {
-            let mut app = todos_with(crate::todos::import::tests::FIXTURE);
-            let file = todo_file(&app);
-            let tops: Vec<&str> = file.subgroups(None).map(|g| g.name.as_str()).collect();
-            assert_eq!(
-                tops,
-                ["Emails", "link sharing", "UI", "MCP fixes", "Side quests"]
-            );
-            assert_eq!(file.items.len(), 29);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("added 29 items from the pasted list")
-            );
-            let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("▾ EMAILS"), "{text}");
-            assert!(text.contains("demo 29"), "{text}");
-            assert!(text.contains("setup templates"), "{text}");
         });
     }
 
@@ -42879,25 +42891,29 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// The footer counts what the paste added: the same list again adds
-    /// nothing. A paste while the priority pick or the delete question is
-    /// up adds nothing either.
+    /// Lines pasted with no field open are an item each, from right after
+    /// the cursor's item, the field left shut, and the footer counts them.
+    /// A paste while the priority pick is up adds nothing.
     #[test]
-    fn a_todo_paste_counts_what_it_added() {
+    fn lines_pasted_on_the_list_are_an_item_each() {
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
             let mut app = todos_with(TWO_EMAILS);
-            assert!(paste_into_overlay(&mut app, TWO_EMAILS));
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("added 0 items from the pasted list")
-            );
-            assert_eq!(todo_file(&app).items.len(), 3);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            assert!(paste_into_overlay(&mut app, "- one\n- two\n"));
+            assert_eq!(app.flash.as_deref(), Some("added 2 items"));
+            let file = todo_file(&app);
+            let emails: Vec<&str> = file
+                .shown_items(file.groups[0].id, &[])
+                .iter()
+                .map(|i| i.text.as_str())
+                .collect();
+            assert_eq!(emails, ["run plan", "one", "two", "setup resend"]);
+            assert!(todo_view(&app).input.is_none(), "the field stays shut");
             press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
             assert!(todo_view(&app).pick.is_some());
-            assert!(paste_into_overlay(&mut app, "- New\n    - thing\n"));
-            assert_eq!(todo_file(&app).items.len(), 3, "the pick takes no paste");
+            assert!(paste_into_overlay(&mut app, "- New\n- thing\n"));
+            assert_eq!(todo_file(&app).items.len(), 5, "the pick takes no paste");
             assert!(todo_view(&app).query.is_empty());
         });
     }
