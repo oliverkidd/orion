@@ -529,3 +529,10 @@ This replaces the warm spare pool, which never serves a launch today (it warms t
 - Moving a folder to the Trash is macOS-only (`paths_util::move_folder_to_trash`).
 - 1E then fixed the two e2e_tui tests that failed on `main` (both were test bugs: a wait on text the viewer no longer draws, and races on the daemon's answer), removed the GitHub-issues wording that was left, and folded `claude_accounts::Places` into `paths_util::Places`. Every suite is green from here.
 
+
+**3B, 5A, 4A, 5B (done, merged).** Built ahead of the wave order where nothing they need was missing.
+- 3B: Grok is wired from docs.x.ai alone (no `grok` CLI on the build machine): hook-driven working/done, session id for resume, auto-title through `--rules`, effort as `--effort`. Grok has no needs-you event, so its picker row says it can't show that. Codex and OpenCode model lists refreshed; Cursor's left as it was (its CLI needs a login to list models, and a signed-in TUI merges the live list daily).
+- 5A: ⌘E's top line also shows the conflict count when there is no PR yet, so a conflict can't go unseen. Conflicts are `conflicts::local` (`git merge-tree`, off the loop, cached by HEAD and base SHA); 5C names conflicting files through it.
+- 4A: the run state is one `TerminalTab.run: RunState` (`stopping_until` as a kill time, `restarting`, `exit_code`, `ports`); a new `TerminalTab` literal needs `run: Default::default()`. A run that's up reads `running` at the right.
+- 5B: replies are held pending too, so `⌘⇧R` sends everything at once; `[` walks threads backwards and `⌘R` re-reads them. Every mutation, input field and returned field it uses was checked against GitHub's live schema, and the threads query was run read-only against a real PR.
+- The daemon tests' `EnvGuard` now holds a lock, so parallel tests can't unset `ORION_AGENT_CMD` under each other.
