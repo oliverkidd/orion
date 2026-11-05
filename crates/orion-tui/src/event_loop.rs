@@ -27266,8 +27266,10 @@ mod tests {
             for needle in [
                 "Claude accounts",
                 "Claude (a@b.co)",
-                "[on · ~/.claude · same as ~/.claude-2 · tag a2]",
-                "[on · ~/.claude-2 · same as ~/.claude · tag a3]",
+                " A  Claude (a@b.co)",
+                "[on · ~/.claude · same as ~/.claude-2]",
+                " 2  Claude (a@b.co)",
+                "[on · ~/.claude-2 · same as ~/.claude]",
                 "Add account",
                 "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
                 "private browser window",

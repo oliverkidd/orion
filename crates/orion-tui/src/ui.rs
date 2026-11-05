@@ -16,7 +16,7 @@ mod diff_view;
 pub(crate) mod footer;
 mod grep_view;
 mod launcher_view;
-pub(crate) use launcher_view::{session_chip, session_line};
+pub(crate) use launcher_view::{chip, session_chip, session_line, CHIP_W};
 
 pub(crate) use diff_view::diff_keys;
 use footer::draw_footer;
@@ -1696,29 +1696,37 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         // the registry; every other values tab reads its
                         // static spec, and a PROJECT TAB row reads the
                         // entry of the project whose block it is in.
-                        let (label, value, prefix) = if tab == crate::config::accounts_tab() {
+                        let (label, value, tag) = if tab == crate::config::accounts_tab() {
                             match (crate::config::ACCOUNTS_HEAD.get(*i), cfg.account_row(*i)) {
                                 (Some(spec), _) => {
-                                    (spec.label.to_string(), cfg.value_label(spec.kind), "")
+                                    (spec.label.to_string(), cfg.value_label(spec.kind), None)
                                 }
                                 // A CLAUDE ACCOUNT goes by its name and
-                                // email; a long one is cut to the label
+                                // email, after the ACCOUNT CHIP its rows
+                                // wear; a long one is cut to the label
                                 // column.
                                 (None, Some(row)) => {
-                                    let label = match &row {
-                                        crate::config::AccountRow::Account(id) => cfg
-                                            .effective_harness_by_id(id)
-                                            .display_label()
-                                            .to_string(),
-                                        crate::config::AccountRow::Add => "Add account".into(),
+                                    let (label, tag) = match &row {
+                                        crate::config::AccountRow::Account(id) => (
+                                            cfg.effective_harness_by_id(id)
+                                                .display_label()
+                                                .to_string(),
+                                            crate::claude_accounts::tag_of(id),
+                                        ),
+                                        crate::config::AccountRow::Add => {
+                                            ("Add account".into(), None)
+                                        }
                                     };
-                                    (truncate(&label, label_w - 1), cfg.account_value(&row), "")
+                                    let fits = label_w
+                                        - 1
+                                        - tag.as_ref().map_or(0, |_| launcher_view::CHIP_COLUMN_W);
+                                    (truncate(&label, fits), cfg.account_value(&row), tag)
                                 }
                                 (None, None) => {
                                     let (id, field) = cfg.agent_row(*i).expect(
                                         "settings_rows indexes the Accounts tab's harness rows",
                                     );
-                                    (field.label().to_string(), cfg.agent_value(&id, field), "")
+                                    (field.label().to_string(), cfg.agent_value(&id, field), None)
                                 }
                             }
                         } else {
@@ -1735,7 +1743,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                 None if spec.kind.is_project() => "n/a".into(),
                                 None => cfg.value_label(spec.kind),
                             };
-                            (spec.label.to_string(), value, "")
+                            (spec.label.to_string(), value, None)
                         };
                         let selected = *i == view.selected && !view.on_tabs;
                         let mut label_style = Style::default();
@@ -1747,17 +1755,18 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         // A typed command can outrun the column: clip it
                         // with an ellipsis rather than at the frame.
                         let room = (inner.width as usize).saturating_sub(3 + label_w + 2);
-                        let mut prefix_style = Style::default().fg(th.ok);
-                        if selected {
-                            prefix_style = prefix_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
+                        let mut spans = vec![Span::styled("   ", label_style)];
+                        let mut label_room = label_w;
+                        if let Some(tag) = &tag {
+                            spans.push(chip(tag, None, th));
+                            spans.push(Span::styled(" ", label_style));
+                            label_room -= launcher_view::CHIP_COLUMN_W;
                         }
-                        let label_room = label_w - prefix.len();
-                        lines.push(Line::from(vec![
-                            Span::styled("   ", label_style),
-                            Span::styled(prefix, prefix_style),
+                        spans.extend([
                             Span::styled(format!("{label:<label_room$}"), label_style),
                             Span::styled(format!("[{}]", truncate(&value, room)), value_style),
-                        ]));
+                        ]);
+                        lines.push(Line::from(spans));
                     }
                     crate::config::SettingsRow::Hotkey(i) => {
                         let spec = crate::keymap::spec_at(*i)

@@ -185,7 +185,7 @@ line each, and only the lines that have something to say:
   you`) — or, while it is open and broken with none on it, what broke and the key that sends one, a button too.
 - **LINEAR** is the issues linked to it — the ones its branch was linked to (`⌘.`, a `⌘L` launch) and
   the ones Linear has it attached to — each with its state.
-- **SESSIONS** is the agents on its head branch, each with its account's tag as its grid row wears it.
+- **SESSIONS** is the agents on its head branch, each with its account's chip as its grid row wears it.
 
 A click on a session lands on it in the grid; a click on an issue opens it in `⌘L`; `⌘G` opens
 the AUTOFIX MODAL on the page in the pane as in the modal.

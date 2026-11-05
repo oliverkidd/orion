@@ -1326,7 +1326,7 @@ fn draw_list_row(
             };
             Entry {
                 lead: look.dot,
-                tag: account_tag_span(a, look.quiet),
+                tag: account_chip(a, look.quiet, th),
                 name: a.name.clone(),
                 name_style: look.name_style,
                 ramp: look.ramp,
@@ -1374,16 +1374,17 @@ fn draw_list_row(
     };
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
-    // The ACCOUNT TAG column, on every row while the machine has more
+    // The ACCOUNT CHIP column, on every row while the machine has more
     // than one Claude account — blank on a row that runs on none — so
     // the names after it line up down the whole grid.
-    if crate::claude_accounts::any_tags() && room > ACCOUNT_TAG_W + 8 {
+    if crate::claude_accounts::any_tags() && room > CHIP_COLUMN_W + 8 {
         spans.push(
             e.tag
                 .clone()
-                .unwrap_or_else(|| Span::raw(" ".repeat(ACCOUNT_TAG_W))),
+                .unwrap_or_else(|| Span::raw(" ".repeat(CHIP_W))),
         );
-        room -= ACCOUNT_TAG_W;
+        spans.push(Span::raw(" ".repeat(CHIP_COLUMN_W - CHIP_W)));
+        room -= CHIP_COLUMN_W;
     }
     // Where the name starts: every offset below (`used`) counts from it.
     let x0 = r.x + (width - room) as u16;
@@ -1487,7 +1488,7 @@ fn draw_list_row(
 
 /// One session as a single line for a picker that lists checkouts with
 /// their sessions under them (the Linear worktree picker): the status
-/// mark, the ACCOUNT TAG, the name as the grid draws it, what it runs on
+/// mark, the ACCOUNT CHIP, the name as the grid draws it, what it runs on
 /// and its last prompt — the LIST row's parts, without its columns or
 /// age, cut to `width`.
 pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Vec<Span<'static>> {
@@ -1495,9 +1496,9 @@ pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Ve
     let look = session_look(app, a, false, th);
     let mut spans = vec![look.dot];
     let mut used = 2;
-    if let Some(tag) = account_tag_span(a, look.quiet) {
-        used += ACCOUNT_TAG_W;
-        spans.push(tag);
+    if let Some(chip) = account_chip(a, look.quiet, th) {
+        used += CHIP_COLUMN_W;
+        spans.extend([chip, Span::raw(" ")]);
     }
     let name = truncate(&a.name, width.saturating_sub(used).min(LIST_NAME_MAX));
     used += name.chars().count();
@@ -1521,29 +1522,62 @@ pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Ve
 }
 
 /// One session as a line that names several draws it (the PULL REQUEST
-/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT TAG and the
+/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT CHIP and the
 /// name, as its grid row draws them.
 pub(crate) fn session_chip(app: &App, a: &orion_core::Agent) -> Vec<Span<'static>> {
     let look = session_look(app, a, false, app.theme);
     let mut spans = vec![look.dot];
-    spans.extend(account_tag_span(a, look.quiet));
+    if let Some(chip) = account_chip(a, look.quiet, app.theme) {
+        spans.extend([chip, Span::raw(" ")]);
+    }
     spans.push(Span::styled(a.name.clone(), look.name_style));
     spans
 }
 
-/// Columns the ACCOUNT TAG takes on a row: its letters and a space.
-pub(crate) const ACCOUNT_TAG_W: usize = crate::claude_accounts::TAG_LEN + 1;
+/// Cells the ACCOUNT CHIP fills: its mark, with a cell of the fill
+/// either side (one before a two-cell glyph).
+pub(crate) const CHIP_W: usize = 3;
 
-/// The ACCOUNT TAG `a` wears, letters and a trailing space, in its
-/// account's tint — or in `quiet` on an archived row, which says nothing
-/// in color. None off a Claude account, or with only one.
-pub(crate) fn account_tag_span(a: &orion_core::Agent, quiet: Color) -> Option<Span<'static>> {
+/// Columns the ACCOUNT CHIP takes on a row: the chip and the air after
+/// it, before the name.
+pub(crate) const CHIP_COLUMN_W: usize = CHIP_W + 1;
+
+/// The ACCOUNT CHIP `a` wears: [`chip`], dimmed to `quiet` on an
+/// archived row, which says nothing in colour. None off a Claude
+/// account, or with only one.
+pub(crate) fn account_chip(
+    a: &orion_core::Agent,
+    quiet: Color,
+    th: Theme,
+) -> Option<Span<'static>> {
     let tag = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref())?;
-    let color = if a.archived { quiet } else { tag.color() };
-    Some(Span::styled(
-        format!("{} ", tag.letters),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ))
+    Some(chip(&tag, a.archived.then_some(quiet), th))
+}
+
+/// An ACCOUNT CHIP: the account's mark — its letter, or the glyph set
+/// for it — black and bold, [`CHIP_W`] cells filled with the account's
+/// tint; with `quiet` instead on an archived row, and in the `mono`
+/// theme with its text gray, inverse, since that theme keeps colour for
+/// the statuses.
+pub(crate) fn chip(
+    tag: &crate::claude_accounts::AccountTag,
+    quiet: Option<Color>,
+    th: Theme,
+) -> Span<'static> {
+    let fill = quiet.unwrap_or(if th.is_gray() { th.text } else { tag.color() });
+    let mark = &tag.mark;
+    let text = if Span::raw(mark.as_str()).width() > 1 {
+        format!(" {mark}")
+    } else {
+        format!(" {mark} ")
+    };
+    Span::styled(
+        text,
+        Style::default()
+            .fg(Color::Black)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 /// What a band's rule needs to know of the band beyond the band itself.
@@ -2261,7 +2295,7 @@ fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
 /// `opus high`, `gpt-5.5 xhigh` — which is what tells one row from the
 /// next. A CLAUDE ACCOUNT's name or email is never the row's to show:
 /// on a line that narrow it pushed the model and effort out of sight (the
-/// ACCOUNT TAG says which account). A session with no model named says
+/// ACCOUNT CHIP says which account). A session with no model named says
 /// its harness in the model's place (`claude high`), a Claude account's
 /// as plain `claude`.
 fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
@@ -4121,85 +4155,133 @@ mod tests {
         });
     }
 
+    /// A machine with two Claude accounts — the default one, unnamed and
+    /// signed in as nobody yet, and `claude-2`, signed in as `email` — and
+    /// `f` run with the tags read, so the default account's chip is `C`
+    /// and the other's the first letter of `email`.
+    pub(crate) fn with_two_accounts<T>(email: &str, f: impl FnOnce() -> T) -> T {
+        let home = tempfile::tempdir().unwrap();
+        let two = home.path().join(".claude-2");
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            two.join(".claude.json"),
+            serde_json::json!({"oauthAccount": {"emailAddress": email, "accountUuid": "u"}})
+                .to_string(),
+        )
+        .unwrap();
+        let config = home.path().join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let places = crate::paths_util::Places::in_home(home.path());
+        crate::paths_util::with_places(places, || {
+            crate::config::with_config_path(config, || {
+                crate::claude_accounts::refresh_now();
+                f()
+            })
+        })
+    }
+
     /// A LIST row says the model and effort a session runs on and never
     /// the CLAUDE ACCOUNT it runs as — the pane's breadcrumb keeps the
     /// account — and with no model named says the harness, an account's
     /// as `claude`.
     #[test]
     fn a_list_row_names_the_model_and_effort_not_the_account() {
-        let home = tempfile::tempdir().unwrap();
-        let two = home.path().join(".claude-2");
-        std::fs::create_dir_all(&two).unwrap();
-        std::fs::write(
-            two.join(".claude.json"),
-            serde_json::json!({"oauthAccount": {"emailAddress": "b@b.co", "accountUuid": "u"}})
-                .to_string(),
-        )
-        .unwrap();
-        let config = home.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let places = crate::paths_util::Places::in_home(home.path());
-        crate::paths_util::with_places(places, || {
-            crate::config::with_config_path(config, || {
-                crate::claude_accounts::refresh_now();
-                let mut a = a_tree().tree.agents[0].clone();
-                a.kind = orion_core::AgentKind::Claude;
-                a.custom_harness = Some("claude-2".into());
-                a.model = Some("opus".into());
-                a.effort = Some("high".into());
-                assert!(harness_line(&a, &mut None).contains("b@b.co"));
-                assert_eq!(list_runs_line(&a, &mut None), "opus high");
-                a.model = None;
-                assert_eq!(list_runs_line(&a, &mut None), "claude high");
-            })
+        with_two_accounts("b@b.co", || {
+            let mut a = a_tree().tree.agents[0].clone();
+            a.kind = orion_core::AgentKind::Claude;
+            a.custom_harness = Some("claude-2".into());
+            a.model = Some("opus".into());
+            a.effort = Some("high".into());
+            assert!(harness_line(&a, &mut None).contains("b@b.co"));
+            assert_eq!(list_runs_line(&a, &mut None), "opus high");
+            a.model = None;
+            assert_eq!(list_runs_line(&a, &mut None), "claude high");
         });
     }
 
-    /// With two Claude accounts every LIST row wears its account's
-    /// two-letter tag right after the status dot; with one, no row does.
+    /// With two Claude accounts every LIST row wears its account's chip
+    /// right after the status dot — its letter in a filled chip, then air
+    /// before the name; with one, no row does.
     #[test]
-    fn rows_wear_their_accounts_tag_with_two_accounts() {
-        let home = tempfile::tempdir().unwrap();
-        let two = home.path().join(".claude-2");
-        std::fs::create_dir_all(&two).unwrap();
-        std::fs::write(
-            two.join(".claude.json"),
-            serde_json::json!({"oauthAccount": {"emailAddress": "rk@b.co", "accountUuid": "u"}})
-                .to_string(),
-        )
-        .unwrap();
-        let config = home.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let places = crate::paths_util::Places::in_home(home.path());
-        crate::paths_util::with_places(places, || {
-            crate::config::with_config_path(config, || {
-                crate::claude_accounts::refresh_now();
+    fn rows_wear_their_accounts_chip_with_two_accounts() {
+        with_two_accounts("rk@b.co", || {
+            let mut app = a_tree();
+            select(&mut app, "api");
+            app.tree.agents[0].kind = orion_core::AgentKind::Claude;
+            app.tree.agents[0].custom_harness = Some("claude-2".into());
+            let body = Rect::new(0, 0, 100, 30);
+            let lines = drawn_lines(&mut app, body);
+            let line = lines
+                .iter()
+                .find(|l| l.contains("s0"))
+                .expect("the session's line");
+            assert!(line.contains(" R  s0"), "{line:?}");
+        });
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("s0")).unwrap();
+        assert!(!line.contains(" R "), "one account, no chip: {line:?}");
+    }
+
+    /// The chip is the account's letter, black and bold, on three cells of
+    /// its tint, in every theme but `mono`, which keeps colour for the
+    /// statuses and draws it inverse — black on its text gray; an
+    /// archived session's chip is dimmed to the quiet it is drawn in.
+    #[test]
+    fn the_chip_is_black_on_its_tint_in_every_theme_and_inverse_in_mono() {
+        with_two_accounts("rk@b.co", || {
+            let body = Rect::new(0, 0, 100, 30);
+            for name in crate::theme::THEMES {
                 let mut app = a_tree();
+                app.theme = Theme::by_name(name);
                 select(&mut app, "api");
                 app.tree.agents[0].kind = orion_core::AgentKind::Claude;
                 app.tree.agents[0].custom_harness = Some("claude-2".into());
-                let body = Rect::new(0, 0, 100, 30);
+                let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                    body.width,
+                    body.height,
+                ))
+                .unwrap();
+                terminal.draw(|f| draw(f, &mut app, body)).unwrap();
+                let buf = terminal.backend().buffer().clone();
                 let lines = drawn_lines(&mut app, body);
-                let line = lines
-                    .iter()
-                    .find(|l| l.contains("s0"))
-                    .expect("the session's line");
-                assert!(line.contains("rk s0"), "{line:?}");
-            })
+                let row = lines.iter().position(|l| l.contains(" R  s0")).unwrap();
+                let at = lines[row].find(" R  s0").unwrap();
+                let x = lines[row][..at].chars().count() as u16;
+                let th = app.theme;
+                let fill = if *name == "mono" {
+                    th.text
+                } else {
+                    crate::theme::ACCOUNT_TINTS[1]
+                };
+                for dx in 0..CHIP_W as u16 {
+                    let cell = buf.cell((x + dx, row as u16)).unwrap();
+                    assert_eq!(cell.bg, fill, "{name}: cell {dx} of the chip");
+                }
+                let mark = buf.cell((x + 1, row as u16)).unwrap();
+                assert_eq!(mark.fg, Color::Black, "{name}");
+                assert!(mark.modifier.contains(Modifier::BOLD), "{name}");
+                let after = buf.cell((x + CHIP_W as u16, row as u16)).unwrap();
+                assert_ne!(after.bg, fill, "{name}: air between the chip and the name");
+
+                let mut archived = app.tree.agents[0].clone();
+                archived.archived = true;
+                let spans = session_chip(&app, &archived);
+                let chip = spans.iter().find(|s| s.content == " R ").unwrap();
+                assert_eq!(
+                    chip.style.bg,
+                    Some(th.dim),
+                    "{name}: an archived chip is dim"
+                );
+            }
         });
     }
 

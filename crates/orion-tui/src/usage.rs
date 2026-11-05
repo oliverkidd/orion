@@ -1162,20 +1162,19 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             " {}",
             crate::ui::truncate(&name, inner_w.saturating_sub(plan.chars().count() + 1))
         );
-        // The ACCOUNT TAG its sessions wear on the grid, ahead of the name.
-        let tag = crate::claude_accounts::tag_of(&account.id)
+        // The ACCOUNT CHIP its sessions wear on the grid, ahead of the name.
+        let chip_w = 1 + crate::ui::CHIP_W;
+        let chip = crate::claude_accounts::tag_of(&account.id)
             .filter(|_| account.provider == Provider::Claude)
-            .filter(|_| inner_w > name.chars().count() + plan.chars().count() + 4);
-        let tag_span = tag.as_ref().map(|t| {
-            Span::styled(
-                format!(" {}", t.letters),
-                sel(Style::default().fg(t.color()).add_modifier(Modifier::BOLD)),
-            )
-        });
-        let tag_w = tag.as_ref().map_or(0, |t| t.letters.chars().count() + 1);
+            .filter(|_| inner_w > name.chars().count() + plan.chars().count() + chip_w)
+            .map(|t| crate::ui::chip(&t, None, th));
+        let tag_w = if chip.is_some() { chip_w } else { 0 };
         let rest = inner_w.saturating_sub(name.chars().count() + plan.chars().count() + tag_w);
-        lines.push(Line::from(vec![
-            tag_span.unwrap_or_else(|| Span::raw("")),
+        let mut heading = Vec::new();
+        if let Some(chip) = chip {
+            heading.extend([Span::styled(" ", sel(Style::default())), chip]);
+        }
+        heading.extend([
             Span::styled(
                 name,
                 sel(Style::default()
@@ -1184,7 +1183,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             ),
             Span::styled(plan, sel(dim)),
             Span::styled(" ".repeat(rest), sel(Style::default())),
-        ]));
+        ]);
+        lines.push(Line::from(heading));
 
         match reading {
             Some(reading) if !signed_out => {

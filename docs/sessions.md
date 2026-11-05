@@ -459,7 +459,10 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   LINE, `▶ setup`, laid out the same way — the command on a `$`, `setting up…` at the right — which
   goes once the setup exits cleanly, or stays as a red `setup failed (1)` whose attach replays what it
   printed; a **Start stack** meanwhile waits for it ([Configuration](configuration.md#setup-command)).
-  A session is its status dot and name,
+  A session is its status dot and name — with more than one Claude account, the ACCOUNT CHIP
+  between them, the account's letter (or the glyph you gave it) black on the account's tint, so
+  which account each session runs on reads down the grid
+  ([Configuration](configuration.md#every-setting) `account_tags`) —
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›` — and, for a session sent at a todo, that todo after it, a dim `☐ text` (`☑` once ticked)
