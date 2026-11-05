@@ -79,6 +79,7 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         | Overlay::FileTabs(_)
         | Overlay::Usage(_)
         | Overlay::Conflicts(_)
+        | Overlay::Review(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::AgentPresets(_) => Vec::new(),
     }

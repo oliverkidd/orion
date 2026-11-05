@@ -348,6 +348,10 @@ async fn main_loop(
         tokio::sync::mpsc::unbounded_channel::<crate::week_review::Answer>();
     app.week_review.tx = Some(week_review_tx);
     app.week_review.root = Some(orion_core::paths::data_dir().join("reviews"));
+    // The PR REVIEW's threads, diff and writes.
+    let (review_tx, mut review_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::pr_review::Answer>();
+    app.pr_review.tx = Some(review_tx);
     let (linear_tx, mut linear_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::linear::LinearAnswer>();
     app.linear_tx = Some(linear_tx);
@@ -760,6 +764,11 @@ async fn main_loop(
             answer = week_review_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::week_review::land_answer(&mut app, answer);
+                }
+            }
+            answer = review_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::pr_review::land(&mut app, answer);
                 }
             }
             answer = linear_rx.recv() => {
@@ -2576,8 +2585,8 @@ fn open_local_pr_review(app: &mut App, review: &PrReview) -> Result<(), crate::f
 /// against `base` (`commit_list::read_tip`) and nothing uncommitted. When
 /// that misses, a head the repo lacks comes by its pull ref
 /// (`conflicts::fetch_pull_head`), a base it has no copy of from origin,
-/// and the list is read again.
-fn read_pr_opening(
+/// and the list is read again. The PR REVIEW reads its diff from the same.
+pub(crate) fn read_pr_opening(
     dir: &std::path::Path,
     number: u64,
     base: &str,
@@ -7368,6 +7377,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
+        Overlay::Review(_) => crate::pr_review::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
@@ -11562,6 +11572,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Conflicts(_))) {
         crate::conflicts::handle_mouse(app, mouse);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Review(_))) {
+        crate::pr_review::handle_mouse(app, mouse);
         return;
     }
     // Hosts picker: the wheel moves the selection, a click on a row connects
@@ -35340,6 +35354,22 @@ mod tests {
                 None,
             ),
             (
+                "Review",
+                |app| {
+                    seed_tree(app);
+                    app.overlay = Some(Overlay::Review(Box::new(
+                        crate::pr_review::ReviewScreen::new(
+                            "https://github.com/o/r/pull/7".into(),
+                            7,
+                            "#7 Add things".into(),
+                            "/nonexistent".into(),
+                            false,
+                        ),
+                    )));
+                },
+                None,
+            ),
+            (
                 "Hosts",
                 |app| {
                     app.overlay = Some(Overlay::Hosts(crate::app::HostsView::new(vec![
@@ -35553,6 +35583,7 @@ mod tests {
             Overlay::Autofix(_) => "Autofix",
             Overlay::WeekReview(_) => "WeekReview",
             Overlay::Conflicts(_) => "Conflicts",
+            Overlay::Review(_) => "Review",
             Overlay::Todos(_) => "Todos",
         }
     }
@@ -35582,7 +35613,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 22, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
         });
     }
 

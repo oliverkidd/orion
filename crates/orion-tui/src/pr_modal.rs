@@ -39,9 +39,9 @@
 //! browser, `⌘R` asks GitHub again, `⌘N` opens a new pull request,
 //! `⌘X` merges this one and `⌘W` closes it (`pr_actions`, each
 //! form in the reading pane's place), and `⌘D` marks a draft ready for
-//! review or a ready one a draft again, and `⌘⇧R` opens its Files tab
-//! on GitHub to review it there (as Enter on the Reviews tab does). Each
-//! verb is one ⌘ chord — the
+//! review or a ready one a draft again, and `⌘⇧R` reviews it in the PR
+//! REVIEW (`pr_review`, as Enter on the Reviews tab does). Each verb is
+//! one ⌘ chord — the
 //! grid's letter where the grid does the same thing (`⌘E` changes, `⌘R`
 //! refresh, `⌘O` open outside, `⌘N` new, `⌘W` close) — with its `^` twin
 //! for a terminal that sends no ⌘.
@@ -1024,15 +1024,6 @@ pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// `⌘⇧R`, and Enter on the Reviews tab: the pull request under the cursor
-/// on GitHub's Files tab, where a review is written and sent.
-fn review_on_github(app: &mut App, out: &mut Vec<ClientRequest>) {
-    if let Some(url) = selected_url(app) {
-        let files = format!("{}/files", url.trim_end_matches('/'));
-        crate::event_loop::open_link(app, &files, out);
-    }
-}
-
 // ---- keys and mouse ----
 
 /// The row under the reading side's cursor, acted on — `⌘E` on a file or
@@ -1094,9 +1085,9 @@ fn switch_tab(view: &mut PullRequestsView, tab: PrTab) {
 }
 
 /// Enter on the page: the row under its cursor acted on — the DIFF
-/// VIEWER at a file or a commit, a check's page — on Reviews the pull
-/// request's Files tab on GitHub (`⌘⇧R`), and on the Description the pull
-/// request in the browser, as Enter on the pane's page does.
+/// VIEWER at a file or a commit, a check's page — on Reviews the PR
+/// REVIEW (`⌘⇧R`), and on the Description the pull request in the
+/// browser, as Enter on the pane's page does.
 fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
     let tab = match &app.overlay {
         Some(Overlay::PullRequests(view)) => view.tabs.tab,
@@ -1105,7 +1096,7 @@ fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
     if tab.lists() {
         act_on_row(app, out, true);
     } else if tab == PrTab::Reviews {
-        review_on_github(app, out);
+        crate::pr_review::open_from_modal(app);
     } else {
         open_in_browser(app, out);
     }
@@ -1183,7 +1174,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
         _ if keys::DIFF.matches(&key) => diff(app, out),
         _ if keys::BROWSER.matches(&key) => browser(app, out),
-        _ if keys::REVIEW.matches(&key) => review_on_github(app, out),
+        _ if keys::REVIEW.matches(&key) => crate::pr_review::open_from_modal(app),
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::NEW.matches(&key) => crate::pr_actions::open_create(app),
         // ⌘X cuts a SELECTION in the filter before it merges.
@@ -1428,9 +1419,9 @@ pub(crate) mod keys {
     /// Close the pull request under the cursor without merging it.
     /// ⌘W, the close every modal's remove verb shares — it asks first.
     pub const CLOSE: Key = Key::new(&["cmd+w", "ctrl+w"], "close PR");
-    /// Review the pull request under the cursor, on GitHub's Files tab
-    /// ([`review_on_github`]). ⌘R's letter, held with ⇧ — ⌘R itself is
-    /// refresh everywhere.
+    /// Review the pull request under the cursor: the PR REVIEW
+    /// (`pr_review`). ⌘R's letter, held with ⇧ — ⌘R itself is refresh
+    /// everywhere.
     pub const REVIEW: Key = Key::new(&["cmd+shift+r", "ctrl+shift+r"], "review");
     /// Mark it ready for review, or a draft again.
     pub const READY: Key = Key::new(&["cmd+d", "ctrl+d"], "ready/draft");
@@ -2744,40 +2735,48 @@ mod tests {
         });
     }
 
-    /// `⌘⇧R` from the list — and Enter on the Reviews tab — opens the pull
-    /// request's Files tab on GitHub, where the review is written; the
-    /// modal stays up on its row, with no form in the reading pane.
+    /// `⌘⇧R` from the list — and Enter on the Reviews tab — opens the PR
+    /// REVIEW on the pull request under the cursor, a level inside the
+    /// modal, once its page is in: Esc comes back to the modal on its row.
     #[test]
-    fn a_review_is_written_on_githubs_files_tab() {
+    fn a_review_opens_in_orion_a_level_inside_the_modal() {
         pinned(|| {
             let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
             open(&mut app);
             let mut out = Vec::new();
-            crate::event_loop::take_opened();
-            handle_key(
-                &mut app,
-                KeyEvent::new(
-                    KeyCode::Char('r'),
-                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
-                ),
-                &mut out,
+            let review = KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
-            assert_eq!(
-                crate::event_loop::take_opened(),
-                ["https://github.com/o/r/pull/42/files"]
-            );
+            handle_key(&mut app, review, &mut out);
             assert!(view(&app).form.is_none());
+            let flash = format!("{:?}", app.flash);
+            assert!(flash.contains("#42 is still loading"), "{flash}");
+
+            let mut page = detail(42, "Fix login");
+            page.head_sha = "abc123".into();
+            app.pr_detail.insert(page.url.clone(), page);
+            handle_key(&mut app, review, &mut out);
+            let Some(Overlay::Review(screen)) = &app.overlay else {
+                panic!("no review: {:?}", app.overlay);
+            };
+            assert_eq!(
+                (screen.number, screen.label.as_str()),
+                (42, "#42 Fix login")
+            );
+            assert!(screen.back.is_some());
+            crate::pr_review::handle_key(&mut app, key(KeyCode::Esc));
+            assert_eq!(
+                view(&app).selected_url.as_deref(),
+                Some("https://github.com/o/r/pull/42")
+            );
 
             handle_key(&mut app, key(KeyCode::Tab), &mut out);
             if let Some(Overlay::PullRequests(v)) = &mut app.overlay {
                 v.tabs.switch(PrTab::Reviews);
             }
             handle_key(&mut app, key(KeyCode::Enter), &mut out);
-            assert_eq!(
-                crate::event_loop::take_opened(),
-                ["https://github.com/o/r/pull/42/files"]
-            );
-            assert!(view(&app).form.is_none());
+            assert!(matches!(app.overlay, Some(Overlay::Review(_))));
         });
     }
 

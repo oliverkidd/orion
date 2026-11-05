@@ -2155,6 +2155,10 @@ pub enum Overlay {
     /// Enter on a conflicted file of a pull request: the CONFLICT
     /// RESOLVER, its merge's files to settle (`crate::conflicts`).
     Conflicts(Box<crate::conflicts::ConflictView>),
+    /// `⌘⇧R` in the PULL REQUESTS MODAL: the PR REVIEW — a pull request's
+    /// files and diff, its review threads under their lines, and the
+    /// review you write on it (`crate::pr_review`).
+    Review(Box<crate::pr_review::ReviewScreen>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -4284,6 +4288,8 @@ pub struct App {
     /// The WEEK IN REVIEW's fetches and the review being written: on the
     /// app, not its modal, so closing the modal loses neither.
     pub week_review: crate::week_review::State,
+    /// Where the PR REVIEW's reads and writes land.
+    pub pr_review: crate::pr_review::State,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
     /// this instance has one: the main loop installs the real one at
     /// startup and hydrates from it; the unit tests leave it `None`, so no
@@ -4576,6 +4582,7 @@ impl App {
             pr_comment_tx: None,
             pr_actions_tx: None,
             week_review: Default::default(),
+            pr_review: Default::default(),
             pr_cache: None,
             pr_cache_dirty: false,
             autofix: crate::autofix::State::default(),

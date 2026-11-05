@@ -47,6 +47,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Todos(v) => v.area,
         Overlay::WeekReview(v) => v.area,
         Overlay::Conflicts(v) => v.area,
+        Overlay::Review(v) => v.area,
     }
 }
 
@@ -94,6 +95,8 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
         // The CONFLICT RESOLVER is a level inside the modal it came from,
         // as the DIFF VIEWER is; its merge stays as it was left.
         Some(Overlay::Conflicts(_)) => crate::conflicts::back(app),
+        // The PR REVIEW too; what is pending stays GitHub's.
+        Some(Overlay::Review(_)) => crate::pr_review::back(app),
         // Nothing to unwind on the way out.
         Some(
             Overlay::Help(_)
