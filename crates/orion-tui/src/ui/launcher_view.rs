@@ -1219,10 +1219,9 @@ fn draw_list_band(
                 row.agent.name.chars().count(),
                 list_runs_line(&row.agent, cfg).chars().count(),
             ),
-            crate::launcher::Card::Terminal(t) => (
-                t.name.chars().count(),
-                t.run_command.as_deref().unwrap_or("shell").chars().count(),
-            ),
+            crate::launcher::Card::Terminal(t) => {
+                (t.name.chars().count(), terminal_runs(t).chars().count())
+            }
         };
         cols = (cols.0.max(name), cols.1.max(runs));
     }
@@ -1254,12 +1253,13 @@ fn draw_list_band(
 }
 
 /// One entry of the LIST, on one line: the cursor mark, the status dot
-/// and name, what it runs on, and the last thing it was asked — or, for a
-/// terminal, what runs in it; how long since it moved (or `exited`) at
-/// the right. `cols` are the band's name and runs-on column widths, so the
-/// entries line up. The cursor's entry (`selected`) wears the mark
-/// ([`LIST_MARK`]) and a wash of its status color across the line
-/// ([`card_tint`]).
+/// and name, what it runs on, the last thing it was asked, and how long
+/// since it moved at the right. A shell runs on `shell`; a RUN LINE
+/// leaves that column blank, puts its command where the prompts go and
+/// its status where the ages go ([`terminal_badge`]). `cols` are the
+/// band's name and runs-on column widths, so the entries line up. The
+/// cursor's entry (`selected`) wears the mark ([`LIST_MARK`]) and a wash
+/// of its status color across the line ([`card_tint`]).
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1339,10 +1339,14 @@ fn draw_list_row(
                 name: t.name.clone(),
                 name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
                 ramp: None,
-                runs: t.run_command.clone().unwrap_or_else(|| "shell".into()),
+                runs: terminal_runs(t).into(),
                 runs_style: Style::default().fg(th.dim),
-                text_mark: "",
-                text: String::new(),
+                text_mark: if t.run_command.is_some() {
+                    RUN_MARK
+                } else {
+                    ""
+                },
+                text: t.run_command.clone().unwrap_or_default(),
                 text_style: Style::default().fg(th.muted),
                 badge,
                 badge_style,
@@ -1380,14 +1384,17 @@ fn draw_list_row(
         app.sweep_phase(),
     ));
     // What it runs on, in the band's column, and the prompt after it —
-    // each only where there is room for a few letters of it.
+    // each only where there is room for a few letters of it. A RUN LINE
+    // has nothing in the first, and its command in the second.
     let runs_at = name_w + LIST_GAP;
-    if !e.runs.is_empty() && room >= runs_at + 6 {
+    if room >= runs_at + 6 {
         let runs_w = runs_col.min(room - runs_at);
-        let runs = truncate(&e.runs, runs_w);
-        spans.push(Span::raw(" ".repeat(runs_at - used)));
-        used = runs_at + runs.chars().count();
-        spans.push(Span::styled(runs, e.runs_style));
+        if !e.runs.is_empty() {
+            let runs = truncate(&e.runs, runs_w);
+            spans.push(Span::raw(" ".repeat(runs_at - used)));
+            used = runs_at + runs.chars().count();
+            spans.push(Span::styled(runs, e.runs_style));
+        }
         let text_at = runs_at + runs_w + LIST_GAP;
         let text_mark_w = e.text_mark.chars().count();
         if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
@@ -1840,9 +1847,24 @@ pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'sta
     )
 }
 
+/// What a terminal's entry says it runs on, in the column a session's
+/// model takes: `shell` for a shell. A RUN LINE's command goes where a
+/// session's prompt does, so the column is blank on it.
+fn terminal_runs(t: &orion_core::TerminalTab) -> &'static str {
+    if t.run_command.is_some() {
+        ""
+    } else {
+        "shell"
+    }
+}
+
+/// What opens a RUN LINE's command, where a session's prompt opens on `›`.
+const RUN_MARK: &str = "$ ";
+
 /// What a terminal's entry says at its right end, where a session's age
-/// goes, at `now` (epoch ms). A run winding down from its stop counts
-/// down to its kill, `stopping… 1:52`, in the working gold. One that
+/// goes, at `now` (epoch ms). A live run is a dim `running`; one winding
+/// down from its stop counts down to its kill, `stopping… 1:52`, in the
+/// working gold. One that
 /// ended with nobody stopping it says how: a faint `done` for a clean
 /// exit, a red `exited 1` for any other; a run whose ending the DAEMON
 /// never saw (it restarted since) is a faint `stopped`. A dead shell is a
@@ -1856,16 +1878,13 @@ fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, 
             Style::default().fg(th.warn),
         );
     }
-    if t.alive {
-        return (String::new(), Style::default());
-    }
-    if t.run_command.is_none() {
-        return ("exited".into(), faint);
-    }
-    match t.run.exit_code {
-        Some(0) => ("done".into(), faint),
-        Some(code) => (format!("exited {code}"), Style::default().fg(th.err)),
-        None => ("stopped".into(), faint),
+    match (t.run_command.is_some(), t.alive, t.run.exit_code) {
+        (false, true, _) => (String::new(), Style::default()),
+        (false, false, _) => ("exited".into(), faint),
+        (true, true, _) => ("running".into(), Style::default().fg(th.dim)),
+        (true, false, Some(0)) => ("done".into(), faint),
+        (true, false, Some(code)) => (format!("exited {code}"), Style::default().fg(th.err)),
+        (true, false, None) => ("stopped".into(), faint),
     }
 }
 
@@ -3686,7 +3705,10 @@ mod tests {
     fn a_stopping_run_counts_down_to_its_kill() {
         let th = Theme::default();
         let mut run = a_run(true);
-        assert_eq!(terminal_badge(&run, 0, th).0, "", "running: nothing yet");
+        assert_eq!(
+            terminal_badge(&run, 0, th),
+            ("running".into(), Style::default().fg(th.dim))
+        );
         run.run.stopping_until = Some(112_000);
         let (badge, style) = terminal_badge(&run, 0, th);
         assert_eq!(badge, "stopping… 1:52");
@@ -3704,6 +3726,46 @@ mod tests {
             line.trim_end().ends_with("stopping… 1:00")
                 || line.trim_end().ends_with("stopping… 0:59"),
             "{line:?}"
+        );
+    }
+
+    /// The RUN LINE fits the list's columns: its command sits where a
+    /// session's prompt does — not under the model — and its status at
+    /// the far right, where the session's age is.
+    #[test]
+    fn the_run_line_puts_its_command_with_the_prompts_and_its_status_at_the_right() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let a = &mut app.tree.agents[0];
+        a.model = Some("opus".into());
+        a.status_changed_at = crate::app::now_ms() - 5 * 60_000;
+        a.recent_prompts = vec![orion_core::PromptEntry {
+            text: "fix the login redirect".into(),
+            submitted_at: 0,
+        }];
+        app.tree.terminals.push(a_run(true));
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line_of = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}: {lines:#?}"))
+                .clone()
+        };
+        let col = |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
+        let session = line_of("fix the login redirect");
+        let run = line_of("▶ run");
+        assert_eq!(
+            col(&run, "$ npm run dev"),
+            col(&session, "› fix the login redirect"),
+            "the command in the prompts' column:\n{session}\n{run}"
+        );
+        assert!(!run[..run.find("$ npm").unwrap()].contains("npm"), "{run}");
+        assert!(run.trim_end().ends_with("running"), "{run:?}");
+        assert_eq!(
+            run.trim_end().chars().count(),
+            session.trim_end().chars().count(),
+            "the status ends where the age does:\n{session}\n{run}"
         );
     }
 
