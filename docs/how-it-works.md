@@ -318,8 +318,9 @@
   size of every live session's transcript each second and reads only what was appended since. The
   new model is what the row stores, so a restart or resume comes back on it and `orion spawn`
   inherits it. A session launched on the default model gets its model named after the first prompt.
-  Built-in Claude only; a row on an exact id (a Bedrock id from `claude_models`) keeps it while
-  Claude stays in that family.
+  Claude only — on every Claude account, the default one and each you added — never a custom
+  harness's; a row on an exact id (a Bedrock id from `claude_models`) keeps it while Claude stays in
+  that family.
 - **Cards show what they were last asked.** The `prompt` field of the `UserPromptSubmit` payload —
   which every hooked harness sends — is condensed to one line in the hook receiver, kept on the AGENT
   row (the newest ten, in SQLite), and the newest is drawn on the session's card with an ago label.
