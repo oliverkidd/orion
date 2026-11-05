@@ -18,7 +18,7 @@ orion rename <title>       title the session this runs inside          (agents r
 orion worktree [name]      move this session into a worktree           (agents run this)
 orion spawn <task>         start another agent session beside it       (agents run this)
 orion open <file>…         show files in this orion's file tabs       (agents run this)
-orion config <cmd>         back up, restore or locate this machine's settings
+orion config <cmd>         locate this machine's settings
 orion ssh <host>           open orion on a remote host over ssh
 orion setup                open orion on its setup, every step
 orion app                  open orion as a Mac app of its own (Orion.app)
@@ -72,12 +72,6 @@ orion open <file>…       # show the files in this orion's FILE TABS — a moda
 ```sh
 orion config path              # where config.json, config.local.json, agent_presets.json and
                                 # ssh_hosts.json live
-orion config export [path]     # one JSON file of this machine's settings: stdout, a file, or
-                                # orion-settings.json inside a folder. Never config.local.json
-orion config import <source>   # merge a backup in: an export, a bare config.json /
-                                # agent_presets.json / ssh_hosts.json, a folder holding any of
-                                # them, or - for stdin. Keys it sets replace this machine's, keys
-                                # it lacks stay, and config.local.json is never written
 orion config harnesses         # print the effective harness registry: every harness with
                                 # the program, flags, resume shape, hook dialect and defaults a
                                 # launch uses. Copy a row into config.json `harnesses` to override it
@@ -126,11 +120,8 @@ See [Installing editors and agent CLIs](configuration.md#installing-editors-and-
 ```sh
 orion ssh <host> [dir]   # open orion on a remote machine over ssh (installs it there if
                           # missing); destinations are remembered for the TUI's HOSTS PICKER
-                          # (SSH hosts, `⌘⇧P`). Needs the OpenSSH client (`ssh`) on PATH here. This
-                          # machine's config.json and agent presets ride along, and the remote
-                          # orion merges them into its own settings (its config.local.json
-                          # still wins); --no-sync-config or the ssh_sync_config setting leaves
-                          # them here
+                          # (SSH hosts, `⌘⇧P`). Needs the OpenSSH client (`ssh`) on PATH here. The
+                          # remote runs on its own settings
 orion upgrade            # install the latest release (--force on a dev build). Swapping the
                           # binary doesn't touch a running daemon, so afterwards it shuts an idle
                           # one (no live sessions) down for you and the next launch starts on the

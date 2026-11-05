@@ -22,8 +22,6 @@ const VISIBLE: &[&[&str]] = &[
     &["open"],
     &["config"],
     &["config", "path"],
-    &["config", "export"],
-    &["config", "import"],
     &["ssh"],
     &["doctor"],
     &["upgrade"],

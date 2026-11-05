@@ -31,8 +31,8 @@ use super::{
     CountColumns, NO_MATCHES, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 use crate::app::{App, DiffFocus, DiffView, Overlay};
-use crate::bundle::plural;
 use crate::commit_list::{CommitList, Row, Showing};
+use crate::flash::plural;
 use crate::theme::Theme;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};

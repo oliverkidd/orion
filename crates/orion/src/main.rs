@@ -13,10 +13,6 @@ fn main() -> Result<()> {
     orion_tui::app_bundle::run_if_launcher();
     orion_tui::app_bundle::settle_inside();
     let cli = Cli::parse();
-    // A `orion ssh` from another machine may have sent its
-    // settings along. Merge them before anything reads a setting, and before
-    // a thread or a child exists to inherit the variable.
-    orion_tui::bundle::apply_forwarded();
     match cli.command {
         Some(Command::Daemon { foreground }) => {
             init_daemon_logging(foreground)?;
@@ -28,8 +24,6 @@ fn main() -> Result<()> {
         Some(Command::Add { path }) => orion_tui::run_add_project(path),
         Some(Command::Config { command }) => orion_tui::run_config(match command {
             ConfigCommand::Path => orion_tui::ConfigOp::Path,
-            ConfigCommand::Export { path } => orion_tui::ConfigOp::Export { path },
-            ConfigCommand::Import { source } => orion_tui::ConfigOp::Import { source },
             ConfigCommand::Harnesses => orion_tui::ConfigOp::Harnesses,
         }),
         Some(Command::Kill) => orion_tui::run_kill(),
@@ -52,11 +46,7 @@ fn main() -> Result<()> {
         Some(Command::Autofix(AutofixCommand::StandDown { reason })) => {
             orion_tui::run_stand_down(reason.join(" "))
         }
-        Some(Command::Ssh {
-            host,
-            path,
-            no_sync_config,
-        }) => ssh::run_ssh(&host, path.as_deref(), !no_sync_config),
+        Some(Command::Ssh { host, path }) => ssh::run_ssh(&host, path.as_deref()),
         Some(Command::Setup) => {
             orion_tui::reset_setup();
             run_tui(true)
@@ -200,7 +190,7 @@ fn run_tui(setup: bool) -> Result<()> {
         // local daemon and its sessions stay up).
         orion_tui::Exit::Ssh(entry) => {
             eprintln!("orion: connecting to {}…", entry.host);
-            ssh::run_ssh(&entry.host, entry.path.as_deref(), true)
+            ssh::run_ssh(&entry.host, entry.path.as_deref())
         }
         // **Restart orion**: the daemon goes, and a fresh
         // `orion` execs over us.

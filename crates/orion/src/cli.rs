@@ -190,13 +190,11 @@ pub(crate) enum Command {
     /// leaves it out.
     #[command(subcommand, hide = true)]
     Autofix(AutofixCommand),
-    /// Back up, restore or locate this machine's settings.
+    /// Locate this machine's settings.
     ///
-    /// Settings live in `config.json` — the portable file an export, an
-    /// import and `orion ssh` carry — with `config.local.json` over it for
+    /// Settings live in `config.json`, with `config.local.json` over it for
     /// what only makes sense on this machine, beside `agent_presets.json` and
-    /// `ssh_hosts.json`. An export is one JSON file holding all but the local
-    /// layer; an import merges one in. Changes apply without a restart.
+    /// `ssh_hosts.json`. Changes apply without a restart.
     #[command(after_help = CONFIG_EXAMPLES)]
     Config {
         #[command(subcommand)]
@@ -205,22 +203,15 @@ pub(crate) enum Command {
     /// Open orion on a remote host over ssh.
     ///
     /// Connects with ssh and runs orion there, installing it on the remote
-    /// first when it is missing, so what you drive is the remote's own daemon
-    /// and sessions. This machine's `config.json` and agent presets ride
-    /// along and are merged into the remote's settings, where its own
-    /// `config.local.json` still wins. Destinations are remembered for the
-    /// TUI's host picker (**SSH hosts** in its command palette, `⌘⇧P`).
+    /// first when it is missing, so what you drive is the remote's own daemon,
+    /// sessions and settings. Destinations are remembered for the TUI's host
+    /// picker (**SSH hosts** in its command palette, `⌘⇧P`).
     #[command(after_help = SSH_EXAMPLES)]
     Ssh {
         /// ssh destination, passed verbatim (e.g. user@server).
         host: String,
         /// Remote directory to start in (default: remote $HOME).
         path: Option<String>,
-        /// Leave this machine's settings behind for this connection.
-        ///
-        /// The `ssh_sync_config` setting turns the forward off for good.
-        #[arg(long)]
-        no_sync_config: bool,
     },
     /// Open orion on its setup, every step.
     ///
@@ -328,15 +319,12 @@ Examples:
 const SSH_EXAMPLES: &str = "\
 Examples:
   orion ssh user@server           open the remote's orion
-  orion ssh user@server /srv/app  start in a directory there
-  orion ssh user@server --no-sync-config
-                                   keep this machine's settings here";
+  orion ssh user@server /srv/app  start in a directory there";
 
 const CONFIG_EXAMPLES: &str = "\
 Examples:
   orion config path               where each settings file lives
-  orion config export ~/backups   write ~/backups/orion-settings.json
-  orion config import ~/backups   merge it back in, here or elsewhere";
+  orion config harnesses          the harness registry launches read";
 
 const DOCTOR_EXAMPLES: &str = "\
 Examples:
@@ -372,36 +360,6 @@ pub(crate) enum ConfigCommand {
     /// checkout, say; `ORION_DATA_DIR` moves them all.
     #[command(after_help = "Example:\n  orion config path")]
     Path,
-    /// Write this machine's settings to one JSON file.
-    ///
-    /// Carries `config.json`, the agent presets and the ssh host list, never
-    /// `config.local.json`. Keys and presets this build doesn't know are
-    /// carried as they are, so a newer orion's settings survive the trip.
-    #[command(
-        after_help = "Examples:\n  orion config export > orion-settings.json\n  \
-                            orion config export ~/backups   writes ~/backups/orion-settings.json"
-    )]
-    Export {
-        /// File, or existing folder, to write (default: stdout; `-` too).
-        #[arg(value_name = "PATH")]
-        path: Option<String>,
-    },
-    /// Merge a settings backup into this machine's settings.
-    ///
-    /// Takes an export, a bare `config.json`, `agent_presets.json` or
-    /// `ssh_hosts.json`, a folder holding any of them, or `-` for stdin. Keys
-    /// the file sets replace this machine's and keys it lacks are left alone;
-    /// presets merge by name and hosts by destination. `config.local.json` is
-    /// never written, and still wins.
-    #[command(
-        after_help = "Examples:\n  orion config import orion-settings.json\n  \
-                            orion config import ~/dotfiles/orion   a folder holding config.json"
-    )]
-    Import {
-        /// The file, the folder, or `-` for stdin.
-        #[arg(value_name = "SOURCE")]
-        source: String,
-    },
     /// Print the effective harness registry: every harness orion knows —
     /// the built-ins, `custom_harnesses` entries and `harnesses` map ids —
     /// with the program, flags, resume shape, hook dialect and defaults a

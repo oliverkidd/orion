@@ -215,7 +215,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
                 .map_or_else(|| project.0.clone(), |p| p.name.clone());
             app.flash = Some(Flash::note(format!(
                 "{name}: pulled {} from {base}",
-                crate::bundle::plural(*commits, "commit")
+                crate::flash::plural(*commits, "commit")
             )));
         }
         _ => {}

@@ -1030,7 +1030,7 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
             }
             app.flash = Some(crate::flash::Flash::done(format!(
                 "added {}",
-                crate::bundle::plural(lines.len(), "item")
+                crate::flash::plural(lines.len(), "item")
             )));
         } else {
             input.insert_str(&text.replace(['\r', '\n'], " "));
@@ -1047,7 +1047,7 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
             let count = edit(app, |file| file.import(&nodes, super::today())).unwrap_or(0);
             app.flash = Some(crate::flash::Flash::done(format!(
                 "added {} from the pasted list",
-                crate::bundle::plural(count, "item")
+                crate::flash::plural(count, "item")
             )));
             return true;
         }
@@ -1408,7 +1408,7 @@ fn clip(app: &mut App, cut: bool) {
             .join("\n"),
     };
     let dir = view.dir.clone();
-    let what = crate::bundle::plural(items.len(), "todo");
+    let what = crate::flash::plural(items.len(), "todo");
     app.todo_clip = Some(TodoClip {
         dir,
         items,
@@ -1496,7 +1496,7 @@ fn paste_clip_at(app: &mut App, text: &str, group: Option<u64>, after: Option<u6
     }
     app.flash = Some(crate::flash::Flash::done(format!(
         "pasted {}",
-        crate::bundle::plural(count, "todo")
+        crate::flash::plural(count, "todo")
     )));
     true
 }
@@ -3016,7 +3016,7 @@ fn header_spans(
                 format!(
                     "delete {} and its {}?",
                     g.name,
-                    crate::bundle::plural(file.size(group), "item")
+                    crate::flash::plural(file.size(group), "item")
                 ),
                 Style::default().fg(th.err).add_modifier(Modifier::BOLD),
             ),

@@ -522,7 +522,6 @@ pub enum SettingKind {
     Editor,
     OutsideEditor,
     CloseFinderOnOpen,
-    SshSyncConfig,
     /// The Tools tab's action row: Enter opens ORION SETUP, every step.
     RunSetup,
     /// The Tools tab's read-only git row: installed or not, `i` installs.
@@ -681,9 +680,7 @@ impl SettingKind {
             | SettingKind::PrewarmAgents
             | SettingKind::PrewarmSessions => (2026, 9, 9),
             // v0.27.0 / v0.28.0
-            SettingKind::SshSyncConfig
-            | SettingKind::HideDraftPrs
-            | SettingKind::HideUninstalledHarnesses => (2026, 9, 15),
+            SettingKind::HideDraftPrs | SettingKind::HideUninstalledHarnesses => (2026, 9, 15),
             // v0.29.0 / v0.31.0
             SettingKind::RunCommand | SettingKind::OpenCommand | SettingKind::RememberHarness => {
                 (2026, 9, 17)
@@ -798,12 +795,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::CloseFinderOnOpen,
                 label: "Finder closes on open",
                 hint: "Opening a file closes the file finder behind the editor, so quitting the editor lands on the grid",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::SshSyncConfig,
-                label: "Sync settings over ssh",
-                hint: "orion ssh / tunnel carry config.json and presets to the remote (config.local.json stays)",
                 group: "",
             },
         ]),
@@ -1496,11 +1487,6 @@ pub struct Config {
     /// touch the tree browser (`b`), whose editor is embedded in its own
     /// preview pane, or ⌥click, which has no overlay to close.
     pub close_finder_on_open: bool,
-    /// `orion ssh` and `orion tunnel` carry this machine's `config.json`
-    /// and AGENT PRESETS to the remote orion, which merges them into its
-    /// own on every connect — its `config.local.json` still wins there. On
-    /// by default; `--no-sync-config` leaves them behind for one connection.
-    pub ssh_sync_config: bool,
     /// LINEAR ACCOUNT: whose issues ⌘L lists. Empty — the default — is
     /// the owner of the project's `LINEAR_API_KEY`, which for a personal
     /// key is the user; an email names another member of the workspace,
@@ -2060,7 +2046,6 @@ impl Default for Config {
             editor: crate::editor::DEFAULT_EDITOR.into(),
             outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
-            ssh_sync_config: true,
             linear_assignee_email: String::new(),
             linear_task_template: String::new(),
             linear_auto_attach: true,
@@ -3489,7 +3474,6 @@ impl Config {
                 &crate::outside_editor::Places::here(),
             ),
             SettingKind::CloseFinderOnOpen => on_off(self.close_finder_on_open).into(),
-            SettingKind::SshSyncConfig => on_off(self.ssh_sync_config).into(),
             SettingKind::LinearAccount => match self.linear_assignee_email.trim() {
                 "" => LINEAR_KEY_OWNER.into(),
                 email => email.to_string(),
@@ -3655,9 +3639,6 @@ impl Config {
             }
             SettingKind::CloseFinderOnOpen => {
                 self.close_finder_on_open = !self.close_finder_on_open;
-            }
-            SettingKind::SshSyncConfig => {
-                self.ssh_sync_config = !self.ssh_sync_config;
             }
             SettingKind::SessionIdleTimeout => {
                 self.session_idle_timeout =
@@ -4284,6 +4265,10 @@ mod tests {
         ),
     ];
 
+    /// Keys a release wrote whose setting has since been removed: no field
+    /// reads them any more.
+    const DROPPED_KEYS: &[&str] = &["ssh_sync_config"];
+
     fn read_json_file(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
@@ -4316,6 +4301,8 @@ mod tests {
     /// change leaves it unreadable, and either reads back as something
     /// else here. A key on that table reads through its alias into the
     /// field's new name, and a save writes it back under that name alone.
+    /// A key on [`DROPPED_KEYS`] loads as nothing, and a save leaves it as
+    /// it was, as it does any key this build doesn't know.
     #[test]
     fn config_files_from_earlier_releases_still_load_every_key() {
         let current = |key: &str| {
@@ -4338,6 +4325,10 @@ mod tests {
             let known = serde_json::to_value(&loaded).unwrap();
             let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
             for (key, value) in fixture.as_object().unwrap() {
+                if DROPPED_KEYS.contains(&key.as_str()) {
+                    assert_eq!(known.get(key), None, "{release}: `{key}` was dropped");
+                    continue;
+                }
                 assert_eq!(
                     known.get(current(key)),
                     Some(value),
@@ -4707,23 +4698,6 @@ mod tests {
             DEFAULT_LINEAR_TEMPLATE,
             "empty is the default"
         );
-    }
-
-    #[test]
-    fn ssh_sync_defaults_on_and_toggles_from_the_general_tab() {
-        assert!(Config::default().ssh_sync_config);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.ssh_sync_config);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut cfg = Config::default();
-        let (t, r) = locate(SettingKind::SshSyncConfig).unwrap();
-        assert_eq!(SETTINGS_TABS[t].title, "General");
-        cfg.cycle(t, r, 0);
-        assert_eq!(cfg.value_label(SettingKind::SshSyncConfig), "off");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["ssh_sync_config"], false);
-        assert!(!load_from(&path).ssh_sync_config);
     }
 
     #[test]

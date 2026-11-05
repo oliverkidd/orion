@@ -73,7 +73,6 @@ behaviors that change how the tree is worked; every switch there is off by defau
 | `setup_version` | number | `0` | — (config.local.json) | The SETUP VERSION this machine last went through. A release that adds a step to **Orion setup** bumps it; on the next launch an onboarded machine on an older version sees only the new steps that have something to offer it (version 5's is the App step: every Mac set up before Orion.app existed is offered the move once, ahead of the release notes — it was version 4's in 2.0.0, where it stood behind them and `Esc` on the notes dismissed it unseen, so a machine that went through 4 is asked once more), then Ready — and with nothing to offer, the version is stamped quietly. 0 on a config from before the key, read as 1. Setup opens again in full from the palette's **Run setup**, Settings → Tools → **Setup**, or `orion setup`. |
 | `seen_version` | string | `""` | — (config.local.json) | The orion version this machine last saw **What's new** for. On the first launch of a newer build — after `orion upgrade` or the footer's update — setup opens as **What's new in Orion**: every release since this one, stacked newest first however many the upgrade jumped, each with its date and what its commits said; then the setup steps added since (`setup_version`) and Ready, or with none missed, the notes alone. Closing it stamps this build's version; it is never lowered, so an older or dev build in between shows nothing twice. A first run stamps it without showing notes. Empty on a config from before the key: read as the release that brought its `setup_version` (2 → 1.0.17, 3 → 1.0.21), or as nothing seen. The notes are baked in at build time from git — each release is the commits between its `v*` tag and the one before (`crates/orion-tui/build.rs`) — so a build without git or tags has none, and setup carries on. |
 | `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal (or the MARKDOWN PAGE), so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
-| `ssh_sync_config` | bool | `true` | General | SETTINGS SYNC: `orion ssh` and `orion tunnel` send this machine's `config.json` and AGENT PRESETS along, and the remote orion merges them into its own settings before it starts — so a remote is set up the way this machine is on every connect, without reconfiguring it. Its `config.local.json` still wins there, and its projects, sessions and SSH HOSTS FILE stay its own. `--no-sync-config` leaves the settings behind for one connection. See [Backup, restore and other machines](#backup-restore-and-other-machines). |
 | `linear_auto_attach` | bool | `true` | Linear | **Link PRs to Linear**: a branch a `⌘L` launch cut is remembered, and when the project's open list first shows a pull request on it, orion attaches the pull request to each of its Linear issues through Linear's API (`attachmentLinkGitHubPR`). The link is orion's, so it holds when the branch name carries no issue ID — the case Linear's own GitHub integration misses — and it is a closing link (`linkKind: closes`), the kind Linear's pull request automations act on: the issue moves when the pull request opens and when it merges, as it would had the branch named it. Linear keeps one attachment per pull request, so an issue that is linked twice still shows it once. An issue has one branch at a time: sent to another worktree (a `⌘L` launch, `⌘.`, or attached by hand to another pull request), it leaves the branch it was on, and orion deletes the attachment it made for that branch's pull request, so the old pull request's merge no longer moves the issue. A link Linear made itself is left alone, and a pull request can still close several issues. Off, nothing is remembered or attached. |
 | `linear_assignee_email` | string | `""` | Linear (config.local.json) | **Linear account**: whose open issues `⌘L` lists. Empty, shown as `the key's owner`, is the owner of the project's `LINEAR_API_KEY`; an email names another member of the workspace, for a key a team shares. A typed row. Always written to `config.local.json`, so `orion ssh` never carries it to a remote. |
 | `linear_task_template` | string | `""` | Linear | **Task template**: the task `⌘L`'s `Enter` fills the QUICK PROMPT with for the issues picked. `{issues}` becomes each issue's ID, title, link and description, `{ids}` the IDs comma-separated, `{first_id}` the first one. Empty, shown as `default`, is the built-in template — one commit per issue, one pull request titled `"{ids}: …"` whose description starts `Fixes {ids}`. `Enter` on the row opens a multi-row box on the template the box would get, the default spelled out; sending the default back unchanged keeps it the default. |
@@ -385,8 +384,7 @@ effort defaults until its own Model / Effort rows on the Agents tab are changed,
 `harnesses.<id>`. The `id` is what its sessions point back at, so it stays put; lowercase letters,
 digits and hyphens, never a built-in's. `name` is the one it goes by, as typed — `Work Laptop` —
 and the only thing a rename changes: never the `id`, never the dir. `enabled: false` switches one off like any harness. The
-list is this machine's logins: an export carries it, but `orion ssh` and `orion tunnel` leave it
-behind, as they leave `harnesses`, so a remote keeps its own accounts. An entry an older orion reads
+list is this machine's logins: a remote reached over `orion ssh` keeps its own. An entry an older orion reads
 is an unknown key it leaves alone: its sessions refuse to start there ("custom harness `claude-2` is
 no longer defined") and nothing is lost.
 
@@ -546,44 +544,13 @@ next ATTACH or prewarm, and an agent RESUMES its conversation there.
 
 ```sh
 orion config path                  # where each settings file is
-orion config export ~/backups      # write ~/backups/orion-settings.json
-orion config import ~/backups      # merge it back in, here or on a new machine
 ```
 
-A SETTINGS BUNDLE is one JSON file holding `config.json`, `agent_presets.json` and `ssh_hosts.json`,
-each exactly as the file has it, under a marker key:
-
-```json
-{
-  "orion_bundle": 1,
-  "exported_by": "0.27.0",
-  "config": { "theme": "ocean", "keybindings": { "git_diff": "ctrl+g" } },
-  "agent_presets": [{ "name": "reviewer", "kind": "claude", "prefix": "Be strict." }],
-  "ssh_hosts": [{ "host": "me@box", "last_used_ms": 1789400000000 }]
-}
-```
-
-- **Export** writes to stdout, to a file, or to `orion-settings.json` inside a folder you name. It
-  never carries `config.local.json`, the database, the logs or the PR and model caches.
-- **Import** takes an export, a bare `config.json`, `agent_presets.json` or `ssh_hosts.json`, a folder
-  holding any of them (a dotfiles folder, a copy of an old data dir), or `-` for stdin. It merges
-  rather than replaces: keys the file sets replace this machine's and keys it lacks are left alone,
-  presets merge by name, and hosts merge by destination, keeping the most recent. `config.local.json`
-  is never written, and the summary names any imported key it still overrides. A settings file that
-  exists but can't be read fails the import before anything is written. Changes apply without a
-  restart.
-- **Copying the file works too.** Both halves re-read `config.json` on every use, so a backup copied
-  over it — or to wherever `ORION_CONFIG_FILE` points — applies at once, with no import and no
-  restart.
-- **Over ssh** (`ssh_sync_config`, on by default), `orion ssh` and `orion tunnel` export
-  `config.json` and the presets into the one ssh command they already run, and the remote orion
-  imports them before it starts, saying what changed on stderr. Sync is one way: the machine you
-  connect from wins key by key on each connect, so a setting the remote should keep goes in the
-  remote's `config.local.json`. A remote orion too old to know about the bundle ignores it and starts
-  as before. The bundle travels base64-encoded in the remote command, so that machine's process list
-  shows it while ssh starts. Settings hold no credentials, but a preset's prefix text travels too.
-  A bundle over 64 KiB is not sent (a real one is a few KiB), and the connection goes ahead without
-  it.
+- **Copy the file.** Both halves re-read `config.json` on every use, so a backup copied over it — or
+  to wherever `ORION_CONFIG_FILE` points — applies at once, with no restart. `agent_presets.json`
+  and `ssh_hosts.json` sit beside it and copy the same way; `config.local.json` is this machine's.
+- **Over ssh**, `orion ssh` runs the remote's own orion on the remote's own settings: nothing of
+  this machine's travels with it.
 
 ### Compatibility rules
 
@@ -610,9 +577,7 @@ version breaks the other:
    one still loads as written and survives a save. Each release adds its own fixture.
 
 `config.json` carries no version number. An older build could only refuse a newer file or ignore the
-number, and the keys a file holds already tell a newer build everything it needs. The bundle's
-`orion_bundle` marks the file and never gates it: sections are only ever added, and a reader leaves
-one it doesn't know alone.
+number, and the keys a file holds already tell a newer build everything it needs.
 
 ## The project file (`.orion.json`)
 
@@ -842,6 +807,4 @@ Overrides for tests and parallel instances — real, but not things a normal ins
 
 `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` are set *by* the DAEMON on every agent
 PTY (and scrubbed from plain terminals) so hooks can reach the HOOK RECEIVER — never something you
-set yourself. `ORION_IMPORT_BUNDLE` is likewise set *by* `orion ssh` and `orion tunnel` in the
-remote command: the SETTINGS BUNDLE the remote orion merges at startup and removes from its
-environment before it starts anything. For all of these, empty and unset mean the same thing: use the default.
+set yourself. For all of these, empty and unset mean the same thing: use the default.

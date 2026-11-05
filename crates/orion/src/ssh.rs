@@ -15,29 +15,9 @@ use orion_core::shell::single_quote;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-/// Hand the orion the script starts the SETTINGS BUNDLE in positional
-/// parameter `$n`, when the command carries one (see `orion_tui::bundle`).
-/// An environment variable rather than a `orion config import` step: a
-/// remote orion too old to know the variable ignores it, where it would fail
-/// on the unknown command — and the remote orion works out its own data dir,
-/// which a script writing the files would have to guess. A macro because
-/// `concat!` only takes literals.
-macro_rules! export_settings_bundle {
-    ($n:literal) => {
-        concat!(
-            "[ -z \"$",
-            $n,
-            "\" ] || export ORION_IMPORT_BUNDLE=\"$",
-            $n,
-            "\"; "
-        )
-    };
-}
-
 /// Runs under `sh -c` on the remote: $1 = install URL, $2 = start dir
-/// (optional, may be empty; defaults to the remote $HOME), $3 = the settings
-/// bundle (optional). It first leaves a usable `orion` on the remote PATH,
-/// installing it when there is none.
+/// (optional; defaults to the remote $HOME). It first leaves a usable
+/// `orion` on the remote PATH, installing it when there is none.
 const REMOTE_SCRIPT: &str = concat!(
     // sshd hands a remote command a bare PATH — no login shell runs, so
     // nothing the user configured applies. Prepend install.sh's default
@@ -51,17 +31,15 @@ const REMOTE_SCRIPT: &str = concat!(
     "curl -fsSL \"$1\" | sh || exit 1; ",
     "fi; ",
     "cd -- \"${2:-$HOME}\" || exit 1; ",
-    export_settings_bundle!("3"),
     "exec orion"
 );
 
-pub fn run_ssh(host: &str, path: Option<&str>, sync_config: bool) -> Result<()> {
+pub fn run_ssh(host: &str, path: Option<&str>) -> Result<()> {
     // Remember the destination for the TUI's `Shift+H` picker. Before the exec on
     // purpose (there is no after); a host that fails to connect still lists,
     // and `d` can drop it.
     orion_tui::hosts::record(host, path);
-    let bundle = sync_config.then(orion_tui::bundle::for_remote).flatten();
-    let cmd = remote_command(&crate::upgrade::install_url(), path, bundle.as_deref());
+    let cmd = remote_command(&crate::upgrade::install_url(), path);
     // exec: ssh owns the tty from here and its exit status propagates
     // natively. Only returns on failure.
     let err = Command::new("ssh").args(["-t", "--", host, &cmd]).exec();
@@ -71,20 +49,15 @@ pub fn run_ssh(host: &str, path: Option<&str>, sync_config: bool) -> Result<()> 
     Err(err).context("failed to exec ssh")
 }
 
-fn remote_command(install_url: &str, path: Option<&str>, bundle: Option<&str>) -> String {
+fn remote_command(install_url: &str, path: Option<&str>) -> String {
     let mut cmd = format!(
         "sh -c '{}' orion-ssh {}",
         REMOTE_SCRIPT,
         single_quote(install_url)
     );
-    // A bundle is `$3`, so an absent start dir still takes its place, empty.
-    if path.is_some() || bundle.is_some() {
+    if let Some(path) = path {
         cmd.push(' ');
-        cmd.push_str(&single_quote(path.unwrap_or("")));
-    }
-    if let Some(bundle) = bundle {
-        cmd.push(' ');
-        cmd.push_str(&single_quote(bundle));
+        cmd.push_str(&single_quote(path));
     }
     cmd
 }
@@ -106,75 +79,20 @@ mod tests {
 
     #[test]
     fn no_path_defaults_to_remote_home() {
-        let cmd = remote_command(URL, None, None);
+        let cmd = remote_command(URL, None);
         assert!(cmd.ends_with("orion-ssh 'https://example.com/install.sh'"));
         assert!(cmd.contains("${2:-$HOME}"));
     }
 
     #[test]
     fn path_is_quoted() {
-        let cmd = remote_command(URL, Some("/srv/my repo"), None);
+        let cmd = remote_command(URL, Some("/srv/my repo"));
         assert!(cmd.ends_with("'/srv/my repo'"));
     }
 
     #[test]
     fn path_with_single_quote_is_escaped() {
-        let cmd = remote_command(URL, Some("/tmp/it's here"), None);
+        let cmd = remote_command(URL, Some("/tmp/it's here"));
         assert!(cmd.ends_with("'/tmp/it'\\''s here'"));
-    }
-
-    #[test]
-    fn a_bundle_rides_after_the_start_dir() {
-        let cmd = remote_command(URL, None, Some("eyJ4IjoxfQ=="));
-        assert!(
-            cmd.ends_with("orion-ssh 'https://example.com/install.sh' '' 'eyJ4IjoxfQ=='"),
-            "{cmd}"
-        );
-        let cmd = remote_command(URL, Some("/srv/app"), Some("eyJ4IjoxfQ=="));
-        assert!(cmd.ends_with("'/srv/app' 'eyJ4IjoxfQ=='"), "{cmd}");
-    }
-
-    /// The script spells the variable inside a string literal, so hold it to
-    /// the constant the remote orion reads.
-    #[test]
-    fn the_script_exports_the_variable_the_remote_orion_reads() {
-        let export = format!("export {}=\"$3\"", orion_core::env::IMPORT_BUNDLE);
-        assert!(REMOTE_SCRIPT.contains(&export), "{REMOTE_SCRIPT}");
-    }
-
-    /// The script run the way sshd runs it, with a stub `orion` that
-    /// records what it was handed: the bundle arrives as the variable, and a
-    /// command without one leaves the variable unset.
-    #[test]
-    fn the_bundle_reaches_the_remote_orion_in_its_environment() {
-        use std::os::unix::fs::PermissionsExt;
-        for bundle in [Some("eyJ4IjoxfQ=="), None] {
-            let home = tempfile::tempdir().unwrap();
-            let stub = home.path().join("stub");
-            std::fs::create_dir(&stub).unwrap();
-            let orion = stub.join("orion");
-            std::fs::write(
-                &orion,
-                "#!/bin/sh\nprintf '%s' \"${ORION_IMPORT_BUNDLE-unset}\" > \"$SEEN\"\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&orion, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let seen = home.path().join("seen");
-            let mut args = vec!["-c", REMOTE_SCRIPT, "orion-ssh", "file:///nonexistent", ""];
-            args.extend(bundle);
-            let status = Command::new("sh")
-                .args(&args)
-                .env("HOME", home.path())
-                .env("PATH", format!("{}:/usr/bin:/bin", stub.display()))
-                .env("SEEN", &seen)
-                .env_remove(orion_core::env::IMPORT_BUNDLE)
-                .status()
-                .expect("sh");
-            assert!(status.success(), "{bundle:?}");
-            assert_eq!(
-                std::fs::read_to_string(&seen).unwrap(),
-                bundle.unwrap_or("unset")
-            );
-        }
     }
 }

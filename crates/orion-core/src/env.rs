@@ -20,10 +20,6 @@ pub const DATA_DIR: &str = "ORION_DATA_DIR";
 /// Moves `config.json` alone — into a dotfiles checkout, say — leaving the
 /// database, the logs and `config.local.json` in the data dir.
 pub const CONFIG_FILE: &str = "ORION_CONFIG_FILE";
-/// A SETTINGS BUNDLE (base64 JSON) that `orion ssh` / `orion tunnel` hand
-/// the remote orion. Read once at startup, merged into that machine's
-/// settings, and removed from the environment before anything is spawned.
-pub const IMPORT_BUNDLE: &str = "ORION_IMPORT_BUNDLE";
 /// Replaces every agent CLI with one command line, taken verbatim (tests
 /// stand in `/bin/sh` or a stub script for `claude`).
 pub const AGENT_CMD: &str = "ORION_AGENT_CMD";

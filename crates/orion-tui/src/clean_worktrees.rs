@@ -32,7 +32,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, Overlay};
-use crate::bundle::plural;
+use crate::flash::plural;
 use crate::flash::Flash;
 use crate::theme::Theme;
 
