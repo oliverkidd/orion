@@ -1865,6 +1865,23 @@ fn copy_linked(app: &mut App, wt: &orion_core::Worktree) {
     copy_issues(app, &issues, &format!(" from {}", wt.branch));
 }
 
+/// The issue checkout `worktree` works on — the first by status of those
+/// whose row names it ([`work_of`]) — by project and id: what a card's
+/// **Open Linear issue** opens. None for the root checkout, and while its
+/// project's list is not read.
+pub(crate) fn worktree_issue(
+    app: &App,
+    worktree: &orion_core::WorktreeId,
+) -> Option<(ProjectId, String)> {
+    let wt = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| &w.id == worktree && !w.is_main)?;
+    let issue = linked_to(app, wt).into_iter().next()?;
+    Some((wt.project_id.clone(), issue.id))
+}
+
 /// The issues in `wt`'s project's list whose worktree it is, by status.
 fn linked_to(app: &App, wt: &orion_core::Worktree) -> Vec<LinearIssue> {
     let mut issues: Vec<LinearIssue> = rows(app, &wt.project_id)

@@ -378,6 +378,12 @@ pub enum MenuAction {
     },
     /// A COMMAND PALETTE or OPEN MENU row: run the action as its key does.
     RunAction(crate::keymap::Action),
+    /// A card menu's **Open Linear issue**: the LINEAR VIEW on the issue
+    /// its checkout works on (`linear::worktree_issue`).
+    OpenLinearIssue {
+        project: ProjectId,
+        id: String,
+    },
 }
 
 /// Which submenu → (right arrow) opens from a menu row.

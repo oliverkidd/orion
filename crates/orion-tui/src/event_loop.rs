@@ -6919,11 +6919,16 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
     // (`launcher::open_pull_request`): ahead of the trailing Delete on an
     // archived card, which keeps no checkout verbs, and after the
     // checkout's Open on a live one.
-    let links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
+    let mut links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
         .and_then(|row| row.pr)
         .map(|pr| MenuItem::new("Open pull request", MenuAction::OpenLink(pr.url)))
         .into_iter()
         .collect();
+    // And the Linear issue it works on, in the LINEAR VIEW.
+    if let Some((project, id)) = crate::linear::worktree_issue(app, &a.worktree_id) {
+        let open = MenuAction::OpenLinearIssue { project, id };
+        links.push(MenuItem::new("Open Linear issue", open));
+    }
     if a.archived {
         let at = items.len().saturating_sub(1);
         items.splice(at..at, links);
@@ -9175,6 +9180,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             });
         }
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
+        MenuAction::OpenLinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
         MenuAction::ContinueOn { id, harness } => {
             launcher::continue_on_harness(app, id, harness, out)
         }
@@ -37952,5 +37958,55 @@ mod tests {
             assert_eq!(todo_file(&app).items.len(), 5, "the pick takes no paste");
             assert!(todo_view(&app).query.is_empty());
         });
+    }
+
+    /// A session whose checkout works on a Linear issue has **Open Linear
+    /// issue** on its right-click menu, which opens the LINEAR VIEW on
+    /// it; one in a checkout no issue names has none.
+    #[test]
+    fn a_sessions_menu_opens_the_linear_issue_its_checkout_works_on() {
+        use crate::linear::{tests::issue, LinearList};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let project = ProjectId("p1".into());
+        let worktree = orion_core::Worktree {
+            id: WorktreeId("w2".into()),
+            project_id: project.clone(),
+            path: "/tmp/demo-eng-2".into(),
+            branch: "eng-2-logout".into(),
+            is_main: false,
+            sort_order: 1,
+        };
+        app.tree.worktrees.push(worktree);
+        let mut agent = app.tree.agents[0].clone();
+        agent.id = AgentId("a2".into());
+        agent.worktree_id = WorktreeId("w2".into());
+        app.tree.agents.push(agent.clone());
+        app.linear.insert(
+            project.clone(),
+            LinearList {
+                list: vec![issue("1", "ENG-1", "Login"), issue("2", "ENG-2", "Logout")],
+                ..Default::default()
+            },
+        );
+        let open = |app: &App, a: &orion_core::Agent| {
+            menu_items_for_session_in(app, a)
+                .into_iter()
+                .find(|i| i.label == "Open Linear issue")
+                .map(|i| i.action)
+        };
+        let main = app.tree.agents[0].clone();
+        assert!(
+            open(&app, &main).is_none(),
+            "the root checkout works on none"
+        );
+        let action = open(&app, &agent).expect("on the menu");
+        let mut out = Vec::new();
+        run_menu_action(&mut app, action, &mut out);
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("the LINEAR VIEW, got {:?}", app.overlay);
+        };
+        assert_eq!(view.project, project);
+        assert_eq!(view.selected, 1, "on ENG-2");
     }
 }

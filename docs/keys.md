@@ -121,7 +121,7 @@ cursor. `↑`/`↓` walk the lines, every band listing all of its entries.
 | `.` / `,` | next / previous session in attention order — waiting on you first, then running, then the unread finishes, then the rest by last interaction — wrapping at both ends, in any project. Landing on an UNSEEN finish reads it |
 | `[` / `]` | the project tab to the left / right, stopping at the ends |
 | `1`–`9` | that PROJECT TAB, counting from the left; rebindable per slot as `project_tab_1` … `project_tab_9` |
-| right-click | a card's, a band's or a project tab's context menu |
+| right-click | a card's, a band's or a project tab's context menu; a card in a checkout that works on a Linear issue (linked to it, or named in its branch) has **Open Linear issue** there, opening the Linear issues modal on it |
 
 The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts**,
