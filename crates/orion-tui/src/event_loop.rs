@@ -13503,6 +13503,9 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // the ones this tree no longer has go, before they could be
             // written back.
             prune_pull_requests_to_tree(app);
+            // A Linear link from before links were kept per project is
+            // the project's whose checkout is on its branch, once.
+            app.linear_links.adopt(&app.tree.worktrees);
             let session_restored = ui_state
                 .as_deref()
                 .is_some_and(|json| restore_ui_state(app, json));

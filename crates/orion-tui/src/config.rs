@@ -1687,7 +1687,8 @@ pub struct Config {
     /// **Auto-fix PRs** (Settings → Review): when one of your pull
     /// requests hits merge conflicts or failing checks, send an agent to
     /// fix it at once — `auto`, the default — or not, `off`. An older
-    /// orion's `ask` reads as on. See `crate::autofix`.
+    /// orion's `ask` is rewritten to `auto` on load ([`Config::migrate`]).
+    /// See `crate::autofix`.
     pub pr_autofix: String,
     /// The autofix agent's model; empty = the default agent's own default.
     pub autofix_model: String,
@@ -3953,9 +3954,23 @@ fn load_layers(path: &Path, local: &Path) -> Config {
     if !loaded.skipped.is_empty() {
         tracing::warn!(keys = ?loaded.skipped, "settings this build can't read keep their defaults");
     }
-    Config {
+    let mut cfg = Config {
         skipped: loaded.skipped,
         ..loaded.value
+    };
+    cfg.migrate();
+    cfg
+}
+
+impl Config {
+    /// What an older release stored, in the words this one keeps, so the
+    /// next save writes it once and nothing reads the old word after: a
+    /// `pr_autofix` of `ask` — from when autofix asked before it sent —
+    /// is `auto`.
+    fn migrate(&mut self) {
+        if self.pr_autofix.trim().eq_ignore_ascii_case("ask") {
+            self.pr_autofix = crate::autofix::Mode::Auto.as_str().into();
+        }
     }
 }
 
@@ -4134,6 +4149,19 @@ mod tests {
         }
     }
     use crate::keymap::Keymap;
+
+    /// An older orion's `pr_autofix: "ask"` is `auto` once loaded, and a
+    /// save writes `auto` back in its place.
+    #[test]
+    fn an_old_autofix_ask_is_rewritten_to_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"pr_autofix": "ask"}"#).unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.pr_autofix, "auto");
+        cfg.save_to(&path).unwrap();
+        assert_eq!(read_json_file(&path)["pr_autofix"], "auto");
+    }
 
     /// Keys an earlier release wrote that this build no longer reads: they
     /// load as nothing, and a save leaves them in the file as they were.
@@ -5132,8 +5160,8 @@ mod tests {
     }
 
     /// The Autofix rows: **Auto-fix PRs** on by default, toggling off and
-    /// back on (an older orion's `ask` reading as on); and a fallback model
-    /// the default agent no longer offers launching on its default instead.
+    /// back on; and a fallback model the default agent no longer offers
+    /// launching on its default instead.
     #[test]
     fn autofix_rows_cycle_and_fall_back_to_the_defaults() {
         let mut cfg = Config::default();
@@ -5143,8 +5171,6 @@ mod tests {
         assert_eq!(cfg.value_label(SettingKind::PrAutofix), "off");
         cfg.cycle_kind(SettingKind::PrAutofix, 1);
         assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Auto);
-        let old: Config = serde_json::from_str(r#"{"pr_autofix": "ask"}"#).unwrap();
-        assert_eq!(old.autofix_mode(), crate::autofix::Mode::Auto);
         let missing: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(missing.autofix_mode(), crate::autofix::Mode::Auto);
         assert_eq!(cfg.value_label(SettingKind::AutofixModel), DEFAULT_CHOICE);

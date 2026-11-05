@@ -92,8 +92,7 @@ impl Mode {
         }
     }
 
-    /// The stored word: `off` is off, and anything else on — the `ask` an
-    /// older orion stored too, which sends now that nothing asks.
+    /// The stored word: `off` is off, and anything else on — the default.
     pub fn parse(word: &str) -> Self {
         match word.trim().to_ascii_lowercase().as_str() {
             "off" => Mode::Off,

@@ -182,9 +182,14 @@ pub fn load_from(path: &Path, repo: &Path, now: u64) -> Loaded {
     };
     match serde_json::from_str::<TodoFile>(&raw) {
         Ok(mut file) => {
-            file.upgrade();
-            file.lift_deep_groups();
-            file.prune_done(super::today());
+            // An older file in this build's shape, and its old ticks gone
+            // — written back at once, so each is done once.
+            let upgraded = file.upgrade();
+            let lifted = file.lift_deep_groups();
+            let pruned = file.prune_done(super::today());
+            if upgraded || lifted || pruned {
+                save(&file);
+            }
             Loaded {
                 file,
                 problem: None,
@@ -358,6 +363,23 @@ mod tests {
                 assert!(raw.contains("\"repo_path\": \"/tmp/demo\""), "{raw}");
                 assert!(!raw.contains("\"agent\""), "unset fields stay out");
             });
+        });
+    }
+
+    /// A file from before the order was kept is upgraded on the load that
+    /// finds it and written back so, never upgraded again.
+    #[test]
+    fn an_old_list_is_written_back_upgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = PathBuf::from("/tmp/demo");
+        with_dir(dir.path().to_path_buf(), || {
+            let mut old = sample(&repo);
+            old.version = 1;
+            let path = path_for(&repo).unwrap();
+            crate::pr_cache::write_json_atomic(&path, &old).unwrap();
+            assert_eq!(load(&repo).file.version, VERSION);
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(raw.contains(&format!("\"version\": {VERSION}")), "{raw}");
         });
     }
 

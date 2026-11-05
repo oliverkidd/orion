@@ -993,8 +993,8 @@ impl KeySource {
 pub struct LinkStore {
     path: Option<PathBuf>,
     /// Keyed by [`link_key`]. A link written before links were kept per
-    /// project is keyed by its branch alone, and any project's branch of
-    /// that name takes it, as then.
+    /// project, keyed by its branch alone, is its project's once the tree
+    /// says whose checkout is on that branch ([`LinkStore::adopt`]).
     links: HashMap<String, PendingLink>,
 }
 
@@ -1002,10 +1002,10 @@ pub struct LinkStore {
 pub(crate) struct PendingLink {
     issue_ids: Vec<String>,
     identifiers: Vec<String>,
-    /// None of its issues waits: kept up to date for an older orion,
-    /// which reads only this. A link written with it and no
-    /// `attached_ids` had every issue attached ([`LinkStore::load`]).
-    #[serde(default)]
+    /// Every issue attached, as a link from before issues were attached
+    /// one by one said it: read once into `attached_ids`
+    /// ([`LinkStore::load`]), never written.
+    #[serde(default, skip_serializing)]
     attached: bool,
     /// The issues a pull request from the branch took; the rest wait.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1058,11 +1058,6 @@ impl PendingLink {
         }
     }
 
-    /// `attached` brought in line with `attached_ids`.
-    fn settle(&mut self) {
-        self.attached = self.waiting().is_empty();
-    }
-
     /// `ids` attached, and of `made` (`(issue id, attachment id)`) the
     /// attachments of the issues on it kept.
     fn attach(&mut self, ids: &[String], made: &[(String, String)]) {
@@ -1076,7 +1071,6 @@ impl PendingLink {
                 self.attachments.insert(id.clone(), attachment.clone());
             }
         }
-        self.settle();
     }
 
     /// Takes the issues `ids` off it; the attachments orion made for
@@ -1097,7 +1091,6 @@ impl PendingLink {
                 stale.push(StaleAttachment { identifier, id });
             }
         }
-        self.settle();
         stale
     }
 }
@@ -1133,41 +1126,121 @@ fn link_key(project: &ProjectId, branch: &str) -> String {
 }
 
 impl LinkStore {
+    /// The store in `path`, an older file's links rewritten once into the
+    /// shape this build keeps ([`migrate`](Self::migrate)) and written
+    /// back when that changed any.
     pub fn load(path: PathBuf) -> Self {
-        let mut links: HashMap<String, PendingLink> = std::fs::read_to_string(&path)
+        let links: HashMap<String, PendingLink> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        // A link from before issues were attached one by one: `attached`
-        // spoke for all of them.
-        for link in links.values_mut() {
-            if link.attached && link.attached_ids.is_empty() {
-                link.attached_ids = link.issue_ids.clone();
-            }
-        }
-        // And one from before links were dated: its age counts from now,
-        // written down so the next launch does not start it again.
-        let now = orion_core::clock::now_secs();
-        let undated = links.values().any(|l| l.linked_at.is_none());
-        for link in links.values_mut() {
-            link.linked_at.get_or_insert(now);
-        }
-        let store = Self {
+        let mut store = Self {
             path: Some(path),
             links,
         };
-        if undated {
+        if store.migrate(orion_core::clock::now_secs()) {
             store.persist();
         }
         store
     }
 
+    /// An older file's links in this build's shape: one from before issues
+    /// were attached one by one has every issue attached that its
+    /// `attached` said were; one from before links were dated counts its
+    /// age from `now` (unix seconds); and an issue on several links — a
+    /// store from before ONE HOME — stays on the one linked last alone.
+    /// True when any changed.
+    fn migrate(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for link in self.links.values_mut() {
+            if link.attached && link.attached_ids.is_empty() {
+                link.attached_ids = link.issue_ids.clone();
+                changed = true;
+            }
+            link.attached = false;
+            if link.linked_at.is_none() {
+                link.linked_at = Some(now);
+                changed = true;
+            }
+        }
+        let mut homes: HashMap<String, (u64, String)> = HashMap::new();
+        for (key, link) in &self.links {
+            let at = link.linked_at.unwrap_or(now);
+            for id in &link.issue_ids {
+                let home = homes.entry(id.clone()).or_insert((at, key.clone()));
+                if (at, key) > (home.0, &home.1) {
+                    *home = (at, key.clone());
+                }
+            }
+        }
+        self.links.retain(|key, link| {
+            let away: Vec<String> = link
+                .issue_ids
+                .iter()
+                .filter(|id| homes.get(*id).is_some_and(|(_, home)| home != key))
+                .cloned()
+                .collect();
+            if !away.is_empty() {
+                link.drop_issues(&away);
+                changed = true;
+            }
+            !link.issue_ids.is_empty()
+        });
+        changed
+    }
+
+    /// A link from before links were kept per project — keyed by its
+    /// branch alone — made the project's whose checkout is on that branch
+    /// in `worktrees`, once the tree says so; with no checkout on it, its
+    /// branch is gone and so is the link. True when any changed.
+    pub(crate) fn adopt(&mut self, worktrees: &[orion_core::Worktree]) -> bool {
+        let bare: Vec<String> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.project.is_none())
+            .map(|(key, _)| key.clone())
+            .collect();
+        if bare.is_empty() {
+            return false;
+        }
+        for branch in bare {
+            let Some(mut link) = self.links.remove(&branch) else {
+                continue;
+            };
+            let Some(project) = worktrees
+                .iter()
+                .find(|w| w.branch == branch)
+                .map(|w| w.project_id.clone())
+            else {
+                continue;
+            };
+            let key = link_key(&project, &branch);
+            link.project = Some(project);
+            link.branch = Some(branch);
+            match self.links.get_mut(&key) {
+                Some(own) => {
+                    let issues: Vec<(String, String)> = link
+                        .issue_ids
+                        .iter()
+                        .cloned()
+                        .zip(link.identifiers.iter().cloned())
+                        .collect();
+                    own.add(&issues);
+                    own.attach(&link.attached_ids, &[]);
+                }
+                None => {
+                    self.links.insert(key, link);
+                }
+            }
+        }
+        self.persist();
+        true
+    }
+
     /// Forget `project`'s links last linked more than [`LINK_KEEP_DAYS`]
     /// before `now` (unix seconds) whose branch is not in `live` — the
     /// branches the project's checkouts are on and its open pull requests
-    /// are from. An attach that is out keeps its link, and so does a link
-    /// from before they were kept per project, which may be another
-    /// project's. True when any went.
+    /// are from. An attach that is out keeps its link. True when any went.
     pub(crate) fn prune(
         &mut self,
         project: &ProjectId,
@@ -1191,17 +1264,10 @@ impl LinkStore {
         pruned
     }
 
-    /// The key of `project`'s link on `branch`: its own, else an older
-    /// one kept for any project.
+    /// The key of `project`'s link on `branch`, while it has one.
     fn key_of(&self, project: &ProjectId, branch: &str) -> Option<String> {
         let own = link_key(project, branch);
-        if self.links.contains_key(&own) {
-            return Some(own);
-        }
-        self.links
-            .get(branch)
-            .filter(|l| l.project.is_none())
-            .map(|_| branch.to_string())
+        self.links.contains_key(&own).then_some(own)
     }
 
     /// `project`'s link on `branch`, made empty if it has none.
@@ -1270,7 +1336,6 @@ impl LinkStore {
         link.attached_ids
             .retain(|id| !pairs.iter().any(|(again, _)| again == id));
         link.failures = 0;
-        link.settle();
         let ids: Vec<String> = pairs.into_iter().map(|(id, _)| id).collect();
         let stale = self.rehome(project, branch, &ids);
         self.persist();
@@ -1361,7 +1426,7 @@ impl LinkStore {
         let own = self.key_of(project, head);
         let mut out = Vec::new();
         for (key, link) in self.links.iter_mut() {
-            let theirs = link.project.as_ref().is_none_or(|p| p == project);
+            let theirs = link.project.as_ref() == Some(project);
             if !theirs || Some(key) == own.as_ref() || link.sending || link.gave_up() {
                 continue;
             }
@@ -1412,18 +1477,13 @@ impl LinkStore {
         gave_up
     }
 
-    /// The branch `issue_id` is linked to — more than one only in a store
-    /// written before ONE HOME — in name order.
-    pub fn branches_of(&self, issue_id: &str) -> Vec<&str> {
-        let mut branches: Vec<&str> = self
-            .links
+    /// The branch `issue_id` is linked to, if any: ONE HOME, so one at
+    /// most.
+    pub fn branch_of(&self, issue_id: &str) -> Option<&str> {
+        self.links
             .iter()
-            .filter(|(_, l)| l.issue_ids.iter().any(|id| id == issue_id))
+            .find(|(_, l)| l.issue_ids.iter().any(|id| id == issue_id))
             .map(|(key, l)| l.branch.as_deref().unwrap_or(key))
-            .collect();
-        branches.sort_unstable();
-        branches.dedup();
-        branches
     }
 
     fn persist(&self) {
@@ -1551,10 +1611,9 @@ pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Op
     let root = root_branch(app, project);
     let not_root = |branch: &str| root != Some(branch);
     let attached: Vec<&IssuePr> = issue.prs.iter().filter(|p| not_root(&p.branch)).collect();
-    let linked = app.linear_links.branches_of(&issue.id);
+    let linked = app.linear_links.branch_of(&issue.id);
     let worktree = linked
-        .iter()
-        .find_map(|b| checkout(b))
+        .and_then(checkout)
         .or_else(|| {
             worktrees
                 .iter()
@@ -1580,7 +1639,7 @@ pub(crate) fn work_of(app: &App, project: &ProjectId, issue: &LinearIssue) -> Op
     let ours = |head: &str| {
         not_root(head)
             && (worktree.is_some_and(|w| w.branch == head)
-                || linked.contains(&head)
+                || linked == Some(head)
                 || names_issue(head, &issue.identifier))
     };
     let live = open
@@ -8498,8 +8557,8 @@ pub(crate) mod tests {
         };
         assert_eq!(prs(&app), [(41, "branch-41".to_string())], "at once");
         assert_eq!(
-            app.linear_links.branches_of("1"),
-            ["branch-41"],
+            app.linear_links.branch_of("1"),
+            Some("branch-41"),
             "remembered against its branch"
         );
         land_list(&mut app, before, &dir, vec![issue("1", "ENG-1", "Login")]);
@@ -8516,32 +8575,82 @@ pub(crate) mod tests {
     // ---- the LinkStore ----
 
     /// `linear-links.json` from before links were kept per project — or
-    /// per issue — still loads: its links wait on any project's branch of
-    /// that name, `attached: true` reading as every issue attached. New
-    /// links on one branch name in two projects stay apart, on disk too.
+    /// per issue — is rewritten once: `attached: true` is every issue
+    /// attached, and is written no more; a link keyed by its branch alone
+    /// is the project's whose checkout is on that branch once the tree
+    /// says so, and gone when none is. New links on one branch name in two
+    /// projects stay apart, on disk too.
     #[test]
-    fn older_links_load_and_two_projects_keep_one_branch_name_apart() {
+    fn older_links_are_rewritten_once_and_two_projects_keep_one_branch_name_apart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("linear-links.json");
         std::fs::write(
             &path,
             r#"{
               "done": {"issue_ids": ["1"], "identifiers": ["ENG-1"], "attached": true},
-              "wait": {"issue_ids": ["2"], "identifiers": ["ENG-2"]}
+              "wait": {"issue_ids": ["2"], "identifiers": ["ENG-2"]},
+              "gone": {"issue_ids": ["5"], "identifiers": ["ENG-5"]}
             }"#,
         )
         .unwrap();
         let (p1, p2) = (ProjectId("p1".into()), ProjectId("p2".into()));
         let mut store = LinkStore::load(path.clone());
+        let on = |project: &ProjectId, branch: &str| orion_core::Worktree {
+            id: orion_core::WorktreeId(branch.into()),
+            project_id: project.clone(),
+            path: dir.path().join(branch),
+            branch: branch.into(),
+            is_main: false,
+            sort_order: 0,
+        };
+        assert!(store.adopt(&[on(&p1, "done"), on(&p2, "wait")]));
+        assert!(!store.adopt(&[]), "once");
         assert!(store.pending(&p1, "done").is_empty(), "attached already");
-        assert_eq!(store.branches_of("1"), ["done"]);
-        assert_eq!(store.pending(&p1, "wait"), ["ENG-2"]);
-        assert_eq!(store.pending(&p2, "wait"), ["ENG-2"], "any project's");
+        assert_eq!(store.branch_of("1"), Some("done"));
+        assert!(
+            store.pending(&p1, "wait").is_empty(),
+            "p2's, not any project's"
+        );
+        assert_eq!(store.pending(&p2, "wait"), ["ENG-2"]);
+        assert_eq!(store.branch_of("5"), None, "no checkout on its branch");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("\"attached\""), "{raw}");
+        assert!(raw.contains("\"wait:p2\""), "{raw}");
         store.remember(&p1, "feature-x", &[issue("3", "ENG-3", "c")]);
         store.remember(&p2, "feature-x", &[issue("4", "ENG-4", "d")]);
         let store = LinkStore::load(path);
         assert_eq!(store.pending(&p1, "feature-x"), ["ENG-3"]);
         assert_eq!(store.pending(&p2, "feature-x"), ["ENG-4"]);
+    }
+
+    /// A store from before ONE HOME, an issue on two branches, keeps it
+    /// on the one linked last alone, the other link left with what else
+    /// it has — or gone, with nothing.
+    #[test]
+    fn an_issue_on_two_links_keeps_the_one_linked_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linear-links.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "old:p1": {"issue_ids": ["1", "2"], "identifiers": ["ENG-1", "ENG-2"],
+                         "project": "p1", "branch": "old", "linked_at": 100},
+              "new:p1": {"issue_ids": ["1"], "identifiers": ["ENG-1"],
+                         "project": "p1", "branch": "new", "linked_at": 200},
+              "lone:p1": {"issue_ids": ["2"], "identifiers": ["ENG-2"],
+                          "project": "p1", "branch": "lone", "linked_at": 50}
+            }"#,
+        )
+        .unwrap();
+        let p1 = ProjectId("p1".into());
+        let store = LinkStore::load(path.clone());
+        assert_eq!(store.branch_of("1"), Some("new"));
+        assert_eq!(store.branch_of("2"), Some("old"));
+        assert_eq!(store.pending(&p1, "old"), ["ENG-2"]);
+        assert!(store.pending(&p1, "lone").is_empty());
+        let back = LinkStore::load(path);
+        assert_eq!(back.branch_of("1"), Some("new"), "written back");
+        assert_eq!(back.links.len(), 2);
     }
 
     /// A link outlives its branch by ninety days and no more: one whose
@@ -8574,17 +8683,17 @@ pub(crate) mod tests {
         let live: std::collections::HashSet<String> = ["kept".to_string()].into();
 
         assert!(!store.prune(&p1, &live, now + 89 * DAY), "not yet");
-        assert_eq!(store.branches_of("1"), ["gone"]);
+        assert_eq!(store.branch_of("1"), Some("gone"));
         assert!(store.prune(&p1, &live, now + 91 * DAY));
-        assert!(store.branches_of("1").is_empty(), "its branch is gone");
-        assert!(store.branches_of("9").is_empty(), "the older one too");
-        assert_eq!(store.branches_of("2"), ["kept"], "still worked on");
-        assert_eq!(store.branches_of("3"), ["gone"], "another project's");
+        assert!(store.branch_of("1").is_none(), "its branch is gone");
+        assert!(store.branch_of("9").is_none(), "the older one too");
+        assert_eq!(store.branch_of("2"), Some("kept"), "still worked on");
+        assert_eq!(store.branch_of("3"), Some("gone"), "another project's");
         assert!(!store.prune(&p1, &live, now + 91 * DAY), "nothing left to");
 
         let back = LinkStore::load(path);
-        assert!(back.branches_of("1").is_empty(), "forgotten on disk too");
-        assert_eq!(back.branches_of("2"), ["kept"]);
+        assert!(back.branch_of("1").is_none(), "forgotten on disk too");
+        assert_eq!(back.branch_of("2"), Some("kept"));
     }
 
     /// Linking more issues to a branch whose pull request took some
@@ -8597,8 +8706,8 @@ pub(crate) mod tests {
         store.remember_attached(&p1, "feat", &[("1".into(), "ENG-1".into())], &[]);
         store.remember(&p1, "feat", &[issue("2", "ENG-2", "b")]);
         assert_eq!(store.pending(&p1, "feat"), ["ENG-2"]);
-        assert_eq!(store.branches_of("1"), ["feat"]);
-        assert_eq!(store.branches_of("2"), ["feat"]);
+        assert_eq!(store.branch_of("1"), Some("feat"));
+        assert_eq!(store.branch_of("2"), Some("feat"));
     }
 
     /// A link Linear refused is not spent: the next list tries it again,
@@ -8681,7 +8790,7 @@ pub(crate) mod tests {
         assert_eq!(sent.len(), 1, "not asked again");
         assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
         assert!(app.linear_links.pending(&project, "feature-x").is_empty());
-        assert_eq!(app.linear_links.branches_of("1"), ["feature-x"]);
+        assert_eq!(app.linear_links.branch_of("1"), Some("feature-x"));
     }
 
     /// A ⌘L launch fired with `issues` onto worktree `w1` — whose pull
@@ -8744,7 +8853,7 @@ pub(crate) mod tests {
         );
         assert_eq!(sent, [attached("2", 41)]);
         assert!(app.linear_links.pending(&project, "branch-41").is_empty());
-        assert_eq!(app.linear_links.branches_of("2"), ["branch-41"]);
+        assert_eq!(app.linear_links.branch_of("2"), Some("branch-41"));
         assert!(app.flash.is_none(), "an auto-attach that worked is silent");
     }
 
@@ -8899,9 +9008,9 @@ pub(crate) mod tests {
                 id: "att-1".into()
             }]
         );
-        assert_eq!(store.branches_of("1"), ["new"]);
+        assert_eq!(store.branch_of("1"), Some("new"));
         assert_eq!(store.pending(&p1, "new"), ["ENG-1"]);
-        assert_eq!(store.branches_of("2"), ["old"], "the rest stay");
+        assert_eq!(store.branch_of("2"), Some("old"), "the rest stay");
         assert!(store.pending(&p1, "old").is_empty());
 
         let moved = [("2".to_string(), "ENG-2".to_string())];
@@ -8909,13 +9018,13 @@ pub(crate) mod tests {
             store.remember_attached(&p1, "new", &moved, &[]).is_empty(),
             "Linear's own link is Linear's to keep"
         );
-        assert_eq!(store.branches_of("2"), ["new"]);
+        assert_eq!(store.branch_of("2"), Some("new"));
         assert!(store.begin_attach(&p1, "old").is_none(), "forgotten");
         let again = store.remember(&p1, "new", &both[..1]);
         assert!(again.is_empty(), "its own branch again moves nothing");
         let back = LinkStore::load(path);
-        assert_eq!(back.branches_of("1"), ["new"]);
-        assert_eq!(back.branches_of("2"), ["new"]);
+        assert_eq!(back.branch_of("1"), Some("new"));
+        assert_eq!(back.branch_of("2"), Some("new"));
     }
 
     /// A ⌘L launch that takes an issue to another worktree takes it off
@@ -8966,7 +9075,7 @@ pub(crate) mod tests {
                 [attached("2", 41), serde_json::json!({"id": "att-41"})]
             );
         });
-        assert_eq!(app.linear_links.branches_of("2"), ["feature-x"]);
+        assert_eq!(app.linear_links.branch_of("2"), Some("feature-x"));
         assert_eq!(app.linear_links.pending(&project, "feature-x"), ["ENG-2"]);
         assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
     }
@@ -9014,7 +9123,7 @@ pub(crate) mod tests {
             sent,
             [attached("2", 41), serde_json::json!({"id": "att-41"})]
         );
-        assert_eq!(app.linear_links.branches_of("2"), ["feature-x"]);
+        assert_eq!(app.linear_links.branch_of("2"), Some("feature-x"));
         assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
     }
 

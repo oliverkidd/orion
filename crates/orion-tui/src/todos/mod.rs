@@ -161,15 +161,17 @@ impl Counts {
 impl TodoFile {
     /// A file from before [`store::VERSION`] 2, its items put in the order
     /// they were drawn in then: by priority, urgent first, each priority
-    /// in the order they stood.
-    pub fn upgrade(&mut self) {
+    /// in the order they stood. True when it was one — the load writes it
+    /// back, so this runs once a file.
+    pub fn upgrade(&mut self) -> bool {
         if self.version >= 2 {
-            return;
+            return false;
         }
         // Stable: equal priorities keep the order they stand in.
         self.items
             .sort_by_key(|i| crate::linear::priority_rank(i.priority));
         self.version = store::VERSION;
+        true
     }
 
     /// Items ticked more than [`DONE_KEEP_DAYS`] before `today` gone from
