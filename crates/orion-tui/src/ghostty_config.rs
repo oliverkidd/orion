@@ -197,6 +197,8 @@ mod tests {
             "cmd+shift+p",
             "cmd+1",
             "cmd+,",
+            // The PULL REQUESTS MODAL's edit.
+            "cmd+;",
         ] {
             assert!(releases(&chord(spec)), "{spec}");
         }

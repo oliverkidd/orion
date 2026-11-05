@@ -3560,10 +3560,11 @@ pub struct OpenPrs {
     /// lands).
     pub list: Vec<OpenPr>,
     /// The pull requests merged within `pull_request::MERGED_DAYS`, the
-    /// latest merge first: the PULL REQUESTS MODAL's `Merged` section, and
-    /// no other surface's — the group, the counts, the palette and AUTOFIX
-    /// read `list`. Kept from the last answer that said, where one did not
-    /// (`ListAnswer::merged`).
+    /// latest merge first, then the ones closed without merging within
+    /// `pull_request::CLOSED_DAYS`: the PULL REQUESTS MODAL's `Merged` and
+    /// `Closed` sections, and no other surface's — the group, the counts,
+    /// the palette and AUTOFIX read `list`. Kept from the last answer that
+    /// said, where one did not (`ListAnswer::merged`).
     pub merged: Vec<OpenPr>,
     /// When this answer landed. Switching projects pulls the next lookup
     /// forward, but never past this plus [`OPEN_PRS_MIN_AGE`] — otherwise

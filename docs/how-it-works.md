@@ -411,7 +411,8 @@ sweeps, and a merged checkout left lying around costs an idle orion no repaints.
 `⌘K` and the pane reads the pull request as its [page](keys.md#the-pull-request-page) — description and
 conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
 as the PULL REQUESTS MODAL does (whose list moves a pull request to its **Merged** section on merge — the last 7 days'
-merges, under the open rows — and which `hide_draft_prs` never thins — the
+merges, under the open rows — and one closed without merging to its **Closed** section, the last 30
+days' — and which `hide_draft_prs` never thins — the
 modal lists drafts too); `⌘E` shows its diff. The page's WORK BLOCK (`pr_work`), under its first
 line, is drawn from what orion already holds and asks for nothing: the `autofix-<n>` on the head
 branch from the tree (or, with none, the page's failing checks and the conflict check's files), the
@@ -452,7 +453,32 @@ lookup that fails keeps the last list that worked on screen, and the PULL REQUES
 `couldn't refresh` under its filter until an answer lands. The same query brings the modal's
 **Merged** section: the merged pull requests most recently touched — name, author and merge
 time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). It is
-the first page of them, the 100 most recently touched, which is where every new merge lands.
+the first page of them, the 100 most recently touched, which is where every new merge lands. Its
+**Closed** section rides along the same way: the 50 closed-unmerged pull requests most recently
+touched, cut to the last 30 days (`pull_request::CLOSED_DAYS`), each with the base it was on, whether
+that base still exists, and the last few `BaseRefDeletedEvent` / `ClosedEvent` items of its timeline
+— which is how a row says `its base feat was deleted` (GitHub closes a pull request whose base
+branch goes) or `closed by sam`.
+
+The new pull request form's **Promote** mode works out what a `dev → main` promotion carries from
+two answers: GitHub's merged pull requests into `dev` (the 100 most recently touched, each with its
+merge commit) and git's `origin/main..origin/dev`, read locally after the form's fetch. A pull request
+goes out when its merge commit is in that range — exactly what the promotion's diff will hold,
+however `main` last moved (a promotion merged, a fast-forward, a hotfix straight onto `main`); git
+unable to say, it falls back to the ones merged after `main`'s tip was committed. Its Linear issues
+are the ones Linear has it attached to, then any its title or head branch names (`rip-412-…`) of a
+team orion's Linear list knows. A promotion already open is one `gh pr list --head dev --base main`.
+
+The **Edit pull request** form (`⌘;`) asks GitHub once as it opens — one GraphQL query for the pull
+request as it stands (its labels, requested reviewers, assignees, whether its base and head branches
+still exist) and what the repo offers (its labels, the people it can assign) — and starts every
+field on what the row already knew, each taking GitHub's word when it lands unless it was changed
+meanwhile. Enter sends only the difference, in the order GitHub allows: a closed pull request can't
+be retargeted and one whose base branch was deleted can't be reopened, so a reopen goes first, a
+deleted base (or head) branch put back first at the commit it last pointed at
+(`POST git/refs`), then `gh pr edit` with every change as flags, then `gh pr ready`, then `gh pr
+close` and the branch's delete. A base put back only to reopen on is deleted again once the pull
+request has moved off it and nothing open is based on it.
 
 The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
 all say where the same pull request stands, on their own beats, and land in whatever order the

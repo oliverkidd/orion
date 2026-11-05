@@ -39,6 +39,8 @@ const CMD_N: &[u8] = b"\x1b[110;9u";
 const CMD_E: &[u8] = b"\x1b[101;9u";
 const CMD_F: &[u8] = b"\x1b[102;9u";
 const CMD_SHIFT_R: &[u8] = b"\x1b[114;10u";
+/// `⌘;`: codepoint 59, modifiers 1 + 8 (super).
+const CMD_SEMICOLON: &[u8] = b"\x1b[59;9u";
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 const SPACE: &[u8] = b" ";
 /// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
@@ -1263,6 +1265,84 @@ fn tui_pr_review_comments_on_a_line_and_sends_the_review() {
         "the review sent with it: {}",
         bodies[2]
     );
+}
+
+/// `⌘;` in the PULL REQUESTS MODAL, as Ghostty's kitty protocol spells it
+/// (`ESC [59;9u`): the EDIT form comes up on the row and fills from
+/// GitHub's one read — and opening it, and leaving, write nothing. A stub
+/// `gh` on PATH answers and writes down every call.
+#[test]
+fn tui_cmd_semicolon_opens_the_edit_form_and_only_reads() {
+    let stub_bin = tempfile::tempdir().unwrap();
+    let calls = stub_bin.path().join("calls");
+    let mut tui = TuiHarness::spawn_with(
+        &[(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )],
+        r#", "pr_autofix": "off""#,
+    );
+    let repo = tui.make_repo("edit-proj");
+    let list = concat!(
+        "{\"data\":{\"repository\":{\"pullRequests\":{\"nodes\":[",
+        "{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
+        "\"isDraft\":false,\"headRefName\":\"feat\",\"isCrossRepository\":false,",
+        "\"headRepositoryOwner\":{\"login\":\"o\"},\"mergeable\":\"MERGEABLE\",",
+        "\"viewerDidAuthor\":false,\"headRefOid\":\"abc123\",",
+        "\"commits\":{\"nodes\":[{\"commit\":{\"statusCheckRollup\":{\"state\":\"SUCCESS\"}}}]}}",
+        "]}}}}"
+    );
+    let facts = concat!(
+        "{\"data\":{\"repository\":{\"pullRequest\":{\"title\":\"Add things\",\"state\":\"OPEN\",",
+        "\"isDraft\":false,\"baseRefName\":\"main\",\"baseRefOid\":\"aaa111\",",
+        "\"headRefName\":\"feat\",\"headRefOid\":\"abc123\",\"isCrossRepository\":false,",
+        "\"author\":{\"login\":\"ada\"},\"baseRef\":{\"name\":\"main\"},\"headRef\":{\"name\":\"feat\"},",
+        "\"labels\":{\"nodes\":[{\"name\":\"bug\"}]},\"reviewRequests\":{\"nodes\":[]},",
+        "\"assignees\":{\"nodes\":[]}},",
+        "\"labels\":{\"nodes\":[{\"name\":\"bug\",\"color\":\"d73a4a\"}]},",
+        "\"assignableUsers\":{\"nodes\":[{\"login\":\"ada\"}]}}}}"
+    );
+    let gh = stub_bin.path().join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{calls}'\ncase \"$*\" in\n\
+             \x20 *assignableUsers*) printf '%s' '{facts}' ;;\n\
+             \x20 'api graphql'*) printf '%s' '{list}' ;;\n\
+             \x20 *) exit 1 ;;\n\
+             esac\n",
+            calls = calls.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    tui.wait_for_text("to begin");
+    add_project(&mut tui, &repo, "edit-proj");
+    tui.send(CMD_U);
+    tui.wait_for_text("Add things");
+    tui.send(CMD_SEMICOLON);
+    tui.wait_for_text("Edit #7");
+    // GitHub's answer is in: the form says where it stands and what it has.
+    tui.wait_for_text("feat → main · open");
+    tui.wait_for_text("Labels    bug");
+    tui.send(ESC);
+    tui.wait_for_gone("Edit #7");
+
+    let calls = std::fs::read_to_string(&calls).unwrap_or_default();
+    let writes: Vec<&str> = calls
+        .lines()
+        .filter(|c| {
+            ["pr edit", "pr close", "pr reopen", "pr ready", "api -X"]
+                .iter()
+                .any(|w| c.starts_with(w))
+        })
+        .collect();
+    assert!(writes.is_empty(), "nothing written: {writes:?}");
 }
 
 /// `⌘U` in an agent's locked pane, as Ghostty's kitty protocol spells it:

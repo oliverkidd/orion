@@ -114,13 +114,18 @@ impl PrObservation {
         }
     }
 
-    /// A row of the list's merged tail (`ListAnswer::merged`): merged, by
-    /// the query that brought it, and nothing asked of its conflicts or
-    /// checks — a merged pull request is past both.
-    pub fn of_merged_row(pr: &OpenPr) -> Self {
+    /// A row of the list's tail (`ListAnswer::merged`): merged — or closed
+    /// without merging — by the query that brought it, and nothing asked
+    /// of its conflicts or checks: such a pull request is past both.
+    pub fn of_tail_row(pr: &OpenPr) -> Self {
+        let state = if pr.is_closed() {
+            crate::pull_request::STATE_CLOSED
+        } else {
+            STATE_MERGED
+        };
         Self {
             title: said(&pr.title),
-            state: Some(STATE_MERGED.to_string()),
+            state: Some(state.to_string()),
             head_sha: said(&pr.head_sha),
             ..Self::default()
         }

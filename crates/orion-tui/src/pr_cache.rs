@@ -337,7 +337,7 @@ pub fn install(app: &mut App, store: Store) {
     }
     for pr in store.merged.values().flatten() {
         app.prs
-            .observe(&pr.url, PrObservation::of_merged_row(pr), Asked::Cached);
+            .observe(&pr.url, PrObservation::of_tail_row(pr), Asked::Cached);
     }
     for (url, detail) in &store.details {
         app.prs
