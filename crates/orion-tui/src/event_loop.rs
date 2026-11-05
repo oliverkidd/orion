@@ -2568,7 +2568,7 @@ pub struct PrReview {
 ///
 /// It reads the pull request from the project's own git, the COMMIT LIST
 /// over its files with every commit ticked: the whole pull request, its
-/// commits there to read one at a time or a few together, as a
+/// commits there to read a commit or a few together, as a
 /// checkout's are. A head the repo lacks — someone else's branch, a
 /// fork's — is fetched by its pull ref first, the way the conflict check
 /// fetches it ([`read_pr_opening`]).
@@ -2606,8 +2606,8 @@ fn pr_modal_under(app: &App) -> Option<Box<crate::pr_modal::PullRequestsView>> {
 /// Dress a DIFF VIEWER about to go up the way every one opens: its column
 /// at the width it was last dragged to; the **Review** SETTINGS — the
 /// files as a tree, the panel with the keys (the commits only where there
-/// are any to tick: `commits`), how ticked commits read; and, opened from
-/// the PULL REQUESTS MODAL, the modal to go back to. Before its files are
+/// are any to tick: `commits`); and, opened from the PULL REQUESTS MODAL,
+/// the modal to go back to. Before its files are
 /// selected or filled in: a tree toggled after would land elsewhere.
 fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
     use crate::app::DiffFocus;
@@ -2619,7 +2619,6 @@ fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
         DiffFocus::Commits if !commits => DiffFocus::Files,
         focus => focus,
     };
-    view.open_one_at_a_time = app.diff_one_at_a_time;
     view.back = pr_modal_under(app);
 }
 
@@ -8069,10 +8068,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // file — this viewer's alone: the **Files as a tree**
                 // SETTING is how the next one opens.
                 _ if TREE.matches(&key) => activate::diff_tree_toggled(view),
-                // The COMMIT LIST's own: tick, all or none, and how the
-                // ticked are read — ^G from anywhere, the rest where its
+                // The COMMIT LIST's own: tick, all or none, where its
                 // cursor is.
-                _ if MODE.matches(&key) && commits.is_some() => activate::diff_review_mode(view),
                 _ if TICK.matches(&key) && on(DiffFocus::Commits) => activate::diff_tick(view),
                 // ^A is the filter's line start while it holds text.
                 _ if ALL.matches(&key)
@@ -8084,9 +8081,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // Tab / ⇧Tab walk the panels: commits, files, diff.
                 KeyCode::Tab => activate::diff_focus_next(view, true),
                 KeyCode::BackTab => activate::diff_focus_next(view, false),
-                // ⇧←/⇧→ step older / newer from wherever the keys are —
-                // the cursor's commit, or the ticked ones one at a time —
-                // beside the ⇧↑/⇧↓ that scroll the diff.
+                // ⇧←/⇧→ step the cursor's commit older / newer from wherever
+                // the keys are, with nothing ticked — beside the ⇧↑/⇧↓ that
+                // scroll the diff.
                 KeyCode::Left if shift && commits.is_some() => {
                     activate::diff_commit_step(view, true)
                 }
@@ -8839,7 +8836,6 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.launcher_all_open = cfg.expand_all_worktrees;
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
-    app.diff_one_at_a_time = cfg.diff_one_at_a_time();
     app.autofix_mode = cfg.autofix_mode();
     app.base_sync.every = crate::base_sync::interval(&cfg.base_fetch);
     // Turned off, the readout goes at once; the poll stops with it.
@@ -26848,7 +26844,6 @@ mod tests {
                 "all ticked · together",
                 "The whole branch since origin/main",
                 "Every commit made on the branch since origin/main",
-                "⇧←/⇧→ step · ^G one at a time",
             ] {
                 assert!(screen.contains(needle), "{needle:?}\n{screen}");
             }
@@ -26976,11 +26971,12 @@ mod tests {
 
     /// The COMMIT LIST's keys: `⇧Tab` gives it the keys, `^A` unticks
     /// everything so the cursor's commit is on screen, `↓` walks it, each
-    /// commit's own files up as the cursor lands; `Space` ticks, `^G` reads
-    /// the ticked one at a time and `⇧←`/`⇧→` step them; `Enter` hands the
-    /// keys on to the files; typing is the files' filter again.
+    /// commit's own files up as the cursor lands; `Space` ticks, and the
+    /// ticked read together with nothing for `⇧←`/`⇧→` to step; `Enter`
+    /// hands the keys on to the files, where `⇧←`/`⇧→` walk the cursor's
+    /// commit once nothing is ticked; typing is the files' filter again.
     #[test]
-    fn the_commit_list_ticks_and_steps_one_commit_at_a_time() {
+    fn the_commit_list_ticks_and_steps_commit_by_commit() {
         use crate::app::DiffFocus;
         use crate::commit_list::Row;
         use crate::diff_doc::Head;
@@ -27017,33 +27013,13 @@ mod tests {
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             assert_eq!(commit_row(&app), Some(Row::Commit(1)), "the oldest ends it");
 
-            // Tick both, read them one at a time.
+            // Tick both: they read together, with nothing to step.
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert_eq!(diff_paths(&app), ["a.txt", "b.txt"], "together");
-            press(
-                &mut app,
-                KeyCode::Char('g'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert_eq!(diff_paths(&app), ["a.txt"], "commit 1 of 2 is the cursor's");
-            assert_eq!(
-                diff_view(&app).head[0],
-                Head::Title("commit 2 of 2 · edit a".into())
-            );
             press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
-            assert_eq!(diff_paths(&app), ["b.txt"], "⇧←: the older step");
-            assert_eq!(
-                commit_row(&app),
-                Some(Row::Commit(1)),
-                "the cursor rides along"
-            );
-            assert_eq!(
-                diff_view(&app).head[0],
-                Head::Title("commit 1 of 2 · add b".into())
-            );
+            assert_eq!(diff_paths(&app), ["a.txt", "b.txt"], "still together");
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert_eq!(
@@ -27051,12 +27027,23 @@ mod tests {
                 DiffFocus::Files,
                 "Enter: the files' keys"
             );
-            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            // ^A unticks them both: the cursor's commit again, which ⇧←
+            // walks older from the files.
+            press(
+                &mut app,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert_eq!(diff_paths(&app), ["a.txt"]);
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
             assert_eq!(
                 diff_paths(&app),
-                ["a.txt"],
-                "⇧→ from the files: the newer step"
+                ["b.txt"],
+                "⇧← from the files: the older commit"
             );
+            assert_eq!(commit_row(&app), Some(Row::Commit(1)));
+            assert_eq!(diff_view(&app).head[0], Head::Title("add b".into()));
             assert_eq!(diff_view(&app).focus, DiffFocus::Files, "the keys stay put");
 
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);

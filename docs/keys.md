@@ -83,7 +83,7 @@ Ghostty config.
 | Skills | `⌘S` | `^S` | the SKILLS BROWSER: every agent skill on the machine, to read, edit or trash (below) |
 | Todos | `⌘I` | `^Q` | the TODOS MODAL: every project's own todo list, a tab each, opened on the selected project's (below). `^I` is Tab, so the twin is `^Q` — on the grid only; in a locked pane `^Q` is the way out |
 | My week in review | `⌘⇧Y` | `⇧W` | the WEEK IN REVIEW: what was merged and done in the last 7 days, written up by product area with what to show and what to say (below). `⌘⇧W` would read better, and Ghostty keeps it |
-| Changes | `⌘E` | `^E` | the DIFF VIEWER for the selected worktree — its uncommitted changes, the whole branch, or the commits you tick, together or one at a time — or the diff of the pull request the pane is reading ([below](#the-diff-viewer)) |
+| Changes | `⌘E` | `^E` | the DIFF VIEWER for the selected worktree — its uncommitted changes, the whole branch, or the commits you tick, read together — or the diff of the pull request the pane is reading ([below](#the-diff-viewer)) |
 | Command palette | `⌘⇧P` | `^⇧P`, `:` | every action by name, with its key; `:` is vim's command line, the key a stock terminal delivers |
 | Open outside orion | `⌘O` | `^O` | the OPEN MENU: the repo or pull request on GitHub, the checkout in your editor app (**Open in app**: Cursor, VS Code, …), a terminal in the checkout, the checkout's open command |
 | Reload from GitHub | `⌘R` | `^R` | ask `gh` again now for the project's open pull requests, the selected worktree's pull request and the one the pane is reading |
@@ -308,7 +308,7 @@ values with how many rows carry each. `↑`/`↓` walk every value, `←`/`→` 
 adds the value's token to the filter line — or takes it out — the rows narrowing behind it. `Enter` or `Esc` puts
 it away with the filter kept.
 
-The DIFF VIEWER keeps its own: `⌘A` all, `⌘G` together / one at a time, `⌘R` reviewed, `⌘B` tree
+The DIFF VIEWER keeps its own: `⌘A` all, `⌘R` reviewed, `⌘B` tree
 ([The diff viewer](#the-diff-viewer)). orion releases every one of these from Ghostty along with
 the grid's ⌘ chords. `⌘V` stays Ghostty's, which is what pastes the clipboard into a field.
 
@@ -413,13 +413,12 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
   while the checkout is dirty. Each row has a box, `[✓]` ticked and `[ ]` not; its subject wraps
   under the box, its short sha, age and `+added −removed` on the line below.
 - **What the diff shows.** With nothing ticked, the row under the cursor. Tick rows and they read
-  TOGETHER, as one diff — or, `⌘G`, ONE AT A TIME, oldest first, `commit 2 of 3 · <subject>` over
-  each. The rows on screen are the bold ones, and the panel's foot says `3 ticked · together`. A
+  TOGETHER, as one diff. The rows on screen are the bold ones, and the panel's foot says `3 ticked · together`. A
   clean checkout opens with every commit ticked — the whole branch, what its pull request shows; a
   dirty one on its uncommitted changes, nothing ticked. Nothing carries over to the next `⌘E`.
 - **How it opens** is Settings → Review: the keys on the commits (**Start on**, so the ticks come
-  first and `Tab` moves on to the files, then the diff), the files as a directory tree (**Files as a
-  tree**), and ticked commits together or one at a time (**Ticked commits**).
+  first and `Tab` moves on to the files, then the diff) and the files as a directory tree (**Files as
+  a tree**).
 - **Ticked with a gap.** Ticked rows side by side on the branch read as one range. An unticked
   commit, or a merge, between two ticked ones starts another range, and a file both ranges touch
   shows each range's diff in turn under its `── 1ec007c..dde6cc9` label — never a diff across the
@@ -436,11 +435,10 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | Key | Where | Action |
 |---|---|---|
 | `Tab` / `⇧Tab` | anywhere | the next panel / the one before |
-| `↑` / `↓` | the commits, the files | walk the list; with nothing ticked each commit goes up as the cursor lands on it, one at a time the step follows it onto a ticked row |
+| `↑` / `↓` | the commits, the files | walk the list; with nothing ticked each commit goes up as the cursor lands on it |
 | `Space` | the commits | tick the row under the cursor, or untick it |
 | `⌘A` | the commits, or the files with nothing typed | tick every commit — or, when they all are, none |
-| `⌘G` | two or more ticked | read them together, or one at a time |
-| `⇧←` / `⇧→` | anywhere | older / newer: the cursor's commit with nothing ticked; the step before or after one at a time; from together, the newest or the oldest step |
+| `⇧←` / `⇧→` | anywhere | older / newer: the cursor's commit, with nothing ticked |
 | `Enter` | the commits / a file / a tree directory | on to the files / the diff takes the keys / fold it |
 | `↑` / `↓`, `Space`, `←` | the diff | a row, a page, back to the files |
 | `⇧↑` / `⇧↓`, `PgUp` / `PgDn`, `Home` / `End` | anywhere | scroll the diff |
@@ -454,7 +452,7 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 
 With the pane reading a pull request, `⌘E` — and the PULL REQUESTS MODAL's `⌘E` and its Changes and
 Commits rows — open the same viewer on that pull request, read from git: its commits over the
-files, every one ticked — the whole pull request — to read one at a time or a few together like a
+files, every one ticked — the whole pull request — to read a commit or a few together like a
 checkout's, opened on the file or the commit you picked. A head the repo lacks (someone else's
 branch, a fork's) is fetched by its pull ref first.
 

@@ -1361,11 +1361,6 @@ pub struct DiffView {
     /// the viewer is a level inside it, and Esc or a click outside puts
     /// it back on the same row and tab rather than closing onto the grid.
     pub back: Option<Box<crate::pr_modal::PullRequestsView>>,
-    /// The **Ticked commits** SETTING as the viewer opened: the COMMIT
-    /// LIST reads two or more ticked commits ONE AT A TIME from the start
-    /// (`commit_list::install`). The list's own `one_at_a_time` is how it
-    /// reads them now.
-    pub open_one_at_a_time: bool,
     /// A file to put the cursor on once the next scope's files land — a
     /// pull request's file, asked for before its commits were read.
     pub want_path: Option<String>,
@@ -1493,7 +1488,6 @@ impl DiffView {
             head: Vec::new(),
             scope_marks: HashMap::new(),
             back: None,
-            open_one_at_a_time: false,
             want_path: None,
             pr_review: None,
         };
@@ -4380,10 +4374,8 @@ pub struct App {
     /// `apply_config`. `Ctrl+t` flips the open viewer alone.
     pub diff_tree: bool,
     /// The diff modal's panel with the keys as it opens — the **Start
-    /// on** SETTING — and whether it reads ticked commits one at a time
-    /// from the start — **Ticked commits**. Mirrored by `apply_config`.
+    /// on** SETTING. Mirrored by `apply_config`.
     pub diff_start: DiffFocus,
-    pub diff_one_at_a_time: bool,
     /// Selected tab of the settings modal, remembered across opens.
     pub settings_tab: usize,
     /// Cursor row of the settings modal, one per tab, remembered across
@@ -4909,7 +4901,6 @@ impl App {
             diff_files_width: DEFAULT_DIFF_FILES_W,
             diff_tree: false,
             diff_start: DiffFocus::Files,
-            diff_one_at_a_time: false,
             settings_tab: 0,
             settings_selected: vec![0; crate::config::tab_count()],
             settings_on_tabs: true,

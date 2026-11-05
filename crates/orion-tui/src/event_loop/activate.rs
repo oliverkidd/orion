@@ -189,19 +189,6 @@ pub(super) fn diff_tick_all(view: &mut DiffView) {
     crate::commit_list::show_selected(view);
 }
 
-/// `^G`: the ticked commits TOGETHER, or ONE AT A TIME. Nothing to choose
-/// between with fewer than two ticked.
-pub(super) fn diff_review_mode(view: &mut DiffView) {
-    let Some(list) = &mut view.commits else {
-        return;
-    };
-    if list.ticked.len() < 2 {
-        return;
-    }
-    list.toggle_mode();
-    crate::commit_list::show_selected(view);
-}
-
 /// `Enter` on the focused COMMIT LIST, or a second click on its row: the
 /// `older` row reads the next page; any other is up already, so the keys
 /// go on to its files.

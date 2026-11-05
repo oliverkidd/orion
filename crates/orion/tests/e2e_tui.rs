@@ -36,7 +36,6 @@ const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
 const CTRL_A: &[u8] = &[0x01];
 const CTRL_W: &[u8] = &[0x17];
-const CTRL_G: &[u8] = &[0x07];
 const CTRL_F: &[u8] = &[0x06];
 /// `⌘U` as Ghostty's kitty protocol spells it.
 const CMD_U: &[u8] = b"\x1b[117;9u";
@@ -700,10 +699,10 @@ fn tui_git_diff_modal() {
 /// of its own opens on the whole branch, every commit ticked, instead of
 /// saying "no changes"; `^A` unticks them and the cursor's commit shows
 /// exactly its files under its message; `⇧←`/`⇧→` step older and newer
-/// from the files; ticked commits read one at a time with `^G`; and a
-/// dirty checkout opens on its uncommitted changes, as it always did.
+/// from the files; ticked commits read together; and a dirty checkout
+/// opens on its uncommitted changes, as it always did.
 #[test]
-fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
+fn tui_diff_steps_through_a_branch_commit_by_commit() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("commits-proj");
     // `origin/HEAD` on the first commit: what a worktree the DAEMON cut
@@ -755,16 +754,14 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     tui.wait_for_text("+ beta line");
     tui.wait_for_gone("the alpha body");
 
-    // ---- tick both, read them one at a time, oldest first ----
+    // ---- tick both: read together ----
     tui.send(SHIFT_TAB);
     tui.send(SPACE);
     tui.send(DOWN);
     tui.send(SPACE);
     tui.wait_for_text("all ticked · together");
-    tui.send(CTRL_G);
-    tui.wait_for_text("commit 1 of 2 · add alpha");
-    tui.send(SHIFT_RIGHT);
-    tui.wait_for_text("commit 2 of 2 · add beta");
+    tui.wait_for_text("+ alpha line");
+    tui.wait_for_text("+ beta line");
     tui.send(ESC);
     tui.wait_for_gone("Commits ·");
 

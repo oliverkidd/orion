@@ -88,11 +88,6 @@ pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
 const START_ON_FILES: &str = "files";
 const START_ON_DIFF: &str = "diff";
 
-/// The **Ticked commits** choices (Settings → Review): how the DIFF
-/// VIEWER reads two or more ticked commits when it opens.
-pub const DIFF_TICKED: &[&str] = &["together", ONE_AT_A_TIME];
-const ONE_AT_A_TIME: &str = "one at a time";
-
 /// The **Merge method** choices (Settings → Review), the default first
 /// (`pr_actions::MergeMethod`).
 pub const MERGE_METHODS: &[&str] = &[
@@ -567,7 +562,6 @@ pub enum SettingKind {
     HideUninstalledHarnesses,
     DiffTreeView,
     DiffStart,
-    DiffTicked,
     PrMergeMethod,
     PrDeleteBranch,
     PrDraft,
@@ -710,7 +704,6 @@ impl SettingKind {
             SettingKind::QuickPromptNewWorktree => (2026, 10, 9),
             SettingKind::DiffTreeView
             | SettingKind::DiffStart
-            | SettingKind::DiffTicked
             | SettingKind::PrMergeMethod
             | SettingKind::PrDeleteBranch
             | SettingKind::PrDraft => (2026, 10, 4),
@@ -1001,12 +994,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::DiffStart,
                 label: "Start on",
                 hint: "Which panel has the keys when the changes viewer opens: the commits to tick, the files, or the diff (Tab moves on from there)",
-                group: "Changes",
-            },
-            SettingSpec {
-                kind: SettingKind::DiffTicked,
-                label: "Ticked commits",
-                hint: "How two or more ticked commits read when the viewer opens: together as one diff, or one at a time from the oldest (^G flips it)",
                 group: "Changes",
             },
             SettingSpec {
@@ -1685,9 +1672,6 @@ pub struct Config {
     /// the ticks come first), `files` or `diff`. Read through
     /// [`Config::diff_start`]; a word off the list is the commits.
     pub diff_start: String,
-    /// How the DIFF VIEWER reads ticked commits when it opens: `together`
-    /// as one diff, the default, or `one at a time` (`^G` flips it).
-    pub diff_ticked: String,
     /// How the PULL REQUESTS MODAL's merge form opens (Settings →
     /// Review): `squash`, `merge` or `rebase` — the first the repo allows
     /// when it refuses this one.
@@ -2084,7 +2068,6 @@ impl Default for Config {
             hide_draft_prs: false,
             diff_tree_view: true,
             diff_start: DIFF_STARTS[0].into(),
-            diff_ticked: DIFF_TICKED[0].into(),
             pr_merge_method: MERGE_METHODS[0].into(),
             pr_delete_branch: true,
             pr_draft: false,
@@ -2351,17 +2334,6 @@ impl Config {
             START_ON_DIFF => crate::app::DiffFocus::Diff,
             _ => crate::app::DiffFocus::Commits,
         }
-    }
-
-    /// `diff_ticked` as one of [`DIFF_TICKED`]; a word off the list is
-    /// together.
-    fn diff_ticked_word(&self) -> &'static str {
-        DIFF_TICKED[cycled_index(&self.diff_ticked, DIFF_TICKED, 0)]
-    }
-
-    /// The **Ticked commits** SETTING says one at a time.
-    pub fn diff_one_at_a_time(&self) -> bool {
-        self.diff_ticked_word() == ONE_AT_A_TIME
     }
 
     /// `session_pane` resolved to the side the LAUNCHER VIEW lays its pane
@@ -3516,7 +3488,6 @@ impl Config {
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
             SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
             SettingKind::DiffStart => self.diff_start_word().into(),
-            SettingKind::DiffTicked => self.diff_ticked_word().into(),
             SettingKind::PrMergeMethod => {
                 crate::pr_actions::MergeMethod::parse(&self.pr_merge_method)
                     .as_str()
@@ -3722,9 +3693,6 @@ impl Config {
             // it reads as.
             SettingKind::DiffStart => {
                 self.diff_start = cycle_choice(&self.diff_start, DIFF_STARTS, step).into();
-            }
-            SettingKind::DiffTicked => {
-                self.diff_ticked = cycle_choice(&self.diff_ticked, DIFF_TICKED, step).into();
             }
             SettingKind::PrMergeMethod => {
                 self.pr_merge_method =
@@ -5260,7 +5228,7 @@ mod tests {
     }
 
     /// The REVIEW TAB: how the changes viewer opens — the tree, the keys
-    /// on the commits, ticked commits together — and how the pull request
+    /// on the commits — and how the pull request
     /// forms open — a squash, the branch deleted, not a draft — each row
     /// cycling its own words and a word off the list reading as the
     /// default.
@@ -5270,13 +5238,11 @@ mod tests {
         let mut cfg = Config::default();
         assert!(cfg.diff_tree_view);
         assert_eq!(cfg.diff_start(), DiffFocus::Commits);
-        assert!(!cfg.diff_one_at_a_time());
         assert_eq!(cfg.value_label(SettingKind::PrMergeMethod), "squash");
         assert!(cfg.pr_delete_branch && !cfg.pr_draft);
         for kind in [
             SettingKind::DiffTreeView,
             SettingKind::DiffStart,
-            SettingKind::DiffTicked,
             SettingKind::PrMergeMethod,
             SettingKind::PrDeleteBranch,
             SettingKind::PrDraft,
@@ -5292,9 +5258,6 @@ mod tests {
         assert_eq!(cfg.value_label(SettingKind::DiffStart), "diff");
         cfg.cycle(tab, row, 1);
         assert_eq!(cfg.diff_start(), DiffFocus::Commits, "round again");
-        let (tab, row) = locate(SettingKind::DiffTicked).unwrap();
-        cfg.cycle(tab, row, 1);
-        assert!(cfg.diff_one_at_a_time());
         let (tab, row) = locate(SettingKind::PrMergeMethod).unwrap();
         cfg.cycle(tab, row, -1);
         assert_eq!(cfg.pr_merge_method, "rebase");
