@@ -808,6 +808,7 @@ screen, so a year of use reads and writes what a week does:
 | GitHub issues | the 100 newest open per project |
 | Pull request pages and diffs (`pr-cache/details/`, `pr-cache/diffs/`) | one file each, while the pull request is on a row; written only when read again |
 | Linear branch links (`linear-links.json`) | until 90 days after they were last linked, once no checkout is on the branch and no open pull request is from it |
+| Ticked todos (`todos/`) | 120 days after they were ticked, pruned when the list loads; a group left with nothing in it goes with them. Open todos stay until you tick or delete them |
 | Week in review (`reviews/`) | the last 12 per project, each with what it was written from; a second one for the same week and scope takes the first's place |
 | Pull request read marks (the DAEMON's `pr_seen`) | 180 days after you last read the pull request; pruned when the DAEMON starts |
 | Files dropped or pasted into a prompt (`attachments/`) | 7 days |

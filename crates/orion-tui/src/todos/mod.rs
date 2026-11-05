@@ -136,6 +136,10 @@ pub const NEW_GROUP: &str = "New group";
 /// The top-level group an item with no group to go in goes into.
 pub const INBOX: &str = "Inbox";
 
+/// How long a ticked item stays in the file for the DONE page and the
+/// week in review ([`TodoFile::prune_done`]).
+pub const DONE_KEEP_DAYS: u64 = 120;
+
 /// How many priorities there are: Linear's four and none.
 pub const PRIORITIES: usize = crate::linear::PRIORITY_ORDER.len();
 
@@ -166,6 +170,39 @@ impl TodoFile {
         self.items
             .sort_by_key(|i| crate::linear::priority_rank(i.priority));
         self.version = store::VERSION;
+    }
+
+    /// Items ticked more than [`DONE_KEEP_DAYS`] before `today` gone from
+    /// the file — and a group with nothing left in it after that, which
+    /// would otherwise stand empty where it was complete. True when any
+    /// went.
+    pub fn prune_done(&mut self, today: NaiveDate) -> bool {
+        let Some(cutoff) = today.checked_sub_days(chrono::Days::new(DONE_KEEP_DAYS)) else {
+            return false;
+        };
+        let stale: std::collections::HashSet<u64> = self
+            .items
+            .iter()
+            .filter(|i| i.done_on().is_some_and(|day| day < cutoff))
+            .map(|i| i.id)
+            .collect();
+        if stale.is_empty() {
+            return false;
+        }
+        let emptied: Vec<u64> = self
+            .groups
+            .iter()
+            .map(|g| g.id)
+            .filter(|g| {
+                let mut items = self.subtree_items(*g).peekable();
+                items.peek().is_some() && items.all(|i| stale.contains(&i.id))
+            })
+            .collect();
+        for id in stale {
+            self.delete_item(id);
+        }
+        self.groups.retain(|g| !emptied.contains(&g.id));
+        true
     }
 
     /// An id no group or item has — or ever had: the counter only goes
@@ -1079,6 +1116,45 @@ mod tests {
             drawn(&file, g, &[]),
             ["urgent", "high", "high2", "none", "low"]
         );
+    }
+
+    /// An item ticked more than 120 days ago leaves the file; one ticked
+    /// since, and every open one, stays. A group that held only those is
+    /// gone too, rather than standing empty; one with anything left in
+    /// it — a nested group's open items included — stays, and a nested
+    /// group stands before the next item when the one it stood before went.
+    #[test]
+    fn ticks_older_than_120_days_are_pruned() {
+        let today = day(30);
+        let ago = |days: u64| {
+            let d = today - chrono::Days::new(days);
+            Local
+                .from_local_datetime(&d.and_hms_opt(9, 0, 0).unwrap())
+                .unwrap()
+        };
+        let mut file = TodoFile::new(Path::new("/r"));
+        let keep = file.add_group(None, "Keep");
+        let stale = file.add_item(keep, "stale", day(1));
+        file.item_mut(stale).unwrap().done = Some(ago(121));
+        let recent = file.add_item(keep, "recent", day(1));
+        file.item_mut(recent).unwrap().done = Some(ago(120));
+        let sub = file.add_group(Some(keep), "Sub");
+        file.group_mut(sub).unwrap().before = Some(stale);
+        file.add_item(sub, "open", day(1));
+        let after = file.add_item(keep, "after", day(1));
+        let old = file.add_group(None, "Old");
+        let gone = file.add_item(old, "gone", day(1));
+        file.item_mut(gone).unwrap().done = Some(ago(400));
+        let empty = file.add_group(None, "Empty");
+
+        assert!(file.prune_done(today));
+        let left: Vec<&str> = file.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(left, ["recent", "open", "after"]);
+        assert!(file.group(old).is_none(), "held only pruned ticks");
+        assert!(file.group(sub).is_some() && file.group(empty).is_some());
+        assert_eq!(file.group(sub).unwrap().before, Some(recent));
+        assert!(!file.prune_done(today), "nothing more to go");
+        let _ = after;
     }
 
     /// A tick stays where it stood while the modal that ticked it is up

@@ -184,6 +184,7 @@ pub fn load_from(path: &Path, repo: &Path, now: u64) -> Loaded {
         Ok(mut file) => {
             file.upgrade();
             file.lift_deep_groups();
+            file.prune_done(super::today());
             Loaded {
                 file,
                 problem: None,
@@ -338,22 +339,39 @@ mod tests {
     fn a_list_round_trips_through_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let repo = PathBuf::from("/tmp/demo");
+        let day_after = Local.with_ymd_and_hms(2026, 10, 7, 9, 0, 0).unwrap();
+        super::super::with_now(day_after, || {
+            with_dir(dir.path().to_path_buf(), || {
+                let file = sample(&repo);
+                save(&file);
+                let path = path_for(&repo).unwrap();
+                assert!(path.starts_with(dir.path()));
+                assert!(path.to_string_lossy().ends_with(".json"));
+                let back = load(&repo).file;
+                assert_eq!(back, file);
+                let done = back.items[0].done.unwrap();
+                assert_eq!(
+                    done.date_naive(),
+                    NaiveDate::from_ymd_opt(2026, 10, 6).unwrap()
+                );
+                let raw = std::fs::read_to_string(&path).unwrap();
+                assert!(raw.contains("\"repo_path\": \"/tmp/demo\""), "{raw}");
+                assert!(!raw.contains("\"agent\""), "unset fields stay out");
+            });
+        });
+    }
+
+    /// A list read in loses the ticks older than 120 days.
+    #[test]
+    fn a_list_loads_without_its_old_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = PathBuf::from("/tmp/demo");
+        let much_later = Local.with_ymd_and_hms(2027, 3, 1, 9, 0, 0).unwrap();
         with_dir(dir.path().to_path_buf(), || {
-            let file = sample(&repo);
-            save(&file);
-            let path = path_for(&repo).unwrap();
-            assert!(path.starts_with(dir.path()));
-            assert!(path.to_string_lossy().ends_with(".json"));
-            let back = load(&repo).file;
-            assert_eq!(back, file);
-            let done = back.items[0].done.unwrap();
-            assert_eq!(
-                done.date_naive(),
-                NaiveDate::from_ymd_opt(2026, 10, 6).unwrap()
-            );
-            let raw = std::fs::read_to_string(&path).unwrap();
-            assert!(raw.contains("\"repo_path\": \"/tmp/demo\""), "{raw}");
-            assert!(!raw.contains("\"agent\""), "unset fields stay out");
+            save(&sample(&repo));
+            super::super::with_now(much_later, || {
+                assert!(load(&repo).file.items.is_empty());
+            });
         });
     }
 
