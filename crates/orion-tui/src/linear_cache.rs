@@ -32,7 +32,7 @@ use orion_core::ProjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
-use crate::linear::{LinearIssue, LinearList, LinearState, LinearUser};
+use crate::linear::{LinearIssue, LinearList, LinearState, LinearTeam, LinearUser};
 
 /// Directory under the DATA DIR the document lives in.
 const DIR: &str = "linear-cache";
@@ -69,6 +69,8 @@ pub struct CachedList {
     pub more: bool,
     #[serde(default)]
     pub more_mine: bool,
+    #[serde(default)]
+    pub teams: Vec<LinearTeam>,
 }
 
 impl CachedList {
@@ -80,6 +82,7 @@ impl CachedList {
             members: list.members.clone(),
             more: list.more,
             more_mine: list.more_mine,
+            teams: list.teams.clone(),
         }
     }
 
@@ -92,6 +95,7 @@ impl CachedList {
             more: self.more,
             more_mine: self.more_mine,
             prs_cut: Default::default(),
+            teams: self.teams,
         }
     }
 }
