@@ -1376,7 +1376,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         (Act(&[PullRequests]), "pull requests: read / launch"),
                         (Act(&[Linear]), "Linear issues"),
                         (Act(&[Todos]), "todos: tick, prioritise, import"),
-                        (Act(&[SwitchBranch]), "switch the ⌂ root's branch"),
                     ],
                 ),
                 (
@@ -2630,7 +2629,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
-        Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
             // room, and the preview is a whole file.
@@ -3844,8 +3842,8 @@ pub(crate) fn status_color(status: Option<AgentStatus>, unseen: bool, th: Theme)
 }
 
 /// A changed file's two-letter git status (`xy`) in the color every diff
-/// surface gives it — the DIFF VIEWER, the PULL REQUEST PAGE's Changes,
-/// the branch switcher's uncommitted files: added (or untracked) sage,
+/// surface gives it — the DIFF VIEWER, the PULL REQUEST PAGE's Changes:
+/// added (or untracked) sage,
 /// deleted rose, a rename or copy muted, anything else the modified sand.
 pub(crate) fn change_color(xy: [char; 2], th: Theme) -> Color {
     match (xy[0], xy[1]) {
@@ -5492,6 +5490,11 @@ fn fmt_mem(bytes: u64) -> String {
     }
 }
 
+/// Screen cells `s` takes: a gitmoji or a CJK subject is two a character.
+pub(crate) fn cells(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
 /// [`truncate`] by terminal cells rather than chars, for a row whose text
 /// a wide glyph (an emoji, CJK) must not push past what is pinned to its
 /// right. What it keeps is a prefix of `s`, so char positions into `s`
@@ -5680,6 +5683,16 @@ mod tests {
         assert_eq!(stacked_rows(&heights[..3], 1, 1, 2, area).0, 0);
         // Nothing to lay out.
         assert_eq!(stacked_rows(&[], 0, 0, 3, area), (0, Vec::new()));
+    }
+
+    #[test]
+    fn cells_count_wide_characters_twice_and_truncate_cells_cuts_by_them() {
+        assert_eq!(cells("ab"), 2);
+        assert_eq!(cells("修复"), 4);
+        let cut = truncate_cells("修复登录重定向", 7);
+        assert!(cells(&cut) <= 7, "{cut:?}");
+        assert!(cut.ends_with('…'));
+        assert_eq!(truncate_cells("short", 10), "short");
     }
 
     #[test]

@@ -135,7 +135,7 @@ pub struct Answer {
 #[derive(Debug, Default)]
 pub struct Shared {
     /// Where the off-loop answers go; installed at startup like
-    /// `branch_switch.tx`. `None` in the unit tests, which never run git
+    /// `branch_list.tx`. `None` in the unit tests, which never run git
     /// from the loop.
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
     /// Checkouts with a PULL or a PUSH running — never two in one.
@@ -389,8 +389,7 @@ pub fn push(
 // ---- the loop's side ----
 
 /// The checkout `p` and `⇧P` act on: the band under the cursor, else the
-/// selected project's root — the BRANCH SWITCHER's aim, linked worktrees
-/// included.
+/// selected project's root, linked worktrees included.
 pub(crate) fn target(app: &App) -> Option<WorktreeId> {
     let on_checkout = matches!(
         app.focus,
@@ -453,8 +452,6 @@ fn refused(app: &mut App, worktree: &WorktreeId) -> Option<String> {
     let name = label(w);
     let why = if let Some(running) = app.git_sync.inflight.get(worktree) {
         format!("already {} {name}", running.doing())
-    } else if app.branch_switch.switching.contains_key(worktree) {
-        format!("{name} is switching branch")
     } else {
         return Some(name);
     };

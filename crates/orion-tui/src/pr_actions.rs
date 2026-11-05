@@ -400,7 +400,7 @@ pub(crate) fn open_create(app: &mut App) {
     put_form(app, PrForm::Create(form));
     if let Some(tx) = tx {
         let base_setting = config.worktree_base_branch.clone();
-        let quit = app.branch_switch.quit.clone();
+        let quit = app.git_sync.quit.clone();
         // What the repo knows now, at once; then again once origin is
         // fetched, so a branch moved on there — a `dev` merged from
         // elsewhere — is counted as it is, not as this clone last saw it.

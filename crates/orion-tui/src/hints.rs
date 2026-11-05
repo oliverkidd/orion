@@ -637,11 +637,6 @@ mod tests {
         );
         assert_hints_from(&crate::linear::hints(&attach), crate::linear::keys::ALL);
 
-        assert_hints_from(
-            &crate::branch_switch::hints(&crate::branch_switch::Stage::Pick),
-            crate::branch_switch::keys::ALL,
-        );
-
         let presets = crate::preset_overlays::AgentPresetsView::new(
             WorktreeId::from("w".to_string()),
             Vec::new(),

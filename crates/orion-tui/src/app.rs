@@ -381,8 +381,6 @@ pub enum MenuAction {
     EditLink(LinkId),
     DeleteLink(LinkId),
     DeleteWorktree(WorktreeId),
-    /// The ROOT WORKTREE row's menu: open the BRANCH SWITCHER on it.
-    SwitchBranch(WorktreeId),
     /// A band's **Pull**: fetch and fast-forward its checkout (`p`).
     PullWorktree(WorktreeId),
     /// A band's **Push**: send its branch's new commits up (`⇧P`).
@@ -410,7 +408,7 @@ pub enum MenuAction {
     /// box's branch) opens: aim this one launch at `target` — one of the project's
     /// checkouts, or a fresh worktree — and hand the box back with its
     /// text. It picks where the session runs, never what branch a checkout
-    /// is on: that is the BRANCH SWITCHER's (`SwitchBranch`).
+    /// is on.
     PickLaunchWorktree {
         target: crate::quick_prompt::QuickTarget,
         back: Box<crate::quick_prompt::QuickReturn>,
@@ -2401,8 +2399,6 @@ pub enum Overlay {
     Linear(crate::linear::LinearView),
     /// `⌘S`: the SKILLS BROWSER — every agent skill on the machine.
     Skills(crate::skills::SkillsView),
-    /// `c`: the BRANCH SWITCHER — the ROOT WORKTREE onto another branch.
-    BranchSwitch(crate::branch_switch::BranchSwitchView),
     /// `^P` in the LAUNCHER VIEW's box: the PROJECT PICKER.
     ProjectPicker(crate::launcher::ProjectPicker),
     /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
@@ -4745,9 +4741,9 @@ pub struct App {
     /// the row stays down — and a refusal puts back the row as the DAEMON
     /// last had it, not as it was on the keypress.
     pub deleting: HashMap<orion_core::EntityId, orion_core::Entity>,
-    /// The BRANCH SWITCHER's answer channel, listing cache and fetch
-    /// throttle — what outlives the modal.
-    pub branch_switch: crate::branch_switch::Shared,
+    /// The WORKTREE PICKER's branch listings: their answer channel, cache
+    /// and fetch throttle (`branch_list`).
+    pub branch_list: crate::branch_list::Shared,
     /// The PULLs and PUSHes running, and where their answers go
     /// (`crate::git_sync`).
     pub git_sync: crate::git_sync::Shared,
@@ -4999,7 +4995,7 @@ impl App {
             diff_probe: None,
             changed_files: None,
             deleting: HashMap::new(),
-            branch_switch: Default::default(),
+            branch_list: Default::default(),
             git_sync: Default::default(),
             clean_worktrees: Default::default(),
             base_sync: Default::default(),

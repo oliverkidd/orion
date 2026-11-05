@@ -124,19 +124,12 @@
   `stat` calls (`ORION_WORKTREE_SYNC_MS` overrides the 2 s beat; the e2e tests turn it down to
   100 ms). This structural sync is the *only* git polling the DAEMON does — the pull request lookups
   further down are the TUI's own.
-- **The root checkout changes branch in place — the BRANCH SWITCHER.** `c` on a root-branch card (or
-  with no card selected) lists the repo's branches with one `git for-each-ref` and switches with
-  `git switch`, asking first when the checkout has uncommitted changes whether to stash, bring along,
-  commit or discard them. That git is the TUI's, like the diff viewer's: the writes and the background
-  `git fetch --all` run in a session of their own with stdin closed, so an `ssh` passphrase prompt fails
-  instead of painting over the screen, and the TUI renames the root row the moment git says yes. The
-  WORKTREE SYNC above then sees the moved `.git/HEAD` and confirms the branch from the DAEMON's side.
-  Linked worktrees don't switch: each is named after the branch it was cut for.
 - **A checkout keeps step with its remote on `p` and `⇧P` — a PULL and a PUSH.** orion fetches when it
-  cuts a worktree, when the BRANCH SWITCHER opens, and on `p` or `⇧P`, never on a timer, so a band
+  cuts a worktree, when the WORKTREE PICKER opens, and on `p` or `⇧P`, never on a timer, so a band
   rule's `⇡⇣` count against
   whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
-  checkout — the TUI's git, detached like the switcher's — rather than `git pull`, so `pull.rebase` /
+  checkout — the TUI's git, run in a session of its own with stdin closed, so an `ssh` passphrase
+  prompt fails instead of painting over the screen — rather than `git pull`, so `pull.rebase` /
   `pull.ff` can't change what it does: a branch only ever moves forward onto its upstream, and one that
   has diverged, or has uncommitted changes git would overwrite, is left alone with the reason in the
   FLASH. A branch that tracks nothing (linked worktrees are cut `--no-track` until the New-PR form

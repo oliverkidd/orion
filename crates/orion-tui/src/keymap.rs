@@ -111,9 +111,6 @@ pub enum Action {
     /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
     /// days, written up by product area with what to show and say.
     WeekReview,
-    /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
-    /// another branch, asking what to do with uncommitted changes.
-    SwitchBranch,
     /// `p`: PULL the selected checkout — fetch, then fast-forward onto its
     /// upstream, never a merge or a rebase (`crate::git_sync`).
     PullWorktree,
@@ -526,15 +523,6 @@ pub const ACTIONS: &[ActionSpec] = &[
         // letter is spoken for, so its twin for a terminal that sends no
         // ⌘ is the grid's `⇧W`, for week.
         defaults: &["cmd+shift+y", "shift+w"],
-    },
-    ActionSpec {
-        action: Action::SwitchBranch,
-        id: "switch_branch",
-        label: "Switch root branch",
-        hint: "Fuzzy-pick a branch or remote for the project's root checkout; uncommitted changes get stash / bring / commit / discard",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &["c"],
     },
     ActionSpec {
         action: Action::PullWorktree,

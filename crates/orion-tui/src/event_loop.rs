@@ -381,11 +381,11 @@ async fn main_loop(
     app.linear_tx = Some(linear_tx);
     app.linear_links =
         crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
-    // The BRANCH SWITCHER's git — the listing, the changed-file count,
-    // the background fetch and the switch itself — lands here too.
+    // The WORKTREE PICKER's branch listings and their background fetch
+    // land here too.
     let (branch_tx, mut branch_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::branch_switch::Answer>();
-    app.branch_switch.tx = Some(branch_tx);
+        tokio::sync::mpsc::unbounded_channel::<crate::branch_list::Answer>();
+    app.branch_list.tx = Some(branch_tx);
     // A PULL's or a PUSH's git lands here.
     let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<crate::git_sync::Answer>();
     app.git_sync.tx = Some(sync_tx);
@@ -814,8 +814,8 @@ async fn main_loop(
             }
             answer = branch_rx.recv() => {
                 if let Some(answer) = answer {
-                    let listed = matches!(answer, crate::branch_switch::Answer::Listed { .. });
-                    crate::branch_switch::land_answer(&mut app, answer);
+                    let listed = matches!(answer, crate::branch_list::Answer::Listed { .. });
+                    crate::branch_list::land_answer(&mut app, answer);
                     if listed {
                         launcher::refresh_worktree_picker(&mut app);
                     }
@@ -1512,7 +1512,7 @@ fn note_pr_answer(app: &mut App, worktree: &WorktreeId, found: bool) {
 }
 
 /// A branch lookup landed. One whose flight was cancelled — the checkout
-/// was switched to another branch, `branch_switch` or a daemon upsert
+/// was switched to another branch, or a daemon upsert
 /// cleared its row — is dropped, and so is one asked while the checkout
 /// was on a branch it has left since (a switch made outside orion): its
 /// pull request is the old branch's, and the row would bring it back. An
@@ -3573,12 +3573,6 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
             view.focus = crate::app::DiffFocus::Files;
             activate::diff_filter_changed(view);
         }
-        // The query, or the commit message while that is being typed.
-        Overlay::BranchSwitch(view) => {
-            if !crate::branch_switch::paste(view, text) {
-                return false;
-            }
-        }
         // Only types while its add/edit input is open.
         Overlay::Hosts(view) => match &mut view.input {
             Some(input) => input.insert_str(text),
@@ -3878,12 +3872,11 @@ const ESC: crate::keymap::KeyChord = crate::keymap::KeyChord {
 
 /// The overlays Esc closes outright rather than one stage at a time:
 /// lists and viewers, where nothing typed is lost with them. A list that
-/// has a form open on it — the hosts picker's new-host row, a branch
-/// switch past its list — backs that out first, through its own Esc.
+/// has a form open on it — the hosts picker's new-host row — backs that
+/// out first, through its own Esc.
 fn closes_on_esc(overlay: &Overlay) -> bool {
     match overlay {
         Overlay::Hosts(view) => view.input.is_none(),
-        Overlay::BranchSwitch(view) => matches!(view.stage, crate::branch_switch::Stage::Pick),
         Overlay::Menu(_)
         | Overlay::Help(_)
         | Overlay::Diff(_)
@@ -4299,7 +4292,6 @@ fn dispatch_action(
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
         Action::WeekReview => crate::week_review::open(app),
-        Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
                 crate::git_sync::request(app, id, crate::git_sync::Op::Pull);
@@ -7240,12 +7232,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         MenuAction::PushWorktree(w.id.clone()),
     ));
     items.extend(links);
-    if w.is_main {
-        items.push(MenuItem::new(
-            "Switch branch…",
-            MenuAction::SwitchBranch(w.id.clone()),
-        ));
-    } else {
+    if !w.is_main {
         items.push(MenuItem::destructive(
             "Delete worktree",
             MenuAction::DeleteWorktree(w.id.clone()),
@@ -7469,14 +7456,8 @@ fn worktree_menu_items(app: &App, w: &orion_core::Worktree) -> Vec<MenuItem> {
         MenuItem::new("Pull", MenuAction::PullWorktree(w.id.clone())),
         MenuItem::new("Push", MenuAction::PushWorktree(w.id.clone())),
     ];
-    // The ROOT WORKTREE moves between branches; a linked worktree, named
-    // for its branch, is deleted instead.
-    if w.is_main {
-        items.push(MenuItem::new(
-            "Switch branch…",
-            MenuAction::SwitchBranch(w.id.clone()),
-        ));
-    } else {
+    // A linked worktree can be deleted; the ROOT WORKTREE is the project.
+    if !w.is_main {
         items.push(MenuItem::destructive(
             "Delete worktree",
             MenuAction::DeleteWorktree(w.id.clone()),
@@ -7738,7 +7719,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Skills(_) => crate::skills::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
-        Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
             // `?` (and `s` where no filter eats letters) on a row that
@@ -10050,7 +10030,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             }
         }
         MenuAction::DeleteWorktree(id) => activate::delete_worktree(app, &id),
-        MenuAction::SwitchBranch(id) => crate::branch_switch::open_for(app, &id),
         MenuAction::PullWorktree(id) => {
             crate::git_sync::request(app, id, crate::git_sync::Op::Pull)
         }
@@ -12477,10 +12456,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Skills(_))) {
         crate::skills::handle_mouse(app, mouse, mouse_pos);
-        return;
-    }
-    if matches!(&app.overlay, Some(Overlay::BranchSwitch(_))) {
-        crate::branch_switch::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
@@ -25610,7 +25585,7 @@ mod tests {
         );
     }
 
-    // ---- branch switcher ----
+    // ---- the root and its linked worktrees ----
 
     /// A linked worktree beside `seed_tree`'s root, on its own branch.
     fn seed_linked_worktree(app: &mut App) {
@@ -25630,54 +25605,11 @@ mod tests {
         );
     }
 
-    fn branch_switch_target(app: &App) -> Option<WorktreeId> {
-        match &app.overlay {
-            Some(Overlay::BranchSwitch(view)) => Some(view.worktree.clone()),
-            _ => None,
-        }
-    }
-
-    /// `c` moves the ROOT WORKTREE and nothing else: from its own row, from
-    /// the Projects panel whatever the Worktrees cursor is on, and never
-    /// from a linked worktree's row, which stays on the branch it was cut
-    /// for.
+    /// A linked worktree's row menu offers its Delete; the ROOT
+    /// WORKTREE's, the project itself, does not.
     #[test]
-    fn c_opens_the_branch_switcher_on_the_root_and_refuses_a_linked_worktree() {
+    fn a_worktree_rows_menu_offers_delete_and_the_roots_does_not() {
         let mut app = App::new();
-        let mut out = Vec::new();
-        seed_tree(&mut app);
-        seed_linked_worktree(&mut app);
-        let root = WorktreeId("w1".into());
-        let mains: Vec<bool> = app.visible_worktrees().iter().map(|w| w.is_main).collect();
-        assert_eq!(mains, [true, false], "the root row leads");
-
-        app.focus = Focus::Worktrees;
-        app.set_sel_worktree(1);
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        assert_eq!(app.flash, None);
-
-        app.focus = Focus::Projects;
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        assert_eq!(
-            branch_switch_target(&app),
-            Some(root.clone()),
-            "the Projects panel means the project's root"
-        );
-        app.overlay = None;
-
-        app.focus = Focus::Worktrees;
-        app.set_sel_worktree(0);
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        assert_eq!(branch_switch_target(&app), Some(root));
-    }
-
-    /// The root row's menu is where the mouse finds the switcher, in the
-    /// seat a linked worktree's Delete takes.
-    #[test]
-    fn the_root_rows_menu_offers_switch_branch_and_a_worktree_row_offers_delete() {
-        let mut app = App::new();
-        let mut out = Vec::new();
         seed_tree(&mut app);
         seed_linked_worktree(&mut app);
         app.focus = Focus::Worktrees;
@@ -25694,22 +25626,12 @@ mod tests {
         open_row_menu(&mut app);
         let linked = labels(&app);
         assert!(linked.iter().any(|l| l == "Delete worktree"), "{linked:?}");
-        assert!(!linked.iter().any(|l| l == "Switch branch…"), "{linked:?}");
         app.overlay = None;
 
         app.set_sel_worktree(0);
         open_row_menu(&mut app);
         let root = labels(&app);
         assert!(!root.iter().any(|l| l == "Delete worktree"), "{root:?}");
-        let at = root
-            .iter()
-            .position(|l| l == "Switch branch…")
-            .expect("the root row offers it");
-        if let Some(Overlay::Menu(menu)) = &mut app.overlay {
-            menu.hover = at;
-        }
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert_eq!(branch_switch_target(&app), Some(WorktreeId("w1".into())));
     }
 
     /// `p` PULLs the checkout under the cursor — a linked worktree as well
@@ -25955,40 +25877,6 @@ mod tests {
         );
         assert!(app.pr_refresh_requested);
     }
-
-    /// Through the real key path — the KEYMAP's `c`, a query typed into the
-    /// modal (so `f`, `e` and `a` feed the filter instead of firing their
-    /// panel hotkeys), `Enter` — a real root checkout moves and its row
-    /// follows before the DAEMON's sync has said a word.
-    #[test]
-    fn the_branch_switcher_moves_a_real_root_through_the_key_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(&dir);
-        run_git(&repo, &["branch", "feature"]);
-        let mut app = App::new();
-        let mut out = Vec::new();
-        seed_repo_tree(&mut app, &repo);
-        app.focus = Focus::Worktrees;
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        for c in "feat".chars() {
-            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
-        }
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        let head = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feature");
-        assert_eq!(
-            app.selected_worktree().map(|w| w.branch.as_str()),
-            Some("feature")
-        );
-    }
-
-    // ---- git-diff modal ----
 
     /// The NEW AGENT PICKER for the selected checkout — what the card
     /// menu's **New agent** opens, and what the Sessions panel's `n` used
@@ -36302,7 +36190,7 @@ mod tests {
     /// name.
     #[test]
     fn the_worktree_picker_checks_out_an_existing_branch() {
-        use crate::branch_switch::Branch;
+        use crate::branch_list::Branch;
         use crate::quick_prompt::QuickTarget;
         use orion_core::ProjectId;
         with_config_json(r#"{"follow_new_session": true}"#, || {
@@ -36320,7 +36208,7 @@ mod tests {
                 committed: 0,
                 subject: String::new(),
             };
-            app.branch_switch.lists.insert(
+            app.branch_list.lists.insert(
                 root,
                 vec![
                     branch("main", false),
@@ -36377,7 +36265,7 @@ mod tests {
             // A fresh listing landing (the background fetch) rebuilds the
             // rows under what is typed, the highlighted row kept.
             let root = app.root_worktree(&ProjectId("p1".into())).unwrap();
-            if let Some(list) = app.branch_switch.lists.get_mut(&root) {
+            if let Some(list) = app.branch_list.lists.get_mut(&root) {
                 list.push(branch("origin/bob/billing-fix", true));
             }
             launcher::refresh_worktree_picker(&mut app);
@@ -38708,14 +38596,6 @@ mod tests {
                 None,
             ),
             (
-                "BranchSwitch",
-                |app| {
-                    seed_tree(app);
-                    press(app, KeyCode::Char('c'), KeyModifiers::NONE, &mut Vec::new());
-                },
-                None,
-            ),
-            (
                 "Hosts",
                 |app| {
                     app.overlay = Some(Overlay::Hosts(crate::app::HostsView::new(vec![
@@ -38926,7 +38806,6 @@ mod tests {
             Overlay::PullRequests(_) => "PullRequests",
             Overlay::Linear(_) => "Linear",
             Overlay::Skills(_) => "Skills",
-            Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
             Overlay::Autofix(_) => "Autofix",
@@ -38961,7 +38840,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
         });
     }
 

@@ -16,7 +16,7 @@
 //! modal, sends a request, spawns a process or moves a cursor as the result
 //! of choosing a row belongs in this file (or, for a modal that lives in a
 //! module of its own, in that module's single `activate_selected` / `Cmd`
-//! executor — `preset_overlays`, `file_tabs`, `issues`, `branch_switch`),
+//! executor — `preset_overlays`, `file_tabs`),
 //! never inline in an input handler. `handle_mouse` holding an action of
 //! its own is the smell to look for in review.
 

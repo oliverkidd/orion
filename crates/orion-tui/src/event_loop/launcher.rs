@@ -2665,8 +2665,8 @@ pub(super) fn open_effort_picker(app: &mut App, back: QuickReturn) {
 /// at the row ([`pick_launch_worktree`]). A PR SESSION has nothing to
 /// pick: the DAEMON runs it in the pull request's own checkout.
 ///
-/// The branches come from the BRANCH SWITCHER's cache of the project's
-/// root, painted at once; opening asks git for a fresh listing and a
+/// The branches come from the cached listing of the project's root
+/// (`branch_list`), painted at once; opening asks git for a fresh listing and a
 /// background fetch (at most once a minute), and each answer that lands
 /// while the picker is up rebuilds it ([`refresh_worktree_picker`]).
 pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
@@ -2677,7 +2677,7 @@ pub(super) fn open_worktree_picker(app: &mut App, back: QuickReturn) {
         return;
     };
     if let Some(root) = app.root_worktree(&project) {
-        crate::branch_switch::warm(app, &root);
+        crate::branch_list::warm(app, &root);
     }
     show_worktree_picker(app, back, None);
 }
@@ -2691,7 +2691,7 @@ struct PickerKeep {
     fresh: Option<QuickTarget>,
 }
 
-/// A BRANCH SWITCHER listing landed: an open WORKTREE PICKER takes the
+/// A branch listing landed (`branch_list`): an open WORKTREE PICKER takes the
 /// fresh branches in place — what is typed still typed, the highlighted
 /// row still highlighted when it is still there.
 pub(crate) fn refresh_worktree_picker(app: &mut App) {
@@ -2827,7 +2827,7 @@ fn tick(on: bool) -> &'static str {
 
 /// The WORKTREE PICKER's branch rows: every branch of `project` with no
 /// checkout yet — local branches, then the ones only `origin` has, newest
-/// commit first, as the BRANCH SWITCHER lists them — each a fresh worktree
+/// commit first (`branch_list`) — each a fresh worktree
 /// that checks that branch out (`QuickTarget::NewWorktree { existing }`).
 /// A branch a checkout is on is already listed as that checkout, so it is
 /// left out, and so is a branch on a remote other than `origin`, which the
@@ -2835,7 +2835,7 @@ fn tick(on: bool) -> &'static str {
 fn branch_rows(app: &App, project: &ProjectId, aimed: &QuickTarget) -> Vec<(String, QuickTarget)> {
     let Some(branches) = app
         .root_worktree(project)
-        .and_then(|root| app.branch_switch.lists.get(&root))
+        .and_then(|root| app.branch_list.lists.get(&root))
     else {
         return Vec::new();
     };

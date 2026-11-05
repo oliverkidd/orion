@@ -61,10 +61,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         },
         Overlay::Linear(v) => vec![(Field::LinearQuery, &mut v.query)],
         Overlay::Skills(v) => vec![(Field::Only, &mut v.query)],
-        Overlay::BranchSwitch(v) => match &mut v.stage {
-            crate::branch_switch::Stage::Commit { message, .. } => vec![(Field::Only, message)],
-            _ => vec![(Field::Only, &mut v.query)],
-        },
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
         Overlay::WeekReview(v) => match v.mode {

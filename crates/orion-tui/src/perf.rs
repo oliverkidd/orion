@@ -168,7 +168,6 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::PullRequests(_)) => "PullRequests",
         Some(Overlay::Linear(_)) => "Linear",
         Some(Overlay::Skills(_)) => "Skills",
-        Some(Overlay::BranchSwitch(_)) => "BranchSwitch",
         Some(Overlay::ProjectPicker(_)) => "ProjectPicker",
         Some(Overlay::Onboard(_)) => "Onboard",
         Some(Overlay::Autofix(_)) => "Autofix",
