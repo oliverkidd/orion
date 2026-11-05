@@ -65,6 +65,7 @@ pub mod pr_preview;
 pub mod pr_review;
 pub mod pr_row;
 pub mod pr_store;
+pub mod pr_work;
 pub mod preset_overlays;
 pub mod pull_request;
 pub mod quick_prompt;

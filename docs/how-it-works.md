@@ -116,7 +116,10 @@
   viewer's top line, beside the branch's pull request and its checks. Nothing is checked out or
   fetched: base sync keeps origin's copy of the base fresh, so this works before a pull request
   exists and needs no network. Answers are kept by the two commits' SHAs, so opening the viewer
-  again on the same commits costs two `rev-parse`s. `Enter` on a `U` file opens the CONFLICT
+  again on the same commits costs two `rev-parse`s. AUTOFIX asks the same of a pull request it
+  sends an agent to — its head against its base, the head fetched by its pull ref when the repo
+  lacks it — as soon as it is seen to conflict, and names the files in the agent's prompt; a send
+  whose answer is still out waits for it and goes on the next git tick. `Enter` on a `U` file opens the CONFLICT
   RESOLVER on the checkout (`conflicts::resolve_in`), unless an `autofix-<n>` is already on the
   pull request. `Enter` on the diff edits its file in the built-in editor at the line at the top of
   the pane (`DiffView::file_at_line`, the same line `⌘O` opens at); when the editor closes, the
@@ -407,7 +410,11 @@ sweeps, and a merged checkout left lying around costs an idle orion no repaints.
 conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
 as the PULL REQUESTS MODAL does (whose list moves a pull request to its **Merged** section on merge — the last 7 days'
 merges, under the open rows — and which `hide_draft_prs` never thins — the
-modal lists drafts too); `⌘E` shows its diff. The page's review threads — comments on lines — come
+modal lists drafts too); `⌘E` shows its diff. The page's WORK BLOCK (`pr_work`), under its first
+line, is drawn from what orion already holds and asks for nothing: the `autofix-<n>` on the head
+branch from the tree (or, with none, the page's failing checks and the conflict check's files), the
+issues on the branch's link in `linear-links.json` and those the project's Linear list has the pull
+request attached to, and the sessions in the project's checkouts of its head branch. The page's review threads — comments on lines — come
 from one GraphQL query asked beside `gh pr view`, and the Reviews tab lists them by file; `Enter` there
 (or `⌘⇧R` in the modal) opens the [PR review](keys.md#the-pr-review), where you comment on lines, reply,
 resolve and submit a verdict. What you write is GitHub's own pending review, written through

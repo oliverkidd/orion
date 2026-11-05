@@ -490,6 +490,7 @@ async fn main_loop(
                 for (url, number, dir) in crate::autofix::due_fetches(&mut app) {
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
+                crate::autofix::send_waiting(&mut app, &mut out);
                 crate::autofix::note_stand_downs(&mut app);
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
@@ -12029,6 +12030,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     enter_terminal_pane(app, out);
                     crate::pr_preview::click_fold(app, key);
                 }
+                Some(HitTarget::PrPageWork(hit)) => crate::pr_work::click(app, hit, out),
                 Some(HitTarget::TerminalPane) => {
                     // A click into the pane is deliberate — it is Enter on
                     // the pane (`enter_terminal_pane`): FOCUS, the input
@@ -12171,6 +12173,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                         | HitTarget::PrPageTab(_)
                         | HitTarget::PrPageRow(_)
                         | HitTarget::PrPageFold(_)
+                        | HitTarget::PrPageWork(_)
                 )
             ) || app.collapsed;
             if in_term && app.reading_url().is_some() {

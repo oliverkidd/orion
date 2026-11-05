@@ -497,6 +497,7 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
             }),
             Some(pane_keys::PAGE.hint()),
             act(km, Action::GitDiff, "diff"),
+            Some(crate::pr_modal::keys::AUTOFIX.hint()),
         ]);
     } else if app.pane_reads_page() {
         list.extend([

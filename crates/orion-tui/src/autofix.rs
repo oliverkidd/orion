@@ -24,8 +24,9 @@
 //!   nothing to confirm — until [`AUTO_ATTEMPTS`] tries in a row have not
 //!   turned the PR green, when it stops and says so (a flash, and a desktop
 //!   notification while the window is away). `⌘G` in the PULL REQUESTS
-//!   MODAL ([`open_for`]) still opens the AUTOFIX MODAL for any PR — the
-//!   issues as a checklist and a note — whatever the setting.
+//!   MODAL, or on the pane's PULL REQUEST PAGE ([`open_asked`]), still
+//!   opens the AUTOFIX MODAL for any PR — the issues as a checklist and a
+//!   note — whatever the setting.
 //! * **As the worktree's agent.** [`dispatch`] launches a PR SESSION
 //!   (`CreatePrAgent`, so the DAEMON finds or cuts the PR's worktree) named
 //!   `autofix-<n>` on the harness, account, model and effort of the session
@@ -42,8 +43,10 @@
 //!   says why ([`note_stand_downs`]). A live session whose conversation
 //!   can't be read holds it back instead, as every busy one used to.
 //!
-//! Unit vs e2e is read off each check's name ([`classify`]) — GitHub has
-//! no such distinction.
+//! What failed is one **Failing checks** list, grouped by the workflow
+//! each check ran in, as GitHub groups them: which of them is a unit test,
+//! an e2e spec or a lint is the agent's to read off the logs, under the
+//! preset's rules for each.
 
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Overlay};
@@ -106,44 +109,20 @@ impl Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Issue {
     Conflicts,
-    Unit,
-    E2e,
-    Other,
+    Checks,
 }
 
 /// What is ticked, by [`Issue`] index.
 pub type Picks = [bool; Issue::ALL.len()];
 
 impl Issue {
-    pub const ALL: [Issue; 4] = [Issue::Conflicts, Issue::Unit, Issue::E2e, Issue::Other];
+    pub const ALL: [Issue; 2] = [Issue::Conflicts, Issue::Checks];
 
-    /// Its row on the form.
+    /// Its row on the form, and its heading in the prompt's list.
     pub fn label(self) -> &'static str {
         match self {
             Issue::Conflicts => "Merge conflicts",
-            Issue::Unit => "Unit tests",
-            Issue::E2e => "E2E tests",
-            Issue::Other => "Other checks",
-        }
-    }
-
-    /// What the prompt calls it, in its list and over its instructions.
-    fn heading(self) -> &'static str {
-        match self {
-            Issue::Conflicts => "Merge conflicts",
-            Issue::Unit => "Failing unit tests",
-            Issue::E2e => "Failing e2e tests",
-            Issue::Other => "Other failing checks",
-        }
-    }
-
-    /// One word for its failed checks in a summary (`2 unit failing`).
-    fn noun(self) -> &'static str {
-        match self {
-            Issue::Conflicts => "conflicts",
-            Issue::Unit => "unit",
-            Issue::E2e => "e2e",
-            Issue::Other => "other",
+            Issue::Checks => "Failing checks",
         }
     }
 
@@ -152,46 +131,18 @@ impl Issue {
     }
 }
 
-/// Words in a check's workflow or name that make it an e2e suite — read
-/// first, since "e2e tests" says "test" too.
-const E2E_WORDS: &[&str] = &[
-    "e2e",
-    "end-to-end",
-    "end to end",
-    "playwright",
-    "cypress",
-    "integration",
-    "smoke",
-    "acceptance",
-];
-/// And a unit suite.
-const UNIT_WORDS: &[&str] = &[
-    "test", "unit", "jest", "vitest", "spec", "pytest", "nextest",
-];
-
-/// Which kind of failure a check is, by its workflow and name: e2e, unit,
-/// or anything else (lint, typecheck, build). Never [`Issue::Conflicts`].
-pub fn classify(check: &PrCheck) -> Issue {
-    let words = format!("{} {}", check.workflow, check.name).to_ascii_lowercase();
-    if E2E_WORDS.iter().any(|w| words.contains(w)) {
-        Issue::E2e
-    } else if UNIT_WORDS.iter().any(|w| words.contains(w)) {
-        Issue::Unit
-    } else {
-        Issue::Other
-    }
-}
-
 /// What is wrong with a pull request, as its body says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Diagnosis {
     pub conflicts: bool,
-    /// The failed checks of each kind.
-    pub unit: Vec<PrCheck>,
-    pub e2e: Vec<PrCheck>,
-    pub other: Vec<PrCheck>,
+    /// The failed checks, in the order GitHub listed them.
+    pub failing: Vec<PrCheck>,
     /// Some check has not finished.
     pub running: bool,
+    /// The files its head conflicts in with its base, as the repo merged
+    /// them ([`want_conflicts`]); none until that is known, or when it
+    /// could not say.
+    pub conflicted: Vec<String>,
 }
 
 /// Read a pull request's body for what is wrong with it — its failed and
@@ -204,11 +155,7 @@ pub fn diagnose(detail: &PrDetail, conflicts: bool) -> Diagnosis {
     };
     for check in &detail.checks {
         match check.state {
-            CheckState::Failed => match classify(check) {
-                Issue::E2e => out.e2e.push(check.clone()),
-                Issue::Unit => out.unit.push(check.clone()),
-                _ => out.other.push(check.clone()),
-            },
+            CheckState::Failed => out.failing.push(check.clone()),
             CheckState::Running => out.running = true,
             CheckState::Passed | CheckState::Skipped => {}
         }
@@ -217,45 +164,33 @@ pub fn diagnose(detail: &PrDetail, conflicts: bool) -> Diagnosis {
 }
 
 impl Diagnosis {
-    fn has_failed_checks(&self) -> bool {
-        !(self.unit.is_empty() && self.e2e.is_empty() && self.other.is_empty())
-    }
-
     /// Nothing to fix.
     pub fn is_empty(&self) -> bool {
-        !self.conflicts && !self.has_failed_checks()
+        !self.conflicts && self.failing.is_empty()
     }
 
     /// Only conflicts — nothing failed that running checks could add to.
     fn conflicts_only(&self) -> bool {
-        self.conflicts && !self.has_failed_checks()
+        self.conflicts && self.failing.is_empty()
     }
 
     /// Whether `issue` was seen.
     pub fn has(&self, issue: Issue) -> bool {
         match issue {
             Issue::Conflicts => self.conflicts,
-            _ => !self.failing(issue).is_empty(),
+            Issue::Checks => !self.failing.is_empty(),
         }
     }
 
-    /// The failed checks behind `issue` (none for conflicts).
-    pub fn failing(&self, issue: Issue) -> &[PrCheck] {
-        match issue {
-            Issue::Conflicts => &[],
-            Issue::Unit => &self.unit,
-            Issue::E2e => &self.e2e,
-            Issue::Other => &self.other,
-        }
+    /// The failed checks grouped by workflow, as the prompt and the form
+    /// list them (`pr_preview::by_workflow`).
+    pub fn failing_by_workflow(&self) -> Vec<(String, Vec<&PrCheck>)> {
+        crate::pr_preview::by_workflow(&self.failing)
     }
 
     /// This breakage, at `head_sha`.
     pub fn fingerprint(&self, head_sha: &str) -> Fingerprint {
-        let mut checks: Vec<String> = [&self.unit, &self.e2e, &self.other]
-            .into_iter()
-            .flatten()
-            .map(|c| c.name.clone())
-            .collect();
+        let mut checks: Vec<String> = self.failing.iter().map(|c| c.name.clone()).collect();
         checks.sort_unstable();
         Fingerprint {
             sha: head_sha.to_string(),
@@ -264,17 +199,14 @@ impl Diagnosis {
         }
     }
 
-    /// `merge conflicts · 2 unit failing · 1 other failing`.
+    /// `merge conflicts · 2 failing checks`.
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.conflicts {
             parts.push("merge conflicts".to_string());
         }
-        for issue in [Issue::Unit, Issue::E2e, Issue::Other] {
-            let n = self.failing(issue).len();
-            if n > 0 {
-                parts.push(format!("{n} {} failing", issue.noun()));
-            }
+        if !self.failing.is_empty() {
+            parts.push(crate::flash::plural(self.failing.len(), "failing check"));
         }
         if parts.is_empty() {
             "nothing failing".into()
@@ -373,6 +305,30 @@ pub struct State {
     pub dirty: bool,
     /// `⌘G` asked for this pull request's form, waiting on a fresh body.
     pub pending_open: Option<String>,
+    /// By PR URL: the files its head conflicts in with its base, as
+    /// `conflicts::local` answered ([`want_conflicts`]).
+    pub conflicted: HashMap<String, Conflicted>,
+    /// Sends waiting on their pull request's [`Conflicted`] answer, sent on
+    /// the beat once it is in ([`send_waiting`]). One per pull request.
+    pub waiting: Vec<AutofixForm>,
+}
+
+/// What a pull request's head was asked to merge with its base — the
+/// files that conflict, once `conflicts::local` has said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflicted {
+    head_sha: String,
+    base: String,
+    /// None while the ask is out; the files once it landed — none when the
+    /// repo could not say.
+    files: Option<Vec<String>>,
+}
+
+impl Conflicted {
+    /// Whether this is the answer for `head_sha` against `base`.
+    fn is_for(&self, head_sha: &str, base: &str) -> bool {
+        self.head_sha == head_sha && self.base == base
+    }
 }
 
 impl State {
@@ -395,6 +351,12 @@ impl State {
     fn forget(&mut self, url: &str) {
         self.watching.remove(url);
         self.held.remove(url);
+        self.conflicted.remove(url);
+    }
+
+    /// A send for `url` is waiting on its conflicting files.
+    fn is_waiting(&self, url: &str) -> bool {
+        self.waiting.iter().any(|form| form.pr.url == url)
     }
 }
 
@@ -539,7 +501,7 @@ pub fn land_detail(
     };
     let status = app.prs.status_or_open(url);
     let diagnosis = diagnose(detail, status.health.conflicts);
-    let pr = open_pr(app, &watch.project, url);
+    let pr = open_pr(app, &watch.project, url).cloned();
     if diagnosis.is_empty() && status.is_open() && pr.is_some() && !status.conflicts_known {
         app.autofix.recheck_later(url);
         return;
@@ -548,10 +510,15 @@ pub fn land_detail(
         app.autofix.forget(url);
         return;
     };
+    // Its conflicting files, asked as soon as it is seen to conflict, so
+    // they are in by the time it is sent.
+    if diagnosis.conflicts {
+        want_conflicts(app, &watch.project, url, pr.number, &PrRefs::of(detail));
+    }
     let settling = diagnosis.running
         && !diagnosis.conflicts_only()
         && watch.first_seen.elapsed() < SETTLE_LIMIT;
-    if settling || fixer_on_it(app, &watch.project, &pr) {
+    if settling || fixer_on_it(app, &watch.project, &pr) || app.autofix.is_waiting(url) {
         app.autofix.recheck_later(url);
         return;
     }
@@ -595,7 +562,7 @@ pub fn land_detail(
         Mode::Off => {}
         Mode::Auto if record.attempts < AUTO_ATTEMPTS => {
             form.peers = peers;
-            dispatch(app, form, out);
+            send(app, form, out);
         }
         Mode::Auto => give_up(app, &form, record.attempts),
     }
@@ -617,43 +584,95 @@ fn give_up(app: &mut App, form: &AutofixForm, attempts: u8) {
     app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
 }
 
-/// `⌘G`'s body landed: the form, over the PULL REQUESTS MODAL if it is
-/// still up on that pull request — from the cached body when `gh` could
-/// not answer. Not for one merged or closed since.
-fn open_pending(app: &mut App, url: &str, detail: Option<&PrDetail>) {
-    let Some(pr) = crate::pr_modal::selected_pr(app).filter(|pr| pr.url == url) else {
+/// `⌘G` — in the PULL REQUESTS MODAL, or on the pane's PULL REQUEST PAGE
+/// (and a click on its `⌘G send autofix`): the form for the pull request
+/// it shows, at once from a fresh body, else once a fresh one lands
+/// ([`land_detail`]), so it names the checks failing now.
+pub(crate) fn open_asked(app: &mut App) {
+    let Some((project, url, number)) = shown(app) else {
         return;
     };
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+    let Some(pr) = still_open(app, &project, &url, number) else {
         return;
     };
-    let project = view.project.clone();
-    let open = app.prs.status_or_open(url).is_open();
-    match detail.or_else(|| app.pr_detail.get(url)).cloned() {
-        Some(_) if !open => {
-            app.flash = Some(Flash::note(format!("#{} is no longer open", pr.number)));
+    let fresh = app.pr_detail_fresh(&url);
+    if let (true, Some(detail)) = (fresh, app.pr_detail.get(&url).cloned()) {
+        open_for(app, project, pr, &detail);
+        return;
+    }
+    let Some(dir) = repo_dir(app, &project) else {
+        return;
+    };
+    app.autofix.pending_open = Some(url.clone());
+    app.pr_detail_failed.remove(&url);
+    app.pending_pr_detail = Some((
+        crate::app::PendingPrDetail { url, number, dir },
+        Instant::now(),
+    ));
+    app.flash = Some(Flash::working(format!("Reading #{number}'s checks…")));
+}
+
+/// The pull request `⌘G` is about, as `(project, url, number)`: the one
+/// under the PULL REQUESTS MODAL's cursor while the modal is up, else the
+/// one the pane's PULL REQUEST PAGE reads — nothing over any other modal.
+fn shown(app: &App) -> Option<(ProjectId, String, u64)> {
+    match &app.overlay {
+        Some(Overlay::PullRequests(view)) => {
+            let pr = crate::pr_modal::selected_pr(app)?;
+            Some((view.project.clone(), pr.url, pr.number))
         }
+        Some(_) => None,
+        None => {
+            let pr = app.previewed_pr()?;
+            Some((app.selected_project()?.id.clone(), pr.url, pr.number))
+        }
+    }
+}
+
+/// `url`'s row on `project`'s open list — None, and the footer saying so,
+/// for one that has merged or closed.
+fn still_open(app: &mut App, project: &ProjectId, url: &str, number: u64) -> Option<OpenPr> {
+    let status = app.prs.status_or_open(url);
+    let row = open_pr(app, project, url)
+        .filter(|_| status.is_open())
+        .cloned();
+    if row.is_none() {
+        let gone = match status.standing {
+            crate::pull_request::Standing::Merged => "has merged",
+            _ => "is no longer open",
+        };
+        app.flash = Some(Flash::note(format!("#{number} {gone}")));
+    }
+    row
+}
+
+/// `⌘G`'s body landed: the form, if what asked for it still shows that
+/// pull request — from the cached body when `gh` could not answer. Not for
+/// one merged or closed since.
+fn open_pending(app: &mut App, url: &str, detail: Option<&PrDetail>) {
+    let Some((project, _, number)) = shown(app).filter(|(_, shown, _)| shown == url) else {
+        return;
+    };
+    match detail.or_else(|| app.pr_detail.get(url)).cloned() {
         Some(detail) => {
-            app.flash = None;
-            open_for(app, project, pr, &detail);
+            if let Some(pr) = still_open(app, &project, url, number) {
+                app.flash = None;
+                open_for(app, project, pr, &detail);
+            }
         }
         None => {
-            app.flash = Some(Flash::failed(format!(
-                "Couldn't read #{}'s checks",
-                pr.number
-            )));
+            app.flash = Some(Flash::failed(format!("Couldn't read #{number}'s checks")));
         }
     }
 }
 
 /// The PR's row in its project's open list.
-fn open_pr(app: &App, project: &ProjectId, url: &str) -> Option<OpenPr> {
+pub(crate) fn open_pr<'a>(app: &'a App, project: &ProjectId, url: &str) -> Option<&'a OpenPr> {
     app.open_prs
         .get(project)?
         .list
         .iter()
         .find(|pr| pr.url == url)
-        .cloned()
 }
 
 /// The session name an autofix agent on PR `number` goes by.
@@ -662,7 +681,12 @@ pub fn agent_name(number: u64) -> String {
 }
 
 /// Whether `agent` works in one of `project`'s checkouts of `branch`.
-fn on_branch(app: &App, agent: &orion_core::Agent, project: &ProjectId, branch: &str) -> bool {
+pub(crate) fn on_branch(
+    app: &App,
+    agent: &orion_core::Agent,
+    project: &ProjectId,
+    branch: &str,
+) -> bool {
     app.tree
         .worktrees
         .iter()
@@ -679,10 +703,21 @@ fn fixer_on_it(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
 /// user in one of `project`'s checkouts of `branch` — what the DIFF
 /// VIEWER's Enter on a conflicted file leaves the conflict to.
 pub(crate) fn fixing(app: &App, project: &ProjectId, branch: &str, number: u64) -> bool {
-    let fixer = agent_name(number);
-    app.tree.agents.iter().any(|agent| {
+    fixer(app, project, branch, number).is_some()
+}
+
+/// The `autofix-<number>` [`fixing`] finds: what the PULL REQUEST PAGE's
+/// AUTOFIX line shows at work (`pr_work`).
+pub(crate) fn fixer<'a>(
+    app: &'a App,
+    project: &ProjectId,
+    branch: &str,
+    number: u64,
+) -> Option<&'a orion_core::Agent> {
+    let name = agent_name(number);
+    app.tree.agents.iter().find(|agent| {
         !agent.archived
-            && agent.name == fixer
+            && agent.name == name
             && matches!(
                 agent.status,
                 AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
@@ -823,14 +858,15 @@ pub const PRESET_TEXT: (&str, &str) = (
 Rules:
 - Fix only what is listed under \"Fix\" below.
 - Merge conflicts: fetch the base branch from origin and merge it. Resolve each conflict by understanding both sides' intent; never drop one side's work silently. Regenerate lockfiles and generated files rather than hand-merging them, and commit the merge.
-- Failing unit tests: read the failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`), reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
-- Failing e2e tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
-- Any other failing check (lint, typecheck, build): reproduce it locally and fix it.",
+- Failing checks: read each one's failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`) to see what kind of check it is.
+  - Unit tests: reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
+  - E2E tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
+  - Any other check (lint, typecheck, build): reproduce it locally and fix it.",
     "Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.",
 );
 
 /// The agent's first prompt: the pull request and the ticked issues —
-/// with the failed checks behind each — and the user's note, between the
+/// the failed checks by workflow — and the user's note, between the
 /// PR autofix preset's prefix and postfix — orion's own
 /// ([`PRESET_TEXT`]) while it holds none of the user's.
 pub fn prompt(
@@ -856,7 +892,8 @@ pub fn prompt(
 }
 
 /// What the agent is pointed at: the pull request, its branches, each
-/// ticked issue with the checks behind it, and the user's note.
+/// ticked issue — the failing checks under their workflows — and the
+/// user's note.
 fn context(
     pr: &OpenPr,
     refs: &PrRefs,
@@ -880,17 +917,25 @@ fn context(
         "Fix:".to_string(),
     ];
     for issue in ticked {
-        let heading = issue.heading();
-        let checks = diagnosis.failing(*issue);
+        let heading = issue.label();
         match issue {
-            Issue::Conflicts => lines.push(format!("- {heading} with {base}")),
-            _ if checks.is_empty() => lines.push(format!(
+            Issue::Conflicts if diagnosis.conflicted.is_empty() => {
+                lines.push(format!("- {heading} with {base}"))
+            }
+            Issue::Conflicts => {
+                lines.push(format!("- {heading} with {base}, in:"));
+                lines.extend(diagnosis.conflicted.iter().map(|f| format!("  - {f}")));
+            }
+            Issue::Checks if diagnosis.failing.is_empty() => lines.push(format!(
                 "- {heading} (none named by GitHub — check `gh pr checks {}`)",
                 pr.number
             )),
-            _ => {
+            Issue::Checks => {
                 lines.push(format!("- {heading}:"));
-                lines.extend(checks.iter().map(|c| format!("  - {}", check_line(c))));
+                for (workflow, checks) in diagnosis.failing_by_workflow() {
+                    lines.push(format!("  - {workflow}:"));
+                    lines.extend(checks.iter().map(|c| format!("    - {}", check_line(c))));
+                }
             }
         }
     }
@@ -902,12 +947,10 @@ fn context(
     lines.join("\n")
 }
 
-/// `name (workflow) url`, leaving out what GitHub did not say.
+/// `name url` — its workflow is the line over it — leaving out a page
+/// GitHub did not give.
 fn check_line(check: &PrCheck) -> String {
     let mut line = check.name.clone();
-    if !check.workflow.is_empty() && check.workflow != check.name {
-        line.push_str(&format!(" ({})", check.workflow));
-    }
     if !check.url.is_empty() {
         line.push_str(&format!(" {}", check.url));
     }
@@ -924,11 +967,9 @@ pub enum Row {
 }
 
 impl Row {
-    const ORDER: [Row; 5] = [
+    const ORDER: [Row; 3] = [
         Row::Issue(Issue::Conflicts),
-        Row::Issue(Issue::Unit),
-        Row::Issue(Issue::E2e),
-        Row::Issue(Issue::Other),
+        Row::Issue(Issue::Checks),
         Row::Note,
     ];
 
@@ -1042,6 +1083,10 @@ impl AutofixForm {
 pub fn open_for(app: &mut App, project: ProjectId, pr: OpenPr, detail: &PrDetail) {
     let conflicts = app.prs.status_or_open(&pr.url).health.conflicts;
     let mut form = AutofixForm::new(project, pr, detail, conflicts);
+    if conflicts {
+        want_conflicts(app, &form.project, &form.pr.url, form.pr.number, &form.refs);
+        form.diagnosis.conflicted = files_for(app, &form).unwrap_or_default();
+    }
     if let Some(Overlay::PullRequests(view)) = app.overlay.take() {
         form.under = Some(Box::new(view));
     }
@@ -1058,6 +1103,113 @@ fn close(app: &mut App) -> Option<AutofixForm> {
     app.overlay = form.under.take().map(|view| Overlay::PullRequests(*view));
     app.dirty = true;
     Some(form)
+}
+
+/// Ask the repo which files pull request `number` at `url` conflicts in —
+/// its head merged with its base in memory (`conflicts::local`), the head
+/// fetched by its pull ref first when the repo lacks it — off the loop,
+/// unless its head and base were asked already.
+fn want_conflicts(app: &mut App, project: &ProjectId, url: &str, number: u64, refs: &PrRefs) {
+    let (head_sha, base) = (refs.head_sha.clone(), refs.base.clone());
+    let asked = app
+        .autofix
+        .conflicted
+        .get(url)
+        .is_some_and(|known| known.is_for(&head_sha, &base));
+    if asked || head_sha.is_empty() || base.is_empty() {
+        return;
+    }
+    let Some(dir) = repo_dir(app, project) else {
+        return;
+    };
+    app.autofix.conflicted.insert(
+        url.to_string(),
+        Conflicted {
+            head_sha: head_sha.clone(),
+            base: base.clone(),
+            files: None,
+        },
+    );
+    let (url, quit) = (url.to_string(), app.git_sync.quit.clone());
+    crate::conflicts::off_loop(app, move || {
+        let merged = crate::conflicts::local(&dir, &base, &head_sha).or_else(|_| {
+            crate::conflicts::fetch_pull_head(&dir, number, &head_sha, &quit)?;
+            crate::conflicts::local(&dir, &base, &head_sha)
+        });
+        crate::conflicts::Answer::Autofix {
+            url,
+            files: merged.map(|local| local.files),
+            head_sha,
+            base,
+        }
+    });
+}
+
+/// [`want_conflicts`]'s answer: the files kept for the head and base it
+/// was asked for — and shown on the form up on that pull request.
+pub(crate) fn land_conflicts(
+    app: &mut App,
+    url: &str,
+    head_sha: &str,
+    base: &str,
+    files: Result<Vec<String>, String>,
+) {
+    let Some(known) = app.autofix.conflicted.get_mut(url) else {
+        return;
+    };
+    if !known.is_for(head_sha, base) {
+        return;
+    }
+    let files = files.unwrap_or_else(|why| {
+        tracing::debug!(url, "autofix: no conflicting files: {why}");
+        Vec::new()
+    });
+    known.files = Some(files.clone());
+    if let Some(Overlay::Autofix(form)) = &mut app.overlay {
+        if form.pr.url == url && form.refs.head_sha == head_sha && form.refs.base == base {
+            form.diagnosis.conflicted = files;
+        }
+    }
+}
+
+/// The files `form`'s pull request conflicts in for its head and base, as
+/// [`want_conflicts`] was answered — none when its head was never asked
+/// about — or None while that answer is out.
+fn files_for(app: &App, form: &AutofixForm) -> Option<Vec<String>> {
+    match app.autofix.conflicted.get(&form.pr.url) {
+        Some(known) if known.is_for(&form.refs.head_sha, &form.refs.base) => known.files.clone(),
+        _ => Some(Vec::new()),
+    }
+}
+
+/// Send `form`'s agent ([`dispatch`]) — naming the files its pull request
+/// conflicts in, when it conflicts: while the repo has yet to say which,
+/// it waits, and goes on the beat once it has ([`send_waiting`]).
+fn send(app: &mut App, mut form: AutofixForm, out: &mut Vec<ClientRequest>) {
+    if form.diagnosis.conflicts {
+        want_conflicts(app, &form.project, &form.pr.url, form.pr.number, &form.refs);
+        let Some(files) = files_for(app, &form) else {
+            app.autofix.waiting.retain(|w| w.pr.url != form.pr.url);
+            app.autofix.waiting.push(form);
+            return;
+        };
+        form.diagnosis.conflicted = files;
+    }
+    dispatch(app, form, out);
+}
+
+/// The beat: each send [`send`] left waiting whose conflicting files are
+/// in, sent.
+pub fn send_waiting(app: &mut App, out: &mut Vec<ClientRequest>) {
+    for mut form in std::mem::take(&mut app.autofix.waiting) {
+        match files_for(app, &form) {
+            Some(files) => {
+                form.diagnosis.conflicted = files;
+                dispatch(app, form, out);
+            }
+            None => app.autofix.waiting.push(form),
+        }
+    }
 }
 
 /// Send the agent: a PR SESSION named `autofix-<n>`, on the harness,
@@ -1126,17 +1278,6 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
     app.dirty = true;
 }
 
-/// Esc: not now — this breakage is not asked about again.
-fn dismiss(app: &mut App) {
-    let Some(form) = close(app) else {
-        return;
-    };
-    // `⌘G` was asked for; nothing to remember.
-    if form.under.is_none() {
-        app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
-    }
-}
-
 pub mod keys {
     use crate::hints::Key;
 
@@ -1158,8 +1299,10 @@ pub fn hints(form: &AutofixForm) -> Vec<Hint> {
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // Esc: not now. `⌘G` asked for the form, so there is nothing to
+    // remember: an unasked send is still the breakage's to make.
     if key.code == KeyCode::Esc {
-        dismiss(app);
+        close(app);
         return;
     }
     let Some(Overlay::Autofix(form)) = &mut app.overlay else {
@@ -1191,7 +1334,7 @@ fn submit(app: &mut App, out: &mut Vec<ClientRequest>) {
         return;
     }
     if let Some(form) = close(app) {
-        dispatch(app, form, out);
+        send(app, form, out);
     }
 }
 
@@ -1236,20 +1379,45 @@ const SOME_BASE: &str = "its base";
 const EXPLAIN: &str = "The agent runs in the PR's worktree on your default agent: it fixes what is ticked, runs the tests locally until they pass, then commits and pushes to the PR.";
 const EXPLAIN_ROWS: u16 = 3;
 
-/// What each issue row says after its box.
+/// What each issue row says after its box; the failing checks' names
+/// follow on lines of their own, a workflow each ([`workflow_rows`]).
 fn row_note(form: &AutofixForm, issue: Issue) -> String {
-    let failing = form.diagnosis.failing(issue);
     match issue {
-        Issue::Conflicts if form.diagnosis.conflicts => format!(
+        _ if !form.diagnosis.has(issue) => "none detected".into(),
+        Issue::Conflicts if form.diagnosis.conflicted.is_empty() => format!(
             "{} has moved on — merge it in and resolve",
             form.refs.base_or(SOME_BASE)
         ),
-        _ if !form.diagnosis.has(issue) => "none detected".into(),
-        _ => {
-            let names: Vec<&str> = failing.iter().map(|c| c.name.as_str()).collect();
-            format!("{} failing: {}", failing.len(), names.join(", "))
-        }
+        Issue::Conflicts => format!(
+            "{}: {}",
+            crate::flash::plural(form.diagnosis.conflicted.len(), "file"),
+            form.diagnosis.conflicted.join(", ")
+        ),
+        Issue::Checks => format!("{} failing", form.diagnosis.failing.len()),
     }
+}
+
+/// Under the **Failing checks** row, a line per workflow: its name in the
+/// labels' column, then the checks that failed in it.
+fn workflow_rows(form: &AutofixForm, th: Theme) -> Vec<Vec<Span<'static>>> {
+    // Past the caret and the box, under the label.
+    const UNDER_LABEL: &str = "       ";
+    form.diagnosis
+        .failing_by_workflow()
+        .into_iter()
+        .map(|(workflow, checks)| {
+            let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+            let workflow = crate::ui::truncate(&workflow, LABEL_W - 1);
+            vec![
+                Span::raw(UNDER_LABEL),
+                Span::styled(
+                    format!("{workflow:<LABEL_W$}"),
+                    Style::default().fg(th.muted),
+                ),
+                Span::styled(names.join(", "), Style::default().fg(th.warn)),
+            ]
+        })
+        .collect()
 }
 
 /// One issue's row: the caret, its box, its name and what was found.
@@ -1311,11 +1479,12 @@ fn lines(form: &AutofixForm, th: Theme) -> Vec<(Option<Row>, Vec<Span<'static>>)
         ),
         (None, Vec::new()),
     ];
-    lines.extend(
-        Issue::ALL
-            .into_iter()
-            .map(|issue| (Some(Row::Issue(issue)), issue_row(form, issue, th))),
-    );
+    for issue in Issue::ALL {
+        lines.push((Some(Row::Issue(issue)), issue_row(form, issue, th)));
+        if issue == Issue::Checks {
+            lines.extend(workflow_rows(form, th).into_iter().map(|row| (None, row)));
+        }
+    }
     lines.push((None, Vec::new()));
     // Drawn where it lands (`draw`), for the mouse to find it there.
     lines.push((Some(Row::Note), Vec::new()));
@@ -1474,17 +1643,6 @@ mod tests {
     }
 
     #[test]
-    fn checks_are_classified_by_name() {
-        let kind = |name: &str, wf: &str| classify(&check(name, wf, CheckState::Failed));
-        assert_eq!(kind("e2e tests (shard 2)", "CI"), Issue::E2e);
-        assert_eq!(kind("chromium", "Playwright"), Issue::E2e);
-        assert_eq!(kind("unit tests", "CI"), Issue::Unit);
-        assert_eq!(kind("vitest", ""), Issue::Unit);
-        assert_eq!(kind("lint", "CI"), Issue::Other);
-        assert_eq!(kind("typecheck", ""), Issue::Other);
-    }
-
-    #[test]
     fn diagnosis_lists_failures_and_notices_running_checks() {
         let d = diag(&detail(
             true,
@@ -1495,10 +1653,9 @@ mod tests {
             ],
         ));
         assert!(d.conflicts);
-        assert_eq!(d.other.len(), 1);
-        assert!(d.unit.is_empty() && d.e2e.is_empty());
+        assert_eq!(d.failing, [check("lint", "", CheckState::Failed)]);
         assert!(d.running);
-        assert_eq!(d.summary(), "merge conflicts · 1 other failing");
+        assert_eq!(d.summary(), "merge conflicts · 1 failing check");
     }
 
     #[test]
@@ -1537,7 +1694,7 @@ mod tests {
             &pr(),
             &PrRefs::of(&detail),
             &diag(&detail),
-            &[false, false, true, false],
+            &[false, true],
             "flaky on CI",
             &orions(),
         );
@@ -1547,14 +1704,15 @@ mod tests {
         assert!(text.contains("https://ci/e2e"));
         assert!(text.contains("Note from the user: flaky on CI"));
         let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Note from the user").unwrap()];
-        assert!(fix.contains("- Failing e2e tests:"), "{fix}");
+        assert!(fix.contains("- Failing checks:"), "{fix}");
         assert!(!fix.contains("- Merge conflicts"), "{fix}");
-        assert!(!fix.contains("- Failing unit tests"), "{fix}");
         for rule in [
             "Fix only what is listed",
+            "fetch the base branch from origin and merge it",
             "re-run only those specs locally, never the full suite — unless earlier attempts failed the same way",
             "reproduce each failing test locally",
-            "`gh pr checks --watch` until it is green",
+            "Any other check (lint, typecheck, build): reproduce it locally and fix it",
+            "`gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again",
         ] {
             assert!(text.contains(rule), "{rule}:\n{text}");
         }
@@ -1578,7 +1736,7 @@ mod tests {
             &pr(),
             &PrRefs::of(&detail),
             &diag(&detail),
-            &[true, false, false, false],
+            &[true, false],
             "",
             &preset,
         );
@@ -1592,8 +1750,51 @@ mod tests {
     fn the_form_ticks_what_was_detected() {
         let detail = detail(false, vec![check("unit", "", CheckState::Failed)]);
         let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail, false);
-        assert_eq!(form.picks, [false, true, false, false]);
-        assert_eq!(form.row, Row::Issue(Issue::Unit));
+        assert_eq!(form.picks, [false, true]);
+        assert_eq!(form.row, Row::Issue(Issue::Checks));
+    }
+
+    /// Unit, e2e and the rest are one **Failing checks** list, grouped by
+    /// the workflow each ran in as GitHub groups them, a check from none
+    /// under `Other`: nothing is guessed from a check's name.
+    #[test]
+    fn failing_checks_are_one_list_grouped_by_workflow() {
+        let detail = detail(
+            false,
+            vec![
+                check("unit tests", "CI", CheckState::Failed),
+                check("chromium", "Playwright", CheckState::Failed),
+                check("lint", "CI", CheckState::Failed),
+                check("build", "CI", CheckState::Passed),
+                check("vercel", "", CheckState::Failed),
+            ],
+        );
+        let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail, false);
+        assert_eq!(form.diagnosis.summary(), "4 failing checks");
+        let text = prompt(
+            &pr(),
+            &form.refs,
+            &form.diagnosis,
+            &form.picks,
+            "",
+            &orions(),
+        );
+        let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Then commit").unwrap()];
+        assert_eq!(
+            fix.trim(),
+            [
+                "Fix:",
+                "- Failing checks:",
+                "  - CI:",
+                "    - unit tests https://ci/unit tests",
+                "    - lint https://ci/lint",
+                "  - Playwright:",
+                "    - chromium https://ci/chromium",
+                "  - Other:",
+                "    - vercel https://ci/vercel",
+            ]
+            .join("\n")
+        );
     }
 
     #[test]
@@ -2107,13 +2308,11 @@ mod tests {
         for text in [
             "Autofix #7",
             "#7 Add things",
-            "merge conflicts · 1 unit failing · 1 other failing",
+            "merge conflicts · 2 failing checks",
             "[x] Merge conflicts",
-            "[x] Unit tests",
-            "1 failing: unit tests",
-            "[ ] E2E tests",
-            "none detected",
-            "[x] Other checks",
+            "main has moved on",
+            "[x] Failing checks  2 failing",
+            "CI              unit tests, lint",
             "Note",
             "send autofix",
             "not now",
@@ -2166,5 +2365,127 @@ mod tests {
         listed(&mut app);
         landed(&mut app, &running);
         assert_eq!(due_fetches(&mut app).len(), 1);
+    }
+
+    // ---- the conflicting files ----
+
+    /// [`app_with`] on a real repo whose `feature` conflicts with `main`
+    /// in `a.txt` and `gone.txt`, and a page of #7 at `feature`'s tip.
+    fn conflicted_app(dir: &tempfile::TempDir) -> (App, PrDetail) {
+        let (_, clone) = crate::conflicts::tests::conflicted_clone(dir);
+        let head = crate::conflicts::tests::git(&clone, &["rev-parse", "HEAD"]);
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        app.tree.projects[0].repo_path = clone;
+        let page = PrDetail {
+            head_sha: head,
+            ..detail(true, Vec::new())
+        };
+        (app, page)
+    }
+
+    /// The conflict's line in the prompt names each file the repo says
+    /// conflicts, under orion's rule to merge the base in and resolve.
+    #[test]
+    fn the_prompt_names_the_files_that_conflict() {
+        let page = detail(true, Vec::new());
+        let mut diagnosis = diag(&page);
+        diagnosis.conflicted = vec!["a.txt".into(), "src/gone.rs".into()];
+        let text = prompt(
+            &pr(),
+            &PrRefs::of(&page),
+            &diagnosis,
+            &[true, false],
+            "",
+            &orions(),
+        );
+        assert!(
+            text.contains("- Merge conflicts with `main`, in:\n  - a.txt\n  - src/gone.rs\n"),
+            "{text}"
+        );
+    }
+
+    /// An unasked send to a conflicting pull request names the files its
+    /// head conflicts in with its base, as the repo merges them
+    /// (`conflicts::local`).
+    #[test]
+    fn an_unasked_send_names_the_files_the_repo_says_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, page) = conflicted_app(&dir);
+        listed(&mut app);
+        let out = landed(&mut app, &page);
+        let prompt = sent_prompt(&out).expect("sent");
+        assert!(
+            prompt.contains("- Merge conflicts with `main`, in:\n  - a.txt\n  - gone.txt"),
+            "{prompt}"
+        );
+        assert!(app.autofix.waiting.is_empty());
+    }
+
+    /// The repo's answer is off the loop: the send waits for it — the PR
+    /// not asked about again meanwhile — and goes on the beat after it
+    /// lands, the files named.
+    #[tokio::test]
+    async fn a_send_waits_for_its_files_and_goes_on_the_beat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, page) = conflicted_app(&dir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.view_jobs = Some(crate::view_jobs::Jobs::new(tx));
+        listed(&mut app);
+        let out = landed(&mut app, &page);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(app.autofix.waiting.len(), 1);
+        let mut out = Vec::new();
+        send_waiting(&mut app, &mut out);
+        assert!(out.is_empty(), "the files are not in yet");
+
+        listed(&mut app);
+        assert!(landed(&mut app, &page).is_empty(), "no second send");
+        assert_eq!(app.autofix.waiting.len(), 1);
+
+        match rx.recv().await {
+            Some(crate::view_jobs::Answer::Conflicts(answer)) => {
+                crate::conflicts::land(&mut app, answer)
+            }
+            other => panic!("the repo's answer, not {other:?}"),
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
+            crate::config::with_config_path(dir.path().join("config.json"), || {
+                send_waiting(&mut app, &mut out)
+            })
+        });
+        let prompt = sent_prompt(&out).expect("sent on the beat");
+        assert!(prompt.contains("  - a.txt\n  - gone.txt"), "{prompt}");
+        assert!(app.autofix.waiting.is_empty());
+        assert_eq!(app.autofix.ledger[&pr().url].attempts, 1);
+    }
+
+    /// `⌘G`'s form names the conflicting files on its Merge conflicts row.
+    #[test]
+    fn the_form_names_the_conflicting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, page) = conflicted_app(&dir);
+        app.prs.observe(
+            &page.url,
+            crate::pr_store::PrObservation::of_detail(&page),
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
+        open_for(&mut app, ProjectId("p".into()), pr(), &page);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let shot: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            shot.contains("[x] Merge conflicts 2 files: a.txt, gone.txt"),
+            "{shot}"
+        );
     }
 }

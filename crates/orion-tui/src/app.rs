@@ -209,6 +209,10 @@ pub enum HitTarget {
     /// A `<details>` summary on that page's description or comments: a
     /// click opens or shuts it. Registered ahead of the pane, so it wins.
     PrPageFold(crate::markdown::FoldKey),
+    /// A session, an issue or `⌘G send autofix` in that page's WORK BLOCK
+    /// (`pr_work`): a click lands on the session in the grid, opens the
+    /// issue, or is `⌘G`. Registered ahead of the pane, so it wins.
+    PrPageWork(crate::pr_work::WorkHit),
 }
 
 /// Default outer width of the diff modal's left column — its commits over

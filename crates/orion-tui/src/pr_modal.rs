@@ -737,38 +737,6 @@ pub(crate) fn selected_open_pr(app: &mut App) -> Option<OpenPr> {
     Some(pr)
 }
 
-/// `⌘G`: the AUTOFIX form for the pull request under the cursor — at
-/// once from a fresh body, else once a fresh one lands
-/// (`autofix::land_detail`), so it names the checks failing now.
-fn autofix(app: &mut App) {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return;
-    };
-    let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = selected_open_pr(app) else {
-        return;
-    };
-    let fresh = app.pr_detail_fresh(&pr.url);
-    if let (true, Some(detail)) = (fresh, app.pr_detail.get(&pr.url).cloned()) {
-        crate::autofix::open_for(app, project, pr, &detail);
-        return;
-    }
-    app.autofix.pending_open = Some(pr.url.clone());
-    app.pr_detail_failed.remove(&pr.url);
-    app.pending_pr_detail = Some((
-        crate::app::PendingPrDetail {
-            url: pr.url.clone(),
-            number: pr.number,
-            dir,
-        },
-        std::time::Instant::now(),
-    ));
-    app.flash = Some(crate::flash::Flash::working(format!(
-        "Reading #{}'s checks…",
-        pr.number
-    )));
-}
-
 /// Whether the modal is what is up.
 pub(crate) fn is_up(app: &App) -> bool {
     matches!(&app.overlay, Some(Overlay::PullRequests(_)))
@@ -1233,7 +1201,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
         _ if keys::CLOSE.matches(&key) => crate::pr_actions::open_close(app),
         _ if keys::READY.matches(&key) => crate::pr_actions::toggle_draft(app),
-        _ if keys::AUTOFIX.matches(&key) => autofix(app),
+        _ if keys::AUTOFIX.matches(&key) => crate::autofix::open_asked(app),
         _ if keys::CHECKOUT.matches(&key) => crate::pr_checkout::from_modal(app, out),
         // A PR PICK already came from the LINEAR VIEW: `⌘L` there would
         // stack the two views on each other, so it does nothing.
@@ -1369,6 +1337,12 @@ pub(crate) fn handle_mouse(
         .iter()
         .find(|(rect, _)| rect.contains(mouse_pos))
         .map(|(_, key)| *key);
+    let on_work = view
+        .tabs
+        .work_hits
+        .iter()
+        .find(|(rect, _)| rect.contains(mouse_pos))
+        .map(|(_, hit)| hit.clone());
     match mouse.kind {
         MouseEventKind::ScrollUp if over_body => view.scroll_by(-WHEEL_LINES),
         MouseEventKind::ScrollDown if over_body => view.scroll_by(WHEEL_LINES),
@@ -1389,6 +1363,12 @@ pub(crate) fn handle_mouse(
                 view.tabs.select(row);
             }
             act_on_row(app, out, true);
+        }
+        // A session or an issue the WORK BLOCK names: landed on, opened.
+        MouseEventKind::Down(MouseButton::Left) if on_work.is_some() => {
+            if let Some(hit) = on_work {
+                crate::pr_work::click(app, hit, out);
+            }
         }
         // A `<details>` summary opens or shuts, as on github.com.
         MouseEventKind::Down(MouseButton::Left) if on_fold.is_some() => {
@@ -1984,6 +1964,7 @@ pub(crate) fn draw(
             v.tabs.tab_hits.clear();
             v.tabs.row_hits.clear();
             v.tabs.fold_hits.clear();
+            v.tabs.work_hits.clear();
             v.filter_pick = Some(pick);
         }
         return;
@@ -2007,6 +1988,7 @@ pub(crate) fn draw(
 
     // ---- right: the reading side, the PULL REQUEST PAGE ----
     let current = cursor.and_then(|i| rows.get(i));
+    let work = current.map(|pr| crate::pr_work::of(app, &view.project, &pr.url, pr.number));
     let input = current.map(|pr| crate::pr_preview::PageInput {
         number: pr.number,
         title: &pr.title,
@@ -2018,6 +2000,7 @@ pub(crate) fn draw(
         browser_key: keys::BROWSER.label(),
         diff_key: keys::DIFF.label(),
         conflicts: crate::conflicts::of_page(app, &pr.url),
+        work: work.as_ref(),
         now,
     });
     // The frame says where it stands, the number and the title — the page

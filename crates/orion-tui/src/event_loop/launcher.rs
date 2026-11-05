@@ -4728,6 +4728,151 @@ mod tests {
         });
     }
 
+    /// `⌘G` on the pane's PULL REQUEST PAGE is the AUTOFIX MODAL for the
+    /// pull request it reads — not HOME — as it is in the PULL REQUESTS
+    /// MODAL, and so is a click on the work block's `⌘G send autofix`.
+    /// Esc closes it with nothing remembered, the page still up. With no
+    /// fresh body to read the checks off, one is asked for and the form
+    /// opens as it lands.
+    #[test]
+    fn cmd_g_on_the_panes_pull_request_page_opens_autofix() {
+        with_default_config(|| {
+            let mut app = with_a_listed_pull_request_on_the_empty_band();
+            let url = pull_request(9).url;
+            let detail = crate::pull_request::PrDetail {
+                number: 9,
+                url: url.clone(),
+                title: "Polish the nav".into(),
+                answered_state: crate::pull_request::STATE_OPEN.into(),
+                base: "main".into(),
+                head: "idle".into(),
+                head_sha: "abc123".into(),
+                checks: vec![crate::pull_request::PrCheck {
+                    name: "build".into(),
+                    workflow: "CI".into(),
+                    state: crate::pull_request::CheckState::Failed,
+                    word: "FAILURE".into(),
+                    started: String::new(),
+                    completed: String::new(),
+                    url: String::new(),
+                }],
+                ..Default::default()
+            };
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+            assert_eq!(app.focus, Focus::Terminal);
+            assert!(
+                footer_text(&app).contains("autofix"),
+                "{}",
+                footer_text(&app)
+            );
+
+            // No body yet: asked for, and the form up as it lands.
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(!app.home, "⌘G on the page is autofix, not HOME");
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert_eq!(app.autofix.pending_open.as_deref(), Some(url.as_str()));
+            assert_eq!(
+                app.pending_pr_detail.as_ref().map(|(p, _)| p.number),
+                Some(9)
+            );
+            let asked = crate::fetch::Asked::At(crate::fetch::now());
+            let mut out = Vec::new();
+            crate::event_loop::land_pr_detail(
+                &mut app,
+                url.clone(),
+                Some(detail.clone()),
+                asked,
+                false,
+                &mut out,
+            );
+            assert!(
+                matches!(&app.overlay, Some(crate::app::Overlay::Autofix(f))
+                    if f.pr.number == 9 && f.under.is_none()),
+                "{:?}",
+                app.overlay
+            );
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            assert_eq!(app.focus, Focus::Terminal, "back on the page");
+            assert!(app.autofix.ledger.is_empty(), "Esc remembers nothing");
+
+            // A fresh body: at once — by the key, and by the work block's
+            // button.
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(matches!(
+                &app.overlay,
+                Some(crate::app::Overlay::Autofix(_))
+            ));
+            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            let screen = screen_text(&draw_tall(&mut app));
+            assert!(
+                screen.contains("AUTOFIX   ✗ 1 failing check · ⌘G send autofix"),
+                "{screen}"
+            );
+            let at = app
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| {
+                    (*hit == HitTarget::PrPageWork(crate::pr_work::WorkHit::SendAutofix))
+                        .then_some(*rect)
+                })
+                .expect("the button, for the mouse");
+            mouse(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                at.x + 1,
+                at.y,
+            );
+            assert!(
+                matches!(&app.overlay, Some(crate::app::Overlay::Autofix(_))),
+                "{:?}",
+                app.overlay
+            );
+        });
+    }
+
+    /// The pane's PULL REQUEST PAGE carries its WORK BLOCK under the
+    /// sentence — here the Linear issue its branch was linked to — and a
+    /// click on the issue opens it in the LINEAR VIEW.
+    #[test]
+    fn the_panes_pull_request_page_names_its_issue_and_a_click_opens_it() {
+        with_default_config(|| {
+            let mut app = with_a_listed_pull_request_on_the_empty_band();
+            let project = ProjectId("p1".into());
+            let issue = crate::linear::tests::issue("1", "ENG-1", "Polish");
+            app.linear_links
+                .remember(&project, "idle", std::slice::from_ref(&issue));
+            app.linear.insert(
+                project,
+                crate::linear::LinearList {
+                    list: vec![issue],
+                    ..Default::default()
+                },
+            );
+            draw_tall(&mut app);
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
+            let screen = screen_text(&draw_tall(&mut app));
+            assert!(screen.contains("LINEAR    ◑ ENG-1 In Progress"), "{screen}");
+            let at = app
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches!(hit, HitTarget::PrPageWork(_)).then_some(*rect))
+                .expect("the issue, for the mouse");
+            mouse(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                at.x + 2,
+                at.y,
+            );
+            assert!(
+                matches!(&app.overlay, Some(crate::app::Overlay::Linear(v)) if v.selected == 0),
+                "{:?}",
+                app.overlay
+            );
+        });
+    }
+
     /// The footer carries hints only with nothing over the grid: a modal's
     /// keys are on its own border, and the footer under it says none.
     #[test]

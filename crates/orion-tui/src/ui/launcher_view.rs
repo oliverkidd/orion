@@ -1499,6 +1499,17 @@ pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Ve
     spans
 }
 
+/// One session as a line that names several draws it (the PULL REQUEST
+/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT TAG and the
+/// name, as its grid row draws them.
+pub(crate) fn session_chip(app: &App, a: &orion_core::Agent) -> Vec<Span<'static>> {
+    let look = session_look(app, a, false, app.theme);
+    let mut spans = vec![look.dot];
+    spans.extend(account_tag_span(a, look.quiet));
+    spans.push(Span::styled(a.name.clone(), look.name_style));
+    spans
+}
+
 /// Columns the ACCOUNT TAG takes on a row: its letters and a space.
 pub(crate) const ACCOUNT_TAG_W: usize = crate::claude_accounts::TAG_LEN + 1;
 
