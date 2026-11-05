@@ -17,6 +17,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// How many rows up from the bottom the editor's status bar may sit: its
+/// own row, or above fresh's find prompt and that prompt's options.
+const STATUS_BAR_REACH: usize = 3;
+
 /// Reader-thread → main-loop messages. `generation` stamps which spawn they
 /// belong to, so bytes from a closed editor can't bleed into a new one.
 #[derive(Debug)]
@@ -266,8 +270,38 @@ impl EditorTerm {
         let Some(prompt) = self.kind.find_prompt() else {
             return false;
         };
-        let bottom = self.parser.screen().rows(0, self.cols).last();
-        bottom.is_some_and(|row| row.starts_with(prompt))
+        self.bottom_rows_up(1)
+            .next()
+            .is_some_and(|row| row.starts_with(prompt))
+    }
+
+    /// The screen's last `n` rows as text, the bottom one first.
+    fn bottom_rows_up(&self, n: usize) -> impl Iterator<Item = String> {
+        let skip = usize::from(self.parser.screen().size().0).saturating_sub(n);
+        let rows: Vec<String> = self.parser.screen().rows(0, self.cols).skip(skip).collect();
+        rows.into_iter().rev()
+    }
+
+    /// The line the editor's cursor is on, read off its status bar
+    /// ([`Kind::cursor_line`]): the bottom row, or a few above it while a
+    /// prompt (fresh's `Search:` and its options) sits under the bar. None
+    /// until the bar is drawn, and for an editor without one orion reads.
+    ///
+    /// [`Kind::cursor_line`]: crate::editor::Kind::cursor_line
+    pub fn cursor_line(&self) -> Option<u64> {
+        self.bottom_rows_up(STATUS_BAR_REACH)
+            .find_map(|row| self.kind.cursor_line(&row))
+    }
+
+    /// The line the file is at now, for `⌘O`: fresh's cursor line — line
+    /// 1 when its status bar can't be read, rather than a guess — and for
+    /// any other editor the line it was opened on, the one line orion
+    /// knows.
+    pub fn line_now(&self) -> u64 {
+        match self.kind {
+            crate::editor::Kind::Fresh => self.cursor_line().unwrap_or(1),
+            crate::editor::Kind::Other => self.line.max(1),
+        }
     }
 
     /// The mouse protocol the editor asked for, and whether in SGR
@@ -453,6 +487,35 @@ mod tests {
         let shown = term.parser.screen().contents();
         assert!(shown.contains("033[1;4R033[?6c"), "{shown}");
         assert_eq!(term.kitty_flags(), 5, "fresh's push");
+        term.kill();
+    }
+
+    /// The line now is fresh's cursor line, off the status bar at the
+    /// bottom or a few rows up under a prompt; line 1 while the bar can't
+    /// be read; and for any other editor the line it was opened on.
+    #[tokio::test]
+    async fn the_line_now_is_read_off_the_status_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut term = EditorTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), "sleep 30".into()],
+            dir.path(),
+            "test".into(),
+            40,
+            10,
+            3,
+            tx,
+        )
+        .unwrap();
+        term.line = 5;
+        assert_eq!(term.line_now(), 5, "not fresh: the line it opened on");
+        term.kind = crate::editor::Kind::Fresh;
+        assert_eq!(term.line_now(), 1, "no bar drawn: line 1");
+        term.process(b"\x1b[10;1H Ln 42, Col 3   Text");
+        assert_eq!(term.line_now(), 42);
+        term.process(b"\x1b[8;1H Ln 7, Col 1\x1b[9;1H\x1b[2K[ ] Regex\x1b[10;1H\x1b[2KSearch:");
+        assert_eq!(term.cursor_line(), Some(7), "the bar above a prompt");
         term.kill();
     }
 

@@ -6234,12 +6234,13 @@ fn cmd_as_ctrl(key: KeyEvent) -> KeyEvent {
 }
 
 /// ⌘O in the editor: the file in the OPEN IN APP editor too, at the line
-/// it opened on — the editor stays up, holding whatever it hasn't saved.
+/// the cursor is on (`EditorTerm::line_now`, off fresh's status bar) — the
+/// editor stays up, holding whatever it hasn't saved.
 fn open_editor_file_outside(app: &mut App) {
     let Some(vim) = &app.editor else {
         return;
     };
-    let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line);
+    let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line_now());
     if app.is_remote {
         app.flash = Some(crate::flash::Flash::note(format!(
             "{} would open on the remote machine — the file stays here",

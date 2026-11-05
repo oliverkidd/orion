@@ -320,8 +320,9 @@ the wheel scrolls — with three exceptions:
 - `^\` — force-closes the modal, in any state, without saving.
 - `^q` — fresh's own quit, which asks to save first. With a command `ORION_EDITOR` names, `^q`
   force-closes the modal instead.
-- `⌘O` — the same file in the **Open in app** editor, at the line it opened on; the editor stays
-  up.
+- `⌘O` — the same file in the **Open in app** editor, at the line fresh's cursor is on (read off
+  its status bar's `Ln 42, Col 7`; line 1 if the bar can't be read — with a command `ORION_EDITOR`
+  names, the line it opened on); the editor stays up.
 
 In fresh a `⌘` chord that reaches orion is fresh's `^` chord, as VS Code has it on a Mac: `⌘S`
 saves, `⌘Z` undoes, `⌘⇧Z` redoes, `⌘F` finds, `⌘A` selects all, `⌘D` adds the next match as another
