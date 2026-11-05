@@ -2649,6 +2649,12 @@ impl Daemon {
             // hook dialect has no context-injection channel.
             Some(AgentKind::Cursor) => hooks::installer::install_cursor_hooks(&worktree.path)
                 .and_then(|()| hooks::installer::install_cursor_title_rule(&worktree.path)),
+            // Grok reads personal hook files from its home with no trust
+            // prompt, so one file of orion's there serves every worktree;
+            // its auto-title rides `--rules` (`launch_system_prompt`).
+            Some(AgentKind::Grok) => {
+                hooks::installer::install_grok_hooks(&hooks::installer::grok_home())
+            }
             // OpenCode runs TypeScript plugins, not shell hooks: one
             // managed plugin in its global config dir (globbed at startup,
             // no trust prompt) serves every worktree.
@@ -2717,6 +2723,11 @@ impl Daemon {
             rule.as_deref(),
             initial_prompt,
         );
+        let system = launch_system_prompt(
+            &harness,
+            agent.session_id.is_some(),
+            prompts.system.as_deref(),
+        );
         let (program, args, resumed) = match attach {
             // Never a watched resume: an attach that dies at once keeps the
             // row's session id, and the pane keeps the CLI's reason.
@@ -2739,7 +2750,7 @@ impl Daemon {
                     agent.effort.as_deref(),
                     cmd_override.as_deref(),
                     prompts.initial.as_deref(),
-                    prompts.system.as_deref(),
+                    system.as_deref(),
                     true,
                 );
                 if !resumed && cmd_override.is_none() {
@@ -3429,6 +3440,28 @@ fn push_mode(
     }
 }
 
+/// What a spawn appends to the CLI's system prompt after orion's guidance:
+/// on a fresh launch of a Grok-dialect harness, the AUTO-TITLE rule — Grok
+/// reads no passive hook's stdout, so the instruction the other dialects
+/// get back from a hook can only ride its `--rules`; a resumed
+/// conversation was told the first time — then `launch`'s own text (a PR
+/// SESSION's rule). Firing on a session already named is harmless: the
+/// DAEMON takes one auto-title per session, as for Cursor's always-on rule.
+fn launch_system_prompt(
+    harness: &orion_core::harness::HarnessDescriptor,
+    resuming: bool,
+    launch: Option<&str>,
+) -> Option<String> {
+    let title = (!resuming
+        && harness.system.append_flag.is_some()
+        && harness.hook_dialect() == Some(AgentKind::Grok))
+    .then(hooks::auto_title_rule);
+    match (title, launch) {
+        (Some(title), Some(launch)) => Some(format!("{title}\n\n{launch}")),
+        (title, launch) => title.or_else(|| launch.map(str::to_string)),
+    }
+}
+
 /// One system-prompt flag carrying orion's guidance (worktree, spawn,
 /// then open) and whatever else the launch adds (the PR scope).
 fn push_system_prompt(
@@ -4075,9 +4108,9 @@ mod tests {
     }
 
     /// A third-party CLI with every row mapped — shaped like xAI's
-    /// `grok` (`--model`, `--reasoning-effort`, `--resume <id>`,
-    /// `--rules` appending to the system prompt, trailing prompt) —
-    /// spawns, resumes and carries guidance with config alone.
+    /// `grok` (`--model`, an effort flag, `--resume <id>`, `--rules`
+    /// appending to the system prompt, trailing prompt) — spawns, resumes
+    /// and carries guidance with config alone.
     #[test]
     fn third_party_harness_with_all_rows_mapped_spawns_and_resumes() {
         use orion_core::harness::{Clearable, HarnessOverride};
@@ -4087,7 +4120,7 @@ mod tests {
             HarnessOverride {
                 program: Clearable::Set("grok".into()),
                 model_flag: Clearable::Set("--model".into()),
-                effort_flag: Clearable::Set("--reasoning-effort".into()),
+                effort_flag: Clearable::Set("--effort".into()),
                 effort_offered: Some(true),
                 resume_flag: Clearable::Set("--resume".into()),
                 system_append_flag: Clearable::Set("--rules".into()),
@@ -4116,7 +4149,7 @@ mod tests {
         let mut expected = vec![
             "--model".to_string(),
             "grok-code".to_string(),
-            "--reasoning-effort".to_string(),
+            "--effort".to_string(),
             "high".to_string(),
         ];
         expected.append(&mut guided("--rules", &[]));
@@ -4243,15 +4276,57 @@ mod tests {
                 "session-id",
                 "--model",
                 "model-id",
-                "--reasoning-effort",
+                "--effort",
                 "high",
                 "--rules",
                 "Review only PR #42",
                 "fix the bug; keep this as one argument",
             ]
         );
-        assert_eq!(grok.hook_dialect(), None);
+        assert_eq!(grok.hook_dialect(), Some(AgentKind::Grok));
         assert_eq!(grok.permissions_flag, None);
+    }
+
+    /// Grok's AUTO-TITLE rides `--rules`: on a fresh launch the rule goes
+    /// ahead of the launch's own text (a PR SESSION's), a resume carries
+    /// only the latter, and no other dialect gets it — theirs comes back
+    /// from a hook, a project rule or a plugin.
+    #[test]
+    fn grok_fresh_launches_carry_the_title_rule_in_rules() {
+        let grok = orion_core::harness::builtin("grok").unwrap();
+        let title = hooks::auto_title_rule();
+        assert_eq!(
+            launch_system_prompt(&grok, false, None),
+            Some(title.clone())
+        );
+        assert_eq!(
+            launch_system_prompt(&grok, false, Some("Review only PR #42")),
+            Some(format!("{title}\n\nReview only PR #42"))
+        );
+        assert_eq!(launch_system_prompt(&grok, true, None), None);
+        assert_eq!(
+            launch_system_prompt(&grok, true, Some("Review only PR #42")).as_deref(),
+            Some("Review only PR #42")
+        );
+        for id in ["claude", "codex", "cursor", "opencode"] {
+            let other = orion_core::harness::builtin(id).unwrap();
+            assert_eq!(launch_system_prompt(&other, false, None), None, "{id}");
+        }
+        // The rule reaches the argv as part of the one `--rules` value.
+        let (_, args, _) = agent_spawn_command_with(
+            &grok,
+            None,
+            Some(Path::new(TEST_CWD)),
+            None,
+            None,
+            None,
+            None,
+            launch_system_prompt(&grok, false, None).as_deref(),
+            true,
+        );
+        assert_eq!(args[0], "--rules");
+        assert!(args[1].contains("orion rename"), "{}", args[1]);
+        assert!(args[1].ends_with(&title), "after the guidance: {}", args[1]);
     }
 
     #[test]

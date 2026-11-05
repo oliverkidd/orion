@@ -52,8 +52,9 @@ pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
-    /// xAI's Grok Build CLI. Status is process-based until managed hooks
-    /// are supported.
+    /// xAI's Grok Build CLI. Status and its session id come from managed
+    /// hooks in its home (see the daemon's `hooks::installer`); it has no
+    /// hook that says it is waiting on you.
     Grok,
     /// OpenCode (opencode.ai): the `opencode` CLI. Status comes from a
     /// managed TypeScript plugin rather than shell hooks (see the daemon's

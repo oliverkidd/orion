@@ -118,11 +118,11 @@ Linear option in one place ([Linear](#linear)).
 | `claude_model` | string | `"default"` | Agents | Default `--model` for new Claude sessions. The literal `"default"` is the sentinel meaning *don't pass the flag, let the CLI pick* — it is what you see in a fresh file, not a missing value. Overlay list: `fable`, `opus`, `sonnet`, `haiku` — unless `claude_models` below or Claude Code's own `availableModels` allowlist replaces it; any other string is passed through verbatim. |
 | `claude_models` | array of strings | `[]` | — (hand-edited) | The Claude model rows every picker offers (the NEW AGENT PICKER and QUICK PROMPT submenus, the AGENTS TAB, the PRESET EDITOR) in place of the built-in aliases, verbatim, `"default"` always first: `["claude-sonnet-5", "us.anthropic.claude-opus-5-v1:0"]`. For an organization that restricts models (Claude Code refuses `--model sonnet` with *Model "sonnet" is restricted by your organization's settings. Using claude-sonnet-5 instead.*) or a provider whose ids the aliases don't reach (Bedrock, Vertex, a gateway; on Bedrock `sonnet` even means Sonnet 4.5). Empty, the list follows Claude Code's `availableModels` when one is on disk — `~/.claude/remote-settings.json` (server-managed cache), the macOS MDM profile, `managed-settings.json` and `managed-settings.d/` in the system directory, then `~/.claude/settings.json`, read once at TUI start — else the aliases. A hand edit here applies without a restart. |
 | `claude_effort` | string | `"default"` | Agents | Default reasoning effort (`--effort`) for new Claude sessions: `low`, `medium`, `high`, `xhigh`, `max`, or the `"default"` sentinel. |
-| `codex_model` | string | `"default"` | Agents | Default `--model` for new Codex sessions (Codex spells the flag the same way Claude does): `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, or the `"default"` sentinel. |
-| `codex_effort` | string | `"default"` | Agents | Default `-c model_reasoning_effort=` for new Codex sessions: `minimal`, `low`, `medium`, `high`, `xhigh`, or the `"default"` sentinel. |
+| `codex_model` | string | `"default"` | Agents | Default `--model` for new Codex sessions (Codex spells the flag the same way Claude does): `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`, or the `"default"` sentinel. |
+| `codex_effort` | string | `"default"` | Agents | Default `-c model_reasoning_effort=` for new Codex sessions: `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (which models take which is Codex's call — Luna stops at `max`), or the `"default"` sentinel. |
 | `cursor_model` | string | `"default"` | Agents | Default model *family* for new Cursor sessions, from the cached catalogue (`cursor_models.json`), or the `"default"` sentinel. |
 | `cursor_effort` | string | `"default"` | Agents | The effort suffix the DAEMON joins onto `cursor_model` into one flat `--model <family>-<effort>` id. The choices follow the family, so the overlay row reads `n/a` while the model is unset or has no effort variants. |
-| `opencode_model` | string | `"default"` | Agents | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-sonnet-5`, …); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
+| `opencode_model` | string | `"default"` | Agents | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-fable-5-1`, `anthropic/claude-opus-5-5`, `anthropic/claude-sonnet-5-5`, `openai/gpt-6.1-sol`); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
 | `harnesses` | object | `{"grok": {"enabled": false}}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the NEW AGENT PICKER, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
 | `claude_accounts` | array | `[]` | Agents | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its `name` when it has one (`"name": "Work"`, written only while set — `Work (you@example.com)`). `enabled: false` switches one off (written only while off). The Agents tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `account_tags` | object | `{}` | — | The ACCOUNT TAG each Claude account's sessions wear on the grid, set by hand: by account id (`claude` for the default one), `{"claude-2": {"tag": "wk", "tint": 2}}`, either half alone. With more than one Claude account, every list row and card shows two letters right after its status dot, tinted per account, so you can see which account each session runs on at a glance; Settings → Agents and the usage modal show each account's tag. An account with no entry gets two letters from its name, else its email, never the same as another's, and the next of six tints, none of them a status color. Written only while set. |
@@ -297,7 +297,8 @@ resume, hooks and the Agents tab section all follow, with no rebuild.
 ```
 
 Nullable rows (`program`, `model_flag`, `permissions_flag`, `hooks`, `env`, …) clear with `null` —
-`"claude": {"hooks": null}` runs Claude with process-based status and no title sync. A row that
+`"claude": {"hooks": null}` runs Claude with process-based status and no title sync (`hooks` names
+one of `claude`, `codex`, `cursor`, `grok` or `opencode`). A row that
 stops making sense (an empty program, a resume flag plus a resume subcommand, an unknown dialect,
 an `env` name a shell can't export) refuses its launches with the reason while every other harness
 keeps working. The per-harness keys
@@ -423,10 +424,18 @@ here.
 Grok Build launches `grok` and starts off: a config with no `harnesses` map at all — `{}`, or a
 file from before the map — reads as `"grok": {"enabled": false}`, and its Enabled toggle is stored
 under `harnesses.grok.enabled`. A `harnesses` map that is there is read as written. Set `harnesses.grok.model_default` and `effort_default` in config.json
-to pass `--model` and `--reasoning-effort`; unset values use the CLI defaults. The picker offers
+to pass `--model` and `--effort`; unset values use the CLI defaults. The picker offers
 only `default` unless you configure `models` and `efforts` lists in that same block.
-`--rules` carries additional system guidance and `--resume` accepts a stored session ID, but
-automatic session-ID capture and managed hooks are not yet supported. Status is process-based.
+`--rules` carries orion's guidance (and, on a fresh launch, the AUTO-TITLE instruction), and
+orion installs its hooks as one file of its own, `~/.grok/hooks/orion.json` (`$GROK_HOME/hooks/`
+when that is set), which Grok reads with no trust prompt. They report `SessionStart`,
+`UserPromptSubmit`, `Stop`, `StopFailure` and the subagent events, so a Grok row shows working and
+done, and its `sessionId` is saved for `grok --resume` after a restart. Grok has no hook for a
+permission prompt, and orion passes no `--always-approve`, so a Grok row never shows that it is
+waiting on you — the picker row says so. A `permissions_flag` of `--always-approve` in its
+`harnesses` entry leaves it nothing to ask. Its first-turn `orion rename` asks for permission like
+any other command until you allow it (`Always allow` at the prompt, or `allow =
+["Bash(orion rename *)"]` under `[permission]` in `~/.grok/config.toml`).
 
 ### Linear
 

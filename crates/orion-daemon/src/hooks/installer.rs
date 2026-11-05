@@ -1,9 +1,16 @@
 //! Managed-hook installation into the agent CLI's config:
 //! `<worktree>/.claude/settings.local.json` (Claude Code),
-//! `~/.codex/hooks.json` (Codex CLI), or `<worktree>/.cursor/hooks.json`
-//! (Cursor CLI). OpenCode has no hook file — its managed TypeScript
-//! plugin is `opencode_plugin.rs`, which shares this module's atomic
-//! writer.
+//! `~/.codex/hooks.json` (Codex CLI), `<worktree>/.cursor/hooks.json`
+//! (Cursor CLI), or `~/.grok/hooks/orion.json` (Grok Build). OpenCode has
+//! no hook file — its managed TypeScript plugin is `opencode_plugin.rs`,
+//! which shares this module's atomic writer.
+//!
+//! Grok reads Claude's group shape (`{"hooks": [{"type": "command", …}]}`
+//! under PascalCase event names) from every `*.json` in `$GROK_HOME/hooks`
+//! (default `~/.grok`), and asks no trust for those personal ones — a
+//! project's `.grok/hooks` waits on `/hooks-trust` (docs.x.ai/build/
+//! features/hooks). So, as with Codex, one file in its home serves every
+//! worktree; it is orion's own file, written whole.
 //!
 //! Claude and Codex share one hooks dialect (PascalCase event names, groups
 //! of `{"hooks": [{"type": "command", ...}]}`). Cursor speaks its own
@@ -50,6 +57,11 @@ const CLAUDE_SETTINGS_FILE: &str = "settings.local.json";
 const CLAUDE_DIR: &str = ".claude";
 const CURSOR_DIR: &str = ".cursor";
 const CODEX_DIR: &str = ".codex";
+/// Grok's home under `$HOME` when `$GROK_HOME` is unset, the directory of
+/// personal hook files inside it, and orion's file there.
+const GROK_DIR: &str = ".grok";
+const GROK_HOOKS_DIR: &str = "hooks";
+const GROK_HOOKS_FILE: &str = "orion.json";
 /// How long a hook waits on the daemon. Hooks run inline in the agent's
 /// turn, so a hung daemon has to cost seconds, not a stuck session.
 const HOOK_CURL_TIMEOUT_SECS: u32 = 3;
@@ -97,6 +109,19 @@ const CODEX_EVENTS: &[(&str, Option<&str>)] = &[
     ("SubagentStop", None),
 ];
 
+/// Grok's events orion reads. It has no `PermissionRequest` and no
+/// question tool, so nothing here says it is waiting on you; `StopFailure`
+/// ends a turn that ends on an API error. Its tool events are left out:
+/// with no dialog to close they would only cost a POST per tool call.
+const GROK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+];
+
 /// (cursor hook event, orion hookEvent query value). Cursor has no
 /// PermissionRequest hook and orion always runs cursor-agent with
 /// `--force`, so waiting-on-user is simply not detectable — busy/idle is.
@@ -133,13 +158,22 @@ fn hook_command(endpoint: &str, event: &str) -> String {
     // model's context, which is how the session auto-title instruction
     // reaches the agent. The daemon keeps that body empty except when an
     // instruction is due. Every other event stays fully silent.
-    let silence = if event == "UserPromptSubmit" {
-        "2>/dev/null"
-    } else {
-        ">/dev/null 2>&1"
-    };
+    if event != "UserPromptSubmit" {
+        return silent_hook_command(endpoint, event);
+    }
     format!(
-        "if {}; then exit 0; fi; {} {silence} || true",
+        "if {}; then exit 0; fi; {} 2>/dev/null || true",
+        env_guard(),
+        hook_curl(endpoint, event)
+    )
+}
+
+/// A hook that prints nothing at all: every event but the injectable
+/// dialects' UserPromptSubmit, and all of Grok's (it reads no passive
+/// hook's stdout).
+fn silent_hook_command(endpoint: &str, event: &str) -> String {
+    format!(
+        "if {}; then exit 0; fi; {} >/dev/null 2>&1 || true",
         env_guard(),
         hook_curl(endpoint, event)
     )
@@ -349,6 +383,48 @@ pub fn codex_home() -> PathBuf {
 /// Merge orion's managed hooks for Codex into `<codex_home>/hooks.json`.
 pub fn install_codex_hooks(codex_home: &Path) -> Result<()> {
     install_managed_hooks(codex_home, HOOKS_FILE, "codex", CODEX_EVENTS, &[])
+}
+
+/// Grok's home (`$GROK_HOME`, else `~/.grok`), whose `hooks/` it reads
+/// personal hook files from. See the module header.
+pub fn grok_home() -> PathBuf {
+    orion_core::env::non_empty(orion_core::env::GROK_HOME)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            orion_core::env::home_dir()
+                .unwrap_or_default()
+                .join(GROK_DIR)
+        })
+}
+
+/// Write orion's hooks for Grok Build to `<grok_home>/hooks/orion.json`,
+/// unless it already holds them. The file is orion's alone — the user's
+/// own hooks live in the directory's other files — so it is written whole.
+pub fn install_grok_hooks(grok_home: &Path) -> Result<()> {
+    install_unless_unchanged(
+        &grok_home.join(GROK_HOOKS_DIR),
+        GROK_HOOKS_FILE,
+        &grok_hooks_source(),
+    )
+}
+
+/// The hook file itself: one silent command group per [`GROK_EVENTS`]
+/// entry, matching every tool, in the group shape Grok's docs show.
+fn grok_hooks_source() -> String {
+    let hooks: Map<String, Value> = GROK_EVENTS
+        .iter()
+        .map(|event| {
+            let command = silent_hook_command("grok", event);
+            (
+                event.to_string(),
+                json!([{ "hooks": [{ "type": "command", "command": command }] }]),
+            )
+        })
+        .collect();
+    let mut text = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
+        .expect("a JSON object always serializes");
+    text.push('\n');
+    text
 }
 
 /// Drop the per-worktree `.codex/hooks.json` groups an older orion wrote:
@@ -808,6 +884,82 @@ mod tests {
         match saved {
             Some(v) => std::env::set_var("CODEX_HOME", v),
             None => std::env::remove_var("CODEX_HOME"),
+        }
+    }
+
+    /// Grok's hooks are one file of orion's own in its home's `hooks/`:
+    /// a silent, env-guarded group per event on the grok route, nothing
+    /// for the events it has no use for, and no stray keys Grok's loader
+    /// was never documented to accept.
+    #[test]
+    fn grok_installs_its_own_file_into_grok_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_grok_hooks(tmp.path()).unwrap();
+        let hooks = read_json(tmp.path(), "hooks/orion.json");
+        let events = hooks["hooks"].as_object().unwrap();
+        let mut names: Vec<&str> = events.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        let mut want = GROK_EVENTS.to_vec();
+        want.sort_unstable();
+        assert_eq!(names, want);
+        for event in GROK_EVENTS {
+            assert_eq!(
+                hooks["hooks"][event],
+                json!([{ "hooks": [{
+                    "type": "command",
+                    "command": silent_hook_command("grok", event),
+                }]}]),
+                "{event}"
+            );
+        }
+        assert_eq!(hooks.as_object().unwrap().len(), 1, "only `hooks`");
+        assert!(events.get("PermissionRequest").is_none());
+        assert!(events.get("PreToolUse").is_none(), "nothing blocking");
+        assert_eq!(
+            silent_hook_command("grok", "UserPromptSubmit"),
+            "if [ -z \"$ORION_AGENT_ID\" ] || [ -z \"$ORION_API_URL\" ]; then exit 0; fi; \
+             curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+             -H \"Content-Type: application/json\" --data-binary @- \
+             \"$ORION_API_URL/api/hooks/grok?agentId=$ORION_AGENT_ID&hookEvent=UserPromptSubmit\" \
+             >/dev/null 2>&1 || true"
+        );
+    }
+
+    /// A reinstall over the same file leaves it untouched, and one the
+    /// user edited is put back.
+    #[test]
+    fn grok_reinstall_rewrites_only_a_changed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_grok_hooks(tmp.path()).unwrap();
+        let path = tmp.path().join("hooks/orion.json");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        install_grok_hooks(tmp.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        std::fs::write(&path, "{}").unwrap();
+        install_grok_hooks(tmp.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), grok_hooks_source());
+    }
+
+    #[test]
+    fn grok_home_prefers_env_over_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let saved = std::env::var(orion_core::env::GROK_HOME).ok();
+        std::env::set_var(orion_core::env::GROK_HOME, tmp.path());
+        assert_eq!(grok_home(), tmp.path());
+        std::env::set_var(orion_core::env::GROK_HOME, "");
+        assert_eq!(
+            grok_home(),
+            orion_core::env::home_dir()
+                .unwrap_or_default()
+                .join(".grok")
+        );
+        match saved {
+            Some(v) => std::env::set_var(orion_core::env::GROK_HOME, v),
+            None => std::env::remove_var(orion_core::env::GROK_HOME),
         }
     }
 

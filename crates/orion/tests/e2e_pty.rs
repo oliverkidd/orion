@@ -1722,6 +1722,159 @@ async fn codex_hooks_install_and_drive_status() {
     wait_for_exit(&mut daemon2);
 }
 
+/// Grok mirror of the codex hook test: a grok-kind agent gets one hook
+/// file of orion's own in Grok's home (`$GROK_HOME/hooks/orion.json`, read
+/// with no trust prompt), and Grok's camelCase posts to `/api/hooks/grok`
+/// drive the status machine and hand over the session id that
+/// `grok --resume` takes after a restart.
+#[tokio::test]
+async fn grok_hooks_install_and_drive_status() {
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let grok_home = env.tmp.path().join("grok-home");
+    let grok_env = [("GROK_HOME", grok_home.to_str().unwrap())];
+    let mut daemon = env.spawn_daemon_with("/bin/sh", &grok_env);
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    subscribe(&mut c).await;
+    write_frame(
+        &mut c,
+        &ClientRequest::AddProject {
+            req_id: 1,
+            path: repo.clone(),
+            name: None,
+            create_missing: false,
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter().any(|e| {
+            matches!(
+                e,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Worktree(_)
+                }
+            )
+        })
+    })
+    .await;
+    let worktree = events
+        .iter()
+        .find_map(|e| match e {
+            ServerEvent::EntityUpserted {
+                entity: Entity::Worktree(w),
+            } => Some(w.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    write_frame(
+        &mut c,
+        &ClientRequest::CreateAgent {
+            mode: Default::default(),
+            req_id: 2,
+            worktree: worktree.id.clone(),
+            name: "grokked".into(),
+            kind: AgentKind::Grok,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            auto_title: false,
+            starting_prompt: None,
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 2).is_some()).await;
+    let ServerEvent::Ack {
+        created: Some(EntityId::Agent(agent_id)),
+        ..
+    } = find_ack(&events, 2).unwrap()
+    else {
+        panic!("CreateAgent failed: {events:#?}");
+    };
+    let agent_id = agent_id.clone();
+
+    // One file in Grok's home, nothing written into the checkout.
+    let hooks_path = grok_home.join("hooks").join("orion.json");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("/api/hooks/grok?"));
+    assert!(hooks["hooks"].get("PermissionRequest").is_none());
+    assert!(!repo.join(".grok").exists(), "no project hooks to trust");
+
+    let sref = SessionRef::Agent(agent_id.clone());
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: sref.clone(),
+            from_seq: None,
+            cols: 120,
+            rows: 30,
+        },
+    )
+    .await
+    .unwrap();
+    let curl = |event: &str| {
+        format!(
+            "curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+             -H 'Content-Type: application/json' \
+             -d '{{\"hookEventName\":\"{event}\",\"sessionId\":\"grok-sess-1\"}}' \
+             \"$ORION_API_URL/api/hooks/grok?agentId=$ORION_AGENT_ID&hookEvent={event}\"\n"
+        )
+    };
+    for (event, status) in [
+        ("UserPromptSubmit", orion_core::AgentStatus::Running),
+        ("Stop", orion_core::AgentStatus::Finished),
+    ] {
+        write_frame(
+            &mut c,
+            &ClientRequest::Input {
+                session: sref.clone(),
+                data: curl(event).into_bytes(),
+            },
+        )
+        .await
+        .unwrap();
+        read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+            evs.iter().any(|e| {
+                matches!(e, ServerEvent::StatusChanged { agent, status: s, .. }
+                    if *agent == agent_id && *s == status)
+            })
+        })
+        .await;
+    }
+
+    // The id Grok reported is the row's, for `grok --resume` on reboot.
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+    let mut daemon2 = env.spawn_daemon_with("/bin/sh", &grok_env);
+    let mut c2 = connect(&env.sock()).await;
+    handshake(&mut c2).await;
+    write_frame(&mut c2, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c2, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+    let ServerEvent::Snapshot { agents, .. } = &events[0] else {
+        panic!()
+    };
+    assert_eq!(agents[0].kind, AgentKind::Grok);
+    assert_eq!(agents[0].session_id.as_deref(), Some("grok-sess-1"));
+    write_frame(&mut c2, &ClientRequest::Shutdown)
+        .await
+        .unwrap();
+    wait_for_exit(&mut daemon2);
+}
+
 #[tokio::test]
 async fn external_worktrees_are_adopted_and_dropped() {
     let env = TestEnv::new();

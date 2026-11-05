@@ -1096,13 +1096,17 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     Span::styled(" ".repeat(pad), style),
                 ];
                 // The hint column is a key — the COMMAND PALETTE's and the
-                // OPEN MENU's — in the one key style.
+                // OPEN MENU's — in the one key style, or a note about the
+                // row (the NEW AGENT PICKER's), dim.
                 if hint_len > 0 {
+                    let hint_style = if item.note {
+                        crate::hints::does_style(th)
+                    } else {
+                        crate::hints::key_style(th)
+                    };
                     spans.push(Span::styled(
                         hint.to_string(),
-                        style
-                            .patch(crate::hints::key_style(th))
-                            .remove_modifier(Modifier::BOLD),
+                        style.patch(hint_style).remove_modifier(Modifier::BOLD),
                     ));
                     spans.push(Span::styled(" ", style));
                 }

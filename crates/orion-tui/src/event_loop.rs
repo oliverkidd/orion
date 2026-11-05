@@ -19511,7 +19511,7 @@ mod tests {
             app.focus = Focus::Sessions;
             let mut out = Vec::new();
 
-            // n → Codex row → models → Luna → efforts → minimal → Enter.
+            // n → Codex row → models → Luna → efforts → low → Enter.
             open_picker(&mut app);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -19519,11 +19519,11 @@ mod tests {
                 panic!("expected codex model submenu");
             };
             assert_eq!(menu.title.as_deref(), Some("Codex model"));
-            assert!(menu.items.iter().any(|item| item.label == "gpt-5.6-terra"));
+            assert!(menu.items.iter().any(|item| item.label == "gpt-6.1-terra"));
             let luna = menu
                 .items
                 .iter()
-                .position(|item| item.label.starts_with("gpt-5.6-luna"))
+                .position(|item| item.label.starts_with("gpt-6-luna"))
                 .expect("Luna row");
             for _ in 0..luna {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
@@ -19541,7 +19541,7 @@ mod tests {
                         model: Some(m),
                         effort: Some(e),
                         ..
-                    }] if m == "gpt-5.6-luna" && e == "minimal"
+                    }] if m == "gpt-6-luna" && e == "low"
                 ),
                 "one create, and no Claude refill behind a Codex launch: {out:?}"
             );
@@ -30333,7 +30333,7 @@ mod tests {
 
     /// Route the preset store at a temp file (and the config at a default
     /// one) and pre-seed two presets: "reviewer" (claude · opus · high,
-    /// wrapped) then "scratch" (codex · gpt-5.5, bare).
+    /// wrapped) then "scratch" (codex · gpt-6-luna, bare).
     pub(super) fn with_seeded_presets(f: impl FnOnce()) {
         use crate::agent_presets::AgentPreset;
         let dir = tempfile::tempdir().unwrap();
@@ -30356,7 +30356,7 @@ mod tests {
                         name: "scratch".into(),
                         kind: AgentKind::Codex,
                         custom_harness: None,
-                        model: Some("gpt-5.5".into()),
+                        model: Some("gpt-6-luna".into()),
                         effort: None,
                         prefix: String::new(),
                         postfix: String::new(),
@@ -31064,8 +31064,8 @@ mod tests {
             };
             assert_eq!(editor.name.as_str(), "tested");
             assert_eq!(editor.kind, AgentKind::Codex);
-            assert_eq!(editor.model, "gpt-5.6-sol", "→ steps off the default");
-            assert_eq!(editor.effort, "minimal");
+            assert_eq!(editor.model, "gpt-6-astra", "→ steps off the default");
+            assert_eq!(editor.effort, "low");
             assert_eq!(editor.prefix.as_str(), "Line one\nLine two\n\nLine four");
             assert_eq!(editor.field, PresetField::Postfix);
 
@@ -31089,8 +31089,8 @@ mod tests {
             let saved = &crate::agent_presets::load()[2];
             assert_eq!(saved.name, "tested");
             assert_eq!(saved.kind, AgentKind::Codex);
-            assert_eq!(saved.model.as_deref(), Some("gpt-5.6-sol"));
-            assert_eq!(saved.effort.as_deref(), Some("minimal"));
+            assert_eq!(saved.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(saved.effort.as_deref(), Some("low"));
             assert_eq!(saved.prefix, "Line one\nLine two\n\nLine four");
             assert_eq!(saved.postfix, "END");
             assert!(
@@ -31360,7 +31360,7 @@ mod tests {
             assert_eq!(editor.editing, Some(1));
             assert_eq!(editor.name.as_str(), "scratch");
             assert_eq!(editor.kind, AgentKind::Codex);
-            assert_eq!(editor.model, "gpt-5.5");
+            assert_eq!(editor.model, "gpt-6-luna");
             assert_eq!(editor.effort, crate::config::DEFAULT_CHOICE);
 
             // Tab to Model; the last choice wraps to the default.

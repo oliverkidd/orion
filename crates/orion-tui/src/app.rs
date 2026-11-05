@@ -430,6 +430,9 @@ pub struct MenuItem {
     pub destructive: bool,
     /// Right-aligned key hint, used by the command palette and Open menu.
     pub hint: Option<String>,
+    /// The hint is a dim note about the row (the NEW AGENT PICKER's
+    /// status note), not a key.
+    pub note: bool,
 }
 
 impl MenuItem {
@@ -440,16 +443,15 @@ impl MenuItem {
             action,
             destructive: false,
             hint: None,
+            note: false,
         }
     }
 
     /// A row drawn in the warning color: it deletes, closes, or removes.
     pub fn destructive(label: impl Into<String>, action: MenuAction) -> Self {
         Self {
-            label: label.into(),
-            action,
             destructive: true,
-            hint: None,
+            ..Self::new(label, action)
         }
     }
 
@@ -457,6 +459,14 @@ impl MenuItem {
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
+    }
+
+    /// Pin a dim note to the right edge of the row, where a key hint goes.
+    pub fn with_note(self, note: impl Into<String>) -> Self {
+        Self {
+            note: true,
+            ..self.with_hint(note)
+        }
     }
 }
 
