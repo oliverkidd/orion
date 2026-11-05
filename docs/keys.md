@@ -368,17 +368,21 @@ tabs, explorer or dock, a two-item status bar, orion's own theme — never your
 ### The markdown page
 
 A **markdown file** opened from Go to file, find in files, the tree or a `⌘`-click opens as its
-MARKDOWN PAGE: the file rendered, full width and wrapped, in a modal of its own.
+MARKDOWN PAGE: the file rendered, full width and wrapped, in a modal of its own. It is read again
+when the file changes on disk (a look every two seconds), so an agent's edit shows while you read.
 
 | Key | Action |
 |---|---|
 | `↑`/`↓`, `PgUp`/`PgDn`, `Space`, `Home`/`End`, the wheel | scroll |
-| `Enter`, `e` | edit it in the BUILT-IN EDITOR, at the line it was opened on (a find-in-files hit's); quitting the editor lands back on the page, re-read |
-| `⌘O` (`^o`) | open it in the **Open in app** editor |
+| `Enter`, `e` | edit it in the BUILT-IN EDITOR at the source line of the row at the top of the page — at the line it was opened on (a find-in-files hit's) until it scrolls; quitting the editor lands back on the page, re-read |
+| `Tab`/`⇧Tab` | the next or previous link, highlighted, scrolled into view; `Enter` then follows it (`e` still edits) |
+| a click on a link | follow it: a relative `.md` link opens that page here (`#heading` brings the heading into view; `/` is the checkout's top), an `http` link opens in the browser, any other file in the BUILT-IN EDITOR at its `#L42` line |
+| `⌘O` (`^o`) | open it in the **Open in app** editor, at the line `Enter` would edit |
 | drag | select text and copy it on release; past the top or bottom edge the page scrolls under the pointer |
 | double-click | select and copy the word under the pointer |
 | `⌘C` (`^y`) | copy the selection, or its path when nothing is selected |
-| `Esc`, `q`, a click outside it | close it |
+| `Esc`, `q` | let go of the link `Tab` is on; else back to the page a link left, scrolled where it was; else close |
+| a click outside it | close it |
 
 A selection stays highlighted until the next click or key, and the wheel keeps it. A copied
 paragraph reads as the sentence it is: rows the page only wrapped for width are joined back up

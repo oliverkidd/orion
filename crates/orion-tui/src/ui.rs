@@ -398,7 +398,6 @@ fn draw_page(f: &mut Frame, app: &mut App) {
                 .bg(th.accent)
                 .add_modifier(Modifier::BOLD),
         ));
-    block = crate::hints::modal_block(block, &page_hints(page), area.width, th);
     let inner = block.inner(area);
     let text = Rect {
         x: inner.x + 1,
@@ -422,6 +421,9 @@ fn draw_page(f: &mut Frame, app: &mut App) {
         th,
     ));
     page.settle();
+    // The hints after the flow: whether there are links to `Tab` to is
+    // the flow's to say.
+    block = crate::hints::modal_block(block, &page_hints(page), area.width, th);
     if let Some(at) = page.position() {
         block = block.title_bottom(
             Line::from(Span::styled(format!(" {at} "), Style::default().fg(th.dim)))
@@ -438,6 +440,21 @@ fn draw_page(f: &mut Frame, app: &mut App) {
         .cloned()
         .collect();
     f.render_widget(Paragraph::new(rows), text);
+    // The link `Tab` is on, every row of it, in the selection's colours.
+    let shown = page.scroll as usize..page.scroll as usize + text.height as usize;
+    let focused = page.rendered.iter().flat_map(|r| &r.links).filter(|s| {
+        Some(s.link) == page.focus && shown.contains(&s.row) && s.cols.start < text.width
+    });
+    for spot in focused {
+        let cell = Rect {
+            x: text.x + spot.cols.start,
+            y: text.y + (spot.row - shown.start) as u16,
+            width: spot.cols.end.min(text.width) - spot.cols.start,
+            height: 1,
+        };
+        f.buffer_mut()
+            .set_style(cell, Style::default().bg(th.sel_bg));
+    }
     if let Some(sel) = page.select.selection {
         sel.paint(f.buffer_mut(), text, page.scroll);
     }
@@ -448,15 +465,31 @@ pub(crate) mod page_keys {
     use crate::hints::Key;
 
     pub const EDIT: Key = Key::new(&["enter", "e"], "edit");
+    /// The next link, `⇧Tab` the one before.
+    pub const LINK: Key = Key::new(&["tab", "shift+tab"], "link");
+    /// Enter on the link `Tab` is on.
+    pub const FOLLOW: Key = Key::new(&["enter"], "follow");
 }
 
-/// The MARKDOWN PAGE's bottom-border keys.
+/// The MARKDOWN PAGE's bottom-border keys: Enter follows the link `Tab` is
+/// on, else edits; Esc lets that link go, else goes back to the page a
+/// link left, else closes.
 pub(crate) fn page_hints(page: &crate::markdown_view::MarkdownPage) -> Vec<crate::hints::Hint> {
-    vec![
-        page_keys::EDIT.hint_as(format!("edit in {}", editor_name(&page.editor))),
-        crate::hints::in_app_hint(),
-        crate::hints::ESC_CLOSE.hint(),
-    ]
+    let mut hints = vec![match page.focus {
+        Some(_) => page_keys::FOLLOW.hint(),
+        None => page_keys::EDIT.hint_as(format!("edit in {}", editor_name(&page.editor))),
+    }];
+    if page.rendered.as_ref().is_some_and(|r| !r.links.is_empty()) {
+        hints.push(page_keys::LINK.hint());
+    }
+    hints.push(crate::hints::in_app_hint());
+    let esc = match (page.focus, page.has_back()) {
+        (Some(_), _) => "clear",
+        (None, true) => "back",
+        (None, false) => "close",
+    };
+    hints.push(crate::hints::ESC_CLOSE.hint_as(esc));
+    hints
 }
 
 /// How much of the box a modal floating over it leaves showing on every

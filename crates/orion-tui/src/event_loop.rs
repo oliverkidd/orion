@@ -582,6 +582,9 @@ async fn main_loop(
                 }
                 let _ = reassert_modes(terminal.backend_mut());
                 next_mode_reassert = tokio::time::Instant::now() + MODE_REASSERT;
+                // The same beat re-reads a MARKDOWN PAGE whose file moved —
+                // paused, like the re-ask, while a drag holds the button.
+                refresh_page(&mut app);
             }
             // The EDGE AUTO-SCROLL beat: a drag-selection resting past the
             // pane's top or bottom edge scrolls the history under it, with
@@ -6247,12 +6250,13 @@ fn open_editor_file_outside(app: &mut App) {
     open_in_outside_app(app, &root, &file, line);
 }
 
-/// Keys on a MARKDOWN PAGE: it scrolls itself; Enter (or `e`) edits the
-/// file in the BUILT-IN EDITOR over it, `⌘O` hands it to the OPEN IN APP
-/// editor, `⌘C` copies its path, and Esc — or the HARDWIRED UNLOCK —
-/// closes it, back to whatever it was opened over.
+/// Keys on a MARKDOWN PAGE: it scrolls itself and walks its links (`Tab`);
+/// Enter follows the link `Tab` is on, or else edits the file in the
+/// BUILT-IN EDITOR over it (`e` always does), `⌘O` hands it to the OPEN IN
+/// APP editor, `⌘C` copies its path, and Esc goes back to the page a link
+/// left — or, on the first, closes it, as the HARDWIRED UNLOCK always
+/// does, back to whatever it was opened over.
 fn handle_page_key(app: &mut App, key: KeyEvent) {
-    use crate::markdown_view::PageKey;
     app.dirty = true;
     if crate::keymap::KeyChord::from_event(&key) == HARDWIRED_UNLOCK {
         app.page = None;
@@ -6271,18 +6275,48 @@ fn handle_page_key(app: &mut App, key: KeyEvent) {
     }
     page.select.clear();
     let asked = page.key(&key);
-    let (root, file, line, editor) = (
-        page.root.clone(),
-        page.file.clone(),
-        page.line,
-        page.editor.clone(),
-    );
+    act_on_page(app, asked);
+}
+
+/// The slow beat's look at a MARKDOWN PAGE's file: re-read when it
+/// changed on disk, so an agent's edit shows up while it is being read.
+fn refresh_page(app: &mut App) {
+    if app.page.as_mut().is_some_and(|page| page.refresh()) {
+        app.dirty = true;
+    }
+}
+
+/// Do what the MARKDOWN PAGE asked, by key or by a click on a link: the
+/// editor at the line it reads at, the app, the clipboard, a link off the
+/// page — in the browser, the editor, or the footer saying it leads
+/// nowhere — or the page closed.
+fn act_on_page(app: &mut App, asked: crate::markdown_view::PageKey) {
+    use crate::markdown_view::{Away, PageKey};
+    let Some(page) = &app.page else {
+        return;
+    };
+    let (root, file, editor) = (page.root.clone(), page.file.clone(), page.editor.clone());
     match asked {
         PageKey::Edit => {
-            let size = editor_size_guess(app);
+            let (line, size) = (page.edit_line(), editor_size_guess(app));
             spawn_editor_modal(app, &editor, &root, &file, line, size);
         }
-        PageKey::Outside => open_file_outside(app, &root, &file, line),
+        PageKey::Outside => {
+            let line = page.edit_line();
+            open_file_outside(app, &root, &file, line);
+        }
+        PageKey::Follow(Away::Web(url)) => {
+            if !open_url(&url) {
+                app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
+            }
+        }
+        PageKey::Follow(Away::File { file, line }) => {
+            let size = editor_size_guess(app);
+            open_file(app, &editor, &root, &file, line, size);
+        }
+        PageKey::Follow(Away::Missing(dest)) => {
+            app.flash = Some(crate::flash::Flash::failed(format!("no such file: {dest}")));
+        }
         PageKey::CopyPath => copy_and_flash(app, &file, &format!("copied {file}")),
         PageKey::Close => app.page = None,
         PageKey::Done => {}
@@ -11150,19 +11184,31 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             MouseEventKind::Down(MouseButton::Left) if !page.frame.contains(mouse_pos) => {
                 app.page = None;
             }
-            // The left button over the text is the DOC SELECTION's.
+            // The left button over the text is the DOC SELECTION's — but
+            // a click that never became a drag, on a link, follows it.
             _ => {
                 let Some(doc) = &page.rendered else {
                     return;
                 };
-                match page.select.mouse(&mouse, page.area, page.scroll, doc) {
-                    doc_select::Outcome::Ignored => {
-                        if !matches!(mouse.kind, MouseEventKind::Down(_)) {
-                            return;
+                let clicked = matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                    && page.select.is_armed();
+                let link = clicked
+                    .then(|| page.link_at(mouse.column, mouse.row))
+                    .flatten();
+                if let Some(link) = link {
+                    page.select.clear();
+                    let asked = page.follow(link);
+                    act_on_page(app, asked);
+                } else {
+                    match page.select.mouse(&mouse, page.area, page.scroll, doc) {
+                        doc_select::Outcome::Ignored => {
+                            if !matches!(mouse.kind, MouseEventKind::Down(_)) {
+                                return;
+                            }
                         }
+                        doc_select::Outcome::Moved { scroll } => page.scroll_by(scroll),
+                        doc_select::Outcome::Copy(text) => copy_text_and_flash(app, &text),
                     }
-                    doc_select::Outcome::Moved { scroll } => page.scroll_by(scroll),
-                    doc_select::Outcome::Copy(text) => copy_text_and_flash(app, &text),
                 }
             }
         }
@@ -27872,6 +27918,133 @@ mod tests {
         assert!(app.page.is_some(), "a click on the page leaves it up");
         click(&mut app, 0, 0, &mut out);
         assert!(app.page.is_none(), "a click outside closes it");
+    }
+
+    /// A click on a link follows it — another page in place, Esc coming
+    /// back and saying so; an `https` link in the browser — while a press
+    /// that drags off it still selects. `Tab` to a code file's link and
+    /// Enter edits it at its `#L` line, over the page.
+    #[test]
+    fn a_click_on_a_link_follows_it_and_tab_enter_does_too() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.md"),
+            "# A\n\n[bee](b.md) [site](https://example.com) [code](m.rs#L2)\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("b.md"), "# B\n").unwrap();
+        std::fs::write(dir.path().join("m.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.editor_tx = Some(tx);
+        app.page = Some(crate::markdown_view::MarkdownPage::open(
+            dir.path().into(),
+            "a.md".into(),
+            1,
+            "/bin/sh".into(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut draw = |app: &mut App| {
+            terminal.draw(|f| ui::draw(f, app)).unwrap();
+            buffer_text(&terminal)
+        };
+        let screen = draw(&mut app);
+        assert!(screen.contains("Tab link"), "{screen}");
+        assert!(screen.contains("Esc close"), "{screen}");
+        let at = |app: &App, link: usize| {
+            let page = app.page.as_ref().unwrap();
+            let spot = page.rendered.as_ref().unwrap().links[link].clone();
+            let row = page.area.y + (spot.row - page.scroll as usize) as u16;
+            (page.area.x + spot.cols.start + 1, row)
+        };
+        let mut out = Vec::new();
+        let left = MouseButton::Left;
+        let press_at = |app: &mut App, kinds: &[(MouseEventKind, u16)], row: u16| {
+            for &(kind, col) in kinds {
+                handle_mouse(app, mev(kind, col, row), &mut Vec::new());
+            }
+        };
+
+        // A drag that starts on the link selects; it follows nothing.
+        let (x, y) = at(&app, 0);
+        press_at(
+            &mut app,
+            &[
+                (MouseEventKind::Down(left), x),
+                (MouseEventKind::Drag(left), x + 2),
+                (MouseEventKind::Up(left), x + 2),
+            ],
+            y,
+        );
+        assert_eq!(app.page.as_ref().unwrap().file, "a.md");
+
+        let (x, y) = at(&app, 1);
+        press_at(
+            &mut app,
+            &[
+                (MouseEventKind::Down(left), x),
+                (MouseEventKind::Up(left), x),
+            ],
+            y,
+        );
+        assert_eq!(take_opened(), ["https://example.com"]);
+
+        let (x, y) = at(&app, 0);
+        press_at(
+            &mut app,
+            &[
+                (MouseEventKind::Down(left), x),
+                (MouseEventKind::Up(left), x),
+            ],
+            y,
+        );
+        assert_eq!(app.page.as_ref().unwrap().file, "b.md");
+        let screen = draw(&mut app);
+        assert!(screen.contains("Esc back"), "{screen}");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        assert_eq!(app.page.as_ref().unwrap().file, "a.md");
+
+        draw(&mut app);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+        }
+        let screen = draw(&mut app);
+        assert!(screen.contains("Enter follow"), "{screen}");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let vim = app.editor.as_ref().expect("the code file, in the editor");
+        assert_eq!((vim.file.as_str(), vim.line), ("m.rs", 2));
+        assert!(app.page.is_some(), "the page waits under it");
+    }
+
+    /// The slow beat reads a page's file again once it changed on disk —
+    /// an agent's edit shows while it is being read — and leaves it be
+    /// while it hasn't.
+    #[test]
+    fn the_slow_beat_rereads_a_page_whose_file_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        std::fs::write(&path, "# one\n").unwrap();
+        let mut app = App::new();
+        app.page = Some(crate::markdown_view::MarkdownPage::open(
+            dir.path().into(),
+            "a.md".into(),
+            1,
+            "/bin/sh".into(),
+        ));
+        app.dirty = false;
+        refresh_page(&mut app);
+        assert!(!app.dirty, "unchanged: nothing to redraw");
+        std::fs::write(&path, "# two\n").unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        refresh_page(&mut app);
+        assert!(app.dirty);
+        assert_eq!(app.page.as_ref().unwrap().text, "# two\n");
     }
 
     /// A drag over the page's text selects and copies it, a double-click

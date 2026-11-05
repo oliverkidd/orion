@@ -163,8 +163,9 @@ fn dropped_file(word: &str) -> Option<PathBuf> {
     (path.is_absolute() && path.is_file()).then_some(path)
 }
 
-/// `%XX` escapes decoded, for a `file://` URL's path.
-fn percent_decode(s: &str) -> Option<String> {
+/// `%XX` escapes decoded, for a `file://` URL's path and a markdown link's
+/// address. None for a broken escape, or bytes that aren't UTF-8.
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(s.len());
     let mut rest = s.as_bytes();
     while let Some((&b, tail)) = rest.split_first() {
