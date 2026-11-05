@@ -296,7 +296,7 @@ impl PresetField {
     pub fn label(self) -> &'static str {
         match self {
             PresetField::Name => "Name",
-            PresetField::Kind => "Harness",
+            PresetField::Kind => "Runs on",
             PresetField::Model => "Model",
             PresetField::Effort => "Effort",
             PresetField::Task => "Task",
@@ -332,9 +332,10 @@ pub struct AgentPresetEditor {
     /// Index into the stored list when editing; None when creating.
     pub editing: Option<usize>,
     pub name: TextInput,
-    /// FOLLOW THE BOX (`AgentPreset::follow_box`): the Harness row's
-    /// first choice, and where a new preset starts. Off, `kind` and
-    /// `custom` are the harness it pins.
+    /// FOLLOW THE BOX (`AgentPreset::follow_box`): the Runs on row's
+    /// first choice, and where every preset starts — the PR autofix
+    /// preset's reads the PR's own agent. Off, `kind` and `custom` are the
+    /// harness it pins.
     pub follow: bool,
     pub kind: AgentKind,
     /// The registry id beside `kind`: a Claude account's, a custom
@@ -498,7 +499,7 @@ impl AgentPresetEditor {
             // Every offered harness by id — built-ins and customs alike,
             // in registry order. Never a bare `custom`, which carries no
             // entry.
-            PresetField::Kind => std::iter::once(crate::agent_presets::FOLLOW_BOX.to_string())
+            PresetField::Kind => std::iter::once(self.follow_label().to_string())
                 .chain(
                     crate::config::Config::load()
                         .offered_harnesses()
@@ -527,11 +528,17 @@ impl AgentPresetEditor {
         }
     }
 
-    /// What the Harness row says: [`crate::agent_presets::FOLLOW_BOX`], or
-    /// the registry id of the harness the form pins.
+    /// What following means for this preset
+    /// (`AgentPreset::follow_label`): the Runs on row's first choice.
+    pub fn follow_label(&self) -> &'static str {
+        crate::agent_presets::follow_label(self.system)
+    }
+
+    /// What the Runs on row says: [`Self::follow_label`], or the registry
+    /// id of the harness the form pins.
     pub fn harness_value(&self) -> String {
         match self.follow {
-            true => crate::agent_presets::FOLLOW_BOX.to_string(),
+            true => self.follow_label().to_string(),
             false => orion_core::harness::registry_id(self.kind, self.custom.as_deref()).into(),
         }
     }
@@ -539,7 +546,7 @@ impl AgentPresetEditor {
     fn set_row_value(&mut self, value: &str) {
         match self.field {
             PresetField::Kind => {
-                if value == crate::agent_presets::FOLLOW_BOX {
+                if value == self.follow_label() {
                     // Saved on the default Claude account, the harness an
                     // older release reads a following preset as.
                     self.follow = true;
@@ -1858,6 +1865,10 @@ mod tests {
                 "{text}"
             );
             assert!(!text.contains("Task "), "no task row:\n{text}");
+            assert!(
+                text.contains("Runs on  ◂ the PR's own agent ▸"),
+                "PR autofix runs on the PR's own agent by default:\n{text}"
+            );
             assert!(text.contains("{task} is where what broke goes"), "{text}");
             assert!(
                 text.contains("You are orion's PR autofixer."),

@@ -550,7 +550,7 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::PrAutofix,
         label: "Auto-fix my PRs",
-        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
+        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort — unless that preset's Runs on row pins a harness. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
         group: "Launching",
     },
     SettingSpec {
@@ -2169,18 +2169,22 @@ impl Config {
         crate::autofix::Mode::parse(&self.pr_autofix)
     }
 
-    /// What the AUTOFIX agent launches on when no session on the branch
-    /// has run here to copy: the default agent
-    /// ([`Config::quick_prompt_harness`]) at `preset`'s model and effort —
-    /// the **PR autofix** SYSTEM PRESET's — each falling back to that
-    /// harness's own default when unset or not offered there (the default
-    /// agent changed since it was picked), and the effort fitted to the
-    /// model, as every launch surface does. `(kind, custom, model, effort)`.
+    /// What the AUTOFIX agent launches on when it does not run on the pull
+    /// request's own agent: the harness the **PR autofix** SYSTEM PRESET
+    /// pins, while that is on, else the default agent
+    /// ([`Config::quick_prompt_harness`]) — at the preset's model and
+    /// effort, each falling back to that harness's own default when unset
+    /// or not offered there (the harness changed since it was picked), and
+    /// the effort fitted to the model, as every launch surface does.
+    /// `(kind, custom, model, effort)`.
     pub fn autofix_launch(
         &self,
         preset: &AgentPreset,
     ) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
-        let (kind, custom) = self.quick_prompt_harness();
+        let (kind, custom) = match self.autofix_pins(preset) {
+            true => (preset.kind, preset.custom_harness.clone()),
+            false => self.quick_prompt_harness(),
+        };
         let descriptor = self.effective_harness(kind, custom.as_deref());
         let model = picked(
             preset.model.as_deref().unwrap_or_default(),
@@ -2194,6 +2198,12 @@ impl Config {
         .or_else(|| descriptor.default_effort().map(str::to_string));
         let effort = fit_effort_in(&descriptor, model.as_deref(), effort);
         (kind, custom, model, effort)
+    }
+
+    /// Whether the **PR autofix** preset pins a harness that can launch:
+    /// then the agent runs on it, not on the pull request's own.
+    pub fn autofix_pins(&self, preset: &AgentPreset) -> bool {
+        !preset.follows_box() && self.preset_harness_usable(preset)
     }
 
     /// The Claude account the WEEK IN REVIEW is written through: `pinned`
@@ -3630,10 +3640,23 @@ mod tests {
         if let Some(model) = model_choices_in(&descriptor).get(1) {
             let picked = AgentPreset {
                 model: Some(model.clone()),
-                ..preset
+                ..preset.clone()
             };
             assert_eq!(cfg.autofix_launch(&picked).2.as_ref(), Some(model));
         }
+
+        // A harness pinned on the preset is what it runs on, while it is
+        // on; switched off, the default agent stands in.
+        let pinned = AgentPreset {
+            kind: AgentKind::Codex,
+            follow_box: Some(false),
+            ..preset
+        };
+        assert!(cfg.autofix_pins(&pinned));
+        assert_eq!(cfg.autofix_launch(&pinned).0, AgentKind::Codex);
+        cfg.set_harness_enabled("codex", false);
+        assert!(!cfg.autofix_pins(&pinned));
+        assert_eq!(cfg.autofix_launch(&pinned).0, defaults.0);
     }
 
     /// The autofix and week review settings an older release kept in the

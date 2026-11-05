@@ -103,7 +103,7 @@ the box is still empty, while text you already typed stays yours to send. The ro
 ordinary session: it names itself on that first turn, resumes, and shows status like any other. Presets
 live in `agent_presets.json` beside `config.json`.
 
-A preset FOLLOWS THE BOX unless it pins a harness: the form's Harness row starts on **the box's
+A preset FOLLOWS THE BOX unless it pins a harness: the form's **Runs on** row starts on **the box's
 agent**, so picked in a quick prompt the preset runs on the account and harness that box is on —
 another Claude account stays on it — at the box's model and effort, taking only the model or
 effort the preset pins that the harness offers; launched with no box up, it starts where `⌘N`
@@ -123,8 +123,9 @@ Three presets are **system presets**, on every list and tagged `orion` — the a
 itself:
 
 - **PR autofix** wraps what broke for the agent **Auto-fix my PRs** sends to a broken pull request.
-  That agent runs on the PR's own agent — the session that did the work on its branch — and, with
-  none, on your default agent at this preset's model and effort. orion's text: fix only what is
+  Its **Runs on** row starts on **the PR's own agent** — the session that did the work on its
+  branch — and, with none, your default agent at this preset's model and effort; pin a harness
+  there and the agent runs on that instead, at this preset's model and effort, while it is on. orion's text: fix only what is
   listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the
   e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push;
   watch the PR until it is green and go round again.

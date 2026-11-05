@@ -32070,7 +32070,7 @@ mod tests {
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
             assert!(text.contains("New preset"), "title:\n{text}");
-            assert!(text.contains("Harness  codex"), "kind row:\n{text}");
+            assert!(text.contains("Runs on  codex"), "the Runs on row:\n{text}");
             assert!(text.contains("Line two"), "the box:\n{text}");
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);

@@ -22,8 +22,14 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// What a preset that follows the box says where a harness goes: the
-/// editor's Harness row, the presets list's line.
+/// editor's Runs on row, the presets list's line.
 pub const FOLLOW_BOX: &str = "the box's agent";
+/// What the PR autofix preset runs on while it follows: the agent that
+/// did the work on the pull request's branch.
+pub const FOLLOW_PR: &str = "the PR's own agent";
+/// What the week review is written through while it follows: the `⌘N`
+/// default's account.
+pub const FOLLOW_DEFAULT: &str = "your default agent";
 
 /// Where a preset's text puts the task. Text that names no place for it
 /// has the task after it, a blank line between ([`AgentPreset::compose`]).
@@ -261,13 +267,21 @@ impl AgentPreset {
         self
     }
 
+    /// What a preset that follows runs on, in its own words: the box's
+    /// agent for a launch ([`FOLLOW_BOX`]); for orion's own, the pull
+    /// request's agent ([`FOLLOW_PR`]) or the default agent
+    /// ([`FOLLOW_DEFAULT`]), there being no box.
+    pub fn follow_label(&self) -> &'static str {
+        follow_label(self.system)
+    }
+
     /// `claude · opus · high` / `codex · gpt-5.5` / `cursor` — the kind plus
     /// whichever of model and effort the preset pins; a CLAUDE ACCOUNT's
     /// email in place of the kind on a machine with more than one, and
-    /// [`FOLLOW_BOX`] for a preset that follows the box.
+    /// [`Self::follow_label`] for a preset that follows.
     pub fn spec_label(&self) -> String {
         let harness = match self.follows_box() {
-            true => FOLLOW_BOX.to_string(),
+            true => self.follow_label().to_string(),
             false => crate::quick_prompt::harness_name(self.kind, self.custom_harness.as_deref()),
         };
         let mut parts = vec![harness];
@@ -327,6 +341,15 @@ impl AgentPreset {
             (before, after) if after.trim().is_empty() => before,
             _ => self.compose(""),
         }
+    }
+}
+
+/// [`AgentPreset::follow_label`] for a preset that is `system`, or none.
+pub fn follow_label(system: Option<SystemPreset>) -> &'static str {
+    match system {
+        Some(SystemPreset::PrAutofix) => FOLLOW_PR,
+        Some(SystemPreset::WeekReview) => FOLLOW_DEFAULT,
+        Some(SystemPreset::LinearTicket) | None => FOLLOW_BOX,
     }
 }
 
@@ -938,6 +961,18 @@ mod tests {
         assert_eq!(
             following.spec_label(),
             format!("{FOLLOW_BOX} · opus · high")
+        );
+        // orion's own say what following means for them: there is no box.
+        let autofix = SystemPreset::PrAutofix.default_preset();
+        assert_eq!(autofix.spec_label(), FOLLOW_PR);
+        let review = SystemPreset::WeekReview.default_preset();
+        assert_eq!(
+            review.spec_label(),
+            format!("{FOLLOW_DEFAULT} · sonnet · medium")
+        );
+        assert_eq!(
+            SystemPreset::LinearTicket.default_preset().spec_label(),
+            FOLLOW_BOX
         );
     }
 
