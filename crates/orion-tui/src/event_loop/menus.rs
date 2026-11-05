@@ -82,6 +82,7 @@ const OPEN_ROWS: &[(Action, &str)] = &[
     (Action::OpenInCursor, "Checkout in"),
     (Action::OpenOutsideTerminal, "Terminal in the checkout"),
     (Action::OpenWorktree, "Open command"),
+    (Action::OpenApp, "Open app"),
 ];
 
 /// `⌘O` on the cards and panels: the OPEN MENU. Each row is the action
@@ -97,7 +98,14 @@ pub(super) fn open_outside_menu(app: &mut App) {
                 _ => label.to_string(),
             };
             let mut item = MenuItem::new(label, MenuAction::RunAction(*action));
-            if let Some(hint) = row_hint(app, *action) {
+            // **Open app** names where it goes, once the run has said.
+            let hint = match action {
+                Action::OpenApp => crate::git_sync::target(app)
+                    .and_then(|w| crate::stacks::app_port(app, &w))
+                    .map(|port| format!("localhost:{port}")),
+                _ => row_hint(app, *action),
+            };
+            if let Some(hint) = hint {
                 item = item.with_hint(hint);
             }
             item

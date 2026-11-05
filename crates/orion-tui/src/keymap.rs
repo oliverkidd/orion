@@ -115,6 +115,9 @@ pub enum Action {
     /// Option+Enter on a Mac with Option as Meta — gets through both and
     /// parses as Alt+Enter. Its RUN COMMAND is the project menu's **Run**.
     OpenWorktree,
+    /// ⌘O's **Open app**: the first localhost port the cursor's
+    /// checkout's run printed, in the browser (`crate::stacks::open_app`).
+    OpenApp,
     // sessions
     NewTerminal,
     Rename,
@@ -195,8 +198,11 @@ pub enum Action {
     /// account, window by window.
     Usage,
     /// `⌘⇧S`: start the cursor's checkout's stack — its RUN COMMAND, in
-    /// the pane — or stop it.
+    /// the background — or stop it.
     ToggleStack,
+    /// **Restart stack**: the cursor's checkout's run stopped, then
+    /// started again in its row once it has gone (`stacks::restart`).
+    RestartStack,
     StopAllStacks,
     /// Delete every linked worktree, in every project, with no live
     /// session and no uncommitted changes, behind one confirm.
@@ -532,6 +538,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         id: "open_worktree",
         label: "Open checkout in editor",
         hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Projects) — e.g. open http://localhost:3000",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::OpenApp,
+        id: "open_app",
+        label: "Open app",
+        hint: "Open the app the selected checkout's stack serves, in the browser: the first localhost port its run printed — the first :3000 on its run line",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -893,10 +908,19 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ToggleStack,
         id: "toggle_stack",
         label: "Start/stop stack",
-        hint: "Start the selected checkout's stack — its run command (Settings → Projects) — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
+        hint: "Start the selected checkout's stack — its run command (Settings → Projects) — in the background, its run line in the band; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+shift+s"],
+    },
+    ActionSpec {
+        action: Action::RestartStack,
+        id: "restart_stack",
+        label: "Restart stack",
+        hint: "Stop the selected checkout's stack — a ^C to its run, so it winds down — then start it again in the same run line once it has gone; again kills it and starts it at once",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &[],
     },
     ActionSpec {
         action: Action::StopAllStacks,

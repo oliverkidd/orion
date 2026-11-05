@@ -113,6 +113,11 @@ pub enum HitTarget {
     /// by the band's place in `launcher::bands`: a click puts the cursor
     /// on the band, as `j`/`k` walking onto it do.
     LauncherBand(usize),
+    /// A port on a RUN LINE — `:3000`, after its command — registered
+    /// ahead of the line, so it wins: a click opens that port on
+    /// localhost in the browser (`stacks::open_port`). The line's terminal
+    /// and the port.
+    RunPort(TerminalId, u16),
     /// The PULL REQUEST on a band's rule — its `↗ #42 title` — registered
     /// ahead of the rule, so it wins: a click opens the pull request in
     /// the browser, through the very `launcher::open_pull_request` `⇧V`
@@ -350,6 +355,9 @@ pub enum MenuAction {
     PushWorktree(WorktreeId),
     /// Start the worktree's RUN COMMAND, or stop it while it runs (`r`).
     ToggleRun(WorktreeId),
+    /// A run line's **Restart stack**: stop the worktree's run, then start
+    /// it again once it has gone.
+    RestartRun(WorktreeId),
     /// Fire the worktree's OPEN COMMAND (`Shift+Enter`).
     OpenWorktree(WorktreeId),
     AddProject,
@@ -2392,6 +2400,11 @@ pub enum PendingIntent {
     /// A row renamed, archived, unarchived or deleted on the keypress
     /// (`event_loop::optimistic`): put it back on Error.
     Undo(Undo),
+    /// `⌘⇧S`'s start, and **Restart stack**: the run comes up in the
+    /// background. Its Ack moves nothing — no select, no attach, no pane —
+    /// the upsert alone puts the run line in its band; an Error says why
+    /// in the footer.
+    RunStarted,
     None,
 }
 
@@ -4179,9 +4192,6 @@ pub struct App {
     /// DAEMON last saw it — `None` while docker is out of reach (or before
     /// the first answer).
     pub stacks: Option<Vec<orion_core::compose::Stack>>,
-    /// Checkouts whose run was sent a `^C` by `⌘⇧S`: the next press kills
-    /// it, and says so.
-    pub runs_stopping: std::collections::HashSet<WorktreeId>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -4572,7 +4582,6 @@ impl App {
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
             stacks: None,
-            runs_stopping: Default::default(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
             attention_walk: None,
@@ -4938,6 +4947,15 @@ impl App {
         // or no spinner.
         if self.editor.is_none()
             && matches!(&self.overlay, Some(Overlay::Conflicts(v)) if v.running())
+        {
+            return true;
+        }
+        // A stop's countdown ticks, animations or none.
+        if self
+            .tree
+            .terminals
+            .iter()
+            .any(|t| t.run.stopping_until.is_some())
         {
             return true;
         }
@@ -6300,6 +6318,13 @@ impl App {
         self.run_terminal(worktree_id).is_some_and(|t| t.alive)
     }
 
+    /// When the worktree's run, sent its `^C` by a stop and still going,
+    /// is killed (epoch ms) — the DAEMON's word, so every client agrees.
+    /// None for a run nobody is stopping, and for no run at all.
+    pub fn run_stopping(&self, worktree_id: &WorktreeId) -> Option<i64> {
+        self.run_terminal(worktree_id)?.run.stopping_until
+    }
+
     /// Sessions under a worktree that went green with nobody looking.
     /// Test-only: the grid reads the free functions through the palette.
     #[cfg(test)]
@@ -6752,6 +6777,7 @@ mod tests {
             sort_order: 0,
             alive: true,
             run_command: None,
+            run: Default::default(),
         });
         app.tree
             .links

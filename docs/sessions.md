@@ -422,8 +422,17 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   request's column, then the counts', before the branch shortens.
   The band the keys are on opens on `❯` where the rest open on `──`.
   The entries under it are the checkout's sessions, then its terminals, the names and what each
-  runs on in columns down the band. A terminal is `❯ shell-1` with what runs in it — `▶` on a RUN
-  TERMINAL, `exited` at the right once its shell is gone. A session is its status dot and name,
+  runs on in columns down the band. A shell is `❯ shell-1` with `shell` for what it runs on, and a
+  faint `exited` at the right once it is gone. A RUN TERMINAL is its RUN LINE, `▶ run`: its command
+  on a `$` where a session's prompt goes, and its state at the right where a session's age is — a
+  dim `running`, `stopping… 1:52` while a stop winds it down (the line goes once it has), or, for a
+  run that ended with nobody stopping it, a faint `done` or a red `exited 1`. After the command come
+  the localhost ports the run has printed — `http://localhost:3000`, `127.0.0.1` or `0.0.0.0` —
+  underlined, `:3000 :5173`, kept after the lines that said them scroll away and cleared when the run
+  starts again. A click on one opens it in the browser; the first is the app, and `⌘O` → **Open
+  app** opens it too. The run line's right-click menu has **Stop stack** (or **Start stack**) and
+  **Restart stack**: a stop, then a start in the same line once the run has gone, `restarting… 1:52`
+  meanwhile. A session is its status dot and name,
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›`, and how long ago at the right. The pull requests come from the same `gh` lookups

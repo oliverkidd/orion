@@ -3909,7 +3909,7 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
     let right = match &app.term {
         Some(t) if t.exited => Some(Span::styled(
             "exited".to_string(),
-            Style::default().fg(th.exited).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.dim).add_modifier(Modifier::BOLD),
         )),
         Some(t) if t.scroll_offset() > 0 => Some(Span::styled(
             format!("scroll {}", t.scroll_offset()),

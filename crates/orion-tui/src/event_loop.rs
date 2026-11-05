@@ -4051,6 +4051,11 @@ fn dispatch_action(
                 toggle_stack_in(app, &id, out);
             }
         }
+        Action::RestartStack => {
+            if let Some(id) = crate::git_sync::target(app) {
+                crate::stacks::restart(app, &id, out);
+            }
+        }
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
         // the first column. Landing on the pane takes the input lock:
@@ -4325,6 +4330,7 @@ fn dispatch_action(
         // cursor stands, as it is for `g`, `f` and `b`, so the key is never
         // quietly dropped on Sessions.
         Action::OpenWorktree => open_selected_worktree(app),
+        Action::OpenApp => crate::stacks::open_app(app),
         // AddProject adds a project from ANY panel — unlike New it never
         // changes meaning with focus, matching the "open a repo" instinct.
         Action::AddProject => open_prompt(app, PromptKind::AddProject),
@@ -5196,10 +5202,11 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// `⌘⇧S`, a menu's **Start stack** / **Stop stack**: start `worktree`'s
 /// stack, or stop it.
 ///
-/// Starting runs its RUN COMMAND in its RUN TERMINAL, and the pane follows
-/// it there to watch it boot; with none set, the DAEMON's refusal says so
-/// in the footer. Stopping sends that run a `^C`, so its own trap winds the
-/// stack down in view — a second press kills it.
+/// Starting runs its RUN COMMAND in its RUN TERMINAL in the background:
+/// the run line comes up in its band, and the cursor and the pane stay
+/// where they were ([`PendingIntent::RunStarted`]); with none set, the
+/// DAEMON's refusal says so in the footer. Stopping sends that run a `^C`,
+/// so its own trap winds the stack down — a second press kills it.
 pub(crate) fn toggle_stack_in(
     app: &mut App,
     worktree: &orion_core::WorktreeId,
@@ -5211,47 +5218,24 @@ pub(crate) fn toggle_stack_in(
         return;
     }
     let id = worktree.clone();
-    // A run that has since ended, here or from another client, is no
-    // longer being stopped.
-    let ended: Vec<_> = app
-        .runs_stopping
-        .iter()
-        .filter(|w| !app.worktree_running(w))
-        .cloned()
-        .collect();
-    for w in ended {
-        app.runs_stopping.remove(&w);
-    }
     if app.worktree_running(&id) {
-        let again = !app.runs_stopping.insert(id.clone());
-        let key = crate::hints::key_or(
-            &app.keymap,
-            crate::keymap::Action::ToggleStack,
-            "Stop stack",
-        );
-        app.flash = Some(crate::flash::Flash::note(if again {
-            "killing the run".to_string()
-        } else {
-            format!("stopping — it winds down in its terminal; {key} again kills it")
-        }));
+        // The first stop is said by the run line and the footer for as
+        // long as it lasts (`ui::footer::stopping_line`); the second kills.
+        app.flash = app
+            .run_stopping(&id)
+            .map(|_| crate::flash::Flash::note("killing the run"));
         send(app, out, |req_id| ClientRequest::StopRun {
             req_id,
             worktree: id,
         });
         return;
     }
-    send_with(
-        app,
-        out,
-        PendingIntent::AttachCreated {
-            focus: false,
-            placeholder: None,
-        },
-        |req_id| ClientRequest::StartRun {
+    send_with(app, out, PendingIntent::RunStarted, |req_id| {
+        ClientRequest::StartRun {
             req_id,
             worktree: id,
-        },
-    );
+        }
+    });
 }
 
 /// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
@@ -6943,15 +6927,33 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
     items
 }
 
-fn menu_items_for_terminal(t: &orion_core::TerminalTab) -> Vec<MenuItem> {
-    vec![
-        MenuItem::new(
-            "Attach",
-            MenuAction::Attach(SessionRef::Terminal(t.id.clone())),
-        ),
-        MenuItem::new("Rename", MenuAction::RenameTerminal(t.id.clone())),
-        MenuItem::destructive("Close", MenuAction::CloseTerminal(t.id.clone())),
-    ]
+/// A terminal's menu. A RUN LINE's has its stack's verbs too: started or
+/// stopped, and restarted.
+fn menu_items_for_terminal(app: &App, t: &orion_core::TerminalTab) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::new(
+        "Attach",
+        MenuAction::Attach(SessionRef::Terminal(t.id.clone())),
+    )];
+    if t.run_command.is_some() {
+        let w = &t.worktree_id;
+        items.push(MenuItem::new(
+            crate::stacks::menu_label(app, w),
+            MenuAction::ToggleRun(w.clone()),
+        ));
+        items.push(MenuItem::new(
+            "Restart stack",
+            MenuAction::RestartRun(w.clone()),
+        ));
+    }
+    items.push(MenuItem::new(
+        "Rename",
+        MenuAction::RenameTerminal(t.id.clone()),
+    ));
+    items.push(MenuItem::destructive(
+        "Close",
+        MenuAction::CloseTerminal(t.id.clone()),
+    ));
+    items
 }
 
 pub(super) fn open_menu(app: &mut App, items: Vec<MenuItem>, at: (u16, u16)) {
@@ -7177,7 +7179,7 @@ fn context_menu_items(app: &App, focus: Focus) -> Option<Vec<MenuItem>> {
             }
             None => match app.selected_session_row()? {
                 SessionRow::Agent(a) => Some(menu_items_for_session_in(app, &a)),
-                SessionRow::Terminal(t) => Some(menu_items_for_terminal(&t)),
+                SessionRow::Terminal(t) => Some(menu_items_for_terminal(app, &t)),
                 SessionRow::Link(l) => Some(menu_items_for_link(&l)),
             },
         },
@@ -7253,6 +7255,10 @@ fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientReq
             launcher::select_drawer_entry(app, band, entry, out)
         }
         HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
+        HitTarget::RunPort(ref id, _) => {
+            launcher::select_card(app, SessionRef::Terminal(id.clone()), out);
+            true
+        }
         _ => false,
     }
 }
@@ -9285,6 +9291,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             }
         }
         MenuAction::ToggleRun(id) => toggle_stack_in(app, &id, out),
+        MenuAction::RestartRun(id) => crate::stacks::restart(app, &id, out),
         MenuAction::OpenWorktree(id) => {
             if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
                 open_worktree(app, &w);
@@ -11024,6 +11031,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             h,
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
+                | HitTarget::RunPort(..)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
@@ -11743,6 +11751,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandPr(wid)) => {
                     launcher::click_pull_request(app, &wid, out)
                 }
+                // A port on a run line: its app, in the browser.
+                Some(HitTarget::RunPort(_, port)) => crate::stacks::open_port(app, port),
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -11959,6 +11969,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                         HitTarget::LauncherCard(_)
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
+                            | HitTarget::RunPort(..)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
@@ -19923,6 +19934,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: None,
+                    run: Default::default(),
                 }),
             },
         );
@@ -19958,6 +19970,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    run: Default::default(),
                 }),
             },
         );
@@ -20019,11 +20032,77 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("bun dev".into()),
+                    run: Default::default(),
                 }),
             },
         );
         assert_eq!(app.flash, None);
         assert!(app.worktree_running(&WorktreeId("w1".into())));
+    }
+
+    /// `⌘⇧S` starts the run in the background: its line comes up in the
+    /// band, and the cursor, the pane and FOCUS stay on the session they
+    /// were on — whichever of the Ack and the upsert lands first.
+    #[test]
+    fn a_started_run_leaves_the_cursor_and_the_pane_where_they_were() {
+        use orion_core::{Entity, TerminalTab, WorktreeId};
+        for ack_first in [false, true] {
+            let mut app = App::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            let a1 = SessionRef::Agent(AgentId("a1".into()));
+            let mut out = Vec::new();
+            attach_now(&mut app, a1.clone(), &mut out);
+            let pane_hidden = app.launcher_pane_hidden;
+            out.clear();
+            out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+            let req_id = out
+                .iter()
+                .find_map(|r| match r {
+                    ClientRequest::StartRun { req_id, .. } => Some(*req_id),
+                    _ => None,
+                })
+                .expect("⌘⇧S sends StartRun");
+            let ack = ServerEvent::Ack {
+                req_id,
+                created: Some(EntityId::Terminal(TerminalId("run1".into()))),
+            };
+            let upsert = ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(TerminalTab {
+                    id: TerminalId("run1".into()),
+                    worktree_id: WorktreeId("w1".into()),
+                    name: "run".into(),
+                    sort_order: 0,
+                    alive: true,
+                    run_command: Some("npm run dev".into()),
+                    run: Default::default(),
+                }),
+            };
+            out.clear();
+            let events = if ack_first {
+                [ack, upsert]
+            } else {
+                [upsert, ack]
+            };
+            for ev in events {
+                handle_server_event(&mut app, ev, &mut out);
+            }
+            assert!(app.worktree_running(&WorktreeId("w1".into())));
+            assert!(
+                !out.iter()
+                    .any(|r| matches!(r, ClientRequest::Attach { .. })),
+                "nothing attaches the run: {out:?}"
+            );
+            assert_eq!(app.term.as_ref().map(|t| t.sref.clone()), Some(a1.clone()));
+            assert_eq!(
+                app.selected_session_row().and_then(|r| r.sref()),
+                Some(a1.clone()),
+                "the cursor stays on the session"
+            );
+            assert_eq!(app.focus, Focus::Sessions);
+            assert_eq!(app.launcher_pane_hidden, pane_hidden);
+            assert_eq!(app.select_when_seen, None, "nothing waits to follow it");
+        }
     }
 
     /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
@@ -27402,10 +27481,11 @@ mod tests {
         assert!(!app.status_anim_active());
     }
 
-    /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run,
-    /// the pane following — and stops it: a ^C to the run (the flash says
-    /// a second press kills it). A stack orion didn't start is only its
-    /// `⬡`: the key starts the run as it would on a checkout with none.
+    /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run —
+    /// and stops it: a ^C to the run, and while the DAEMON says it is
+    /// stopping the footer holds that a second press kills it. A stack
+    /// orion didn't start is only its `⬡`: the key starts the run as it
+    /// would on a checkout with none.
     #[test]
     fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
         use orion_core::{Entity, TerminalId, TerminalTab};
@@ -27427,29 +27507,56 @@ mod tests {
             "{out:?}"
         );
 
-        let run = |alive| TerminalTab {
+        let run = |alive, stopping_until| TerminalTab {
             id: TerminalId("run1".into()),
             worktree_id: orion_core::WorktreeId("w1".into()),
             name: "run".into(),
             sort_order: 0,
             alive,
             run_command: Some("just start".into()),
+            run: orion_core::RunState {
+                stopping_until,
+                ..Default::default()
+            },
         };
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
-                entity: Entity::Terminal(run(true)),
+                entity: Entity::Terminal(run(true, None)),
             },
         );
         assert!(footer(&app).contains(" stop stack"), "{}", footer(&app));
+        assert_eq!(crate::ui::footer::stopping_line(&app), None);
         out.clear();
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(
             matches!(out.as_slice(), [ClientRequest::StopRun { .. }]),
             "{out:?}"
         );
-        let flash = app.flash.as_deref().unwrap_or_default().to_string();
-        assert!(flash.contains("again kills it"), "{flash}");
+        assert_eq!(app.flash, None, "the run line and the footer say it");
+        // The DAEMON's word that it is stopping: the footer holds the
+        // line through any number of keys, until the run is gone.
+        let kill_at = crate::app::now_ms() + 112_000;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(run(true, Some(kill_at))),
+            },
+        );
+        let held = crate::ui::footer::stopping_line(&app).expect("held while it stops");
+        assert_eq!(&*held, "stopping run · ⌘⇧S again kills it now");
+        assert!(app.status_anim_active(), "the countdown ticks");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("stopping run · ⌘⇧S again kills it now"),
+            "{text}"
+        );
+        assert!(
+            text.contains("stopping… 1:5"),
+            "the run line counts down:\n{text}"
+        );
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(app.flash.as_deref().unwrap_or_default().contains("killing"));
 
@@ -27457,9 +27564,10 @@ mod tests {
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
-                entity: Entity::Terminal(run(false)),
+                entity: Entity::Terminal(run(false, None)),
             },
         );
+        assert_eq!(crate::ui::footer::stopping_line(&app), None);
         list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
         assert_eq!(
             crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
@@ -27495,6 +27603,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("just start".into()),
+                    run: Default::default(),
                 }),
             },
         );
@@ -36089,6 +36198,7 @@ mod tests {
             sort_order: 0,
             alive: true,
             run_command: None,
+            run: Default::default(),
         })
     }
 

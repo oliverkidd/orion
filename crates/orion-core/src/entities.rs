@@ -343,6 +343,36 @@ pub struct TerminalTab {
     /// the worktree is RUNNING. None for a plain shell tab.
     #[serde(default)]
     pub run_command: Option<String>,
+    /// Where a RUN TERMINAL's run is at, as the DAEMON knows it right now.
+    /// Stamped on every send, never stored; the default on a plain shell.
+    #[serde(default)]
+    pub run: RunState,
+}
+
+/// What a RUN LINE says about its run beyond whether its PTY lives
+/// ([`TerminalTab::alive`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunState {
+    /// Sent its `^C` by a stop and not yet gone: the epoch ms its
+    /// two-minute kill lands at, so every client counts down to the same
+    /// moment (`stopping… 1:52`). None for a run nobody is stopping, and
+    /// always None once the PTY is gone.
+    pub stopping_until: Option<i64>,
+    /// That stop is a restart's: once the run has gone it starts again in
+    /// this row (`restarting… 1:52`) rather than taking the row with it.
+    pub restarting: bool,
+    /// A run that ended on its own, nobody having stopped it: the code it
+    /// exited with — the run line's faint `done` for 0, a red `exited 1`
+    /// for anything else. None while it runs, and for one whose ending
+    /// this DAEMON did not see (a run from before it restarted). A run a
+    /// stop ended has no row left to carry one.
+    pub exit_code: Option<i32>,
+    /// The localhost ports the live run has printed —
+    /// `http://localhost:3000` is 3000 — first seen first, kept after the
+    /// lines scroll away: the run line's `:3000 :5173`, the first of them
+    /// what ⌘O's **Open app** opens. Empty once the run has ended, and
+    /// again from a start.
+    pub ports: Vec<u16>,
 }
 
 /// A URL pinned to a worktree — the pull request, the ticket, the design

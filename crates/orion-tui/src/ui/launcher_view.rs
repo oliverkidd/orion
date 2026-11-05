@@ -1219,10 +1219,9 @@ fn draw_list_band(
                 row.agent.name.chars().count(),
                 list_runs_line(&row.agent, cfg).chars().count(),
             ),
-            crate::launcher::Card::Terminal(t) => (
-                t.name.chars().count(),
-                t.run_command.as_deref().unwrap_or("shell").chars().count(),
-            ),
+            crate::launcher::Card::Terminal(t) => {
+                (t.name.chars().count(), terminal_runs(t).chars().count())
+            }
         };
         cols = (cols.0.max(name), cols.1.max(runs));
     }
@@ -1234,7 +1233,7 @@ fn draw_list_band(
         else {
             continue;
         };
-        draw_list_row(
+        let ports = draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
@@ -1243,6 +1242,13 @@ fn draw_list_band(
             cols,
             cfg,
         );
+        // A run line's ports are links, ahead of the line so they win.
+        if let crate::launcher::Card::Terminal(t) = &band.cards[i] {
+            for (rect, port) in ports {
+                app.hits
+                    .push((rect, HitTarget::RunPort(t.id.clone(), port)));
+            }
+        }
         app.hits.push((
             placed.rect,
             HitTarget::LauncherCard(crate::launcher::CardRef {
@@ -1254,12 +1260,15 @@ fn draw_list_band(
 }
 
 /// One entry of the LIST, on one line: the cursor mark, the status dot
-/// and name, what it runs on, and the last thing it was asked — or, for a
-/// terminal, what runs in it; how long since it moved (or `exited`) at
-/// the right. `cols` are the band's name and runs-on column widths, so the
-/// entries line up. The cursor's entry (`selected`) wears the mark
-/// ([`LIST_MARK`]) and a wash of its status color across the line
-/// ([`card_tint`]).
+/// and name, what it runs on, the last thing it was asked, and how long
+/// since it moved at the right. A shell runs on `shell`; a RUN LINE
+/// leaves that column blank, puts its command where the prompts go and
+/// its status where the ages go ([`terminal_badge`]). `cols` are the
+/// band's name and runs-on column widths, so the entries line up. The
+/// cursor's entry (`selected`) wears the mark ([`LIST_MARK`]) and a wash
+/// of its status color across the line ([`card_tint`]). A run line's
+/// ports follow its command, underlined — the cells of each come back,
+/// for the clicks that open them.
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1268,7 +1277,7 @@ fn draw_list_row(
     selected: bool,
     (name_col, runs_col): (usize, usize),
     cfg: &mut Option<crate::config::Config>,
-) {
+) -> Vec<(Rect, u16)> {
     let th = app.theme;
     let width = usize::from(r.width);
     // A bar rather than the rule's `❯`: a shell's own glyph is `❯`, one
@@ -1278,7 +1287,7 @@ fn draw_list_row(
     } else {
         Span::raw("  ")
     };
-    struct Entry {
+    struct Entry<'a> {
         lead: Span<'static>,
         tag: Option<Span<'static>>,
         name: String,
@@ -1289,6 +1298,8 @@ fn draw_list_row(
         text_mark: &'static str,
         text: String,
         text_style: Style,
+        /// A run line's ports, drawn after its command (`text`).
+        ports: &'a [u16],
         badge: String,
         badge_style: Style,
         /// The color the cursor's wash takes: the status's while it
@@ -1322,6 +1333,7 @@ fn draw_list_row(
                 text_mark,
                 text,
                 text_style: Style::default().fg(look.prompt),
+                ports: &[],
                 badge: look.ago,
                 badge_style: look.ago_style,
                 status: card_edge(
@@ -1331,25 +1343,29 @@ fn draw_list_row(
                 ),
             }
         }
-        crate::launcher::Card::Terminal(t) => Entry {
-            lead: terminal_mark(t, th),
-            tag: None,
-            name: t.name.clone(),
-            name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-            ramp: None,
-            runs: t.run_command.clone().unwrap_or_else(|| "shell".into()),
-            runs_style: Style::default().fg(th.dim),
-            text_mark: "",
-            text: String::new(),
-            text_style: Style::default().fg(th.muted),
-            badge: if t.alive {
-                String::new()
-            } else {
-                EXITED_BADGE.into()
-            },
-            badge_style: Style::default().fg(th.exited),
-            status: None,
-        },
+        crate::launcher::Card::Terminal(t) => {
+            let (badge, badge_style) = terminal_badge(t, crate::app::now_ms(), th);
+            Entry {
+                lead: terminal_mark(t, th),
+                tag: None,
+                name: t.name.clone(),
+                name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+                ramp: None,
+                runs: terminal_runs(t).into(),
+                runs_style: Style::default().fg(th.dim),
+                text_mark: if t.run_command.is_some() {
+                    RUN_MARK
+                } else {
+                    ""
+                },
+                text: t.run_command.clone().unwrap_or_default(),
+                text_style: Style::default().fg(th.muted),
+                ports: &t.run.ports,
+                badge,
+                badge_style,
+                status: None,
+            }
+        }
     };
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
@@ -1364,6 +1380,9 @@ fn draw_list_row(
         );
         room -= ACCOUNT_TAG_W;
     }
+    // Where the name starts: every offset below (`used`) counts from it.
+    let x0 = r.x + (width - room) as u16;
+    let mut port_cells = Vec::new();
     // The badge at the right end, while the name keeps a few letters.
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
@@ -1381,22 +1400,56 @@ fn draw_list_row(
         app.sweep_phase(),
     ));
     // What it runs on, in the band's column, and the prompt after it —
-    // each only where there is room for a few letters of it.
+    // each only where there is room for a few letters of it. A RUN LINE
+    // has nothing in the first, and its command in the second.
     let runs_at = name_w + LIST_GAP;
-    if !e.runs.is_empty() && room >= runs_at + 6 {
+    if room >= runs_at + 6 {
         let runs_w = runs_col.min(room - runs_at);
-        let runs = truncate(&e.runs, runs_w);
-        spans.push(Span::raw(" ".repeat(runs_at - used)));
-        used = runs_at + runs.chars().count();
-        spans.push(Span::styled(runs, e.runs_style));
+        if !e.runs.is_empty() {
+            let runs = truncate(&e.runs, runs_w);
+            spans.push(Span::raw(" ".repeat(runs_at - used)));
+            used = runs_at + runs.chars().count();
+            spans.push(Span::styled(runs, e.runs_style));
+        }
         let text_at = runs_at + runs_w + LIST_GAP;
         let text_mark_w = e.text_mark.chars().count();
         if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
-            let text = truncate(&e.text, room - text_at - text_mark_w);
+            // The ports keep their room — `  :3000 :5173`, two cells
+            // before the first and one between — and the command gives way.
+            let labels: Vec<String> = e.ports.iter().map(|p| format!(":{p}")).collect();
+            let ports_w: usize = labels.iter().map(|l| l.chars().count() + 1).sum::<usize>() + 1;
+            let ports_fit = !labels.is_empty() && room >= text_at + text_mark_w + 6 + ports_w;
+            let text_room = room - text_at - text_mark_w - if ports_fit { ports_w } else { 0 };
+            let text = truncate(&e.text, text_room);
             spans.push(Span::raw(" ".repeat(text_at - used)));
             spans.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
             used = text_at + text_mark_w + text.chars().count();
             spans.push(Span::styled(text, e.text_style));
+            // Underlined links, the one under the pointer lit.
+            let hovered = match (&app.hover_crumb, card) {
+                (Some(HitTarget::RunPort(id, port)), crate::launcher::Card::Terminal(t))
+                    if *id == t.id =>
+                {
+                    Some(*port)
+                }
+                _ => None,
+            };
+            let shown: &[u16] = if ports_fit { e.ports } else { &[] };
+            for (i, (&port, label)) in shown.iter().zip(labels).enumerate() {
+                let gap = if i == 0 { 2 } else { 1 };
+                spans.push(Span::raw(" ".repeat(gap)));
+                used += gap;
+                let w = label.chars().count();
+                port_cells.push((Rect::new(x0 + used as u16, r.y, w as u16, 1), port));
+                let fg = if hovered == Some(port) {
+                    th.accent
+                } else {
+                    th.text
+                };
+                let style = Style::default().fg(fg).add_modifier(Modifier::UNDERLINED);
+                spans.push(Span::styled(label, style));
+                used += w;
+            }
         }
     }
     if keep_badge {
@@ -1408,6 +1461,7 @@ fn draw_list_row(
         line = line.style(Style::default().bg(card_tint(app, e.status, th)));
     }
     line.render(r, buf);
+    port_cells
 }
 
 /// One session as a single line for a picker that lists checkouts with
@@ -1841,8 +1895,57 @@ pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'sta
     )
 }
 
-/// What a dead terminal's entry says at its right.
-const EXITED_BADGE: &str = " exited";
+/// What a terminal's entry says it runs on, in the column a session's
+/// model takes: `shell` for a shell. A RUN LINE's command goes where a
+/// session's prompt does, so the column is blank on it.
+fn terminal_runs(t: &orion_core::TerminalTab) -> &'static str {
+    if t.run_command.is_some() {
+        ""
+    } else {
+        "shell"
+    }
+}
+
+/// What opens a RUN LINE's command, where a session's prompt opens on `›`.
+const RUN_MARK: &str = "$ ";
+
+/// What a terminal's entry says at its right end, where a session's age
+/// goes, at `now` (epoch ms). A live run is a dim `running`; one winding
+/// down from its stop counts down to its kill, `stopping… 1:52` (or
+/// `restarting… 1:52`, a restart's), in the working gold. One that
+/// ended with nobody stopping it says how: a faint `done` for a clean
+/// exit, a red `exited 1` for any other; a run whose ending the DAEMON
+/// never saw (it restarted since) is a faint `stopped`. A dead shell is a
+/// faint `exited`. A stop that was asked for leaves no row to say any of
+/// it.
+fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, Style) {
+    let faint = Style::default().fg(th.faint);
+    if let Some(kill_at) = t.run.stopping_until {
+        let doing = if t.run.restarting {
+            "restarting"
+        } else {
+            "stopping"
+        };
+        return (
+            format!("{doing}… {}", countdown(kill_at - now)),
+            Style::default().fg(th.warn),
+        );
+    }
+    match (t.run_command.is_some(), t.alive, t.run.exit_code) {
+        (false, true, _) => (String::new(), Style::default()),
+        (false, false, _) => ("exited".into(), faint),
+        (true, true, _) => ("running".into(), Style::default().fg(th.dim)),
+        (true, false, Some(0)) => ("done".into(), faint),
+        (true, false, Some(code)) => (format!("exited {code}"), Style::default().fg(th.err)),
+        (true, false, None) => ("stopped".into(), faint),
+    }
+}
+
+/// `ms` to go as `m:ss`, rounded up to the second and never below `0:00`.
+fn countdown(ms: i64) -> String {
+    let secs = (ms.max(0) + 999) / 1000;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
 
 /// The color an entry's cursor wash takes when its status wants you:
 /// crimson for a turn waiting on you or a crash, the done color for a
@@ -3542,6 +3645,7 @@ mod tests {
                 sort_order: i,
                 alive: true,
                 run_command: None,
+                run: Default::default(),
             });
         }
         app.set_sel_session(
@@ -3609,6 +3713,7 @@ mod tests {
                 sort_order: 0,
                 alive: true,
                 run_command: run.map(Into::into),
+                run: Default::default(),
             });
         }
         let body = Rect::new(0, 0, 100, 30);
@@ -3632,6 +3737,141 @@ mod tests {
         app.tree.terminals[0].alive = false;
         let lines = drawn_lines(&mut app, body);
         assert!(row_of(&lines, "shell-1").contains("exited"), "{lines:#?}");
+    }
+
+    /// A RUN TERMINAL in the `api` checkout running `npm run dev`.
+    fn a_run(alive: bool) -> orion_core::TerminalTab {
+        orion_core::TerminalTab {
+            id: orion_core::TerminalId("t1".into()),
+            worktree_id: orion_core::WorktreeId("w0".into()),
+            name: "run".into(),
+            sort_order: 0,
+            alive,
+            run_command: Some("npm run dev".into()),
+            run: Default::default(),
+        }
+    }
+
+    /// A run winding down from its stop says so at the right end of its
+    /// line, counting down to the kill in the working gold.
+    #[test]
+    fn a_stopping_run_counts_down_to_its_kill() {
+        let th = Theme::default();
+        let mut run = a_run(true);
+        assert_eq!(
+            terminal_badge(&run, 0, th),
+            ("running".into(), Style::default().fg(th.dim))
+        );
+        run.run.stopping_until = Some(112_000);
+        let (badge, style) = terminal_badge(&run, 0, th);
+        assert_eq!(badge, "stopping… 1:52");
+        assert_eq!(style.fg, Some(th.warn));
+        assert_eq!(terminal_badge(&run, 111_500, th).0, "stopping… 0:01");
+        assert_eq!(terminal_badge(&run, 200_000, th).0, "stopping… 0:00");
+
+        let mut app = a_tree();
+        select(&mut app, "api");
+        run.run.stopping_until = Some(crate::app::now_ms() + 60_000);
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(
+            line.trim_end().ends_with("stopping… 1:00")
+                || line.trim_end().ends_with("stopping… 0:59"),
+            "{line:?}"
+        );
+    }
+
+    /// The RUN LINE fits the list's columns: its command sits where a
+    /// session's prompt does — not under the model — and its status at
+    /// the far right, where the session's age is.
+    #[test]
+    fn the_run_line_puts_its_command_with_the_prompts_and_its_status_at_the_right() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let a = &mut app.tree.agents[0];
+        a.model = Some("opus".into());
+        a.status_changed_at = crate::app::now_ms() - 5 * 60_000;
+        a.recent_prompts = vec![orion_core::PromptEntry {
+            text: "fix the login redirect".into(),
+            submitted_at: 0,
+        }];
+        app.tree.terminals.push(a_run(true));
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line_of = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}: {lines:#?}"))
+                .clone()
+        };
+        let col = |line: &str, needle: &str| line[..line.find(needle).unwrap()].chars().count();
+        let session = line_of("fix the login redirect");
+        let run = line_of("▶ run");
+        assert_eq!(
+            col(&run, "$ npm run dev"),
+            col(&session, "› fix the login redirect"),
+            "the command in the prompts' column:\n{session}\n{run}"
+        );
+        assert!(!run[..run.find("$ npm").unwrap()].contains("npm"), "{run}");
+        assert!(run.trim_end().ends_with("running"), "{run:?}");
+        assert_eq!(
+            run.trim_end().chars().count(),
+            session.trim_end().chars().count(),
+            "the status ends where the age does:\n{session}\n{run}"
+        );
+    }
+
+    /// A run line's ports keep their room on a narrow line: the command
+    /// is what gives way.
+    #[test]
+    fn a_long_command_gives_way_to_the_ports() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let mut run = a_run(true);
+        run.run_command = Some("docker compose up --build --remove-orphans api web worker".into());
+        run.run.ports = vec![3000, 5173];
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 60, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(line.contains("…  :3000 :5173"), "{line:?}");
+        assert!(line.trim_end().ends_with("running"), "{line:?}");
+    }
+
+    /// A run that ended with nobody stopping it says how at the right
+    /// end of its line: a faint `done` for a clean exit, a red `exited N`
+    /// for any other, a faint `stopped` when the DAEMON never saw it end.
+    /// Nothing is copper any more, a dead shell's `exited` included.
+    #[test]
+    fn a_run_that_ended_on_its_own_says_how() {
+        let th = Theme::default();
+        let mut run = a_run(false);
+        for (code, said, color) in [
+            (Some(0), "done", th.faint),
+            (Some(1), "exited 1", th.err),
+            (Some(137), "exited 137", th.err),
+            (None, "stopped", th.faint),
+        ] {
+            run.run.exit_code = code;
+            let (badge, style) = terminal_badge(&run, 0, th);
+            assert_eq!((badge.as_str(), style.fg), (said, Some(color)), "{code:?}");
+        }
+        let shell = orion_core::TerminalTab {
+            run_command: None,
+            ..a_run(false)
+        };
+        assert_eq!(
+            terminal_badge(&shell, 0, th),
+            ("exited".into(), Style::default().fg(th.faint))
+        );
+
+        let mut app = a_tree();
+        select(&mut app, "api");
+        run.run.exit_code = Some(2);
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(line.trim_end().ends_with("exited 2"), "{line:?}");
     }
 
     /// A session's line says what it runs on — the model and the
