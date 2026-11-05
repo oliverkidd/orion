@@ -226,12 +226,6 @@ pub struct Agent {
     /// `claude` with no link to the work.
     #[serde(default)]
     pub cloud_session_id: Option<String>,
-    /// The GitHub issue this session was started from — an ISSUE SESSION,
-    /// launched out of the ISSUES MODAL — or None. The daemon folds it into
-    /// every spawn's context; the TUI reads it for `⇧I`, which opens the
-    /// issue in the browser.
-    #[serde(default)]
-    pub issue_url: Option<String>,
     pub sort_order: i64,
     /// True when the daemon currently holds a live PTY for this agent.
     pub alive: bool,
@@ -341,13 +335,6 @@ impl Agent {
     /// its tracking query.
     pub fn cloud_session_url(&self) -> Option<String> {
         self.cloud_session_id.as_deref().map(cloud_session_url)
-    }
-
-    /// The number of the GitHub issue this ISSUE SESSION was started from,
-    /// read off `issue_url` (`…/issues/15`, with or without a trailing
-    /// path) — None for every other row.
-    pub fn issue_number(&self) -> Option<u64> {
-        url_number_after(self.issue_url.as_deref()?, "/issues/")
     }
 }
 

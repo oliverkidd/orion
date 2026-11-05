@@ -38,7 +38,6 @@ pub mod hints;
 pub mod hosts;
 pub mod install;
 pub mod ipc;
-pub mod issues;
 pub mod key_combo;
 pub mod keymap;
 pub mod keys;

@@ -85,27 +85,18 @@ pub enum Action {
     /// browser — the `#42 title` line on the card. `⌘U` lists the
     /// project's pull requests in orion; this one goes to GitHub.
     OpenPullRequest,
-    /// `Shift+I`: the GitHub issue the session card under the cursor was
-    /// started from, in the browser. `i` lists the project's issues in
-    /// orion; the shifted key goes to GitHub.
-    OpenIssue,
     /// `Shift+T`: a terminal *outside* orion — a new Ghostty tab or
     /// Terminal.app window (the **Outside terminal** setting) in the
     /// selected worktree's directory, where `t` opens one inside orion; a
     /// silent no-op off macOS or over ssh.
     OpenOutsideTerminal,
     /// `Shift+R`: reload from GitHub now, past every timer — the project's
-    /// open pull requests and issues, the worktree's PR, the one the pane
-    /// is reading.
+    /// open pull requests, the worktree's PR, the one the pane is reading.
     RefreshPullRequests,
     /// `y`: reply — the COMMENT BOX on the card's pull request (the one
     /// `Shift+V` opens), or on the one the pane is reading, posted to
     /// GitHub with `gh pr comment` on Enter.
     CommentPullRequest,
-    /// `i`: the ISSUES MODAL — the project's open GitHub issues, read in
-    /// place, commented on, with a QUICK PROMPT or an AGENT PRESET launched
-    /// on one.
-    Issues,
     /// `⌘U`: the PULL REQUESTS MODAL — the project's open pull requests,
     /// read in place, commented on, with a PR SESSION launched on one.
     PullRequests,
@@ -465,19 +456,10 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &[],
     },
     ActionSpec {
-        action: Action::OpenIssue,
-        id: "open_issue",
-        label: "Open issue in browser",
-        hint: "Send the GitHub issue the session card under the cursor was started from to your browser. i lists the issues in orion",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &[],
-    },
-    ActionSpec {
         action: Action::RefreshPullRequests,
         id: "refresh_pull_requests",
         label: "Reload from GitHub",
-        hint: "Ask GitHub again now for the project's open pull requests and issues, the selected worktree's PR and the one the pane is reading",
+        hint: "Ask GitHub again now for the project's open pull requests, the selected worktree's PR and the one the pane is reading",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+r", "ctrl+r"],
@@ -490,15 +472,6 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
-    },
-    ActionSpec {
-        action: Action::Issues,
-        id: "issues",
-        label: "GitHub issues",
-        hint: "List the project's open issues; Enter prompts an agent on one, ⇧Tab launches a preset on it",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &["i"],
     },
     ActionSpec {
         action: Action::PullRequests,

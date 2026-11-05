@@ -134,15 +134,6 @@ pub enum ClientRequest {
         /// adoption, since a spare booted bare cannot be handed one.
         #[serde(default)]
         starting_prompt: Option<String>,
-        /// The GitHub issue this session was created for — an ISSUE
-        /// SESSION, launched from the ISSUES MODAL. Persisted with the row
-        /// like a PR SESSION's URL, so every cold spawn and RESUME rebuilds
-        /// the same issue context: Claude and Pi take it as an appended
-        /// system prompt, a Codex / Cursor cold spawn as the opening of its
-        /// first prompt. Skips PREWARM POOL adoption like `starting_prompt`,
-        /// since a spare booted bare never got it.
-        #[serde(default)]
-        issue_url: Option<String>,
         /// The mode the CLI starts in — plan, ask, or the edit it always
         /// starts in ([`crate::harness::AgentMode`]). Request-only like
         /// `starting_prompt`: a RESUME starts where the session left off,

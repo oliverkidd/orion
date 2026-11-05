@@ -95,9 +95,6 @@ pub(crate) struct CreateAgentSpec {
     /// The CLI's positional first prompt (an AGENT PRESET launch). Request-only.
     pub starting_prompt: Option<String>,
     pub pr_url: Option<String>,
-    /// The GitHub issue an ISSUE SESSION was launched for (see
-    /// `pr_scope::issue_rule`). Persisted like `pr_url`.
-    pub issue_url: Option<String>,
     /// The mode the CLI starts in (plan, ask, edit). Request-only.
     pub mode: orion_core::harness::AgentMode,
 }
@@ -1155,7 +1152,6 @@ impl Daemon {
             cloud_prompt,
             starting_prompt,
             pr_url,
-            issue_url,
             mode,
         } = spec;
         let cloud_prompt = match cloud_prompt {
@@ -1182,13 +1178,6 @@ impl Daemon {
             Some(url) => Some(crate::pr_scope::validate_pr_url(&url)?),
             None => None,
         };
-        let issue_url = match issue_url {
-            Some(_) if cloud_prompt.is_some() => {
-                bail!("issue launch context is not supported for Claude Cloud")
-            }
-            Some(url) => Some(crate::pr_scope::validate_issue_url(&url)?),
-            None => None,
-        };
         // Every harness resolves against the current registry before
         // anything spawns: a missing or broken entry refuses the create
         // with its reason, and a deleted entry breaks respawns the same
@@ -1203,7 +1192,7 @@ impl Daemon {
         let optimistic_run = Self::launch_submits_first_prompt(
             &harness,
             starting_prompt.as_deref(),
-            pr_url.is_some() || issue_url.is_some(),
+            pr_url.is_some(),
         ) && cloud_prompt.is_none();
         let worktree = self
             .store
@@ -1213,11 +1202,10 @@ impl Daemon {
         // its pre-generated id — the CLI booted while the user typed the
         // name, so the create feels instant. A starting prompt rides the
         // CLI's argv, and a spare already booted bare cannot be handed one;
-        // neither can it be handed a PR or issue rule.
+        // neither can it be handed a PR rule.
         // Nor can one booted in edit mode be handed plan or ask.
         let adopted = (cloud_prompt.is_none()
             && pr_url.is_none()
-            && issue_url.is_none()
             && starting_prompt.is_none()
             && mode == orion_core::harness::AgentMode::Edit)
             .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
@@ -1261,16 +1249,11 @@ impl Daemon {
             sort_order: 0,
             status_changed_at: orion_core::clock::now_ms(),
             alive: false,
-            issue_url: issue_url.clone(),
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
-        self.store.insert_agent_with_launch_context(
-            &agent,
-            auto_title,
-            pr_url.as_deref(),
-            issue_url.as_deref(),
-        )?;
+        self.store
+            .insert_agent_with_launch_context(&agent, auto_title, pr_url.as_deref())?;
         // A cloud task is the session's first prompt, and the only one
         // orion will ever see typed for it: the agent runs in the sandbox,
         // where no `UserPromptSubmit` hook reaches the daemon. Recorded
@@ -1330,7 +1313,7 @@ impl Daemon {
     /// turn that makes a created row `running` before a single hook has
     /// fired? Asked of the two places that decide it, so it cannot drift
     /// from them: [`crate::pr_scope::launch_prompts`], which folds a launch
-    /// rule (a PR SESSION's, an ISSUE SESSION's) into the first prompt on a
+    /// rule (a PR SESSION's) into the first prompt on a
     /// harness with no system-prompt flag, and the argv builder's prepend
     /// shape, which puts orion's guidance there
     /// ([`agent_spawn_command_with`]). The rule's text is built per spawn
@@ -1434,7 +1417,6 @@ impl Daemon {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -2882,18 +2864,14 @@ impl Daemon {
             }
             _ => agent,
         };
-        // A PR SESSION's rule — or an ISSUE SESSION's — rides Claude's
-        // system prompt, or opens a Codex / Cursor cold spawn as its first
-        // prompt (see `pr_scope`). Rebuilt from the row's *current*
-        // worktree on every spawn, so a relocated session is told where it
-        // now works.
-        let (pr_url, issue_url) = if cloud_task.is_none() {
-            (
-                self.store.agent_pr_url(&agent.id)?,
-                self.store.agent_issue_url(&agent.id)?,
-            )
+        // A PR SESSION's rule rides Claude's system prompt, or opens a
+        // Codex / Cursor cold spawn as its first prompt (see `pr_scope`).
+        // Rebuilt from the row's *current* worktree on every spawn, so a
+        // relocated session is told where it now works.
+        let pr_url = if cloud_task.is_none() {
+            self.store.agent_pr_url(&agent.id)?
         } else {
-            (None, None)
+            None
         };
         let root = match &pr_url {
             Some(_) if !worktree.is_main => self
@@ -2908,12 +2886,7 @@ impl Daemon {
             branch: &worktree.branch,
             root: root.as_deref(),
         });
-        let issue_scope = issue_url.as_deref().map(|url| crate::pr_scope::IssueScope {
-            url,
-            worktree: &worktree.path,
-            branch: &worktree.branch,
-        });
-        let rule = crate::pr_scope::combined_rule(scope.as_ref(), issue_scope.as_ref());
+        let rule = scope.as_ref().map(crate::pr_scope::rule);
         let prompts = crate::pr_scope::launch_prompts(
             harness.system.append_flag.is_some(),
             agent.session_id.is_some(),
@@ -5313,7 +5286,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -5393,7 +5365,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -5701,7 +5672,6 @@ mod tests {
                 cloud_prompt: Some(" \n ".into()),
                 starting_prompt: None,
                 pr_url: None,
-                issue_url: None,
             })
             .await
             .unwrap_err();
@@ -5720,7 +5690,6 @@ mod tests {
                 cloud_prompt: Some("fix\0auth".into()),
                 starting_prompt: None,
                 pr_url: None,
-                issue_url: None,
             })
             .await
             .unwrap_err();
@@ -5739,7 +5708,6 @@ mod tests {
                 cloud_prompt: Some("Fix auth".into()),
                 starting_prompt: None,
                 pr_url: None,
-                issue_url: None,
             })
             .await
             .unwrap_err();
@@ -5761,7 +5729,6 @@ mod tests {
             cloud_prompt: cloud.map(String::from),
             starting_prompt: None,
             pr_url: Some("https://github.com/o/r/pull/7".into()),
-            issue_url: None,
         };
         for kind in AgentKind::ALL {
             if kind == AgentKind::Custom {
@@ -5928,56 +5895,6 @@ mod tests {
         assert!(err.to_string().contains("NUL"), "{err}");
     }
 
-    /// The ISSUE SESSION's URL is checked at the boundary like the PR
-    /// SESSION's: every harness may carry one, a PR URL is not an issue,
-    /// and Claude Cloud takes no launch context at all.
-    #[tokio::test]
-    async fn issue_launch_context_is_accepted_for_every_kind_but_never_with_cloud() {
-        let daemon = test_daemon();
-        let spec = |kind: AgentKind, cloud: Option<&str>| CreateAgentSpec {
-            mode: Default::default(),
-            worktree: WorktreeId("unused".into()),
-            name: "issue".into(),
-            kind,
-            custom_harness: None,
-            model: None,
-            effort: None,
-            auto_title: true,
-            cloud_prompt: cloud.map(String::from),
-            starting_prompt: Some("Fix it".into()),
-            pr_url: None,
-            issue_url: Some("https://github.com/o/r/issues/15".into()),
-        };
-        for kind in AgentKind::ALL {
-            if kind == AgentKind::Custom {
-                let err = daemon.create_agent(spec(kind, None)).await.unwrap_err();
-                assert!(err.to_string().contains("registry id"), "{err}");
-                continue;
-            }
-            let err = daemon.create_agent(spec(kind, None)).await.unwrap_err();
-            assert!(
-                err.to_string().contains("worktree not found"),
-                "{kind:?}: {err}"
-            );
-        }
-        let cloud = daemon
-            .create_agent(CreateAgentSpec {
-                mode: Default::default(),
-                starting_prompt: None,
-                ..spec(AgentKind::Claude, Some("Fix auth"))
-            })
-            .await
-            .unwrap_err();
-        assert!(cloud.to_string().contains("not supported for Claude Cloud"));
-        let not_an_issue = CreateAgentSpec {
-            mode: Default::default(),
-            issue_url: Some("https://github.com/o/r/pull/7".into()),
-            ..spec(AgentKind::Codex, None)
-        };
-        let err = daemon.create_agent(not_an_issue).await.unwrap_err();
-        assert!(err.to_string().contains("not an issue URL"), "{err}");
-    }
-
     #[tokio::test]
     async fn starting_prompt_is_validated_and_never_adopts_a_warm_cli() {
         let daemon = test_daemon();
@@ -5993,7 +5910,6 @@ mod tests {
             cloud_prompt: cloud.map(String::from),
             starting_prompt: starting.map(String::from),
             pr_url: None,
-            issue_url: None,
         };
         // Validation runs before the worktree lookup, so an unknown
         // worktree is fine here and every failure is the prompt's own.
@@ -6097,7 +6013,6 @@ mod tests {
             cloud_prompt: None,
             starting_prompt: task.map(String::from),
             pr_url: None,
-            issue_url: None,
         };
 
         let created = |mut events: broadcast::Receiver<ServerEvent>| {
@@ -6227,7 +6142,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })
@@ -6362,7 +6276,6 @@ mod tests {
                 cloud_prompt: None,
                 starting_prompt: None,
                 pr_url: None,
-                issue_url: None,
             })
             .await
             .unwrap()
@@ -6565,7 +6478,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },

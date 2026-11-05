@@ -260,8 +260,8 @@ pub(super) fn draft(
         custom: launch.custom.clone(),
         // A CLAUDE CLOUD box sends the text as the cloud task instead —
         // `claude --cloud <task>` — and no STARTING PROMPT beside it, which
-        // the DAEMON refuses (`QuickLaunch::with_cloud` keeps a preset, an
-        // issue and a PR off a cloud box).
+        // the DAEMON refuses (`QuickLaunch::with_cloud` keeps a preset and
+        // a PR off a cloud box).
         cloud_prompt: launch.cloud.then(|| text.clone()),
         // Sized in `submit_prompt`, with the task — composing cannot fail.
         // An empty box (`launches_empty`) sends a preset's prefix + postfix
@@ -269,13 +269,6 @@ pub(super) fn draft(
         // the CLI's own input is it.
         starting_prompt: Some(launch.compose(&text))
             .filter(|prompt| !launch.cloud && !prompt.is_empty()),
-        // An ISSUE SESSION's context, persisted by the DAEMON with the row
-        // — or the Linear issue a TODO is linked to.
-        issue_url: launch
-            .issue
-            .as_ref()
-            .map(|issue| issue.url.clone())
-            .or_else(|| launch.todo.as_ref().and_then(|t| t.issue_url.clone())),
         todo: launch.todo.clone(),
         // A PR SESSION's: the create goes to the PROJECT as a
         // `CreatePrAgent`, and `worktree` only names which.
@@ -375,7 +368,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms(),
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),

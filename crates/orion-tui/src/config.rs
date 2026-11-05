@@ -556,7 +556,6 @@ pub enum SettingKind {
     SessionPane,
     WorktreeLayout,
     ExpandAllWorktrees,
-    CardIssueNumber,
     HideDraftPrs,
     QuickPromptKind,
     QuickPromptFocus,
@@ -696,8 +695,7 @@ impl SettingKind {
             SettingKind::DeleteEmptyWorktree
             | SettingKind::ShowAllWorktrees
             | SettingKind::HideCardMarks
-            | SettingKind::WorktreeLayout
-            | SettingKind::CardIssueNumber => (2026, 9, 24),
+            | SettingKind::WorktreeLayout => (2026, 9, 24),
             SettingKind::ExpandAllWorktrees | SettingKind::FollowNewSession => (2026, 9, 26),
             SettingKind::HighlightCurrentCard => (2026, 9, 28),
             SettingKind::LinkEnvFiles
@@ -1668,10 +1666,6 @@ pub struct Config {
     /// row and nothing reads it. Still loaded and written back as stored,
     /// so an older build sharing the file keeps the choice its user made.
     pub hide_card_prompt: bool,
-    /// RETIRED: GitHub issue numbers on session cards. Orion uses Linear,
-    /// so no tab shows the row and the grid never paints `#15`. Still
-    /// loaded and written back as stored.
-    pub card_issue_number: bool,
     /// Leave draft pull requests out of the PROJECT OPEN PRS GROUP and the
     /// `/` PALETTE's pull-request rows, so browsing what's open shows only
     /// the rows asking for a reviewer. A view filter, not a fetch filter:
@@ -2087,7 +2081,6 @@ impl Default for Config {
             worktree_layout: WORKTREE_LAYOUTS[0].into(),
             expand_all_worktrees: false,
             hide_card_prompt: false,
-            card_issue_number: true,
             hide_draft_prs: false,
             diff_tree_view: true,
             diff_start: DIFF_STARTS[0].into(),
@@ -3520,7 +3513,6 @@ impl Config {
             SettingKind::SessionPane => self.pane_side().as_str().into(),
             SettingKind::WorktreeLayout => WORKTREE_LAYOUTS[usize::from(self.list_layout())].into(),
             SettingKind::ExpandAllWorktrees => on_off(self.expand_all_worktrees).into(),
-            SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
             SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
             SettingKind::DiffStart => self.diff_start_word().into(),
@@ -3719,9 +3711,6 @@ impl Config {
             }
             SettingKind::ExpandAllWorktrees => {
                 self.expand_all_worktrees = !self.expand_all_worktrees;
-            }
-            SettingKind::CardIssueNumber => {
-                self.card_issue_number = !self.card_issue_number;
             }
             SettingKind::HideDraftPrs => {
                 self.hide_draft_prs = !self.hide_draft_prs;
@@ -4318,6 +4307,10 @@ mod tests {
     /// field's new name, and a save writes it back under that name alone.
     #[test]
     fn config_files_from_earlier_releases_still_load_every_key() {
+        // Keys the feature cull dropped with what they set: this build
+        // reads them no more, and a save still writes them back as the
+        // unknown keys they now are.
+        const DROPPED: &[&str] = &["card_issue_number"];
         let current = |key: &str| {
             RENAMED_KEYS
                 .iter()
@@ -4338,6 +4331,9 @@ mod tests {
             let known = serde_json::to_value(&loaded).unwrap();
             let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
             for (key, value) in fixture.as_object().unwrap() {
+                if DROPPED.contains(&key.as_str()) {
+                    continue;
+                }
                 assert_eq!(
                     known.get(current(key)),
                     Some(value),
@@ -5400,22 +5396,6 @@ mod tests {
         );
     }
 
-    /// CARD ISSUE NUMBER is retired: no tab shows the row, a stored key
-    /// still loads, and an empty file keeps the historical default.
-    #[test]
-    fn card_issue_number_is_retired_from_the_appearance_tab() {
-        assert!(
-            locate(SettingKind::CardIssueNumber).is_none(),
-            "no tab shows the row"
-        );
-        let cfg = Config::default();
-        assert!(cfg.card_issue_number, "stored default unchanged");
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(legacy.card_issue_number);
-        let loaded: Config = serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
-        assert!(!loaded.card_issue_number);
-    }
-
     /// HIGHLIGHT CURRENT CARD: an Appearance row that reads `on` / `off`,
     /// on by default (a config that predates the key too), and persisted
     /// under `highlight_current_card`.
@@ -6432,7 +6412,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };

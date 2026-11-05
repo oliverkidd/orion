@@ -126,7 +126,7 @@ as its very first prompt, so the agent is already working when the pane opens. T
 send the box empty and the prefix and postfix go on their own (a preset with neither starts the CLI
 with no first prompt). Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
 and `Enter` launches it at once, no box at all; the list marks those rows `no task`. A `skip` preset
-picked with `Shift+Tab` in a quick prompt or in the issues modal launches the same way when
+picked with `Shift+Tab` in a quick prompt launches the same way when
 the box is still empty, while text you already typed stays yours to send. The row it creates is an
 ordinary session: it names itself on that first turn, resumes, and shows status like any other. Presets
 live in `agent_presets.json` beside `config.json`. The form's Harness row lists custom registry entries
@@ -351,7 +351,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   with any of the box's pickers open over it, and none of them closes the box. `Tab` again on the
   picker's Claude row — or in the Claude model list `⌘/` opens — is the new-session picker's Claude
   Cloud toggle: the box comes back as a cloud one (`agent Claude · cloud`) and Enter sends your text
-  as the cloud task — not offered in a box for an issue or a pull request. `⇧Tab` takes a preset; a
+  as the cloud task — not offered in a box for a pull request. `⇧Tab` takes a preset; a
   model or effort picked afterwards for the same harness keeps it. None of it needs the key: the
   header is a row of buttons, and a click on a field opens what the key printed beside it opens — on
   `effort`, the model's effort list — box and task still in front of you. Enter
@@ -467,16 +467,16 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   default effort stops at the model),
   then the last thing it was asked to do, on a `›`, over four rows so a sentence reads as one
   (what still does not fit ends in an ellipsis). The pull requests come from the same `gh` lookups
-  the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests and issues beside the session count
-  (`4 sessions  3 prs · 2 issues`), so what is waiting on the repo is read without opening `v` or
-  `i` to find it — and a click on either count opens that list, as the key does. When the room left
+  the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests beside the session count
+  (`4 sessions  3 prs`), so what is waiting on the repo is read without opening `v` to find it —
+  and a click on the count opens that list, as the key does. When the room left
   cannot hold every card, the far right of that row says how many it could not draw and which way
   they went — `↓ 7 hidden` for cards under the fold, `↑ 4 hidden` for ones scrolled off the top,
   `↑↓ 5 hidden` for both. The count beside it still says how many sessions the project has, so a
   card that is not on screen reads as something taking its room rather than as a session gone, and
   the arrow says whether the way back to it is `↓` down through the grid or the pane's edge dragged
   back down. On a row the tabs leave little of, the counts give way whole, least needed first: the
-  session count (each band's rule says its own), then the pr and issue counts, and this one last.
+  session count (each band's rule says its own), then the pr count, and this one last.
   An open band's edges say it again where the eye looks for the rest: `↑ 2 more
   above` on the row of air under the PROJECT TABS once the top has scrolled off, `↓ 3 more below`
   on a row kept under the cards while there is more past the bottom — the row stays as air once the
@@ -630,86 +630,9 @@ cursor the whole card lifts a step, so the one you are about to unarchive stays 
 selection fill, and with color off entirely the two shapes still tell the grids apart. No card says
 the word `archived`: the header says it once, for all of them.
 
-## The ISSUES MODAL and ISSUE SESSIONS
-
-`i` lists the selected PROJECT's open GitHub issues — `gh issue list`, newest first,
-pull requests left out — down the left of a modal, and reads the one under the cursor on the right:
-number and title, who opened it and when, its labels, the description rendered as markdown (a newline
-is a line break, as GitHub shows a comment), and,
-once the cursor has rested on the row for a moment, its comments (`gh issue view`, one call per issue
-you actually stop on, remembered for the session). `Ctrl+o` — or a click on the `↗ open in browser`
-button pinned right on the reading pane's frame — opens the issue in the browser and `Ctrl+r` asks
-GitHub again; a machine with no `gh`, or one that is not logged in, gets a line saying so in the pane
-rather than an empty modal. The list is asked for before you press `i`: once the cursor has rested
-on a project for a moment its open issues are fetched in the background, and re-fetched every couple
-of minutes while the project stays selected (backing off when the repo has none, or `gh` can't
-answer), so the modal opens on rows instead of an empty pane. A list that landed in the last thirty
-seconds is what you see; an older one paints while the fresh list lands underneath — and the cursor
-stays on the issue it was on, by URL, when a refresh retires a row above it.
-
-The list filters as you type, from the moment the modal is up — the FILE FINDER's and the DIFF
-VIEWER's way, no key to press first: letters narrow the rows to the fuzzy matches of `#15 title`,
-best first, the cursor on the best with its comments asked for as any move asks for them, the matched
-letters lit in each row and the title's count reading `2/14`. `↑`/`↓` (or `Ctrl+n`/`Ctrl+p`) walk the
-matches, and `Enter`, `Shift+Tab`, `Ctrl+e`, `Ctrl+c` (or `Ctrl+y`) and `Ctrl+o` act on the issue you found. `Esc`
-clears the filter, the cursor staying on that row, and a second `Esc` closes the modal, as in every
-fuzzy overlay; a filter nothing matches says `no issues match` and leaves the cursor where it was for
-the next letter or `Backspace` to decide. A refresh that retires the row under the cursor lands it on
-the filter's next match, never on a row the filter hides. Because the letters are the filter's, the
-verbs are chords — the diff viewer's rule — and `Ctrl+u` kills the typed filter before it scrolls the
-pane.
-
-`Ctrl+c` leaves a comment on the issue under the cursor without leaving the modal for long: a multi-row
-box (the task prompts' shape, `Shift+Enter` for a newline) whose `Enter` posts the text as you —
-`gh issue comment`, so it appears under your GitHub login — and puts the modal back on the row at
-once, the pane saying the comment is on its way until GitHub answers; then the conversation is read
-again with it in. `Esc`, or an empty box, puts the modal back without posting, and a post `gh`
-refused (not logged in, no network) brings the box back with your text so nothing is lost.
-
-`Ctrl+e` edits the issue itself without leaving the modal at all: the reading pane becomes a form on
-the row's title and description — `Tab`, `↑`/`↓` or a click move between the two fields, and the
-description takes `Shift+Enter` (or `Option+Enter`, or `Ctrl+J`) for a line break and `↑`/`↓` to walk
-its lines, as every multi-row box does — the preset editor's prefix and postfix included.
-`Enter` first reads the issue back from GitHub, then sends only the fields you changed as one
-`gh issue edit` (the title on the command line, the description on its stdin), holding the form, its
-foot saying `saving…`, until GitHub answers: the row and the pane then carry the new text at once,
-and the list is asked for again underneath — a list asked before the save can't put the old text
-back. If someone changed a field you changed since the form opened, nothing is sent: the form comes
-back over GitHub's new text with what you typed kept, its frame saying `changed on GitHub since you
-opened it — Enter saves yours over it`. `Esc` drops the draft and puts the reading pane back. An
-unchanged form closes without a call, a blank title is refused on the spot, and a save GitHub
-refuses — not logged in, no push access to the repo — keeps the form up with `gh`'s own reason on its
-frame and your text intact. Left before GitHub answered, the form's text is kept as a draft and opens
-with the issue's form next time, so nothing typed is lost. Labels, assignees and milestones stay
-GitHub's to edit.
-
-Two keys put an agent on the issue. `Enter` opens the QUICK PROMPT for it — the same box
-`⌘N` opens anywhere, titled `Quick prompt · issue #15 (claude · opus)`, launching the `Agent` row's
-harness from Settings → Agents on the PROJECT's ROOT WORKTREE, whatever card the cursor is on. `Shift+Tab` opens the AGENT PRESETS list as a picker instead — the box's own key for it — over
-the modal, which stays up under it (`Esc` goes back to the issue), and `Enter` on a preset hands the same box back with that preset's harness, model, effort and
-prefix/postfix applied. Inside the box `Tab` and `Shift+Tab` still switch the harness or the preset,
-and the WORKTREE PICKER's first row (`⌘.`) is a fresh worktree — named `issue-15-fix-login-redirect`
-here, the number first and the title slugified, rather than a random name — and the issue survives
-every one of those round trips. Send the box empty and the task is `Fix GitHub issue #15: <title> (<url>)`. The box
-goes up over the modal rather than in its place — the list and the issue you were reading stay on
-screen under it. `Esc`, or a click outside the box, puts you back in the modal on the same row; the
-launch closes the modal as well, back onto the grid with the new session's card up in its band —
-the cursor on the new card, or still on the card you were on with **Follow new** off.
-
-Either way the launch is an ISSUE SESSION. The create carries the issue's URL
-(`CreateAgent::issue_url`); the DAEMON validates it, keeps it with the AGENT row beside a PR
-SESSION's URL, refuses to hand the launch to a PREWARM POOL spare (which booted without it), and on
-every cold spawn and RESUME composes an issue-context rule naming the URL, the checkout and its
-branch — Claude and Pi receive it through `--append-system-prompt`, Grok Build through `--rules`, and Codex, Cursor, Muse and OpenCode as the opening
-of their first prompt, exactly as the PR rule travels. The harness therefore knows which issue the
-session exists for before it reads your task, is told to read the issue with `gh issue view` first,
-and to reference it in commits and close it from the pull request. The row it creates is an
-ordinary agent from then on: auto-title, hooks, status, resume.
-
 ## The PULL REQUESTS MODAL
 
-`v` is the ISSUES MODAL for pull requests: the selected PROJECT's open pull requests
-down the left of a modal — newest first with the drafts sunk below the
+`v` lists the selected PROJECT's open pull requests down the left of a modal — newest first with the drafts sunk below the
 finished ones, and drafts listed even while `hide_draft_prs` keeps them out of the `⌘K` jump list — and the one
 under the cursor read on the right as the pane reads a pull request, its [PULL REQUEST
 PAGE](keys.md#the-pull-request-page): number and title, state, mergeability, author, branches and
@@ -737,7 +660,7 @@ request read in one is read in the other, and resting on a row for a moment fetc
 view` — one call for the body and every tab) the same way. `Ctrl+r` asks for the list and the row's
 body again now.
 
-The keys are the ISSUES MODAL's, and the QUICK PROMPT box's: the list filters as you type, narrowing
+The keys are every filtered list's, and the QUICK PROMPT box's: the list filters as you type, narrowing
 the rows to the fuzzy matches of `#42 title`, `Esc` clears the filter before a second `Esc` closes,
 and the verbs are chords. `Enter` opens the QUICK PROMPT for a
 PR SESSION on the pull request — the box `⌘N` opens, titled `Quick prompt · PR #42 …`
@@ -746,9 +669,9 @@ PR SESSION on the pull request — the box `⌘N` opens, titled `Quick prompt ·
 `CreatePrAgent` that runs in the project's checkout of the pull request's head branch, reused when
 one is there and cut by the DAEMON otherwise, its stand-in rows up under the pull request from the
 moment you launch, and the PR's URL and work rule in the harness's context. The QUICK PROMPT stands
-on the modal as the ISSUES MODAL's does: the list stays under the box, `Esc` or a click outside puts
+on the modal: the list stays under the box, `Esc` or a click outside puts
 you back on the pull request you opened it on, and the launch closes the modal onto the grid, the
-new session's card up in its band as the ISSUES MODAL's launch leaves it. `Ctrl+c` (or `Ctrl+y`) opens the
+new session's card up in its band. `Ctrl+c` (or `Ctrl+y`) opens the
 COMMENT BOX on the pull request and comes back to the modal on the row — after `Enter` posts, after
 `Esc`, and after a post `gh` refused, with your text back in the box — `Ctrl+g` opens the pull request's
 whole diff — on the Changes tab at the file under the cursor, on Commits that commit's own diff, and a

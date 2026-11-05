@@ -192,10 +192,7 @@
   instead — the live conversation, which detaching (Ctrl+Z) or archiving the row leaves running. A
   refused resume the job-dir look missed is asked about the same way and re-opened attached. An AGENT created from the PULL REQUESTS MODAL also receives the PR URL and a PR-only
   work rule — Claude and Pi through `--append-system-prompt` and Grok Build through `--rules` on every spawn, Codex, Cursor, Muse and OpenCode as the first prompt of
-  their cold spawn (their transcripts carry it through a resume); orion persists that URL. An AGENT
-  launched from the ISSUES MODAL (`i`) carries the GitHub issue's URL the same way — persisted with
-  the row, rebuilt into an issue-context rule on every spawn and resume — so the harness knows which
-  issue the session is for (see [Sessions](sessions.md#the-issues-modal-and-issue-sessions)).
+  their cold spawn (their transcripts carry it through a resume); orion persists that URL.
 - **Status via agent-CLI hooks, not MCP.** At agent spawn, orion merges managed hooks into the
   worktree's `.claude/settings.local.json` (Claude Code) or `.cursor/hooks.json` (Cursor CLI), and into
   `~/.codex/hooks.json` (Codex — codex records hook approvals against the hook file's path, so a
@@ -319,13 +316,12 @@
   Pure capture: nothing is injected into the
   model's context and no extra turn runs. See [Sessions](sessions.md#recent-prompts).
 - **The header counts what is waiting on the repo.** The GRID's header says
-  `4 sessions  3 prs · 2 issues` for the
-  selected project, both counts muted, a count being a fact rather than a status — the open
+  `4 sessions  3 prs` for the
+  selected project, the count muted, a count being a fact rather than a status — the open
   pull requests the OPEN PRS sweep already keeps warm for every project (drafts left out while
-  `hide_draft_prs` is on), and the open issues, which a sweep of their own asks for one project per
-  tick on a five-minute beat. Zero says nothing, and a narrow column
-  drops the badge before the name. Each count is a button: a click opens the PULL REQUESTS or
-  ISSUES MODAL for that project, as `v` and `i` do. See [Configuration](configuration.md#every-setting).
+  `hide_draft_prs` is on). Zero says nothing, and a narrow column
+  drops the badge before the name. The count is a button: a click opens the PULL REQUESTS MODAL
+  for that project, as `v` does. See [Configuration](configuration.md#every-setting).
 - **Ask the agent for a worktree and it moves there.** Tell a Claude session "do this in a worktree" and
   it runs `orion worktree <name>` instead of its own `EnterWorktree` tool (whose checkouts land under
   `<repo>/.claude/worktrees/` on a `worktree-*` branch). orion creates the checkout in its usual
@@ -405,7 +401,7 @@ attachment is gone; links an earlier version saved stay in the database, so no d
 though the grid draws none of them.
 
 This is the one part of orion the TUI asks for itself rather than the DAEMON: every `gh pr view`,
-open-list query (`gh api graphql`) and `gh pr diff` — and the ISSUES MODAL's `gh issue list`, `gh issue view` and `gh issue comment` — is spawned by the client, which is why the lookups stop the moment you
+open-list query (`gh api graphql`) and `gh pr diff` — is spawned by the client, which is why the lookups stop the moment you
 quit, and why a machine with no `gh` — or one that is unauthenticated, or pointed at a checkout with no
 remote — just shows no rows instead of an error. The selected project is asked about most: its
 selected worktree's pull request and its open list on every tick, one process each, and its other
@@ -447,7 +443,7 @@ the merge form and AUTOFIX — draws from that store. The newest-asked answer wi
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
 last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's
-list, the ISSUES MODAL, the git counts on the bands and the todo chips keep their answers by the same
+list, the git counts on the bands and the todo chips keep their answers by the same
 rules.
 
 Settings and hotkeys live in [Configuration](configuration.md). The process model, the IPC CODEC and

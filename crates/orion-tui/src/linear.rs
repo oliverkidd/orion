@@ -2617,8 +2617,8 @@ pub(crate) mod keys {
     pub const ROWS: Key = Key::new(&["down"], "to list");
     pub const CONFIRM: Key = Key::new(&["enter"], "agent on marked");
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
-    pub const BROWSER: Key = crate::issues::keys::BROWSER;
-    pub const REFRESH: Key = crate::issues::keys::REFRESH;
+    pub const BROWSER: Key = crate::hints::BROWSER;
+    pub const REFRESH: Key = crate::hints::REFRESH;
     /// The issue's workflow state.
     pub const STATUS: Key = Key::new(&["cmd+s", "ctrl+s"], "status");
     /// Its priority: the TODOS MODAL's own key for one.
@@ -7422,7 +7422,6 @@ pub(crate) mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         });

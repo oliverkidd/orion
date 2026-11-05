@@ -380,12 +380,6 @@ async fn main_loop(
         tokio::sync::mpsc::unbounded_channel::<crate::week_review::Answer>();
     app.week_review.tx = Some(week_review_tx);
     app.week_review.root = Some(orion_core::paths::data_dir().join("reviews"));
-    // The ISSUES MODAL's `gh issue list` / `gh issue view` answers, on the
-    // same footing: the modal's own handlers start the fetch, the loop
-    // lands it.
-    let (issues_tx, mut issues_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::issues::IssuesAnswer>();
-    app.issues_tx = Some(issues_tx);
     let (linear_tx, mut linear_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::linear::LinearAnswer>();
     app.linear_tx = Some(linear_tx);
@@ -526,12 +520,6 @@ async fn main_loop(
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
                 crate::base_sync::tick(&mut app);
-                // The selected project's open issues, on the same beat, so
-                // `i` paints rows that are at most a couple of minutes old.
-                crate::issues::refresh_selected(&mut app);
-                // And one other project's — the pass that keeps every
-                // row's count warm, `sweep_open_prs` for issues.
-                crate::issues::sweep_others(&mut app);
                 // Who each CLAUDE ACCOUNT is signed in as, on a slower
                 // beat of its own: a `/login` typed in a session's pane
                 // renames its account here.
@@ -670,14 +658,6 @@ async fn main_loop(
                 if app.pending_prewarm.is_some() =>
             {
                 fire_pending_prewarm(&mut app, &mut out);
-            }
-            // The project selection rested past the debounce: ask GitHub
-            // for its open issues in the background, so `i` paints the
-            // rows at once instead of an empty modal.
-            _ = tokio::time::sleep(app.issues_prefetch_delay().unwrap_or_default()),
-                if app.pending_issues_prefetch.is_some() =>
-            {
-                crate::issues::fire_prefetch(&mut app);
             }
             // Standing keep-warm: periodically re-assert the selected
             // worktree's warm default-spec Claude session so the daemon's
@@ -834,17 +814,6 @@ async fn main_loop(
             answer = week_review_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::week_review::land_answer(&mut app, answer);
-                }
-            }
-            // The ISSUES MODAL's hover debounce: the cursor has rested on
-            // an issue long enough to fetch its comments.
-            _ = tokio::time::sleep(app.issue_detail_delay().unwrap_or(Duration::MAX)),
-                if app.issue_detail_delay().is_some() => {
-                crate::issues::lookup_detail(&mut app);
-            }
-            answer = issues_rx.recv() => {
-                if let Some(answer) = answer {
-                    crate::issues::land_answer(&mut app, answer);
                 }
             }
             answer = linear_rx.recv() => {
@@ -2248,18 +2217,16 @@ fn schedule_pr_detail(app: &mut App) {
 }
 
 /// The one place "the pane is reading something else now" is noticed: the
-/// loop takes `reading_url()` — the pull request's or the issue's — before
-/// handling an event and hands it back here after. A different URL — the
-/// Sessions cursor stepped onto or off the PR ROW, focus left the Sessions
-/// panel for the pane, a refresh retired the row, the Worktrees cursor
-/// landed on an issue — re-arms the detail fetch (the pull request's, and
-/// the issue's comments) and rewinds the scroll; the same URL leaves a
-/// reader exactly where they were. Keyed on URL, not the whole row, so a
+/// loop takes `reading_url()` — the pull request's — before handling an
+/// event and hands it back here after. A different URL — the Sessions
+/// cursor stepped onto or off the PR ROW, focus left the Sessions panel
+/// for the pane, a refresh retired the row — re-arms the detail fetch and
+/// rewinds the scroll; the same URL leaves a reader exactly where they
+/// were. Keyed on URL, not the whole row, so a
 /// re-titled PR arriving on the GIT POLL is not a change.
 fn note_preview_change(app: &mut App, before: Option<String>) {
     if app.reading_url() != before {
         schedule_pr_detail(app);
-        crate::issues::schedule_detail(app);
     }
 }
 
@@ -3157,8 +3124,7 @@ fn schedule_pull_request_refresh(app: &mut App) {
 }
 
 /// `Shift+R`, from any panel: reload from GitHub *now* — the selected
-/// project's open list and its open issues (`issues::reload_selected`),
-/// every one of its checkouts' own PR, and the body
+/// project's open list, every one of its checkouts' own PR, and the body
 /// and conversation of the pull request the pane is reading — past
 /// every timer and floor the beats keep. `schedule_pull_request_refresh`
 /// is what a focus event may do; this is what a deliberate keypress may
@@ -3180,7 +3146,6 @@ fn refresh_pull_requests(app: &mut App) {
     schedule_pr_sweep(app);
     refetch_pr_detail(app);
     app.pr_refresh_requested = true;
-    crate::issues::reload_selected(app);
     app.dirty = true;
 }
 
@@ -3364,7 +3329,6 @@ fn ui_state_json(app: &App) -> String {
         show_archived: app.show_archived,
         collapsed: app.collapsed,
         open_prs_collapsed: app.open_prs_collapsed,
-        issues_collapsed: app.issues_collapsed,
         diff_files_width: Some(app.diff_files_width),
         diff_tree: app.diff_tree,
         launcher_pane_h: app.launcher_pane_h,
@@ -3419,7 +3383,6 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
     app.show_archived = state.show_archived;
     app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
-    app.issues_collapsed = state.issues_collapsed;
     if let Some(w) = state
         .diff_files_width
         .filter(|&w| w != crate::app::OLD_DEFAULT_DIFF_FILES_W)
@@ -3888,12 +3851,9 @@ pub(crate) fn paste_unsent(
 /// live. Returns false when nothing is typing, so the paste falls through to
 /// the terminal pane.
 fn paste_into_overlay(app: &mut App, text: &str) -> bool {
-    // The ISSUE EDITOR's field under the caret, or either modal's `/`
-    // FILTER ROW while it has the caret — resolved against the rows, so
-    // the cursor lands on the best match as a typed letter's would.
-    if matches!(&app.overlay, Some(Overlay::Issues(_))) {
-        return crate::issues::paste(app, text);
-    }
+    // A modal's `/` FILTER ROW while it has the caret — resolved against
+    // the rows, so the cursor lands on the best match as a typed letter's
+    // would.
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         return crate::pr_modal::paste(app, text);
     }
@@ -4680,7 +4640,6 @@ fn dispatch_action(
         Action::SelectModel => select_model(app),
         Action::CycleEffort => cycle_effort(app),
         Action::SelectLaunchWorktree => select_launch_worktree(app),
-        Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
@@ -4928,7 +4887,6 @@ fn dispatch_action(
         // reaches here over a full-screen session the keys got past, which
         // is still the selected session's card.
         Action::OpenPullRequest => launcher::open_pull_request(app, out),
-        Action::OpenIssue => launcher::open_issue(app, out),
         Action::DuplicateSession => launcher::duplicate_session(app),
         Action::ContinueOn => launcher::continue_on(app),
         Action::OpenOutsideTerminal => open_outside_terminal(app),
@@ -5323,27 +5281,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 None => cfg.text_value(*kind),
             };
             (title.into(), hint.into(), value)
-        }
-
-        PromptKind::IssueComment { issue, .. } => {
-            let title = if issue.title.trim().is_empty() {
-                format!("Comment on issue #{}", issue.number)
-            } else {
-                format!(
-                    "Comment on issue #{} · {}",
-                    issue.number,
-                    crate::ui::truncate(issue.title.trim(), 40)
-                )
-            };
-            (
-                title.into(),
-                format!(
-                    "what do you want to say on #{}? (posted as you, with gh issue comment)",
-                    issue.number
-                )
-                .into(),
-                String::new(),
-            )
         }
         PromptKind::EditLink { id } => {
             let current = app
@@ -7067,25 +7004,6 @@ fn last_checkout_row(app: &App) -> usize {
         .unwrap_or(0)
 }
 
-/// Fold/unfold the Worktrees panel's ISSUES group (header click, context
-/// menu; ↓ off the row above it unfolds it too — see `move_selection`).
-/// Folding while the cursor sits on an issue re-lands it on the row above
-/// the header — the last pull request, whose preview the loop's
-/// `note_preview_change` brings up, or the last checkout, whose session
-/// comes back the way the OPEN PRS fold brings it back.
-fn toggle_issues(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let on_issue = app.selected_worktree_issue().is_some();
-    app.issues_collapsed = !app.issues_collapsed;
-    if on_issue {
-        app.set_sel_worktree(app.worktree_row_count().saturating_sub(1));
-        if app.selected_worktree().is_some() {
-            restore_session(app, out);
-            fire_pending_attach(app, out);
-        }
-    }
-    app.dirty = true;
-}
-
 /// Shift+T: create a shell terminal whose pwd is the selection's checkout —
 /// the selected worktree, or the project's main checkout (root) when the
 /// Projects panel has focus. The daemon names it (`term-N`) and the Ack
@@ -7653,19 +7571,14 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         let targets = crate::config::Config::load().continue_targets(a);
         items.splice(at + 1..at + 1, launcher::continue_items(a, targets));
     }
-    // The card's pull request and the issue it was started from, what `⇧V`
-    // and `⇧I` open (`launcher::open_pull_request`, `launcher::open_issue`):
-    // ahead of the trailing Delete on an archived card, which keeps no
-    // checkout verbs, and after the checkout's Open on a live one.
+    // The card's pull request, what `⇧V` opens
+    // (`launcher::open_pull_request`): ahead of the trailing Delete on an
+    // archived card, which keeps no checkout verbs, and after the
+    // checkout's Open on a live one.
     let links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
         .and_then(|row| row.pr)
         .map(|pr| MenuItem::new("Open pull request", MenuAction::OpenLink(pr.url)))
         .into_iter()
-        .chain(
-            a.issue_url
-                .clone()
-                .map(|url| MenuItem::new("Open issue", MenuAction::OpenLink(url))),
-        )
         .collect();
     if a.archived {
         let at = items.len().saturating_sub(1);
@@ -7777,15 +7690,6 @@ pub(super) fn open_pr_agent_picker(app: &mut App) {
         return;
     };
     agent_picker::open_kind_picker(app, KindPicker::pr_session(worktree, &pr));
-}
-
-/// The CONTEXT MENU for a PROJECT ISSUES GROUP row: the browser. The
-/// launches are the row's keys (`p`, `e`), as the footer says.
-fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
-    vec![MenuItem::new(
-        "Open in browser",
-        MenuAction::OpenLink(issue.url.clone()),
-    )]
 }
 
 /// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: a PR SESSION row per
@@ -7978,10 +7882,7 @@ fn context_menu_items(app: &App, focus: Focus) -> Option<Vec<MenuItem>> {
         }
         Focus::Worktrees => match app.selected_worktree_pr() {
             Some(pr) => Some(pr_row_menu_items(app, pr)),
-            None => match app.selected_worktree_issue() {
-                Some(issue) => Some(issue_row_menu_items(issue)),
-                None => app.selected_worktree().map(|w| worktree_menu_items(app, w)),
-            },
+            None => app.selected_worktree().map(|w| worktree_menu_items(app, w)),
         },
         // An EMPTY BAND on the grid: its checkout's own menu, the same
         // **Delete worktree** its `d` opens — its pull request's link row
@@ -8020,9 +7921,6 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
                         "Show/hide open PRs",
                         MenuAction::ToggleOpenPrs,
                     ));
-                }
-                if !app.listed_issues().is_empty() {
-                    items.push(MenuItem::new("Show/hide issues", MenuAction::ToggleIssues));
                 }
                 // And drafts to hide — or, once hidden, a way back that
                 // doesn't need the list to still hold one.
@@ -8203,7 +8101,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         }
         Overlay::AgentPresets(_) => crate::preset_overlays::handle_list_key(app, key, out),
         Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key, out),
-        Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
@@ -8299,13 +8196,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::RenameClaudeAccount { .. }
                         | PromptKind::AdoptClaudeDir { .. }
                 );
-                // The comment box stood in for the ISSUES MODAL: Esc puts
-                // the modal back on its row, the comment unposted.
-                let back_to_issues = match &prompt.kind {
-                    PromptKind::IssueComment { view, .. } => Some(view.clone()),
-                    _ => None,
-                };
-                // And the PULL REQUESTS MODAL's, the same way.
+                // The comment box stood in for the PULL REQUESTS MODAL: Esc
+                // puts the modal back on its row, the comment unposted.
                 let back_to_prs = match &prompt.kind {
                     PromptKind::PrComment { back, .. } => back.clone(),
                     _ => None,
@@ -8331,8 +8223,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 if back_to_settings {
                     reopen_settings(app);
-                } else if let Some(view) = back_to_issues {
-                    crate::issues::reopen(app, view);
                 } else if let Some(view) = back_to_prs {
                     crate::pr_modal::reopen(app, *view);
                 } else if let Some(view) = back_to_skills {
@@ -9338,7 +9228,6 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.theme = cfg.theme();
     app.animations = cfg.animations;
     app.black_background = cfg.black_background;
-    app.card_issue_number = cfg.card_issue_number;
     app.show_all_worktrees = cfg.show_all_worktrees;
     app.hide_card_marks = cfg.hide_card_marks;
     app.highlight_current_card = cfg.highlight_current_card;
@@ -9807,13 +9696,6 @@ pub(crate) fn submit_prompt_now(app: &mut App, kind: PromptKind, out: &mut Vec<C
 
 fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientRequest>) {
     let value = prompt.input.trim().to_string();
-    // An ISSUE SESSION's box may be sent empty: the issue is the task.
-    let value = match &prompt.kind {
-        PromptKind::QuickPrompt(launch) if value.is_empty() => {
-            launch.default_task().unwrap_or(value)
-        }
-        _ => value,
-    };
     // A cloud session cannot start without its task. Keep the multiline
     // dialog open on validation so the user can correct it in place (the
     // QUICK PROMPT opts out of the empty half of that — see below).
@@ -9833,9 +9715,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             PromptKind::QuickPrompt(_) => (None, "prompt"),
             // An empty comment is a change of mind too.
             PromptKind::PrComment { .. } => (None, "comment"),
-            // An empty comment box likewise: the cancel below puts the
-            // ISSUES MODAL back.
-            PromptKind::IssueComment { .. } => (None, "comment"),
             // And an empty follow-up: the turn is simply not sent.
             PromptKind::FollowUp { .. } => (None, "follow-up"),
             // A typed setting over several lines (the Linear task
@@ -9881,7 +9760,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         // An empty comment box goes back to the modal it stood in for, and
         // an empty QUICK PROMPT to the one it stood on.
         match &prompt.kind {
-            PromptKind::IssueComment { view, .. } => crate::issues::reopen(app, view.clone()),
             PromptKind::PrComment {
                 back: Some(view), ..
             } => crate::pr_modal::reopen(app, (**view).clone()),
@@ -9984,8 +9862,8 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             };
             create_agent(app, draft, out);
         }
-        // A box opened over the ISSUES MODAL or the PULL REQUESTS MODAL
-        // takes the modal with it when it launches: the grid is where the
+        // A box opened over the PULL REQUESTS MODAL (or the LINEAR VIEW,
+        // the TODOS MODAL) takes the modal with it when it launches: the grid is where the
         // new session's card goes up — and where the Ack puts the cursor on
         // it (`attach_created`) with FOLLOW NEW SESSION on, or else leaves
         // it on the card it was on. Only a box that goes without launching
@@ -10047,10 +9925,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     view.info(format!("{label}: {shown}"));
                 }
             }
-        }
-
-        PromptKind::IssueComment { view, issue } => {
-            crate::issues::post_comment(app, view, issue, value);
         }
         PromptKind::EditLink { id } => {
             send(app, out, |req_id| ClientRequest::UpdateLink {
@@ -10437,7 +10311,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                     launch.preset = back.launch.preset.clone();
                 }
                 let launch = launch
-                    .with_issue(back.launch.issue.clone())
                     .with_pr(back.launch.pr.clone())
                     .with_linear(back.launch.linear.clone())
                     .with_todo(back.launch.todo.clone())
@@ -10571,7 +10444,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::ToggleArchived => toggle_archived(app, out),
         MenuAction::ToggleOpenPrs => toggle_open_prs(app, out),
-        MenuAction::ToggleIssues => toggle_issues(app, out),
         MenuAction::ToggleDraftPrs => toggle_hide_draft_prs(app, out),
         MenuAction::PickLaunchWorktree { target, back } => {
             launcher::pick_launch_worktree(app, target, *back)
@@ -10664,7 +10536,6 @@ fn restore_context(app: &mut App, out: &mut Vec<ClientRequest>) {
 fn restore_project_cursors(app: &mut App) {
     app.set_sel_worktree(0);
     schedule_open_prs_lookup(app);
-    crate::issues::schedule_prefetch(app);
     schedule_pr_detail(app);
     if let Some(pid) = app.selected_project().map(|p| p.id.clone()) {
         if let Some(wid) = app.last_worktree_for_project.get(&pid).cloned() {
@@ -11161,24 +11032,6 @@ fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
                 select_worktree_row(app, first, out);
                 return;
             }
-            // And off the last row above a folded ISSUES group — the last
-            // pull request, or the last checkout when there are none —
-            // into that group, the same way.
-            if delta > 0
-                && app.issues_collapsed
-                && sel + 1 >= checkouts
-                && !app.listed_issues().is_empty()
-            {
-                app.issues_collapsed = false;
-                app.dirty = true;
-                let first = app
-                    .worktree_rows()
-                    .iter()
-                    .position(|row| row.open_issue().is_some())
-                    .unwrap_or(checkouts);
-                select_worktree_row(app, first, out);
-                return;
-            }
             (checkouts, sel)
         }
         Focus::Sessions => {
@@ -11219,8 +11072,7 @@ fn select_project_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
 }
 
 /// Move the Worktrees cursor to a *different* row `i` and bring up its
-/// session. Stepping onto an open-PR or issue row is not a worktree
-/// switch: it has no sessions to restore and nothing to attach, so the
+/// session. Stepping onto an open-PR row is not a worktree switch: it has no sessions to restore and nothing to attach, so the
 /// pane is left exactly as it was.
 pub(super) fn select_worktree_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
     app.select_worktree_when_seen = None;
@@ -11230,7 +11082,6 @@ pub(super) fn select_worktree_row(app: &mut App, i: usize, out: &mut Vec<ClientR
         restore_session(app, out);
     }
     schedule_pr_detail(app);
-    crate::issues::schedule_detail(app);
 }
 
 /// Show the selected session in the terminal pane WITHOUT taking focus or
@@ -11645,7 +11496,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         starting_prompt,
         reopen_on_error,
         pr,
-        issue_url,
         focus_pane,
         placeholder,
         follow,
@@ -11787,7 +11637,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             auto_title,
             cloud_prompt,
             starting_prompt,
-            issue_url,
             mode,
         },
     });
@@ -12444,8 +12293,8 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // under the pointer is marked while it is there (the draw reads this
     // in `ui::launcher_view`). Only those take it: every other target is
     // a card, which has its own highlight, or the background.
-    // The header's PR & ISSUE COUNTS are buttons of the same kind, and
-    // take the same underline; so are the pane's CLOSE and SIDE BUTTONS
+    // The header's PR COUNT is a button of the same kind, and takes the
+    // same underline; so are the pane's CLOSE and SIDE BUTTONS
     // and the footer's memory readout. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
     // pointer, so the line takes it for itself.
@@ -12468,7 +12317,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherTabMore
                 | HitTarget::LauncherCrumb
                 | HitTarget::LauncherPullRequests
-                | HitTarget::LauncherIssues
                 | HitTarget::LauncherWelcomePrompt
                 | HitTarget::FooterUsage
                 | HitTarget::FooterHome
@@ -12985,10 +12833,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::preset_overlays::handle_list_mouse(app, mouse, mouse_pos, out);
         return;
     }
-    if matches!(&app.overlay, Some(Overlay::Issues(_))) {
-        crate::issues::handle_mouse(app, mouse, mouse_pos, out);
-        return;
-    }
     if matches!(&app.overlay, Some(Overlay::Usage(_))) {
         crate::usage::handle_mouse(app, mouse, mouse_pos);
         return;
@@ -13252,10 +13096,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandStack(wid)) => {
                     crate::stacks::open_at(app, &wid);
                 }
-                // The ISSUE NUMBER on a session's card: the cursor onto
-                // the card, and the issue in the browser, through the very
-                // `open_issue` `⇧I` runs.
-                Some(HitTarget::LauncherCardIssue(id)) => launcher::click_issue(app, &id, out),
+                // The ISSUE NUMBER on a session's card is never drawn: a
+                // click there is a click on the card.
+                Some(HitTarget::LauncherCardIssue(id)) => {
+                    launcher::select_issue_card(app, &id, out);
+                }
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -13282,11 +13127,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The key cap in the empty grid's welcome: the QUICK
                 // PROMPT, through the `open_box` its key runs.
                 Some(HitTarget::LauncherWelcomePrompt) => launcher::open_box(app),
-                // The header's PR & ISSUE COUNTS: each opens its own list
-                // for the project in front of you, through the very
-                // function `v` / `i` run — the click is the key's twin.
+                // The header's PR COUNT: the list for the project in front
+                // of you, through the very function `v` runs — the click is
+                // the key's twin.
                 Some(HitTarget::LauncherPullRequests) => crate::pr_modal::open(app),
-                Some(HitTarget::LauncherIssues) => crate::issues::open_issues(app),
                 // The footer's memory readout: the modal `⇧M` opens,
                 // through the same `open_metrics`.
                 Some(HitTarget::FooterUsage) => open_metrics(app, out),
@@ -13668,9 +13512,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // Boot the restored worktree's sessions right away — the first
             // thing the user does after launch is walk into one of them.
             schedule_prewarm(app);
-            // And ask for the restored project's open issues, so an `i`
-            // straight after launch has rows to paint.
-            crate::issues::schedule_prefetch(app);
             // The cursor came back on the session the user left on; bring
             // its terminal back with it, exactly as landing on the row would.
             // No debounce: a boot restores one remembered session once, so
@@ -14465,11 +14306,10 @@ struct SelectionSnapshot {
     project: Option<orion_core::ProjectId>,
     worktree: Option<WorktreeId>,
     /// The OPEN PRS row under the Worktrees cursor, by URL, when it is on
-    /// one (`worktree` is None then), and the ISSUES row the same way: no
-    /// re-seat reads them — a row that left takes its cursor's neighbour —
-    /// but they make two snapshots on different rows differ.
+    /// one (`worktree` is None then): no re-seat reads it — a row that left
+    /// takes its cursor's neighbour — but it makes two snapshots on
+    /// different rows differ.
     pr: Option<String>,
-    issue: Option<String>,
     session: Option<SessionRef>,
     /// The Sessions panel row the cursor was on, and the group that row
     /// sat in. Following onto an archived row is only right when the
@@ -14507,7 +14347,6 @@ fn selection_snapshot(app: &App) -> SelectionSnapshot {
         project: app.selected_project().map(|p| p.id.clone()),
         worktree: app.selected_worktree().map(|w| w.id.clone()),
         pr: app.selected_worktree_pr().map(|pr| pr.url.clone()),
-        issue: app.selected_worktree_issue().map(|i| i.url.clone()),
         session_index,
         session_group: row.map(session_group),
         session: row.and_then(SessionRow::sref),
@@ -14645,7 +14484,6 @@ mod tests {
                     sort_order: 9,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -14675,7 +14513,6 @@ mod tests {
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -15718,7 +15555,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -16624,31 +16460,6 @@ mod tests {
         );
     }
 
-    /// Open issues on the selected project, as `gh issue list` would have
-    /// answered — the PROJECT ISSUES GROUP's rows.
-    pub(super) fn seed_issues(app: &mut App, issues: &[(u64, &str)]) {
-        let id = app.selected_project().expect("a project").id.clone();
-        app.issues.insert(
-            id,
-            crate::issues::IssueList {
-                list: issues
-                    .iter()
-                    .map(|(number, title)| crate::issues::Issue {
-                        number: *number,
-                        url: format!("https://github.com/o/r/issues/{number}"),
-                        title: (*title).into(),
-                        author: "webdevcody".into(),
-                        created_at: "2026-09-10T12:00:00Z".into(),
-                        updated_at: "2026-09-11T12:00:00Z".into(),
-                        labels: Vec::new(),
-                        body: format!("Body of issue {number}"),
-                    })
-                    .collect(),
-                at: std::time::Instant::now(),
-            },
-        );
-    }
-
     /// A control chord pressed wherever the cursor is: `ctrl(app, 'd', out)`.
     fn ctrl(app: &mut App, c: char, out: &mut Vec<ClientRequest>) {
         press(app, KeyCode::Char(c), KeyModifiers::CONTROL, out);
@@ -16742,7 +16553,6 @@ mod tests {
                     WorktreeRow::Checkout(w) => w.branch.clone(),
                     WorktreeRow::Pr(pr) => format!("#{}", pr.number),
                     WorktreeRow::PrCheckout(worktree) => format!("└ {}", worktree.branch),
-                    WorktreeRow::Issue(issue) => format!("issue #{}", issue.number),
                 })
                 .collect()
         };
@@ -19177,7 +18987,6 @@ diff --git a/src/b.rs b/src/b.rs
         };
         land(&mut app, Some(vec![landed()]), false);
         assert_eq!(open_pr_numbers(&app), vec![7]);
-        assert_eq!(app.project_open_counts(&pid).0, Some(1));
         assert_eq!(app.open_prs[&pid].merged, vec![landed()]);
         assert_eq!(app.prs.status_or_open(&pr_url(5)).word(), "merged");
         assert!(app.live_pr_urls().contains(&pr_url(5)), "its page is kept");
@@ -21066,7 +20875,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: sort,
                     status_changed_at: changed_at,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -21122,7 +20930,6 @@ diff --git a/src/c.rs b/src/c.rs
                 sort_order: sort,
                 status_changed_at: at,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             }),
@@ -21205,7 +21012,6 @@ diff --git a/src/c.rs b/src/c.rs
                 sort_order: sort,
                 status_changed_at: at,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             }),
@@ -21266,7 +21072,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -21335,7 +21140,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -23589,7 +23393,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -24115,7 +23918,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: sort,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         })
@@ -25624,27 +25426,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.mouse_held(), "…and the mode re-ask beat resumes");
     }
 
-    /// The ISSUES fold rides the UI-state blob like the OPEN PRS one, and
-    /// a blob from before it existed leaves the group open.
-    #[test]
-    fn ui_state_roundtrip_includes_the_issues_fold() {
-        let mut app = App::new();
-        app.issues_collapsed = true;
-        let json = ui_state_json(&app);
-        assert!(json.contains(r#""issues_collapsed":true"#), "{json}");
-
-        let mut restored = App::new();
-        restore_ui_state(&mut restored, &json);
-        assert!(restored.issues_collapsed);
-
-        let mut legacy = App::new();
-        restore_ui_state(
-            &mut legacy,
-            r#"{"project":null,"worktree":null,"session_agent":null,"show_archived":false,"collapsed":false}"#,
-        );
-        assert!(!legacy.issues_collapsed, "old blobs keep the group open");
-    }
-
     /// The fold is remembered like the ARCHIVED toggle: it rides the
     /// UI-state blob out and back, and a blob from before it existed leaves
     /// the group open.
@@ -25717,7 +25498,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -25909,7 +25689,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 0,
             status_changed_at: at,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         })
@@ -28542,7 +28321,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -28568,7 +28346,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -28932,7 +28709,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 5,
             status_changed_at: 500,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -29416,7 +29192,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -33803,7 +33578,6 @@ diff --git a/src/c.rs b/src/c.rs
                         sort_order: 1,
                         status_changed_at: 0,
                         alive: true,
-                        issue_url: None,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
                     }),
@@ -33880,7 +33654,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 1,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         })
@@ -34528,7 +34301,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -34596,7 +34368,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -35173,379 +34944,6 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// The ISSUES MODAL's comment box round-trips: Esc puts the modal back
-    /// on its row with nothing posted, an empty Enter does the same, and
-    /// Enter with text hands it to `gh` — here a checkout that isn't on
-    /// disk, so the box comes back with the text instead.
-    #[test]
-    fn the_issue_comment_box_comes_back_to_the_modal_on_its_row() {
-        let mut app = App::new();
-        let mut out = Vec::new();
-        let project = orion_core::ProjectId("p1".into());
-        app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-            project.clone(),
-            "demo".into(),
-            "/nonexistent/orion-issue-comment-box".into(),
-        )));
-        let issue = |number: u64| crate::issues::Issue {
-            number,
-            url: format!("https://github.com/o/r/issues/{number}"),
-            title: format!("issue {number}"),
-            author: "webdevcody".into(),
-            created_at: "2026-09-10T12:00:00Z".into(),
-            updated_at: "2026-09-11T12:00:00Z".into(),
-            labels: vec![],
-            body: String::new(),
-        };
-        crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        let on_row =
-            |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
-        assert!(on_row(&app));
-
-        // Esc: back, nothing posted.
-        press(
-            &mut app,
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.title.contains("#14")));
-        type_text(&mut app, "never mind", &mut out);
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(on_row(&app), "Esc puts the modal back: {:?}", app.overlay);
-
-        // An empty Enter: the same.
-        press(
-            &mut app,
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(on_row(&app), "an empty box is a cancel: {:?}", app.overlay);
-        assert_eq!(app.flash, None);
-
-        // Enter with text: posted — or, off a checkout that isn't on disk,
-        // the box comes back with the text, newline and all.
-        press(
-            &mut app,
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        type_text(&mut app, "on it", &mut out);
-        press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
-        type_text(&mut app, "today", &mut out);
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-            panic!(
-                "the box should come back with the text, got {:?}",
-                app.overlay
-            );
-        };
-        assert_eq!(prompt.input.as_str(), "on it\ntoday");
-        assert!(
-            app.flash.as_deref().unwrap().contains("isn't on disk"),
-            "{:?}",
-            app.flash
-        );
-        assert!(out.is_empty(), "nothing goes to the daemon: {out:?}");
-    }
-
-    /// The ISSUES MODAL's box lands on the project's ROOT BRANCH, whatever
-    /// card the cursor was on — the QUICK PROMPT NEW WORKTREE SETTING
-    /// changes nothing, an issue's box keeps its own aim — and the WORKTREE
-    /// PICKER's fresh worktree is named after the issue.
-    #[test]
-    fn the_issue_quick_prompt_starts_on_the_root_branch_or_a_fresh_worktree() {
-        use crate::quick_prompt::QuickTarget;
-        let target = |json: &str, fresh: bool| {
-            with_config_json(json, || {
-                let mut app = App::new();
-                seed_tree(&mut app);
-                seed_feat_worktree(&mut app, "w2", "feat");
-                app.set_sel_worktree(1);
-                assert_eq!(
-                    app.selected_worktree().map(|w| w.branch.as_str()),
-                    Some("feat")
-                );
-                let mut out = Vec::new();
-                let project = orion_core::ProjectId("p1".into());
-                app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                    project.clone(),
-                    "demo".into(),
-                    "/tmp/demo".into(),
-                )));
-                crate::issues::land_list(
-                    &mut app,
-                    project,
-                    Some(vec![crate::issues::Issue {
-                        number: 15,
-                        url: "https://github.com/o/r/issues/15".into(),
-                        title: "Login fails".into(),
-                        author: "webdevcody".into(),
-                        created_at: "2026-09-10T12:00:00Z".into(),
-                        updated_at: "2026-09-11T12:00:00Z".into(),
-                        labels: vec![],
-                        body: String::new(),
-                    }]),
-                );
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                if fresh {
-                    pick_fresh_worktree(&mut app, &mut out);
-                }
-                match &app.overlay {
-                    Some(Overlay::Prompt(prompt)) => match &prompt.kind {
-                        PromptKind::QuickPrompt(launch) => launch.target.clone(),
-                        other => panic!("{other:?}"),
-                    },
-                    other => panic!("Enter: expected the box, got {other:?}"),
-                }
-            })
-        };
-        for json in ["{}", r#"{"quick_prompt_new_worktree": true}"#] {
-            assert_eq!(
-                target(json, false),
-                QuickTarget::Worktree(WorktreeId("w1".into())),
-                "{json}: not the selected card's checkout"
-            );
-        }
-        match target("{}", true) {
-            QuickTarget::NewWorktree { branch, .. } => {
-                assert!(branch.starts_with("issue-15"), "{branch}")
-            }
-            other => panic!("the picker cuts a fresh worktree: {other:?}"),
-        }
-    }
-
-    /// `Enter` in the ISSUES MODAL puts the QUICK PROMPT up over the modal
-    /// rather than in its place — both on screen, the box on top. A box
-    /// that goes without launching (Esc, a click outside it) leaves the
-    /// modal on its row; the launch closes the modal too, and its Ack puts
-    /// the grid's cursor on the new session's card, the keys still there.
-    #[test]
-    fn the_issue_quick_prompt_stands_on_the_modal() {
-        with_config_json(r#"{"follow_new_session": true}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let focus = app.focus;
-            let mut out = Vec::new();
-            let project = orion_core::ProjectId("p1".into());
-            app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                project.clone(),
-                "demo".into(),
-                "/tmp/demo".into(),
-            )));
-            let issue = |number: u64| crate::issues::Issue {
-                number,
-                url: format!("https://github.com/o/r/issues/{number}"),
-                title: format!("issue {number}"),
-                author: "webdevcody".into(),
-                created_at: "2026-09-10T12:00:00Z".into(),
-                updated_at: "2026-09-11T12:00:00Z".into(),
-                labels: vec![],
-                body: String::new(),
-            };
-            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let on_row =
-                |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
-            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Enter: expected the box, got {:?}", app.overlay);
-            };
-            let PromptKind::QuickPrompt(launch) = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert!(
-                matches!(&launch.under, Some(crate::quick_prompt::ModalUnder::Issues(v)) if v.selected == 1),
-                "the box carries the modal it stands on: {:?}",
-                launch.under
-            );
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            let screen = buffer_text(&terminal);
-            assert!(
-                screen.contains("Issues — demo"),
-                "the modal under:\n{screen}"
-            );
-            assert!(screen.contains("issue #14"), "the box over it:\n{screen}");
-            assert!(screen.contains("Esc back to issues"), "{screen}");
-
-            // Esc: the box goes, the modal stays.
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(on_row(&app), "Esc leaves the modal: {:?}", app.overlay);
-
-            // A click outside the box: the same.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            crate::overlay_close::click_outside(&mut app, &mut out);
-            assert!(on_row(&app), "a click outside: {:?}", app.overlay);
-
-            // The launch, through the loop's own entry point (so a follow
-            // it may not take is caught): the create goes out, and the
-            // modal goes with the box.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            type_text(&mut app, "look into it", &mut out);
-            out.clear();
-            let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-            handle_terminal_event(&mut app, enter, &mut out);
-            let (req_id, worktree) = match out.as_slice() {
-                [ClientRequest::CreateAgent {
-                    req_id,
-                    worktree,
-                    issue_url: Some(url),
-                    ..
-                }] if url == "https://github.com/o/r/issues/14" => (*req_id, worktree.clone()),
-                other => panic!("one create, for the issue: {other:?}"),
-            };
-            assert!(
-                app.overlay.is_none(),
-                "the launch closes the modal: {:?}",
-                app.overlay
-            );
-
-            // The DAEMON's side: the row, then the Ack — and the cursor is
-            // on the new card, the keys on the grid.
-            let fresh = AgentId("a9".into());
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: orion_core::Entity::Agent(orion_core::Agent {
-                        id: fresh.clone(),
-                        worktree_id: worktree,
-                        name: "agent-2".into(),
-                        status: orion_core::AgentStatus::Fresh,
-                        archived: false,
-                        archived_at: 0,
-                        unseen: false,
-                        kind: orion_core::AgentKind::Claude,
-                        custom_harness: None,
-                        model: None,
-                        effort: None,
-                        session_id: None,
-                        cloud_session_id: None,
-                        sort_order: 0,
-                        status_changed_at: crate::app::now_ms(),
-                        alive: true,
-                        issue_url: None,
-                        recent_prompts: Vec::new(),
-                        usage_limit: None,
-                    }),
-                },
-            );
-            handle_server_event(
-                &mut app,
-                ServerEvent::Ack {
-                    req_id,
-                    created: Some(orion_core::EntityId::Agent(fresh.clone())),
-                },
-                &mut out,
-            );
-            assert!(app.overlay.is_none(), "nothing comes back up");
-            assert_eq!(
-                app.selected_session().map(|a| a.id),
-                Some(fresh),
-                "the cursor is on the new card"
-            );
-            assert_eq!(app.focus, focus, "the keys stay on the grid");
-            assert!(!app.term_locked);
-        });
-    }
-
-    /// `Shift+Tab` in the ISSUES MODAL puts the AGENT PRESETS picker up over
-    /// the modal rather than in its place. Esc and a click outside leave the
-    /// modal on its row; a pick hands the box over, still on the modal, and
-    /// the box's own Esc goes back to it too.
-    #[test]
-    fn the_issue_preset_picker_stands_on_the_modal() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let mut out = Vec::new();
-            let project = orion_core::ProjectId("p1".into());
-            app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                project.clone(),
-                "demo".into(),
-                "/tmp/demo".into(),
-            )));
-            let issue = |number: u64| crate::issues::Issue {
-                number,
-                url: format!("https://github.com/o/r/issues/{number}"),
-                title: format!("issue {number}"),
-                author: "webdevcody".into(),
-                created_at: "2026-09-10T12:00:00Z".into(),
-                updated_at: "2026-09-11T12:00:00Z".into(),
-                labels: vec![],
-                body: String::new(),
-            };
-            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let on_row =
-                |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
-            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!(
-                    "Shift+Tab: expected the preset picker, got {:?}",
-                    app.overlay
-                );
-            };
-            let back = view.quick.as_ref().expect("a picker for a launch");
-            assert!(
-                matches!(&back.launch.under, Some(crate::quick_prompt::ModalUnder::Issues(v)) if v.selected == 1),
-                "the picker carries the modal it stands on: {:?}",
-                back.launch.under
-            );
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            let screen = buffer_text(&terminal);
-            assert!(
-                screen.contains("Issues — demo"),
-                "the modal under:\n{screen}"
-            );
-            assert!(screen.contains("reviewer"), "the picker over it:\n{screen}");
-
-            // Esc: the picker goes, the modal stays on its row.
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(on_row(&app), "Esc leaves the modal: {:?}", app.overlay);
-
-            // A click outside the picker: the same.
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            crate::overlay_close::click_outside(&mut app, &mut out);
-            assert!(on_row(&app), "a click outside: {:?}", app.overlay);
-
-            // A pick: the box, preset applied, still standing on the modal.
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick: expected the box, got {:?}", app.overlay);
-            };
-            let PromptKind::QuickPrompt(launch) = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert_eq!(
-                launch.preset.as_ref().map(|p| p.name.as_str()),
-                Some("reviewer")
-            );
-            assert!(
-                matches!(&launch.under, Some(crate::quick_prompt::ModalUnder::Issues(v)) if v.selected == 1),
-                "{:?}",
-                launch.under
-            );
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            let screen = buffer_text(&terminal);
-            assert!(
-                screen.contains("Issues — demo"),
-                "the modal under:\n{screen}"
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(on_row(&app), "the box's Esc: {:?}", app.overlay);
-        });
-    }
-
     /// `Tab` on the AGENT PRESETS list `e` opens flips the launch onto a
     /// fresh worktree of the project, and back; a click on the list's
     /// `[ ] new worktree` row is the same flip (INPUT PARITY). Enter on a
@@ -35618,71 +35016,6 @@ diff --git a/src/c.rs b/src/c.rs
                 ),
                 "the worktree is cut first: {out:?}"
             );
-        });
-    }
-
-    /// `Shift+Tab` in the ISSUES MODAL, then `Tab`: the picker flips the
-    /// launch onto a fresh worktree named after the issue, and the box its
-    /// Enter hands over is aimed there — still standing on the modal. Esc
-    /// before a pick drops the flip with the picker.
-    #[test]
-    fn the_issue_preset_picker_tab_flips_a_new_worktree() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let mut out = Vec::new();
-            let project = orion_core::ProjectId("p1".into());
-            app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                project.clone(),
-                "demo".into(),
-                "/tmp/demo".into(),
-            )));
-            crate::issues::land_list(
-                &mut app,
-                project,
-                Some(vec![crate::issues::Issue {
-                    number: 15,
-                    url: "https://github.com/o/r/issues/15".into(),
-                    title: "Fix login redirect".into(),
-                    author: "webdevcody".into(),
-                    created_at: "2026-09-10T12:00:00Z".into(),
-                    updated_at: "2026-09-11T12:00:00Z".into(),
-                    labels: vec![],
-                    body: String::new(),
-                }]),
-            );
-            let fresh = |app: &App| match &app.overlay {
-                Some(Overlay::AgentPresets(v)) => v.is_new_worktree(),
-                other => panic!("expected the preset picker, got {other:?}"),
-            };
-
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            assert!(!fresh(&app), "the root worktree, as Enter's box");
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert!(fresh(&app));
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(matches!(&app.overlay, Some(Overlay::Issues(_))));
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            assert!(!fresh(&app), "Esc dropped the flip");
-
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick: expected the box, got {:?}", app.overlay);
-            };
-            let PromptKind::QuickPrompt(launch) = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert!(
-                matches!(&launch.target, crate::quick_prompt::QuickTarget::NewWorktree { branch, .. } if branch.starts_with("issue-15")),
-                "{:?}",
-                launch.target
-            );
-            assert_eq!(launch.issue.as_ref().map(|i| i.number), Some(15));
-            assert!(matches!(
-                &launch.under,
-                Some(crate::quick_prompt::ModalUnder::Issues(_))
-            ));
         });
     }
 
@@ -36884,7 +36217,6 @@ diff --git a/src/c.rs b/src/c.rs
                         sort_order: 1,
                         status_changed_at: 0,
                         alive: true,
-                        issue_url: None,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
                     }),
@@ -38234,7 +37566,6 @@ diff --git a/src/c.rs b/src/c.rs
                             kind: AgentKind::Claude,
                             cloud_prompt: None,
                             starting_prompt: None,
-                            issue_url: None,
                             ..
                         },
                         ClientRequest::PrewarmAgent { .. }
@@ -39625,7 +38956,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 1,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -40265,14 +39595,6 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
-                "Issues",
-                |app| {
-                    seed_tree(app);
-                    press(app, KeyCode::Char('i'), KeyModifiers::NONE, &mut Vec::new());
-                },
-                None,
-            ),
-            (
                 "PullRequests",
                 |app| {
                     seed_tree(app);
@@ -40549,7 +39871,6 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",
-            Overlay::Issues(_) => "Issues",
             Overlay::PullRequests(_) => "PullRequests",
             Overlay::Linear(_) => "Linear",
             Overlay::Skills(_) => "Skills",
@@ -40588,7 +39909,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 26, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
         });
     }
 
@@ -41044,9 +40365,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.key_combo.is_some(), "a config apply leaves it standing");
     }
 
-    /// PR & ISSUE COUNTS is live the same way: the switch reaches the
-    /// running app on apply, on and off, so the rows change on the next
-    /// paint and the issues sweep starts (or stops) on the next tick.
     /// CARD LINE COUNTS are always read: a config that still says
     /// `card_line_changes: false` (an older build's) turns nothing off,
     /// and a read that finds nothing changed by the line drops its

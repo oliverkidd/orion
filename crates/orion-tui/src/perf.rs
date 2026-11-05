@@ -166,7 +166,6 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::Hosts(_)) => "Hosts",
         Some(Overlay::AgentPresets(_)) => "AgentPresets",
         Some(Overlay::AgentPresetEditor(_)) => "AgentPresetEditor",
-        Some(Overlay::Issues(_)) => "Issues",
         Some(Overlay::PullRequests(_)) => "PullRequests",
         Some(Overlay::Linear(_)) => "Linear",
         Some(Overlay::Skills(_)) => "Skills",

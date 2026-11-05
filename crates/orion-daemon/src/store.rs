@@ -502,31 +502,30 @@ impl Store {
     // ---- agents ----
 
     pub fn insert_agent(&self, a: &Agent) -> Result<()> {
-        self.insert_agent_with_launch_context(a, false, None, None)
+        self.insert_agent_with_launch_context(a, false, None)
     }
 
     /// `auto_title` marks the row as awaiting one agent-driven title
     /// (`orion rename` from inside the CLI). The flag is store-internal:
     /// clients never see it, they only observe the eventual rename.
     pub fn insert_agent_with_auto_title(&self, a: &Agent, auto_title: bool) -> Result<()> {
-        self.insert_agent_with_launch_context(a, auto_title, None, None)
+        self.insert_agent_with_launch_context(a, auto_title, None)
     }
 
     /// Persist an AGENT plus the launch context that must be rebuilt on
     /// every process spawn. `pr_url` is intentionally not part of the
     /// shared Agent entity: it constrains the CLI's launch, not row
-    /// display. `issue_url` is launch context too, and also rides the
-    /// entity (`Agent::issue_url`) so the TUI's `⇧I` can open the issue.
+    /// display. (The `issue_url` column, an ISSUE SESSION's, is left in
+    /// place and unused.)
     pub fn insert_agent_with_launch_context(
         &self,
         a: &Agent,
         auto_title: bool,
         pr_url: Option<&str>,
-        issue_url: Option<&str>,
     ) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, cloud_session_id, pr_url, issue_url, custom_harness)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, cloud_session_id, pr_url, custom_harness)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 a.id.as_str(),
                 a.worktree_id.as_str(),
@@ -545,7 +544,6 @@ impl Store {
                 a.unseen as i64,
                 a.cloud_session_id,
                 pr_url,
-                issue_url,
                 a.custom_harness,
             ],
         )?;
@@ -557,11 +555,6 @@ impl Store {
     /// resolved the Agent itself before asking for this adjunct.
     pub fn agent_pr_url(&self, id: &AgentId) -> Result<Option<String>> {
         self.agent_text_column(id, "pr_url")
-    }
-
-    /// Issue launch context for an AGENT (an ISSUE SESSION), or None.
-    pub fn agent_issue_url(&self, id: &AgentId) -> Result<Option<String>> {
-        self.agent_text_column(id, "issue_url")
     }
 
     fn agent_text_column(&self, id: &AgentId, column: &str) -> Result<Option<String>> {
@@ -1098,7 +1091,7 @@ const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_orde
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
                              archived_at, unseen, cloud_session_id, recent_prompts, custom_harness, \
-                             issue_url, usage_limit";
+                             usage_limit";
 const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command";
 const LINK_COLUMNS: &str = "id, worktree_id, url, sort_order";
 
@@ -1141,10 +1134,9 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         unseen: r.get::<_, i64>(12)? != 0,
         cloud_session_id: r.get(13)?,
         alive: false,
-        issue_url: r.get(16)?,
         recent_prompts: parse_prompts(r.get::<_, Option<String>>(14)?.as_deref()),
         custom_harness: r.get(15)?,
-        usage_limit: parse_usage_limit(r.get::<_, Option<String>>(17)?.as_deref()),
+        usage_limit: parse_usage_limit(r.get::<_, Option<String>>(16)?.as_deref()),
     })
 }
 
@@ -1247,13 +1239,12 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
         let pr_url = "https://github.com/oliverkidd/orion/pull/42";
         store
-            .insert_agent_with_launch_context(&agent, false, Some(pr_url), None)
+            .insert_agent_with_launch_context(&agent, false, Some(pr_url))
             .unwrap();
         let codex_agent = Agent {
             id: AgentId::generate(),
@@ -1272,7 +1263,6 @@ mod tests {
             sort_order: 1,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -1294,13 +1284,11 @@ mod tests {
             sort_order: 2,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
         store.insert_agent(&cursor_agent).unwrap();
-        let issue_url = "https://github.com/oliverkidd/orion/issues/15";
-        let issue_agent = Agent {
+        let titled_agent = Agent {
             id: AgentId::generate(),
             worktree_id: worktree.id.clone(),
             name: "agent-4".into(),
@@ -1317,12 +1305,11 @@ mod tests {
             sort_order: 3,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
         store
-            .insert_agent_with_launch_context(&issue_agent, true, None, Some(issue_url))
+            .insert_agent_with_auto_title(&titled_agent, true)
             .unwrap();
 
         let (projects, worktrees, agents, _terms) = store.load_tree().unwrap();
@@ -1360,7 +1347,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -1373,17 +1359,7 @@ mod tests {
         assert_eq!(agents[1].kind, AgentKind::Codex);
         assert_eq!(agents[1].model, None);
         assert_eq!(agents[2].kind, AgentKind::Cursor);
-        // The issue context is its own column: a PR SESSION carries none,
-        // an ISSUE SESSION carries no PR.
-        assert_eq!(store.agent_issue_url(&agents[0].id).unwrap(), None);
-        assert_eq!(
-            store.agent_issue_url(&agents[3].id).unwrap().as_deref(),
-            Some(issue_url)
-        );
         assert_eq!(store.agent_pr_url(&agents[3].id).unwrap(), None);
-        // …and the loaded row carries the issue to the TUI (`⇧I` opens it).
-        assert_eq!(agents[0].issue_url, None);
-        assert_eq!(agents[3].issue_url.as_deref(), Some(issue_url));
     }
 
     /// Read marks are keyed by PR URL and outlive the worktree they were
@@ -1892,7 +1868,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -1981,7 +1956,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },
@@ -2111,7 +2085,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 })
@@ -2197,7 +2170,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })
@@ -2282,7 +2254,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             };
@@ -2383,7 +2354,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })

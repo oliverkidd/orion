@@ -199,9 +199,6 @@ pub enum HitTarget {
     /// a click opens the open pull requests of the project in front of
     /// you — the modal `v` opens.
     LauncherPullRequests,
-    /// The ISSUE COUNT beside it (`1 issue`): a click opens that
-    /// project's open issues — the modal `i` opens.
-    LauncherIssues,
     /// The key cap in the empty GRID's welcome (`press ⌘N to start an agent`): a
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
@@ -221,14 +218,14 @@ pub enum HitTarget {
     /// grid with the cursor on that part
     /// (`event_loop::launcher::click_crumb`).
     FooterCrumb(CrumbPart),
-    /// The `↗ open in browser` BUTTON on the ISSUES and PULL REQUESTS
-    /// MODALS' reading pane, pinned right on its top border: a click opens
-    /// the row under the cursor in the browser, through the very function
-    /// the modal's `o` runs (`pr_modal::open_in_browser`,
-    /// `issues::open_in_browser`). The modals route their own mouse off
-    /// the rects they write back at draw time, so this is never in the hit
-    /// map: it is what `hover_crumb` holds while the pointer rests on the
-    /// button (`ui::browser_button_under`), so the draw can underline it.
+    /// The `↗ open in browser` BUTTON on the PULL REQUESTS MODAL's and the
+    /// LINEAR VIEW's reading pane, pinned right on its top border: a click
+    /// opens the row under the cursor in the browser, through the very
+    /// function the modal's `o` runs (`pr_modal::open_in_browser`). The
+    /// modals route their own mouse off the rects they write back at draw
+    /// time, so this is never in the hit map: it is what `hover_crumb` holds while the
+    /// pointer rests on the button (`ui::browser_button_under`), so the
+    /// draw can underline it.
     ModalBrowser,
     /// A tab's label on the PULL REQUEST PAGE the pane reads
     /// (`pr_preview`): a click shows that tab, the pane taking the keys.
@@ -409,8 +406,6 @@ pub enum MenuAction {
     ToggleArchived,
     /// Fold / unfold the PROJECT OPEN PRS GROUP (Worktrees panel menu).
     ToggleOpenPrs,
-    /// Fold / unfold the PROJECT ISSUES GROUP (Worktrees panel menu).
-    ToggleIssues,
     /// Flip the `hide_draft_prs` SETTING from the Worktrees panel menu:
     /// drafts out of the group and `/`, or back in.
     ToggleDraftPrs,
@@ -971,15 +966,6 @@ pub enum PromptKind {
     EditLink {
         id: LinkId,
     },
-    /// `c` in the ISSUES MODAL: a comment to post on the issue under the
-    /// cursor, as you, with `gh issue comment`. Multi-row like the tasks —
-    /// a comment is rarely one line. Enter posts it off the loop and puts
-    /// the modal back on its row while the answer lands; Esc, or an empty
-    /// box, puts the modal back without posting.
-    IssueComment {
-        view: crate::issues::IssuesView,
-        issue: crate::issues::IssueRef,
-    },
     /// `^a` in the SKILLS BROWSER: a new skill's name. Enter makes the
     /// folder and its SKILL.md and opens it in the editor; Esc, or an empty
     /// name, puts the browser back.
@@ -1130,7 +1116,6 @@ impl PromptDialog {
                 | PromptKind::PrComment { .. }
                 | PromptKind::AgentPresetTask { .. }
                 | PromptKind::QuickPrompt { .. }
-                | PromptKind::IssueComment { .. }
         ) || matches!(self.kind, PromptKind::SettingText { kind, .. } if kind.is_multiline_text())
     }
 
@@ -2428,8 +2413,6 @@ pub enum Overlay {
     AgentPresets(crate::preset_overlays::AgentPresetsView),
     /// The PRESET EDITOR form behind the list's `Ctrl+a` / `Ctrl+e`.
     AgentPresetEditor(crate::preset_overlays::AgentPresetEditor),
-    /// `i`: the ISSUES MODAL — the project's open GitHub issues.
-    Issues(crate::issues::IssuesView),
     /// `v`: the PULL REQUESTS MODAL — the project's open pull requests.
     PullRequests(crate::pr_modal::PullRequestsView),
     /// `⌘L`: the LINEAR VIEW — the open Linear issues assigned to the
@@ -2481,8 +2464,8 @@ pub struct PlaceholderRows {
 }
 
 /// A `CreateAgent` (or `CreatePrAgent`) as a launch surface drafts it —
-/// the NEW AGENT PICKER, the QUICK PROMPT, an AGENT PRESET's task box,
-/// the ISSUES MODAL. `event_loop::create_agent` turns it into the request
+/// the NEW AGENT PICKER, the QUICK PROMPT, an AGENT PRESET's task box.
+/// `event_loop::create_agent` turns it into the request
 /// and the PENDING INTENT that attaches the row; a draft aimed at a
 /// stand-in checkout waits on that checkout's own intent instead
 /// (`PendingIntent::SelectCreatedWorktree::launch`).
@@ -2510,10 +2493,6 @@ pub struct AgentLaunchDraft {
     /// OPEN PRS launch context: this launch is a PR SESSION, scoped to that
     /// pull request and run in a checkout of its head branch.
     pub pr: Option<crate::pull_request::PrLaunch>,
-    /// ISSUES MODAL launch context: this launch is an ISSUE SESSION, and
-    /// the DAEMON persists the URL as the row's context (see
-    /// `ClientRequest::CreateAgent::issue_url`).
-    pub issue_url: Option<String>,
     /// Enter and lock the TERMINAL PANE once the create is acked. True for
     /// every launch the user walked a picker to reach; the QUICK PROMPT
     /// passes the `quick_prompt_focus` SETTING, which is off by default.
@@ -2540,7 +2519,7 @@ pub struct AgentLaunchDraft {
 impl AgentLaunchDraft {
     /// A launch of `kind` at `model` / `effort` into `worktree` with
     /// nothing else said: no name (the row titles itself), no first
-    /// prompt, no pull request or issue behind it, no box to bring back,
+    /// prompt, no pull request behind it, no box to bring back,
     /// no stand-in row, and the pane taken — what a launch the user walked
     /// a picker to reach looks like. Every launch surface starts from this
     /// and names only what is its own (`..AgentLaunchDraft::new(…)`), so a
@@ -2563,7 +2542,6 @@ impl AgentLaunchDraft {
             starting_prompt: None,
             reopen_on_error: None,
             pr: None,
-            issue_url: None,
             focus_pane: true,
             placeholder: None,
             follow: true,
@@ -2869,27 +2847,15 @@ pub enum WorktreeRow<'a> {
     /// among the plain checkouts, so the checkout and the pull request it
     /// is for read as one thing.
     PrCheckout(&'a Worktree),
-    /// A PROJECT ISSUES GROUP row: an issue open on the repo, listed under
-    /// the pull requests. No checkout and no sessions — the pane reads it,
-    /// as it reads a pull request row.
-    Issue(&'a crate::issues::Issue),
 }
 
 impl<'a> WorktreeRow<'a> {
     /// The checkout the row is, wherever it sits: a plain one, or one
-    /// nested under its pull request. None on a pull request or issue row.
+    /// nested under its pull request. None on a pull request row.
     pub fn checkout(self) -> Option<&'a Worktree> {
         match self {
             WorktreeRow::Checkout(w) | WorktreeRow::PrCheckout(w) => Some(w),
-            WorktreeRow::Pr(_) | WorktreeRow::Issue(_) => None,
-        }
-    }
-
-    /// The issue the row *is* — a PROJECT ISSUES GROUP row.
-    pub fn open_issue(self) -> Option<&'a crate::issues::Issue> {
-        match self {
-            WorktreeRow::Issue(issue) => Some(issue),
-            WorktreeRow::Checkout(_) | WorktreeRow::Pr(_) | WorktreeRow::PrCheckout(_) => None,
+            WorktreeRow::Pr(_) => None,
         }
     }
 
@@ -2899,7 +2865,7 @@ impl<'a> WorktreeRow<'a> {
     pub fn open_pr(self) -> Option<&'a OpenPr> {
         match self {
             WorktreeRow::Pr(pr) => Some(pr),
-            WorktreeRow::Checkout(_) | WorktreeRow::PrCheckout(_) | WorktreeRow::Issue(_) => None,
+            WorktreeRow::Checkout(_) | WorktreeRow::PrCheckout(_) => None,
         }
     }
 }
@@ -2969,7 +2935,6 @@ impl<K> PanelCursor<K> {
 enum WorktreeRowKey {
     Checkout(WorktreeId),
     Pr(String),
-    Issue(String),
 }
 
 impl WorktreeRow<'_> {
@@ -2979,7 +2944,6 @@ impl WorktreeRow<'_> {
                 WorktreeRowKey::Checkout(w.id.clone())
             }
             WorktreeRow::Pr(pr) => WorktreeRowKey::Pr(pr.url.clone()),
-            WorktreeRow::Issue(issue) => WorktreeRowKey::Issue(issue.url.clone()),
         }
     }
 
@@ -2991,7 +2955,6 @@ impl WorktreeRow<'_> {
                 WorktreeRowKey::Checkout(id),
             ) => &w.id == id,
             (WorktreeRow::Pr(pr), WorktreeRowKey::Pr(url)) => &pr.url == url,
-            (WorktreeRow::Issue(issue), WorktreeRowKey::Issue(url)) => &issue.url == url,
             _ => false,
         }
     }
@@ -3561,10 +3524,6 @@ pub struct UiState {
     /// older blobs, which keep it open.
     #[serde(default)]
     pub open_prs_collapsed: bool,
-    /// The PROJECT ISSUES GROUP folded down to its header; absent in
-    /// older blobs, which keep it open.
-    #[serde(default)]
-    pub issues_collapsed: bool,
     /// Diff modal file-list width; absent in older blobs.
     #[serde(default)]
     pub diff_files_width: Option<u16>,
@@ -4158,8 +4117,6 @@ pub struct App {
     /// click on it). Like `show_archived`, it rides the UI-state blob so a
     /// restart brings it back folded.
     pub open_prs_collapsed: bool,
-    /// The ISSUES group under it, folded and remembered the same way.
-    pub issues_collapsed: bool,
     /// The session in the pane is FULL-SCREEN (`^F`, `zoom_pane`) — the
     /// grid and its header give way to the PTY.
     pub collapsed: bool,
@@ -4703,8 +4660,8 @@ pub struct App {
     /// *now*: the event loop runs the two list lookups on its next turn
     /// instead of waiting for the git tick, then clears this.
     pub pr_refresh_requested: bool,
-    /// Top visible line of the reading pane — the pull request or the
-    /// issue under a cursor (`App::reading_url`) — and the pane's total
+    /// Top visible line of the reading pane — the pull request under a
+    /// cursor (`App::reading_url`) — and the pane's total
     /// line count as of the last draw (for clamping).
     pub pr_preview_scroll: u16,
     pub pr_preview_lines: usize,
@@ -4777,55 +4734,6 @@ pub struct App {
     /// repo answered for its head, and the CONFLICT RESOLVER's merge and
     /// commit on their way (`crate::conflicts`).
     pub conflicts: crate::conflicts::Known,
-    /// What `gh issue list` last said about each project's open issues —
-    /// the ISSUES MODAL's rows, kept for the session. Prefetched in the
-    /// background once the cursor rests on a project and kept fresh on a
-    /// slow beat while it stays selected (`issues::schedule_prefetch`,
-    /// `issues::refresh_selected`), so `i` paints rows at once; the modal
-    /// re-asks on open only past `issues::FRESH`, and on its `r`.
-    pub issues: HashMap<ProjectId, crate::issues::IssueList>,
-    /// Projects with a list lookup in flight — one each, a refresh asked
-    /// meanwhile owed rather than dropped — and ones whose first ask `gh`
-    /// couldn't answer (the modal says so rather than spinning).
-    pub issues_flights: crate::fetch::Flights<ProjectId>,
-    pub issues_failed: std::collections::HashSet<ProjectId>,
-    /// An issue's title or description orion knows is newer than the
-    /// list it last landed: a save GitHub took, or GitHub's copy read
-    /// before one. Laid over any list asked before it, so a list in
-    /// flight when the edit landed can't put the old text back; a list
-    /// asked after it retires the entry. By URL.
-    pub issue_edits: HashMap<String, crate::issues::NewerText>,
-    /// What a save that went nowhere — changed on GitHub meanwhile, or
-    /// refused — had typed, when the form that sent it was gone by the
-    /// answer, by issue URL: the next `⌘I` on the issue opens on it, so
-    /// nothing typed is lost (`issues::EditDraft`).
-    pub issue_edit_drafts: HashMap<String, crate::issues::EditDraft>,
-    /// When each project's next background list ask is owed — the steady
-    /// beat once it has issues, a backoff while it hasn't — so the git
-    /// tick spends a `gh` only when one is due.
-    pub issues_due: HashMap<ProjectId, crate::issues::IssuesBeat>,
-    /// The debounced prefetch: the project the cursor landed on and when
-    /// its list is asked for, re-armed on every project switch.
-    pub pending_issues_prefetch: Option<(ProjectId, std::time::Instant)>,
-    /// The conversations of the issues the cursor has rested on, keyed by
-    /// URL; in flight and failed like the pull requests'.
-    pub issue_detail: HashMap<String, crate::issues::IssueDetail>,
-    pub issue_detail_flights: crate::fetch::Flights<String>,
-    pub issue_detail_failed: std::collections::HashSet<String>,
-    /// When the last answer for each conversation — page or failure — was
-    /// asked: a visit reads the page again once it is older than
-    /// `issues::FRESH`, and a failure is retried after as long.
-    pub issue_detail_at: HashMap<String, std::time::Instant>,
-    /// Issues with a comment on its way to GitHub (`gh issue comment`),
-    /// by URL, so the reading pane says so until the answer lands.
-    pub issue_comment_inflight: std::collections::HashSet<String>,
-    /// Debounced comments fetch: the issue under the cursor and when its
-    /// lookup is due, re-armed on every move.
-    pub pending_issue_detail: Option<(crate::issues::PendingIssueDetail, std::time::Instant)>,
-    /// Where a finished `gh issue …` is sent back to the loop; installed at
-    /// startup like `pr_diff_tx`, so the modal's own handlers can start a
-    /// fetch. `None` in the unit tests, which then never spawn one.
-    pub issues_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::issues::IssuesAnswer>>,
     /// LINEAR VIEW rows, the lists in flight (one per project, a ⌘R
     /// asked meanwhile owed), failed asks, and the answer channel.
     pub linear: std::collections::HashMap<ProjectId, crate::linear::LinearList>,
@@ -4928,11 +4836,6 @@ pub struct App {
     /// applies it. Mirrors the config, refreshed at startup and when the
     /// settings overlay applies a change.
     pub black_background: bool,
-    /// The `card_issue_number` setting: an ISSUE SESSION's card shows the
-    /// `#15` of the issue it was started from, a link a click opens
-    /// (`HitTarget::LauncherCardIssue`). Mirrors the config, refreshed at
-    /// startup and when the settings overlay applies a change.
-    pub card_issue_number: bool,
     /// The `show_all_worktrees` setting: every checkout of the project
     /// gets a BAND on the grid, one with nothing running in it too
     /// (`launcher::bands`). Mirrors the config, refreshed at startup and
@@ -5002,7 +4905,6 @@ impl App {
             show_archived: false,
             archived_open: Default::default(),
             open_prs_collapsed: false,
-            issues_collapsed: false,
             collapsed: false,
             hide_draft_prs: false,
             launcher_unaimed: false,
@@ -5135,20 +5037,6 @@ impl App {
             pr_detail_stale: std::collections::HashSet::new(),
             pr_detail_unsaved: std::collections::HashSet::new(),
             conflicts: crate::conflicts::Known::default(),
-            issues: HashMap::new(),
-            issues_flights: Default::default(),
-            issues_failed: std::collections::HashSet::new(),
-            issue_edits: HashMap::new(),
-            issue_edit_drafts: HashMap::new(),
-            issues_due: HashMap::new(),
-            pending_issues_prefetch: None,
-            issue_detail: HashMap::new(),
-            issue_detail_flights: Default::default(),
-            issue_detail_failed: std::collections::HashSet::new(),
-            issue_detail_at: HashMap::new(),
-            issue_comment_inflight: std::collections::HashSet::new(),
-            pending_issue_detail: None,
-            issues_tx: None,
             linear: HashMap::new(),
             linear_flights: crate::fetch::Flights::default(),
             linear_failed: std::collections::HashSet::new(),
@@ -5176,7 +5064,6 @@ impl App {
             confetti: None,
             welcome_on_screen: false,
             animations: true,
-            card_issue_number: false,
             show_all_worktrees: false,
             black_background: false,
             hide_card_marks: false,
@@ -5875,11 +5762,10 @@ impl App {
             return mouseless;
         };
         // Asked on every wheel notch over the pane: one reading of the
-        // cursor for all four (`RowsMemo`).
+        // cursor for all three (`RowsMemo`).
         let reading_something_else = self.rows_memo.hold(|| {
             self.pane_shows_placeholder()
                 || self.previewed_pr().is_some()
-                || self.previewed_issue().is_some()
                 || self.previewed_cloud().is_some()
         });
         if term.exited || reading_something_else {
@@ -6522,28 +6408,6 @@ impl App {
         self.listed_open_prs()
     }
 
-    /// The selected project's open issues, as `gh issue list` last
-    /// answered (`issues::request_list`): the ISSUES MODAL's rows, and
-    /// what the PROJECT ISSUES GROUP under the pull requests lists and its
-    /// header counts while it is folded. Empty until the first answer, or
-    /// when the repo has none.
-    pub fn listed_issues(&self) -> &[crate::issues::Issue] {
-        self.selected_project()
-            .and_then(|p| self.issues.get(&p.id))
-            .map(|l| l.list.as_slice())
-            .unwrap_or_default()
-    }
-
-    /// The issues with rows under the pull requests: the listed ones, or
-    /// none while the group is folded — a folded group has no rows for
-    /// the cursor to walk into, like the folded OPEN PRS group.
-    pub fn visible_issues(&self) -> &[crate::issues::Issue] {
-        if self.issues_collapsed {
-            return &[];
-        }
-        self.listed_issues()
-    }
-
     /// The Worktrees panel's rows in cursor order — what
     /// [`App::sel_worktree`] is a place in: the project's checkouts, then the pull requests still open
     /// on its repo, each followed by the checkout on its head branch when
@@ -6563,13 +6427,9 @@ impl App {
     /// is the truth about it; one on a nested checkout has that worktree
     /// and no pull request — the row is a worktree, its pull request is
     /// the row above.
-    ///
-    /// The issues open on the repo close the list (`visible_issues`): one
-    /// row each under the pull requests, none while their group is
-    /// folded. An issue nests nothing — it has no branch to check out.
     pub fn worktree_rows(&self) -> Vec<WorktreeRow<'_>> {
-        // The checkouts, the pull requests and the issues each ask for
-        // the selected project: one sort of the projects between them.
+        // The checkouts and the pull requests each ask for the selected
+        // project: one sort of the projects between them.
         self.rows_memo.hold(|| self.build_worktree_rows())
     }
 
@@ -6602,7 +6462,6 @@ impl App {
                     .map(|(w, _)| WorktreeRow::PrCheckout(w)),
             );
         }
-        rows.extend(self.visible_issues().iter().map(WorktreeRow::Issue));
         rows
     }
 
@@ -6629,27 +6488,12 @@ impl App {
             .position(|row| row.open_pr().is_some_and(|pr| pr.url == url))
     }
 
-    /// The Worktrees row of the open issue at `url`, while the ISSUES
-    /// group is open and lists it.
-    pub fn issue_row_of(&self, url: &str) -> Option<usize> {
-        self.worktree_rows()
-            .iter()
-            .position(|row| row.open_issue().is_some_and(|i| i.url == url))
-    }
-
     /// The open pull request under the Worktrees cursor, when it's on one.
     /// Mutually exclusive with [`App::selected_worktree`]: a pull request
     /// row has no checkout, and a checkout nested under a pull request is
     /// still a checkout, not the pull request.
     pub fn selected_worktree_pr(&self) -> Option<&OpenPr> {
         self.selected_worktree_row().and_then(WorktreeRow::open_pr)
-    }
-
-    /// The issue under the Worktrees cursor — a PROJECT ISSUES GROUP row.
-    /// None on a checkout or a pull request.
-    pub fn selected_worktree_issue(&self) -> Option<&crate::issues::Issue> {
-        self.selected_worktree_row()
-            .and_then(WorktreeRow::open_issue)
     }
 
     /// The pull request the pane should be reading: the PROJECT OPEN PRS
@@ -6708,27 +6552,16 @@ impl App {
         })
     }
 
-    /// The issue the pane should be reading: the PROJECT ISSUES GROUP row
-    /// under the Worktrees cursor. `draw_terminal` asks for the pull
-    /// request first; the two never share a cursor.
-    pub fn previewed_issue(&self) -> Option<&crate::issues::Issue> {
-        self.selected_worktree_issue()
-    }
-
-    /// What the pane is reading, by URL — the pull request or the issue
-    /// under a cursor — so the loop can tell a turn that changed it
+    /// What the pane is reading, by URL — the pull request under a cursor
+    /// — so the loop can tell a turn that changed it
     /// (`note_preview_change`) from one that left the reader in place.
     pub fn reading_url(&self) -> Option<String> {
-        // Twice a turn of the event loop, and three walks to the same
-        // cursor each time (`RowsMemo`).
-        self.rows_memo.hold(|| {
-            self.previewed_pr()
-                .map(|pr| pr.url)
-                .or_else(|| self.previewed_issue().map(|i| i.url.clone()))
-        })
+        // Twice a turn of the event loop, and `previewed_pr` walks to the
+        // cursor more than once (`RowsMemo`).
+        self.rows_memo.hold(|| self.previewed_pr().map(|pr| pr.url))
     }
 
-    /// The pane is reading a page — a pull request, an issue, a Claude
+    /// The pane is reading a page — a pull request, a Claude
     /// Cloud session — rather than showing a PTY: FOCUS in it scrolls the
     /// page, and there is nothing to type into.
     pub fn pane_reads_page(&self) -> bool {
@@ -6928,19 +6761,6 @@ impl App {
             .is_none_or(|at| at.elapsed() < crate::event_loop::PR_DETAIL_FRESH)
     }
 
-    /// The same for the ISSUES MODAL's debounced comments fetch.
-    pub fn issue_detail_delay(&self) -> Option<std::time::Duration> {
-        let (_, at) = self.pending_issue_detail.as_ref()?;
-        Some(at.saturating_duration_since(std::time::Instant::now()))
-    }
-
-    /// Delay until the debounced issues prefetch is due, so the loop can
-    /// wake up and fire it. None when nothing is armed.
-    pub fn issues_prefetch_delay(&self) -> Option<std::time::Duration> {
-        let (_, at) = self.pending_issues_prefetch.as_ref()?;
-        Some(at.saturating_duration_since(std::time::Instant::now()))
-    }
-
     /// Every pull request still on some row, by URL: each project's open
     /// list and its merged tail, and each checkout's own PR ROW whatever
     /// its state — a merged pull request stays on that row (see
@@ -6963,23 +6783,6 @@ impl App {
     pub fn keepwarm_delay(&self) -> Option<std::time::Duration> {
         let at = self.next_keepwarm.as_ref()?;
         Some(at.saturating_duration_since(std::time::Instant::now()))
-    }
-
-    /// PR & ISSUE COUNTS for a project row: how many open pull requests
-    /// its OPEN PRS GROUP lists (drafts left out with `hide_draft_prs`, so
-    /// the number is the group header's), and how many issues are open on
-    /// the repo. Each is `None` until its list has landed — a repo nobody
-    /// has asked about yet says nothing rather than `0`. Always counted:
-    /// there is no switch.
-    pub fn project_open_counts(&self, project_id: &ProjectId) -> (Option<usize>, Option<usize>) {
-        let prs = self.open_prs.get(project_id).map(|open| {
-            open.list
-                .iter()
-                .filter(|pr| !(self.hide_draft_prs && self.pr_is_draft(&pr.url)))
-                .count()
-        });
-        let issues = self.issues.get(project_id).map(|l| l.list.len());
-        (prs, issues)
     }
 
     /// Aggregate status for a worktree row ([`worktree_rollup`]), archived
@@ -7174,7 +6977,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 1_000 * (i as i64 + 1),
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })
@@ -7463,7 +7265,6 @@ mod tests {
             cloud_session_id: None,
             sort_order: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         });
@@ -7697,7 +7498,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 100 * (i as i64 + 1),
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             });

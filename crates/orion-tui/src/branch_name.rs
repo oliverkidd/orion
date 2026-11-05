@@ -21,21 +21,10 @@ pub fn slugify(input: &str) -> String {
         .to_string()
 }
 
-/// A branch for an ISSUE SESSION cut into a fresh worktree:
-/// `issue-15-fix-login-redirect` — the number first so the checkout sorts
-/// and reads by issue, then the title lowercased and reduced to
-/// hyphenated words, capped so a long title stays a usable ref. A name
-/// already in `taken` gets a `-2`, `-3`, … suffix.
-pub fn issue_name(number: u64, title: &str, taken: &[String]) -> String {
-    unused(
-        &prefixed(&format!("issue-{number}"), &title_slug(title)),
-        taken,
-    )
-}
-
 /// A branch for one LINEAR issue cut into a fresh worktree:
 /// `eng-12-fix-login-redirect` — the identifier, lowercased, then the
-/// title as [`issue_name`] slugs it. Linear's GitHub integration finds
+/// title lowercased and reduced to hyphenated words, capped so a long
+/// title stays a usable ref. Linear's GitHub integration finds
 /// the issue by its identifier in the branch name, so it stays spelled
 /// whole. A name already in `taken` gets a `-2`, `-3`, … suffix.
 pub fn linear_name(identifier: &str, title: &str, taken: &[String]) -> String {
@@ -198,45 +187,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn issue_branches_carry_the_number_and_a_bounded_slug() {
+    fn a_title_becomes_a_bounded_slug() {
         assert_eq!(
-            issue_name(15, "Fix login redirect", &[]),
-            "issue-15-fix-login-redirect"
+            linear_name("ENG-7", "  Crash: `orion open` on a PDF!  ", &[]),
+            "eng-7-crash-orion-open-on-a-pdf"
         );
-        assert_eq!(
-            issue_name(7, "  Crash: `orion open` on a PDF!  ", &[]),
-            "issue-7-crash-orion-open-on-a-pdf"
-        );
-        assert_eq!(issue_name(3, "", &[]), "issue-3");
-        assert_eq!(issue_name(3, "!!!", &[]), "issue-3");
-        let long = issue_name(9, &"word ".repeat(30), &[]);
-        assert!(long.len() <= "issue-9-".len() + 40, "{long}");
+        assert_eq!(linear_name("ENG-3", "!!!", &[]), "eng-3");
+        let long = linear_name("ENG-9", &"word ".repeat(30), &[]);
+        assert!(long.len() <= "eng-9-".len() + 40, "{long}");
         assert!(!long.ends_with('-'), "{long}");
         // The cap falls between words, never inside one.
         assert_eq!(
-            issue_name(
-                61,
+            linear_name(
+                "ENG-61",
                 "Quick prompt loses its text when the preset picker is cancelled",
                 &[]
             ),
-            "issue-61-quick-prompt-loses-its-text-when-the"
+            "eng-61-quick-prompt-loses-its-text-when-the"
         );
         assert_eq!(
-            issue_name(2, &"x".repeat(60), &[]),
-            format!("issue-2-{}", "x".repeat(40)),
+            linear_name("ENG-2", &"x".repeat(60), &[]),
+            format!("eng-2-{}", "x".repeat(40)),
             "a single overlong word is clipped, not dropped"
         );
         assert_eq!(
-            issue_name(15, "Fix login", &["issue-15-fix-login".into()]),
-            "issue-15-fix-login-2"
-        );
-        assert_eq!(
-            issue_name(
-                15,
+            linear_name(
+                "ENG-15",
                 "Fix login",
-                &["issue-15-fix-login".into(), "issue-15-fix-login-2".into()]
+                &["eng-15-fix-login".into(), "eng-15-fix-login-2".into()]
             ),
-            "issue-15-fix-login-3"
+            "eng-15-fix-login-3"
         );
     }
 

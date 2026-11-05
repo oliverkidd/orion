@@ -22,7 +22,6 @@ enum Field {
     /// highlighted lets Enter go back to the text.
     Prompt,
     Preset(crate::preset_overlays::PresetField),
-    Issue(crate::issues::EditField),
     PrQuery,
     PrCreate(crate::pr_actions::CreateField),
     PrClose,
@@ -50,13 +49,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
             (Field::Preset(PresetField::Prefix), &mut e.prefix),
             (Field::Preset(PresetField::Postfix), &mut e.postfix),
         ],
-        Overlay::Issues(v) => match &mut v.editor {
-            Some(e) => vec![
-                (Field::Issue(crate::issues::EditField::Title), &mut e.title),
-                (Field::Issue(crate::issues::EditField::Body), &mut e.body),
-            ],
-            None => vec![(Field::Only, &mut v.query)],
-        },
         Overlay::PullRequests(v) => match v.form.as_deref_mut() {
             Some(PrForm::Create(form)) => vec![
                 (Field::PrCreate(CreateField::From), &mut form.from),
@@ -109,11 +101,6 @@ fn focus(app: &mut App, field: Field) {
         (Some(Overlay::AgentPresetEditor(e)), Field::Preset(to)) => {
             if e.field != to {
                 e.filter.clear();
-                e.field = to;
-            }
-        }
-        (Some(Overlay::Issues(v)), Field::Issue(to)) => {
-            if let Some(e) = &mut v.editor {
                 e.field = to;
             }
         }

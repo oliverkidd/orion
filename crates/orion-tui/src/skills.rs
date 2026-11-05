@@ -1001,7 +1001,7 @@ pub(crate) mod keys {
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new");
     /// Every modal's remove verb: it asks first.
     pub const TRASH: Key = Key::new(&["cmd+w", "ctrl+w"], "trash");
-    pub const REFRESH: Key = crate::issues::keys::REFRESH;
+    pub const REFRESH: Key = crate::hints::REFRESH;
     /// `⌘O` is caught before the browser sees it (`overlay_file`); `^O`
     /// is its twin for a terminal that never sends ⌘.
     pub const IN_CURSOR: Key = crate::hints::IN_CURSOR;

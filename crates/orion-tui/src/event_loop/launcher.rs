@@ -721,9 +721,8 @@ pub(super) fn handle_action(
         // exactly as it is.
         Action::FollowUp => follow_up(app),
         // `⇧V` on a card: the pull request its `#42 title` line names, in
-        // the browser. `⇧I`: the issue it was started from.
+        // the browser.
         Action::OpenPullRequest => open_pull_request(app, out),
-        Action::OpenIssue => open_issue(app, out),
         // `⇧P` on a card: another session with its settings, nothing typed.
         Action::DuplicateSession => duplicate_session(app),
         // `⇧C` on a card: the Claude session carried onto another account.
@@ -825,37 +824,6 @@ pub(super) fn click_pull_request(
     open_pull_request(app, out);
 }
 
-/// `⇧I` on a card, and **Open issue** in its menu: the GitHub issue the
-/// card's session was started from (an ISSUE SESSION, launched out of the
-/// ISSUES MODAL — `Agent::issue_url`), in the browser. `i` lists the
-/// project's issues in orion; the shifted key goes to GitHub, as `⇧V`
-/// does for `v`'s pull requests.
-///
-/// INPUT PARITY: the menu row's `MenuAction::OpenLink` carries the URL
-/// this reads, and ends in the same `open_link`.
-pub(super) fn open_issue(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let aimed = !(app.launcher_grid() && app.launcher_unaimed);
-    let Some(agent) = app.selected_session().filter(|_| aimed) else {
-        return;
-    };
-    if let Some(url) = agent.issue_url {
-        super::open_link(app, &url, out);
-    }
-}
-
-/// A click on the ISSUE NUMBER on a session's card — its `#15`
-/// (`HitTarget::LauncherCardIssue`): the cursor lands on that card, as
-/// the pointer landing on it puts it there ([`select_card`]), and the
-/// issue opens in the browser through the very [`open_issue`] `⇧I` runs.
-/// INPUT PARITY: the click and the key end in the same state. Like a
-/// click on a band's pull request ([`click_pull_request`]), it leaves a
-/// folded pane folded: the link leaves orion for the browser.
-pub(super) fn click_issue(app: &mut App, id: &AgentId, out: &mut Vec<ClientRequest>) {
-    select_card(app, SessionRef::Agent(id.clone()), out);
-    take_aim(app);
-    open_issue(app, out);
-}
-
 /// A right-click's first half on a card's ISSUE NUMBER: the chip is the
 /// card to this button — the cursor onto it and the pane open on it, as
 /// on the rest of the card ([`select_card_row`]); the menu it opens
@@ -874,8 +842,7 @@ pub(super) fn select_issue_card(app: &mut App, id: &AgentId, out: &mut Vec<Clien
 
 /// `⇧P` on a card, and **Duplicate** in its menu: the QUICK PROMPT, set to
 /// launch what the card runs — the same harness, model and effort, into
-/// the same checkout, for the same issue where the card is an ISSUE
-/// SESSION — so the task is all there is to type. Enter there is the
+/// the same checkout — so the task is all there is to type. Enter there is the
 /// box's own send (`quick_launch::submit`): the settings read off the
 /// card go out on the `CreateAgent` exactly as a spec picked through the
 /// box's `Tab` / `⌘/` would, and the box's pickers still work on it. `p`
@@ -922,10 +889,6 @@ pub(super) fn duplicate_agent(app: &mut App, id: AgentId) {
     if app.is_placeholder_worktree(&worktree.id) {
         return;
     }
-    let issue = agent
-        .issue_url
-        .as_deref()
-        .and_then(|url| issue_ref(app, &worktree.project_id, url));
     let launch = QuickLaunch::of_kind(
         QuickTarget::Worktree(worktree.id),
         agent.kind,
@@ -934,7 +897,6 @@ pub(super) fn duplicate_agent(app: &mut App, id: AgentId) {
         agent.effort,
         &crate::config::Config::load(),
     )
-    .with_issue(issue)
     .with_cloud(agent.cloud_session_id.is_some());
     crate::quick_prompt::reopen(app, launch, "");
 }
@@ -1028,25 +990,6 @@ pub(super) fn continue_on_harness(
         id,
         harness,
     });
-}
-
-/// The issue an ISSUE SESSION's card was started from, as the box carries
-/// one: its number off the URL's tail, and its title from the project's
-/// fetched list when it is in there. The box's title names the number
-/// and an empty send fixes the issue, with or without a title.
-fn issue_ref(app: &App, project: &ProjectId, url: &str) -> Option<crate::issues::IssueRef> {
-    let number: u64 = url.trim_end_matches('/').rsplit('/').next()?.parse().ok()?;
-    let title = app
-        .issues
-        .get(project)
-        .and_then(|issues| issues.list.iter().find(|i| i.url == url))
-        .map(|i| i.title.clone())
-        .unwrap_or_default();
-    Some(crate::issues::IssueRef {
-        url: url.to_string(),
-        number,
-        title,
-    })
 }
 
 /// The PROJECT's own menu — a right-click on its PROJECT TAB ([`tab_menu`]):
@@ -2345,8 +2288,8 @@ pub(super) fn enter_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
         open_session(app, out);
         return;
     }
-    // A band with nothing on it but its pull request (or an issue): the
-    // pane is reading it, and Enter hands it the keys to scroll it.
+    // A band with nothing on it but its pull request: the pane is reading
+    // it, and Enter hands it the keys to scroll it.
     if app.reading_url().is_some() && focus_pane(app) {
         return;
     }
@@ -2378,7 +2321,7 @@ pub(super) fn enter_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
 
 /// The PANE takes the keys without the input lock: FOCUS on it, to read
 /// and scroll what it shows rather than type into it — a pull request's
-/// page, an issue's, a session's scrollback. The ways in: `→` off the
+/// page, a session's scrollback. The ways in: `→` off the
 /// last card of a row with the pane beside the cards, Enter on a band
 /// with nothing on it but its pull request, a click on a page in it. The pane's frame wears the
 /// accent while it has them and the FOOTER says how to scroll and how to
@@ -2624,11 +2567,11 @@ pub(super) fn click_box_field(app: &mut App, field: BoxField) {
 }
 
 /// `⌘P` / `^P`: the PROJECT PICKER over the box. A box already bound to one
-/// project's work — an issue's, a pull request's — keeps its project.
+/// project's work — Linear issues, a pull request — keeps its project.
 /// Only ever reached from a box that is up, so its `back` always hands
 /// one back ([`handle_picker_key`]).
 fn open_project_picker(app: &mut App, back: QuickReturn) {
-    if back.launch.issue.is_some() || back.launch.linear.is_some() || back.launch.pr.is_some() {
+    if back.launch.linear.is_some() || back.launch.pr.is_some() {
         return;
     }
     let picker = ProjectPicker::new(app, back);
@@ -3020,8 +2963,8 @@ fn pick(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        buffer_text, hse, pick_fresh_worktree, seed_issues, seed_open_prs, seed_tree,
-        with_config_json, with_default_config,
+        buffer_text, hse, pick_fresh_worktree, seed_open_prs, seed_tree, with_config_json,
+        with_default_config,
     };
     use super::super::{handle_terminal_event, sweep_target};
     use crate::app::{App, Focus, HitTarget, Overlay, PendingAction, PromptKind};
@@ -3094,7 +3037,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -3135,7 +3077,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -3188,7 +3129,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -9294,7 +9234,6 @@ mod tests {
                         sort_order: 0,
                         status_changed_at: crate::app::now_ms(),
                         alive: true,
-                        issue_url: None,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
                     }),
@@ -9685,36 +9624,32 @@ mod tests {
         });
     }
 
-    /// PR & ISSUE COUNTS: the header counts the selected project's open
-    /// pull requests and issues beside the session count, so what is
-    /// waiting on the repo reads off the header instead of `v` and `i`.
+    /// PR COUNT: the header counts the selected project's open pull
+    /// requests beside the session count, so what is waiting on the repo
+    /// reads off the header instead of `v`.
     #[test]
-    fn the_header_counts_the_projects_open_prs_and_issues() {
+    fn the_header_counts_the_projects_open_prs() {
         with_default_config(|| {
             let mut app = two_sessions();
             seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Fix the nav")]);
-            seed_issues(&mut app, &[(15, "Crash on boot")]);
             app.launcher_expanded = None;
 
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("2 sessions"), "{text}");
             assert!(text.contains("2 prs"), "{text}");
-            assert!(text.contains("1 issue"), "the singular: {text}");
         });
     }
 
-    /// INPUT PARITY: the header's PR & ISSUE COUNTS are buttons. A click
-    /// on `2 prs` opens the PULL REQUESTS MODAL and one on `1 issue` the
-    /// ISSUES MODAL, each for the project in front of you — the modals `v`
-    /// and `i` open, through the same function. Each target sits on its
-    /// own word and not on the `·` between them, and the one under the
-    /// pointer is underlined, as the header's tabs are.
+    /// INPUT PARITY: the header's PR COUNT is a button. A click on `2 prs`
+    /// opens the PULL REQUESTS MODAL for the project in front of you — the
+    /// modal `v` opens, through the same function. The target sits on its
+    /// word, and under the pointer it is underlined, as the header's tabs
+    /// are.
     #[test]
-    fn clicking_a_header_count_opens_that_list() {
+    fn clicking_the_header_count_opens_the_list() {
         with_default_config(|| {
             let mut app = two_sessions();
             seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Fix the nav")]);
-            seed_issues(&mut app, &[(15, "Crash on boot")]);
             let project = app.selected_project().expect("a project").id.clone();
             let terminal = draw(&mut app);
             let line: Vec<char> = head_line(&terminal).chars().collect();
@@ -9726,12 +9661,11 @@ mod tests {
                     .collect()
             };
             assert_eq!(word(&app, HitTarget::LauncherPullRequests), "2 prs");
-            assert_eq!(word(&app, HitTarget::LauncherIssues), "1 issue");
 
-            // The pointer resting on a count underlines that word alone.
-            let (x, y) = crumb_cell(&app, HitTarget::LauncherIssues);
+            // The pointer resting on the count underlines that word alone.
+            let (x, y) = crumb_cell(&app, HitTarget::LauncherPullRequests);
             mouse(&mut app, MouseEventKind::Moved, x, y);
-            assert_eq!(underlined_head(&draw(&mut app)), "1 issue");
+            assert_eq!(underlined_head(&draw(&mut app)), "2 prs");
 
             let (x, y) = crumb_cell(&app, HitTarget::LauncherPullRequests);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
@@ -9745,22 +9679,6 @@ mod tests {
                 format!("{:?}", app.overlay),
                 format!("{clicked:?}"),
                 "the click is `⌘U`"
-            );
-
-            app.overlay = None;
-            draw(&mut app);
-            let (x, y) = crumb_cell(&app, HitTarget::LauncherIssues);
-            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            let Some(Overlay::Issues(view)) = &app.overlay else {
-                panic!("`1 issue` opens the issues: {:?}", app.overlay);
-            };
-            assert_eq!(view.project, project);
-            let clicked = app.overlay.take();
-            key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
-            assert_eq!(
-                format!("{:?}", app.overlay),
-                format!("{clicked:?}"),
-                "the click is `i`"
             );
         });
     }
@@ -9920,23 +9838,15 @@ mod tests {
     }
 
     /// `⇧R` on the grid reloads from GitHub: the pull requests on the
-    /// loop's next turn, past every timer, and the project's issues with
-    /// them — asked of a checkout that is not on disk here, so the ask is
-    /// the miss it records without a process.
+    /// loop's next turn, past every timer.
     #[test]
-    fn shift_r_on_the_grid_reloads_pull_requests_and_issues() {
+    fn shift_r_on_the_grid_reloads_pull_requests() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
-            let pid = app.selected_project().expect("a project").id.clone();
-            for p in app.tree.projects.iter_mut() {
-                p.repo_path = "/nonexistent/orion-shift-r".into();
-            }
-            assert!(!app.issues_failed.contains(&pid));
             let sent = key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
             assert!(sent.is_empty(), "gh runs client-side: {sent:?}");
             assert!(app.pr_refresh_requested, "the pull requests are re-asked");
-            assert!(app.issues_failed.contains(&pid), "and the issues with them");
             assert!(app.flash.is_none());
         });
     }
@@ -10252,8 +10162,8 @@ mod tests {
     }
 
     /// [`two_sessions`], drawn, with the card under the cursor a CODEX
-    /// session at an explicit model and effort, started from issue #15 —
-    /// every setting the box has to come up on.
+    /// session at an explicit model and effort — every setting the box has
+    /// to come up on.
     fn card_with_settings() -> App {
         let mut app = two_sessions();
         draw(&mut app);
@@ -10261,7 +10171,6 @@ mod tests {
         agent.kind = AgentKind::Codex;
         agent.model = Some("gpt-5".into());
         agent.effort = Some("high".into());
-        agent.issue_url = Some(ISSUE_15.into());
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -10297,8 +10206,8 @@ mod tests {
     }
 
     /// `⇧P` on a card opens the QUICK PROMPT set to launch what the card
-    /// runs — its harness, model, effort and checkout, and the issue it
-    /// was started from — with nothing typed and nothing sent: the task
+    /// runs — its harness, model, effort and checkout — with nothing typed
+    /// and nothing sent: the task
     /// is typed there, and Enter sends the create with those settings and
     /// the text as the first prompt. INPUT PARITY: the card menu's
     /// **Duplicate** puts up the same box.
@@ -10319,10 +10228,6 @@ mod tests {
             assert_eq!(launch.custom, None);
             assert_eq!(launch.model.as_deref(), Some("gpt-5"));
             assert_eq!(launch.effort.as_deref(), Some("high"));
-            assert_eq!(
-                launch.issue.as_ref().map(|i| (i.url.as_str(), i.number)),
-                Some((ISSUE_15, 15))
-            );
             assert!(launch.preset.is_none());
             assert!(!launch.cloud);
 
@@ -10348,7 +10253,6 @@ mod tests {
                     auto_title,
                     cloud_prompt,
                     starting_prompt,
-                    issue_url,
                     ..
                 }] => {
                     assert_eq!(worktree, &card.worktree_id);
@@ -10359,7 +10263,6 @@ mod tests {
                     assert!(auto_title, "the row titles itself on its first prompt");
                     assert_eq!(cloud_prompt, &None);
                     assert_eq!(starting_prompt.as_deref(), Some("tidy the nav"));
-                    assert_eq!(issue_url.as_deref(), Some(ISSUE_15));
                 }
                 other => panic!("one CreateAgent: {other:?}"),
             }
@@ -10556,109 +10459,6 @@ mod tests {
             assert_eq!(launch.kind, AgentKind::Claude);
             assert_eq!(launch.model.as_deref(), Some("opus"));
             assert_eq!(launch.effort.as_deref(), Some("high"));
-        });
-    }
-
-    const ISSUE_15: &str = "https://github.com/o/demo/issues/15";
-
-    /// [`two_sessions`], drawn, with the card under the cursor an ISSUE
-    /// SESSION started from issue #15 — the daemon's upsert carrying the
-    /// URL, as it does for a session launched out of the ISSUES MODAL.
-    fn card_from_an_issue() -> App {
-        let mut app = two_sessions();
-        draw(&mut app);
-        let mut agent = app.selected_session().expect("a card under the cursor");
-        agent.issue_url = Some(ISSUE_15.into());
-        hse(
-            &mut app,
-            ServerEvent::EntityUpserted {
-                entity: Entity::Agent(agent),
-            },
-        );
-        draw(&mut app);
-        app
-    }
-
-    /// Where **Open issue** sits on the card's right-click menu, if it is
-    /// there.
-    fn issue_menu_row(app: &mut App) -> Option<usize> {
-        right_click_card(app);
-        match &app.overlay {
-            Some(Overlay::Menu(menu)) => menu.items.iter().position(|i| i.label == "Open issue"),
-            other => panic!("expected the card's menu, got {other:?}"),
-        }
-    }
-
-    /// `⇧I` on a card opens the issue its session was started from — and,
-    /// INPUT PARITY, the card menu's **Open issue** ends in the same state.
-    #[test]
-    fn shift_i_opens_the_cards_issue_as_its_menu_row_does() {
-        with_default_config(|| {
-            let mut by_key = card_from_an_issue();
-            let sent = crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenIssue);
-            assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
-            assert_eq!(
-                crate::event_loop::take_opened(),
-                ["https://github.com/o/demo/issues/15"]
-            );
-
-            let mut by_menu = card_from_an_issue();
-            let at = issue_menu_row(&mut by_menu).expect("the row is on the card's menu");
-            for _ in 0..at {
-                key(&mut by_menu, KeyCode::Down, KeyModifiers::NONE);
-            }
-            let sent_by_menu = key(&mut by_menu, KeyCode::Enter, KeyModifiers::NONE);
-            assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
-            assert_eq!(
-                crate::event_loop::take_opened(),
-                ["https://github.com/o/demo/issues/15"]
-            );
-            assert_eq!(by_menu.flash, by_key.flash);
-            assert_eq!(format!("{sent_by_menu:?}"), format!("{sent:?}"));
-        });
-    }
-
-    /// GitHub issue numbers on cards are retired: the stored flag no
-    /// longer draws a `#15` chip or a click target.
-    #[test]
-    fn the_cards_issue_number_is_not_drawn() {
-        with_default_config(|| {
-            let mut app = card_from_an_issue();
-            app.card_issue_number = true;
-            draw(&mut app);
-            assert!(
-                !app.hits
-                    .iter()
-                    .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))),
-                "no issue link drawn"
-            );
-        });
-    }
-
-    /// A card that was not started from an issue says so, and its menu
-    /// carries no row for one.
-    #[test]
-    fn shift_i_on_a_card_with_no_issue_says_so() {
-        with_default_config(|| {
-            let mut app = two_sessions();
-            draw(&mut app);
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenIssue);
-            assert!(sent.is_empty(), "{sent:?}");
-            assert!(app.flash.is_none());
-            assert_eq!(issue_menu_row(&mut app), None);
-        });
-    }
-
-    /// With the aim let go of (Esc), `⇧I` has no card to read an issue off.
-    #[test]
-    fn shift_i_with_no_card_selected_opens_nothing() {
-        with_default_config(|| {
-            let mut app = card_from_an_issue();
-            keys(&mut app, &[KeyCode::Esc, KeyCode::Esc]);
-            assert!(app.launcher_unaimed);
-            let sent = crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenIssue);
-            assert!(sent.is_empty(), "{sent:?}");
-            assert!(app.flash.is_none());
         });
     }
 
@@ -12508,7 +12308,6 @@ mod tests {
                         sort_order: 0,
                         status_changed_at: 0,
                         alive: false,
-                        issue_url: None,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
                     }),

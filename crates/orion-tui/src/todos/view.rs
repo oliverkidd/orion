@@ -425,7 +425,7 @@ pub(crate) mod keys {
     /// The PULL REQUESTS MODAL's way to Linear: the item's Linear menu.
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
     /// Ask Linear again how the linked issues stand.
-    pub const REFRESH: Key = crate::issues::keys::REFRESH;
+    pub const REFRESH: Key = crate::hints::REFRESH;
     /// The pick's: `⌘L`'s menu, the team, the priority.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const CHOOSE: Key = Key::new(&["enter"], "choose");

@@ -420,8 +420,8 @@ pub fn card_at(bands: &[Band], at: CardRef) -> Option<&Card> {
 }
 
 /// The band the cursor is on: the SELECTED WORKTREE's, when it has one.
-/// None while the selection rests on a pull request, an issue, or a
-/// checkout with nothing running.
+/// None while the selection rests on a pull request, or a checkout with
+/// nothing running.
 pub fn band_cursor(app: &App, bands: &[Band]) -> Option<usize> {
     let w = app.selected_worktree()?;
     bands.iter().position(|b| b.worktree == w.id)
@@ -1910,7 +1910,7 @@ pub fn target_for(app: &App, project: &ProjectId, new_worktree: bool) -> QuickTa
 /// the cursor, or from inside the worktree, runs in that worktree, as
 /// `t`'s terminal does — else the project's ROOT BRANCH
 /// ([`root_checkout`]): the aim let go (Esc off the band), the cursor on
-/// a pull request or an issue, or a box re-aimed at another project with
+/// a pull request, or a box re-aimed at another project with
 /// `^P`. A checkout still being cut is stepped over to the root. None
 /// for a project with no usable checkout at all.
 pub fn launch_checkout(app: &App, project: &ProjectId) -> Option<WorktreeId> {
@@ -1966,18 +1966,17 @@ pub fn project_of(app: &App, target: &QuickTarget) -> Option<ProjectId> {
 }
 
 /// A fresh worktree for `launch` in `project`, on a branch nobody has
-/// yet: named after the issue for an ISSUE SESSION or a single LINEAR
-/// issue, the random name `n` would offer otherwise.
+/// yet: named after the issue for a single LINEAR issue, the random name
+/// `n` would offer otherwise.
 pub fn fresh_worktree(
     app: &App,
     project: ProjectId,
     launch: &crate::quick_prompt::QuickLaunch,
 ) -> QuickTarget {
     let taken = app.project_branches(&project);
-    let branch = match (&launch.issue, &launch.linear) {
-        (Some(issue), _) => crate::branch_name::issue_name(issue.number, &issue.title, &taken),
-        (None, Some(linear)) => linear.branch(&taken),
-        (None, None) => crate::branch_name::random_name(&taken),
+    let branch = match &launch.linear {
+        Some(linear) => linear.branch(&taken),
+        None => crate::branch_name::random_name(&taken),
     };
     QuickTarget::NewWorktree {
         project,
@@ -2218,7 +2217,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         }

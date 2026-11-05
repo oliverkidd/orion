@@ -100,16 +100,14 @@ use crate::ui::{
 };
 
 /// A list younger than this is what opening the modal shows, with no
-/// second ask — the ISSUES MODAL's window, for the same reason: the list
-/// the OPEN PRS beat landed moments ago *is* the answer. `r` asks
-/// regardless.
-pub(crate) const FRESH: std::time::Duration = crate::issues::FRESH;
+/// second ask: the list the OPEN PRS beat landed moments ago *is* the
+/// answer. `r` asks regardless.
+pub(crate) const FRESH: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long the cursor rests on a row before its body and conversation
 /// are fetched — the pane's own debounce, so walking the list with `j`
 /// fetches only the rows actually paused on.
 pub(crate) const DETAIL_DEBOUNCE: std::time::Duration = crate::event_loop::PR_DETAIL_DEBOUNCE;
-/// The list column's share of the modal, and its floor. The ISSUES MODAL
-/// is laid out the same.
+/// The list column's share of the modal, and its floor.
 pub(crate) const LIST_PCT: u16 = 38;
 pub(crate) const MIN_LIST_W: u16 = 24;
 /// Lines one wheel notch scrolls the reading pane.
@@ -1015,8 +1013,8 @@ fn open_comment_for_selected(app: &mut App) {
 
 /// `⌘O`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the pull request under the cursor in the
-/// browser, through the very `event_loop::open_link` a card's `⇧V` and
-/// `⇧I` run — the footer says when it could not — and the pull request is
+/// browser, through the very `event_loop::open_link` a card's `⇧V` runs
+/// — the footer says when it could not — and the pull request is
 /// marked read on the way out, its conversation about to be on screen.
 /// Nothing under the cursor opens nothing. INPUT PARITY: the key and the
 /// click end in the same state.
@@ -1388,14 +1386,14 @@ pub(crate) fn handle_mouse(
 /// The PULL REQUESTS MODAL's own keys: one table [`handle_key`] matches
 /// and [`hints`] spells — the reading side's tabs and rows from the PULL
 /// REQUEST PAGE's (`pr_preview::keys`). The letters are the filter's, so
-/// the verbs are chords — the ISSUES MODAL's, where the two do the same
-/// thing.
+/// the verbs are chords (`hints::BROWSER` and `hints::REFRESH` shared with
+/// the other modals over a list).
 pub(crate) mod keys {
     use crate::hints::Key;
 
     /// Enter on the list: the QUICK PROMPT for an agent on the pull
     /// request.
-    pub const PROMPT: Key = crate::issues::keys::PROMPT;
+    pub const PROMPT: Key = Key::new(&["enter"], "prompt an agent");
     /// The keys to the other panel: the page from the list, the list from
     /// the page.
     pub const PANEL: Key = Key::new(&["tab", "shift+tab"], "page");
@@ -1405,13 +1403,15 @@ pub(crate) mod keys {
     pub const PAGE_TABS: Key = Key::new(&["left", "right"], "tabs").show(2);
     pub const PAGE_ROWS: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const ACT: Key = Key::new(&["enter"], "open");
-    pub const COMMENT: Key = crate::issues::keys::COMMENT;
+    /// The grid's `y` (reply) as a chord.
+    pub const COMMENT: Key = Key::new(&["cmd+y", "ctrl+y"], "comment");
     /// The grid's changes chord (`Action::GitDiff`), for the pull
     /// request's.
     pub const DIFF: Key = Key::new(&["cmd+e", "ctrl+e"], "diff");
-    pub const BROWSER: Key = crate::issues::keys::BROWSER;
-    pub const REFRESH: Key = crate::issues::keys::REFRESH;
-    pub const READ: Key = crate::issues::keys::READ;
+    pub const BROWSER: Key = crate::hints::BROWSER;
+    pub const REFRESH: Key = crate::hints::REFRESH;
+    /// The reading pane, a page at a time.
+    pub const READ: Key = Key::new(&["pgup", "pgdn"], "read").show(2);
     /// A new pull request, from a branch of the project's.
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new PR");
     /// Merge the pull request under the cursor.

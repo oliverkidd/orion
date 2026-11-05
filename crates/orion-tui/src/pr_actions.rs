@@ -1,6 +1,5 @@
 //! The PULL REQUESTS MODAL's forms, each drawn in the reading pane's
-//! place while the list stays up on the left — the ISSUES MODAL's editor,
-//! the same way round:
+//! place while the list stays up on the left:
 //!
 //! * **New pull request** (`⌘N`): the branch it comes from — the one
 //!   the Worktrees cursor's checkout is on, else the ROOT WORKTREE's — the

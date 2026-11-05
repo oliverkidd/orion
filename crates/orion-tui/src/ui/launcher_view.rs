@@ -241,9 +241,9 @@ fn draw_head(f: &mut Frame, app: &mut App, body: Rect, count: HeadCount, hidden:
         let room = (r.width as usize).saturating_sub(taken + HEAD_GAP);
         let right = head_count(app, count, hidden, room, th);
         let used: usize = right.iter().map(|(s, _)| s.width()).sum();
-        // The PR & ISSUE COUNTS are buttons, laid down where the
-        // right-aligned row puts each word: a click opens that list for
-        // the project in front of you, as `v` and `i` do.
+        // The PR COUNT is a button, laid down where the right-aligned row
+        // puts the word: a click opens that list for the project in front
+        // of you, as `v` does.
         let mut x = r.x + (r.width as usize).saturating_sub(used) as u16;
         let mut spans = Vec::with_capacity(right.len());
         for (span, hit) in right {
@@ -688,8 +688,8 @@ fn tab_ramp(tally: Tally, th: Theme) -> Option<[Color; 3]> {
 ///
 /// It gets what the tabs leave of the row ([`draw_head`]), and what does
 /// not fit in `width` gives way whole, least needed first: the count of
-/// the cards (each band's rule says its own), then the PR & ISSUE COUNTS
-/// (`v` and `i` say them again), and the HIDDEN MARKER last — a
+/// the cards (each band's rule says its own), then the PR COUNT (`v`
+/// says it again), and the HIDDEN MARKER last — a
 /// screenful of cards with more behind it looks exactly like a project
 /// with that many sessions in it, and the PANE dragged up over the grid
 /// is the usual way of getting there. The row never runs past `width`.
@@ -708,15 +708,13 @@ fn head_count(
         Span::styled(count_words(app, count), Style::default().fg(th.dim)),
         None,
     )];
-    // The PR & ISSUE COUNTS the PROJECTS PANEL's rows used to carry: how
-    // many open pull requests and issues the project in front of you has,
-    // so the number is read without opening `v` or `i` to find it — and a
-    // click on either count opens that list, the pointer's way to the
-    // same modal. A second column of air sets them off from the count.
-    let badge: Part = app
-        .selected_project()
-        .and_then(|project| crate::ui::open_counts_badge(app.project_open_counts(&project.id), th))
-        .map(|(parts, _)| {
+    // The PR COUNT the PROJECTS PANEL's rows used to carry: how many open
+    // pull requests the project in front of you has, so the number is
+    // read without opening `v` to find it — and a click on it opens that
+    // list, the pointer's way to the same modal. A second column of air
+    // sets it off from the count.
+    let badge: Part = crate::ui::open_prs_badge(app.listed_open_prs().len(), th)
+        .map(|parts| {
             let parts = parts.into_iter().map(|(text, mut style, hit)| {
                 // Nothing about a word says it is a button, so the one
                 // under the pointer is underlined, as the header's tabs
@@ -3875,13 +3873,10 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
 /// The view's box title: what Enter starts — always a new AGENT (a
 /// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
-/// keys that change them; what is left here is what the box is *for* — an
-/// issue, a pull request, a Claude Cloud task.
+/// keys that change them; what is left here is what the box is *for* — a
+/// pull request, Linear issues, a Claude Cloud task.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
     let mut head = vec!["New agent".to_string()];
-    if let Some(issue) = &launch.issue {
-        head.push(format!("issue #{}", issue.number));
-    }
     if let Some(pr) = &launch.pr {
         head.push(format!("PR #{}", pr.number));
     }
@@ -4425,7 +4420,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })
@@ -4924,27 +4918,6 @@ mod tests {
         });
     }
 
-    /// GitHub issue numbers on cards are retired: even with the stored
-    /// flag on, an ISSUE SESSION does not paint `#15` or register a click.
-    #[test]
-    fn card_issue_number_is_not_drawn() {
-        let mut app = a_tree();
-        select(&mut app, "api");
-        app.tree.agents[0].issue_url = Some("https://github.com/o/r/issues/15".into());
-        app.card_issue_number = true;
-        let body = Rect::new(0, 0, 100, 30);
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("s0"))
-            .expect("the session's card drawn");
-        assert!(!lines[row + 1].contains("#15"), "{:?}", lines[row + 1]);
-        assert!(!app
-            .hits
-            .iter()
-            .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))));
-    }
-
     /// The runs-on line is the harness, then the model, then the effort,
     /// each only while the row carries it; a cloud row names the sandbox
     /// in place of harness and model and keeps the effort, as the pane's
@@ -5221,27 +5194,32 @@ mod tests {
     }
 
     /// The counts get what the tabs leave them and give way whole, least
-    /// needed first — the count of the cards, then the PR & ISSUE COUNTS
-    /// — with the HIDDEN MARKER last, and never run past their room.
+    /// needed first — the count of the cards, then the PR COUNT — with the
+    /// HIDDEN MARKER last, and never run past their room.
     #[test]
     fn the_counts_give_way_a_piece_at_a_time() {
         let mut app = a_tree();
         select(&mut app, "api");
         let id = app.selected_project().expect("api").id.clone();
-        app.issues.insert(
+        let now = std::time::Instant::now();
+        app.open_prs.insert(
             id,
-            crate::issues::IssueList {
-                list: vec![crate::issues::Issue {
+            crate::app::OpenPrs {
+                list: vec![crate::pull_request::OpenPr {
                     number: 7,
-                    url: "https://github.com/o/r/issues/7".into(),
                     title: "Tabs vanish on a narrow window".into(),
-                    author: "webdevcody".into(),
-                    created_at: "2026-09-10T12:00:00Z".into(),
-                    updated_at: "2026-09-11T12:00:00Z".into(),
-                    labels: Vec::new(),
-                    body: String::new(),
+                    url: "https://github.com/o/r/pull/7".into(),
+                    answered_draft: false,
+                    answered: Default::default(),
+                    head: "tabs".into(),
+                    mine: false,
+                    head_sha: String::new(),
+                    meta: Default::default(),
                 }],
-                at: std::time::Instant::now(),
+                merged: Vec::new(),
+                at: now,
+                due: now,
+                step: std::time::Duration::ZERO,
             },
         );
         let th = app.theme;
@@ -5253,7 +5231,7 @@ mod tests {
             let used: usize = spans.iter().map(|s| s.width()).sum();
             assert!(used <= width, "{width}: {text:?} overruns");
             let words = text.contains("9 sessions");
-            let badge = text.contains("1 issue");
+            let badge = text.contains("1 pr");
             let mark = text.contains("5 hidden");
             assert_eq!(mark, width >= mark_w, "{width}: {text:?}");
             assert!(!badge || mark, "{width}: the marker went first: {text:?}");
@@ -5261,7 +5239,7 @@ mod tests {
         }
         assert_eq!(
             row_text(&count_spans(&app, 9, hidden, 120, th)),
-            "9 sessions  1 issue  ↓ 5 hidden",
+            "9 sessions  1 pr  ↓ 5 hidden",
             "a column of air more between the count and the badge"
         );
     }
@@ -5797,7 +5775,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },
@@ -6272,7 +6249,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -6398,7 +6374,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             },
@@ -6454,7 +6429,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             },
@@ -6559,7 +6533,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms() - 60_000,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },
