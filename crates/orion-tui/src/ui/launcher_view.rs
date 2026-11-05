@@ -3322,15 +3322,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let places = crate::claude_accounts::Places {
-            home: Some(home.path().to_path_buf()),
-            default_dir: Some(home.path().join(".claude")),
-            default_record: Some(orion_core::claude_account::Record {
-                file: home.path().join(".claude.json"),
-                legacy: home.path().join(".claude/.config.json"),
-            }),
-        };
-        crate::claude_accounts::with_places(places, || {
+        let places = crate::paths_util::Places::in_home(home.path());
+        crate::paths_util::with_places(places, || {
             crate::config::with_config_path(config, || {
                 crate::claude_accounts::refresh_now();
                 let cfg = crate::config::Config::load();
@@ -3778,15 +3771,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let places = crate::claude_accounts::Places {
-            home: Some(home.path().to_path_buf()),
-            default_dir: Some(home.path().join(".claude")),
-            default_record: Some(orion_core::claude_account::Record {
-                file: home.path().join(".claude.json"),
-                legacy: home.path().join(".claude/.config.json"),
-            }),
-        };
-        crate::claude_accounts::with_places(places, || {
+        let places = crate::paths_util::Places::in_home(home.path());
+        crate::paths_util::with_places(places, || {
             crate::config::with_config_path(config, || {
                 crate::claude_accounts::refresh_now();
                 let mut a = a_tree().tree.agents[0].clone();
@@ -3824,15 +3810,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let places = crate::claude_accounts::Places {
-            home: Some(home.path().to_path_buf()),
-            default_dir: Some(home.path().join(".claude")),
-            default_record: Some(orion_core::claude_account::Record {
-                file: home.path().join(".claude.json"),
-                legacy: home.path().join(".claude/.config.json"),
-            }),
-        };
-        crate::claude_accounts::with_places(places, || {
+        let places = crate::paths_util::Places::in_home(home.path());
+        crate::paths_util::with_places(places, || {
             crate::config::with_config_path(config, || {
                 crate::claude_accounts::refresh_now();
                 let mut app = a_tree();

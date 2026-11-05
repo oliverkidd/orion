@@ -1,19 +1,28 @@
 //! Where this machine keeps things orion reads and writes outside a
-//! checkout — the home directory, Claude Code's config dir, the Trash —
-//! and the two things done with them: a path shown with `~` for the home
-//! directory, and a folder moved into the Trash.
+//! checkout — the home directory, Claude Code's config dir and its
+//! sign-in record, the Trash — and the two things done with them: a path
+//! shown with `~` for the home directory, and a folder moved into the
+//! Trash.
 //!
 //! A move into the Trash is a rename into `~/.Trash`, never a removal
 //! (Finder has no Put Back for it — drag it out).
 
+use orion_core::claude_account::Record;
 use std::path::{Path, PathBuf};
 
 /// This machine's folders, as orion finds them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Places {
+    /// The home dir: where a new Claude account's dir goes
+    /// (`~/.claude-2`).
     pub home: Option<PathBuf>,
-    /// Claude Code's config dir (`orion_core::paths::claude_config_dir`).
+    /// Claude Code's config dir (`orion_core::paths::claude_config_dir`),
+    /// `$CLAUDE_CONFIG_DIR` else `~/.claude`: the default Claude account's,
+    /// which a new account shares its setup from.
     pub claude: Option<PathBuf>,
+    /// Where Claude Code records who that default account is signed in
+    /// as.
+    pub claude_record: Option<Record>,
     /// `~/.Trash`, the folder Finder empties.
     pub trash: Option<PathBuf>,
 }
@@ -21,7 +30,7 @@ pub struct Places {
 impl Places {
     /// This machine's, from the environment. A unit test gets the ones
     /// [`with_places`] pinned, or none at all — never the developer's own
-    /// folders, and never their Trash.
+    /// folders or accounts, and never their Trash.
     pub fn of_this_machine() -> Self {
         if cfg!(test) {
             return pinned().unwrap_or_default();
@@ -30,8 +39,25 @@ impl Places {
         let trash = home.as_ref().map(|h| h.join(".Trash"));
         Self {
             claude: orion_core::paths::claude_config_dir(),
+            claude_record: Record::of(None),
             home,
             trash,
+        }
+    }
+
+    /// A test machine whose home is `home`: Claude Code's dir and record
+    /// where they are with `CLAUDE_CONFIG_DIR` unset, and no Trash, so
+    /// nothing is ever moved into one.
+    #[cfg(test)]
+    pub fn in_home(home: &Path) -> Self {
+        Self {
+            home: Some(home.to_path_buf()),
+            claude: Some(home.join(".claude")),
+            claude_record: Some(Record {
+                file: home.join(".claude.json"),
+                legacy: home.join(".claude/.config.json"),
+            }),
+            trash: None,
         }
     }
 

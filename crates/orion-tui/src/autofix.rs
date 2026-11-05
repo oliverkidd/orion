@@ -1904,14 +1904,13 @@ mod tests {
         agent.kind = orion_core::AgentKind::Claude;
         agent.session_id = Some("sid-1".into());
         listed(&mut app);
-        let places = crate::claude_accounts::Places {
+        let places = crate::paths_util::Places {
             home: Some(home.path().to_path_buf()),
-            default_dir: Some(claude.clone()),
-            default_record: None,
+            claude: Some(claude.clone()),
+            ..Default::default()
         };
-        let out = crate::claude_accounts::with_places(places, || {
-            landed(&mut app, &detail(true, Vec::new()))
-        });
+        let out =
+            crate::paths_util::with_places(places, || landed(&mut app, &detail(true, Vec::new())));
         let prompt = sent_prompt(&out).expect("sent");
         assert!(prompt.starts_with("Before you change anything"), "{prompt}");
         assert!(

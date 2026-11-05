@@ -26748,15 +26748,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let places = crate::claude_accounts::Places {
-            home: Some(root.to_path_buf()),
-            default_dir: Some(root.join(".claude")),
-            default_record: Some(orion_core::claude_account::Record {
-                file: root.join(".claude.json"),
-                legacy: root.join(".claude/.config.json"),
-            }),
-        };
-        crate::claude_accounts::with_places(places, || {
+        let places = crate::paths_util::Places::in_home(root);
+        crate::paths_util::with_places(places, || {
             crate::config::with_config_path(config, || {
                 crate::claude_accounts::refresh_now();
                 f(root)

@@ -43,6 +43,7 @@ use orion_core::AgentKind;
 
 use crate::app::App;
 use crate::config::Config;
+use crate::paths_util::Places;
 
 /// What the default account's config dir shares with a new account, as
 /// symlinks: its instructions, settings, skills, agents, commands,
@@ -319,59 +320,6 @@ pub fn land_refresh(app: &mut App, ticket: crate::fetch::Ticket<()>, changed: bo
 
 // ---- where things are ----
 
-/// The places an account lives in, captured from the environment.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Places {
-    /// The home dir: where a new account's dir goes (`~/.claude-2`).
-    pub home: Option<PathBuf>,
-    /// The default account's config dir, `$CLAUDE_CONFIG_DIR` else
-    /// `~/.claude`: what a new account shares its setup from.
-    pub default_dir: Option<PathBuf>,
-    /// Where the default account's sign-in is recorded.
-    pub default_record: Option<Record>,
-}
-
-impl Places {
-    /// This machine's. A unit test gets the ones [`with_places`] pinned,
-    /// or none — never the developer's own accounts.
-    pub fn of_this_machine() -> Self {
-        if cfg!(test) {
-            return pinned_places().unwrap_or_default();
-        }
-        Self {
-            home: orion_core::env::home_dir(),
-            default_dir: orion_core::paths::claude_config_dir(),
-            default_record: Record::of(None),
-        }
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static PLACES: std::cell::RefCell<Option<Places>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn pinned_places() -> Option<Places> {
-    PLACES.with(|p| p.borrow().clone())
-}
-
-#[cfg(not(test))]
-fn pinned_places() -> Option<Places> {
-    None
-}
-
-/// Run `f` with [`Places::of_this_machine`] answering `places`.
-#[cfg(test)]
-pub fn with_places<T>(places: Places, f: impl FnOnce() -> T) -> T {
-    PLACES.with(|slot| {
-        let prev = slot.replace(Some(places));
-        let out = f();
-        slot.replace(prev);
-        out
-    })
-}
-
 /// Where Claude Code records who `entry` is signed in as, when it is a
 /// Claude account: its pinned dir's record, or the default account's.
 pub fn record_of(entry: &HarnessDescriptor) -> Option<Record> {
@@ -380,7 +328,7 @@ pub fn record_of(entry: &HarnessDescriptor) -> Option<Record> {
     }
     match entry.pinned_claude_config_dir() {
         Some(dir) => Record::of(Some(&dir)),
-        None => Places::of_this_machine().default_record,
+        None => Places::of_this_machine().claude_record,
     }
 }
 
@@ -391,7 +339,7 @@ pub fn dir_of(entry: &HarnessDescriptor) -> Option<PathBuf> {
     }
     entry
         .pinned_claude_config_dir()
-        .or_else(|| Places::of_this_machine().default_dir)
+        .or_else(|| Places::of_this_machine().claude)
 }
 
 /// `path` as a person writes it: `~/.claude-2` under the home dir.
@@ -1145,7 +1093,7 @@ pub fn default_dir(cfg: &Config) -> Option<PathBuf> {
         .iter()
         .find(|entry| entry.id == AgentKind::Claude.as_str())
         .and_then(|claude| claude.pinned_claude_config_dir())
-        .or_else(|| Places::of_this_machine().default_dir)
+        .or_else(|| Places::of_this_machine().claude)
 }
 
 /// Link every [`SHARED_SETUP`] entry `from` holds into `to`, where `to`
@@ -1196,7 +1144,7 @@ pub fn remove(id: &str, trash: bool) -> Result<String, String> {
             "removed {id} — {shown} stays: another account runs in it"
         ));
     }
-    Ok(match crate::paths_util::Places::of_this_machine().trash {
+    Ok(match Places::of_this_machine().trash {
         Some(bin) => match crate::paths_util::move_folder_to_trash(&dir, &bin) {
             Ok(_) => format!("removed {id} and moved {shown} to the Trash"),
             Err(e) => format!("removed {id}, but couldn't move {shown} to the Trash: {e}"),
@@ -1293,20 +1241,9 @@ mod tests {
             }
         }
 
-        fn places(&self) -> Places {
-            let home = self.home.path().to_path_buf();
-            Places {
-                default_dir: Some(home.join(".claude")),
-                default_record: Some(Record {
-                    file: home.join(".claude.json"),
-                    legacy: home.join(".claude/.config.json"),
-                }),
-                home: Some(home),
-            }
-        }
-
         fn run<T>(&self, f: impl FnOnce() -> T) -> T {
-            with_places(self.places(), || {
+            let places = Places::in_home(self.home.path());
+            crate::paths_util::with_places(places, || {
                 crate::config::with_config_path(self.config.clone(), f)
             })
         }

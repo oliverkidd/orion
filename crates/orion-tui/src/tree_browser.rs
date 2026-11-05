@@ -837,11 +837,7 @@ mod tests {
     fn open_skills_folder_browses_the_users_skills() {
         let home = tempfile::tempdir().unwrap();
         let claude = home.path().join(".claude");
-        let places = crate::paths_util::Places {
-            home: Some(home.path().to_path_buf()),
-            claude: Some(claude.clone()),
-            trash: None,
-        };
+        let places = crate::paths_util::Places::in_home(home.path());
         crate::config::with_config_path(home.path().join("config.json"), || {
             crate::paths_util::with_places(places, || {
                 let mut app = crate::app::App::new();
