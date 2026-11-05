@@ -1021,6 +1021,97 @@ impl Account {
     }
 }
 
+// ---- HEADROOM: what is left, where an account is picked ----
+
+/// What is left on one account's login, as the places that name an
+/// account say it: the FOOTER while the pointer is on its ACCOUNT CHIP,
+/// and the new-agent box and its picker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Headroom {
+    /// The emptiest limit at the last reading; None before one landed.
+    pub cell: Option<Cell>,
+    /// A session on the login is stopped at its limit.
+    pub limited: bool,
+}
+
+impl Headroom {
+    /// At its limit: a session stopped on it, or nothing left at the last
+    /// reading.
+    pub fn spent(&self) -> bool {
+        self.limited || self.cell.is_some_and(|c| c.shown_left() <= 0.0)
+    }
+
+    /// `41% left · resets in 2h 14m`, `limit reached · resets in 38m`.
+    pub fn long(&self, now: i64) -> String {
+        let left = match self.cell {
+            _ if self.spent() => "limit reached".to_string(),
+            Some(cell) => left_text(&cell),
+            None => String::new(),
+        };
+        let resets = self.cell.map(|c| resets_text(&c, now)).unwrap_or_default();
+        [left, resets]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+impl Account {
+    /// Whether account `id` is read under this heading: it is this one, or
+    /// shares its login.
+    fn heads(&self, id: &str) -> bool {
+        self.id == id || self.also.iter().any(|also| also == id)
+    }
+}
+
+/// The heading account `id` is read under.
+fn account_of<'a>(usage: &'a Usage, id: &str) -> Option<&'a Account> {
+    usage.accounts.iter().find(|a| a.heads(id))
+}
+
+/// What is left on account `id` ([`Headroom`]), from the last reading and
+/// the sessions stopped at their limit. None while neither says anything.
+pub fn headroom(app: &App, id: &str) -> Option<Headroom> {
+    let limited = limited_harnesses(app);
+    let (key, hit) = match account_of(&app.usage, id) {
+        Some(account) => (account.id.as_str(), account.limit_hit(&limited)),
+        None => (id, limited.contains(id)),
+    };
+    let cell = app.usage.readings.get(key).and_then(|reading| {
+        let limits = reading.limits();
+        emptiest(&limits).map(|i| *limits[i].1)
+    });
+    (cell.is_some() || hit).then_some(Headroom { cell, limited: hit })
+}
+
+/// What the FOOTER says of account `id`'s usage while the pointer is on
+/// its ACCOUNT CHIP: [`Headroom::long`], else why there is no reading,
+/// else that none has landed yet.
+pub(crate) fn readout(app: &App, id: &str) -> String {
+    let now = orion_core::clock::now_secs() as i64;
+    if let Some(room) = headroom(app, id) {
+        return room.long(now);
+    }
+    let key = account_of(&app.usage, id).map_or(id, |a| a.id.as_str());
+    match app.usage.problems.get(key) {
+        Some(problem) => problem.says(Provider::Claude),
+        None => "usage not read yet".into(),
+    }
+}
+
+/// A click on an ACCOUNT CHIP: ACCOUNT USAGE, its cursor on that
+/// account's heading.
+pub(crate) fn open_on(app: &mut App, id: &str) {
+    open(app);
+    let Some(row) = app.usage.accounts.iter().position(|a| a.heads(id)) else {
+        return;
+    };
+    if let Some(Overlay::Usage(view)) = &mut app.overlay {
+        view.select(row, &app.usage.accounts);
+    }
+}
+
 /// The modal's widest: a limit's whole line, a problem's words, the frame.
 const MODAL_W: u16 = 74;
 const INDENT: &str = "   ";

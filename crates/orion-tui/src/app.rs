@@ -118,6 +118,11 @@ pub enum HitTarget {
     /// localhost in the browser (`stacks::open_port`). The line's terminal
     /// and the port.
     RunPort(TerminalId, u16),
+    /// An ACCOUNT CHIP — on a grid row, or the PANE's header — by the
+    /// account's registry id, registered ahead of what it sits on, so it
+    /// wins: the pointer resting on it puts the account and what is left
+    /// on it in the FOOTER, and a click opens ACCOUNT USAGE on it.
+    AccountTag(String),
     /// The PULL REQUEST on a band's rule — its `↗ #42 title` — registered
     /// ahead of the rule, so it wins: a click opens the pull request in
     /// the browser, through the very `launcher::open_pull_request` `⇧V`

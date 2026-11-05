@@ -1150,7 +1150,7 @@ fn draw_drawer(
         let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_row(inset, i)) else {
             continue;
         };
-        draw_list_row(
+        let links = draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
@@ -1159,6 +1159,7 @@ fn draw_drawer(
             cols,
             cfg,
         );
+        app.hits.extend(links);
         app.hits
             .push((placed.rect, HitTarget::LauncherDrawerEntry(index, i)));
     }
@@ -1233,7 +1234,7 @@ fn draw_list_band(
         else {
             continue;
         };
-        let ports = draw_list_row(
+        let links = draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
@@ -1242,13 +1243,9 @@ fn draw_list_band(
             cols,
             cfg,
         );
-        // A run line's ports are links, ahead of the line so they win.
-        if let crate::launcher::Card::Terminal(t) = &band.cards[i] {
-            for (rect, port) in ports {
-                app.hits
-                    .push((rect, HitTarget::RunPort(t.id.clone(), port)));
-            }
-        }
+        // A run line's ports and a session's ACCOUNT CHIP are links, ahead
+        // of the line so they win.
+        app.hits.extend(links);
         app.hits.push((
             placed.rect,
             HitTarget::LauncherCard(crate::launcher::CardRef {
@@ -1267,8 +1264,9 @@ fn draw_list_band(
 /// band's name and runs-on column widths, so the entries line up. The
 /// cursor's entry (`selected`) wears the mark ([`LIST_MARK`]) and a wash
 /// of its status color across the line ([`card_tint`]). A run line's
-/// ports follow its command, underlined — the cells of each come back,
-/// for the clicks that open them.
+/// ports follow its command, underlined. The links on the line come back
+/// with their cells — each port, and a session's ACCOUNT CHIP — for the
+/// pointer and the clicks that open them.
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1277,7 +1275,7 @@ fn draw_list_row(
     selected: bool,
     (name_col, runs_col): (usize, usize),
     cfg: &mut Option<crate::config::Config>,
-) -> Vec<(Rect, u16)> {
+) -> Vec<(Rect, HitTarget)> {
     let th = app.theme;
     let width = usize::from(r.width);
     // A bar rather than the rule's `❯`: a shell's own glyph is `❯`, one
@@ -1289,7 +1287,8 @@ fn draw_list_row(
     };
     struct Entry<'a> {
         lead: Span<'static>,
-        tag: Option<Span<'static>>,
+        /// The ACCOUNT CHIP, and the account it names.
+        tag: Option<(Span<'static>, String)>,
         name: String,
         name_style: Style,
         ramp: Option<[Color; 3]>,
@@ -1326,7 +1325,10 @@ fn draw_list_row(
             };
             Entry {
                 lead: look.dot,
-                tag: account_chip(a, look.quiet, th),
+                tag: account_chip(a, look.quiet, th).map(|chip| {
+                    let id = orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref());
+                    (chip, id.to_string())
+                }),
                 name: a.name.clone(),
                 name_style: look.name_style,
                 ramp: look.ramp,
@@ -1374,21 +1376,27 @@ fn draw_list_row(
     };
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
+    let mut links = Vec::new();
     // The ACCOUNT CHIP column, on every row while the machine has more
     // than one Claude account — blank on a row that runs on none — so
     // the names after it line up down the whole grid.
     if crate::claude_accounts::any_tags() && room > CHIP_COLUMN_W + 8 {
-        spans.push(
-            e.tag
-                .clone()
-                .unwrap_or_else(|| Span::raw(" ".repeat(CHIP_W))),
-        );
+        match e.tag.clone() {
+            Some((chip, id)) => {
+                let x = r.x + LIST_LEAD;
+                links.push((
+                    Rect::new(x, r.y, CHIP_W as u16, 1),
+                    HitTarget::AccountTag(id),
+                ));
+                spans.push(chip);
+            }
+            None => spans.push(Span::raw(" ".repeat(CHIP_W))),
+        }
         spans.push(Span::raw(" ".repeat(CHIP_COLUMN_W - CHIP_W)));
         room -= CHIP_COLUMN_W;
     }
     // Where the name starts: every offset below (`used`) counts from it.
     let x0 = r.x + (width - room) as u16;
-    let mut port_cells = Vec::new();
     // The badge at the right end, while the name keeps a few letters.
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
@@ -1462,7 +1470,12 @@ fn draw_list_row(
                 spans.push(Span::raw(" ".repeat(gap)));
                 used += gap;
                 let w = label.chars().count();
-                port_cells.push((Rect::new(x0 + used as u16, r.y, w as u16, 1), port));
+                if let crate::launcher::Card::Terminal(t) = card {
+                    links.push((
+                        Rect::new(x0 + used as u16, r.y, w as u16, 1),
+                        HitTarget::RunPort(t.id.clone(), port),
+                    ));
+                }
                 let fg = if hovered == Some(port) {
                     th.accent
                 } else {
@@ -1483,7 +1496,7 @@ fn draw_list_row(
         line = line.style(Style::default().bg(card_tint(app, e.status, th)));
     }
     line.render(r, buf);
-    port_cells
+    links
 }
 
 /// One session as a single line for a picker that lists checkouts with
@@ -2427,7 +2440,7 @@ impl PaneTab {
     }
 
     fn width(&self) -> usize {
-        self.spans.iter().map(|s| s.content.chars().count()).sum()
+        self.spans.iter().map(Span::width).sum()
     }
 }
 
@@ -2584,10 +2597,12 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
     match card {
         Some(crate::launcher::Card::Session(row)) => {
             let a = &row.agent;
+            let look = session_look(app, a, false, th);
             tabs.push(PaneTab::plain(vec![
-                session_look(app, a, false, th).dot,
+                look.dot,
                 Span::styled(truncate(&a.name, name_room), lit),
             ]));
+            tabs.extend(pane_account(a, look.quiet, room, th));
         }
         Some(crate::launcher::Card::Terminal(t)) => {
             tabs.push(PaneTab::plain(vec![
@@ -2655,6 +2670,40 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
         tabs.push(PaneTab::plain(spans));
     }
     tabs
+}
+
+/// The account a session in the pane runs on, after its name in the
+/// pane's header, on a machine with more than one: its ACCOUNT CHIP and
+/// its name (else its email) in its tint, `  R  Riplo` — the pointer and
+/// a click on it doing what they do on the row's chip. Nothing off a
+/// Claude account, or with only one.
+fn pane_account(a: &orion_core::Agent, quiet: Color, room: usize, th: Theme) -> Vec<PaneTab> {
+    let Some(tag) = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref()) else {
+        return Vec::new();
+    };
+    let id = orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref());
+    let name = crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref())
+        .unwrap_or_else(|| id.to_string());
+    let tint = if a.archived {
+        quiet
+    } else if th.is_gray() {
+        th.text
+    } else {
+        tag.color()
+    };
+    vec![
+        PaneTab::plain(vec![Span::raw("  ")]),
+        PaneTab {
+            spans: vec![
+                chip(&tag, a.archived.then_some(quiet), th),
+                Span::styled(
+                    format!(" {}", truncate(&name, (room / 4).max(8))),
+                    Style::default().fg(tint),
+                ),
+            ],
+            hit: Some(HitTarget::AccountTag(id.to_string())),
+        },
+    ]
 }
 
 /// The name of the session `sref` attaches, whichever kind it is.

@@ -11207,13 +11207,15 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // same underline; so are the pane's CLOSE BUTTON and the footer's
     // buttons. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
-    // pointer, so the line takes it for itself.
+    // pointer, so the line takes it for itself. An ACCOUNT CHIP under the
+    // pointer has the FOOTER say whose it is and what is left on it.
     let crumb = hit.filter(|h| {
         matches!(
             h,
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
                 | HitTarget::RunPort(..)
+                | HitTarget::AccountTag(_)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
@@ -11954,6 +11956,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 }
                 // A port on a run line: its app, in the browser.
                 Some(HitTarget::RunPort(_, port)) => crate::stacks::open_port(app, port),
+                // An ACCOUNT CHIP: ACCOUNT USAGE, on that account.
+                Some(HitTarget::AccountTag(id)) => crate::usage::open_on(app, &id),
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -12172,6 +12176,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
                             | HitTarget::RunPort(..)
+                            | HitTarget::AccountTag(_)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
@@ -27028,6 +27033,143 @@ mod tests {
                 f(root)
             })
         })
+    }
+
+    /// Two Claude accounts, the grid's one session on the second, and a
+    /// usage reading for it: 41% left, the reset 2h 14m off.
+    fn on_the_second_account(app: &mut App) {
+        seed_tree(app);
+        app.tree.agents[0].custom_harness = Some("claude-2".into());
+        let now = orion_core::clock::now_secs() as i64;
+        let cell = crate::usage::Cell {
+            used_pct: 59.0,
+            resets_at: Some(now + 2 * 3600 + 14 * 60 + 30),
+        };
+        app.usage.readings.insert(
+            "claude-2".into(),
+            crate::usage::Reading {
+                plan: None,
+                main: crate::usage::Row {
+                    label: String::new(),
+                    cells: [Some(cell), None, None, None],
+                },
+                sub: Vec::new(),
+                extra: None,
+                fetched_at: now,
+            },
+        );
+    }
+
+    /// Where the ACCOUNT CHIP for `id` was last drawn, as the hit map has it.
+    fn chip_at(app: &App, id: &str, below: u16) -> ratatui::layout::Rect {
+        app.hits
+            .iter()
+            .find(|(rect, hit)| rect.y >= below && *hit == HitTarget::AccountTag(id.to_string()))
+            .map(|(rect, _)| *rect)
+            .unwrap_or_else(|| panic!("no chip for {id} drawn below row {below}"))
+    }
+
+    /// The pointer resting on a row's ACCOUNT CHIP has the FOOTER say
+    /// whose it is — the chip, the account by name and email, what is left
+    /// on it and when that resets — in the hints' place, and only while it
+    /// rests there; a click opens ACCOUNT USAGE with its cursor on that
+    /// account.
+    #[test]
+    fn the_chip_under_the_pointer_says_its_account_and_a_click_opens_its_usage() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            on_the_second_account(&mut app);
+            let draw = |app: &mut App| {
+                let mut terminal = Terminal::new(TestBackend::new(130, 34)).unwrap();
+                terminal.draw(|f| ui::draw(f, app)).unwrap();
+                buffer_text(&terminal)
+            };
+            let footer = |text: &str| text.lines().last().unwrap_or_default().to_string();
+            draw(&mut app);
+            let chip = chip_at(&app, "claude-2", 0);
+            let before = footer(&draw(&mut app));
+            assert!(!before.contains("41% left"), "{before}");
+
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Moved, chip.x + 1, chip.y),
+                &mut out,
+            );
+            assert_eq!(
+                app.hover_crumb,
+                Some(HitTarget::AccountTag("claude-2".into()))
+            );
+            let line = footer(&draw(&mut app));
+            for needle in [
+                " C  Claude (not signed in)",
+                "41% left",
+                "resets in 2h 14m",
+                "click for usage",
+            ] {
+                assert!(line.contains(needle), "{needle}: {line}");
+            }
+
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Moved, 0, chip.y + 3),
+                &mut out,
+            );
+            assert!(
+                !footer(&draw(&mut app)).contains("41% left"),
+                "it goes with the pointer"
+            );
+
+            click(&mut app, chip.x + 1, chip.y, &mut out);
+            let Some(Overlay::Usage(view)) = &app.overlay else {
+                panic!("a click opens ACCOUNT USAGE, got {:?}", app.overlay);
+            };
+            let on = app.usage.accounts.get(view.selected).map(|a| a.id.clone());
+            assert_eq!(on.as_deref(), Some("claude-2"), "on that account");
+        });
+    }
+
+    /// The pane's header names the account the session in it runs on:
+    /// its chip, then its name in its tint — and that chip is a chip like
+    /// the row's, the pointer on it saying the account in the footer.
+    #[test]
+    fn the_panes_header_names_the_account_in_its_tint() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            on_the_second_account(&mut app);
+            let mut terminal = Terminal::new(TestBackend::new(130, 34)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let header = app
+                .hits
+                .iter()
+                .filter(|(_, hit)| *hit == HitTarget::AccountTag("claude-2".into()))
+                .map(|(rect, _)| *rect)
+                .find(|rect| rect.width > crate::ui::CHIP_W as u16)
+                .expect("the pane's header names the account");
+            let buf = terminal.backend().buffer().clone();
+            let text: String = (header.x..header.x + header.width)
+                .filter_map(|x| buf.cell((x, header.y)))
+                .map(|c| c.symbol().to_string())
+                .collect();
+            assert_eq!(text, " C  claude-2", "no name or email yet: its id");
+            let tint = crate::theme::ACCOUNT_TINTS[1];
+            assert_eq!(buf.cell((header.x, header.y)).unwrap().bg, tint);
+            let name = buf
+                .cell((header.x + crate::ui::CHIP_W as u16 + 1, header.y))
+                .unwrap();
+            assert_eq!(name.fg, tint, "the name in the account's tint");
+
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Moved, header.x, header.y),
+                &mut out,
+            );
+            assert_eq!(
+                app.hover_crumb,
+                Some(HitTarget::AccountTag("claude-2".into()))
+            );
+        });
     }
 
     /// `Tab` in the `⌘N` box switches between two Claude accounts for the
