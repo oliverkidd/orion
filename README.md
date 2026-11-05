@@ -21,18 +21,18 @@ macOS
 curl -fsSL https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh | sh
 ```
 
-That is the whole install. It needs git. It also gets Ghostty if you don't have it, then opens orion as its own app, **Orion.app**.
+That is the whole install. It needs git. It also gets fresh (the editor files open in), gh and Ghostty if you don't have them, then opens orion as its own app, **Orion.app**.
 
 ## Run
 
 - Open **Orion** from the Dock or Spotlight. Typing `orion` in a terminal opens the same app.
 - **Over ssh or in tmux:** `orion` runs in the terminal it was typed in.
 
-The first launch walks you through setup: Claude Code (installed for you if it is missing) and its accounts, then your first project. `orion upgrade` gets the latest release.
+The first launch walks you through setup: Claude Code (one key installs it if it is missing) and its accounts, then your first project. `orion upgrade` gets the latest release.
 
 ## Core features
 
-- **One grid for every agent.** Each project and git worktree gets a band; each agent is a card showing what it is doing and whether it needs you.
+- **One grid for every agent.** Each git worktree of a project gets a band; each agent is a row in it showing what it is doing and whether it needs you.
 - **Agents keep running.** A background daemon owns every session, so you can close orion and come back to the same agents and their scrollback.
 - **A worktree per task.** Start an agent on a fresh worktree in one step, so parallel tasks never share a checkout.
 - **Review without leaving.** Read the diff, find a file, search the code and open an editor on any checkout.
@@ -49,7 +49,7 @@ The first launch walks you through setup: Claude Code (installed for you if it i
 | `⌘L` | Linear issues |
 | `⌘,` | Settings |
 
-In a terminal use `Ctrl` in place of `⌘`. Every key: [docs/keys.md](docs/keys.md).
+The `⌘` keys reach orion in Orion.app. Every key: [docs/keys.md](docs/keys.md).
 
 ## Docs
 

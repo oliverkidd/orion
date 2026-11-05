@@ -12,7 +12,7 @@
   or `/tmp/orion-<uid>/`, mode 0700). Quit the TUI, relaunch later, and your sessions are still alive
   with scrollback replayed. When the daemon swaps the process under a session you are looking at — a
   restart, or the `orion worktree` relocation at the end of a turn — the pane is rebound to the new
-  one on its own. Moving the cursor onto a live session — a card in the grid, or a worktree or
+  one on its own. Moving the cursor onto a live session — a row on the grid, or a worktree or
   project switch that brings one back — attaches it on the keypress; only a session the
   idle reaper took waits a moment, so that walking past its row doesn't boot a CLI. The screens of the
   last six sessions shown are kept, so returning to one paints on the same frame and fetches only the
@@ -96,8 +96,8 @@
   detached checkout lists the same way. Over the commits sits **Uncommitted changes** while the
   checkout is dirty, the view `⌘E` always opened on and still does then; a clean checkout opens with
   every commit ticked. What is on screen is a scope: the cursor's row with nothing ticked — a
-  commit against its first parent, its message heading each diff — or the ticked rows, one at a
-  time or TOGETHER. Together, rows side by side on the branch are one range, `git diff <first
+  commit against its first parent, its message heading each diff — or the ticked rows, read
+  TOGETHER: rows side by side on the branch are one range, `git diff <first
   parent of the oldest> <newest>` (the working tree, for the uncommitted row); an unticked commit or
   a merge between two starts another range, and a file two ranges touch reads as each range's diff
   in turn, so a commit left out never comes back in a diff that runs across it. A range down to the
@@ -138,12 +138,14 @@
   itself, a `git checkout` you did in another terminal, or a worktree someone removed lands on the
   grid within a couple of seconds without a restart, while an idle repo costs nothing but a few
   `stat` calls (`ORION_WORKTREE_SYNC_MS` overrides the 2 s beat; the e2e tests turn it down to
-  100 ms). This structural sync is the *only* git polling the DAEMON does — the pull request lookups
-  further down are the TUI's own.
+  100 ms). This structural sync, and the five-minute fetch of `origin` a SPARE WORKTREE follows its base
+  by (below), are the *only* git polling the DAEMON does — the base sync and the pull request
+  lookups further down are the TUI's own.
 - **A checkout keeps step with its remote on `p` and `⇧P` — a PULL and a PUSH.** orion fetches when it
-  cuts a worktree, when the WORKTREE PICKER opens, and on `p` or `⇧P`, never on a timer, so a band
-  rule's `⇡⇣` count against
-  whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
+  cuts a worktree, when the WORKTREE PICKER opens, on `p` or `⇧P`, and through BASE SYNC: every five
+  minutes (and at once after a merge from the PULL REQUESTS MODAL) each project's ROOT WORKTREE
+  fetches origin, and, when it is on the base branch with nothing in the way, fast-forwards onto it
+  (`base_sync.rs`). A band rule's `⇡⇣` count against whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
   checkout — the TUI's git, run in a session of its own with stdin closed, so an `ssh` passphrase
   prompt fails instead of painting over the screen — rather than `git pull`, so `pull.rebase` /
   `pull.ff` can't change what it does: a branch only ever moves forward onto its upstream, and one that
@@ -164,9 +166,8 @@
   cap and nothing waiting on it but **Start stack**. Its row reads `setting up…`, goes on a clean exit,
   and otherwise stays as a red `setup failed (1)` holding its PTY for the attach that wants to read why.
   A `StartRun` while it runs is queued on the setup's row (`run.run_queued`, which every client's
-  footer says) and starts the run once the setup exits cleanly; a `StopRun` meanwhile calls it off. It
-  replaces the WORKTREE HOOKS of git config (`orion.worktreeCreateHook` / `orion.worktreeDeleteHook`),
-  which nothing reads any more. See [Configuration](configuration.md#setup-command).
+  footer says) and starts the run once the setup exits cleanly; a `StopRun` meanwhile calls it off.
+  See [Configuration](configuration.md#setup-command).
 - **The next worktree is already there — the SPARE WORKTREE.** For each project used in the last
   day the DAEMON keeps one checkout ahead of you: cut from the **Base branch**, set up, with `claude`
   booted in it on the `⌘N` account at that account's default model and effort, sitting at its
@@ -181,19 +182,19 @@
   nothing goes into a CLI still starting. A CLI that never says it booted within a minute is put
   down and the task boots a fresh one, as a cold launch would. A new spare is cut behind it. A
   launch on another account, model or effort, in plan mode, onto a branch that exists, or for a pull
-  request is cut cold, as before, and leaves the spare for the next. When the base moves (`origin`
+  request is cut cold and leaves the spare for the next. When the base moves (`origin`
   is fetched for it every five minutes) or the **Base branch** setting changes, an untaken spare is
   `git reset --hard` to the new base and its CLI restarted; a taken one is never touched. At boot a
   spare the last DAEMON left fully set up is kept and anything else of one is removed; removing a
   project removes its spare. The footer's memory readout counts the spares. See
   [Configuration](configuration.md#spare-worktrees).
 - **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
-  holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the
+  holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a row's, a band's or the
   project tab's right-click menu, has the DAEMON start `run` — once the worktree's setup, if any, has
   finished — in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
-  card's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts
+  row's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts
   the row as stopping (`stopping_until`, the moment of the kill, which every client counts down to),
   and drops the row once the run has wound down — killing the process tree first on a second stop or
   after two minutes. The idle reaper and the prewarm sweep leave that terminal alone, and a run that
@@ -326,7 +327,7 @@
   reads no passive hook's output). Grok asks before running `orion rename` until you allow it. Titling is one-shot and never clobbers a name you typed or set
   with `r` — a late agent attempt is politely declined. `orion rename --force` overrides.
 - **A Claude session's own name and its row stay tied.** `/rename <name>` inside Claude Code retitles
-  the row within a moment — the same name then shows on the session's card, Claude's prompt box, its
+  the row within a moment — the same name then shows on the session's row, Claude's prompt box, its
   `/resume` picker and `/rc` list, and survives a restart. Claude fires no hook for `/rename`; it
   rewrites the window title (`✳ <name>`) and writes `custom-title.json` beside the transcript, so the
   DAEMON reads that file when the PTY's title changes (and on every hook), and adopts a title Claude
@@ -336,8 +337,8 @@
   last wins; a name you set in orion is never undone by re-reading Claude's older one. Claude only —
   Codex and Cursor have no session name of their own, and Grok's (`/rename`) has no hook or flag
   that reaches it from outside.
-- **A Claude session's card names the model it is on.** Switch with `/model` inside Claude Code and
-  the card follows within a second (`claude opus` → `claude fable`, `[1m]` kept for the 1M context
+- **A Claude session's row names the model it is on.** Switch with `/model` inside Claude Code and
+  the row follows within a second (`claude opus` → `claude fable`, `[1m]` kept for the 1M context
   window). Claude fires no hook for that either; it writes `Set model to …` into the transcript at
   once, and a `model` line naming the exact id with each session's first prompt. The DAEMON checks the
   size of every live session's transcript each second and reads only what was appended since. The
@@ -346,9 +347,9 @@
   Claude only — on every Claude account, the default one and each you added — never a custom
   harness's; a row on an exact id (a Bedrock id from `claude_models`) keeps it while Claude stays in
   that family.
-- **Cards show what they were last asked.** The `prompt` field of the `UserPromptSubmit` payload —
+- **Rows show what they were last asked.** The `prompt` field of the `UserPromptSubmit` payload —
   which every hooked harness sends — is condensed to one line in the hook receiver, kept on the AGENT
-  row (the newest ten, in SQLite), and the newest is drawn on the session's card with an ago label.
+  row (the newest ten, in SQLite), and the newest is drawn on the session's grid row.
   Pure capture: nothing is injected into the
   model's context and no extra turn runs. See [Sessions](sessions.md#recent-prompts).
 - **The header counts what is waiting on the repo.** The GRID's header says
@@ -357,7 +358,7 @@
   pull requests the OPEN PRS sweep already keeps warm for every project (drafts left out while
   `hide_draft_prs` is on). Zero says nothing, and a narrow column
   drops the badge before the name. The count is a button: a click opens the PULL REQUESTS MODAL
-  for that project, as `v` does. See [Configuration](configuration.md#every-setting).
+  for that project, as `⌘U` does. See [Configuration](configuration.md#hand-edited).
 - **Ask the agent for a worktree and it moves there.** Tell a Claude session "do this in a worktree" and
   it runs `orion worktree <name>` instead of its own `EnterWorktree` tool (whose checkouts land under
   `<repo>/.claude/worktrees/` on a `worktree-*` branch). orion creates the checkout in its usual
@@ -377,7 +378,7 @@
   session that fixes the login redirect" and it runs `orion spawn "<task>"`: the daemon starts a second
   agent beside it — same worktree, same harness, model and effort unless `--kind claude|codex|cursor|grok|opencode`
   names another — opening on that task as its first prompt, so it is working before you look. The new
-  card appears on the grid on its own (default name, so it titles itself), and the session you
+  row appears on the grid on its own (default name, so it titles itself), and the session you
   asked from is untouched: no restart, no focus change. Claude learns this from the same appended system
   prompt as the worktree rule, plus a `Bash(orion spawn:*)` permission.
 - **Ask the agent to show you a file and it opens in orion.** Say "open it" or "show me the examples"
@@ -409,9 +410,8 @@
 
 ## Pull requests
 
-orion finds the pull request on each branch with `gh` and shows it on the band's rule and on its
-cards' `#42 title` line. The row outlives
-the pull request: once it is merged or closed the row stays, badged `merged` or `closed` (an open one is
+orion finds the pull request on each branch with `gh` and shows it, `#42`, at the right end of the
+band's rule, where it stays once it is merged or closed, badged `merged` or `closed` (an open one is
 badged `ready` — ready for review, the state and nothing more — and a draft is dimmed and badged `draft`;
 one GitHub says cannot merge, its branch conflicting with the base or a check failing, is red end to end
 and badged `conflicts` or `failing` instead, the PULL REQUEST PAGE saying the conflict beside the
@@ -439,9 +439,7 @@ from one GraphQL query asked beside `gh pr view`, and the Reviews tab lists them
 (or `⌘⇧R` in the modal) opens the [PR review](keys.md#the-pr-review), where you comment on lines, reply,
 resolve and submit a verdict. What you write is GitHub's own pending review, written through
 `gh api graphql` as you go, so nothing of it lives in orion: leave mid-review and it is there next
-time, here or on github.com. Manual link
-attachment is gone; links an earlier version saved stay in the database, so no data is discarded,
-though the grid draws none of them.
+time, here or on github.com.
 
 This is the one part of orion the TUI asks for itself rather than the DAEMON: every `gh pr view`,
 open-list query (`gh api graphql`) — is spawned by the client, which is why the lookups stop the moment you
@@ -453,7 +451,7 @@ has merged without the cursor ever visiting it (the ROOT WORKTREE is left out; n
 merge). Nothing is stacked while a call is in flight — a refresh asked for meanwhile (`⌘R`, a
 merge, a comment) runs as soon as it lands rather than being dropped — and each is abandoned after
 20 s. The other
-projects' open pull requests and open issues are swept too, one project per tick on the five-minute
+projects' open pull requests are swept too, one project per tick on the five-minute
 beat, so a project switched to shows lists minutes old at worst. The selected
 worktree and the open list settle onto a steady 15 s beat; the swept checkouts onto 5 min, since a
 merge reaches them sooner anyway — the moment a pull request drops out of the open list, the checkout on
@@ -461,7 +459,8 @@ its branch is asked again on the next tick, and turns purple seconds after the m
 backs off by doubling — out to 3 min for a branch that never grows a PR, 10 min for a project with none
 open — so a machine with thirty repos does not cost thirty API calls a beat. Focusing the
 terminal window pulls the next lookup forward, floored at a few seconds; `⌘R` is the one
-gesture that asks straight away, every checkout of the project and its open issues included.
+gesture that asks straight away: the project's open list, the selected worktree's pull request and
+the one the pane is reading at once, its other checkouts at the sweep's one-per-tick pace.
 
 The open list is one GraphQL query per project rather than `gh pr list`, because a row's checks need
 only GitHub's own verdict on them — the pass / fail / pending the pull request page shows — and `gh pr
@@ -501,7 +500,7 @@ The open list, the failing-checks recheck, a checkout's own lookup and the page 
 all say where the same pull request stands, on their own beats, and land in whatever order the
 network gives. So none of them is drawn directly: each answer goes into one store of what is known
 about every pull request, each fact stamped with when its answer was *asked*, and every surface — the
-modal's rows and page, the preview, the band, its cards, the footer, the palette, Linear's work column,
+modal's rows and page, the preview, the band, its rows, the footer, the palette, Linear's work column,
 the merge form and AUTOFIX — draws from that store. The newest-asked answer wins, so a slow list asked
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
@@ -510,5 +509,5 @@ list and the git counts on the bands keep their answers by the same rules. Linea
 disk the same way (`linear-cache/issues.json`), and each project's is asked for as the project is
 selected, so `⌘L` opens on what was last read while the ask runs underneath.
 
-Settings and hotkeys live in [Configuration](configuration.md). The process model, the IPC CODEC and
+Settings and key overrides live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

@@ -4,7 +4,7 @@
 
 The `orion` CLI. Every command carries its own help — `orion <command> --help` is the full page,
 flags and examples included, and `-h` is the one-screen reminder. `orion --version` (short `-V`)
-prints the version of the binary you're running (`orion 1.0.0`) — the same version the TUI's
+prints the version of the binary you're running (`orion 3.0.0`) — the same version the TUI's
 FOOTER carries at its left edge (with `⇡ vX.Y.Z` beside it once a newer release is published), and
 what to check after `orion upgrade`. This page is the same surface in one place. Commands marked *(agents run this)* are the ones a coding agent invokes on
 your behalf — see [How it works](how-it-works.md).
@@ -57,10 +57,13 @@ orion worktree [name] [--base <ref>]  # move the current session into a worktree
                           # worktree; no name invents one; --base picks a new branch's start point,
                           # a branch name meaning origin's fetched copy — main is origin/main;
                           # without it the project's Base branch, else origin's default)
-orion spawn <task> [--kind <claude|codex|cursor|grok|opencode>]  # start a new agent session beside the current
-                          # one, in the same worktree, opening on <task> (agents run this when you
-                          # ask for a new orion session; --kind defaults to this session's harness;
-                          # custom harnesses launch from the TUI picker and presets, not --kind)
+orion spawn <task> [--kind <claude|codex|cursor|grok|opencode>] [--worktree <name> [--base <ref>]]
+                          # start a new agent session beside the current one, in the same
+                          # worktree, opening on <task> (agents run this when you ask for a new
+                          # orion session; --kind defaults to this session's harness; custom
+                          # harnesses launch from the TUI picker and presets, not --kind).
+                          # --worktree starts it in that branch's worktree instead, cutting one
+                          # when it has none, from --base or the project's Base branch
 orion open <file>…       # show the files in this orion's FILE TABS — a modal with one tab per
                           # file, the focused one previewed, Enter editing it (agents run this only
                           # when you ask to see a file; text files only — an image or any other
@@ -76,7 +79,7 @@ orion config path              # where config.json, config.local.json, agent_pre
                                 # ssh_hosts.json live
 ```
 
-See [Configuration](configuration.md#backup-restore-and-other-machines).
+See [Configuration](configuration.md#ssh-and-other-machines).
 
 ## Checking the machine
 
@@ -114,13 +117,14 @@ Everything orion needs is here.
 
 See [Installing editors and agent CLIs](configuration.md#installing-editors-and-agent-clis).
 
-## Other machines, other screens
+## Other machines
 
 ```sh
 orion ssh <host> [dir]   # open orion on a remote machine over ssh (installs it there if
                           # missing); destinations are remembered for the TUI's HOSTS PICKER
-                          # (SSH hosts, `⌘⇧P`). Needs the OpenSSH client (`ssh`) on PATH here. The
-                          # remote runs on its own settings
+                          # (**SSH hosts** in the command palette — it has no key of its own).
+                          # Needs the OpenSSH client (`ssh`) on PATH here. The remote runs on
+                          # its own settings
 orion upgrade            # install the latest release (--force on a dev build). Swapping the
                           # binary doesn't touch a running daemon, so afterwards it shuts an idle
                           # one (no live sessions) down for you and the next launch starts on the
@@ -134,4 +138,4 @@ orion upgrade            # install the latest release (--force on a dev build). 
 
 From source: `cargo install --path crates/orion --locked`, then `orion kill && orion` to restart the daemon.
 
-The agent CLIs orion runs, one of which it needs: [Claude](https://code.claude.com/docs/en/setup), [Codex](https://github.com/openai/codex), [Cursor](https://cursor.com/install), [OpenCode](https://opencode.ai/docs/) and [Grok](https://github.com/xai-org/grok-build). Setup's Agents step installs the ones you turn on.
+The agent CLIs orion runs, one of which it needs: [Claude](https://code.claude.com/docs/en/setup), [Codex](https://github.com/openai/codex), [Cursor](https://cursor.com/docs/cli/installation), [OpenCode](https://opencode.ai/docs/) and [Grok Build](https://docs.x.ai/build/overview). Setup's **Claude** page installs Claude (`i`); `i` on a harness's **Enabled** row in Settings → Accounts installs the others.
