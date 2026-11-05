@@ -2976,7 +2976,12 @@ pub(crate) mod keys {
 }
 
 /// The keys along the modal's bottom edge, for browsing or for picking
-/// the issues a pull request attaches to. Esc clears a typed filter first.
+/// the issues a pull request attaches to — what fits a 120-column window
+/// (the modal's border there, its scroll position kept clear, cuts `⌘N`
+/// first). The rest are in `docs/keys.md`: `←`/`→` the tabs the strip
+/// shows, `⌘F` the filter its line names, `⇧↑`/`⇧↓`, `⌘↑`/`⌘↓`, `⌘C`,
+/// `⌘U`, `⌘.`, `⇧Tab`, `⌘O` (the `↗` on the page) and `⌘R`. Esc clears a
+/// typed filter first.
 pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let esc = if !view.query.is_empty() {
@@ -3026,42 +3031,24 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         LinearFocus::List => keys::MARK.hint(),
         LinearFocus::Search => keys::ROWS.hint(),
     };
-    match view.mode {
-        LinearMode::Browse => vec![
-            mark,
-            keys::CONFIRM.hint().kept(),
-            keys::TABS.hint(),
-            keys::FILTER.hint(),
-            // An issue's own properties before where it is sent: a
-            // narrow border cuts the hints from the right.
-            keys::STATUS.hint(),
-            keys::PRIORITY.hint(),
-            keys::ASSIGN.hint(),
-            keys::SELECT.hint(),
-            keys::COPY.hint(),
-            keys::JUMP.hint(),
-            keys::ATTACH.hint(),
-            keys::WORKTREE.hint(),
-            keys::NEW.hint(),
-            keys::PRESET.hint(),
-            keys::BROWSER.hint(),
-            keys::REFRESH.hint(),
-            Hint::new("Esc", esc),
-        ],
-        LinearMode::Attach { .. } => vec![
-            mark,
-            keys::CONFIRM.hint_as("attach marked to this PR").kept(),
-            keys::TABS.hint(),
-            keys::FILTER.hint(),
-            keys::STATUS.hint(),
-            keys::PRIORITY.hint(),
-            keys::ASSIGN.hint(),
-            keys::SELECT.hint(),
-            keys::JUMP.hint(),
-            keys::BROWSER.hint(),
-            Hint::new("Esc", esc),
-        ],
+    let confirm = match view.mode {
+        LinearMode::Browse => keys::CONFIRM.hint(),
+        LinearMode::Attach { .. } => keys::CONFIRM.hint_as("attach marked to this PR"),
+    };
+    // An issue's own properties, then a new one: a narrow border cuts
+    // the hints from the right.
+    let mut hints = vec![
+        mark,
+        confirm.kept(),
+        keys::STATUS.hint(),
+        keys::PRIORITY.hint(),
+        keys::ASSIGN.hint(),
+    ];
+    if view.mode == LinearMode::Browse {
+        hints.push(keys::NEW.hint());
     }
+    hints.push(Hint::new("Esc", esc));
+    hints
 }
 
 /// A property picker for `issues` in the reading pane's place: `rows`,
@@ -6957,10 +6944,6 @@ pub(crate) mod tests {
         ] {
             let (mut app, _dir, mut rx) = paired();
             browse_marked(&mut app);
-            let Some(Overlay::Linear(view)) = &app.overlay else {
-                unreachable!();
-            };
-            assert!(hints(view).iter().any(|h| h.does == "attach to PR"));
             press(&mut app, flip);
             let Some(Overlay::PullRequests(prs)) = &app.overlay else {
                 panic!("the PR PICK, got {:?}", app.overlay);
@@ -7040,9 +7023,6 @@ pub(crate) mod tests {
         app.tree.agents.last_mut().unwrap().name = "fx-agent".into();
         app.tree.agents.last_mut().unwrap().worktree_id = orion_core::WorktreeId("w2".into());
         browse_marked(&mut app);
-        assert!(hints(the_view(&app))
-            .iter()
-            .any(|h| h.does == "link to worktree"));
         press(
             &mut app,
             KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SUPER),
@@ -8832,6 +8812,21 @@ pub(crate) mod tests {
         press(&mut app, plain(KeyCode::Enter));
         assert_eq!(the_view(&app).tab, LinearTab::Others);
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-3"));
+    }
+
+    /// The keys row fits a 120-column window whole — the issue's own keys
+    /// and `⌘N` among them — and the rest are left to `docs/keys.md`.
+    #[test]
+    fn the_key_row_fits_a_120_column_window() {
+        let mut app = view_on(vec![issue("1", "ENG-1", "Login")]);
+        let screen = shot(&mut app, 120, 30);
+        let border = line_with(&screen, "Esc close");
+        for hint in hints(the_view(&app)) {
+            let said = format!("{} {}", hint.key, hint.does);
+            assert!(border.contains(&said), "{said} missing from\n{border}");
+        }
+        assert!(border.contains("⌘N new issue"), "{border}");
+        assert!(!border.contains("⌘R"), "{border}");
     }
 
     // ---- the prefetch ----
