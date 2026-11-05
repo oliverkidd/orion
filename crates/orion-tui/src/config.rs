@@ -881,15 +881,20 @@ fn grouped(
     rows
 }
 
-/// One `account_tags` entry: the letters and tint an account's ACCOUNT
-/// TAG takes in place of the ones orion would pick.
+/// One `account_tags` entry: what an account's ACCOUNT CHIP shows and
+/// the tint it is filled with, in place of what orion would pick.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AccountTagOverride {
-    /// Two characters; longer is cut to two.
+    /// The chip's letter or glyph, one character (Settings → Accounts `g`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// The two letters the tag showed before it was a chip: the chip
+    /// shows the first while no `icon` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// An index into the tag tints ([`crate::theme::ACCOUNT_TINTS`]).
+    /// An index into the tag tints ([`crate::theme::ACCOUNT_TINTS`])
+    /// (Settings → Accounts `c`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tint: Option<usize>,
 }
@@ -1085,11 +1090,12 @@ pub struct Config {
     /// The Accounts tab's **Claude accounts** section and first-run
     /// onboarding add and remove them; empty by default.
     pub claude_accounts: Vec<orion_core::claude_account::ClaudeAccount>,
-    /// The ACCOUNT TAG a Claude account's rows wear, set by hand: by
-    /// account id (`claude` for the default one), `{"tag": "wk", "tint":
-    /// 2}`, either half alone. An account with no entry gets two letters
-    /// from its name or email and the next tint in line
-    /// ([`crate::claude_accounts::account_tag`]). Written only while set.
+    /// The ACCOUNT CHIP a Claude account's rows wear, set in Settings →
+    /// Accounts (`c`, `g`) or by hand: by account id (`claude` for the
+    /// default one), `{"icon": "★", "tint": 2}`, either half alone. An
+    /// account with no entry gets a letter from its name or email and the
+    /// next tint in line ([`crate::claude_accounts::account_tag`]).
+    /// Written only while set.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub account_tags: BTreeMap<String, AccountTagOverride>,
     /// Which AGENT KIND the QUICK PROMPT hotkey launches. Its model and
@@ -1817,15 +1823,7 @@ impl Config {
         match row {
             AccountRow::Add => self.next_account_dir(),
             AccountRow::Account(id) => match self.account_status(id) {
-                Some((enabled, dir, state)) => {
-                    let value = format!("{} · {dir} · {state}", on_off(enabled));
-                    // The ACCOUNT TAG its rows wear on the grid, so the
-                    // letters can be learned here.
-                    match crate::claude_accounts::tag_of(id) {
-                        Some(tag) => format!("{value} · tag {}", tag.letters.trim_end()),
-                        None => value,
-                    }
-                }
+                Some((enabled, dir, state)) => format!("{} · {dir} · {state}", on_off(enabled)),
                 None => "n/a".into(),
             },
         }

@@ -619,12 +619,18 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             .flat_map(|seg| &seg.spans)
             .map(|s| s.width())
             .sum::<usize>();
-    // The flash, behind the four cells the crumb leaves before it.
-    let flash = app
-        .flash
-        .clone()
-        .or_else(|| stopping_line(app))
-        .or_else(|| setup_wait_line(app));
+    // The flash, behind the four cells the crumb leaves before it. The
+    // pointer resting on an ACCOUNT CHIP has its account said there,
+    // over everything but a flash.
+    let readout = match app.flash {
+        Some(_) => None,
+        None => account_readout(app),
+    };
+    let flash = match (&app.flash, &readout) {
+        (Some(flash), _) => Some(flash.clone()),
+        (None, Some(_)) => None,
+        (None, None) => stopping_line(app).or_else(|| setup_wait_line(app)),
+    };
     let flash_w = flash.as_ref().map_or(0, |f| {
         flash_spans(app, f).iter().map(|s| s.width()).sum::<usize>() + 4
     });
@@ -674,9 +680,10 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let room = usize::from(left.width).saturating_sub(used + 1);
-    match &flash {
-        Some(flash) => spans.extend(flash_spans(app, flash)),
-        None => spans.extend(crate::hints::spans(&hints(app), room, th)),
+    match (&flash, readout) {
+        (Some(flash), _) => spans.extend(flash_spans(app, flash)),
+        (None, Some(readout)) => spans.extend(readout),
+        (None, None) => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }
     f.render_widget(Paragraph::new(Line::from(spans)), left);
     if let Some(spot) = spot {
@@ -711,6 +718,32 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             right,
         );
     }
+}
+
+/// While the pointer rests on an ACCOUNT CHIP, what the bar says in the
+/// hints' place: the chip, the account by its name and email, what is
+/// left on it and when that resets, and that a click opens the rest —
+/// `R  Riplo (you@riplo.ai) · 41% left · resets in 2h 14m · click for usage`.
+fn account_readout(app: &App) -> Option<Vec<Span<'static>>> {
+    let Some(HitTarget::AccountTag(id)) = &app.hover_crumb else {
+        return None;
+    };
+    let th = app.theme;
+    let tag = crate::claude_accounts::tag_of(id)?;
+    let label = crate::config::Config::load()
+        .effective_harness_by_id(id)
+        .display_label()
+        .to_string();
+    Some(vec![
+        super::chip(&tag, None, th),
+        Span::styled(format!(" {label}"), Style::default().fg(th.text)),
+        Span::styled(" · ", Style::default().fg(th.dim)),
+        Span::styled(
+            crate::usage::readout(app, id),
+            Style::default().fg(th.muted),
+        ),
+        Span::styled(" · click for usage", Style::default().fg(th.dim)),
+    ])
 }
 
 /// A dim button on the bar — the nameplate, the Spotify glyphs — as it

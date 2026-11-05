@@ -46,7 +46,17 @@ const BACK_TO_CARD: &str = "Back to the card";
 /// on the card) — so which of the worktree's cards the cursor last
 /// rested on does not matter, only which worktree.
 pub(super) fn open_box(app: &mut App) {
-    if let Some(launch) = box_launch(app) {
+    if let Some(launch) = box_launch(app, false) {
+        crate::quick_prompt::open_box(app, launch);
+    }
+}
+
+/// `⌘⇧N`: the box aimed at **+ new worktree** — the WORKTREE PICKER's
+/// first row, picked already — in the project [`open_box`] aims at, its
+/// branch minted as that row mints one. Enter cuts the worktree and
+/// starts the agent in it, as from the picker.
+pub(super) fn open_new_worktree_box(app: &mut App) {
+    if let Some(launch) = box_launch(app, true) {
         crate::quick_prompt::open_box(app, launch);
     }
 }
@@ -58,7 +68,7 @@ pub(super) fn open_box(app: &mut App) {
 /// OPENS the box rather than launching, and Esc closes the picker and
 /// opens nothing. The cursor starts on the harness `p` would have used.
 pub(super) fn open_new_session(app: &mut App) {
-    let Some(launch) = box_launch(app) else {
+    let Some(launch) = box_launch(app, false) else {
         return;
     };
     // The checkout the rows are built against; the launch keeps its own
@@ -75,8 +85,9 @@ pub(super) fn open_new_session(app: &mut App) {
 
 /// The launch a box opened from the grid starts from: the Settings →
 /// Accounts harness, aimed as [`open_box`] says — the checkout under the
-/// cursor. None when there is no project to aim at.
-fn box_launch(app: &mut App) -> Option<QuickLaunch> {
+/// cursor, or a fresh worktree beside it with `new_worktree`. None when
+/// there is no project to aim at.
+fn box_launch(app: &mut App, new_worktree: bool) -> Option<QuickLaunch> {
     let project = app.selected_project().map(|p| p.id.clone()).or_else(|| {
         app.project_rows()
             .first()
@@ -85,7 +96,7 @@ fn box_launch(app: &mut App) -> Option<QuickLaunch> {
     });
     let project = project?;
     let cfg = crate::config::Config::load();
-    let target = view::target_for(app, &project, false);
+    let target = view::target_for(app, &project, new_worktree);
     Some(QuickLaunch::from_config(target, &cfg))
 }
 
@@ -3336,6 +3347,53 @@ mod tests {
         });
     }
 
+    /// `⌘⇧N` is a new agent in a new worktree in one press: the box opens
+    /// aimed at **+ new worktree** of the project under the cursor, its
+    /// branch already named and in the header — however the terminal
+    /// spells the chord (`N` with ⌘, or `n` with ⌘⇧) — and Enter cuts that
+    /// worktree for the agent.
+    #[test]
+    fn cmd_shift_n_opens_the_box_on_a_new_worktree() {
+        with_default_config(|| {
+            for mods in [
+                KeyModifiers::SUPER,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            ] {
+                let mut app = two_sessions();
+                let code = if mods.contains(KeyModifiers::SHIFT) {
+                    KeyCode::Char('n')
+                } else {
+                    KeyCode::Char('N')
+                };
+                key(&mut app, code, mods);
+                let (fresh, typed) = launch(&app);
+                assert!(typed.is_empty());
+                let QuickTarget::NewWorktree {
+                    project,
+                    branch,
+                    existing,
+                } = &fresh.target
+                else {
+                    panic!("aimed at a checkout: {:?}", fresh.target);
+                };
+                assert!(!existing, "a fresh branch, not a checkout of one");
+                assert_eq!(Some(project), app.selected_project().map(|p| &p.id));
+                let text = buffer_text(&draw_at(&mut app, 140, 40));
+                assert!(text.contains(&format!("new worktree {branch}")), "{text}");
+
+                type_text(&mut app, "ship it");
+                let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+                assert!(
+                    out.iter().any(|req| matches!(
+                        req,
+                        ClientRequest::CreateWorktree { branch: cut, .. } if cut == branch
+                    )),
+                    "Enter cuts the worktree: {out:?}"
+                );
+            }
+        });
+    }
+
     /// Every chord Select model, Cycle effort and Select worktree answer
     /// to — their ⌘ chords, and ⌘⇧/ in every spelling a terminal sends
     /// it — works with the box up and with any of
@@ -4342,8 +4400,9 @@ mod tests {
             let mut app = with_empty_band();
             let screen = screen_text(&draw_tall(&mut app));
             assert!(screen.contains("idle"), "{screen}");
-            // The band says only that nothing runs there; what can be done
-            // is the footer's, once the cursor is on it.
+            // The band says that nothing runs there and how to start
+            // something; the rest of what can be done is the footer's, once
+            // the cursor is on it.
             assert!(screen.contains("  nothing running"), "{screen}");
             assert!(!screen.contains("delete worktree"), "{screen}");
             keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
@@ -4372,6 +4431,59 @@ mod tests {
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             assert!(app.flash.is_none());
+        });
+    }
+
+    /// An EMPTY BAND's line names the ways to start something there, on
+    /// every empty band — dim, in the accent once the cursor is on it —
+    /// the longest giving way, whole, on a narrow grid; and a band's rule
+    /// carries no run's ports: those are the run line's alone.
+    #[test]
+    fn an_empty_band_names_the_ways_in_and_a_rule_no_ports() {
+        with_default_config(|| {
+            const HINT: &str =
+                "  nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree · t terminal";
+            let mut app = with_empty_band();
+            seed_run(&mut app, vec![3000]);
+            let narrow = screen_text(&draw_tall(&mut app));
+            assert!(
+                narrow.contains("  nothing running · ⌘N new agent · t terminal  "),
+                "{narrow}"
+            );
+            let wide = |app: &mut App| draw_at(app, 200, 70);
+            let terminal = wide(&mut app);
+            let text = screen_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let rule = lines
+                .iter()
+                .position(|l| l.contains("⎇ idle"))
+                .expect("the empty band's rule");
+            assert!(lines[rule + 1].contains(HINT), "{text}");
+            let hint_at = |terminal: &Terminal<TestBackend>| {
+                let x = lines[rule + 1].find("nothing").unwrap();
+                let x = lines[rule + 1][..x].chars().count() as u16;
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, rule as u16 + 1))
+                    .unwrap()
+                    .fg
+            };
+            assert_eq!(hint_at(&terminal), app.theme.dim);
+
+            let main = lines
+                .iter()
+                .find(|l| l.contains("⌂ main"))
+                .expect("the root's rule");
+            assert!(!main.contains(":3000"), "{main}");
+            assert!(text.contains("$ npm run dev  :3000"), "{text}");
+
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Down]);
+            assert_eq!(
+                app.selected_worktree().map(|w| w.id.clone()),
+                Some(WorktreeId("w3".into()))
+            );
+            assert_eq!(hint_at(&wide(&mut app)), app.theme.accent);
         });
     }
 

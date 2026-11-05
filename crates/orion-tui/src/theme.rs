@@ -24,10 +24,10 @@ use ratatui::style::Color;
 /// gray the setting exists to get away from.
 pub const BLACK_BACKGROUND: Color = Color::Rgb(0, 0, 0);
 
-/// The tints an ACCOUNT TAG is drawn in, one an account in registry
+/// The tints an ACCOUNT CHIP is filled with, one an account in registry
 /// order (`crate::claude_accounts::AccountTag`). Fixed 256-color values
 /// like the status colors, and clear of them: no red (needs you), gold
-/// (working) or purple (merged), so a tag never reads as a status.
+/// (working) or purple (merged), so a chip never reads as a status.
 pub const ACCOUNT_TINTS: [Color; 6] = [
     Color::Indexed(75),  // blue
     Color::Indexed(211), // pink
@@ -209,6 +209,12 @@ impl Theme {
             ],
             focus_tint,
         }
+    }
+
+    /// The gray preset, `mono`: colour is for the statuses alone, so what
+    /// another preset tints — an ACCOUNT CHIP — it draws in its grays.
+    pub fn is_gray(&self) -> bool {
+        self.accent == Color::White
     }
 
     pub fn by_name(name: &str) -> Self {

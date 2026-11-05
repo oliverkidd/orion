@@ -953,9 +953,8 @@ fn draw_bands(
     app.hits.push((area, HitTarget::PanelBg(Focus::Sessions)));
 }
 
-/// What an EMPTY BAND says under its rule: only that. What can be done
-/// there is the FOOTER's to say, for the band under the cursor
-/// (`ui::footer`), not every empty band's at once.
+/// What an EMPTY BAND says under its rule, before the ways to start
+/// something there ([`empty_band_hint`]).
 const EMPTY_BAND: &str = "nothing running";
 
 /// What the DORMANT DIVIDER says, ahead of the dashes that fill its row.
@@ -976,11 +975,45 @@ fn draw_dormant_divider(buf: &mut Buffer, r: Rect, th: Theme) {
     buf.set_string(r.x, r.y, text, Style::default().fg(th.faint));
 }
 
+/// What an EMPTY BAND's line says in `width` columns: [`EMPTY_BAND`],
+/// then the keys that start something there, from the live keymap —
+/// `nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree · t
+/// terminal` — an unbound one left out. Short of room the longest gives
+/// way first, whole, so the line never ends mid-word.
+fn empty_band_hint(app: &App, width: usize) -> String {
+    let mut ways: Vec<String> = [
+        (Action::QuickPrompt, "new agent"),
+        (
+            Action::QuickPromptNewWorktree,
+            "new agent in a new worktree",
+        ),
+        (Action::NewTerminal, "terminal"),
+    ]
+    .iter()
+    .filter_map(|(action, does)| {
+        crate::hints::key(&app.keymap, *action).map(|key| format!("{key} {does}"))
+    })
+    .collect();
+    loop {
+        let line = std::iter::once(EMPTY_BAND.to_string())
+            .chain(ways.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let longest = (0..ways.len()).max_by_key(|&i| ways[i].chars().count());
+        match longest {
+            Some(i) if line.chars().count() > width => {
+                ways.remove(i);
+            }
+            _ => return truncate(&line, width),
+        }
+    }
+}
+
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
 /// in it — in place of the row
-/// of cards it has none of: [`EMPTY_BAND`], dim, and in the accent while
-/// the cursor is on the band with the keys on the grid. A click on it is
-/// a click on the band (the band's whole area).
+/// of cards it has none of: [`empty_band_hint`], dim, and in the accent
+/// while the cursor is on the band with the keys on the grid. A click on
+/// it is a click on the band (the band's whole area).
 fn draw_empty_band(
     f: &mut Frame,
     app: &App,
@@ -999,11 +1032,11 @@ fn draw_empty_band(
         return;
     };
     let fg = if lit { th.accent } else { th.dim };
+    let indent = "  ";
+    let room = usize::from(placed.rect.width).saturating_sub(indent.len());
+    let hint = format!("{indent}{}", empty_band_hint(app, room));
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("  {EMPTY_BAND}"),
-            Style::default().fg(fg),
-        ))),
+        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(fg)))),
         placed.rect,
     );
 }
@@ -1150,7 +1183,7 @@ fn draw_drawer(
         let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_row(inset, i)) else {
             continue;
         };
-        draw_list_row(
+        let links = draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
@@ -1159,6 +1192,7 @@ fn draw_drawer(
             cols,
             cfg,
         );
+        app.hits.extend(links);
         app.hits
             .push((placed.rect, HitTarget::LauncherDrawerEntry(index, i)));
     }
@@ -1233,7 +1267,7 @@ fn draw_list_band(
         else {
             continue;
         };
-        let ports = draw_list_row(
+        let links = draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
@@ -1242,13 +1276,9 @@ fn draw_list_band(
             cols,
             cfg,
         );
-        // A run line's ports are links, ahead of the line so they win.
-        if let crate::launcher::Card::Terminal(t) = &band.cards[i] {
-            for (rect, port) in ports {
-                app.hits
-                    .push((rect, HitTarget::RunPort(t.id.clone(), port)));
-            }
-        }
+        // A run line's ports and a session's ACCOUNT CHIP are links, ahead
+        // of the line so they win.
+        app.hits.extend(links);
         app.hits.push((
             placed.rect,
             HitTarget::LauncherCard(crate::launcher::CardRef {
@@ -1267,8 +1297,9 @@ fn draw_list_band(
 /// band's name and runs-on column widths, so the entries line up. The
 /// cursor's entry (`selected`) wears the mark ([`LIST_MARK`]) and a wash
 /// of its status color across the line ([`card_tint`]). A run line's
-/// ports follow its command, underlined — the cells of each come back,
-/// for the clicks that open them.
+/// ports follow its command, underlined. The links on the line come back
+/// with their cells — each port, and a session's ACCOUNT CHIP — for the
+/// pointer and the clicks that open them.
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1277,7 +1308,7 @@ fn draw_list_row(
     selected: bool,
     (name_col, runs_col): (usize, usize),
     cfg: &mut Option<crate::config::Config>,
-) -> Vec<(Rect, u16)> {
+) -> Vec<(Rect, HitTarget)> {
     let th = app.theme;
     let width = usize::from(r.width);
     // A bar rather than the rule's `❯`: a shell's own glyph is `❯`, one
@@ -1289,7 +1320,8 @@ fn draw_list_row(
     };
     struct Entry<'a> {
         lead: Span<'static>,
-        tag: Option<Span<'static>>,
+        /// The ACCOUNT CHIP, and the account it names.
+        tag: Option<(Span<'static>, String)>,
         name: String,
         name_style: Style,
         ramp: Option<[Color; 3]>,
@@ -1326,7 +1358,10 @@ fn draw_list_row(
             };
             Entry {
                 lead: look.dot,
-                tag: account_tag_span(a, look.quiet),
+                tag: account_chip(a, look.quiet, th).map(|chip| {
+                    let id = orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref());
+                    (chip, id.to_string())
+                }),
                 name: a.name.clone(),
                 name_style: look.name_style,
                 ramp: look.ramp,
@@ -1374,20 +1409,27 @@ fn draw_list_row(
     };
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
-    // The ACCOUNT TAG column, on every row while the machine has more
+    let mut links = Vec::new();
+    // The ACCOUNT CHIP column, on every row while the machine has more
     // than one Claude account — blank on a row that runs on none — so
     // the names after it line up down the whole grid.
-    if crate::claude_accounts::any_tags() && room > ACCOUNT_TAG_W + 8 {
-        spans.push(
-            e.tag
-                .clone()
-                .unwrap_or_else(|| Span::raw(" ".repeat(ACCOUNT_TAG_W))),
-        );
-        room -= ACCOUNT_TAG_W;
+    if crate::claude_accounts::any_tags() && room > CHIP_COLUMN_W + 8 {
+        match e.tag.clone() {
+            Some((chip, id)) => {
+                let x = r.x + LIST_LEAD;
+                links.push((
+                    Rect::new(x, r.y, CHIP_W as u16, 1),
+                    HitTarget::AccountTag(id),
+                ));
+                spans.push(chip);
+            }
+            None => spans.push(Span::raw(" ".repeat(CHIP_W))),
+        }
+        spans.push(Span::raw(" ".repeat(CHIP_COLUMN_W - CHIP_W)));
+        room -= CHIP_COLUMN_W;
     }
     // Where the name starts: every offset below (`used`) counts from it.
     let x0 = r.x + (width - room) as u16;
-    let mut port_cells = Vec::new();
     // The badge at the right end, while the name keeps a few letters.
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
@@ -1461,7 +1503,12 @@ fn draw_list_row(
                 spans.push(Span::raw(" ".repeat(gap)));
                 used += gap;
                 let w = label.chars().count();
-                port_cells.push((Rect::new(x0 + used as u16, r.y, w as u16, 1), port));
+                if let crate::launcher::Card::Terminal(t) = card {
+                    links.push((
+                        Rect::new(x0 + used as u16, r.y, w as u16, 1),
+                        HitTarget::RunPort(t.id.clone(), port),
+                    ));
+                }
                 let fg = if hovered == Some(port) {
                     th.accent
                 } else {
@@ -1482,12 +1529,12 @@ fn draw_list_row(
         line = line.style(Style::default().bg(card_tint(app, e.status, th)));
     }
     line.render(r, buf);
-    port_cells
+    links
 }
 
 /// One session as a single line for a picker that lists checkouts with
 /// their sessions under them (the Linear worktree picker): the status
-/// mark, the ACCOUNT TAG, the name as the grid draws it, what it runs on
+/// mark, the ACCOUNT CHIP, the name as the grid draws it, what it runs on
 /// and its last prompt — the LIST row's parts, without its columns or
 /// age, cut to `width`.
 pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Vec<Span<'static>> {
@@ -1495,9 +1542,9 @@ pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Ve
     let look = session_look(app, a, false, th);
     let mut spans = vec![look.dot];
     let mut used = 2;
-    if let Some(tag) = account_tag_span(a, look.quiet) {
-        used += ACCOUNT_TAG_W;
-        spans.push(tag);
+    if let Some(chip) = account_chip(a, look.quiet, th) {
+        used += CHIP_COLUMN_W;
+        spans.extend([chip, Span::raw(" ")]);
     }
     let name = truncate(&a.name, width.saturating_sub(used).min(LIST_NAME_MAX));
     used += name.chars().count();
@@ -1521,29 +1568,62 @@ pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Ve
 }
 
 /// One session as a line that names several draws it (the PULL REQUEST
-/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT TAG and the
+/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT CHIP and the
 /// name, as its grid row draws them.
 pub(crate) fn session_chip(app: &App, a: &orion_core::Agent) -> Vec<Span<'static>> {
     let look = session_look(app, a, false, app.theme);
     let mut spans = vec![look.dot];
-    spans.extend(account_tag_span(a, look.quiet));
+    if let Some(chip) = account_chip(a, look.quiet, app.theme) {
+        spans.extend([chip, Span::raw(" ")]);
+    }
     spans.push(Span::styled(a.name.clone(), look.name_style));
     spans
 }
 
-/// Columns the ACCOUNT TAG takes on a row: its letters and a space.
-pub(crate) const ACCOUNT_TAG_W: usize = crate::claude_accounts::TAG_LEN + 1;
+/// Cells the ACCOUNT CHIP fills: its mark, with a cell of the fill
+/// either side (one before a two-cell glyph).
+pub(crate) const CHIP_W: usize = 3;
 
-/// The ACCOUNT TAG `a` wears, letters and a trailing space, in its
-/// account's tint — or in `quiet` on an archived row, which says nothing
-/// in color. None off a Claude account, or with only one.
-pub(crate) fn account_tag_span(a: &orion_core::Agent, quiet: Color) -> Option<Span<'static>> {
+/// Columns the ACCOUNT CHIP takes on a row: the chip and the air after
+/// it, before the name.
+pub(crate) const CHIP_COLUMN_W: usize = CHIP_W + 1;
+
+/// The ACCOUNT CHIP `a` wears: [`chip`], dimmed to `quiet` on an
+/// archived row, which says nothing in colour. None off a Claude
+/// account, or with only one.
+pub(crate) fn account_chip(
+    a: &orion_core::Agent,
+    quiet: Color,
+    th: Theme,
+) -> Option<Span<'static>> {
     let tag = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref())?;
-    let color = if a.archived { quiet } else { tag.color() };
-    Some(Span::styled(
-        format!("{} ", tag.letters),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ))
+    Some(chip(&tag, a.archived.then_some(quiet), th))
+}
+
+/// An ACCOUNT CHIP: the account's mark — its letter, or the glyph set
+/// for it — black and bold, [`CHIP_W`] cells filled with the account's
+/// tint; with `quiet` instead on an archived row, and in the `mono`
+/// theme with its text gray, inverse, since that theme keeps colour for
+/// the statuses.
+pub(crate) fn chip(
+    tag: &crate::claude_accounts::AccountTag,
+    quiet: Option<Color>,
+    th: Theme,
+) -> Span<'static> {
+    let fill = quiet.unwrap_or(if th.is_gray() { th.text } else { tag.color() });
+    let mark = &tag.mark;
+    let text = if Span::raw(mark.as_str()).width() > 1 {
+        format!(" {mark}")
+    } else {
+        format!(" {mark} ")
+    };
+    Span::styled(
+        text,
+        Style::default()
+            .fg(Color::Black)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 /// What a band's rule needs to know of the band beyond the band itself.
@@ -2261,7 +2341,7 @@ fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
 /// `opus high`, `gpt-5.5 xhigh` — which is what tells one row from the
 /// next. A CLAUDE ACCOUNT's name or email is never the row's to show:
 /// on a line that narrow it pushed the model and effort out of sight (the
-/// ACCOUNT TAG says which account). A session with no model named says
+/// ACCOUNT CHIP says which account). A session with no model named says
 /// its harness in the model's place (`claude high`), a Claude account's
 /// as plain `claude`.
 fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
@@ -2393,7 +2473,7 @@ impl PaneTab {
     }
 
     fn width(&self) -> usize {
-        self.spans.iter().map(|s| s.content.chars().count()).sum()
+        self.spans.iter().map(Span::width).sum()
     }
 }
 
@@ -2550,10 +2630,12 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
     match card {
         Some(crate::launcher::Card::Session(row)) => {
             let a = &row.agent;
+            let look = session_look(app, a, false, th);
             tabs.push(PaneTab::plain(vec![
-                session_look(app, a, false, th).dot,
+                look.dot,
                 Span::styled(truncate(&a.name, name_room), lit),
             ]));
+            tabs.extend(pane_account(a, look.quiet, room, th));
         }
         Some(crate::launcher::Card::Terminal(t)) => {
             tabs.push(PaneTab::plain(vec![
@@ -2621,6 +2703,40 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
         tabs.push(PaneTab::plain(spans));
     }
     tabs
+}
+
+/// The account a session in the pane runs on, after its name in the
+/// pane's header, on a machine with more than one: its ACCOUNT CHIP and
+/// its name (else its email) in its tint, `  R  Riplo` — the pointer and
+/// a click on it doing what they do on the row's chip. Nothing off a
+/// Claude account, or with only one.
+fn pane_account(a: &orion_core::Agent, quiet: Color, room: usize, th: Theme) -> Vec<PaneTab> {
+    let Some(tag) = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref()) else {
+        return Vec::new();
+    };
+    let id = orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref());
+    let name = crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref())
+        .unwrap_or_else(|| id.to_string());
+    let tint = if a.archived {
+        quiet
+    } else if th.is_gray() {
+        th.text
+    } else {
+        tag.color()
+    };
+    vec![
+        PaneTab::plain(vec![Span::raw("  ")]),
+        PaneTab {
+            spans: vec![
+                chip(&tag, a.archived.then_some(quiet), th),
+                Span::styled(
+                    format!(" {}", truncate(&name, (room / 4).max(8))),
+                    Style::default().fg(tint),
+                ),
+            ],
+            hit: Some(HitTarget::AccountTag(id.to_string())),
+        },
+    ]
 }
 
 /// The name of the session `sref` attaches, whichever kind it is.
@@ -2837,6 +2953,9 @@ struct HeaderField {
     /// A click on it opens its picker — every field but a PR SESSION's
     /// checkout, which is the DAEMON's to pick.
     button: bool,
+    /// Said after the value, the first thing to go short of room: the
+    /// agent's headroom, `41% · 2h`.
+    detail: Option<Span<'static>>,
 }
 
 /// The two rows of fields [`box_header`] lays out: where, then what.
@@ -2858,6 +2977,7 @@ fn header_fields(
         value_style,
         key,
         button: true,
+        detail: None,
     };
 
     let background = crate::launcher::project_of(app, &launch.target)
@@ -2912,9 +3032,18 @@ fn header_fields(
     }
 
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
-    // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
-    // row room for the mode, the model and the effort beside it.
-    let agent = super::truncate(harness.display_label(), AGENT_W);
+    // A CLAUDE ACCOUNT by its name, else its email, with more than one —
+    // cut to a fixed width, so a long one leaves the row room for the
+    // mode, the model and the effort beside it.
+    let agent = crate::claude_accounts::short_name(launch.kind, launch.custom.as_deref())
+        .unwrap_or_else(|| harness.display_label().to_string());
+    let agent = super::truncate(&agent, AGENT_W);
+    // What is left on it, as the usage readings have it: `41% · 2h`.
+    let now = orion_core::clock::now_secs() as i64;
+    let headroom = crate::usage::headroom(app, &harness.id)
+        .map(|room| (room.short(now), room.color(th)))
+        .filter(|(said, _)| !said.is_empty())
+        .map(|(said, fg)| Span::styled(said, Style::default().fg(fg)));
     let model = crate::config::model_row_label(
         launch
             .model
@@ -2923,13 +3052,16 @@ fn header_fields(
         harness.model.catalog,
     );
     let mut runs = vec![
-        field(
-            BoxField::Agent,
-            "agent",
-            agent,
-            bold(th.text),
-            Some(AGENT.label()),
-        ),
+        HeaderField {
+            detail: headroom,
+            ..field(
+                BoxField::Agent,
+                "agent",
+                agent,
+                bold(th.text),
+                Some(AGENT.label()),
+            )
+        },
         field(
             BoxField::Model,
             "model",
@@ -2999,6 +3131,7 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
                 .key
                 .as_ref()
                 .map_or(0, |k| 1 + Span::raw(k.as_str()).width());
+            let detail_w = field.detail.as_ref().map_or(0, |d| 1 + d.width());
             let value_w = Span::raw(field.value.as_str()).width();
             let label_at = |x: usize| {
                 let own = field.label.chars().count();
@@ -3009,11 +3142,16 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
                 }
             };
             // Whole on this row, or whole on a row of its own.
-            if x > 0 && x + FIELD_GAP + label_at(x) + 1 + value_w + key_w > width {
+            if x > 0 && x + FIELD_GAP + label_at(x) + 1 + value_w + detail_w + key_w > width {
                 flush(&mut out, &mut row, &mut x);
             }
             let gap = if x > 0 { FIELD_GAP } else { 0 };
             let room = width.saturating_sub(x + gap);
+            // The detail goes first, whole, before the value is cut.
+            let detail = field
+                .detail
+                .clone()
+                .filter(|_| label_at(x) + 1 + value_w + detail_w + key_w <= room);
             // The value is cut before the word goes, and the word before
             // the field does; the key is never cut.
             let labelled = label_at(x) + 1;
@@ -3042,6 +3180,10 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
             let value_at = x;
             x += Span::raw(value.as_str()).width();
             row.push(Span::styled(value, field.value_style));
+            if let Some(detail) = detail {
+                x += 1 + detail.width();
+                row.extend([Span::raw(" "), detail]);
+            }
             if let Some(key) = &field.key {
                 let text = format!(" {key}");
                 x += Span::raw(text.as_str()).width();
@@ -3456,49 +3598,69 @@ mod tests {
         );
     }
 
-    /// A CLAUDE ACCOUNT is named as every picker names it — `Claude
-    /// (you@example.com)` — once its sign-in has been read.
+    /// A CLAUDE ACCOUNT is named in the box's `agent` field as its chip's
+    /// rows name it — its name, else the email it is signed in as — and,
+    /// once its usage has been read, what is left on it beside: the share
+    /// on its emptiest limit and the time to that limit's reset, in the
+    /// usage modal's colours — red once it is at its limit.
     #[test]
-    fn a_claude_account_is_named_with_its_email() {
-        let home = tempfile::tempdir().unwrap();
-        let two = home.path().join(".claude-2");
-        std::fs::create_dir_all(&two).unwrap();
-        std::fs::write(
-            two.join(".claude.json"),
-            serde_json::json!({"oauthAccount": {"emailAddress": "b@b.co", "accountUuid": "u"}})
-                .to_string(),
-        )
-        .unwrap();
-        let config = home.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let places = crate::paths_util::Places::in_home(home.path());
-        crate::paths_util::with_places(places, || {
-            crate::config::with_config_path(config, || {
-                crate::claude_accounts::refresh_now();
-                let cfg = crate::config::Config::load();
-                let target =
-                    crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
-                let launch = QuickLaunch::of_kind(
-                    target,
-                    orion_core::AgentKind::Claude,
-                    Some("claude-2".into()),
-                    None,
-                    None,
-                    &cfg,
-                );
-                let head = box_header(&App::new(), &launch, &cfg, 200, Theme::default());
-                let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
-                // Cut to ten columns, the row's room going to the mode,
-                // the model and the effort beside it.
-                assert_eq!(agent, "agent   Claude (b… Tab", "{:?}", rows_of(&head));
-            })
+    fn the_boxs_agent_field_names_the_account_and_its_headroom() {
+        with_two_accounts("b@b.co", || {
+            let cfg = crate::config::Config::load();
+            let target =
+                crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+            let launch = QuickLaunch::of_kind(
+                target,
+                orion_core::AgentKind::Claude,
+                Some("claude-2".into()),
+                None,
+                None,
+                &cfg,
+            );
+            let mut app = App::new();
+            let head = box_header(&app, &launch, &cfg, 200, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co Tab", "{:?}", rows_of(&head));
+
+            let now = orion_core::clock::now_secs() as i64;
+            let reading = |used_pct: f64| crate::usage::Reading {
+                plan: None,
+                main: crate::usage::Row {
+                    label: String::new(),
+                    cells: [
+                        Some(crate::usage::Cell {
+                            used_pct,
+                            resets_at: Some(now + 2 * 3600 + 600),
+                        }),
+                        None,
+                        None,
+                        None,
+                    ],
+                },
+                sub: Vec::new(),
+                extra: None,
+                fetched_at: now,
+            };
+            app.usage.readings.insert("claude-2".into(), reading(59.0));
+            let head = box_header(&app, &launch, &cfg, 200, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co 41% · 2h Tab", "{:?}", rows_of(&head));
+            let left = head.lines[1]
+                .spans
+                .iter()
+                .find(|span| span.content == "41% · 2h")
+                .expect("the headroom");
+            assert_eq!(left.style.fg, Some(Theme::default().ok));
+
+            app.usage.readings.insert("claude-2".into(), reading(100.0));
+            let head = box_header(&app, &launch, &cfg, 200, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co at limit · 2h Tab");
+
+            // Short of room the headroom goes, whole, before the name is cut.
+            let head = box_header(&app, &launch, &cfg, 24, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co Tab", "{:?}", rows_of(&head));
         });
     }
 
@@ -4121,85 +4283,133 @@ mod tests {
         });
     }
 
+    /// A machine with two Claude accounts — the default one, unnamed and
+    /// signed in as nobody yet, and `claude-2`, signed in as `email` — and
+    /// `f` run with the tags read, so the default account's chip is `C`
+    /// and the other's the first letter of `email`.
+    pub(crate) fn with_two_accounts<T>(email: &str, f: impl FnOnce() -> T) -> T {
+        let home = tempfile::tempdir().unwrap();
+        let two = home.path().join(".claude-2");
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            two.join(".claude.json"),
+            serde_json::json!({"oauthAccount": {"emailAddress": email, "accountUuid": "u"}})
+                .to_string(),
+        )
+        .unwrap();
+        let config = home.path().join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"claude_accounts": [
+                {"id": "claude-2", "config_dir": two.display().to_string()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let places = crate::paths_util::Places::in_home(home.path());
+        crate::paths_util::with_places(places, || {
+            crate::config::with_config_path(config, || {
+                crate::claude_accounts::refresh_now();
+                f()
+            })
+        })
+    }
+
     /// A LIST row says the model and effort a session runs on and never
     /// the CLAUDE ACCOUNT it runs as — the pane's breadcrumb keeps the
     /// account — and with no model named says the harness, an account's
     /// as `claude`.
     #[test]
     fn a_list_row_names_the_model_and_effort_not_the_account() {
-        let home = tempfile::tempdir().unwrap();
-        let two = home.path().join(".claude-2");
-        std::fs::create_dir_all(&two).unwrap();
-        std::fs::write(
-            two.join(".claude.json"),
-            serde_json::json!({"oauthAccount": {"emailAddress": "b@b.co", "accountUuid": "u"}})
-                .to_string(),
-        )
-        .unwrap();
-        let config = home.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let places = crate::paths_util::Places::in_home(home.path());
-        crate::paths_util::with_places(places, || {
-            crate::config::with_config_path(config, || {
-                crate::claude_accounts::refresh_now();
-                let mut a = a_tree().tree.agents[0].clone();
-                a.kind = orion_core::AgentKind::Claude;
-                a.custom_harness = Some("claude-2".into());
-                a.model = Some("opus".into());
-                a.effort = Some("high".into());
-                assert!(harness_line(&a, &mut None).contains("b@b.co"));
-                assert_eq!(list_runs_line(&a, &mut None), "opus high");
-                a.model = None;
-                assert_eq!(list_runs_line(&a, &mut None), "claude high");
-            })
+        with_two_accounts("b@b.co", || {
+            let mut a = a_tree().tree.agents[0].clone();
+            a.kind = orion_core::AgentKind::Claude;
+            a.custom_harness = Some("claude-2".into());
+            a.model = Some("opus".into());
+            a.effort = Some("high".into());
+            assert!(harness_line(&a, &mut None).contains("b@b.co"));
+            assert_eq!(list_runs_line(&a, &mut None), "opus high");
+            a.model = None;
+            assert_eq!(list_runs_line(&a, &mut None), "claude high");
         });
     }
 
-    /// With two Claude accounts every LIST row wears its account's
-    /// two-letter tag right after the status dot; with one, no row does.
+    /// With two Claude accounts every LIST row wears its account's chip
+    /// right after the status dot — its letter in a filled chip, then air
+    /// before the name; with one, no row does.
     #[test]
-    fn rows_wear_their_accounts_tag_with_two_accounts() {
-        let home = tempfile::tempdir().unwrap();
-        let two = home.path().join(".claude-2");
-        std::fs::create_dir_all(&two).unwrap();
-        std::fs::write(
-            two.join(".claude.json"),
-            serde_json::json!({"oauthAccount": {"emailAddress": "rk@b.co", "accountUuid": "u"}})
-                .to_string(),
-        )
-        .unwrap();
-        let config = home.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let places = crate::paths_util::Places::in_home(home.path());
-        crate::paths_util::with_places(places, || {
-            crate::config::with_config_path(config, || {
-                crate::claude_accounts::refresh_now();
+    fn rows_wear_their_accounts_chip_with_two_accounts() {
+        with_two_accounts("rk@b.co", || {
+            let mut app = a_tree();
+            select(&mut app, "api");
+            app.tree.agents[0].kind = orion_core::AgentKind::Claude;
+            app.tree.agents[0].custom_harness = Some("claude-2".into());
+            let body = Rect::new(0, 0, 100, 30);
+            let lines = drawn_lines(&mut app, body);
+            let line = lines
+                .iter()
+                .find(|l| l.contains("s0"))
+                .expect("the session's line");
+            assert!(line.contains(" R  s0"), "{line:?}");
+        });
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("s0")).unwrap();
+        assert!(!line.contains(" R "), "one account, no chip: {line:?}");
+    }
+
+    /// The chip is the account's letter, black and bold, on three cells of
+    /// its tint, in every theme but `mono`, which keeps colour for the
+    /// statuses and draws it inverse — black on its text gray; an
+    /// archived session's chip is dimmed to the quiet it is drawn in.
+    #[test]
+    fn the_chip_is_black_on_its_tint_in_every_theme_and_inverse_in_mono() {
+        with_two_accounts("rk@b.co", || {
+            let body = Rect::new(0, 0, 100, 30);
+            for name in crate::theme::THEMES {
                 let mut app = a_tree();
+                app.theme = Theme::by_name(name);
                 select(&mut app, "api");
                 app.tree.agents[0].kind = orion_core::AgentKind::Claude;
                 app.tree.agents[0].custom_harness = Some("claude-2".into());
-                let body = Rect::new(0, 0, 100, 30);
+                let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                    body.width,
+                    body.height,
+                ))
+                .unwrap();
+                terminal.draw(|f| draw(f, &mut app, body)).unwrap();
+                let buf = terminal.backend().buffer().clone();
                 let lines = drawn_lines(&mut app, body);
-                let line = lines
-                    .iter()
-                    .find(|l| l.contains("s0"))
-                    .expect("the session's line");
-                assert!(line.contains("rk s0"), "{line:?}");
-            })
+                let row = lines.iter().position(|l| l.contains(" R  s0")).unwrap();
+                let at = lines[row].find(" R  s0").unwrap();
+                let x = lines[row][..at].chars().count() as u16;
+                let th = app.theme;
+                let fill = if *name == "mono" {
+                    th.text
+                } else {
+                    crate::theme::ACCOUNT_TINTS[1]
+                };
+                for dx in 0..CHIP_W as u16 {
+                    let cell = buf.cell((x + dx, row as u16)).unwrap();
+                    assert_eq!(cell.bg, fill, "{name}: cell {dx} of the chip");
+                }
+                let mark = buf.cell((x + 1, row as u16)).unwrap();
+                assert_eq!(mark.fg, Color::Black, "{name}");
+                assert!(mark.modifier.contains(Modifier::BOLD), "{name}");
+                let after = buf.cell((x + CHIP_W as u16, row as u16)).unwrap();
+                assert_ne!(after.bg, fill, "{name}: air between the chip and the name");
+
+                let mut archived = app.tree.agents[0].clone();
+                archived.archived = true;
+                let spans = session_chip(&app, &archived);
+                let chip = spans.iter().find(|s| s.content == " R ").unwrap();
+                assert_eq!(
+                    chip.style.bg,
+                    Some(th.dim),
+                    "{name}: an archived chip is dim"
+                );
+            }
         });
     }
 

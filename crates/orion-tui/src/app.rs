@@ -118,6 +118,11 @@ pub enum HitTarget {
     /// localhost in the browser (`stacks::open_port`). The line's terminal
     /// and the port.
     RunPort(TerminalId, u16),
+    /// An ACCOUNT CHIP — on a grid row, or the PANE's header — by the
+    /// account's registry id, registered ahead of what it sits on, so it
+    /// wins: the pointer resting on it puts the account and what is left
+    /// on it in the FOOTER, and a click opens ACCOUNT USAGE on it.
+    AccountTag(String),
     /// The PULL REQUEST on a band's rule — its `↗ #42 title` — registered
     /// ahead of the rule, so it wins: a click opens the pull request in
     /// the browser, through the very `launcher::open_pull_request` `⇧V`
@@ -821,6 +826,13 @@ pub enum PromptKind {
     /// away, back to `Claude (a@b.co)` — and Esc keeps it; both put the
     /// overlay back on the row. The id and the dir never change.
     RenameClaudeAccount {
+        id: String,
+    },
+    /// `g` on a CLAUDE ACCOUNTS row: the letter or glyph account `id`'s
+    /// ACCOUNT CHIP shows, prefilled with the one it was given. Enter
+    /// saves its first character — empty puts orion's letter back — and
+    /// Esc keeps it; both put the overlay back on the row.
+    AccountChipMark {
         id: String,
     },
 }

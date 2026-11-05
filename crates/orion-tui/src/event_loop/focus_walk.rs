@@ -115,6 +115,7 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
         ) => enter_terminal_pane(app, out),
         // The crumb is a button out of a full-screen session, not
         // somewhere focus lives: its own handler is what moves focus. So
+        // is an ACCOUNT CHIP, which opens ACCOUNT USAGE, and so
         // are the PANE's own TAB STRIP tabs — a click on one says what
         // the pane reads, and typing into it is the separate commitment
         // the pane itself takes.
@@ -129,6 +130,7 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::LauncherPaneZoom
             | HitTarget::LauncherPullRequests
             | HitTarget::LauncherWelcomePrompt
+            | HitTarget::AccountTag(_)
             | HitTarget::FooterHome
             | HitTarget::FooterUpgrade
             | HitTarget::FooterSpotify(_)

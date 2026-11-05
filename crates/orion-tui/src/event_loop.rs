@@ -4129,6 +4129,7 @@ fn dispatch_action(
         // the aim let go, or on a fresh worktree.
         Action::QuickPrompt if app.launcher_active() => launcher::open_box(app),
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
+        Action::QuickPromptNewWorktree => launcher::open_new_worktree_box(app),
         Action::SelectModel => select_model(app),
         Action::CycleEffort => cycle_effort(app),
         Action::SelectLaunchWorktree => select_launch_worktree(app),
@@ -4780,6 +4781,17 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 )
                 .into(),
                 crate::claude_accounts::current_name(&cfg, id),
+            )
+        }
+        PromptKind::AccountChipMark { id } => {
+            let cfg = crate::config::Config::load();
+            let letter = crate::claude_accounts::tag_of(id).map_or_else(String::new, |tag| {
+                format!(" (empty = its letter, now {})", tag.mark)
+            });
+            (
+                format!("Chip · {}", cfg.effective_harness_by_id(id).display_label()).into(),
+                format!("the letter or glyph its chip shows, one character{letter}").into(),
+                crate::claude_accounts::chip_icon(&cfg, id),
             )
         }
     };
@@ -7721,6 +7733,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::ClaudeSignIn { .. }
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
+                        | PromptKind::AccountChipMark { .. }
                 );
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
@@ -8216,7 +8229,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
-    // out, `⌫` removes it.
+    // out, `⌫` removes it, `c` and `g` change its ACCOUNT CHIP.
     let account_row = || {
         (!on_tabs && tab == crate::config::accounts_tab())
             .then(|| crate::config::Config::load().account_row(selected))
@@ -8258,6 +8271,8 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
         _ if keys::REMOVE.matches(&key) && account() => SettingsCmd::RemoveAccount(selected),
+        _ if keys::CHIP_TINT.matches(&key) && account() => SettingsCmd::ChipTint(selected),
+        _ if keys::CHIP_MARK.matches(&key) && account() => SettingsCmd::ChipMark(selected),
         // Nothing to cycle on a hotkey row — say so instead of no-op'ing.
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('l') | KeyCode::Right if hotkeys => {
             SettingsCmd::Nudge
@@ -8313,15 +8328,26 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
         SettingsCmd::Apply(i, delta) => apply_setting_at(app, tab, i, delta),
         SettingsCmd::Install(i) => ask_install(app, tab, i),
         SettingsCmd::RenameAccount(i) => {
-            if let Some(crate::config::AccountRow::Account(id)) =
-                crate::config::Config::load().account_row(i)
-            {
+            if let Some(id) = account_at(i) {
                 app.remember_settings_row(tab, i);
                 open_prompt(app, PromptKind::RenameClaudeAccount { id });
             }
         }
         SettingsCmd::SignOut(i) => confirm_sign_out(app, i),
         SettingsCmd::RemoveAccount(i) => confirm_remove_account(app, i),
+        SettingsCmd::ChipTint(i) => {
+            if let Some(id) = account_at(i) {
+                let result = crate::claude_accounts::cycle_tint(&id);
+                crate::claude_accounts::request_refresh(app, true);
+                settings_note(app, result);
+            }
+        }
+        SettingsCmd::ChipMark(i) => {
+            if let Some(id) = account_at(i) {
+                app.remember_settings_row(tab, i);
+                open_prompt(app, PromptKind::AccountChipMark { id });
+            }
+        }
         SettingsCmd::Nudge => {
             if let Some(view) = settings_mut(app) {
                 view.info(HOTKEYS_ARE_HAND_EDITED);
@@ -8342,6 +8368,14 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
                 area: ratatui::layout::Rect::default(),
             }));
         }
+    }
+}
+
+/// The CLAUDE ACCOUNT on the Accounts tab's row `index`, by its id.
+fn account_at(index: usize) -> Option<String> {
+    match crate::config::Config::load().account_row(index)? {
+        crate::config::AccountRow::Account(id) => Some(id),
+        crate::config::AccountRow::Add => None,
     }
 }
 
@@ -8393,6 +8427,10 @@ enum SettingsCmd {
     SignOut(usize),
     /// `⌫` on a CLAUDE ACCOUNTS row.
     RemoveAccount(usize),
+    /// `c` on a CLAUDE ACCOUNTS row: its chip's next tint.
+    ChipTint(usize),
+    /// `g` on a CLAUDE ACCOUNTS row: its chip's letter or glyph.
+    ChipMark(usize),
     /// A HOTKEYS row: nothing to change here, so say where it changes.
     Nudge,
     ResetAll,
@@ -8843,6 +8881,12 @@ fn settings_note(app: &mut App, result: Result<String, String>) {
 /// stay — and land back on its row, the cards renamed at the next read.
 fn rename_claude_account(app: &mut App, id: &str, name: &str) {
     let result = crate::claude_accounts::rename(id, name);
+    back_on_the_account(app, id, result);
+}
+
+/// The overlay back on account `id`'s row after a change to it, the
+/// accounts read again so the grid shows it, and `result` said.
+fn back_on_the_account(app: &mut App, id: &str, result: Result<String, String>) {
     open_claude_accounts(app, Some(id));
     crate::claude_accounts::request_refresh(app, true);
     settings_note(app, result);
@@ -8980,6 +9024,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::ClaudeSignIn { .. }
             | PromptKind::AddClaudeAccount
             | PromptKind::RenameClaudeAccount { .. }
+            | PromptKind::AccountChipMark { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9112,6 +9157,10 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         PromptKind::AddClaudeAccount => ask_to_share(app, &value),
         PromptKind::RenameClaudeAccount { id } => rename_claude_account(app, &id, &value),
+        PromptKind::AccountChipMark { id } => {
+            let result = crate::claude_accounts::set_chip_mark(&id, &value);
+            back_on_the_account(app, &id, result);
+        }
     }
 }
 
@@ -11207,13 +11256,15 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // same underline; so are the pane's CLOSE BUTTON and the footer's
     // buttons. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
-    // pointer, so the line takes it for itself.
+    // pointer, so the line takes it for itself. An ACCOUNT CHIP under the
+    // pointer has the FOOTER say whose it is and what is left on it.
     let crumb = hit.filter(|h| {
         matches!(
             h,
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
                 | HitTarget::RunPort(..)
+                | HitTarget::AccountTag(_)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
@@ -11954,6 +12005,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 }
                 // A port on a run line: its app, in the browser.
                 Some(HitTarget::RunPort(_, port)) => crate::stacks::open_port(app, port),
+                // An ACCOUNT CHIP: ACCOUNT USAGE, on that account.
+                Some(HitTarget::AccountTag(id)) => crate::usage::open_on(app, &id),
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -12172,6 +12225,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
                             | HitTarget::RunPort(..)
+                            | HitTarget::AccountTag(_)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
@@ -12264,7 +12318,20 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             // background has no row and no cursor, so its menu is the
             // mouse's alone.
             let at = (mouse.column, mouse.row);
-            match app.hit_at(mouse.column, mouse.row) {
+            // An ACCOUNT CHIP is a link on its row, not a row: the right
+            // button is the row's under it.
+            let hit = match app.hit_at(mouse.column, mouse.row) {
+                Some(HitTarget::AccountTag(_)) => app
+                    .hits
+                    .iter()
+                    .find(|(rect, hit)| {
+                        rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                            && !matches!(hit, HitTarget::AccountTag(_))
+                    })
+                    .map(|(_, hit)| hit.clone()),
+                hit => hit,
+            };
+            match hit {
                 // A PROJECT TAB has no cursor to move, but it is the
                 // project's own handle: the right button opens it, with
                 // the project's menu hung under the tab.
@@ -27030,6 +27097,291 @@ mod tests {
         })
     }
 
+    /// Two Claude accounts, the grid's one session on the second, and a
+    /// usage reading for it: 41% left, the reset 2h 14m off.
+    fn on_the_second_account(app: &mut App) {
+        seed_tree(app);
+        app.tree.agents[0].custom_harness = Some("claude-2".into());
+        let now = orion_core::clock::now_secs() as i64;
+        let cell = crate::usage::Cell {
+            used_pct: 59.0,
+            resets_at: Some(now + 2 * 3600 + 14 * 60 + 30),
+        };
+        app.usage.readings.insert(
+            "claude-2".into(),
+            crate::usage::Reading {
+                plan: None,
+                main: crate::usage::Row {
+                    label: String::new(),
+                    cells: [Some(cell), None, None, None],
+                },
+                sub: Vec::new(),
+                extra: None,
+                fetched_at: now,
+            },
+        );
+    }
+
+    /// Where the ACCOUNT CHIP for `id` was last drawn, as the hit map has it.
+    fn chip_at(app: &App, id: &str, below: u16) -> ratatui::layout::Rect {
+        app.hits
+            .iter()
+            .find(|(rect, hit)| rect.y >= below && *hit == HitTarget::AccountTag(id.to_string()))
+            .map(|(rect, _)| *rect)
+            .unwrap_or_else(|| panic!("no chip for {id} drawn below row {below}"))
+    }
+
+    /// The pointer resting on a row's ACCOUNT CHIP has the FOOTER say
+    /// whose it is — the chip, the account by name and email, what is left
+    /// on it and when that resets — in the hints' place, and only while it
+    /// rests there; a click opens ACCOUNT USAGE with its cursor on that
+    /// account.
+    #[test]
+    fn the_chip_under_the_pointer_says_its_account_and_a_click_opens_its_usage() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            on_the_second_account(&mut app);
+            let draw = |app: &mut App| {
+                let mut terminal = Terminal::new(TestBackend::new(130, 34)).unwrap();
+                terminal.draw(|f| ui::draw(f, app)).unwrap();
+                buffer_text(&terminal)
+            };
+            let footer = |text: &str| text.lines().last().unwrap_or_default().to_string();
+            draw(&mut app);
+            let chip = chip_at(&app, "claude-2", 0);
+            let before = footer(&draw(&mut app));
+            assert!(!before.contains("41% left"), "{before}");
+
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Moved, chip.x + 1, chip.y),
+                &mut out,
+            );
+            assert_eq!(
+                app.hover_crumb,
+                Some(HitTarget::AccountTag("claude-2".into()))
+            );
+            let line = footer(&draw(&mut app));
+            for needle in [
+                " C  Claude (not signed in)",
+                "41% left",
+                "resets in 2h 14m",
+                "click for usage",
+            ] {
+                assert!(line.contains(needle), "{needle}: {line}");
+            }
+
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Moved, 0, chip.y + 3),
+                &mut out,
+            );
+            assert!(
+                !footer(&draw(&mut app)).contains("41% left"),
+                "it goes with the pointer"
+            );
+
+            // The right button on it is the row's.
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Down(MouseButton::Right), chip.x + 1, chip.y),
+                &mut out,
+            );
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Menu(_))),
+                "the row's menu: {:?}",
+                app.overlay
+            );
+            app.overlay = None;
+
+            click(&mut app, chip.x + 1, chip.y, &mut out);
+            let Some(Overlay::Usage(view)) = &app.overlay else {
+                panic!("a click opens ACCOUNT USAGE, got {:?}", app.overlay);
+            };
+            let on = app.usage.accounts.get(view.selected).map(|a| a.id.clone());
+            assert_eq!(on.as_deref(), Some("claude-2"), "on that account");
+        });
+    }
+
+    /// The pane's header names the account the session in it runs on:
+    /// its chip, then its name in its tint — and that chip is a chip like
+    /// the row's, the pointer on it saying the account in the footer.
+    #[test]
+    fn the_panes_header_names_the_account_in_its_tint() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            on_the_second_account(&mut app);
+            let mut terminal = Terminal::new(TestBackend::new(130, 34)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let header = app
+                .hits
+                .iter()
+                .filter(|(_, hit)| *hit == HitTarget::AccountTag("claude-2".into()))
+                .map(|(rect, _)| *rect)
+                .find(|rect| rect.width > crate::ui::CHIP_W as u16)
+                .expect("the pane's header names the account");
+            let buf = terminal.backend().buffer().clone();
+            let text: String = (header.x..header.x + header.width)
+                .filter_map(|x| buf.cell((x, header.y)))
+                .map(|c| c.symbol().to_string())
+                .collect();
+            assert_eq!(text, " C  claude-2", "no name or email yet: its id");
+            let tint = crate::theme::ACCOUNT_TINTS[1];
+            assert_eq!(buf.cell((header.x, header.y)).unwrap().bg, tint);
+            let name = buf
+                .cell((header.x + crate::ui::CHIP_W as u16 + 1, header.y))
+                .unwrap();
+            assert_eq!(name.fg, tint, "the name in the account's tint");
+
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Moved, header.x, header.y),
+                &mut out,
+            );
+            assert_eq!(
+                app.hover_crumb,
+                Some(HitTarget::AccountTag("claude-2".into()))
+            );
+        });
+    }
+
+    /// The `⌘N` box and the QUICK PROMPT up, as a `(kind, custom)` and the
+    /// line under its title.
+    fn box_on(app: &App) -> ((AgentKind, Option<String>), String) {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => match &p.kind {
+                PromptKind::QuickPrompt(launch) => {
+                    ((launch.kind, launch.custom.clone()), p.label.clone())
+                }
+                other => panic!("expected the box, got {other:?}"),
+            },
+            other => panic!("expected the box, got {other:?}"),
+        }
+    }
+
+    /// USAGE-AWARE LAUNCHING: with the `⌘N` account at its limit — a
+    /// session on it stopped there, or nothing left at the last reading —
+    /// the box opens on the other account and says so under its title;
+    /// with the default account clear, it opens on the default as ever.
+    #[test]
+    fn a_box_opens_on_the_other_account_while_the_default_is_at_its_limit() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let (on, label) = box_on(&app);
+            assert_eq!(on, (AgentKind::Claude, None));
+            assert!(!label.contains("at its limit"), "{label}");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            app.tree.agents[0].usage_limit = Some(orion_core::UsageLimit {
+                reason: orion_core::LimitReason::RateLimit,
+                message: None,
+            });
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let (on, label) = box_on(&app);
+            assert_eq!(on, (AgentKind::Claude, Some("claude-2".into())));
+            assert!(
+                label.starts_with("a@b.co is at its limit · on claude-2 · "),
+                "{label}"
+            );
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            // A reading with nothing left says the same, with its reset.
+            app.tree.agents[0].usage_limit = None;
+            let now = orion_core::clock::now_secs() as i64;
+            app.usage.readings.insert(
+                "claude".into(),
+                crate::usage::Reading {
+                    plan: None,
+                    main: crate::usage::Row {
+                        label: String::new(),
+                        cells: [
+                            Some(crate::usage::Cell {
+                                used_pct: 100.0,
+                                resets_at: Some(now + 3 * 3600 + 60),
+                            }),
+                            None,
+                            None,
+                            None,
+                        ],
+                    },
+                    sub: Vec::new(),
+                    extra: None,
+                    fetched_at: now,
+                },
+            );
+            app.quick_draft.clear();
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let (on, label) = box_on(&app);
+            assert_eq!(on, (AgentKind::Claude, Some("claude-2".into())));
+            assert!(
+                label.starts_with("a@b.co is at its limit, resets in 3h · on claude-2"),
+                "{label}"
+            );
+        });
+    }
+
+    /// The `Tab` picker's rows say what is left on each account, at the
+    /// right of the row, `41% · 2h`.
+    #[test]
+    fn the_agent_picker_rows_say_each_accounts_headroom() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            on_the_second_account(&mut app);
+            app.focus = Focus::Sessions;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("Tab opens the harness picker, got {:?}", app.overlay);
+            };
+            let row = menu
+                .items
+                .iter()
+                .find(|item| {
+                    matches!(
+                        &item.action,
+                        MenuAction::NewAgentOfKind { custom: Some(id), .. } if id == "claude-2"
+                    )
+                })
+                .expect("the second account's row");
+            assert_eq!(row.hint.as_deref(), Some("41% · 2h"));
+            assert!(row.note, "a note, not a key");
+        });
+    }
+
+    /// With nothing on but the two Claude accounts, `Tab` in the box steps
+    /// to the other account in place — the box, its text and all, never a
+    /// picker of nothing but accounts — and round again.
+    #[test]
+    fn tab_switches_account_in_place_with_only_claude_accounts_on() {
+        with_two_accounts(|_| {
+            crate::config::persist(|cfg| {
+                for id in ["codex", "cursor", "grok", "opencode"] {
+                    cfg.harnesses.entry(id.into()).or_default().enabled = Some(false);
+                }
+            });
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            assert!(paste_into_overlay(&mut app, "Fix auth"));
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_on(&app).0, (AgentKind::Claude, Some("claude-2".into())));
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Fix auth")
+            );
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_on(&app).0, (AgentKind::Claude, None), "and round again");
+        });
+    }
+
     /// `Tab` in the `⌘N` box switches between two Claude accounts for the
     /// one launch: the box opens on the account `⌘N` is set to, the picker
     /// lists the default account right before it, and each pick launches
@@ -27266,8 +27618,10 @@ mod tests {
             for needle in [
                 "Claude accounts",
                 "Claude (a@b.co)",
-                "[on · ~/.claude · same as ~/.claude-2 · tag a2]",
-                "[on · ~/.claude-2 · same as ~/.claude · tag a3]",
+                " A  Claude (a@b.co)",
+                "[on · ~/.claude · same as ~/.claude-2]",
+                " 2  Claude (a@b.co)",
+                "[on · ~/.claude-2 · same as ~/.claude]",
                 "Add account",
                 "⚠ ~/.claude and ~/.claude-2 are signed in as one account,",
                 "private browser window",
@@ -27276,6 +27630,65 @@ mod tests {
             ] {
                 assert!(text.contains(needle), "{needle}:\n{text}");
             }
+        });
+    }
+
+    /// `c` on an account's row steps its chip to the next tint and `g`
+    /// gives it a letter or glyph of your own, each written as the
+    /// account's `account_tags` entry and on the row's chip once the
+    /// overlay is back; an empty `g` puts orion's letter back.
+    #[test]
+    fn c_and_g_change_an_accounts_chip() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let custom = || {
+                crate::config::Config::load()
+                    .account_tags
+                    .get("claude-2")
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let tag = || crate::claude_accounts::tag_of("claude-2").expect("a chip");
+            open_account_row(&mut app, 1, &mut out);
+            assert_eq!((tag().mark.as_str(), tag().tint), ("C", 1));
+
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert_eq!(custom().tint, Some(2));
+            assert_eq!(tag().tint, 2, "the chip takes it at once");
+            assert!(settings_view(&app)
+                .notice
+                .as_ref()
+                .is_some_and(|(n, _)| n.contains("tint 3 of 6")));
+
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::AccountChipMark { id: "claude-2".into() }
+                        && p.input.as_str().is_empty()
+                        && p.label.contains("now C")),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "★", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(custom().icon.as_deref(), Some("★"));
+            assert_eq!(tag().mark, "★");
+            let (_, first) = crate::config::locate_accounts();
+            assert_eq!(settings_view(&app).selected, first + 1, "back on its row");
+            let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains(" ★  Claude (not signed in)"), "{text}");
+            assert!(text.contains("c colour · g letter"), "{text}");
+
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "★"));
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(custom().icon, None);
+            assert_eq!(custom().tint, Some(2), "the tint stays");
+            assert_eq!(tag().mark, "C");
         });
     }
 

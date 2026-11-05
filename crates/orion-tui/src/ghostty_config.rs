@@ -199,6 +199,8 @@ mod tests {
             "cmd+,",
             // The PULL REQUESTS MODAL's edit.
             "cmd+;",
+            // A new agent in a new worktree.
+            "cmd+shift+n",
         ] {
             assert!(releases(&chord(spec)), "{spec}");
         }

@@ -1021,6 +1021,140 @@ impl Account {
     }
 }
 
+// ---- HEADROOM: what is left, where an account is picked ----
+
+/// What is left on one account's login, as the places that name an
+/// account say it: the FOOTER while the pointer is on its ACCOUNT CHIP,
+/// and the new-agent box and its picker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Headroom {
+    /// The emptiest limit at the last reading; None before one landed.
+    pub cell: Option<Cell>,
+    /// A session on the login is stopped at its limit.
+    pub limited: bool,
+}
+
+impl Headroom {
+    /// At its limit: a session stopped on it, or nothing left at the last
+    /// reading.
+    pub fn spent(&self) -> bool {
+        self.limited || self.cell.is_some_and(|c| c.shown_left() <= 0.0)
+    }
+
+    /// `41% · 2h`: the share left on the emptiest limit and the time to
+    /// its reset, by its biggest unit — `at limit · 2h` once spent.
+    pub fn short(&self, now: i64) -> String {
+        let left = match self.cell {
+            _ if self.spent() => "at limit".to_string(),
+            Some(cell) => format!("{:.0}%", cell.shown_left()),
+            None => return String::new(),
+        };
+        match self.resets_in(now) {
+            Some(resets) => format!("{left} · {resets}"),
+            None => left,
+        }
+    }
+
+    /// How long until the emptiest limit resets, by its biggest unit —
+    /// `38m`, `2h`, `3d`. None when the provider gave no time, or it is
+    /// due.
+    pub fn resets_in(&self, now: i64) -> Option<String> {
+        self.cell
+            .and_then(|c| c.resets_at)
+            .filter(|at| *at > now)
+            .map(|at| span_short(at - now))
+    }
+
+    /// The colour the share left is drawn in, the modal's: green, yellow
+    /// at a quarter left, red near none — and red once spent.
+    pub fn color(&self, th: Theme) -> Color {
+        match self.cell {
+            _ if self.spent() => th.err,
+            Some(cell) => left_color(&cell, th),
+            None => th.dim,
+        }
+    }
+
+    /// `41% left · resets in 2h 14m`, `limit reached · resets in 38m`.
+    pub fn long(&self, now: i64) -> String {
+        let left = match self.cell {
+            _ if self.spent() => "limit reached".to_string(),
+            Some(cell) => left_text(&cell),
+            None => String::new(),
+        };
+        let resets = self.cell.map(|c| resets_text(&c, now)).unwrap_or_default();
+        [left, resets]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+impl Account {
+    /// Whether account `id` is read under this heading: it is this one, or
+    /// shares its login.
+    fn heads(&self, id: &str) -> bool {
+        self.id == id || self.also.iter().any(|also| also == id)
+    }
+}
+
+/// `38m`, `2h`, `3d`: [`span`]'s biggest unit alone.
+fn span_short(seconds: i64) -> String {
+    match (seconds / 86_400, seconds / 3600) {
+        (0, 0) => format!("{}m", (seconds / 60).max(1)),
+        (0, h) => format!("{h}h"),
+        (d, _) => format!("{d}d"),
+    }
+}
+
+/// The heading account `id` is read under.
+fn account_of<'a>(usage: &'a Usage, id: &str) -> Option<&'a Account> {
+    usage.accounts.iter().find(|a| a.heads(id))
+}
+
+/// What is left on account `id` ([`Headroom`]), from the last reading and
+/// the sessions stopped at their limit. None while neither says anything.
+pub fn headroom(app: &App, id: &str) -> Option<Headroom> {
+    let limited = limited_harnesses(app);
+    let (key, hit) = match account_of(&app.usage, id) {
+        Some(account) => (account.id.as_str(), account.limit_hit(&limited)),
+        None => (id, limited.contains(id)),
+    };
+    let cell = app.usage.readings.get(key).and_then(|reading| {
+        let limits = reading.limits();
+        emptiest(&limits).map(|i| *limits[i].1)
+    });
+    (cell.is_some() || hit).then_some(Headroom { cell, limited: hit })
+}
+
+/// What the FOOTER says of account `id`'s usage while the pointer is on
+/// its ACCOUNT CHIP: [`Headroom::long`], else why there is no reading,
+/// else that none has landed yet.
+pub(crate) fn readout(app: &App, id: &str) -> String {
+    let now = orion_core::clock::now_secs() as i64;
+    if let Some(room) = headroom(app, id) {
+        return room.long(now);
+    }
+    let key = account_of(&app.usage, id).map_or(id, |a| a.id.as_str());
+    match app.usage.problems.get(key) {
+        Some(problem) => problem.says(Provider::Claude),
+        None => "usage not read yet".into(),
+    }
+}
+
+/// A click on an ACCOUNT CHIP: ACCOUNT USAGE, its cursor on that
+/// account's heading.
+pub(crate) fn open_on(app: &mut App, id: &str) {
+    open(app);
+    let Some(row) = app.usage.accounts.iter().position(|a| a.heads(id)) else {
+        return;
+    };
+    if let Some(Overlay::Usage(view)) = &mut app.overlay {
+        view.select(row, &app.usage.accounts);
+    }
+}
+
 /// The modal's widest: a limit's whole line, a problem's words, the frame.
 const MODAL_W: u16 = 74;
 const INDENT: &str = "   ";
@@ -1162,20 +1296,19 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             " {}",
             crate::ui::truncate(&name, inner_w.saturating_sub(plan.chars().count() + 1))
         );
-        // The ACCOUNT TAG its sessions wear on the grid, ahead of the name.
-        let tag = crate::claude_accounts::tag_of(&account.id)
+        // The ACCOUNT CHIP its sessions wear on the grid, ahead of the name.
+        let chip_w = 1 + crate::ui::CHIP_W;
+        let chip = crate::claude_accounts::tag_of(&account.id)
             .filter(|_| account.provider == Provider::Claude)
-            .filter(|_| inner_w > name.chars().count() + plan.chars().count() + 4);
-        let tag_span = tag.as_ref().map(|t| {
-            Span::styled(
-                format!(" {}", t.letters),
-                sel(Style::default().fg(t.color()).add_modifier(Modifier::BOLD)),
-            )
-        });
-        let tag_w = tag.as_ref().map_or(0, |t| t.letters.chars().count() + 1);
+            .filter(|_| inner_w > name.chars().count() + plan.chars().count() + chip_w)
+            .map(|t| crate::ui::chip(&t, None, th));
+        let tag_w = if chip.is_some() { chip_w } else { 0 };
         let rest = inner_w.saturating_sub(name.chars().count() + plan.chars().count() + tag_w);
-        lines.push(Line::from(vec![
-            tag_span.unwrap_or_else(|| Span::raw("")),
+        let mut heading = Vec::new();
+        if let Some(chip) = chip {
+            heading.extend([Span::styled(" ", sel(Style::default())), chip]);
+        }
+        heading.extend([
             Span::styled(
                 name,
                 sel(Style::default()
@@ -1184,7 +1317,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             ),
             Span::styled(plan, sel(dim)),
             Span::styled(" ".repeat(rest), sel(Style::default())),
-        ]));
+        ]);
+        lines.push(Line::from(heading));
 
         match reading {
             Some(reading) if !signed_out => {
@@ -1621,6 +1755,45 @@ mod tests {
     /// Usage reads each Claude account on its own: a row per account, the
     /// second one asked through its own config dir's keychain item, and a
     /// session stopped at its limit on the second account — a Claude
+    /// What is left on an account reads short where an account is picked
+    /// and long in the footer, the reset by its biggest unit in the one
+    /// and whole in the other; a limit nothing is left on, or a session
+    /// stopped at it, is spent, and a time already past says nothing.
+    #[test]
+    fn headroom_reads_short_and_long_and_knows_when_it_is_spent() {
+        let now = 1_000_000;
+        let room = |used_pct: f64, resets_in: i64, limited: bool| Headroom {
+            cell: Some(Cell {
+                used_pct,
+                resets_at: Some(now + resets_in),
+            }),
+            limited,
+        };
+        let open = room(59.0, 2 * 3600 + 14 * 60, false);
+        assert!(!open.spent());
+        assert_eq!(open.short(now), "41% · 2h");
+        assert_eq!(open.long(now), "41% left · resets in 2h 14m");
+        assert_eq!(room(10.0, 3 * 86_400, false).short(now), "90% · 3d");
+        assert_eq!(room(10.0, 90, false).short(now), "90% · 1m");
+        assert_eq!(room(10.0, -5, false).short(now), "90%", "due: no time");
+
+        let empty = room(100.0, 38 * 60, false);
+        assert!(empty.spent());
+        assert_eq!(empty.short(now), "at limit · 38m");
+        assert_eq!(empty.long(now), "limit reached · resets in 38m");
+        assert!(room(20.0, 60, true).spent(), "a session stopped at it");
+        let th = Theme::default();
+        assert_eq!(empty.color(th), th.err);
+        assert_eq!(open.color(th), th.ok);
+
+        let stopped = Headroom {
+            cell: None,
+            limited: true,
+        };
+        assert_eq!(stopped.short(now), "at limit");
+        assert_eq!(stopped.long(now), "limit reached");
+    }
+
     /// session with the account beside — marks that one, never the
     /// default.
     #[test]

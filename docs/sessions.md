@@ -317,13 +317,15 @@ anything stops; an archived session or one off Claude has nowhere to go, and
 
 orion opens on a GRID of session cards — no modal over it, ever, on any launch. Starting a session
 is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first thing you type is the task.
+`⌘⇧N` opens the same box aimed at a fresh worktree — the WORKTREE PICKER's **+ new worktree**, picked
+already — so a new agent in a new worktree is that one chord, the task and `Enter`.
 
 - **The box** starts on the selected project and in the checkout under the cursor — the worktree
   whose band the cursor is on, open or collapsed; the root branch with nothing selected —
   launching the harness, model and effort the Accounts tab defaults name. Its header spells them out,
   each field beside the key that changes it, where the launch runs over what runs it:
   `project demo ⌘P   worktree main ⌘.` over
-  `agent Claude (you@example.com) Tab   model opus · latest ⌘/   effort high ⌘Y`. The effort is
+  `agent Claude Tab   model opus · latest ⌘/   effort high ⌘Y`. The effort is
   always there — `default` until one is picked — for every harness that has one; an AGENT PRESET on
   the box adds its own `preset … ⇧Tab` field; and a fresh worktree reads `new worktree <branch>` in
   green, the frame turning green with it. The keys are the ones the box answers to, the worktree,
@@ -346,7 +348,16 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   box's own toggle for it gone. `⌘/` opens the harness's model list straight away (`→` on a model
   reaches its efforts), `⌘Y` steps the effort in place — `default`, then the harness's list, round
   again — and `Tab` opens the harness picker — the lists over the box, as the project picker is,
-  so the task stays in front of you while you pick what will run it. The three keymap keys work
+  so the task stays in front of you while you pick what will run it; with nothing switched on but
+  your Claude accounts, `Tab` steps to the next account in place instead. With more than one account
+  the `agent` field names the account as its chip's rows do, by its name or else its email, and
+  beside it what is left on it at the last usage reading — `agent Riplo 41% · 2h Tab`, the share on
+  its emptiest limit and the time to that limit's reset, green, yellow or red as ACCOUNT USAGE
+  colours it, `at limit` once spent — and the picker's rows say the same at their right. When the
+  `⌘N` account is at its limit — a session on it stopped there, or nothing left at the last reading
+  — the box opens on your next Claude account that isn't, and says so first along its bottom
+  (`Riplo is at its limit, resets in 2h · on Personal`); a box whose AGENT PRESET pins an account
+  keeps it. The three keymap keys work
   with any of the box's pickers open over it, and none of them closes the box. `⇧Tab` takes a
   preset; a model or effort picked afterwards for the same harness keeps it. None of it needs the
   key: the header is a row of buttons, and a click on a field opens what the key printed beside it
@@ -419,10 +430,12 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   its name whole wherever there is room for it. A tab's name, its `×`, the chip and the `+` all mark
   themselves while the pointer rests on them. The cards are grouped
   into **BANDS**, one per checkout — the root first, then the rest most recently worked in first.
-  A checkout with nothing running in it is an EMPTY BAND, its rule over a single line,
-  `nothing running` — what can be done there is
-  the footer's to say once the cursor is on it (`⌘N new agent · t terminal · ⌫ delete worktree`,
-  and `→ focus PR` beside the pull request the pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
+  A checkout with nothing running in it is an EMPTY BAND, its rule over a single line that says so
+  and how to start something — `nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree ·
+  t terminal`, the keys your keymap's, the longest giving way on a narrow grid; dim, and in the
+  accent while the cursor is on the band. The footer has the rest once the cursor is on it
+  (`⌘N new agent · t terminal · ⌫ delete worktree`, and `→ focus PR` beside the pull request the
+  pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
   that checkout, and `Backspace` (or **Delete worktree** in its right-click menu) deletes it behind the
   worktree's own confirm — and `⌘⌫` (`⇧D`) does the same from any card on a band, taking every
   session in it down with the checkout behind one confirm that names them; the root's band offers
@@ -459,7 +472,13 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   LINE, `▶ setup`, laid out the same way — the command on a `$`, `setting up…` at the right — which
   goes once the setup exits cleanly, or stays as a red `setup failed (1)` whose attach replays what it
   printed; a **Start stack** meanwhile waits for it ([Configuration](configuration.md#setup-command)).
-  A session is its status dot and name,
+  A session is its status dot and name — with more than one Claude account, the ACCOUNT CHIP
+  between them, the account's letter (or the glyph you gave it) black on the account's tint, so
+  which account each session runs on reads down the grid
+  ([Configuration](configuration.md#every-setting) `account_tags`). The pointer on a chip has the
+  footer say whose it is — `R  Riplo (you@riplo.ai) · 41% left · resets in 2h 14m` — and a click
+  on it opens ACCOUNT USAGE on that account; the pane's header names the account too, after the
+  session's name, its chip and its name in its tint —
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›` — and, for a session sent at a todo, that todo after it, a dim `☐ text` (`☑` once ticked)

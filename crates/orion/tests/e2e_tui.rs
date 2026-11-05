@@ -36,6 +36,8 @@ const CTRL_A: &[u8] = &[0x01];
 /// `⌘U`, `⌘N`, `⌘E` and `⌘F` as Ghostty's kitty protocol spells them.
 const CMD_U: &[u8] = b"\x1b[117;9u";
 const CMD_N: &[u8] = b"\x1b[110;9u";
+/// ⌘⇧N as the kitty protocol spells it: `n`, modifiers 1 + shift 1 + super 8.
+const CMD_SHIFT_N: &[u8] = b"\x1b[110;10u";
 const CMD_E: &[u8] = b"\x1b[101;9u";
 const CMD_F: &[u8] = b"\x1b[102;9u";
 const CMD_SHIFT_R: &[u8] = b"\x1b[114;10u";
@@ -593,6 +595,29 @@ fn tui_project_rename_shows_the_folder_and_empty_undoes_it() {
     // exactly as a freshly added project renders.
     tui.wait_for_gone("Acme API");
     tui.wait_for_text("acme-repo");
+}
+
+/// ⌘⇧N, as Orion.app's Ghostty sends it, opens the new-agent box aimed
+/// at a fresh worktree, in one press.
+#[test]
+fn tui_cmd_shift_n_opens_the_box_on_a_new_worktree() {
+    let mut tui = TuiHarness::spawn();
+    let repo = tui.make_repo("fresh-proj");
+
+    tui.wait_for_text("to begin");
+    add_project(&mut tui, &repo, "fresh-proj");
+
+    tui.send(CMD_SHIFT_N);
+    tui.wait_for_text("what should the agent do?");
+    // The box's header names the branch it will cut — a line of its own,
+    // not the empty band's hint naming the key.
+    let screen = tui.screen_text();
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("new worktree ") && !l.contains("in a new worktree")),
+        "{screen}"
+    );
 }
 
 /// Manual LINK creation is intentionally absent: Shift+L is unbound and

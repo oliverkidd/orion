@@ -393,15 +393,17 @@ pub fn short_name(kind: AgentKind, custom: Option<&str>) -> Option<String> {
     store::short(|short| short.get(id).cloned())
 }
 
-// ---- the ACCOUNT TAG: two letters a row wears for its account ----
+// ---- the ACCOUNT CHIP: the letter a row wears for its account ----
 
-/// The two letters a session row wears after its status dot to say which
-/// Claude account it runs on, and the tint they are drawn in, on a
-/// machine with more than one account. Fixed width, so a column of them
-/// lines up and the model and effort beside them never move.
+/// What a session row wears after its status dot to say which Claude
+/// account it runs on, on a machine with more than one account: one
+/// letter — or the glyph the user picked — in a chip filled with the
+/// account's tint. Fixed width, so a column of them lines up and the
+/// names beside them never move.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountTag {
-    pub letters: String,
+    /// What the chip shows: a capital letter, or the `icon` set for it.
+    pub mark: String,
     /// An index into [`crate::theme::ACCOUNT_TINTS`].
     pub tint: usize,
 }
@@ -412,9 +414,6 @@ impl AccountTag {
         tints[self.tint % tints.len()]
     }
 }
-
-/// How many letters an [`AccountTag`] has.
-pub const TAG_LEN: usize = 2;
 
 /// What one account's tag is made from: the letters of its name, else of
 /// its email's local part, else of its id — lowercase, letters and digits
@@ -451,60 +450,72 @@ fn tag_seed(name: Option<&str>, email: Option<&str>, id: &str) -> String {
 }
 
 /// Every account's tag, from the seeds in registry order (the default
-/// account first, so it keeps the first tint): the seed's first two
-/// letters, or — when an account earlier in the list already has those —
-/// its first letter with a later one, then with a digit. An override the
-/// user set in `account_tags` wins, as written.
+/// account first, so it keeps the first tint): the seed's first letter,
+/// or — when an account earlier in the list already has it — the next
+/// letter of the seed no account has, then a digit. What the user set in
+/// `account_tags` wins, as written: its `icon`, else the first letter of
+/// the older two-letter `tag`.
 fn account_tags(
     seeds: &[(String, String)],
     overrides: &BTreeMap<String, crate::config::AccountTagOverride>,
 ) -> BTreeMap<String, AccountTag> {
-    let mut taken: Vec<String> = overrides
-        .values()
-        .filter_map(|o| o.tag.as_deref().map(fit_tag))
-        .collect();
+    let mut taken: Vec<String> = overrides.values().filter_map(set_mark).collect();
     let mut out = BTreeMap::new();
     for (index, (id, seed)) in seeds.iter().enumerate() {
         let custom = overrides.get(id);
-        let letters = match custom.and_then(|o| o.tag.as_deref()) {
-            Some(tag) => fit_tag(tag),
+        let mark = match custom.and_then(set_mark) {
+            Some(mark) => mark,
             None => {
-                let picked = pick_letters(seed, &taken);
+                let picked = pick_mark(seed, &taken);
                 taken.push(picked.clone());
                 picked
             }
         };
         let tint = custom.and_then(|o| o.tint).unwrap_or(index);
-        out.insert(id.clone(), AccountTag { letters, tint });
+        out.insert(id.clone(), AccountTag { mark, tint });
     }
     out
 }
 
-/// A tag the user typed, held to [`TAG_LEN`] characters and padded out
-/// to them, so the column stays put.
-fn fit_tag(tag: &str) -> String {
-    let mut letters: String = tag.trim().chars().take(TAG_LEN).collect();
-    while letters.chars().count() < TAG_LEN {
-        letters.push(' ');
-    }
-    letters
+/// The mark an `account_tags` entry sets: its `icon`, else its `tag`'s
+/// first letter. None when it sets neither.
+fn set_mark(custom: &crate::config::AccountTagOverride) -> Option<String> {
+    custom.icon.as_deref().and_then(fit_mark).or_else(|| {
+        custom
+            .tag
+            .as_deref()
+            .and_then(fit_mark)
+            .map(|m| m.to_uppercase())
+    })
 }
 
-/// The first pair of letters from `seed` that no tag in `taken` has.
-fn pick_letters(seed: &str, taken: &[String]) -> String {
-    let chars: Vec<char> = seed.chars().collect();
-    let Some(&first) = chars.first() else {
-        return fit_tag("?");
-    };
-    let candidates = chars
-        .iter()
-        .skip(1)
-        .map(|&second| format!("{first}{second}"))
-        .chain((2..=9).map(|n| format!("{first}{n}")));
-    candidates
-        .into_iter()
-        .find(|c| !taken.contains(c))
-        .unwrap_or_else(|| fit_tag(&first.to_string()))
+/// The first character of `typed` a chip can hold — one or two cells
+/// wide, so the chip keeps its width — or None.
+pub fn fit_mark(typed: &str) -> Option<String> {
+    use unicode_width::UnicodeWidthChar;
+    typed
+        .trim()
+        .chars()
+        .find(|c| matches!(c.width(), Some(1 | 2)))
+        .map(String::from)
+}
+
+/// The first letter of `seed` no tag in `taken` has, as a capital, then
+/// a digit.
+fn pick_mark(seed: &str, taken: &[String]) -> String {
+    let candidates = seed
+        .chars()
+        .flat_map(char::to_uppercase)
+        .map(String::from)
+        .chain(('2'..='9').map(String::from));
+    let mut first = None;
+    for candidate in candidates {
+        first.get_or_insert_with(|| candidate.clone());
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    first.unwrap_or_else(|| "?".into())
 }
 
 /// The tag for a session's harness: an [`AccountTag`] when it runs on a
@@ -1061,6 +1072,66 @@ pub fn rename(id: &str, name: &str) -> Result<String, String> {
     })
 }
 
+/// `c` on an account's row: its ACCOUNT CHIP takes the next tint, written
+/// as its `account_tags.<id>.tint` and shown at once. The answer is the
+/// line the settings overlay shows.
+pub fn cycle_tint(id: &str) -> Result<String, String> {
+    let tag = tag_of(id).ok_or_else(no_chip)?;
+    let tints = crate::theme::ACCOUNT_TINTS.len();
+    let next = (tag.tint % tints + 1) % tints;
+    edit_chip(id, |custom| custom.tint = Some(next))?;
+    store::tags(|tags| tags.get_mut(id).map(|tag| tag.tint = next));
+    Ok(format!("{id}'s chip takes tint {} of {tints}", next + 1))
+}
+
+/// `g`'s character typed: account `id`'s ACCOUNT CHIP shows it in place of
+/// its letter, written as its `account_tags.<id>.icon` — empty puts the
+/// letter orion picks back. The answer is the line the settings overlay
+/// shows.
+pub fn set_chip_mark(id: &str, typed: &str) -> Result<String, String> {
+    tag_of(id).ok_or_else(no_chip)?;
+    let icon = match typed.trim() {
+        "" => None,
+        typed => Some(fit_mark(typed).ok_or("that character can't sit in a chip")?),
+    };
+    let note = match &icon {
+        Some(mark) => format!("{id}'s chip shows {mark}"),
+        None => format!("{id}'s chip shows its own letter again"),
+    };
+    edit_chip(id, |custom| custom.icon = icon)?;
+    Ok(note)
+}
+
+/// What [`cycle_tint`] and [`set_chip_mark`] say with only one account:
+/// there is no chip to change.
+fn no_chip() -> String {
+    "a chip shows once there are two Claude accounts".into()
+}
+
+/// Change account `id`'s `account_tags` entry and save it, an entry left
+/// saying nothing going with it. The chips follow at the next read.
+fn edit_chip(
+    id: &str,
+    change: impl FnOnce(&mut crate::config::AccountTagOverride),
+) -> Result<(), String> {
+    let mut cfg = Config::load();
+    let custom = cfg.account_tags.entry(id.to_string()).or_default();
+    change(custom);
+    if *custom == crate::config::AccountTagOverride::default() {
+        cfg.account_tags.remove(id);
+    }
+    cfg.save()
+        .map_err(|e| format!("couldn't save settings: {e}"))
+}
+
+/// The character account `id`'s chip was given (`g`), for its prompt.
+pub fn chip_icon(cfg: &Config, id: &str) -> String {
+    cfg.account_tags
+        .get(id)
+        .and_then(|custom| custom.icon.clone())
+        .unwrap_or_default()
+}
+
 /// Account `id`'s name as its `harnesses` label; empty takes it away, and
 /// an entry that said nothing but the name goes with it.
 fn set_name(cfg: &mut Config, id: &str, name: &str) {
@@ -1147,7 +1218,7 @@ pub fn remove(id: &str, trash: bool) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_tags, tag_seed, AccountTag};
+    use super::{account_tags, fit_mark, tag_seed, AccountTag};
     use crate::config::AccountTagOverride;
     use std::collections::BTreeMap as Map;
 
@@ -1157,10 +1228,7 @@ mod tests {
             .map(|(id, seed)| (id.to_string(), seed.to_string()))
             .collect();
         let tags = account_tags(&seeds, overrides);
-        seeds
-            .iter()
-            .map(|(id, _)| tags[id].letters.clone())
-            .collect()
+        seeds.iter().map(|(id, _)| tags[id].mark.clone()).collect()
     }
 
     #[test]
@@ -1171,8 +1239,10 @@ mod tests {
         assert_eq!(tag_seed(None, None, "claude-2"), "claude2");
     }
 
+    /// Each account's chip is one capital letter no other account's
+    /// has: its seed's first, else a later one, else a digit.
     #[test]
-    fn tags_never_collide_and_keep_two_columns() {
+    fn marks_never_collide_and_are_one_letter() {
         let tags = tags_of(
             &[
                 ("claude", "oliver"),
@@ -1181,22 +1251,25 @@ mod tests {
             ],
             &Map::new(),
         );
-        assert_eq!(tags, ["ol", "oi", "o2"]);
-        assert!(tags.iter().all(|t| t.chars().count() == super::TAG_LEN));
+        assert_eq!(tags, ["O", "L", "2"]);
     }
 
+    /// An `icon` the user set wins over the letter and is never picked
+    /// for another account; the older two-letter `tag` still gives its
+    /// first letter.
     #[test]
     fn an_override_wins_and_is_never_taken_by_another() {
         let mut overrides = Map::new();
         overrides.insert(
             "claude-2".to_string(),
             AccountTagOverride {
-                tag: Some("ol".into()),
+                icon: Some("O".into()),
                 tint: Some(4),
+                ..AccountTagOverride::default()
             },
         );
         let seeds = [("claude", "oliver"), ("claude-2", "work")];
-        assert_eq!(tags_of(&seeds, &overrides), ["oi", "ol"]);
+        assert_eq!(tags_of(&seeds, &overrides), ["L", "O"]);
         let seeds: Vec<(String, String)> = seeds
             .iter()
             .map(|(id, seed)| (id.to_string(), seed.to_string()))
@@ -1205,11 +1278,31 @@ mod tests {
         assert_eq!(
             tags["claude-2"],
             AccountTag {
-                letters: "ol".into(),
+                mark: "O".into(),
                 tint: 4
             }
         );
         assert_eq!(tags["claude"].tint, 0, "registry order picks the rest");
+
+        overrides.insert(
+            "claude-2".to_string(),
+            AccountTagOverride {
+                tag: Some("wk".into()),
+                ..AccountTagOverride::default()
+            },
+        );
+        assert_eq!(tags_of(&[("claude-2", "x")], &overrides), ["W"]);
+    }
+
+    /// A glyph is kept as typed, one character of it, and only one a chip
+    /// can hold.
+    #[test]
+    fn a_mark_is_one_character_a_chip_can_hold() {
+        assert_eq!(fit_mark(" ★ and more").as_deref(), Some("★"));
+        assert_eq!(fit_mark("🚀").as_deref(), Some("🚀"));
+        assert_eq!(fit_mark("w").as_deref(), Some("w"));
+        assert_eq!(fit_mark("  "), None);
+        assert_eq!(fit_mark("\u{0301}"), None, "a lone combining mark");
     }
 
     use super::*;
@@ -1940,7 +2033,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(cfg.section_title("claude-2"), "Claude (a@b.co) · ~/.claude-2");
             assert_eq!(
                 cfg.account_value(&AccountRow::Account("claude-2".into())),
-                "on · ~/.claude-2 · same as ~/.claude · tag a3"
+                "on · ~/.claude-2 · same as ~/.claude"
             );
             assert_eq!(cfg.account_value(&AccountRow::Add), "~/.claude-3");
             let rows = crate::config::settings_rows(crate::config::accounts_tab(), 0);
