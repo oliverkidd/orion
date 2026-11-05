@@ -480,12 +480,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   cursor, or `↑`/`↓` against the grid's edge, scrolls just far enough to bring the cursor's entry
   back on screen — with the checkout's rule when it is the first — and a click on one does the
   same.
-- **The pane** runs down the right side of the cards, full height and half the width — or along
-  the bottom, under them, with the `⬓` button just before the `×` on its header (`◨` there moves
-  it back) or Settings → Appearance → **Session pane** (`session_pane`, which the button writes; a
-  window too narrow for it beside a column of cards lays it along the bottom until there is
-  room) — and reads whichever card the cursor is on — on a collapsed band, its remembered
-  card: `● polish-nav  ⎇ feat  ↗ #42` on its header, the card's name, its checkout and its pull
+- **The pane** runs down the right side of the grid, full height and half the width — a window
+  too narrow for it beside the grid lays it along the bottom until there is room — and reads
+  whichever entry the cursor is on: `● polish-nav  ⎇ feat  ↗ #42` on its header, the card's name, its checkout and its pull
   request, and that session
   live under it, swapping as you walk the
   grid, so stepping across the bands reads each checkout's progress in turn. A terminal's chip

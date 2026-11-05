@@ -2263,14 +2263,7 @@ impl PaneTab {
 /// folds the pane away, as `^~` does. A cell of air either side, so the
 /// target is wider than the glyph.
 const PANE_CLOSE: &str = " × ";
-/// The PANE's SIDE BUTTON, just before the CLOSE BUTTON: a picture of the
-/// layout one click moves it to — the pane down the right of the cards on
-/// a pane along the bottom, the pane along the bottom on one down the
-/// right. The click writes Settings → Appearance → **Session pane**, so
-/// the move lasts. Aired like the close button.
-const PANE_TO_RIGHT: &str = " ◨ ";
-const PANE_TO_BOTTOM: &str = " ⬓ ";
-/// The PANE's FULL-SCREEN BUTTON, before the SIDE BUTTON: one click gives
+/// The PANE's FULL-SCREEN BUTTON, before the CLOSE BUTTON: one click gives
 /// the session the whole screen, as `^F` does. A full-screen session's
 /// header ends in the NORMAL-SIZE BUTTON, which brings it back down.
 const PANE_FULL_SCREEN: &str = " ⤢ ";
@@ -2301,7 +2294,7 @@ fn header_button(
 /// The PANE's own header in the LAUNCHER VIEW: what the pane is reading
 /// — the card under the cursor, session or terminal, and the checkout
 /// it runs in — then the state tag (`scroll 4`, `exited`) right-aligned
-/// before the FULL-SCREEN, SIDE and CLOSE BUTTONS. A rule under it, and the rect the
+/// before the FULL-SCREEN and CLOSE BUTTONS. A rule under it, and the rect the
 /// PTY draws in returned, exactly as `ui::terminal_frame` does for the
 /// panels' pane. Opening a terminal is `t`'s alone: the grid offers no
 /// `+` for it.
@@ -2315,19 +2308,13 @@ pub(super) fn pane_frame(
     let th = app.theme;
     if let Some(r) = row_rect(area, 1) {
         let r = pad_x(r);
-        // The CLOSE BUTTON holds the right end of the row, the SIDE
-        // BUTTON stands before it — unless there is nowhere to move the
-        // pane (`App::launcher_pane_move_to`) — and the state tag
+        // The CLOSE BUTTON holds the right end of the row, the
+        // FULL-SCREEN BUTTON stands before it, and the state tag
         // (`scroll 4`, exited) is right-aligned before those: the title
-        // gets what the three leave.
-        let side_button = app.launcher_pane_move_to().map(|to| match to {
-            crate::launcher::PaneSide::Right => PANE_TO_RIGHT,
-            crate::launcher::PaneSide::Bottom => PANE_TO_BOTTOM,
-        });
-        let side_w = side_button.map_or(0, |b| b.chars().count() as u16);
+        // gets what they leave.
         let zoom_w = PANE_FULL_SCREEN.chars().count() as u16;
         let close_w = PANE_CLOSE.chars().count() as u16;
-        let buttons_w = zoom_w + side_w + close_w;
+        let buttons_w = zoom_w + close_w;
         let taken = usize::from(buttons_w)
             + right
                 .as_ref()
@@ -2379,26 +2366,6 @@ pub(super) fn pane_frame(
                 th.accent,
             );
             x += zoom_w;
-            if let Some(glyph) = side_button {
-                let side = Rect {
-                    x,
-                    width: side_w,
-                    ..r
-                };
-                // Lit under the pointer as the header's other buttons are:
-                // a half-filled square does not say it is one until then.
-                let fg = if app.hover_crumb == Some(HitTarget::LauncherPaneSide) {
-                    th.accent
-                } else {
-                    th.muted
-                };
-                f.render_widget(
-                    Paragraph::new(Span::styled(glyph, Style::default().fg(fg))),
-                    side,
-                );
-                app.hits.push((side, HitTarget::LauncherPaneSide));
-                x += side_w;
-            }
             let close = Rect {
                 x,
                 width: close_w,

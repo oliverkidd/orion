@@ -572,45 +572,16 @@ pub fn split(body: Rect, want: Option<u16>) -> (Rect, Option<Rect>) {
     (view, Some(pane))
 }
 
-/// Where the PANE sits against the GRID: down the right side of the
-/// cards — the default — or along the bottom, under them, where it sat
-/// before there was a choice. Settings → Appearance → **Session pane**
-/// (`session_pane`, read through `Config::pane_side`), or the SIDE BUTTON
-/// on the pane's own TAB STRIP, which writes that same setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Where the PANE sits against the GRID: down the right side of it, or
+/// along the bottom, under it, on a window too narrow to stand it beside
+/// the grid ([`fitted_side`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneSide {
     Bottom,
-    #[default]
     Right,
 }
 
 impl PaneSide {
-    /// The word `config.json` stores, and the value the settings row shows.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            PaneSide::Bottom => "bottom",
-            PaneSide::Right => "right",
-        }
-    }
-
-    /// A stored word read back. Anything else — a typo in a hand edit, a
-    /// side a newer build added, the `left` older builds offered — is the
-    /// default, down the right.
-    pub fn parse(word: &str) -> Self {
-        match word.trim() {
-            "bottom" => PaneSide::Bottom,
-            _ => PaneSide::default(),
-        }
-    }
-
-    /// The other side: where the pane's SIDE BUTTON moves it.
-    pub const fn other(self) -> Self {
-        match self {
-            PaneSide::Bottom => PaneSide::Right,
-            PaneSide::Right => PaneSide::Bottom,
-        }
-    }
-
     /// The pane stands beside the cards rather than under them: its edge
     /// runs down the body, and is dragged sideways.
     pub fn beside(self) -> bool {
@@ -654,15 +625,15 @@ pub fn pane_width(body: Rect, want: Option<u16>) -> Option<u16> {
     )
 }
 
-/// The side the pane is laid out on in `body`: the one `side` asks for,
-/// or the bottom when the body is too narrow to stand the pane beside a
-/// column of cards — a pane under the grid beats no pane at all on a
-/// narrow window, and the setting is picked up again once there is room.
-pub fn fitted_side(body: Rect, side: PaneSide) -> PaneSide {
-    if side.beside() && pane_width(body, None).is_none() {
+/// The side the pane is laid out on in `body`: down the right, or the
+/// bottom when the body is too narrow to stand the pane beside the grid —
+/// a pane under the grid beats no pane at all on a narrow window, and it
+/// goes back to the right once there is room.
+pub fn fitted_side(body: Rect) -> PaneSide {
+    if pane_width(body, None).is_none() {
         PaneSide::Bottom
     } else {
-        side
+        PaneSide::Right
     }
 }
 
@@ -2283,24 +2254,6 @@ mod tests {
         assert_eq!(split(short, Some(20)), (short, None));
     }
 
-    /// The **Session pane** words: both sides round-trip and are each
-    /// other's other, and a word off the list — `left` included, which
-    /// older builds offered — is the right side the pane has out of the
-    /// box.
-    #[test]
-    fn pane_sides_read_back_and_default_to_the_right() {
-        for side in [PaneSide::Bottom, PaneSide::Right] {
-            assert_eq!(PaneSide::parse(side.as_str()), side);
-            assert_eq!(side.other().other(), side);
-            assert_ne!(side.other(), side);
-        }
-        assert_eq!(PaneSide::parse(" bottom "), PaneSide::Bottom);
-        assert_eq!(PaneSide::parse("left"), PaneSide::Right);
-        assert_eq!(PaneSide::parse("top"), PaneSide::Right);
-        assert_eq!(PaneSide::parse(""), PaneSide::Right);
-        assert_eq!(PaneSide::default(), PaneSide::Right);
-    }
-
     /// A pane beside the cards splits the body's columns rather than its
     /// rows: half of them by default, all of the height, the grid on the
     /// left — and its edge, grip column and grab zone face the cards.
@@ -2349,12 +2302,11 @@ mod tests {
             Some(160 - GRID_MIN_W),
             "the grid's narrowest kept"
         );
-        assert_eq!(fitted_side(body, PaneSide::Right), PaneSide::Right);
+        assert_eq!(fitted_side(body), PaneSide::Right);
 
         let narrow = Rect::new(0, 0, GRID_MIN_W + PANE_MIN_W - 1, 40);
         assert_eq!(pane_width(narrow, None), None);
-        assert_eq!(fitted_side(narrow, PaneSide::Right), PaneSide::Bottom);
-        assert_eq!(fitted_side(narrow, PaneSide::Bottom), PaneSide::Bottom);
+        assert_eq!(fitted_side(narrow), PaneSide::Bottom);
     }
 
     /// The picker lists every project, each with its path; typing narrows

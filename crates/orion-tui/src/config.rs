@@ -67,14 +67,6 @@ impl OutsideTerminal {
     }
 }
 
-/// The **Session pane** choices (Settings → Appearance), in the order the
-/// row cycles them: the [`crate::launcher::PaneSide`] sides by name, the
-/// default first.
-pub const PANE_SIDES: &[&str] = &[
-    crate::launcher::PaneSide::Right.as_str(),
-    crate::launcher::PaneSide::Bottom.as_str(),
-];
-
 /// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
 /// that has the keys when it opens, the default first.
 pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
@@ -533,7 +525,6 @@ pub enum SettingKind {
     Animations,
     Spotify,
     BlackBackground,
-    SessionPane,
     CardIssueNumber,
     HideDraftPrs,
     QuickPromptKind,
@@ -817,12 +808,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::BlackBackground,
                 label: "Black background",
                 hint: "Paint the window pure black instead of the terminal's own background (off keeps the terminal's, transparency included)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::SessionPane,
-                label: "Session pane",
-                hint: "Where the session under the cursor is read: beside the cards on the right, or under them",
                 group: "",
             },
             SettingSpec {
@@ -1464,15 +1449,6 @@ pub struct Config {
     /// Ghostty is a dark gray. On by default; off lets a transparency or
     /// image configured in the terminal show through.
     pub black_background: bool,
-    /// Where the LAUNCHER VIEW's PANE — the session under the cursor, live
-    /// — sits against the GRID of cards: `right` (down that side of them,
-    /// the default) or `bottom` (under them). Also written by the SIDE
-    /// BUTTON on the pane's own TAB STRIP. Read through
-    /// [`Config::pane_side`], so a word off the list — the `left` older
-    /// builds offered too — is the right; a window too narrow for the
-    /// pane beside the cards lays it out along the bottom until there is
-    /// room (`launcher::fitted_side`).
-    pub session_pane: String,
     /// RETIRED with every card carrying its last prompt. Through 0.40 the
     /// **Card prompt** SETTING (Settings → Appearance, `shown` by default)
     /// could leave the last prompt off every session card on the GRID.
@@ -1880,7 +1856,6 @@ impl Default for Config {
             animations: true,
             spotify: true,
             black_background: true,
-            session_pane: crate::launcher::PaneSide::default().as_str().into(),
             hide_card_prompt: false,
             card_issue_number: true,
             hide_draft_prs: false,
@@ -2145,12 +2120,6 @@ impl Config {
     /// The **Ticked commits** SETTING says one at a time.
     pub fn diff_one_at_a_time(&self) -> bool {
         self.diff_ticked_word() == ONE_AT_A_TIME
-    }
-
-    /// `session_pane` resolved to the side the LAUNCHER VIEW lays its pane
-    /// out on.
-    pub fn pane_side(&self) -> crate::launcher::PaneSide {
-        crate::launcher::PaneSide::parse(&self.session_pane)
     }
 
     /// `outside_terminal` resolved to the app ⇧T opens.
@@ -3201,7 +3170,6 @@ impl Config {
             SettingKind::Animations => on_off(self.animations).into(),
             SettingKind::Spotify => on_off(self.spotify).into(),
             SettingKind::BlackBackground => on_off(self.black_background).into(),
-            SettingKind::SessionPane => self.pane_side().as_str().into(),
             SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
             SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
@@ -3380,12 +3348,6 @@ impl Config {
             }
             SettingKind::BlackBackground => {
                 self.black_background = !self.black_background;
-            }
-            SettingKind::SessionPane => {
-                // Cycled from the resolved side, so a hand edit off the
-                // list steps on from the right it reads as.
-                self.session_pane =
-                    cycle_choice(self.pane_side().as_str(), PANE_SIDES, step).into();
             }
             SettingKind::CardIssueNumber => {
                 self.card_issue_number = !self.card_issue_number;
@@ -5121,45 +5083,6 @@ mod tests {
 
         let older: Config = serde_json::from_str("{}").unwrap();
         assert!(older.spotify, "a config predating the key turns it on");
-    }
-
-    /// The **Session pane**: down the right out of the box, cycled from
-    /// its Appearance row to the bottom and back, persisted under
-    /// `session_pane`. A config predating the key, or holding a word off
-    /// the list — `left`, which older builds offered, included — reads as
-    /// the right.
-    #[test]
-    fn session_pane_defaults_to_the_right_cycles_and_persists() {
-        use crate::launcher::PaneSide;
-        let mut cfg = Config::default();
-        assert_eq!(cfg.pane_side(), PaneSide::Right);
-        let (tab, row) = locate(SettingKind::SessionPane).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(cfg.value_label(SettingKind::SessionPane), "right");
-        cfg.cycle(tab, row, 0);
-        assert_eq!(cfg.pane_side(), PaneSide::Bottom);
-        assert_eq!(cfg.value_label(SettingKind::SessionPane), "bottom");
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.pane_side(), PaneSide::Right, "and round again");
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.pane_side(), PaneSide::Bottom, "either arrow walks it");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).pane_side(), PaneSide::Bottom);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("session_pane"), Some(&serde_json::json!("bottom")));
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(older.pane_side(), PaneSide::Right, "predating the key");
-        let mut odd: Config = serde_json::from_str(r#"{"session_pane": "top"}"#).unwrap();
-        assert_eq!(odd.pane_side(), PaneSide::Right, "a word off the list");
-        odd.cycle(tab, row, 0);
-        assert_eq!(odd.pane_side(), PaneSide::Bottom, "steps on from the right");
-        let left: Config = serde_json::from_str(r#"{"session_pane": "left"}"#).unwrap();
-        assert_eq!(left.pane_side(), PaneSide::Right, "the retired left side");
     }
 
     /// The QUICK PROMPT's focus toggle: off unless the user turns it on,

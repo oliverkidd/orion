@@ -165,11 +165,6 @@ pub enum HitTarget {
     /// the pane away, the same `event_loop::launcher::toggle_pane` `^~`
     /// runs.
     LauncherPaneClose,
-    /// The SIDE BUTTON just before it: a click moves the pane to the
-    /// other side of the cards — under them to the right, the right back
-    /// under them — by writing Settings → Appearance → **Session pane**
-    /// (`event_loop::launcher::move_pane`).
-    LauncherPaneSide,
     /// The FULL-SCREEN BUTTON before those in the pane's header, and the
     /// NORMAL-SIZE BUTTON at the right end of a full-screen session's: a
     /// click toggles between the two, the same
@@ -4122,12 +4117,6 @@ pub struct App {
     /// kept apart from it so switching sides never reads a height as a
     /// width. Re-clamped the same way (`launcher::pane_width`).
     pub launcher_pane_w: Option<u16>,
-    /// Where the PANE sits against the GRID — along the bottom, or down
-    /// the right side — as Settings → Appearance → **Session pane** has it
-    /// (`event_loop::apply_config`). What a frame lays out
-    /// is [`App::launcher_pane_side`], which falls back to the bottom on a
-    /// window too narrow to stand the pane beside the cards.
-    pub launcher_pane_at: crate::launcher::PaneSide,
     /// The LAUNCHER VIEW's PANE is folded away (`^~`): the GRID takes the
     /// whole body and no session is read under it. Hiding it also lets
     /// the card under the cursor go (`event_loop::launcher::toggle_pane`
@@ -4886,7 +4875,6 @@ impl App {
             mark_anchor: None,
             launcher_pane_h: None,
             launcher_pane_w: None,
-            launcher_pane_at: crate::launcher::PaneSide::default(),
             launcher_pane_hidden: false,
             launcher_scroll: 0,
             launcher_scroll_held: false,
@@ -5508,9 +5496,9 @@ impl App {
     }
 
     /// `body` in two the way the LAUNCHER VIEW draws it: the grid's half
-    /// and the PANE — along the bottom, or beside the cards on the side
-    /// [`App::launcher_pane_side`] names — or the whole body and no pane
-    /// at all. `launcher::split_at` is the geometry — whether there is
+    /// and the PANE — down the right, or along the bottom of a narrow
+    /// window ([`App::launcher_pane_side`]) — or the whole body and no
+    /// pane at all. `launcher::split_at` is the geometry — whether there is
     /// room for a pane, and how the two share the rows or the columns;
     /// this is the one place the fold (`^~`) and the aim are read, so the
     /// draw, the drag grip and the keys all agree about whether a pane is
@@ -5525,7 +5513,7 @@ impl App {
         if self.launcher_pane_hidden || !self.launcher_aimed() {
             return (body, None);
         }
-        let side = crate::launcher::fitted_side(body, self.launcher_pane_at);
+        let side = crate::launcher::fitted_side(body);
         let want = if side.beside() {
             self.launcher_pane_w
         } else {
@@ -5534,23 +5522,13 @@ impl App {
         crate::launcher::split_at(body, side, want)
     }
 
-    /// The side the PANE is laid out on this frame: the one Settings asks
-    /// for, or the bottom on a body too narrow to stand it beside the cards
+    /// The side the PANE is laid out on this frame: down the right, or
+    /// the bottom on a body too narrow to stand it beside the grid
     /// (`launcher::fitted_side`). The drag, the grip and the pointer's
     /// arrows all read this one, so none of them can disagree with the
     /// draw about which way the pane's edge runs.
     pub fn launcher_pane_side(&self) -> crate::launcher::PaneSide {
-        crate::launcher::fitted_side(self.launcher_body, self.launcher_pane_at)
-    }
-
-    /// Where the PANE's SIDE BUTTON would move it: the side the pane is
-    /// not on this frame. None while it is along the bottom of a body too
-    /// narrow to stand it beside the cards — a move there would change the
-    /// setting and nothing on screen, so no button is drawn for it. The
-    /// draw and the click both read this one.
-    pub fn launcher_pane_move_to(&self) -> Option<crate::launcher::PaneSide> {
-        let to = self.launcher_pane_side().other();
-        (crate::launcher::fitted_side(self.launcher_body, to) == to).then_some(to)
+        crate::launcher::fitted_side(self.launcher_body)
     }
 
     /// Where the edge between the cards and the PANE sits on this frame,

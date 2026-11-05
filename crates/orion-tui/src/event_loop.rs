@@ -9128,7 +9128,6 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.black_background = cfg.black_background;
     app.card_issue_number = cfg.card_issue_number;
     app.show_all_worktrees = cfg.show_all_worktrees;
-    app.launcher_pane_at = cfg.pane_side();
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
     app.diff_one_at_a_time = cfg.diff_one_at_a_time();
@@ -12106,8 +12105,8 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // in `ui::launcher_view`). Only those take it: every other target is
     // a card, which has its own highlight, or the background.
     // The header's PR & ISSUE COUNTS are buttons of the same kind, and
-    // take the same underline; so are the pane's CLOSE and SIDE BUTTONS
-    // and the footer's memory readout. A card's PULL REQUEST LINE is a
+    // take the same underline; so are the pane's CLOSE BUTTON and the
+    // footer's memory readout. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
     // pointer, so the line takes it for itself.
     let crumb = hit.filter(|h| {
@@ -12119,7 +12118,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
-                | HitTarget::LauncherPaneSide
                 | HitTarget::LauncherPaneZoom
                 | HitTarget::LauncherTabAdd
                 | HitTarget::LauncherTabMore
@@ -12948,11 +12946,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // is only drawn on a pane that is showing, so the toggle
                 // can only ever fold.
                 Some(HitTarget::LauncherPaneClose) => launcher::toggle_pane(app),
-                // The SIDE BUTTON beside it: the pane moves to the other
-                // side of the cards, written to Settings as the
-                // **Session pane** row's own cycling writes it.
-                Some(HitTarget::LauncherPaneSide) => launcher::move_pane(app),
-                // The FULL-SCREEN BUTTON before them, and the NORMAL-SIZE
+                // The FULL-SCREEN BUTTON before it, and the NORMAL-SIZE
                 // BUTTON in a full-screen session's header: the one
                 // toggle `^F` runs.
                 Some(HitTarget::LauncherPaneZoom) => {
@@ -24772,16 +24766,16 @@ diff --git a/src/c.rs b/src/c.rs
     fn launcher_pane_edge_drags_the_pane_taller_and_shorter() {
         use crate::launcher::{pane_height, GRID_KEEP_H, HEAD_H, PANE_MIN_H};
         let mut app = App::new();
-        // A pane along the bottom, whose edge trades rows; the one beside
-        // the cards has its own drag test in `event_loop::launcher`.
-        app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
-        // Tall enough that the default share, and a drag either side of
-        // it, sit clear of both stops — the stops get their own drags below.
-        let body = ratatui::layout::Rect::new(0, 0, 120, 60);
+        // A pane along the bottom of a window too narrow to stand it
+        // beside the grid, whose edge trades rows; the one beside the grid
+        // has its own drag test in `event_loop::launcher`. Tall enough
+        // that the default share, and a drag either side of it, sit clear
+        // of both stops — the stops get their own drags below.
+        let body = ratatui::layout::Rect::new(0, 0, 70, 60);
         app.launcher_body = body;
         let boundary = body.height - pane_height(body, None).expect("60 rows fits a pane");
         app.hits.push((
-            ratatui::layout::Rect::new(0, boundary - 1, 120, 2),
+            ratatui::layout::Rect::new(0, boundary - 1, 70, 2),
             HitTarget::LauncherPaneSplitter,
         ));
         let mut out = Vec::new();

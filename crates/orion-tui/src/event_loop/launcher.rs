@@ -287,23 +287,6 @@ pub(super) fn toggle_pane(app: &mut App) {
     app.dirty = true;
 }
 
-/// The pane's SIDE BUTTON: move the PANE to the other side of the cards —
-/// from along the bottom to down the right, or back — by writing Settings
-/// → Appearance → **Session pane** and adopting it, exactly as cycling
-/// that row does, so the move outlives the restart and the row reads it.
-/// Nothing where the button is not drawn (`App::launcher_pane_move_to`).
-pub(super) fn move_pane(app: &mut App) {
-    let Some(to) = app.launcher_pane_move_to() else {
-        return;
-    };
-    let mut cfg = crate::config::Config::load();
-    cfg.session_pane = to.as_str().into();
-    if super::save_config(app, &cfg) {
-        super::apply_config(app, &cfg);
-    }
-    app.dirty = true;
-}
-
 /// A double-click on the pane's edge: the edge snaps to the middle of the
 /// body, the cards and the pane sharing it evenly — a row each way under
 /// the cards, a column each way beside them — and that size is remembered
@@ -2848,11 +2831,6 @@ mod tests {
     /// testable off one tree. The view is on; nothing is owed at boot.
     fn two_sessions() -> App {
         let mut app = App::new();
-        // Along the bottom: these tests were written against that
-        // geometry — the row the pane's strip lands on, how many cards a
-        // row holds — and the side is the setting's own tests' business
-        // (`the_side_button_moves_the_pane_to_the_bottom_and_back`).
-        app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
         seed_tree(&mut app);
         seed_feat(&mut app, "/tmp/demo-feat".into());
         seed_web(&mut app);
@@ -3020,7 +2998,9 @@ mod tests {
     /// falling through to [`super::open_session`]). Full-screen is a
     /// state, not a fit, so the next `draw` at the usual size keeps it.
     fn full_screen(app: &mut App) {
-        draw_at(app, 130, 20);
+        // Too narrow to stand a pane beside the grid, too short for one
+        // under it.
+        draw_at(app, 70, 20);
         key(app, KeyCode::Enter, KeyModifiers::NONE);
     }
 
@@ -3034,6 +3014,8 @@ mod tests {
     #[test]
     fn the_panes_top_edge_drags_the_grid_and_the_pane() {
         with_default_config(|| {
+            // Drawn too narrow to stand the pane beside the grid: it lies
+            // along the bottom.
             let mut app = two_sessions();
             let edge = |app: &App| {
                 app.hits
@@ -3049,7 +3031,7 @@ mod tests {
                     .to_string()
             };
 
-            let terminal = draw(&mut app);
+            let terminal = draw_at(&mut app, 70, 34);
             let zone = edge(&app).expect("the pane's edge was registered");
             let body = app.launcher_body;
             let pane_h = crate::launcher::pane_height(body, None).expect("34 rows fits a pane");
@@ -3086,7 +3068,7 @@ mod tests {
             assert_eq!(app.launcher_pane_h, Some(pane_h + 4));
 
             // The next frame lays it out there, grip and grab zone with it.
-            let terminal = draw(&mut app);
+            let terminal = draw_at(&mut app, 70, 34);
             assert_eq!(
                 edge(&app).expect("still draggable").y,
                 zone.y - 4,
@@ -3100,8 +3082,8 @@ mod tests {
         });
     }
 
-    /// INPUT PARITY for a pane BESIDE the cards (Settings → Appearance →
-    /// **Session pane**): the draw lays it down the right side, registers
+    /// INPUT PARITY for the pane BESIDE the grid: the draw lays it down
+    /// the right side, registers
     /// the grab zone on the edge facing the cards, and a drag through the
     /// loop's own entry point moves that edge sideways — the next frame
     /// laying the pane out at the width it was left at, and the height it
@@ -3112,7 +3094,6 @@ mod tests {
         with_default_config(|| {
             let side = PaneSide::Right;
             let mut app = two_sessions();
-            app.launcher_pane_at = side;
             let edge = |app: &App| {
                 app.hits
                     .iter()
@@ -3171,7 +3152,6 @@ mod tests {
         use crate::launcher::PaneSide;
         with_default_config(|| {
             let mut app = two_sessions();
-            app.launcher_pane_at = PaneSide::Right;
             draw(&mut app);
             let body = app.launcher_body;
             let (_, pane) = app.launcher_split(body);
@@ -3244,11 +3224,11 @@ mod tests {
     /// a drag.
     #[test]
     fn a_double_click_on_the_panes_top_edge_centers_it() {
-        use crate::launcher::PaneSide;
         with_default_config(|| {
+            // Too narrow to stand the pane beside the grid: along the
+            // bottom.
             let mut app = two_sessions();
-            app.launcher_pane_at = PaneSide::Bottom;
-            draw(&mut app);
+            draw_at(&mut app, 70, 34);
             let body = app.launcher_body;
             let pane_h = crate::launcher::pane_height(body, None).expect("34 rows fits a pane");
             let boundary = body.y + body.height - pane_h;
@@ -3290,7 +3270,7 @@ mod tests {
             assert!(app.launcher_pane_drag.is_none());
             assert_eq!(app.launcher_pane_w, None, "the side's width untouched");
 
-            draw(&mut app);
+            draw_at(&mut app, 70, 34);
             let (grid, centered) = app.launcher_split(body);
             let centered = centered.expect("still a pane");
             assert_eq!(
@@ -3302,90 +3282,6 @@ mod tests {
         });
     }
 
-    /// The SIDE BUTTON on the pane's TAB STRIP, just before its `×`: a
-    /// click on the pane down the right — where it opens out of the box —
-    /// moves it under the cards, and the same button — now showing the
-    /// way back — moves it down the right again. Each move is the
-    /// **Session pane** setting's, written to the config as the settings
-    /// row writes it, so it outlives the restart.
-    #[test]
-    fn the_side_button_moves_the_pane_to_the_bottom_and_back() {
-        use crate::launcher::PaneSide;
-        with_default_config(|| {
-            let mut app = two_sessions();
-            app.launcher_pane_at = PaneSide::default();
-            let click = |app: &mut App| {
-                let at = tab_at(app, HitTarget::LauncherPaneSide);
-                let close = tab_at(app, HitTarget::LauncherPaneClose);
-                assert_eq!(at.y, close.y, "on the strip's own row");
-                assert_eq!(at.x + at.width, close.x, "just before the `×`");
-                mouse(app, MouseEventKind::Down(MouseButton::Left), at.x + 1, at.y);
-            };
-            let side_strip = |app: &App, terminal: &Terminal<TestBackend>| {
-                let pane = app.launcher_split(app.launcher_body).1.expect("a pane");
-                buffer_text(terminal)
-                    .lines()
-                    .nth(usize::from(pane.y) + 1)
-                    .map(|line| line.chars().skip(usize::from(pane.x)).collect::<String>())
-                    .unwrap_or_default()
-            };
-
-            let terminal = draw(&mut app);
-            assert_eq!(app.launcher_pane_side(), PaneSide::Right, "out of the box");
-            let strip = side_strip(&app, &terminal);
-            assert!(
-                strip.contains('⬓'),
-                "down the right it pictures the bottom: {strip}"
-            );
-            assert!(!strip.contains('◨'));
-            click(&mut app);
-            assert_eq!(app.launcher_pane_at, PaneSide::Bottom);
-            assert_eq!(crate::config::Config::load().pane_side(), PaneSide::Bottom);
-            assert!(app.flash.is_none());
-
-            let terminal = draw(&mut app);
-            assert_eq!(app.launcher_pane_side(), PaneSide::Bottom);
-            assert!(
-                head_row(&app, &terminal).contains('◨'),
-                "along the bottom it pictures the pane on the right"
-            );
-            click(&mut app);
-            assert_eq!(app.launcher_pane_at, PaneSide::Right);
-            assert_eq!(crate::config::Config::load().pane_side(), PaneSide::Right);
-            assert!(app.flash.is_none());
-            let terminal = draw(&mut app);
-            assert_eq!(app.launcher_pane_side(), PaneSide::Right);
-            assert!(
-                side_strip(&app, &terminal).contains('⬓'),
-                "and the way back again"
-            );
-        });
-    }
-
-    /// No SIDE BUTTON where there is nowhere to move the pane: along the
-    /// bottom of a window too narrow to stand it beside the cards, a move
-    /// to the right would change the setting and nothing on screen.
-    #[test]
-    fn no_side_button_on_a_window_too_narrow_for_the_right() {
-        with_default_config(|| {
-            let mut app = two_sessions();
-            draw_at(&mut app, 70, 34);
-            assert_eq!(app.launcher_pane_move_to(), None);
-            assert!(
-                !app.hits
-                    .iter()
-                    .any(|(_, h)| *h == HitTarget::LauncherPaneSide),
-                "no button drawn"
-            );
-            assert!(
-                app.hits
-                    .iter()
-                    .any(|(_, h)| *h == HitTarget::LauncherPaneClose),
-                "the close button stays"
-            );
-        });
-    }
-
     /// Too narrow for the pane beside the cards: it goes along the bottom
     /// rather than away, and its edge is dragged up and down there.
     #[test]
@@ -3393,7 +3289,6 @@ mod tests {
         use crate::launcher::PaneSide;
         with_default_config(|| {
             let mut app = two_sessions();
-            app.launcher_pane_at = PaneSide::Right;
             draw_at(&mut app, 70, 34);
             assert_eq!(app.launcher_pane_side(), PaneSide::Bottom);
             let body = app.launcher_body;
@@ -3916,15 +3811,19 @@ mod tests {
 
     /// The PANE's header row, as the last draw left it.
     fn head_row(app: &App, terminal: &Terminal<TestBackend>) -> String {
-        let body = app.launcher_body;
-        let pane_h =
-            crate::launcher::pane_height(body, app.launcher_pane_h).expect("a pane worth drawing");
-        let y = body.y + body.height - pane_h + 1;
-        buffer_text(terminal)
+        let pane = app
+            .launcher_split(app.launcher_body)
+            .1
+            .expect("a pane worth drawing");
+        let line: Vec<char> = buffer_text(terminal)
             .lines()
-            .nth(y as usize)
+            .nth(usize::from(pane.y + 1))
             .unwrap_or_default()
-            .to_string()
+            .chars()
+            .collect();
+        line[usize::from(pane.x)..usize::from(pane.x + pane.width).min(line.len())]
+            .iter()
+            .collect()
     }
 
     /// Walk the cursor onto the entry at `index` — its place in the flat
@@ -4356,7 +4255,6 @@ mod tests {
     fn the_pull_request_beside_an_empty_band_takes_the_keys_to_scroll() {
         with_default_config(|| {
             let mut app = with_empty_band_on_a_pull_request();
-            app.launcher_pane_at = crate::launcher::PaneSide::Right;
             draw_tall(&mut app);
             keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
             draw_tall(&mut app);
@@ -4440,7 +4338,6 @@ mod tests {
     /// lands, before that checkout's own `gh pr view` has answered.
     fn with_a_listed_pull_request_on_the_empty_band() -> App {
         let mut app = with_empty_band();
-        app.launcher_pane_at = crate::launcher::PaneSide::Right;
         let now = std::time::Instant::now();
         app.open_prs.insert(
             ProjectId("p1".into()),
@@ -5697,10 +5594,12 @@ mod tests {
     #[test]
     fn the_pane_along_the_bottom_reads_the_card_under_the_cursor() {
         with_default_config(|| {
+            // Drawn too narrow to stand the pane beside the grid: it lies
+            // along the bottom.
             let mut app = two_sessions();
-            draw(&mut app);
+            draw_at(&mut app, 70, 34);
             keys(&mut app, &[KeyCode::Esc, KeyCode::Down]);
-            let text = buffer_text(&draw(&mut app));
+            let text = buffer_text(&draw_at(&mut app, 70, 34));
             assert!(
                 text.contains("polish-nav  ⎇ feat"),
                 "the pane names the cursor's card and its checkout: {text}"
@@ -5726,7 +5625,7 @@ mod tests {
 
             // And the walk keeps swapping it.
             key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-            let text = buffer_text(&draw(&mut app));
+            let text = buffer_text(&draw_at(&mut app, 70, 34));
             assert!(
                 text.contains("agent-1  ⌂ main"),
                 "the band above takes the pane: {text}"
@@ -7853,12 +7752,10 @@ mod tests {
     fn enter_full_screens_a_session_when_the_body_has_no_pane() {
         with_default_config(|| {
             let mut app = two_sessions();
-            draw_at(&mut app, 130, 20);
+            draw_at(&mut app, 70, 20);
             assert!(
-                crate::launcher::split(app.launcher_body, app.launcher_pane_h)
-                    .1
-                    .is_none(),
-                "too short for a pane"
+                app.launcher_split(app.launcher_body).1.is_none(),
+                "too narrow and too short for a pane"
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(app.focus, Focus::Terminal);
@@ -10518,8 +10415,10 @@ mod tests {
     #[test]
     fn a_click_opens_the_pane_and_esc_collapses_it() {
         with_default_config(|| {
+            // Drawn too narrow to stand the pane beside the grid: it lies
+            // along the bottom.
             let mut app = two_sessions();
-            let draw = |app: &mut App| draw_at(app, 130, 50);
+            let draw = |app: &mut App| draw_at(app, 70, 50);
             draw(&mut app);
             let has_pane = |app: &App| {
                 app.hits
@@ -10602,8 +10501,10 @@ mod tests {
     #[test]
     fn folding_the_pane_away_lets_the_card_go_too() {
         with_default_config(|| {
+            // Drawn too narrow to stand the pane beside the grid: it lies
+            // along the bottom.
             let mut app = two_sessions();
-            draw(&mut app);
+            draw_at(&mut app, 70, 34);
             // The pane's own edge, which `ui::draw` registers only while
             // there is a pane to drag, and the rows the cards are laid
             // out over: the fold hands one to the other.
@@ -10630,7 +10531,7 @@ mod tests {
                 app.launcher_unaimed,
                 "folding the pane away let the card under the cursor go"
             );
-            draw(&mut app);
+            draw_at(&mut app, 70, 34);
             assert!(
                 !has_pane(&app),
                 "a folded pane leaves no edge under the pointer to drag"
@@ -10649,7 +10550,7 @@ mod tests {
                 !app.launcher_unaimed,
                 "the pane came back without the card it reads"
             );
-            draw(&mut app);
+            draw_at(&mut app, 70, 34);
             assert!(has_pane(&app));
             assert_eq!(cards_h(&app), grid_was, "the pane took its rows back");
 
@@ -10664,7 +10565,7 @@ mod tests {
                     app.launcher_pane_hidden, folded,
                     "{chord:?} did not fold the pane"
                 );
-                draw(&mut app);
+                draw_at(&mut app, 70, 34);
             }
         });
     }
@@ -11319,7 +11220,6 @@ mod tests {
             std::fs::write(repo.join("src/auth.rs"), "").unwrap();
             std::fs::write(repo.join("README.md"), "").unwrap();
             let mut app = App::new();
-            app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
             seed_tree(&mut app);
             seed_feat(&mut app, repo.to_path_buf());
             seed_web(&mut app);
