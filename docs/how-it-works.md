@@ -154,18 +154,20 @@
   holding again if HEAD has moved. A branch that tracks nothing is published to origin with
   `--set-upstream`; a fork's pull request checkout, on its read-only `refs/pull/N/head`, pulls but is
   never pushed.
-- **A worktree's outside resources are yours to hook — WORKTREE HOOKS.** `git config
-  orion.worktreeCreateHook` / `orion.worktreeDeleteHook` name an executable the DAEMON runs after it
-  creates or removes a checkout, from the main repository, with the repo path and the worktree path as
-  its two arguments — so a project can claim a dev-server port or a Caddy route on create and release
-  it on delete. The hook runs after the git operation and the row change have gone through, still
-  under the worktree lock — so hooks never overlap and a create of a path waits for the delete hook
-  releasing it — and under a 30 s timeout that kills the hook and everything it started; a failure is
-  a warning in every client, never a rolled-back create or delete. Per repo in git config rather than in CONFIG.JSON, and never a file inside the
-  checkout. See [Configuration](configuration.md#worktree-hooks).
+- **A new worktree sets itself up — the SETUP COMMAND.** The Projects tab holds a `setup` command per
+  project too. Each worktree the DAEMON creates — `orion worktree`, the QUICK PROMPT's fresh worktree,
+  a PR SESSION's checkout — runs it once, after its `.env` links, in a SETUP TERMINAL: a terminal row
+  in its band (`TerminalTab.setup`) spawned through the same `$SHELL -l -i -c` as a run, with no time
+  cap and nothing waiting on it but **Start stack**. Its row reads `setting up…`, goes on a clean exit,
+  and otherwise stays as a red `setup failed (1)` holding its PTY for the attach that wants to read why.
+  A `StartRun` while it runs is queued on the setup's row (`run.run_queued`, which every client's
+  footer says) and starts the run once the setup exits cleanly; a `StopRun` meanwhile calls it off. It
+  replaces the WORKTREE HOOKS of git config (`orion.worktreeCreateHook` / `orion.worktreeDeleteHook`),
+  which nothing reads any more. See [Configuration](configuration.md#setup-command).
 - **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
   holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the
-  project tab's right-click menu, has the DAEMON start `run` in a RUN TERMINAL — a terminal row
+  project tab's right-click menu, has the DAEMON start `run` — once the worktree's setup, if any, has
+  finished — in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
   card's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts

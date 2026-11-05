@@ -445,7 +445,11 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   starts again. A click on one opens it in the browser; the first is the app, and `⌘O` → **Open
   app** opens it too. The run line's right-click menu has **Stop stack** (or **Start stack**) and
   **Restart stack**: a stop, then a start in the same line once the run has gone, `restarting… 1:52`
-  meanwhile. A session is its status dot and name,
+  meanwhile. A worktree orion has just created for a project with a **Setup command** has its SETUP
+  LINE, `▶ setup`, laid out the same way — the command on a `$`, `setting up…` at the right — which
+  goes once the setup exits cleanly, or stays as a red `setup failed (1)` whose attach replays what it
+  printed; a **Start stack** meanwhile waits for it ([Configuration](configuration.md#setup-command)).
+  A session is its status dot and name,
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›`, and how long ago at the right. The pull requests come from the same `gh` lookups

@@ -46,7 +46,7 @@ convenience stores: missing or malformed reads as empty.
 Thirty-four keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key
 exists only in the file, so it is hand-edit-only. The overlay has five tabs: **General ·
 Accounts · Projects · Presets · Keys**. Most rows toggle or cycle on `Enter` / `←` / `→`; a
-*typed* row (the Projects tab's **Base branch**, **Run command** and **Open command**) opens a
+*typed* row (the Projects tab's **Base branch**, **Setup command**, **Run command** and **Open command**) opens a
 one-line prompt on `Enter` instead, pre-filled with the stored value, and an empty answer puts its
 default back. **General** groups its rows under **Launching**, **Sounds** and **Look**.
 **Accounts** opens on **New agents on** (which account or harness `⌘N` starts on), then **Claude
@@ -72,7 +72,7 @@ read as nothing.
 | Key | Type | Default | Overlay | What it does |
 |---|---|---|---|---|
 | `outside_editor` | string | `"auto"` | General | **Open files in**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode` or `sublime`. `auto` is the first of Cursor, VS Code and Sublime Text installed, else whatever macOS's `open` hands the file to; the row shows which (`auto · Cursor`) and its hint lists the ones installed. A stored `zed` or `default` reads as `auto`. With a named app missing, `i` on the row installs it — `brew install --cask cursor`, `visual-studio-code` or `sublime-text` — in the install modal. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` with `<file>:<line>`); `open -a` and `open` open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
-| `onboarded` | bool | `false` | — (config.local.json) | Whether **Orion setup** has been seen. While it is false, orion opens it over the grid at startup: four pages under a STEP STRIP — Welcome; **Claude**, its CLI `installed` or `install…` (`i` installs it, [Installing editors and agent CLIs](#installing-editors-and-agent-clis)) and every Claude account, each signed in (which switches it on) or added; **First project**, the repo orion was started in opened as a project, its **Base branch** and **Run command**; and **Ready**, the keys that matter. `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key, or **Run setup** in the palette, or `orion setup`, to see it again. |
+| `onboarded` | bool | `false` | — (config.local.json) | Whether **Orion setup** has been seen. While it is false, orion opens it over the grid at startup: four pages under a STEP STRIP — Welcome; **Claude**, its CLI `installed` or `install…` (`i` installs it, [Installing editors and agent CLIs](#installing-editors-and-agent-clis)) and every Claude account, each signed in (which switches it on) or added; **First project**, the repo orion was started in opened as a project, its **Base branch**, **Setup command** and **Run command**; and **Ready**, the keys that matter. `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key, or **Run setup** in the palette, or `orion setup`, to see it again. |
 | `seen_version` | string | `""` | — (config.local.json) | The orion version this machine last saw **What's new** for. On the first launch of a newer build — after `orion upgrade` or the footer's update — the **What's new in Orion** sheet is up over the grid: every release since this one, stacked newest first however many the upgrade jumped, each with its date and what its commits said. Closing it — or setup — stamps this build's version; it is never lowered, so an older or dev build in between shows nothing twice. A first run stamps it without showing notes; a config from before the key shows the newest releases. The notes are baked in at build time from git — each release is the commits between its `v*` tag and the one before (`crates/orion-tui/build.rs`) — so a build without git or tags has none. |
 | `linear_assignee_email` | string | `""` | — (config.local.json) | Whose open issues `⌘L` lists. Empty is the owner of the project's `LINEAR_API_KEY`; an email names another member of the workspace, for a key a team shares. Set by hand; a save keeps it in `config.local.json`, so `orion ssh` never carries it to a remote. |
 | `session_idle_timeout` | string | `"5m"` | General | DAEMON-owned IDLE TIMEOUT: how long a session in a WORKTREE no client is viewing goes unwatched before the IDLE REAPER kills its PTY. See the values below. |
@@ -85,7 +85,7 @@ read as nothing.
 | `hide_draft_prs` | bool | `false` | — (hand-edited) | Leave draft pull requests out of the grid's PR COUNT and the jump list's (`⌘K`) pull-request rows, so browsing what's open shows only the rows asking for a reviewer; the PULL REQUESTS MODAL lists drafts either way. A view filter, not a fetch filter: the open-list lookup still fetches the drafts and the PR CACHE still holds them, so `false` brings them back at once and a draft marked ready joins the rows on the refresh that says so. Sessions and the pull request under their cards are never hidden. |
 | `diff_tree_view` | bool | `true` | — (⌘B) | Whether the DIFF VIEWER (`⌘E`, and a pull request's diff) lists its files as a directory tree rather than flat paths. `⌘B` flips the open viewer and writes the answer here, so the next one — after a restart too — opens the way the last was left. Replaces the tree state the UI-state blob carried through 0.42, which no longer decides it. |
 | `pr_autofix` | string | `"auto"` | General | **Auto-fix my PRs**: on (`auto`) or `off`. When one of *your* open pull requests (`gh`'s signed-in user opened it) hits merge conflicts or failing checks, a fresh `autofix-<n>` session starts on it, nothing to confirm, and the footer says so. It runs on the harness, Claude account, model and effort of the session that did the work on the PR's branch (the most recently active one there), and with none on your default agent at the **PR autofix** system preset's model and effort (as the PR's own agent is what it runs on, the preset's harness is not used). Its prompt is the PR and what broke, wrapped in that preset's text (see [Sessions](sessions.md#agent-presets)): orion's own rules unless you changed them — fix only what is listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push; watch the PR until it is green and go round again. Failing checks are acted on once every check has finished (or after 20 minutes); conflicts alone at once. Each breakage — head commit, conflicts, failing checks — is sent once, across restarts; there is never a second `autofix-<n>` on a pull request while one is starting, working or waiting on you. Another session live on the branch, working or waiting on you, does not hold it back: the agent is told where that session's conversation is and reads it first, and when that session is already on this fix it runs `orion autofix stand-down "<why>"`, which archives it, and the footer shows why. A live session whose conversation can't be read (not a Claude session, or no transcript yet) holds it back instead, and the footer says so once. After 3 sends in a row that didn't turn the PR green it stops, with a footer message and a desktop notification. Unit vs e2e is read off each check's name. Seen while the TUI runs: within about 15s for the selected project, 5 minutes for the others; a breakage from while it was closed is picked up on the next launch. `⌘G` in the PULL REQUESTS MODAL still opens the AUTOFIX MODAL for any PR, whatever this says. An older orion's `ask` reads as on. |
-| `projects` | object | `{}` | Projects | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Projects** tab — `{"projects": {"/Users/me/src/app": {"base_branch": "dev", "run_command": "npm run dev", "open_command": "open http://localhost:3000", "worktree_containers": "remove"}}}`. **Base branch** (`base_branch`, string, default `""`) is where the project's new WORKTREES start when nobody named a base — a bare `orion worktree`, the QUICK PROMPT's **+ new worktree** (`orion worktree --base` always wins). Empty, shown as `auto`, is origin's own default branch: `origin/HEAD` freshly fetched. A name — `dev`, `master` — is resolved the way `--base` resolves one: origin is fetched and origin's copy of that branch is the start point, untracked, never the checkout's local branch of that name; a branch origin lacks that the checkout has locally is used as named, and a name the repo has no branch of at all falls back to `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. Typed, like the commands. The same branch is what the grid's ahead/behind counts, the COMMIT LIST and the background base fetch measure against, and what a merge never deletes. **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees; empty (shown as `not set`) is none, and **Start stack** says where to set one. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer unsets it. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. **On worktree delete** (`worktree_containers`, string, default `""` shown as `off`) is what deleting one of the project's worktrees does to the docker compose projects started in it — see [Worktree containers](#worktree-containers). **Linear key** is no setting: it says where the project's `LINEAR_API_KEY` was found, and `Enter` tests it ([Linear](#linear)). `merge_method` (string, default `""`, squash) has no row: it is the method the project's last merge took (`squash`, `merge` or `rebase`), which its next merge form opens on. Releases before these keys kept **Base branch**, **On worktree delete** and **Merge method** once for every project (`worktree_base_branch`, `worktree_containers`, `pr_merge_method`): the first time the grid lists the projects, each project with no value of its own takes the old one, and the old key leaves the file on the next save. The tab lists every project under its name and path; with no project in the tree it says so. A project with no entry reads as the defaults, and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty row is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
+| `projects` | object | `{}` | Projects | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Projects** tab — `{"projects": {"/Users/me/src/app": {"base_branch": "dev", "setup_command": "npm ci", "run_command": "npm run dev", "open_command": "open http://localhost:3000", "worktree_containers": "remove"}}}`. **Base branch** (`base_branch`, string, default `""`) is where the project's new WORKTREES start when nobody named a base — a bare `orion worktree`, the QUICK PROMPT's **+ new worktree** (`orion worktree --base` always wins). Empty, shown as `auto`, is origin's own default branch: `origin/HEAD` freshly fetched. A name — `dev`, `master` — is resolved the way `--base` resolves one: origin is fetched and origin's copy of that branch is the start point, untracked, never the checkout's local branch of that name; a branch origin lacks that the checkout has locally is used as named, and a name the repo has no branch of at all falls back to `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. Typed, like the commands. The same branch is what the grid's ahead/behind counts, the COMMIT LIST and the background base fetch measure against, and what a merge never deletes. **Setup command** (`setup_command`, string, default `""`) is the SETUP COMMAND the DAEMON runs once in each worktree it creates for the project, on a setup line in its band — see [Setup command](#setup-command); empty (shown as `not set`) is none. Typed, and read fresh at each create. **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees; empty (shown as `not set`) is none, and **Start stack** says where to set one. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer unsets it. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. **On worktree delete** (`worktree_containers`, string, default `""` shown as `off`) is what deleting one of the project's worktrees does to the docker compose projects started in it — see [Worktree containers](#worktree-containers). **Linear key** is no setting: it says where the project's `LINEAR_API_KEY` was found, and `Enter` tests it ([Linear](#linear)). `merge_method` (string, default `""`, squash) has no row: it is the method the project's last merge took (`squash`, `merge` or `rebase`), which its next merge form opens on. Releases before these keys kept **Base branch**, **On worktree delete** and **Merge method** once for every project (`worktree_base_branch`, `worktree_containers`, `pr_merge_method`): the first time the grid lists the projects, each project with no value of its own takes the old one, and the old key leaves the file on the next save. The tab lists every project under its name and path; with no project in the tree it says so. A project with no entry reads as the defaults, and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty row is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
 | `quick_prompt_kind` | string | `"claude"` | Accounts | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **New agents on** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. The NEW AGENT PICKER opens on it too. |
 | `follow_new_session` | bool | `true` | General | FOLLOW NEW SESSION (**Follow new session**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: a QUICK PROMPT never enters its session's terminal. It covers every QUICK PROMPT: `⌘N`, **New agent — choose harness**'s box, **Duplicate session** on a card, and the box the PULL REQUESTS MODAL opens. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way. Terminals (`t`) always come up in the pane. |
 | `claude_enabled` | bool | `false` | Accounts | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW AGENT PICKER, and skips the standing PREWARM POOL slot; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until setup or the Accounts tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
@@ -494,13 +494,15 @@ number, and the keys a file holds already tell a newer build everything it needs
 ## Run and open commands
 
 Each project can carry two shell command lines, **Run command** and **Open command** on the SETTINGS
-OVERLAY's Projects tab (`s`), kept in `config.json` under the project's `projects` entry. Both run in the
-selected worktree's checkout:
+OVERLAY's Projects tab (`s`), kept in `config.json` under the project's `projects` entry, beside the
+**Setup command** a new worktree runs ([Setup command](#setup-command)). Both run in the selected
+worktree's checkout:
 
 - **Run command** — the RUN COMMAND: how a worktree's stack starts, `npm run dev` say. `⌘⇧S` on the
   grid, or **Start stack** in a card's right-click menu (or the project tab's), starts it in the
   background — its run line comes up in the band, and the cursor and the pane stay where they were;
-  the same key, or the row now **Stop stack**, stops it. The DAEMON runs it in a RUN
+  the same key, or the row now **Stop stack**, stops it. On a worktree still running its setup it
+  waits for the setup to finish first. The DAEMON runs it in a RUN
   TERMINAL: your login shell (`$SHELL -l -i -c`, the wrapper an agent launch uses, so `npm`, `bun` or
   `mise` resolve the way they do typed) running that line and nothing else. Its process is the
   worktree's RUNNING state — it is a terminal in the worktree's band, its `▶` lit while the process
@@ -557,10 +559,9 @@ How a project is matched, and when it is left alone:
   work. The DAEMON looks for `docker` on its own `PATH`, then in `~/.orbstack/bin`, `/usr/local/bin`,
   `/opt/homebrew/bin` and Docker Desktop's app bundle, since launchd's `PATH` names none of them. A
   machine with no docker CLI has nothing to clean up.
-- **Only after a delete that succeeded, and before the delete hook.** It runs when the WORKTREE
-  HOOKS below would — after `git worktree remove` and the row drop, under the same lock, skipped
-  while the directory is still on disk — and ahead of `orion.worktreeDeleteHook`, so a hook that
-  releases ports finds them already free. Worktrees removed outside orion run nothing.
+- **Only after a delete that succeeded.** It runs after `git worktree remove` and the row drop,
+  under the DAEMON's worktree lock — so a create of the same path waits for it — and is skipped while
+  the directory is still on disk. Worktrees removed outside orion run nothing.
 - **It only reports.** Docker not answering, a compose command failing, or one running past 60 s
   (`docker ps` gets 15 s) is a one-line warning in every client; the worktree stays deleted. What it
   stopped or removed is logged in `daemon.log`.
@@ -575,71 +576,40 @@ docker is left alone.
 gone — a checkout deleted while this was `off`, or deleted outside orion — with the
 `docker compose -p <project> down --volumes` that removes each ([Commands](commands.md#checking-the-machine)).
 
-## Worktree hooks
+## Setup command
 
-A checkout often owns things outside its own directory — a dev-server port, a Caddy or nginx route, a
-docker compose project, a database — that orion knows nothing about. WORKTREE HOOKS are two
-executables of yours the DAEMON runs after it creates or deletes a worktree, so a project can provision
-and release those itself. They are the one setting that is not in CONFIG.JSON: a hook is per
-repository, so it lives in git config, read fresh at each use:
+A new checkout often needs work before it is any use — dependencies installed, `.env` files linked,
+a build cache cleared. The **Setup command** on the SETTINGS OVERLAY's Projects tab (`setup_command`
+in the project's `projects` entry, typed like the Run command, and on setup's **First project** page
+too) is that work as one shell line, `just setup-worktree` say. The DAEMON reads it fresh each time it
+creates a worktree for the project — a bare `orion worktree`, the QUICK PROMPT's **+ new worktree**, a
+branch picked in the WORKTREE PICKER, a PR SESSION's checkout — and runs it there once:
 
-```sh
-git config orion.worktreeCreateHook /absolute/path/to/worktree-setup
-git config orion.worktreeDeleteHook /absolute/path/to/worktree-cleanup
-```
+- **On a setup line in the worktree's band**, `▶ setup` with its command on a `$`, laid out as a run
+  line is. It is your login shell (`$SHELL -l -i -c`, the wrapper a run command and an agent launch
+  use, so `npm`, `bun`, `nvm` or `mise` resolve the way they do typed) running that line in the new
+  checkout, once its ENV LINKS are in.
+- **For as long as it takes.** There is no time cap, and the create does not wait for it: the
+  worktree is in the grid at once, and sessions can start in it while it sets up. The idle reaper
+  never takes it.
+- **`setting up…`** at the right of its line while it runs. A clean exit takes the line with it. Any
+  other leaves it, a red `setup failed (1)`: attaching it replays what it printed, and nothing runs it
+  again — close the line when you are done with it. A daemon restart in between loses the output, and
+  the line then reads `setup failed` with no code.
+- **Start stack waits for it.** `⌘⇧S` on a checkout that is still setting up starts nothing yet: the
+  footer holds `setting up · the stack starts once setup finishes · ⌘⇧S again cancels`, and the run
+  starts once the setup exits cleanly. A second press, or **Cancel start** in the menu, calls the
+  start off and leaves the setup running. A setup that fails starts nothing that was waiting on it,
+  and a warning says so; **Start stack** then starts the run as usual.
 
-Git resolves the key the usual way, so `git config --global` sets one script for every project and a
-repo's own `.git/config` overrides it. Orion never reads a hook from a file inside the checkout — a
-committed hook would run whatever a clone brought with it, which is why git refuses working-tree hooks
-too. Keep the executable outside the worktrees it serves; the delete hook runs after its checkout is
-gone.
+Worktrees created outside orion, which WORKTREE SYNC merely notices, run nothing. An empty row (`not
+set`) is no setup at all.
 
-What a hook gets:
-
-- **Two arguments**, both absolute: the main repository path, then the created or deleted worktree
-  path. The value is spawned directly as an executable — no shell — so a space in either path arrives
-  intact.
-- **The main checkout as its working directory**, since the deleted directory no longer exists.
-- **Environment**: `ORION_HOOK` (`worktree-create` or `worktree-delete`, so one script can serve
-  both keys), `ORION_WORKTREE_BRANCH` and `ORION_WORKTREE_ID`.
-
-When they run, and what a failure means:
-
-- **Only after a orion operation that succeeded.** The create hook fires once the checkout exists and
-  its row is in every client — `orion worktree`, the QUICK PROMPT's fresh
-  worktree, a PR SESSION's checkout. The delete hook fires once `git worktree remove` (forced or not)
-  and the row drop went through, including a checkout you had already `rm -rf`'d by hand. A delete
-  that fails or is cancelled runs nothing. Worktrees created or removed outside orion, which WORKTREE
-  SYNC merely notices, run nothing either.
-- **Skipped while the directory is still there.** When git had already stopped tracking a checkout
-  and orion leaves the untracked directory alone, the delete hook does not run against live files;
-  the warning says so.
-- **Hooks never overlap.** They run under the DAEMON's worktree lock, so a create of a path waits
-  for the delete hook still releasing it, and **Delete all sessions**' batch runs its hooks one after another. A
-  stuck hook holds the next worktree operation for at most the timeout; keystrokes never wait on it.
-- **A hook only reports.** It exits non-zero, cannot start, or runs past the timeout (30 s; then it
-  and every process it started are killed) — orion shows a one-line warning naming the hook and the
-  last line it wrote to stderr, and logs the tail of its output in `daemon.log`. The worktree stays
-  created or deleted, because it already was. Nothing is retried.
-- **It may start something that outlives it.** A hook that launches a dev server in the background
-  and exits 0 is a success the moment it exits — its output goes to a file, not a pipe, so a child
-  holding it open never stalls the wait — and the server is left running. Only a timeout takes down
-  what the hook started.
-- **The DAEMON's environment is not a login shell.** On macOS a launchd-started daemon has a thin
-  `PATH`; a script that calls `caddy` or `docker` sets its own.
-
-A cleanup script in the spirit of the request that introduced this — release a routing entry and a
-development slot keyed by the deleted path:
-
-```sh
-#!/bin/sh
-# $1 = main repo, $2 = deleted worktree
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-name=$(basename "$2")
-[ -e "$HOME/.config/dev-slots/$name" ] || exit 0
-rm -f "$HOME/.config/dev-slots/$name" "/etc/caddy/sites/$name.caddy"
-caddy reload --config /etc/caddy/Caddyfile
-```
+Releases before this one ran WORKTREE HOOKS from git config instead (`orion.worktreeCreateHook`,
+`orion.worktreeDeleteHook`). They are gone, and a repository that still sets them runs nothing: move a
+create hook's work into the project's **Setup command**. Nothing replaces a delete hook — **On
+worktree delete** above stops or removes the checkout's compose projects, and anything else the
+checkout held is yours to release.
 
 ## Logs
 
@@ -699,7 +669,6 @@ Overrides for tests and parallel instances — real, but not things a normal ins
 | `ORION_SPOTIFY_POLL_SECS` | `1` | How often the TUI asks Spotify what it is playing while a track is up, for the FOOTER's Spotify readout (one `osascript`; every five seconds while Spotify is closed or stopped); `0` turns it off, as the e2e tests do. macOS only. See the `spotify` setting. |
 | `ORION_IDLE_REAP_MS` | `15000` | IDLE REAPER sweep period in ms. This is how often it looks, not how long a session may idle — that is `session_idle_timeout`. |
 | `ORION_WORKTREE_SYNC_MS` | `2000` | WORKTREE SYNC probe period in ms: how often the DAEMON reconciles `git worktree list` so worktrees made outside orion appear. |
-| `ORION_HOOK_TIMEOUT_MS` | `30000` | How long a WORKTREE HOOK may run before the DAEMON kills it and warns; tests shorten it. |
 
 `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` are set *by* the DAEMON on every agent
 PTY (and scrubbed from plain terminals) so hooks can reach the HOOK RECEIVER — never something you
